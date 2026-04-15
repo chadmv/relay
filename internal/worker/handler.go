@@ -46,8 +46,9 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return fmt.Errorf("register worker: %w", err)
 	}
 
-	defer h.markWorkerOffline(workerID)
-	defer h.requeueWorkerTasks(workerID)
+	defer h.requeueWorkerTasks(workerID)    // runs 3rd
+	defer h.markWorkerOffline(workerID)     // runs 2nd
+	defer h.registry.Unregister(workerID)  // runs 1st
 
 	// Message loop.
 	for {
@@ -149,6 +150,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	// Retry if applicable.
 	if terminal && task.RetryCount < task.Retries {
 		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err == nil {
+			updateJobStatusFromTasks(ctx, h.q, task.JobID)
 			go h.triggerDispatch()
 		}
 		return
@@ -213,8 +215,6 @@ func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk
 
 // markWorkerOffline is called in a defer after the stream ends.
 func (h *Handler) markWorkerOffline(workerID string) {
-	h.registry.Unregister(workerID)
-
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
 		return

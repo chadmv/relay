@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/api"
@@ -39,7 +41,7 @@ func main() {
 	defer stop()
 
 	// Run migrations (migrate DSN uses pgx5 prefix).
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
+	migrateDSN := "pgx5://" + strings.TrimPrefix(strings.TrimPrefix(dsn, "postgresql://"), "postgres://")
 	if err := store.Migrate(migrateDSN); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
@@ -92,6 +94,8 @@ func main() {
 	<-ctx.Done()
 	log.Println("shutting down...")
 	grpcSrv.GracefulStop()
-	_ = srv.Shutdown(context.Background())
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	_ = srv.Shutdown(shutCtx)
 	fmt.Println("relay-server stopped")
 }

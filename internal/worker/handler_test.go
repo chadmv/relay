@@ -5,7 +5,9 @@ package worker_test
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
@@ -21,14 +23,19 @@ import (
 
 // fakeStream implements grpc.BidiStreamingServer[relayv1.AgentMessage, relayv1.CoordinatorMessage].
 type fakeStream struct {
-	msgs []*relayv1.AgentMessage
-	sent []*relayv1.CoordinatorMessage
-	pos  int
-	ctx  context.Context
+	msgs   []*relayv1.AgentMessage
+	sent   []*relayv1.CoordinatorMessage
+	sentCh chan struct{} // signaled when first Send completes
+	pos    int
+	ctx    context.Context
+	hold   chan struct{} // if non-nil, Recv blocks until this is closed after msgs exhausted
 }
 
 func (f *fakeStream) Recv() (*relayv1.AgentMessage, error) {
 	if f.pos >= len(f.msgs) {
+		if f.hold != nil {
+			<-f.hold // block until test releases
+		}
 		return nil, io.EOF
 	}
 	msg := f.msgs[f.pos]
@@ -38,6 +45,12 @@ func (f *fakeStream) Recv() (*relayv1.AgentMessage, error) {
 
 func (f *fakeStream) Send(msg *relayv1.CoordinatorMessage) error {
 	f.sent = append(f.sent, msg)
+	if f.sentCh != nil {
+		select {
+		case f.sentCh <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -64,7 +77,7 @@ func newTestStore(t *testing.T) (*store.Queries, *pgxpool.Pool) {
 	dsn, err := pg.ConnectionString(ctx)
 	require.NoError(t, err)
 
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
+	migrateDSN := "pgx5://" + strings.TrimPrefix(strings.TrimPrefix(dsn, "postgresql://"), "postgres://")
 	require.NoError(t, store.Migrate(migrateDSN))
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -75,54 +88,75 @@ func newTestStore(t *testing.T) (*store.Queries, *pgxpool.Pool) {
 }
 
 func TestHandler_RegisterNewWorker(t *testing.T) {
-	ctx := context.Background()
 	q, _ := newTestStore(t)
-
-	triggered := false
-	triggerFn := func() { triggered = true }
-
 	registry := worker.NewRegistry()
 	broker := events.NewBroker()
-	handler := worker.NewHandler(q, registry, broker, triggerFn)
+	triggered := make(chan struct{}, 1)
+	h := worker.NewHandler(q, registry, broker, func() {
+		select {
+		case triggered <- struct{}{}:
+		default:
+		}
+	})
 
+	// hold is closed by the test to let Connect proceed to io.EOF
+	hold := make(chan struct{})
 	stream := &fakeStream{
-		ctx: ctx,
+		ctx:    context.Background(),
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
 		msgs: []*relayv1.AgentMessage{
-			{
-				Payload: &relayv1.AgentMessage_Register{
-					Register: &relayv1.RegisterRequest{
-						WorkerId: "",
-						Hostname: "test-host",
-						CpuCores: 4,
-						RamGb:    8,
-						GpuCount: 0,
-						GpuModel: "",
-						Os:       "linux",
-					},
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "render-01",
+					CpuCores: 16,
+					RamGb:    64,
+					GpuCount: 2,
+					GpuModel: "RTX 4090",
+					Os:       "linux",
 				},
-			},
+			}},
 		},
 	}
 
-	err := handler.Connect(stream)
-	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		done <- h.Connect(stream)
+	}()
 
-	// Expect RegisterResponse as first sent message.
+	// Wait for RegisterResponse
+	select {
+	case <-stream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse")
+	}
+
+	// Assert RegisterResponse
 	require.Len(t, stream.sent, 1)
 	resp := stream.sent[0].GetRegisterResponse()
-	assert.NotNil(t, resp)
+	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.WorkerId)
 
-	// Expect worker in DB with status "online" (may be offline after Connect returns).
-	// The defer runs markWorkerOffline when stream ends (EOF), so check by hostname.
-	w, err := q.GetWorkerByHostname(ctx, "test-host")
+	// Assert worker is online in DB while Connect is still running
+	wk, err := q.GetWorkerByHostname(context.Background(), "render-01")
 	require.NoError(t, err)
-	assert.Equal(t, "test-host", w.Hostname)
+	assert.Equal(t, "online", wk.Status)
 
-	// triggerDispatch should have been called (set to true via goroutine).
-	// Give the goroutine a moment to run.
-	for i := 0; i < 100 && !triggered; i++ {
-		// small busy-wait — acceptable in tests
+	// Assert dispatch was triggered
+	select {
+	case <-triggered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for triggerDispatch")
 	}
-	assert.True(t, triggered)
+
+	// Let the stream end
+	close(hold)
+
+	// Wait for Connect to return
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return")
+	}
 }
