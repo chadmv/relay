@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +27,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, e.Data)
+			// Replace newlines in data to keep SSE frame valid.
+			// Per SSE spec, each line in the data value needs its own "data:" prefix.
+			dataStr := strings.ReplaceAll(string(e.Data), "\n", "\ndata: ")
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Type, dataStr)
 			flusher.Flush()
 		}
 	}

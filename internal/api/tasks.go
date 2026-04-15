@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +39,11 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 	task, err := s.q.GetTask(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "task not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "task not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
 		return
 	}
 

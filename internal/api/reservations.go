@@ -69,7 +69,11 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	u, _ := UserFromCtx(ctx)
+	u, ok := UserFromCtx(ctx)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
 	var body struct {
 		Name      string            `json:"name"`

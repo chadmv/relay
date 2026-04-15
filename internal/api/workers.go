@@ -2,10 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type workerResponse struct {
@@ -70,7 +73,11 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 
 	worker, err := s.q.GetWorker(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "worker not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
 		return
 	}
 
@@ -78,6 +85,8 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {
+	// Note: this is a read-modify-write without a transaction.
+	// Concurrent PATCH requests could race; acceptable for v1 admin operations.
 	ctx := r.Context()
 	id, err := parseUUID(r.PathValue("id"))
 	if err != nil {
@@ -87,7 +96,11 @@ func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {
 
 	current, err := s.q.GetWorker(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "worker not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
 		return
 	}
 

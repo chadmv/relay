@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"relay/internal/events"
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -97,7 +99,11 @@ func toJobResponse(j store.Job, tasks []store.Task) jobResponse {
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
-	u, _ := UserFromCtx(r.Context())
+	u, ok := UserFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
 	var req createJobRequest
 	if err := readJSON(r, &req); err != nil {
@@ -268,7 +274,11 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.q.GetJob(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
 		return
 	}
 
@@ -284,26 +294,65 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel pending tasks
-	tasks, _ := s.q.ListTasksByJob(ctx, id)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer tx.Rollback(ctx)
+	q := s.q.WithTx(tx)
+
+	// Check current job status before cancelling.
+	job, err := q.GetJob(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+	if job.Status == "cancelled" || job.Status == "done" {
+		writeError(w, http.StatusConflict, "job is already in a terminal state")
+		return
+	}
+
+	// Cancel pending/queued tasks.
+	tasks, err := q.ListTasksByJob(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
 	for _, t := range tasks {
 		if t.Status == "pending" || t.Status == "queued" {
-			_, _ = s.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+			if _, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 				ID:         t.ID,
 				Status:     "failed",
 				WorkerID:   pgtype.UUID{},
 				StartedAt:  pgtype.Timestamptz{},
 				FinishedAt: pgtype.Timestamptz{Valid: true, Time: time.Now()},
-			})
+			}); err != nil {
+				writeError(w, http.StatusInternalServerError, "db error")
+				return
+			}
 		}
 	}
 
-	job, err := s.q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{
+	job, err = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{
 		ID:     id,
 		Status: "cancelled",
 	})
 	if err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
 
@@ -321,6 +370,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtype.UUID) {
 	tasks, err := q.ListTasksByJob(ctx, jobID)
 	if err != nil || len(tasks) == 0 {
+		// If we can't list tasks we can't determine the correct status; skip update.
 		return
 	}
 	var done, failed, active int
@@ -343,5 +393,6 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 	default:
 		newStatus = "failed"
 	}
+	// Best-effort update; caller has no error return so we can't propagate failures.
 	_, _ = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{ID: jobID, Status: newStatus})
 }
