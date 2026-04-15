@@ -24,7 +24,15 @@ func Migrate(dsn string) error {
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}
-	defer m.Close()
+	defer func() {
+		srcErr, dbErr := m.Close()
+		if srcErr != nil {
+			_ = srcErr // source cleanup error; non-fatal for startup migration
+		}
+		if dbErr != nil {
+			_ = dbErr // db cleanup error; non-fatal for startup migration
+		}
+	}()
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("run migrations: %w", err)
 	}

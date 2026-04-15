@@ -41,7 +41,7 @@ CREATE TABLE jobs (
     name         TEXT        NOT NULL,
     priority     TEXT        NOT NULL DEFAULT 'normal',
     status       TEXT        NOT NULL DEFAULT 'pending',
-    submitted_by UUID        NOT NULL REFERENCES users(id),
+    submitted_by UUID        NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- intentional: preserve job history
     labels       JSONB       NOT NULL DEFAULT '{}',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -59,7 +59,7 @@ CREATE TABLE tasks (
     retries         INT         NOT NULL DEFAULT 0,
     retry_count     INT         NOT NULL DEFAULT 0,
     status          TEXT        NOT NULL DEFAULT 'pending',
-    worker_id       UUID        REFERENCES workers(id),
+    worker_id       UUID        REFERENCES workers(id) ON DELETE SET NULL,
     started_at      TIMESTAMPTZ,
     finished_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
