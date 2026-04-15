@@ -1,0 +1,78 @@
+//go:build integration
+
+package api_test
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"relay/internal/api"
+	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestBearerAuth_MissingToken(t *testing.T) {
+	q := newTestQueries(t)
+	handler := api.BearerAuth(q)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestBearerAuth_ValidToken(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := t.Context()
+
+	user, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Alice", Email: "alice@test.com", IsAdmin: false,
+	})
+	require.NoError(t, err)
+
+	raw := "test-token-12345"
+	sum := sha256.Sum256([]byte(raw))
+	hash := hex.EncodeToString(sum[:])
+
+	_, err = q.CreateToken(ctx, store.CreateTokenParams{
+		UserID:    user.ID,
+		TokenHash: hash,
+		ExpiresAt: pgtype.Timestamptz{}, // no expiry
+	})
+	require.NoError(t, err)
+
+	var gotUser api.AuthUser
+	handler := api.BearerAuth(q)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, ok := api.UserFromCtx(r.Context())
+		require.True(t, ok)
+		gotUser = u
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "alice@test.com", gotUser.Email)
+	assert.False(t, gotUser.IsAdmin)
+}
+
+func TestAdminOnly_NonAdmin(t *testing.T) {
+	handler := api.AdminOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	// No user in context
+	req := httptest.NewRequest("GET", "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
