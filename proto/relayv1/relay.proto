@@ -35,15 +35,15 @@ message RegisterRequest {
 message TaskStatusUpdate {
   string     task_id       = 1;
   TaskStatus status        = 2;
-  int32      exit_code     = 3;
+  optional int32 exit_code = 3;
   string     error_message = 4;
 }
 
 // A chunk of captured output from a running task.
 message TaskLogChunk {
-  string task_id = 1;
-  string stream  = 2; // "stdout" or "stderr"
-  bytes  content = 3;
+  string    task_id = 1;
+  LogStream stream  = 2;
+  bytes     content = 3;
 }
 
 // ─── Coordinator → Agent ───────────────────────────────────────────────────
@@ -83,4 +83,10 @@ enum TaskStatus {
   TASK_STATUS_DONE        = 2;
   TASK_STATUS_FAILED      = 3;
   TASK_STATUS_TIMED_OUT   = 4;
+}
+
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT      = 1;
+  LOG_STREAM_STDERR      = 2;
 }

@@ -14,4 +14,5 @@ func TestProtoCompiles(t *testing.T) {
 	_ = &relayv1.DispatchTask{}
 	_ = &relayv1.TaskLogChunk{}
 	_ = &relayv1.TaskStatusUpdate{}
+	_ = relayv1.LogStream_LOG_STREAM_STDOUT
 }

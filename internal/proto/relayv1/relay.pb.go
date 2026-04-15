@@ -76,6 +76,55 @@ func (TaskStatus) EnumDescriptor() ([]byte, []int) {
 	return file_relayv1_relay_proto_rawDescGZIP(), []int{0}
 }
 
+type LogStream int32
+
+const (
+	LogStream_LOG_STREAM_UNSPECIFIED LogStream = 0
+	LogStream_LOG_STREAM_STDOUT      LogStream = 1
+	LogStream_LOG_STREAM_STDERR      LogStream = 2
+)
+
+// Enum value maps for LogStream.
+var (
+	LogStream_name = map[int32]string{
+		0: "LOG_STREAM_UNSPECIFIED",
+		1: "LOG_STREAM_STDOUT",
+		2: "LOG_STREAM_STDERR",
+	}
+	LogStream_value = map[string]int32{
+		"LOG_STREAM_UNSPECIFIED": 0,
+		"LOG_STREAM_STDOUT":      1,
+		"LOG_STREAM_STDERR":      2,
+	}
+)
+
+func (x LogStream) Enum() *LogStream {
+	p := new(LogStream)
+	*p = x
+	return p
+}
+
+func (x LogStream) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (LogStream) Descriptor() protoreflect.EnumDescriptor {
+	return file_relayv1_relay_proto_enumTypes[1].Descriptor()
+}
+
+func (LogStream) Type() protoreflect.EnumType {
+	return &file_relayv1_relay_proto_enumTypes[1]
+}
+
+func (x LogStream) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use LogStream.Descriptor instead.
+func (LogStream) EnumDescriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{1}
+}
+
 type AgentMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -272,7 +321,7 @@ type TaskStatusUpdate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Status        TaskStatus             `protobuf:"varint,2,opt,name=status,proto3,enum=relay.v1.TaskStatus" json:"status,omitempty"`
-	ExitCode      int32                  `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	ExitCode      *int32                 `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -323,8 +372,8 @@ func (x *TaskStatusUpdate) GetStatus() TaskStatus {
 }
 
 func (x *TaskStatusUpdate) GetExitCode() int32 {
-	if x != nil {
-		return x.ExitCode
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
 	}
 	return 0
 }
@@ -340,7 +389,7 @@ func (x *TaskStatusUpdate) GetErrorMessage() string {
 type TaskLogChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Stream        string                 `protobuf:"bytes,2,opt,name=stream,proto3" json:"stream,omitempty"` // "stdout" or "stderr"
+	Stream        LogStream              `protobuf:"varint,2,opt,name=stream,proto3,enum=relay.v1.LogStream" json:"stream,omitempty"`
 	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -383,11 +432,11 @@ func (x *TaskLogChunk) GetTaskId() string {
 	return ""
 }
 
-func (x *TaskLogChunk) GetStream() string {
+func (x *TaskLogChunk) GetStream() LogStream {
 	if x != nil {
 		return x.Stream
 	}
-	return ""
+	return LogStream_LOG_STREAM_UNSPECIFIED
 }
 
 func (x *TaskLogChunk) GetContent() []byte {
@@ -680,15 +729,17 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x06ram_gb\x18\x04 \x01(\x05R\x05ramGb\x12\x1b\n" +
 	"\tgpu_count\x18\x05 \x01(\x05R\bgpuCount\x12\x1b\n" +
 	"\tgpu_model\x18\x06 \x01(\tR\bgpuModel\x12\x0e\n" +
-	"\x02os\x18\a \x01(\tR\x02os\"\x9b\x01\n" +
+	"\x02os\x18\a \x01(\tR\x02os\"\xae\x01\n" +
 	"\x10TaskStatusUpdate\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12,\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x14.relay.v1.TaskStatusR\x06status\x12\x1b\n" +
-	"\texit_code\x18\x03 \x01(\x05R\bexitCode\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"Y\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x14.relay.v1.TaskStatusR\x06status\x12 \n" +
+	"\texit_code\x18\x03 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12#\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessageB\f\n" +
+	"\n" +
+	"_exit_code\"n\n" +
 	"\fTaskLogChunk\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x16\n" +
-	"\x06stream\x18\x02 \x01(\tR\x06stream\x12\x18\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
+	"\x06stream\x18\x02 \x01(\x0e2\x13.relay.v1.LogStreamR\x06stream\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\fR\acontent\"\xe2\x01\n" +
 	"\x12CoordinatorMessage\x12I\n" +
 	"\x11register_response\x18\x01 \x01(\v2\x1a.relay.v1.RegisterResponseH\x00R\x10registerResponse\x12=\n" +
@@ -716,7 +767,11 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x13TASK_STATUS_RUNNING\x10\x01\x12\x14\n" +
 	"\x10TASK_STATUS_DONE\x10\x02\x12\x16\n" +
 	"\x12TASK_STATUS_FAILED\x10\x03\x12\x19\n" +
-	"\x15TASK_STATUS_TIMED_OUT\x10\x042S\n" +
+	"\x15TASK_STATUS_TIMED_OUT\x10\x04*U\n" +
+	"\tLogStream\x12\x1a\n" +
+	"\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n" +
+	"\x11LOG_STREAM_STDERR\x10\x022S\n" +
 	"\fAgentService\x12C\n" +
 	"\aConnect\x12\x16.relay.v1.AgentMessage\x1a\x1c.relay.v1.CoordinatorMessage(\x010\x01B\x1eZ\x1crelay/internal/proto/relayv1b\x06proto3"
 
@@ -732,36 +787,38 @@ func file_relayv1_relay_proto_rawDescGZIP() []byte {
 	return file_relayv1_relay_proto_rawDescData
 }
 
-var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_relayv1_relay_proto_goTypes = []any{
 	(TaskStatus)(0),            // 0: relay.v1.TaskStatus
-	(*AgentMessage)(nil),       // 1: relay.v1.AgentMessage
-	(*RegisterRequest)(nil),    // 2: relay.v1.RegisterRequest
-	(*TaskStatusUpdate)(nil),   // 3: relay.v1.TaskStatusUpdate
-	(*TaskLogChunk)(nil),       // 4: relay.v1.TaskLogChunk
-	(*CoordinatorMessage)(nil), // 5: relay.v1.CoordinatorMessage
-	(*RegisterResponse)(nil),   // 6: relay.v1.RegisterResponse
-	(*DispatchTask)(nil),       // 7: relay.v1.DispatchTask
-	(*CancelTask)(nil),         // 8: relay.v1.CancelTask
-	nil,                        // 9: relay.v1.DispatchTask.EnvEntry
+	(LogStream)(0),             // 1: relay.v1.LogStream
+	(*AgentMessage)(nil),       // 2: relay.v1.AgentMessage
+	(*RegisterRequest)(nil),    // 3: relay.v1.RegisterRequest
+	(*TaskStatusUpdate)(nil),   // 4: relay.v1.TaskStatusUpdate
+	(*TaskLogChunk)(nil),       // 5: relay.v1.TaskLogChunk
+	(*CoordinatorMessage)(nil), // 6: relay.v1.CoordinatorMessage
+	(*RegisterResponse)(nil),   // 7: relay.v1.RegisterResponse
+	(*DispatchTask)(nil),       // 8: relay.v1.DispatchTask
+	(*CancelTask)(nil),         // 9: relay.v1.CancelTask
+	nil,                        // 10: relay.v1.DispatchTask.EnvEntry
 }
 var file_relayv1_relay_proto_depIdxs = []int32{
-	2, // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
-	3, // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
-	4, // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
-	0, // 3: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
-	6, // 4: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
-	7, // 5: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
-	8, // 6: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
-	9, // 7: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
-	1, // 8: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
-	5, // 9: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
-	9, // [9:10] is the sub-list for method output_type
-	8, // [8:9] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	3,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
+	4,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
+	5,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
+	0,  // 3: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
+	1,  // 4: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
+	7,  // 5: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
+	8,  // 6: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
+	9,  // 7: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
+	10, // 8: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
+	2,  // 9: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
+	6,  // 10: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
+	10, // [10:11] is the sub-list for method output_type
+	9,  // [9:10] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_relayv1_relay_proto_init() }
@@ -774,6 +831,7 @@ func file_relayv1_relay_proto_init() {
 		(*AgentMessage_TaskStatus)(nil),
 		(*AgentMessage_TaskLog)(nil),
 	}
+	file_relayv1_relay_proto_msgTypes[2].OneofWrappers = []any{}
 	file_relayv1_relay_proto_msgTypes[4].OneofWrappers = []any{
 		(*CoordinatorMessage_RegisterResponse)(nil),
 		(*CoordinatorMessage_DispatchTask)(nil),
@@ -784,7 +842,7 @@ func file_relayv1_relay_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relayv1_relay_proto_rawDesc), len(file_relayv1_relay_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
