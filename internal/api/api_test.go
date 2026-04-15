@@ -3,17 +3,22 @@
 package api_test
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,4 +55,156 @@ func TestCreateToken(t *testing.T) {
 	token, ok := resp["token"].(string)
 	require.True(t, ok)
 	assert.NotEmpty(t, token)
+}
+
+func createTestToken(t *testing.T, q *store.Queries, userID pgtype.UUID) string {
+	t.Helper()
+	raw := make([]byte, 16)
+	_, _ = rand.Read(raw)
+	rawHex := hex.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(rawHex))
+	hash := hex.EncodeToString(sum[:])
+	_, err := q.CreateToken(t.Context(), store.CreateTokenParams{
+		UserID:    userID,
+		TokenHash: hash,
+		ExpiresAt: pgtype.Timestamptz{},
+	})
+	require.NoError(t, err)
+	return rawHex
+}
+
+func TestCreateAndGetJob(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := t.Context()
+
+	user, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Alice", Email: "alice@example.com", IsAdmin: false,
+	})
+	require.NoError(t, err)
+	token := createTestToken(t, q, user.ID)
+
+	body := `{
+        "name": "render-job",
+        "priority": "normal",
+        "tasks": [
+            {"name": "task-a", "command": ["echo", "a"], "depends_on": []},
+            {"name": "task-b", "command": ["echo", "b"], "depends_on": ["task-a"]}
+        ]
+    }`
+	req := httptest.NewRequest("POST", "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	jobID, ok := resp["id"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, jobID)
+
+	// GET /v1/jobs/:id
+	req2 := httptest.NewRequest("GET", "/v1/jobs/"+jobID, nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	var job map[string]any
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&job))
+	assert.Equal(t, "render-job", job["name"])
+	tasks := job["tasks"].([]any)
+	assert.Len(t, tasks, 2)
+}
+
+func TestGetTaskAndLogs(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := t.Context()
+
+	user, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Alice", Email: "alice2@example.com", IsAdmin: false,
+	})
+	require.NoError(t, err)
+	token := createTestToken(t, q, user.ID)
+
+	body := `{"name":"j","tasks":[{"name":"t","command":["echo","hi"]}]}`
+	req := httptest.NewRequest("POST", "/v1/jobs", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var job map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&job))
+	jobID := job["id"].(string)
+	taskID := job["tasks"].([]any)[0].(map[string]any)["id"].(string)
+
+	// GET /v1/jobs/:id/tasks
+	req2 := httptest.NewRequest("GET", "/v1/jobs/"+jobID+"/tasks", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	// GET /v1/tasks/:id
+	req3 := httptest.NewRequest("GET", "/v1/tasks/"+taskID, nil)
+	req3.Header.Set("Authorization", "Bearer "+token)
+	rec3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec3, req3)
+	require.Equal(t, http.StatusOK, rec3.Code)
+
+	// GET /v1/tasks/:id/logs
+	req4 := httptest.NewRequest("GET", "/v1/tasks/"+taskID+"/logs", nil)
+	req4.Header.Set("Authorization", "Bearer "+token)
+	rec4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec4, req4)
+	require.Equal(t, http.StatusOK, rec4.Code)
+}
+
+func TestListWorkers(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := t.Context()
+
+	user, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Admin", Email: "admin@example.com", IsAdmin: true,
+	})
+	require.NoError(t, err)
+	token := createTestToken(t, q, user.ID)
+
+	req := httptest.NewRequest("GET", "/v1/workers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var workers []any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&workers))
+	assert.Empty(t, workers)
+}
+
+func TestSSESubscribe(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := t.Context()
+
+	user, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Alice", Email: "alice3@example.com", IsAdmin: false,
+	})
+	require.NoError(t, err)
+	token := createTestToken(t, q, user.ID)
+
+	req := httptest.NewRequest("GET", "/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Handler().ServeHTTP(rec, req)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
 }
