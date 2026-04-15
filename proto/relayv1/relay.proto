@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package relay.v1;
+
+option go_package = "relay/internal/proto/relayv1";
+
+// AgentService is the bidirectional gRPC stream between the coordinator
+// and each relay-agent. The agent opens the stream; both sides send messages.
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream CoordinatorMessage);
+}
+
+// ─── Agent → Coordinator ───────────────────────────────────────────────────
+
+message AgentMessage {
+  oneof payload {
+    RegisterRequest  register    = 1;
+    TaskStatusUpdate task_status = 2;
+    TaskLogChunk     task_log    = 3;
+  }
+}
+
+// Sent once when the stream opens. worker_id is empty on first registration.
+message RegisterRequest {
+  string worker_id  = 1;
+  string hostname   = 2;
+  int32  cpu_cores  = 3;
+  int32  ram_gb     = 4;
+  int32  gpu_count  = 5;
+  string gpu_model  = 6;
+  string os         = 7;
+}
+
+// Sent when a task changes state.
+message TaskStatusUpdate {
+  string     task_id       = 1;
+  TaskStatus status        = 2;
+  int32      exit_code     = 3;
+  string     error_message = 4;
+}
+
+// A chunk of captured output from a running task.
+message TaskLogChunk {
+  string task_id = 1;
+  string stream  = 2; // "stdout" or "stderr"
+  bytes  content = 3;
+}
+
+// ─── Coordinator → Agent ───────────────────────────────────────────────────
+
+message CoordinatorMessage {
+  oneof payload {
+    RegisterResponse register_response = 1;
+    DispatchTask     dispatch_task     = 2;
+    CancelTask       cancel_task       = 3;
+  }
+}
+
+// Sent in response to RegisterRequest; assigns a stable worker ID.
+message RegisterResponse {
+  string worker_id = 1;
+}
+
+// Instructs the agent to execute a task.
+message DispatchTask {
+  string              task_id         = 1;
+  string              job_id          = 2;
+  repeated string     command         = 3;
+  map<string, string> env             = 4;
+  int32               timeout_seconds = 5;
+}
+
+// Instructs the agent to kill a running task.
+message CancelTask {
+  string task_id = 1;
+}
+
+// ─── Enums ─────────────────────────────────────────────────────────────────
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_RUNNING     = 1;
+  TASK_STATUS_DONE        = 2;
+  TASK_STATUS_FAILED      = 3;
+  TASK_STATUS_TIMED_OUT   = 4;
+}
