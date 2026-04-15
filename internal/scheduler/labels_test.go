@@ -15,6 +15,7 @@ func TestLabelMatch(t *testing.T) {
 		requires string
 		labels   string
 		want     bool
+		wantErr  bool
 	}{
 		{
 			name:     "empty requires matches anything",
@@ -52,10 +53,26 @@ func TestLabelMatch(t *testing.T) {
 			labels:   `{}`,
 			want:     true,
 		},
+		{
+			name:     "requires invalid JSON",
+			requires: `{bad json}`,
+			labels:   `{}`,
+			wantErr:  true,
+		},
+		{
+			name:     "labels invalid JSON",
+			requires: `{"zone": "studio-a"}`,
+			labels:   `not json at all`,
+			wantErr:  true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := scheduler.LabelMatch([]byte(tc.requires), []byte(tc.labels))
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
