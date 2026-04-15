@@ -61,3 +61,19 @@ UPDATE tasks
 SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
   AND id IN (SELECT task_id FROM blocked);
+
+-- name: CountActiveTasksForWorker :one
+SELECT COUNT(*) FROM tasks
+WHERE worker_id = $1 AND status IN ('dispatched', 'running');
+
+-- name: RequeueWorkerTasks :exec
+-- Re-queue dispatched/running tasks for a worker that has disconnected.
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE worker_id = $1 AND status IN ('dispatched', 'running');
+
+-- name: RequeueAllActiveTasks :exec
+-- Called on coordinator startup to recover from an unclean shutdown.
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE status IN ('dispatched', 'running');

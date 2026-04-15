@@ -23,3 +23,16 @@ UPDATE workers
 SET status = $2, last_seen_at = $3
 WHERE id = $1
 RETURNING *;
+
+-- name: UpsertWorkerByHostname :one
+-- Insert a new worker or update hardware specs on reconnect.
+-- Admin-managed fields (name, labels, max_slots) are preserved on conflict.
+INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (hostname) DO UPDATE
+    SET cpu_cores = EXCLUDED.cpu_cores,
+        ram_gb    = EXCLUDED.ram_gb,
+        gpu_count = EXCLUDED.gpu_count,
+        gpu_model = EXCLUDED.gpu_model,
+        os        = EXCLUDED.os
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at;

@@ -243,3 +243,66 @@ func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatus
 	)
 	return i, err
 }
+
+const upsertWorkerByHostname = `-- name: UpsertWorkerByHostname :one
+INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (hostname) DO UPDATE
+    SET cpu_cores = EXCLUDED.cpu_cores,
+        ram_gb    = EXCLUDED.ram_gb,
+        gpu_count = EXCLUDED.gpu_count,
+        gpu_model = EXCLUDED.gpu_model,
+        os        = EXCLUDED.os
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+`
+
+type UpsertWorkerByHostnameParams struct {
+	Name     string `json:"name"`
+	Hostname string `json:"hostname"`
+	CpuCores int32  `json:"cpu_cores"`
+	RamGb    int32  `json:"ram_gb"`
+	GpuCount int32  `json:"gpu_count"`
+	GpuModel string `json:"gpu_model"`
+	Os       string `json:"os"`
+}
+
+// Insert a new worker or update hardware specs on reconnect.
+// Admin-managed fields (name, labels, max_slots) are preserved on conflict.
+//
+//	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
+//	VALUES ($1, $2, $3, $4, $5, $6, $7)
+//	ON CONFLICT (hostname) DO UPDATE
+//	    SET cpu_cores = EXCLUDED.cpu_cores,
+//	        ram_gb    = EXCLUDED.ram_gb,
+//	        gpu_count = EXCLUDED.gpu_count,
+//	        gpu_model = EXCLUDED.gpu_model,
+//	        os        = EXCLUDED.os
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerByHostnameParams) (Worker, error) {
+	row := q.db.QueryRow(ctx, upsertWorkerByHostname,
+		arg.Name,
+		arg.Hostname,
+		arg.CpuCores,
+		arg.RamGb,
+		arg.GpuCount,
+		arg.GpuModel,
+		arg.Os,
+	)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Hostname,
+		&i.CpuCores,
+		&i.RamGb,
+		&i.GpuCount,
+		&i.GpuModel,
+		&i.Os,
+		&i.MaxSlots,
+		&i.Labels,
+		&i.Status,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}

@@ -29,6 +29,22 @@ func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) er
 	return err
 }
 
+const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
+SELECT COUNT(*) FROM tasks
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+`
+
+// CountActiveTasksForWorker
+//
+//	SELECT COUNT(*) FROM tasks
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+func (q *Queries) CountActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTasksForWorker, workerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (job_id, name, command, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -355,6 +371,38 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task
 		return nil, err
 	}
 	return items, nil
+}
+
+const requeueAllActiveTasks = `-- name: RequeueAllActiveTasks :exec
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE status IN ('dispatched', 'running')
+`
+
+// Called on coordinator startup to recover from an unclean shutdown.
+//
+//	UPDATE tasks
+//	SET status = 'pending', worker_id = NULL, started_at = NULL
+//	WHERE status IN ('dispatched', 'running')
+func (q *Queries) RequeueAllActiveTasks(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, requeueAllActiveTasks)
+	return err
+}
+
+const requeueWorkerTasks = `-- name: RequeueWorkerTasks :exec
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+`
+
+// Re-queue dispatched/running tasks for a worker that has disconnected.
+//
+//	UPDATE tasks
+//	SET status = 'pending', worker_id = NULL, started_at = NULL
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, requeueWorkerTasks, workerID)
+	return err
 }
 
 const updateTaskStatus = `-- name: UpdateTaskStatus :one
