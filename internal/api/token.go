@@ -17,7 +17,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Name  string `json:"name"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Email == "" {
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Email == "" {
 		writeError(w, http.StatusBadRequest, "email is required")
 		return
 	}
