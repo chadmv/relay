@@ -7,11 +7,8 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 
-	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const appendTaskLog = `-- name: AppendTaskLog :exec
@@ -19,16 +16,16 @@ INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3)
 `
 
 type AppendTaskLogParams struct {
-	TaskID  uuid.UUID `json:"task_id"`
-	Stream  string    `json:"stream"`
-	Content string    `json:"content"`
+	TaskID  pgtype.UUID `json:"task_id"`
+	Stream  string      `json:"stream"`
+	Content string      `json:"content"`
 }
 
 // AppendTaskLog
 //
 //	INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3)
 func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) error {
-	_, err := q.db.ExecContext(ctx, appendTaskLog, arg.TaskID, arg.Stream, arg.Content)
+	_, err := q.db.Exec(ctx, appendTaskLog, arg.TaskID, arg.Stream, arg.Content)
 	return err
 }
 
@@ -39,13 +36,13 @@ RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, re
 `
 
 type CreateTaskParams struct {
-	JobID          uuid.UUID       `json:"job_id"`
-	Name           string          `json:"name"`
-	Command        []string        `json:"command"`
-	Env            json.RawMessage `json:"env"`
-	Requires       json.RawMessage `json:"requires"`
-	TimeoutSeconds sql.NullInt32   `json:"timeout_seconds"`
-	Retries        int32           `json:"retries"`
+	JobID          pgtype.UUID `json:"job_id"`
+	Name           string      `json:"name"`
+	Command        []string    `json:"command"`
+	Env            []byte      `json:"env"`
+	Requires       []byte      `json:"requires"`
+	TimeoutSeconds *int32      `json:"timeout_seconds"`
+	Retries        int32       `json:"retries"`
 }
 
 // CreateTask
@@ -54,10 +51,10 @@ type CreateTaskParams struct {
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
 //	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at
 func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, error) {
-	row := q.db.QueryRowContext(ctx, createTask,
+	row := q.db.QueryRow(ctx, createTask,
 		arg.JobID,
 		arg.Name,
-		pq.Array(arg.Command),
+		arg.Command,
 		arg.Env,
 		arg.Requires,
 		arg.TimeoutSeconds,
@@ -68,7 +65,7 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.ID,
 		&i.JobID,
 		&i.Name,
-		pq.Array(&i.Command),
+		&i.Command,
 		&i.Env,
 		&i.Requires,
 		&i.TimeoutSeconds,
@@ -90,8 +87,8 @@ ON CONFLICT DO NOTHING
 `
 
 type CreateTaskDependencyParams struct {
-	TaskID          uuid.UUID `json:"task_id"`
-	DependsOnTaskID uuid.UUID `json:"depends_on_task_id"`
+	TaskID          pgtype.UUID `json:"task_id"`
+	DependsOnTaskID pgtype.UUID `json:"depends_on_task_id"`
 }
 
 // CreateTaskDependency
@@ -100,30 +97,39 @@ type CreateTaskDependencyParams struct {
 //	VALUES ($1, $2)
 //	ON CONFLICT DO NOTHING
 func (q *Queries) CreateTaskDependency(ctx context.Context, arg CreateTaskDependencyParams) error {
-	_, err := q.db.ExecContext(ctx, createTaskDependency, arg.TaskID, arg.DependsOnTaskID)
+	_, err := q.db.Exec(ctx, createTaskDependency, arg.TaskID, arg.DependsOnTaskID)
 	return err
 }
 
 const failDependentTasks = `-- name: FailDependentTasks :exec
+WITH RECURSIVE blocked AS (
+    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1::uuid
+    UNION ALL
+    SELECT td.task_id FROM task_dependencies td
+    JOIN blocked b ON td.depends_on_task_id = b.task_id
+)
 UPDATE tasks
 SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
-  AND id IN (
-    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1
-  )
+  AND id IN (SELECT task_id FROM blocked)
 `
 
-// Mark all tasks that directly depend on a failed task as failed.
+// Mark all tasks that transitively depend on a failed task as failed.
+// Uses a recursive CTE to walk the full dependency chain.
 // Call this after marking a task as failed.
 //
+//	WITH RECURSIVE blocked AS (
+//	    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1::uuid
+//	    UNION ALL
+//	    SELECT td.task_id FROM task_dependencies td
+//	    JOIN blocked b ON td.depends_on_task_id = b.task_id
+//	)
 //	UPDATE tasks
 //	SET status = 'failed', finished_at = NOW()
 //	WHERE status = 'pending'
-//	  AND id IN (
-//	    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1
-//	  )
-func (q *Queries) FailDependentTasks(ctx context.Context, dependsOnTaskID uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, failDependentTasks, dependsOnTaskID)
+//	  AND id IN (SELECT task_id FROM blocked)
+func (q *Queries) FailDependentTasks(ctx context.Context, failedTaskID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, failDependentTasks, failedTaskID)
 	return err
 }
 
@@ -151,7 +157,7 @@ ORDER BY t.created_at
 //	  )
 //	ORDER BY t.created_at
 func (q *Queries) GetEligibleTasks(ctx context.Context) ([]Task, error) {
-	rows, err := q.db.QueryContext(ctx, getEligibleTasks)
+	rows, err := q.db.Query(ctx, getEligibleTasks)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +169,7 @@ func (q *Queries) GetEligibleTasks(ctx context.Context) ([]Task, error) {
 			&i.ID,
 			&i.JobID,
 			&i.Name,
-			pq.Array(&i.Command),
+			&i.Command,
 			&i.Env,
 			&i.Requires,
 			&i.TimeoutSeconds,
@@ -179,9 +185,6 @@ func (q *Queries) GetEligibleTasks(ctx context.Context) ([]Task, error) {
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -195,14 +198,14 @@ SELECT id, job_id, name, command, env, requires, timeout_seconds, retries, retry
 // GetTask
 //
 //	SELECT id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at FROM tasks WHERE id = $1
-func (q *Queries) GetTask(ctx context.Context, id uuid.UUID) (Task, error) {
-	row := q.db.QueryRowContext(ctx, getTask, id)
+func (q *Queries) GetTask(ctx context.Context, id pgtype.UUID) (Task, error) {
+	row := q.db.QueryRow(ctx, getTask, id)
 	var i Task
 	err := row.Scan(
 		&i.ID,
 		&i.JobID,
 		&i.Name,
-		pq.Array(&i.Command),
+		&i.Command,
 		&i.Env,
 		&i.Requires,
 		&i.TimeoutSeconds,
@@ -224,22 +227,19 @@ SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1
 // GetTaskDependencies
 //
 //	SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1
-func (q *Queries) GetTaskDependencies(ctx context.Context, taskID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.QueryContext(ctx, getTaskDependencies, taskID)
+func (q *Queries) GetTaskDependencies(ctx context.Context, taskID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, getTaskDependencies, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []uuid.UUID
+	var items []pgtype.UUID
 	for rows.Next() {
-		var depends_on_task_id uuid.UUID
+		var depends_on_task_id pgtype.UUID
 		if err := rows.Scan(&depends_on_task_id); err != nil {
 			return nil, err
 		}
 		items = append(items, depends_on_task_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -254,8 +254,8 @@ SELECT id, task_id, stream, content, created_at FROM task_logs WHERE task_id = $
 // GetTaskLogs
 //
 //	SELECT id, task_id, stream, content, created_at FROM task_logs WHERE task_id = $1 ORDER BY id
-func (q *Queries) GetTaskLogs(ctx context.Context, taskID uuid.UUID) ([]TaskLog, error) {
-	rows, err := q.db.QueryContext(ctx, getTaskLogs, taskID)
+func (q *Queries) GetTaskLogs(ctx context.Context, taskID pgtype.UUID) ([]TaskLog, error) {
+	rows, err := q.db.Query(ctx, getTaskLogs, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -273,9 +273,6 @@ func (q *Queries) GetTaskLogs(ctx context.Context, taskID uuid.UUID) ([]TaskLog,
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -296,14 +293,14 @@ RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, re
 //	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
 //	WHERE id = $1
 //	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at
-func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id uuid.UUID) (Task, error) {
-	row := q.db.QueryRowContext(ctx, incrementTaskRetryCount, id)
+func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (Task, error) {
+	row := q.db.QueryRow(ctx, incrementTaskRetryCount, id)
 	var i Task
 	err := row.Scan(
 		&i.ID,
 		&i.JobID,
 		&i.Name,
-		pq.Array(&i.Command),
+		&i.Command,
 		&i.Env,
 		&i.Requires,
 		&i.TimeoutSeconds,
@@ -325,8 +322,8 @@ SELECT id, job_id, name, command, env, requires, timeout_seconds, retries, retry
 // ListTasksByJob
 //
 //	SELECT id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at FROM tasks WHERE job_id = $1 ORDER BY created_at
-func (q *Queries) ListTasksByJob(ctx context.Context, jobID uuid.UUID) ([]Task, error) {
-	rows, err := q.db.QueryContext(ctx, listTasksByJob, jobID)
+func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task, error) {
+	rows, err := q.db.Query(ctx, listTasksByJob, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +335,7 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID uuid.UUID) ([]Task, 
 			&i.ID,
 			&i.JobID,
 			&i.Name,
-			pq.Array(&i.Command),
+			&i.Command,
 			&i.Env,
 			&i.Requires,
 			&i.TimeoutSeconds,
@@ -354,9 +351,6 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID uuid.UUID) ([]Task, 
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -371,11 +365,11 @@ RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, re
 `
 
 type UpdateTaskStatusParams struct {
-	ID         uuid.UUID     `json:"id"`
-	Status     string        `json:"status"`
-	WorkerID   uuid.NullUUID `json:"worker_id"`
-	StartedAt  sql.NullTime  `json:"started_at"`
-	FinishedAt sql.NullTime  `json:"finished_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Status     string             `json:"status"`
+	WorkerID   pgtype.UUID        `json:"worker_id"`
+	StartedAt  pgtype.Timestamptz `json:"started_at"`
+	FinishedAt pgtype.Timestamptz `json:"finished_at"`
 }
 
 // UpdateTaskStatus
@@ -385,7 +379,7 @@ type UpdateTaskStatusParams struct {
 //	WHERE id = $1
 //	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at
 func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusParams) (Task, error) {
-	row := q.db.QueryRowContext(ctx, updateTaskStatus,
+	row := q.db.QueryRow(ctx, updateTaskStatus,
 		arg.ID,
 		arg.Status,
 		arg.WorkerID,
@@ -397,7 +391,7 @@ func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusPara
 		&i.ID,
 		&i.JobID,
 		&i.Name,
-		pq.Array(&i.Command),
+		&i.Command,
 		&i.Env,
 		&i.Requires,
 		&i.TimeoutSeconds,

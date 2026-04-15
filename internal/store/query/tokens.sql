@@ -6,7 +6,7 @@ RETURNING *;
 -- name: GetTokenWithUser :one
 SELECT
     t.id          AS token_id,
-    t.user_id,
+    t.user_id     AS token_user_id,
     t.token_hash,
     t.created_at  AS token_created_at,
     t.expires_at,

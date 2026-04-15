@@ -7,10 +7,8 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"time"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createToken = `-- name: CreateToken :one
@@ -20,9 +18,9 @@ RETURNING id, user_id, token_hash, created_at, expires_at
 `
 
 type CreateTokenParams struct {
-	UserID    uuid.UUID    `json:"user_id"`
-	TokenHash string       `json:"token_hash"`
-	ExpiresAt sql.NullTime `json:"expires_at"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	TokenHash string             `json:"token_hash"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 }
 
 // CreateToken
@@ -31,7 +29,7 @@ type CreateTokenParams struct {
 //	VALUES ($1, $2, $3)
 //	RETURNING id, user_id, token_hash, created_at, expires_at
 func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (ApiToken, error) {
-	row := q.db.QueryRowContext(ctx, createToken, arg.UserID, arg.TokenHash, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, createToken, arg.UserID, arg.TokenHash, arg.ExpiresAt)
 	var i ApiToken
 	err := row.Scan(
 		&i.ID,
@@ -46,7 +44,7 @@ func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (ApiTo
 const getTokenWithUser = `-- name: GetTokenWithUser :one
 SELECT
     t.id          AS token_id,
-    t.user_id,
+    t.user_id     AS token_user_id,
     t.token_hash,
     t.created_at  AS token_created_at,
     t.expires_at,
@@ -60,22 +58,22 @@ WHERE t.token_hash = $1
 `
 
 type GetTokenWithUserRow struct {
-	TokenID        uuid.UUID    `json:"token_id"`
-	UserID         uuid.UUID    `json:"user_id"`
-	TokenHash      string       `json:"token_hash"`
-	TokenCreatedAt time.Time    `json:"token_created_at"`
-	ExpiresAt      sql.NullTime `json:"expires_at"`
-	UserID_2       uuid.UUID    `json:"user_id_2"`
-	UserName       string       `json:"user_name"`
-	UserEmail      string       `json:"user_email"`
-	UserIsAdmin    bool         `json:"user_is_admin"`
+	TokenID        pgtype.UUID        `json:"token_id"`
+	TokenUserID    pgtype.UUID        `json:"token_user_id"`
+	TokenHash      string             `json:"token_hash"`
+	TokenCreatedAt pgtype.Timestamptz `json:"token_created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	UserID         pgtype.UUID        `json:"user_id"`
+	UserName       string             `json:"user_name"`
+	UserEmail      string             `json:"user_email"`
+	UserIsAdmin    bool               `json:"user_is_admin"`
 }
 
 // GetTokenWithUser
 //
 //	SELECT
 //	    t.id          AS token_id,
-//	    t.user_id,
+//	    t.user_id     AS token_user_id,
 //	    t.token_hash,
 //	    t.created_at  AS token_created_at,
 //	    t.expires_at,
@@ -87,15 +85,15 @@ type GetTokenWithUserRow struct {
 //	JOIN users u ON u.id = t.user_id
 //	WHERE t.token_hash = $1
 func (q *Queries) GetTokenWithUser(ctx context.Context, tokenHash string) (GetTokenWithUserRow, error) {
-	row := q.db.QueryRowContext(ctx, getTokenWithUser, tokenHash)
+	row := q.db.QueryRow(ctx, getTokenWithUser, tokenHash)
 	var i GetTokenWithUserRow
 	err := row.Scan(
 		&i.TokenID,
-		&i.UserID,
+		&i.TokenUserID,
 		&i.TokenHash,
 		&i.TokenCreatedAt,
 		&i.ExpiresAt,
-		&i.UserID_2,
+		&i.UserID,
 		&i.UserName,
 		&i.UserEmail,
 		&i.UserIsAdmin,

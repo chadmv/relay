@@ -8,7 +8,7 @@ package store
 import (
 	"context"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createUser = `-- name: CreateUser :one
@@ -29,7 +29,7 @@ type CreateUserParams struct {
 //	VALUES ($1, $2, $3)
 //	RETURNING id, name, email, is_admin, created_at
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, createUser, arg.Name, arg.Email, arg.IsAdmin)
+	row := q.db.QueryRow(ctx, createUser, arg.Name, arg.Email, arg.IsAdmin)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -48,8 +48,8 @@ SELECT id, name, email, is_admin, created_at FROM users WHERE id = $1
 // GetUser
 //
 //	SELECT id, name, email, is_admin, created_at FROM users WHERE id = $1
-func (q *Queries) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUser, id)
+func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUser, id)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -69,7 +69,7 @@ SELECT id, name, email, is_admin, created_at FROM users WHERE email = $1
 //
 //	SELECT id, name, email, is_admin, created_at FROM users WHERE email = $1
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUserByEmail, email)
+	row := q.db.QueryRow(ctx, getUserByEmail, email)
 	var i User
 	err := row.Scan(
 		&i.ID,

@@ -7,10 +7,8 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createWorker = `-- name: CreateWorker :one
@@ -35,7 +33,7 @@ type CreateWorkerParams struct {
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
 //	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
 func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Worker, error) {
-	row := q.db.QueryRowContext(ctx, createWorker,
+	row := q.db.QueryRow(ctx, createWorker,
 		arg.Name,
 		arg.Hostname,
 		arg.CpuCores,
@@ -70,8 +68,8 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 // GetWorker
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE id = $1
-func (q *Queries) GetWorker(ctx context.Context, id uuid.UUID) (Worker, error) {
-	row := q.db.QueryRowContext(ctx, getWorker, id)
+func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorker, id)
 	var i Worker
 	err := row.Scan(
 		&i.ID,
@@ -99,7 +97,7 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE hostname = $1
 func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Worker, error) {
-	row := q.db.QueryRowContext(ctx, getWorkerByHostname, hostname)
+	row := q.db.QueryRow(ctx, getWorkerByHostname, hostname)
 	var i Worker
 	err := row.Scan(
 		&i.ID,
@@ -127,7 +125,7 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers ORDER BY name
 func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
-	rows, err := q.db.QueryContext(ctx, listWorkers)
+	rows, err := q.db.Query(ctx, listWorkers)
 	if err != nil {
 		return nil, err
 	}
@@ -154,9 +152,6 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -171,10 +166,10 @@ RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_s
 `
 
 type UpdateWorkerParams struct {
-	ID       uuid.UUID       `json:"id"`
-	Name     string          `json:"name"`
-	Labels   json.RawMessage `json:"labels"`
-	MaxSlots int32           `json:"max_slots"`
+	ID       pgtype.UUID `json:"id"`
+	Name     string      `json:"name"`
+	Labels   []byte      `json:"labels"`
+	MaxSlots int32       `json:"max_slots"`
 }
 
 // UpdateWorker
@@ -184,7 +179,7 @@ type UpdateWorkerParams struct {
 //	WHERE id = $1
 //	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
 func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Worker, error) {
-	row := q.db.QueryRowContext(ctx, updateWorker,
+	row := q.db.QueryRow(ctx, updateWorker,
 		arg.ID,
 		arg.Name,
 		arg.Labels,
@@ -217,9 +212,9 @@ RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_s
 `
 
 type UpdateWorkerStatusParams struct {
-	ID         uuid.UUID    `json:"id"`
-	Status     string       `json:"status"`
-	LastSeenAt sql.NullTime `json:"last_seen_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Status     string             `json:"status"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
 }
 
 // UpdateWorkerStatus
@@ -229,7 +224,7 @@ type UpdateWorkerStatusParams struct {
 //	WHERE id = $1
 //	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
 func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatusParams) (Worker, error) {
-	row := q.db.QueryRowContext(ctx, updateWorkerStatus, arg.ID, arg.Status, arg.LastSeenAt)
+	row := q.db.QueryRow(ctx, updateWorkerStatus, arg.ID, arg.Status, arg.LastSeenAt)
 	var i Worker
 	err := row.Scan(
 		&i.ID,

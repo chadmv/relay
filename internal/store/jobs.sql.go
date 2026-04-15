@@ -7,9 +7,8 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createJob = `-- name: CreateJob :one
@@ -19,10 +18,10 @@ RETURNING id, name, priority, status, submitted_by, labels, created_at, updated_
 `
 
 type CreateJobParams struct {
-	Name        string          `json:"name"`
-	Priority    string          `json:"priority"`
-	SubmittedBy uuid.UUID       `json:"submitted_by"`
-	Labels      json.RawMessage `json:"labels"`
+	Name        string      `json:"name"`
+	Priority    string      `json:"priority"`
+	SubmittedBy pgtype.UUID `json:"submitted_by"`
+	Labels      []byte      `json:"labels"`
 }
 
 // CreateJob
@@ -31,7 +30,7 @@ type CreateJobParams struct {
 //	VALUES ($1, $2, $3, $4)
 //	RETURNING id, name, priority, status, submitted_by, labels, created_at, updated_at
 func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, error) {
-	row := q.db.QueryRowContext(ctx, createJob,
+	row := q.db.QueryRow(ctx, createJob,
 		arg.Name,
 		arg.Priority,
 		arg.SubmittedBy,
@@ -58,8 +57,8 @@ DELETE FROM jobs WHERE id = $1
 // DeleteJob
 //
 //	DELETE FROM jobs WHERE id = $1
-func (q *Queries) DeleteJob(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, deleteJob, id)
+func (q *Queries) DeleteJob(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteJob, id)
 	return err
 }
 
@@ -70,8 +69,8 @@ SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at 
 // GetJob
 //
 //	SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at FROM jobs WHERE id = $1
-func (q *Queries) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
-	row := q.db.QueryRowContext(ctx, getJob, id)
+func (q *Queries) GetJob(ctx context.Context, id pgtype.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, getJob, id)
 	var i Job
 	err := row.Scan(
 		&i.ID,
@@ -94,7 +93,7 @@ SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at 
 //
 //	SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at FROM jobs ORDER BY created_at DESC
 func (q *Queries) ListJobs(ctx context.Context) ([]Job, error) {
-	rows, err := q.db.QueryContext(ctx, listJobs)
+	rows, err := q.db.Query(ctx, listJobs)
 	if err != nil {
 		return nil, err
 	}
@@ -115,9 +114,6 @@ func (q *Queries) ListJobs(ctx context.Context) ([]Job, error) {
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -133,7 +129,7 @@ SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at 
 //
 //	SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at FROM jobs WHERE status = $1 ORDER BY created_at DESC
 func (q *Queries) ListJobsByStatus(ctx context.Context, status string) ([]Job, error) {
-	rows, err := q.db.QueryContext(ctx, listJobsByStatus, status)
+	rows, err := q.db.Query(ctx, listJobsByStatus, status)
 	if err != nil {
 		return nil, err
 	}
@@ -155,9 +151,6 @@ func (q *Queries) ListJobsByStatus(ctx context.Context, status string) ([]Job, e
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -172,8 +165,8 @@ RETURNING id, name, priority, status, submitted_by, labels, created_at, updated_
 `
 
 type UpdateJobStatusParams struct {
-	ID     uuid.UUID `json:"id"`
-	Status string    `json:"status"`
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
 }
 
 // UpdateJobStatus
@@ -183,7 +176,7 @@ type UpdateJobStatusParams struct {
 //	WHERE id = $1
 //	RETURNING id, name, priority, status, submitted_by, labels, created_at, updated_at
 func (q *Queries) UpdateJobStatus(ctx context.Context, arg UpdateJobStatusParams) (Job, error) {
-	row := q.db.QueryRowContext(ctx, updateJobStatus, arg.ID, arg.Status)
+	row := q.db.QueryRow(ctx, updateJobStatus, arg.ID, arg.Status)
 	var i Job
 	err := row.Scan(
 		&i.ID,

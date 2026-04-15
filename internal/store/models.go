@@ -5,94 +5,90 @@
 package store
 
 import (
-	"database/sql"
-	"encoding/json"
-	"time"
-
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type ApiToken struct {
-	ID        uuid.UUID    `json:"id"`
-	UserID    uuid.UUID    `json:"user_id"`
-	TokenHash string       `json:"token_hash"`
-	CreatedAt time.Time    `json:"created_at"`
-	ExpiresAt sql.NullTime `json:"expires_at"`
+	ID        pgtype.UUID        `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	TokenHash string             `json:"token_hash"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 }
 
 type Job struct {
-	ID          uuid.UUID       `json:"id"`
-	Name        string          `json:"name"`
-	Priority    string          `json:"priority"`
-	Status      string          `json:"status"`
-	SubmittedBy uuid.UUID       `json:"submitted_by"`
-	Labels      json.RawMessage `json:"labels"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Priority    string             `json:"priority"`
+	Status      string             `json:"status"`
+	SubmittedBy pgtype.UUID        `json:"submitted_by"`
+	Labels      []byte             `json:"labels"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Reservation struct {
-	ID        uuid.UUID       `json:"id"`
-	Name      string          `json:"name"`
-	Selector  json.RawMessage `json:"selector"`
-	WorkerIds []uuid.UUID     `json:"worker_ids"`
-	UserID    uuid.NullUUID   `json:"user_id"`
-	Project   sql.NullString  `json:"project"`
-	StartsAt  sql.NullTime    `json:"starts_at"`
-	EndsAt    sql.NullTime    `json:"ends_at"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID        pgtype.UUID        `json:"id"`
+	Name      string             `json:"name"`
+	Selector  []byte             `json:"selector"`
+	WorkerIds []pgtype.UUID      `json:"worker_ids"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	Project   *string            `json:"project"`
+	StartsAt  pgtype.Timestamptz `json:"starts_at"`
+	EndsAt    pgtype.Timestamptz `json:"ends_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type Task struct {
-	ID             uuid.UUID       `json:"id"`
-	JobID          uuid.UUID       `json:"job_id"`
-	Name           string          `json:"name"`
-	Command        []string        `json:"command"`
-	Env            json.RawMessage `json:"env"`
-	Requires       json.RawMessage `json:"requires"`
-	TimeoutSeconds sql.NullInt32   `json:"timeout_seconds"`
-	Retries        int32           `json:"retries"`
-	RetryCount     int32           `json:"retry_count"`
-	Status         string          `json:"status"`
-	WorkerID       uuid.NullUUID   `json:"worker_id"`
-	StartedAt      sql.NullTime    `json:"started_at"`
-	FinishedAt     sql.NullTime    `json:"finished_at"`
-	CreatedAt      time.Time       `json:"created_at"`
+	ID             pgtype.UUID        `json:"id"`
+	JobID          pgtype.UUID        `json:"job_id"`
+	Name           string             `json:"name"`
+	Command        []string           `json:"command"`
+	Env            []byte             `json:"env"`
+	Requires       []byte             `json:"requires"`
+	TimeoutSeconds *int32             `json:"timeout_seconds"`
+	Retries        int32              `json:"retries"`
+	RetryCount     int32              `json:"retry_count"`
+	Status         string             `json:"status"`
+	WorkerID       pgtype.UUID        `json:"worker_id"`
+	StartedAt      pgtype.Timestamptz `json:"started_at"`
+	FinishedAt     pgtype.Timestamptz `json:"finished_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
 type TaskDependency struct {
-	TaskID          uuid.UUID `json:"task_id"`
-	DependsOnTaskID uuid.UUID `json:"depends_on_task_id"`
+	TaskID          pgtype.UUID `json:"task_id"`
+	DependsOnTaskID pgtype.UUID `json:"depends_on_task_id"`
 }
 
 type TaskLog struct {
-	ID        int64     `json:"id"`
-	TaskID    uuid.UUID `json:"task_id"`
-	Stream    string    `json:"stream"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64              `json:"id"`
+	TaskID    pgtype.UUID        `json:"task_id"`
+	Stream    string             `json:"stream"`
+	Content   string             `json:"content"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	Name      string    `json:"name"`
-	Email     string    `json:"email"`
-	IsAdmin   bool      `json:"is_admin"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        pgtype.UUID        `json:"id"`
+	Name      string             `json:"name"`
+	Email     string             `json:"email"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
 type Worker struct {
-	ID         uuid.UUID       `json:"id"`
-	Name       string          `json:"name"`
-	Hostname   string          `json:"hostname"`
-	CpuCores   int32           `json:"cpu_cores"`
-	RamGb      int32           `json:"ram_gb"`
-	GpuCount   int32           `json:"gpu_count"`
-	GpuModel   string          `json:"gpu_model"`
-	Os         string          `json:"os"`
-	MaxSlots   int32           `json:"max_slots"`
-	Labels     json.RawMessage `json:"labels"`
-	Status     string          `json:"status"`
-	LastSeenAt sql.NullTime    `json:"last_seen_at"`
-	CreatedAt  time.Time       `json:"created_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Name       string             `json:"name"`
+	Hostname   string             `json:"hostname"`
+	CpuCores   int32              `json:"cpu_cores"`
+	RamGb      int32              `json:"ram_gb"`
+	GpuCount   int32              `json:"gpu_count"`
+	GpuModel   string             `json:"gpu_model"`
+	Os         string             `json:"os"`
+	MaxSlots   int32              `json:"max_slots"`
+	Labels     []byte             `json:"labels"`
+	Status     string             `json:"status"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 }

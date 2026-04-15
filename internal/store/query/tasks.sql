@@ -48,11 +48,16 @@ INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3);
 SELECT * FROM task_logs WHERE task_id = $1 ORDER BY id;
 
 -- name: FailDependentTasks :exec
--- Mark all tasks that directly depend on a failed task as failed.
+-- Mark all tasks that transitively depend on a failed task as failed.
+-- Uses a recursive CTE to walk the full dependency chain.
 -- Call this after marking a task as failed.
+WITH RECURSIVE blocked AS (
+    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = sqlc.arg(failed_task_id)::uuid
+    UNION ALL
+    SELECT td.task_id FROM task_dependencies td
+    JOIN blocked b ON td.depends_on_task_id = b.task_id
+)
 UPDATE tasks
 SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
-  AND id IN (
-    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1
-  );
+  AND id IN (SELECT task_id FROM blocked);

@@ -7,11 +7,8 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 
-	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createReservation = `-- name: CreateReservation :one
@@ -21,13 +18,13 @@ RETURNING id, name, selector, worker_ids, user_id, project, starts_at, ends_at, 
 `
 
 type CreateReservationParams struct {
-	Name      string          `json:"name"`
-	Selector  json.RawMessage `json:"selector"`
-	WorkerIds []uuid.UUID     `json:"worker_ids"`
-	UserID    uuid.NullUUID   `json:"user_id"`
-	Project   sql.NullString  `json:"project"`
-	StartsAt  sql.NullTime    `json:"starts_at"`
-	EndsAt    sql.NullTime    `json:"ends_at"`
+	Name      string             `json:"name"`
+	Selector  []byte             `json:"selector"`
+	WorkerIds []pgtype.UUID      `json:"worker_ids"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	Project   *string            `json:"project"`
+	StartsAt  pgtype.Timestamptz `json:"starts_at"`
+	EndsAt    pgtype.Timestamptz `json:"ends_at"`
 }
 
 // CreateReservation
@@ -36,10 +33,10 @@ type CreateReservationParams struct {
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
 //	RETURNING id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at
 func (q *Queries) CreateReservation(ctx context.Context, arg CreateReservationParams) (Reservation, error) {
-	row := q.db.QueryRowContext(ctx, createReservation,
+	row := q.db.QueryRow(ctx, createReservation,
 		arg.Name,
 		arg.Selector,
-		pq.Array(arg.WorkerIds),
+		arg.WorkerIds,
 		arg.UserID,
 		arg.Project,
 		arg.StartsAt,
@@ -50,7 +47,7 @@ func (q *Queries) CreateReservation(ctx context.Context, arg CreateReservationPa
 		&i.ID,
 		&i.Name,
 		&i.Selector,
-		pq.Array(&i.WorkerIds),
+		&i.WorkerIds,
 		&i.UserID,
 		&i.Project,
 		&i.StartsAt,
@@ -67,8 +64,8 @@ DELETE FROM reservations WHERE id = $1
 // DeleteReservation
 //
 //	DELETE FROM reservations WHERE id = $1
-func (q *Queries) DeleteReservation(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.ExecContext(ctx, deleteReservation, id)
+func (q *Queries) DeleteReservation(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteReservation, id)
 	return err
 }
 
@@ -79,14 +76,14 @@ SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, cre
 // GetReservation
 //
 //	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations WHERE id = $1
-func (q *Queries) GetReservation(ctx context.Context, id uuid.UUID) (Reservation, error) {
-	row := q.db.QueryRowContext(ctx, getReservation, id)
+func (q *Queries) GetReservation(ctx context.Context, id pgtype.UUID) (Reservation, error) {
+	row := q.db.QueryRow(ctx, getReservation, id)
 	var i Reservation
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Selector,
-		pq.Array(&i.WorkerIds),
+		&i.WorkerIds,
 		&i.UserID,
 		&i.Project,
 		&i.StartsAt,
@@ -110,7 +107,7 @@ ORDER BY created_at
 //	  AND (starts_at IS NULL OR starts_at <= NOW())
 //	ORDER BY created_at
 func (q *Queries) ListActiveReservations(ctx context.Context) ([]Reservation, error) {
-	rows, err := q.db.QueryContext(ctx, listActiveReservations)
+	rows, err := q.db.Query(ctx, listActiveReservations)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +119,7 @@ func (q *Queries) ListActiveReservations(ctx context.Context) ([]Reservation, er
 			&i.ID,
 			&i.Name,
 			&i.Selector,
-			pq.Array(&i.WorkerIds),
+			&i.WorkerIds,
 			&i.UserID,
 			&i.Project,
 			&i.StartsAt,
@@ -132,9 +129,6 @@ func (q *Queries) ListActiveReservations(ctx context.Context) ([]Reservation, er
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -150,7 +144,7 @@ SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, cre
 //
 //	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations ORDER BY created_at DESC
 func (q *Queries) ListReservations(ctx context.Context) ([]Reservation, error) {
-	rows, err := q.db.QueryContext(ctx, listReservations)
+	rows, err := q.db.Query(ctx, listReservations)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +156,7 @@ func (q *Queries) ListReservations(ctx context.Context) ([]Reservation, error) {
 			&i.ID,
 			&i.Name,
 			&i.Selector,
-			pq.Array(&i.WorkerIds),
+			&i.WorkerIds,
 			&i.UserID,
 			&i.Project,
 			&i.StartsAt,
@@ -172,9 +166,6 @@ func (q *Queries) ListReservations(ctx context.Context) ([]Reservation, error) {
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
