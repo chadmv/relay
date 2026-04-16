@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ type Agent struct {
 	sendCh   chan *relayv1.AgentMessage // buffered 64; shared across reconnects
 	mu       sync.Mutex
 	runners  map[string]*Runner
+	runnerWG sync.WaitGroup // tracks active runner goroutines; waited before sendCh drain
 	saveID   func(string) error
 }
 
@@ -70,6 +72,11 @@ func (a *Agent) connect(ctx context.Context) error {
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
+	// Wait for all runner goroutines from the previous connection to finish before
+	// draining sendCh. Runners were cancelled when the previous stream closed;
+	// waiting here ensures no runner is still writing to sendCh during the drain.
+	a.runnerWG.Wait()
+
 	// Discard any messages queued from the previous connection. They were never
 	// sent on the old stream and sending them on a new stream would confuse the
 	// coordinator with stale task IDs.
@@ -117,7 +124,9 @@ func (a *Agent) connect(ctx context.Context) error {
 	}
 	if reg.WorkerId != a.workerID {
 		a.workerID = reg.WorkerId
-		_ = a.saveID(a.workerID)
+		if err := a.saveID(a.workerID); err != nil {
+			fmt.Fprintf(os.Stderr, "relay-agent: warning: failed to persist worker ID: %v\n", err)
+		}
 	}
 
 	// Start send goroutine — gRPC streams are not concurrent-send-safe.
@@ -163,7 +172,9 @@ func (a *Agent) handleDispatch(ctx context.Context, task *relayv1.DispatchTask) 
 	a.mu.Lock()
 	a.runners[task.TaskId] = runner
 	a.mu.Unlock()
+	a.runnerWG.Add(1)
 	go func() {
+		defer a.runnerWG.Done()
 		runner.Run(runCtx, task)
 		a.mu.Lock()
 		delete(a.runners, task.TaskId)

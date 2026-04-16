@@ -44,6 +44,11 @@ func (r *Runner) Cancel() {
 func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	defer r.cancel() // always release context resources, even on normal exit
 
+	if len(task.Command) == 0 {
+		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
+		return
+	}
+
 	// Merge env: current process env first, task env overrides.
 	env := os.Environ()
 	for k, v := range task.Env {
@@ -51,6 +56,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	}
 
 	cmd := exec.CommandContext(ctx, task.Command[0], task.Command[1:]...)
+	cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
 	cmd.Env = env
 
 	stdout, err := cmd.StdoutPipe()
