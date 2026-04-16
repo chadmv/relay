@@ -36,7 +36,8 @@ func TestLoadConfig_FileOnly(t *testing.T) {
 	t.Setenv("RELAY_URL", "")
 	t.Setenv("RELAY_TOKEN", "")
 
-	data, _ := json.Marshal(Config{ServerURL: "http://example.com", Token: "abc"})
+	data, err := json.Marshal(Config{ServerURL: "http://example.com", Token: "abc"})
+	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0600))
 
 	cfg, err := LoadConfig()
@@ -61,7 +62,8 @@ func TestLoadConfig_EnvOverridesFile(t *testing.T) {
 	t.Setenv("RELAY_URL", "http://override.com")
 	t.Setenv("RELAY_TOKEN", "override-token")
 
-	data, _ := json.Marshal(Config{ServerURL: "http://file.com", Token: "file-token"})
+	data, err2 := json.Marshal(Config{ServerURL: "http://file.com", Token: "file-token"})
+	require.NoError(t, err2)
 	require.NoError(t, os.WriteFile(path, data, 0600))
 
 	cfg, err := LoadConfig()

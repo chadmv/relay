@@ -25,6 +25,8 @@ func LoadConfig() (*Config, error) {
 	path, err := configFilePathFn()
 	if err == nil {
 		if data, readErr := os.ReadFile(path); readErr == nil {
+			// A malformed config file is silently ignored — fall back to defaults
+			// rather than blocking CLI use. Env vars can always override.
 			_ = json.Unmarshal(data, cfg)
 		}
 	}
