@@ -7,6 +7,7 @@ import (
 	"flag"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -101,3 +102,29 @@ func TestListJobs_JSONFlag(t *testing.T) {
 
 // Verify flag parsing helper compiles (used in jobs.go).
 var _ = flag.NewFlagSet
+
+func TestSubmitJob_DetachPrintsID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "POST", r.Method)
+		require.Equal(t, "/v1/jobs", r.URL.Path)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(jobResp{ID: "new-job-id", Status: "pending"})
+	}))
+	defer srv.Close()
+
+	// Write a minimal job JSON to a temp file.
+	f, err := os.CreateTemp("", "job*.json")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.Remove(f.Name()) })
+	json.NewEncoder(f).Encode(map[string]any{
+		"name":  "test",
+		"tasks": []map[string]any{{"name": "t1", "command": []string{"echo", "hi"}}},
+	})
+	f.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err = doSubmit(context.Background(), cfg, []string{"--detach", f.Name()}, &out)
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "new-job-id")
+}

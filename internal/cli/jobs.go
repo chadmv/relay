@@ -150,3 +150,57 @@ func doCancelJob(ctx context.Context, cfg *Config, args []string, w io.Writer) e
 	fmt.Fprintf(w, "Job %s: %s\n", job.ID, job.Status)
 	return nil
 }
+
+// SubmitCommand returns the relay submit Command.
+func SubmitCommand() Command {
+	return Command{
+		Name:  "submit",
+		Usage: "submit <job.json> [--detach]",
+		Run: func(ctx context.Context, args []string, cfg *Config) error {
+			return doSubmit(ctx, cfg, args, os.Stdout)
+		},
+	}
+}
+
+func doSubmit(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
+	detach := fs.Bool("detach", false, "print job ID and exit without waiting for completion")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay submit [--detach] <job.json>")
+	}
+	if cfg.Token == "" {
+		return fmt.Errorf("no token configured — run 'relay login' first")
+	}
+
+	data, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		return fmt.Errorf("read file: %w", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	c := cfg.NewClient()
+	var job jobResp
+	if err := c.do(ctx, "POST", "/v1/jobs", body, &job); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, job.ID)
+
+	if *detach {
+		return nil
+	}
+
+	status, err := watchJobLogs(ctx, c, job.ID, w)
+	if err != nil {
+		return err
+	}
+	if status != "done" {
+		return silentError{}
+	}
+	return nil
+}
