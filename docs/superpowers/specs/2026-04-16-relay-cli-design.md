@@ -40,7 +40,7 @@ type Command struct {
 
 ### HTTP Client
 
-`client.go` wraps `*http.Client` with `base URL` and `Authorization: Bearer <token>` baked in. All command `Run` funcs receive a `*Client` constructed from `*Config`. Commands never build raw HTTP requests directly.
+`client.go` wraps `*http.Client` with `base URL` and `Authorization: Bearer <token>` baked in. Commands call `cfg.NewClient()` to get an authenticated `*Client`. `relay login` is the exception — it constructs a URL-only client before a token exists. Commands never build raw HTTP requests directly.
 
 ---
 
@@ -83,7 +83,7 @@ Config is loaded once at startup in `main.go` and passed to every command. Comma
 | `relay list [--status <s>]` | `GET /v1/jobs` | Tabular: ID, name, status, created |
 | `relay get <job-id>` | `GET /v1/jobs/{id}` | Job detail + task table |
 | `relay cancel <job-id>` | `DELETE /v1/jobs/{id}` | Prints confirmation or error |
-| `relay logs <job-id>` | `GET /v1/events?job_id=<id>` | Tails SSE; exits on terminal job state |
+| `relay logs <job-id>` | `GET /v1/events?job_id=<id>` | Tails SSE; exits when an `event: job` frame contains `{"status":"done"\|"failed"\|"cancelled"}` |
 | `relay workers list` | `GET /v1/workers` | Tabular: ID, status, labels |
 | `relay workers get <id>` | `GET /v1/workers/{id}` | Detail view |
 | `relay reservations list` | `GET /v1/reservations` | Tabular |
