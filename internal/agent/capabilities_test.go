@@ -18,7 +18,7 @@ func TestDetect_basicFields(t *testing.T) {
 	require.NotEmpty(t, caps.Hostname)
 	assert.Equal(t, runtime.GOOS, caps.OS)
 	assert.Greater(t, caps.CPUCores, int32(0))
-	assert.GreaterOrEqual(t, caps.RAMGB, int32(0))
+	assert.Greater(t, caps.RAMGB, int32(0))
 	assert.Equal(t, int32(0), caps.GPUCount)
 	assert.Equal(t, "", caps.GPUModel)
 }
