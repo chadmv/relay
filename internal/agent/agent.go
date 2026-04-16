@@ -17,7 +17,7 @@ import (
 type Agent struct {
 	coord    string
 	caps     Capabilities
-	workerID string
+	workerID string // only accessed from the single reconnect goroutine in Run; no mutex needed
 	sendCh   chan *relayv1.AgentMessage // buffered 64; shared across reconnects
 	mu       sync.Mutex
 	runners  map[string]*Runner
@@ -69,6 +69,13 @@ func (a *Agent) Run(ctx context.Context) {
 func (a *Agent) connect(ctx context.Context) error {
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
+
+	// Discard any messages queued from the previous connection. They were never
+	// sent on the old stream and sending them on a new stream would confuse the
+	// coordinator with stale task IDs.
+	for len(a.sendCh) > 0 {
+		<-a.sendCh
+	}
 
 	conn, err := grpc.NewClient(a.coord, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
