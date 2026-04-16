@@ -1,0 +1,152 @@
+// internal/cli/jobs.go
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"text/tabwriter"
+	"time"
+)
+
+// ─── Response types (mirror api package JSON output) ─────────────────────────
+
+type jobResp struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Priority    string     `json:"priority"`
+	Status      string     `json:"status"`
+	SubmittedBy string     `json:"submitted_by"`
+	Tasks       []taskResp `json:"tasks,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type taskResp struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	WorkerID string `json:"worker_id,omitempty"`
+}
+
+// ─── Commands ─────────────────────────────────────────────────────────────────
+
+func ListCommand() Command {
+	return Command{
+		Name:  "list",
+		Usage: "list jobs [--status <status>] [--json]",
+		Run: func(ctx context.Context, args []string, cfg *Config) error {
+			return doListJobs(ctx, cfg, args, os.Stdout)
+		},
+	}
+}
+
+func GetCommand() Command {
+	return Command{
+		Name:  "get",
+		Usage: "get <job-id> [--json]",
+		Run: func(ctx context.Context, args []string, cfg *Config) error {
+			return doGetJob(ctx, cfg, args, os.Stdout)
+		},
+	}
+}
+
+func CancelCommand() Command {
+	return Command{
+		Name:  "cancel",
+		Usage: "cancel <job-id>",
+		Run: func(ctx context.Context, args []string, cfg *Config) error {
+			return doCancelJob(ctx, cfg, args, os.Stdout)
+		},
+	}
+}
+
+// ─── Implementations ─────────────────────────────────────────────────────────
+
+func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	status := fs.String("status", "", "filter by status")
+	asJSON := fs.Bool("json", false, "output raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if cfg.Token == "" {
+		return fmt.Errorf("no token configured — run 'relay login' first")
+	}
+	c := cfg.NewClient()
+
+	path := "/v1/jobs"
+	if *status != "" {
+		path += "?status=" + *status
+	}
+	var jobs []jobResp
+	if err := c.do(ctx, "GET", path, nil, &jobs); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(w).Encode(jobs)
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tCREATED")
+	for _, j := range jobs {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.ID, j.Name, j.Status, j.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	return tw.Flush()
+}
+
+func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "output raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay get <job-id>")
+	}
+	if cfg.Token == "" {
+		return fmt.Errorf("no token configured — run 'relay login' first")
+	}
+	c := cfg.NewClient()
+
+	var job jobResp
+	if err := c.do(ctx, "GET", "/v1/jobs/"+fs.Arg(0), nil, &job); err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(w).Encode(job)
+	}
+	fmt.Fprintf(w, "ID:       %s\n", job.ID)
+	fmt.Fprintf(w, "Name:     %s\n", job.Name)
+	fmt.Fprintf(w, "Priority: %s\n", job.Priority)
+	fmt.Fprintf(w, "Status:   %s\n", job.Status)
+	if len(job.Tasks) > 0 {
+		fmt.Fprintln(w, "Tasks:")
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  NAME\tSTATUS\tWORKER")
+		for _, t := range job.Tasks {
+			fmt.Fprintf(tw, "  %s\t%s\t%s\n", t.Name, t.Status, t.WorkerID)
+		}
+		_ = tw.Flush()
+	}
+	return nil
+}
+
+func doCancelJob(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: relay cancel <job-id>")
+	}
+	if cfg.Token == "" {
+		return fmt.Errorf("no token configured — run 'relay login' first")
+	}
+	c := cfg.NewClient()
+
+	var job jobResp
+	if err := c.do(ctx, "DELETE", "/v1/jobs/"+args[0], nil, &job); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "Job %s: %s\n", job.ID, job.Status)
+	return nil
+}
