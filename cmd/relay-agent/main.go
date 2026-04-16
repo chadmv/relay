@@ -75,9 +75,9 @@ func saveWorkerID(path, id string) error {
 }
 
 // resolveCoordinator returns the coordinator address, either from the flag or mDNS.
-func resolveCoordinator(ctx context.Context, flag string) (string, error) {
-	if flag != "" {
-		return flag, nil
+func resolveCoordinator(ctx context.Context, addr string) (string, error) {
+	if addr != "" {
+		return addr, nil
 	}
 	return discovery.Browse(ctx)
 }
