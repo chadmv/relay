@@ -42,6 +42,8 @@ func (r *Runner) Cancel() {
 
 // Run executes the task and sends status/log messages to sendCh. Blocks until done.
 func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
+	defer r.cancel() // always release context resources, even on normal exit
+
 	// Merge env: current process env first, task env overrides.
 	env := os.Environ()
 	for k, v := range task.Env {

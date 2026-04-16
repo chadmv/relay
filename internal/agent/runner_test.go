@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,12 +71,12 @@ func TestRunner_done(t *testing.T) {
 	var hasLog bool
 	for _, m := range msgs {
 		if chunk := m.GetTaskLog(); chunk != nil {
-			if string(chunk.Content) != "" {
+			if strings.Contains(string(chunk.Content), "hello") {
 				hasLog = true
 			}
 		}
 	}
-	assert.True(t, hasLog, "expected at least one log chunk")
+	assert.True(t, hasLog, "expected at least one log chunk containing 'hello'")
 }
 
 func TestRunner_timeout(t *testing.T) {
