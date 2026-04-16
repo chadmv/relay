@@ -23,6 +23,7 @@ func Browse(ctx context.Context) (string, error) {
 
 	select {
 	case entry := <-entries:
+		// IPv6-only hosts are not supported; a coordinator must advertise an IPv4 address.
 		if len(entry.AddrIPv4) == 0 {
 			return "", fmt.Errorf("mdns: service found but has no IPv4 address")
 		}
