@@ -4,8 +4,10 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -43,13 +45,34 @@ func doLogin(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) erro
 		return fmt.Errorf("email is required")
 	}
 
+	type tokenRequest struct {
+		Email       string `json:"email"`
+		InviteToken string `json:"invite_token,omitempty"`
+	}
+
 	c := NewClient(serverURL, "")
 	var resp struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := c.do(ctx, "POST", "/v1/auth/token", map[string]string{"email": email}, &resp); err != nil {
-		return fmt.Errorf("login failed: %w", err)
+
+	reqBody := tokenRequest{Email: email}
+	if err := c.do(ctx, "POST", "/v1/auth/token", reqBody, &resp); err != nil {
+		var re *ResponseError
+		if errors.As(err, &re) && re.StatusCode == http.StatusForbidden && re.Message == "invite required" {
+			fmt.Fprint(out, "Invite token: ")
+			inviteToken, _ := r.ReadString('\n')
+			inviteToken = strings.TrimSpace(inviteToken)
+			if inviteToken == "" {
+				return fmt.Errorf("invite token required for new accounts")
+			}
+			reqBody.InviteToken = inviteToken
+			if err := c.do(ctx, "POST", "/v1/auth/token", reqBody, &resp); err != nil {
+				return fmt.Errorf("login failed: %w", err)
+			}
+		} else {
+			return fmt.Errorf("login failed: %w", err)
+		}
 	}
 
 	cfg.ServerURL = serverURL

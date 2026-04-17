@@ -54,3 +54,43 @@ func TestRunLogin_EmptyEmailReturnsError(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "email is required")
 }
+
+func TestRunLogin_InviteRequired_PromptsAndRetries(t *testing.T) {
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		callCount++
+		if callCount == 1 {
+			// First call: no invite token — server rejects.
+			require.Equal(t, "", body["invite_token"])
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invite required"})
+			return
+		}
+		// Second call: invite token present.
+		require.Equal(t, "my-invite-token", body["invite_token"])
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"token":      "tok-new",
+			"expires_at": time.Now().Add(30 * 24 * time.Hour),
+		})
+	}))
+	defer srv.Close()
+
+	var saved *Config
+	origSave := saveConfigFn
+	saveConfigFn = func(cfg *Config) error { saved = cfg; return nil }
+	t.Cleanup(func() { saveConfigFn = origSave })
+
+	cfg := &Config{ServerURL: srv.URL}
+	// hits Enter to accept pre-filled URL, types email, types invite token
+	input := strings.NewReader("\nnewuser@example.com\nmy-invite-token\n")
+	var out strings.Builder
+	err := doLogin(context.Background(), cfg, input, &out)
+	require.NoError(t, err)
+	require.Equal(t, 2, callCount)
+	require.NotNil(t, saved)
+	require.Equal(t, "tok-new", saved.Token)
+	require.Contains(t, out.String(), "Logged in")
+}
