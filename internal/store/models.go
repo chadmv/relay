@@ -16,6 +16,17 @@ type ApiToken struct {
 	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
 }
 
+type Invite struct {
+	ID        pgtype.UUID        `json:"id"`
+	TokenHash string             `json:"token_hash"`
+	Email     *string            `json:"email"`
+	CreatedBy pgtype.UUID        `json:"created_by"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	UsedBy    pgtype.UUID        `json:"used_by"`
+}
+
 type Job struct {
 	ID          pgtype.UUID        `json:"id"`
 	Name        string             `json:"name"`

@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const adminExists = `-- name: AdminExists :one
+SELECT EXISTS(
+    SELECT 1 FROM users WHERE is_admin = TRUE
+) AS "exists"
+`
+
+// AdminExists
+//
+//	SELECT EXISTS(
+//	    SELECT 1 FROM users WHERE is_admin = TRUE
+//	) AS "exists"
+func (q *Queries) AdminExists(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, adminExists)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (name, email, is_admin)
 VALUES ($1, $2, $3)
@@ -79,4 +97,16 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
+UPDATE users SET is_admin = TRUE WHERE id = $1
+`
+
+// PromoteUserToAdmin
+//
+//	UPDATE users SET is_admin = TRUE WHERE id = $1
+func (q *Queries) PromoteUserToAdmin(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, promoteUserToAdmin, id)
+	return err
 }
