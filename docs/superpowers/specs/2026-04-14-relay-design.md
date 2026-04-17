@@ -55,7 +55,7 @@ A single unit of work within a job.
 | requires | map[string]string | Label selectors — worker must match all |
 | depends_on | []uuid | Task IDs that must succeed before this task is dispatched |
 | timeout | duration | Max execution time; agent kills subprocess if exceeded |
-| retries | int | Max retry attempts on failure (default: 0) |
+| retries | int | Max retry attempts on any failure, including worker crashes (default: 0 — no retries) |
 | status | enum | `pending` → `dispatched` → `running` → `done` / `failed` / `timed_out` |
 | worker_id | uuid | Worker assigned to this task |
 | started_at | timestamp | |
@@ -126,7 +126,7 @@ The scheduler runs on every worker connect event and on a periodic tick, so queu
 
 - Managed by admins only via the API.
 - Can target workers by label selector (e.g., all workers with `zone=studio-a`) or by specific worker IDs.
-- Scoped to a user or project.
+- Scoped to a user ID or a project name. A "project" is not a first-class entity — it is matched against the `project` label on submitted jobs (e.g., a reservation for `project=vfx` applies to any job submitted with `labels.project=vfx`).
 - Support an optional time window (start/end); reservations auto-expire at the end time.
 - Reserved workers are used exclusively by the designated user/project — other jobs skip them during dispatch.
 
