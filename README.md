@@ -162,6 +162,8 @@ On first start the server runs all database migrations automatically. Default ad
 .\bin\relay-agent.exe --coordinator relay-server.local:9090
 ```
 
+> **`relay-server.local:9090` explained** — `relay-server.local` is an example mDNS hostname. The `.local` suffix is the standard domain used by mDNS to find machines on a local network by name without a DNS server. Replace `relay-server` with your server machine's actual hostname, or use its IP address directly (e.g. `192.168.1.50:9090`). The `--coordinator` flag accepts any `host:port`.
+
 > **Running the agent on the same machine as the server?** mDNS multicast does not work on the loopback interface, so the agent will fail to discover the server automatically. Use `--coordinator localhost:9090` instead:
 >
 > ```powershell
