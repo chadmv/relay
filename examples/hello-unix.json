@@ -1,0 +1,14 @@
+{
+  "name": "hello",
+  "tasks": [
+    {
+      "name": "hello",
+      "command": ["echo", "Relay is running successfully!"]
+    },
+    {
+      "name": "hello-2",
+      "command": ["echo", "Relay ran a second task successfully!"],
+      "depends_on": ["hello"]
+    }
+  ]
+}

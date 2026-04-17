@@ -190,13 +190,13 @@ Credentials are saved to:
 **Linux / macOS**
 
 ```sh
-./bin/relay submit examples/hello.json
+./bin/relay submit examples/hello-unix.json
 ```
 
 **Windows**
 
 ```powershell
-.\bin\relay.exe submit examples\hello.json
+.\bin\relay.exe submit examples\hello-windows.json
 ```
 
 ---
