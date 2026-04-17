@@ -229,6 +229,7 @@ All configuration is via environment variables:
 | `RELAY_DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | PostgreSQL connection string |
 | `RELAY_HTTP_ADDR` | `:8080` | HTTP server bind address |
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC server bind address |
+| `RELAY_BOOTSTRAP_ADMIN` | _(empty)_ | Email address — creates or promotes this user to admin on startup when no admin exists |
 
 **Linux / macOS**
 
