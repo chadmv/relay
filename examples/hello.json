@@ -1,0 +1,9 @@
+{
+  "name": "hello",
+  "tasks": [
+    {
+      "name": "hello",
+      "command": ["cmd", "/c", "echo Relay is running successfully!"]
+    }
+  ]
+}
