@@ -93,4 +93,20 @@ func TestRunLogin_InviteRequired_PromptsAndRetries(t *testing.T) {
 	require.NotNil(t, saved)
 	require.Equal(t, "tok-new", saved.Token)
 	require.Contains(t, out.String(), "Logged in")
+	require.Contains(t, out.String(), "Invite token:")
+}
+
+func TestRunLogin_InviteRequired_BlankToken_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invite required"})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL}
+	input := strings.NewReader("\nnewuser@example.com\n\n") // blank invite token
+	var out strings.Builder
+	err := doLogin(context.Background(), cfg, input, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invite token required")
 }
