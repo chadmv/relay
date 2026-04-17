@@ -181,13 +181,21 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 		_ = h.q.FailDependentTasks(ctx, taskID)
 	}
 
-	updateJobStatusFromTasks(ctx, h.q, updated.JobID)
+	jobStatus := updateJobStatusFromTasks(ctx, h.q, updated.JobID)
 
 	h.broker.Publish(events.Event{
 		Type:  "task",
 		JobID: uuidStr(updated.JobID),
 		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(taskID), statusStr)),
 	})
+
+	if jobStatus == "done" || jobStatus == "failed" {
+		h.broker.Publish(events.Event{
+			Type:  "job",
+			JobID: uuidStr(updated.JobID),
+			Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(updated.JobID), jobStatus)),
+		})
+	}
 
 	if statusStr == "done" {
 		go h.triggerDispatch()
@@ -243,10 +251,11 @@ func (h *Handler) requeueWorkerTasks(workerID string) {
 }
 
 // updateJobStatusFromTasks recomputes and persists a job's status from its tasks.
-func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtype.UUID) {
+// Returns the new status string, or "" if the status could not be determined.
+func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtype.UUID) string {
 	tasks, err := q.ListTasksByJob(ctx, jobID)
 	if err != nil || len(tasks) == 0 {
-		return
+		return ""
 	}
 	var done, failed, active int
 	for _, t := range tasks {
@@ -269,6 +278,7 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 		newStatus = "failed"
 	}
 	_, _ = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{ID: jobID, Status: newStatus})
+	return newStatus
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.
