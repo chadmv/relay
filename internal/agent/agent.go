@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -128,6 +129,8 @@ func (a *Agent) connect(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "relay-agent: warning: failed to persist worker ID: %v\n", err)
 		}
 	}
+
+	log.Printf("connected to coordinator %s (worker ID: %s)", a.coord, a.workerID)
 
 	// Start send goroutine — gRPC streams are not concurrent-send-safe.
 	go func() {
