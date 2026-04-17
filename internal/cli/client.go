@@ -11,6 +11,15 @@ import (
 	"strings"
 )
 
+// ResponseError is returned by Client.do for non-2xx responses.
+// Callers can inspect StatusCode to handle specific HTTP errors.
+type ResponseError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *ResponseError) Error() string { return e.Message }
+
 // Client wraps *http.Client with a base URL and Bearer token.
 type Client struct {
 	base  string
@@ -58,12 +67,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			Error string `json:"error"`
 		}
 		if decodeErr := json.NewDecoder(resp.Body).Decode(&errBody); decodeErr == nil && errBody.Error != "" {
-			return fmt.Errorf("%s", errBody.Error)
+			return &ResponseError{StatusCode: resp.StatusCode, Message: errBody.Error}
 		}
 		if resp.StatusCode >= 500 {
-			return fmt.Errorf("server error (%d) — try again", resp.StatusCode)
+			return &ResponseError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("server error (%d) — try again", resp.StatusCode)}
 		}
-		return fmt.Errorf("request failed (%d)", resp.StatusCode)
+		return &ResponseError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("request failed (%d)", resp.StatusCode)}
 	}
 
 	if out != nil {

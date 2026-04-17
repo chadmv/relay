@@ -22,6 +22,7 @@ func main() {
 
 	commands := []cli.Command{
 		cli.LoginCommand(),
+		cli.InviteCommand(),
 		cli.SubmitCommand(),
 		cli.ListCommand(),
 		cli.GetCommand(),
