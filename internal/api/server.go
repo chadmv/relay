@@ -73,6 +73,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/reservations", auth(admin(http.HandlerFunc(s.handleCreateReservation))))
 	mux.Handle("DELETE /v1/reservations/{id}", auth(admin(http.HandlerFunc(s.handleDeleteReservation))))
 
+	// Invites (admin-only)
+	mux.Handle("POST /v1/invites", auth(admin(http.HandlerFunc(s.handleCreateInvite))))
+
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
 
