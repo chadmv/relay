@@ -47,15 +47,16 @@ type taskResponse struct {
 }
 
 type jobResponse struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Priority    string          `json:"priority"`
-	Status      string          `json:"status"`
-	SubmittedBy string          `json:"submitted_by"`
-	Labels      json.RawMessage `json:"labels"`
-	Tasks       []taskResponse  `json:"tasks,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	ID               string          `json:"id"`
+	Name             string          `json:"name"`
+	Priority         string          `json:"priority"`
+	Status           string          `json:"status"`
+	SubmittedBy      string          `json:"submitted_by"`
+	SubmittedByEmail string          `json:"submitted_by_email,omitempty"`
+	Labels           json.RawMessage `json:"labels"`
+	Tasks            []taskResponse  `json:"tasks,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 // ─── Converters ───────────────────────────────────────────────────────────────
@@ -75,7 +76,7 @@ func toTaskResponse(t store.Task) taskResponse {
 	}
 }
 
-func toJobResponse(j store.Job, tasks []store.Task) jobResponse {
+func toJobResponse(j store.Job, email string, tasks []store.Task) jobResponse {
 	var taskResps []taskResponse
 	if len(tasks) > 0 {
 		taskResps = make([]taskResponse, len(tasks))
@@ -84,15 +85,16 @@ func toJobResponse(j store.Job, tasks []store.Task) jobResponse {
 		}
 	}
 	return jobResponse{
-		ID:          uuidStr(j.ID),
-		Name:        j.Name,
-		Priority:    j.Priority,
-		Status:      j.Status,
-		SubmittedBy: uuidStr(j.SubmittedBy),
-		Labels:      rawJSON(j.Labels),
-		Tasks:       taskResps,
-		CreatedAt:   j.CreatedAt.Time,
-		UpdatedAt:   j.UpdatedAt.Time,
+		ID:               uuidStr(j.ID),
+		Name:             j.Name,
+		Priority:         j.Priority,
+		Status:           j.Status,
+		SubmittedBy:      uuidStr(j.SubmittedBy),
+		SubmittedByEmail: email,
+		Labels:           rawJSON(j.Labels),
+		Tasks:            taskResps,
+		CreatedAt:        j.CreatedAt.Time,
+		UpdatedAt:        j.UpdatedAt.Time,
 	}
 }
 
@@ -238,28 +240,41 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	go s.triggerDispatch()
 
-	writeJSON(w, http.StatusCreated, toJobResponse(job, tasks))
+	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks))
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	status := r.URL.Query().Get("status")
 
-	var jobs []store.Job
-	var err error
-	if status != "" {
-		jobs, err = s.q.ListJobsByStatus(ctx, status)
-	} else {
-		jobs, err = s.q.ListJobs(ctx)
+	type jobWithEmail struct {
+		job   store.Job
+		email string
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list jobs failed")
-		return
+	var rows []jobWithEmail
+	if status != "" {
+		rs, err := s.q.ListJobsByStatusWithEmail(ctx, status)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			return
+		}
+		for _, r := range rs {
+			rows = append(rows, jobWithEmail{store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, r.SubmittedByEmail})
+		}
+	} else {
+		rs, err := s.q.ListJobsWithEmail(ctx)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			return
+		}
+		for _, r := range rs {
+			rows = append(rows, jobWithEmail{store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, r.SubmittedByEmail})
+		}
 	}
 
-	resp := make([]jobResponse, len(jobs))
-	for i, j := range jobs {
-		resp[i] = toJobResponse(j, nil)
+	resp := make([]jobResponse, len(rows))
+	for i, r := range rows {
+		resp[i] = toJobResponse(r.job, r.email, nil)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -272,7 +287,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := s.q.GetJob(ctx, id)
+	row, err := s.q.GetJobWithEmail(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "job not found")
@@ -282,8 +297,9 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, _ := s.q.ListTasksByJob(ctx, job.ID)
-	writeJSON(w, http.StatusOK, toJobResponse(job, tasks))
+	job := store.Job{ID: row.ID, Name: row.Name, Priority: row.Priority, Status: row.Status, SubmittedBy: row.SubmittedBy, Labels: row.Labels, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+	tasks, _ := s.q.ListTasksByJob(ctx, row.ID)
+	writeJSON(w, http.StatusOK, toJobResponse(job, row.SubmittedByEmail, tasks))
 }
 
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
@@ -362,7 +378,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		Data:  []byte(`{"status":"cancelled"}`),
 	})
 
-	writeJSON(w, http.StatusOK, toJobResponse(job, nil))
+	writeJSON(w, http.StatusOK, toJobResponse(job, "", nil))
 }
 
 // ─── Package-level helper ─────────────────────────────────────────────────────

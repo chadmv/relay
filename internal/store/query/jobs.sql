@@ -6,11 +6,30 @@ RETURNING *;
 -- name: GetJob :one
 SELECT * FROM jobs WHERE id = $1;
 
+-- name: GetJobWithEmail :one
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.id = $1;
+
 -- name: ListJobs :many
 SELECT * FROM jobs ORDER BY created_at DESC;
 
+-- name: ListJobsWithEmail :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+ORDER BY j.created_at DESC;
+
 -- name: ListJobsByStatus :many
 SELECT * FROM jobs WHERE status = $1 ORDER BY created_at DESC;
+
+-- name: ListJobsByStatusWithEmail :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.status = $1
+ORDER BY j.created_at DESC;
 
 -- name: UpdateJobStatus :one
 UPDATE jobs

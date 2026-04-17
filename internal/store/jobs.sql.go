@@ -85,6 +85,48 @@ func (q *Queries) GetJob(ctx context.Context, id pgtype.UUID) (Job, error) {
 	return i, err
 }
 
+const getJobWithEmail = `-- name: GetJobWithEmail :one
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.id = $1
+`
+
+type GetJobWithEmailRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// GetJobWithEmail
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE j.id = $1
+func (q *Queries) GetJobWithEmail(ctx context.Context, id pgtype.UUID) (GetJobWithEmailRow, error) {
+	row := q.db.QueryRow(ctx, getJobWithEmail, id)
+	var i GetJobWithEmailRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Priority,
+		&i.Status,
+		&i.SubmittedBy,
+		&i.Labels,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SubmittedByEmail,
+	)
+	return i, err
+}
+
 const listJobs = `-- name: ListJobs :many
 SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at FROM jobs ORDER BY created_at DESC
 `
@@ -146,6 +188,118 @@ func (q *Queries) ListJobsByStatus(ctx context.Context, status string) ([]Job, e
 			&i.Labels,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsByStatusWithEmail = `-- name: ListJobsByStatusWithEmail :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.status = $1
+ORDER BY j.created_at DESC
+`
+
+type ListJobsByStatusWithEmailRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsByStatusWithEmail
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE j.status = $1
+//	ORDER BY j.created_at DESC
+func (q *Queries) ListJobsByStatusWithEmail(ctx context.Context, status string) ([]ListJobsByStatusWithEmailRow, error) {
+	rows, err := q.db.Query(ctx, listJobsByStatusWithEmail, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsByStatusWithEmailRow
+	for rows.Next() {
+		var i ListJobsByStatusWithEmailRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmail = `-- name: ListJobsWithEmail :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+ORDER BY j.created_at DESC
+`
+
+type ListJobsWithEmailRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmail
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	ORDER BY j.created_at DESC
+func (q *Queries) ListJobsWithEmail(ctx context.Context) ([]ListJobsWithEmailRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailRow
+	for rows.Next() {
+		var i ListJobsWithEmailRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SubmittedByEmail,
 		); err != nil {
 			return nil, err
 		}

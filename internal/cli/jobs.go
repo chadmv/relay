@@ -15,14 +15,15 @@ import (
 // ─── Response types (mirror api package JSON output) ─────────────────────────
 
 type jobResp struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Priority    string     `json:"priority"`
-	Status      string     `json:"status"`
-	SubmittedBy string     `json:"submitted_by"`
-	Tasks       []taskResp `json:"tasks,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Priority         string     `json:"priority"`
+	Status           string     `json:"status"`
+	SubmittedBy      string     `json:"submitted_by"`
+	SubmittedByEmail string     `json:"submitted_by_email"`
+	Tasks            []taskResp `json:"tasks,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 type taskResp struct {
@@ -90,9 +91,9 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 		return json.NewEncoder(w).Encode(jobs)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tCREATED")
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tSUBMITTED BY\tCREATED")
 	for _, j := range jobs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.ID, j.Name, j.Status, j.CreatedAt.Format("2006-01-02 15:04"))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", j.ID, j.Name, j.Status, j.SubmittedByEmail, j.CreatedAt.Format("2006-01-02 15:04"))
 	}
 	return tw.Flush()
 }
@@ -118,10 +119,11 @@ func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 	if *asJSON {
 		return json.NewEncoder(w).Encode(job)
 	}
-	fmt.Fprintf(w, "ID:       %s\n", job.ID)
-	fmt.Fprintf(w, "Name:     %s\n", job.Name)
-	fmt.Fprintf(w, "Priority: %s\n", job.Priority)
-	fmt.Fprintf(w, "Status:   %s\n", job.Status)
+	fmt.Fprintf(w, "ID:           %s\n", job.ID)
+	fmt.Fprintf(w, "Name:         %s\n", job.Name)
+	fmt.Fprintf(w, "Priority:     %s\n", job.Priority)
+	fmt.Fprintf(w, "Status:       %s\n", job.Status)
+	fmt.Fprintf(w, "Submitted by: %s\n", job.SubmittedByEmail)
 	if len(job.Tasks) > 0 {
 		fmt.Fprintln(w, "Tasks:")
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
