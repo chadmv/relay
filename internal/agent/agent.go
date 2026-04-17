@@ -153,10 +153,16 @@ func (a *Agent) connect(ctx context.Context) error {
 		if err != nil {
 			// Cancel all runners for this connection.
 			a.mu.Lock()
+			count := len(a.runners)
 			for _, r := range a.runners {
 				r.Cancel()
 			}
 			a.mu.Unlock()
+			if count > 0 {
+				log.Printf("lost contact with coordinator: %d running task(s) cancelled; will restart once reconnected", count)
+			} else {
+				log.Printf("lost contact with coordinator; reconnecting...")
+			}
 			connCancel()
 			return err
 		}
