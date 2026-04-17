@@ -59,6 +59,12 @@ func main() {
 		log.Printf("warn: requeue active tasks: %v", err)
 	}
 
+	if bootstrapEmail := os.Getenv("RELAY_BOOTSTRAP_ADMIN"); bootstrapEmail != "" {
+		if err := bootstrapAdmin(ctx, q, bootstrapEmail); err != nil {
+			log.Fatalf("bootstrap admin: %v", err)
+		}
+	}
+
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 	dispatcher := scheduler.NewDispatcher(q, registry, broker)
