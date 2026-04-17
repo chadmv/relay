@@ -94,6 +94,34 @@ docker run -d `
   postgres:16
 ```
 
+> **Production use** — the commands above store data inside the container. If the container is deleted and recreated, the data is lost. Add a named volume to persist data across container replacements:
+>
+> ```sh
+> # Linux / macOS
+> docker run -d \
+>   --name relay-postgres \
+>   -e POSTGRES_USER=relay \
+>   -e POSTGRES_PASSWORD=relay \
+>   -e POSTGRES_DB=relay \
+>   -p 5432:5432 \
+>   -v relay-pgdata:/var/lib/postgresql/data \
+>   postgres:16
+> ```
+>
+> ```powershell
+> # Windows
+> docker run -d `
+>   --name relay-postgres `
+>   -e POSTGRES_USER=relay `
+>   -e POSTGRES_PASSWORD=relay `
+>   -e POSTGRES_DB=relay `
+>   -p 5432:5432 `
+>   -v relay-pgdata:/var/lib/postgresql/data `
+>   postgres:16
+> ```
+>
+> Docker manages the `relay-pgdata` volume internally. Data survives container deletion and is only removed if you explicitly run `docker volume rm relay-pgdata`.
+
 Alternatively, install PostgreSQL natively via the [PostgreSQL Windows installer](https://www.postgresql.org/download/windows/) and create the `relay` database and user manually.
 
 ### 2 — Start the server
