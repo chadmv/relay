@@ -162,6 +162,21 @@ On first start the server runs all database migrations automatically. Default ad
 .\bin\relay-agent.exe --coordinator relay-server.local:9090
 ```
 
+> **Running the agent on the same machine as the server?** mDNS multicast does not work on the loopback interface, so the agent will fail to discover the server automatically. Use `--coordinator localhost:9090` instead:
+>
+> ```powershell
+> .\bin\relay-agent.exe --coordinator localhost:9090
+> ```
+>
+> ```sh
+> ./bin/relay-agent --coordinator localhost:9090
+> ```
+
+When the agent connects successfully it prints:
+```
+connected to coordinator <host>:9090 (worker ID: <uuid>)
+```
+
 ### 4 — Configure the CLI
 
 **Linux / macOS**
