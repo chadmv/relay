@@ -21,14 +21,19 @@ func Browse(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("mdns: browse: %w", err)
 	}
 
-	select {
-	case entry := <-entries:
-		// IPv6-only hosts are not supported; a coordinator must advertise an IPv4 address.
-		if len(entry.AddrIPv4) == 0 {
-			return "", fmt.Errorf("mdns: service found but has no IPv4 address")
+	for {
+		select {
+		case entry := <-entries:
+			if entry == nil {
+				continue
+			}
+			// IPv6-only hosts are not supported; a coordinator must advertise an IPv4 address.
+			if len(entry.AddrIPv4) == 0 {
+				continue
+			}
+			return fmt.Sprintf("%s:%d", entry.AddrIPv4[0], entry.Port), nil
+		case <-ctx.Done():
+			return "", fmt.Errorf("mdns: no relay coordinator found on local network (use --coordinator to specify address)")
 		}
-		return fmt.Sprintf("%s:%d", entry.AddrIPv4[0], entry.Port), nil
-	case <-ctx.Done():
-		return "", fmt.Errorf("mdns: no relay coordinator found on local network (use --coordinator to specify address)")
 	}
 }
