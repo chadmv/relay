@@ -93,7 +93,21 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("shutting down...")
-	grpcSrv.GracefulStop()
+
+	// Attempt a graceful gRPC stop, but fall back to a hard stop after 5 seconds.
+	// Without the timeout, GracefulStop blocks until all streaming RPCs finish —
+	// which means the server hangs as long as any agent is still connected.
+	grpcStopped := make(chan struct{})
+	go func() {
+		grpcSrv.GracefulStop()
+		close(grpcStopped)
+	}()
+	select {
+	case <-grpcStopped:
+	case <-time.After(5 * time.Second):
+		grpcSrv.Stop()
+	}
+
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
