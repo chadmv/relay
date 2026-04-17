@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -29,6 +30,10 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email is required")
 		return
 	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid email address")
+		return
+	}
 
 	ctx := r.Context()
 
@@ -49,7 +54,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 
 		invite, err := s.q.GetInviteByTokenHash(ctx, hash)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid invite token")
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, "invalid invite token")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to look up invite")
+			}
 			return
 		}
 		if invite.UsedAt.Valid {
@@ -65,11 +74,20 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to start transaction")
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		txq := s.q.WithTx(tx)
+
 		name := req.Name
 		if name == "" {
 			name = req.Email
 		}
-		user, err = s.q.CreateUser(ctx, store.CreateUserParams{
+		user, err = txq.CreateUser(ctx, store.CreateUserParams{
 			Name:    name,
 			Email:   req.Email,
 			IsAdmin: false,
@@ -80,7 +98,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Mark invite used atomically (WHERE used_at IS NULL prevents double-redemption).
-		rows, err := s.q.MarkInviteUsed(ctx, store.MarkInviteUsedParams{
+		rows, err := txq.MarkInviteUsed(ctx, store.MarkInviteUsedParams{
 			ID:     invite.ID,
 			UsedBy: user.ID,
 		})
@@ -90,6 +108,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 		if rows == 0 {
 			writeError(w, http.StatusBadRequest, "invite already used")
+			return
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to redeem invite")
 			return
 		}
 	}
