@@ -269,6 +269,7 @@ The server creates these tables on first run:
 - **task_dependencies** — DAG edges expressing `depends_on` relationships
 - **task_logs** — captured stdout/stderr per task
 - **reservations** — admin-managed worker allocations
+- **invites** — one-time invite tokens issued by admins; SHA-256 hashed; single-use with optional email binding and expiry
 
 ---
 
@@ -336,6 +337,26 @@ relay login
 ```
 
 Tokens are valid for 30 days. Re-run `relay login` to refresh.
+
+If the email is not yet registered, the server will require an invite token. The CLI prompts for it automatically:
+
+```
+Invite token: <paste token here>
+```
+
+---
+
+#### `relay invite create`
+
+Create a one-time invite token (admin only). The token can then be sent to the recipient out-of-band; they supply it when running `relay login` for the first time.
+
+```sh
+relay invite create                          # open invite, 72h expiry
+relay invite create --email user@example.com # bind to a specific address
+relay invite create --expires 24h           # custom expiry
+```
+
+The raw token is printed to stdout and is never stored — it cannot be retrieved again.
 
 ---
 
@@ -516,10 +537,10 @@ The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `
 **POST `/v1/auth/token`** body:
 
 ```json
-{ "email": "you@example.com", "name": "Your Name" }
+{ "email": "you@example.com", "name": "Your Name", "invite_token": "<raw invite token>" }
 ```
 
-If the email is new, a user is created. Returns:
+If the email is known, a new API token is issued immediately. If the email is new, an `invite_token` must be supplied — obtain one from an admin with `relay invite create`. Returns:
 
 ```json
 { "token": "<hex>", "expires_at": "2026-07-16T00:00:00Z" }
@@ -559,6 +580,28 @@ All reservation endpoints are admin-only.
 | `GET` | `/v1/reservations` | List reservations |
 | `POST` | `/v1/reservations` | Create a reservation |
 | `DELETE` | `/v1/reservations/{id}` | Delete a reservation |
+
+### Invites
+
+All invite endpoints are admin-only.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/invites` | Create a one-time invite token |
+
+**POST `/v1/invites`** body:
+
+```json
+{ "email": "optional@example.com", "expires_in": "72h" }
+```
+
+- `email` — optional; binds the invite to a specific address.
+- `expires_in` — optional duration (`"1h"` to `"720h"`); defaults to `"72h"`.
+
+Returns the raw token once:
+```json
+{ "id": "<uuid>", "token": "<raw token>", "expires_at": "2026-04-19T12:00:00Z" }
+```
 
 ### Events (Server-Sent Events)
 
