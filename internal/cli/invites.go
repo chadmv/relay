@@ -1,3 +1,4 @@
+// internal/cli/invites.go
 package cli
 
 import (
@@ -30,6 +31,10 @@ func doInviteCreate(ctx context.Context, args []string, cfg *Config, out io.Writ
 
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
+	}
+
+	if cfg.Token == "" {
+		return fmt.Errorf("not logged in — run 'relay login' first")
 	}
 
 	var req struct {
