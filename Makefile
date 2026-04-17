@@ -10,9 +10,9 @@ build:
 test:
 	go test ./... -timeout 120s
 
-# Run integration tests (requires Docker)
+# Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows
 test-integration:
-	go test -tags integration ./... -timeout 300s
+	go test -tags integration -p 1 ./... -timeout 300s
 
 # Regenerate sqlc store layer and protobuf code
 generate:
