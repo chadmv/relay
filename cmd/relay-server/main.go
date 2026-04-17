@@ -24,15 +24,15 @@ import (
 )
 
 func main() {
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("RELAY_DATABASE_URL")
 	if dsn == "" {
 		dsn = "postgres://relay:relay@localhost:5432/relay?sslmode=disable"
 	}
-	httpAddr := os.Getenv("HTTP_ADDR")
+	httpAddr := os.Getenv("RELAY_HTTP_ADDR")
 	if httpAddr == "" {
 		httpAddr = ":8080"
 	}
-	grpcAddr := os.Getenv("GRPC_ADDR")
+	grpcAddr := os.Getenv("RELAY_GRPC_ADDR")
 	if grpcAddr == "" {
 		grpcAddr = ":9090"
 	}

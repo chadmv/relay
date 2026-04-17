@@ -181,25 +181,25 @@ All configuration is via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | PostgreSQL connection string |
-| `HTTP_ADDR` | `:8080` | HTTP server bind address |
-| `GRPC_ADDR` | `:9090` | gRPC server bind address |
+| `RELAY_DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | PostgreSQL connection string |
+| `RELAY_HTTP_ADDR` | `:8080` | HTTP server bind address |
+| `RELAY_GRPC_ADDR` | `:9090` | gRPC server bind address |
 
 **Linux / macOS**
 
 ```sh
-DATABASE_URL=postgres://relay:relay@db-host:5432/relay?sslmode=disable \
-HTTP_ADDR=:8080 \
-GRPC_ADDR=:9090 \
+RELAY_DATABASE_URL=postgres://relay:relay@db-host:5432/relay?sslmode=disable \
+RELAY_HTTP_ADDR=:8080 \
+RELAY_GRPC_ADDR=:9090 \
 ./bin/relay-server
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-$env:DATABASE_URL = "postgres://relay:relay@db-host:5432/relay?sslmode=disable"
-$env:HTTP_ADDR    = ":8080"
-$env:GRPC_ADDR    = ":9090"
+$env:RELAY_DATABASE_URL = "postgres://relay:relay@db-host:5432/relay?sslmode=disable"
+$env:RELAY_HTTP_ADDR    = ":8080"
+$env:RELAY_GRPC_ADDR    = ":9090"
 .\bin\relay-server.exe
 ```
 
