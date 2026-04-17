@@ -62,9 +62,33 @@ func TestCreateInvite_Admin_ReturnsToken(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.NotEmpty(t, resp["token"])
+	assert.Len(t, resp["token"], 64, "token should be 64-char hex string")
 	assert.NotEmpty(t, resp["id"])
 	assert.NotEmpty(t, resp["expires_at"])
 	assert.Nil(t, resp["email"]) // no email bound
+}
+
+func TestCreateInvite_InvalidExpiry_BadRequest(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	ctx := t.Context()
+
+	admin, err := q.CreateUser(ctx, store.CreateUserParams{
+		Name: "Admin", Email: "admin2@test.com", IsAdmin: true,
+	})
+	require.NoError(t, err)
+	token := createTestToken(t, q, admin.ID)
+
+	srv := api.New(pool, q, nil, nil, func() {})
+
+	body := `{"expires_in":"notaduration"}`
+	req := httptest.NewRequest("POST", "/v1/invites", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestCreateInvite_Admin_EmailBound(t *testing.T) {

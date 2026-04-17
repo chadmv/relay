@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"net/mail"
 	"time"
 
 	"relay/internal/store"
@@ -33,7 +34,16 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		var err error
 		dur, err = time.ParseDuration(req.ExpiresIn)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid expires_in: use a Go duration like '72h' or '24h'")
+			writeError(w, http.StatusBadRequest, "invalid expires_in: expected a duration string such as '24h' or '72h'")
+			return
+		}
+		if dur <= 0 {
+			writeError(w, http.StatusBadRequest, "expires_in must be positive")
+			return
+		}
+		const maxInviteDuration = 30 * 24 * time.Hour
+		if dur > maxInviteDuration {
+			writeError(w, http.StatusBadRequest, "expires_in exceeds maximum of 720h")
 			return
 		}
 	}
@@ -55,6 +65,10 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expiresAt,
 	}
 	if req.Email != "" {
+		if _, err := mail.ParseAddress(req.Email); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid email address")
+			return
+		}
 		params.Email = &req.Email
 	}
 
