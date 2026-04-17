@@ -58,7 +58,7 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 func doWorkersList(ctx context.Context, c *Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	var workers []workerResp
@@ -80,7 +80,7 @@ func doWorkersList(ctx context.Context, c *Client, args []string, w io.Writer) e
 func doWorkersGet(ctx context.Context, c *Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers get", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {

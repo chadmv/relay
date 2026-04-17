@@ -70,7 +70,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	status := fs.String("status", "", "filter by status")
 	asJSON := fs.Bool("json", false, "output raw JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if cfg.Token == "" {
@@ -100,7 +100,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
@@ -165,7 +165,7 @@ func SubmitCommand() Command {
 func doSubmit(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	detach := fs.Bool("detach", false, "print job ID and exit without waiting for completion")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {

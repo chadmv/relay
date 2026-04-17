@@ -4,8 +4,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 )
 
@@ -45,6 +47,47 @@ func Dispatch(ctx context.Context, cmds []Command, args []string, cfg *Config) i
 	fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", name)
 	printUsage(cmds)
 	return 1
+}
+
+// reorderArgs moves flag arguments before positional arguments so that flags
+// can appear anywhere in the command line (e.g. "cmd <arg> --flag" works the
+// same as "cmd --flag <arg>"). fs is used to determine which flags take a
+// value argument so that those values are not mistaken for positional args.
+func reorderArgs(fs *flag.FlagSet, args []string) []string {
+	var flagArgs, posArgs []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			posArgs = append(posArgs, arg)
+			i++
+			continue
+		}
+		// Extract the flag name, stripping leading dashes and any =value suffix.
+		name := strings.TrimLeft(arg, "-")
+		if eq := strings.Index(name, "="); eq >= 0 {
+			name = name[:eq]
+		}
+		flagArgs = append(flagArgs, arg)
+		// If the flag is known, not boolean, and has no inline =value, consume
+		// the next arg as its value.
+		f := fs.Lookup(name)
+		if f != nil && !isBoolFlag(f) && !strings.Contains(arg, "=") && i+1 < len(args) {
+			flagArgs = append(flagArgs, args[i+1])
+			i += 2
+			continue
+		}
+		i++
+	}
+	return append(flagArgs, posArgs...)
+}
+
+func isBoolFlag(f *flag.Flag) bool {
+	type boolFlagger interface{ IsBoolFlag() bool }
+	if bf, ok := f.Value.(boolFlagger); ok {
+		return bf.IsBoolFlag()
+	}
+	return false
 }
 
 func printUsage(cmds []Command) {
