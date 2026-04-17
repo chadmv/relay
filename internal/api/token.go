@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -31,6 +33,10 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	user, err := s.q.GetUserByEmail(ctx, req.Email)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to look up user")
+		return
+	}
 	if err != nil {
 		// Unknown user — require a valid invite token.
 		if req.InviteToken == "" {
