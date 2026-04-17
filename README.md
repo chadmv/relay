@@ -35,11 +35,13 @@ Agents discover the server automatically via **mDNS** (`_relay._tcp.local`) or y
 
 ### Prerequisites
 
-- Go 1.22+ (module name: `relay`)
+- Go 1.22+
 - PostgreSQL 14+
 - Docker (for integration tests only)
 
 ### Build
+
+**Linux / macOS**
 
 ```sh
 make build
@@ -47,10 +49,30 @@ make build
 
 Produces `bin/relay-server`, `bin/relay-agent`, and `bin/relay`.
 
+**Windows**
+
+`make` is not available by default on Windows. Build with `go build` directly:
+
+```powershell
+go build -o bin\relay-server.exe .\cmd\relay-server
+go build -o bin\relay-agent.exe  .\cmd\relay-agent
+go build -o bin\relay.exe        .\cmd\relay
+```
+
+Or install [GNU Make for Windows](https://gnuwin32.sourceforge.net/packages/make.htm) / use Git Bash / WSL and run `make build` as normal.
+
+> **Cross-compiling** — to build Windows `.exe` files from Linux or macOS:
+> ```sh
+> GOOS=windows GOARCH=amd64 go build -o bin/relay-server.exe ./cmd/relay-server
+> GOOS=windows GOARCH=amd64 go build -o bin/relay-agent.exe  ./cmd/relay-agent
+> GOOS=windows GOARCH=amd64 go build -o bin/relay.exe        ./cmd/relay
+> ```
+
 ### 1 — Start PostgreSQL
 
+**Linux / macOS (Docker)**
+
 ```sh
-# Example using Docker
 docker run -d \
   --name relay-postgres \
   -e POSTGRES_USER=relay \
@@ -60,38 +82,93 @@ docker run -d \
   postgres:16
 ```
 
+**Windows (Docker Desktop)**
+
+```powershell
+docker run -d `
+  --name relay-postgres `
+  -e POSTGRES_USER=relay `
+  -e POSTGRES_PASSWORD=relay `
+  -e POSTGRES_DB=relay `
+  -p 5432:5432 `
+  postgres:16
+```
+
+Alternatively, install PostgreSQL natively via the [PostgreSQL Windows installer](https://www.postgresql.org/download/windows/) and create the `relay` database and user manually.
+
 ### 2 — Start the server
+
+**Linux / macOS**
 
 ```sh
 ./bin/relay-server
+```
+
+**Windows**
+
+```powershell
+.\bin\relay-server.exe
 ```
 
 On first start the server runs all database migrations automatically. Default addresses: HTTP `:8080`, gRPC `:9090`.
 
 ### 3 — Start one or more agents
 
+**Linux / macOS**
+
 ```sh
-# On the same machine (mDNS discovery)
+# mDNS discovery (same network as server)
 ./bin/relay-agent
 
-# On a different machine (explicit address)
+# Explicit coordinator address
 ./bin/relay-agent --coordinator relay-server.local:9090
+```
+
+**Windows**
+
+```powershell
+# mDNS discovery
+.\bin\relay-agent.exe
+
+# Explicit coordinator address
+.\bin\relay-agent.exe --coordinator relay-server.local:9090
 ```
 
 ### 4 — Configure the CLI
 
+**Linux / macOS**
+
 ```sh
 ./bin/relay login
-# Server URL [http://localhost:8080]: (press Enter for default)
-# Email: you@example.com
 ```
 
-Credentials are saved to `~/.relay/config.json`. You're ready to submit jobs.
+**Windows**
+
+```powershell
+.\bin\relay.exe login
+```
+
+```
+Server URL [http://localhost:8080]: (press Enter for default)
+Email: you@example.com
+```
+
+Credentials are saved to:
+- Linux/macOS: `~/.relay/config.json`
+- Windows: `%APPDATA%\relay\config.json`
 
 ### 5 — Submit a job
 
+**Linux / macOS**
+
 ```sh
 ./bin/relay submit examples/hello.json
+```
+
+**Windows**
+
+```powershell
+.\bin\relay.exe submit examples\hello.json
 ```
 
 ---
@@ -107,6 +184,24 @@ All configuration is via environment variables:
 | `DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | PostgreSQL connection string |
 | `HTTP_ADDR` | `:8080` | HTTP server bind address |
 | `GRPC_ADDR` | `:9090` | gRPC server bind address |
+
+**Linux / macOS**
+
+```sh
+DATABASE_URL=postgres://relay:relay@db-host:5432/relay?sslmode=disable \
+HTTP_ADDR=:8080 \
+GRPC_ADDR=:9090 \
+./bin/relay-server
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$env:DATABASE_URL = "postgres://relay:relay@db-host:5432/relay?sslmode=disable"
+$env:HTTP_ADDR    = ":8080"
+$env:GRPC_ADDR    = ":9090"
+.\bin\relay-server.exe
+```
 
 ### Startup sequence
 
@@ -433,17 +528,36 @@ Streams job and task status changes as SSE until the job reaches a terminal stat
 
 ### Run tests
 
+**Linux / macOS**
+
 ```sh
 make test                # unit tests — no external dependencies
 make test-integration    # integration tests — requires Docker
 ```
 
-Integration tests spin up a real PostgreSQL container per test using [testcontainers-go](https://golang.testcontainers.org/).
+**Windows**
+
+```powershell
+# Unit tests
+go test ./... -timeout 120s
+
+# Integration tests (requires Docker Desktop)
+go test -tags integration -p 1 ./... -timeout 300s
+```
+
+> Integration tests use [testcontainers-go](https://golang.testcontainers.org/) to spin up a real PostgreSQL container per test. Docker Desktop must be running. The `-p 1` flag is required on Windows to prevent container provider conflicts when multiple packages run in parallel.
 
 ### Regenerate code
 
 ```sh
 make generate
+```
+
+**Windows**
+
+```powershell
+sqlc generate
+buf generate
 ```
 
 Runs `sqlc generate` (store queries) and `buf generate` (protobuf/gRPC).
