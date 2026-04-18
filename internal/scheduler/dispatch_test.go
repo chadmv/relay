@@ -75,10 +75,11 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	q := newTestStore(t)
 
 	// Create user.
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name:    "test",
-		Email:   "test@example.com",
-		IsAdmin: false,
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name:         "test",
+		Email:        "test@example.com",
+		IsAdmin:      false,
+		PasswordHash: "x",
 	})
 	require.NoError(t, err)
 
