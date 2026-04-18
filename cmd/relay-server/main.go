@@ -60,7 +60,11 @@ func main() {
 	}
 
 	if bootstrapEmail := os.Getenv("RELAY_BOOTSTRAP_ADMIN"); bootstrapEmail != "" {
-		if err := bootstrapAdmin(ctx, q, bootstrapEmail); err != nil {
+		bootstrapPassword := os.Getenv("RELAY_BOOTSTRAP_PASSWORD")
+		if bootstrapPassword == "" {
+			log.Fatalf("RELAY_BOOTSTRAP_PASSWORD must be set when RELAY_BOOTSTRAP_ADMIN is set")
+		}
+		if err := bootstrapAdmin(ctx, q, bootstrapEmail, bootstrapPassword); err != nil {
 			log.Fatalf("bootstrap admin: %v", err)
 		}
 	}

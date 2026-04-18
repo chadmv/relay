@@ -44,13 +44,15 @@ func New(
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Public endpoints
-	mux.HandleFunc("GET /v1/health", s.handleHealth)
-	mux.HandleFunc("POST /v1/auth/token", s.handleCreateToken)
-
 	// Authenticated helpers
 	auth := BearerAuth(s.q)
 	admin := AdminOnly
+
+	// Public endpoints
+	mux.HandleFunc("GET /v1/health", s.handleHealth)
+	mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
+	mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
 
 	// Jobs
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))

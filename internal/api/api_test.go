@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newTestServer(t *testing.T) (*api.Server, *store.Queries) {
@@ -33,28 +34,15 @@ func newTestServer(t *testing.T) (*api.Server, *store.Queries) {
 	return srv, q
 }
 
-func TestHealth(t *testing.T) {
-	srv, _ := newTestServer(t)
-	req := httptest.NewRequest("GET", "/v1/health", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-}
-
-func TestCreateToken(t *testing.T) {
-	srv, _ := newTestServer(t)
-	body := `{"email":"bob@example.com","name":"Bob"}`
-	req := httptest.NewRequest("POST", "/v1/auth/token", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusCreated, rec.Code)
-
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	token, ok := resp["token"].(string)
-	require.True(t, ok)
-	assert.NotEmpty(t, token)
+func createTestUser(t *testing.T, q *store.Queries, name, email string, isAdmin bool) store.User {
+	t.Helper()
+	ph, err := bcrypt.GenerateFromPassword([]byte("testpassword1"), bcrypt.MinCost)
+	require.NoError(t, err)
+	user, err := q.CreateUserWithPassword(t.Context(), store.CreateUserWithPasswordParams{
+		Name: name, Email: email, IsAdmin: isAdmin, PasswordHash: string(ph),
+	})
+	require.NoError(t, err)
+	return user
 }
 
 func createTestToken(t *testing.T, q *store.Queries, userID pgtype.UUID) string {
@@ -73,14 +61,17 @@ func createTestToken(t *testing.T, q *store.Queries, userID pgtype.UUID) string 
 	return rawHex
 }
 
+func TestHealth(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/v1/health", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestCreateAndGetJob(t *testing.T) {
 	srv, q := newTestServer(t)
-	ctx := t.Context()
-
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Alice", Email: "alice@example.com", IsAdmin: false,
-	})
-	require.NoError(t, err)
+	user := createTestUser(t, q, "Alice", "alice@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
 	body := `{
@@ -104,7 +95,6 @@ func TestCreateAndGetJob(t *testing.T) {
 	require.True(t, ok)
 	assert.NotEmpty(t, jobID)
 
-	// GET /v1/jobs/:id
 	req2 := httptest.NewRequest("GET", "/v1/jobs/"+jobID, nil)
 	req2.Header.Set("Authorization", "Bearer "+token)
 	rec2 := httptest.NewRecorder()
@@ -120,12 +110,7 @@ func TestCreateAndGetJob(t *testing.T) {
 
 func TestGetTaskAndLogs(t *testing.T) {
 	srv, q := newTestServer(t)
-	ctx := t.Context()
-
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Alice", Email: "alice2@example.com", IsAdmin: false,
-	})
-	require.NoError(t, err)
+	user := createTestUser(t, q, "Alice", "alice2@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
 	body := `{"name":"j","tasks":[{"name":"t","command":["echo","hi"]}]}`
@@ -141,21 +126,18 @@ func TestGetTaskAndLogs(t *testing.T) {
 	jobID := job["id"].(string)
 	taskID := job["tasks"].([]any)[0].(map[string]any)["id"].(string)
 
-	// GET /v1/jobs/:id/tasks
 	req2 := httptest.NewRequest("GET", "/v1/jobs/"+jobID+"/tasks", nil)
 	req2.Header.Set("Authorization", "Bearer "+token)
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusOK, rec2.Code)
 
-	// GET /v1/tasks/:id
 	req3 := httptest.NewRequest("GET", "/v1/tasks/"+taskID, nil)
 	req3.Header.Set("Authorization", "Bearer "+token)
 	rec3 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec3, req3)
 	require.Equal(t, http.StatusOK, rec3.Code)
 
-	// GET /v1/tasks/:id/logs
 	req4 := httptest.NewRequest("GET", "/v1/tasks/"+taskID+"/logs", nil)
 	req4.Header.Set("Authorization", "Bearer "+token)
 	rec4 := httptest.NewRecorder()
@@ -165,12 +147,7 @@ func TestGetTaskAndLogs(t *testing.T) {
 
 func TestListWorkers(t *testing.T) {
 	srv, q := newTestServer(t)
-	ctx := t.Context()
-
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Admin", Email: "admin@example.com", IsAdmin: true,
-	})
-	require.NoError(t, err)
+	user := createTestUser(t, q, "Admin", "admin@example.com", true)
 	token := createTestToken(t, q, user.ID)
 
 	req := httptest.NewRequest("GET", "/v1/workers", nil)
@@ -187,11 +164,7 @@ func TestListWorkers(t *testing.T) {
 func TestSSESubscribe(t *testing.T) {
 	srv, q := newTestServer(t)
 	ctx := t.Context()
-
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Alice", Email: "alice3@example.com", IsAdmin: false,
-	})
-	require.NoError(t, err)
+	user := createTestUser(t, q, "Alice", "alice3@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
 	req := httptest.NewRequest("GET", "/v1/events", nil)
