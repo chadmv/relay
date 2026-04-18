@@ -172,7 +172,44 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	ctx := r.Context()
+	user, err := s.q.GetUserByEmail(ctx, req.Email)
+
+	var hashToCompare []byte
+	if err == nil {
+		hashToCompare = []byte(user.PasswordHash)
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		hashToCompare = getDummyHash()
+	} else {
+		writeError(w, http.StatusInternalServerError, "failed to look up user")
+		return
+	}
+
+	bcryptErr := bcrypt.CompareHashAndPassword(hashToCompare, []byte(req.Password))
+	if bcryptErr != nil || errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
+
+	token, expires, err := s.issueToken(ctx, s.q, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token":      token,
+		"expires_at": expires,
+	})
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {

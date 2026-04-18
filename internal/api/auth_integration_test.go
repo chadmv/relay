@@ -248,3 +248,90 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp))
 	assert.Equal(t, "email already registered", resp["error"])
 }
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+
+func TestLogin_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
+	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+
+	// Register first.
+	regBody, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "alicepassword",
+		"invite_token": inviteToken,
+	})
+	regReq := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(regBody)))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(regRec, regReq)
+	require.Equal(t, http.StatusCreated, regRec.Code)
+
+	// Now login.
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "alicepassword",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp["token"])
+}
+
+func TestLogin_WrongPassword(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
+	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+
+	regBody, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "correctpassword",
+		"invite_token": inviteToken,
+	})
+	regReq := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(regBody)))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(regRec, regReq)
+	require.Equal(t, http.StatusCreated, regRec.Code)
+
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "wrongpassword",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "invalid email or password", resp["error"])
+}
+
+func TestLogin_UnknownEmail_SameErrorAsWrongPassword(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": "nobody@test.com", "password": "anypassword",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "invalid email or password", resp["error"])
+}
