@@ -21,8 +21,8 @@ func TestCreateInvite_NonAdmin_Forbidden(t *testing.T) {
 	q := store.New(pool)
 	ctx := t.Context()
 
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Alice", Email: "alice@test.com", IsAdmin: false,
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "Alice", Email: "alice@test.com", IsAdmin: false, PasswordHash: "x",
 	})
 	require.NoError(t, err)
 	token := createTestToken(t, q, user.ID)
@@ -43,8 +43,8 @@ func TestCreateInvite_Admin_ReturnsToken(t *testing.T) {
 	q := store.New(pool)
 	ctx := t.Context()
 
-	admin, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Admin", Email: "admin@test.com", IsAdmin: true,
+	admin, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "Admin", Email: "admin@test.com", IsAdmin: true, PasswordHash: "x",
 	})
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)
@@ -73,8 +73,8 @@ func TestCreateInvite_InvalidExpiry_BadRequest(t *testing.T) {
 	q := store.New(pool)
 	ctx := t.Context()
 
-	admin, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Admin", Email: "admin2@test.com", IsAdmin: true,
+	admin, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "Admin", Email: "admin2@test.com", IsAdmin: true, PasswordHash: "x",
 	})
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)
@@ -96,8 +96,8 @@ func TestCreateInvite_Admin_EmailBound(t *testing.T) {
 	q := store.New(pool)
 	ctx := t.Context()
 
-	admin, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Admin", Email: "admin@test.com", IsAdmin: true,
+	admin, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "Admin", Email: "admin@test.com", IsAdmin: true, PasswordHash: "x",
 	})
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)

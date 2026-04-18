@@ -32,8 +32,8 @@ func TestBearerAuth_ValidToken(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := t.Context()
 
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Alice", Email: "alice@test.com", IsAdmin: false,
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "Alice", Email: "alice@test.com", IsAdmin: false, PasswordHash: "x",
 	})
 	require.NoError(t, err)
 
