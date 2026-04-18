@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,13 +14,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func withMockPassword(t *testing.T, password string) {
+	t.Helper()
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		return password, nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+}
+
 func TestRunLogin_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
-		require.Equal(t, "/v1/auth/token", r.URL.Path)
+		require.Equal(t, "/v1/auth/login", r.URL.Path)
 		var body map[string]string
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.Equal(t, "user@example.com", body["email"])
+		require.Equal(t, "mypassword1", body["password"])
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"token":      "tok-abc",
@@ -33,9 +44,10 @@ func TestRunLogin_Success(t *testing.T) {
 	saveConfigFn = func(cfg *Config) error { saved = cfg; return nil }
 	t.Cleanup(func() { saveConfigFn = origSave })
 
+	withMockPassword(t, "mypassword1")
+
 	cfg := &Config{ServerURL: srv.URL}
-	// Simulate: user hits Enter to accept pre-filled URL, then types email.
-	input := strings.NewReader("\nuser@example.com\n")
+	input := strings.NewReader("\nuser@example.com\n") // accept URL, type email
 	var out strings.Builder
 	err := doLogin(context.Background(), cfg, input, &out)
 	require.NoError(t, err)
@@ -47,6 +59,7 @@ func TestRunLogin_Success(t *testing.T) {
 }
 
 func TestRunLogin_EmptyEmailReturnsError(t *testing.T) {
+	withMockPassword(t, "mypassword1")
 	cfg := &Config{ServerURL: "http://localhost"}
 	input := strings.NewReader("\n\n") // blank URL, blank email
 	var out strings.Builder
@@ -55,58 +68,28 @@ func TestRunLogin_EmptyEmailReturnsError(t *testing.T) {
 	require.Contains(t, err.Error(), "email is required")
 }
 
-func TestRunLogin_InviteRequired_PromptsAndRetries(t *testing.T) {
-	callCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]string
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		callCount++
-		if callCount == 1 {
-			// First call: no invite token — server rejects.
-			require.Equal(t, "", body["invite_token"])
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invite required"})
-			return
-		}
-		// Second call: invite token present.
-		require.Equal(t, "my-invite-token", body["invite_token"])
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]any{
-			"token":      "tok-new",
-			"expires_at": time.Now().Add(30 * 24 * time.Hour),
-		})
-	}))
-	defer srv.Close()
-
-	var saved *Config
-	origSave := saveConfigFn
-	saveConfigFn = func(cfg *Config) error { saved = cfg; return nil }
-	t.Cleanup(func() { saveConfigFn = origSave })
-
-	cfg := &Config{ServerURL: srv.URL}
-	// hits Enter to accept pre-filled URL, types email, types invite token
-	input := strings.NewReader("\nnewuser@example.com\nmy-invite-token\n")
-	var out strings.Builder
-	err := doLogin(context.Background(), cfg, input, &out)
-	require.NoError(t, err)
-	require.Equal(t, 2, callCount)
-	require.NotNil(t, saved)
-	require.Equal(t, "tok-new", saved.Token)
-	require.Contains(t, out.String(), "Logged in")
-	require.Contains(t, out.String(), "Invite token:")
-}
-
-func TestRunLogin_InviteRequired_BlankToken_Error(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invite required"})
-	}))
-	defer srv.Close()
-
-	cfg := &Config{ServerURL: srv.URL}
-	input := strings.NewReader("\nnewuser@example.com\n\n") // blank invite token
+func TestRunLogin_EmptyPasswordReturnsError(t *testing.T) {
+	withMockPassword(t, "")
+	cfg := &Config{ServerURL: "http://localhost"}
+	input := strings.NewReader("\nuser@example.com\n")
 	var out strings.Builder
 	err := doLogin(context.Background(), cfg, input, &out)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invite token required")
+	require.Contains(t, err.Error(), "password is required")
+}
+
+func TestRunLogin_ServerReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid email or password"})
+	}))
+	defer srv.Close()
+
+	withMockPassword(t, "wrongpassword")
+	cfg := &Config{ServerURL: srv.URL}
+	input := strings.NewReader("\nuser@example.com\n")
+	var out strings.Builder
+	err := doLogin(context.Background(), cfg, input, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid email or password")
 }

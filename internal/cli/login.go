@@ -4,16 +4,29 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // saveConfigFn is a variable so tests can override it.
 var saveConfigFn = SaveConfig
+
+// readPasswordFn reads a masked password prompt. Tests override this to avoid
+// requiring a real terminal file descriptor.
+var readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+	fmt.Fprint(out, prompt)
+	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
 
 // LoginCommand returns the relay login Command.
 func LoginCommand() Command {
@@ -45,9 +58,17 @@ func doLogin(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) erro
 		return fmt.Errorf("email is required")
 	}
 
-	type tokenRequest struct {
-		Email       string `json:"email"`
-		InviteToken string `json:"invite_token,omitempty"`
+	password, err := readPasswordFn(out, "Password: ")
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+
+	type loginRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	c := NewClient(serverURL, "")
@@ -56,23 +77,8 @@ func doLogin(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) erro
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 
-	reqBody := tokenRequest{Email: email}
-	if err := c.do(ctx, "POST", "/v1/auth/token", reqBody, &resp); err != nil {
-		var re *ResponseError
-		if errors.As(err, &re) && re.StatusCode == http.StatusForbidden && re.Message == "invite required" {
-			fmt.Fprint(out, "Invite token: ")
-			inviteToken, _ := r.ReadString('\n')
-			inviteToken = strings.TrimSpace(inviteToken)
-			if inviteToken == "" {
-				return fmt.Errorf("invite token required for new accounts")
-			}
-			reqBody.InviteToken = inviteToken
-			if err := c.do(ctx, "POST", "/v1/auth/token", reqBody, &resp); err != nil {
-				return fmt.Errorf("login failed: %w", err)
-			}
-		} else {
-			return fmt.Errorf("login failed: %w", err)
-		}
+	if err := c.do(ctx, "POST", "/v1/auth/login", loginRequest{Email: email, Password: password}, &resp); err != nil {
+		return fmt.Errorf("login failed: %w", err)
 	}
 
 	cfg.ServerURL = serverURL
