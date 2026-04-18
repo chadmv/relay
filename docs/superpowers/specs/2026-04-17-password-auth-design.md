@@ -144,6 +144,12 @@ Requires an existing valid token in config. Prompts for current password (masked
 - Expired and used invite rejection
 - Enumeration: verify identical HTTP status and body for unknown email vs wrong password
 
+## Transport Security
+
+Relay itself runs plain HTTP and does not handle TLS. Passwords travel unencrypted if Relay is accessed directly. For any deployment where passwords are in use, Relay should be placed behind a TLS-terminating reverse proxy (e.g., nginx, Caddy). This is standard IT infrastructure and does not change how Relay is deployed or configured.
+
+The README should include a note advising TLS termination via reverse proxy, with a minimal example config for at least one common proxy.
+
 ## Out of Scope
 
 - Account lockout after failed login attempts (can be added later)
