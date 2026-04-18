@@ -15,6 +15,7 @@ import (
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,7 +34,7 @@ func getDummyHash() []byte {
 	return dummyBcryptHash
 }
 
-func (s *Server) issueToken(ctx context.Context, userID pgtype.UUID) (string, time.Time, error) {
+func (s *Server) issueToken(ctx context.Context, q *store.Queries, userID pgtype.UUID) (string, time.Time, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", time.Time{}, err
@@ -42,7 +43,7 @@ func (s *Server) issueToken(ctx context.Context, userID pgtype.UUID) (string, ti
 	sum := sha256.Sum256([]byte(rawHex))
 	hash := hex.EncodeToString(sum[:])
 	expires := time.Now().Add(30 * 24 * time.Hour)
-	if _, err := s.q.CreateToken(ctx, store.CreateTokenParams{
+	if _, err := q.CreateToken(ctx, store.CreateTokenParams{
 		UserID:    userID,
 		TokenHash: hash,
 		ExpiresAt: pgtype.Timestamptz{Time: expires, Valid: true},
@@ -131,7 +132,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: string(passwordHash),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create user")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeError(w, http.StatusConflict, "email already registered")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to create user")
+		}
 		return
 	}
 
@@ -148,14 +154,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit registration")
+	token, expires, err := s.issueToken(ctx, txq, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
-	token, expires, err := s.issueToken(ctx, user.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit registration")
 		return
 	}
 

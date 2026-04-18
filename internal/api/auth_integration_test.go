@@ -214,3 +214,37 @@ func TestRegister_EmailBoundInvite_WrongEmail(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "invite not valid for this email", resp["error"])
 }
+
+func TestRegister_DuplicateEmail(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
+	invite1 := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+	invite2 := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+
+	// Register once.
+	body, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "securepass1", "invite_token": invite1,
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Try to register again with same email.
+	body2, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "securepass1", "invite_token": invite2,
+	})
+	req2 := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body2)))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+
+	assert.Equal(t, http.StatusConflict, rec2.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp))
+	assert.Equal(t, "email already registered", resp["error"])
+}
