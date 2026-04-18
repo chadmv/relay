@@ -14,6 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newTestQueries(t *testing.T) *store.Queries {
@@ -39,28 +40,37 @@ func newTestQueries(t *testing.T) *store.Queries {
 	return store.New(pool)
 }
 
+func createUserWithTestPassword(t *testing.T, q *store.Queries, name, email string, isAdmin bool) store.User {
+	t.Helper()
+	ph, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
+	require.NoError(t, err)
+	user, err := q.CreateUserWithPassword(t.Context(), store.CreateUserWithPasswordParams{
+		Name: name, Email: email, IsAdmin: isAdmin, PasswordHash: string(ph),
+	})
+	require.NoError(t, err)
+	return user
+}
+
 func TestBootstrapAdmin_NoUsers_CreatesAdmin(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := t.Context()
 
-	require.NoError(t, bootstrapAdmin(ctx, q, "admin@example.com"))
+	require.NoError(t, bootstrapAdmin(ctx, q, "admin@example.com", "bootstrappassword"))
 
 	user, err := q.GetUserByEmail(ctx, "admin@example.com")
 	require.NoError(t, err)
 	assert.True(t, user.IsAdmin)
 	assert.Equal(t, "admin@example.com", user.Email)
+	assert.NotEmpty(t, user.PasswordHash)
 }
 
 func TestBootstrapAdmin_ExistingUser_Promotes(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := t.Context()
 
-	_, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Bob", Email: "admin@example.com", IsAdmin: false,
-	})
-	require.NoError(t, err)
+	createUserWithTestPassword(t, q, "Bob", "admin@example.com", false)
 
-	require.NoError(t, bootstrapAdmin(ctx, q, "admin@example.com"))
+	require.NoError(t, bootstrapAdmin(ctx, q, "admin@example.com", "bootstrappassword"))
 
 	user, err := q.GetUserByEmail(ctx, "admin@example.com")
 	require.NoError(t, err)
@@ -71,14 +81,10 @@ func TestBootstrapAdmin_AdminAlreadyExists_Skips(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := t.Context()
 
-	_, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name: "Existing Admin", Email: "other@example.com", IsAdmin: true,
-	})
-	require.NoError(t, err)
+	createUserWithTestPassword(t, q, "Existing Admin", "other@example.com", true)
 
-	require.NoError(t, bootstrapAdmin(ctx, q, "new@example.com"))
+	require.NoError(t, bootstrapAdmin(ctx, q, "new@example.com", "bootstrappassword"))
 
-	// The requested email must NOT have been created.
-	_, err = q.GetUserByEmail(ctx, "new@example.com")
+	_, err := q.GetUserByEmail(ctx, "new@example.com")
 	require.Error(t, err, "expected no user created when an admin already exists")
 }

@@ -8,19 +8,26 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 	"relay/internal/store"
 )
+
+func makeTestUser(t *testing.T, q *store.Queries, ctx context.Context, name, email string) store.User {
+	t.Helper()
+	ph, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
+	require.NoError(t, err)
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: name, Email: email, IsAdmin: false, PasswordHash: string(ph),
+	})
+	require.NoError(t, err)
+	return user
+}
 
 func TestCreateAndGetJob(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := context.Background()
 
-	user, err := q.CreateUser(ctx, store.CreateUserParams{
-		Name:    "Alice",
-		Email:   "alice@example.com",
-		IsAdmin: false,
-	})
-	require.NoError(t, err)
+	user := makeTestUser(t, q, ctx, "Alice", "alice@example.com")
 
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name:        "test-job",
@@ -64,8 +71,7 @@ func TestTaskDependencyAndEligibility(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := context.Background()
 
-	user, err := q.CreateUser(ctx, store.CreateUserParams{Name: "Bob", Email: "bob@example.com", IsAdmin: false})
-	require.NoError(t, err)
+	user := makeTestUser(t, q, ctx, "Bob", "bob@example.com")
 
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "dag-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
