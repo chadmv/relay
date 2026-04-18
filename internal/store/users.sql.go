@@ -29,25 +29,31 @@ func (q *Queries) AdminExists(ctx context.Context) (bool, error) {
 	return exists, err
 }
 
-const createUser = `-- name: CreateUser :one
-INSERT INTO users (name, email, is_admin)
-VALUES ($1, $2, $3)
-RETURNING id, name, email, is_admin, created_at
+const createUserWithPassword = `-- name: CreateUserWithPassword :one
+INSERT INTO users (name, email, is_admin, password_hash)
+VALUES ($1, $2, $3, $4)
+RETURNING id, name, email, is_admin, created_at, password_hash
 `
 
-type CreateUserParams struct {
-	Name    string `json:"name"`
-	Email   string `json:"email"`
-	IsAdmin bool   `json:"is_admin"`
+type CreateUserWithPasswordParams struct {
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	IsAdmin      bool   `json:"is_admin"`
+	PasswordHash string `json:"password_hash"`
 }
 
-// CreateUser
+// CreateUserWithPassword
 //
-//	INSERT INTO users (name, email, is_admin)
-//	VALUES ($1, $2, $3)
-//	RETURNING id, name, email, is_admin, created_at
-func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
-	row := q.db.QueryRow(ctx, createUser, arg.Name, arg.Email, arg.IsAdmin)
+//	INSERT INTO users (name, email, is_admin, password_hash)
+//	VALUES ($1, $2, $3, $4)
+//	RETURNING id, name, email, is_admin, created_at, password_hash
+func (q *Queries) CreateUserWithPassword(ctx context.Context, arg CreateUserWithPasswordParams) (User, error) {
+	row := q.db.QueryRow(ctx, createUserWithPassword,
+		arg.Name,
+		arg.Email,
+		arg.IsAdmin,
+		arg.PasswordHash,
+	)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -55,17 +61,18 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Email,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.PasswordHash,
 	)
 	return i, err
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, name, email, is_admin, created_at FROM users WHERE id = $1
+SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE id = $1
 `
 
 // GetUser
 //
-//	SELECT id, name, email, is_admin, created_at FROM users WHERE id = $1
+//	SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE id = $1
 func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	row := q.db.QueryRow(ctx, getUser, id)
 	var i User
@@ -75,17 +82,18 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 		&i.Email,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.PasswordHash,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, name, email, is_admin, created_at FROM users WHERE email = $1
+SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE email = $1
 `
 
 // GetUserByEmail
 //
-//	SELECT id, name, email, is_admin, created_at FROM users WHERE email = $1
+//	SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE email = $1
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	row := q.db.QueryRow(ctx, getUserByEmail, email)
 	var i User
@@ -95,6 +103,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Email,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.PasswordHash,
 	)
 	return i, err
 }
@@ -108,5 +117,22 @@ UPDATE users SET is_admin = TRUE WHERE id = $1
 //	UPDATE users SET is_admin = TRUE WHERE id = $1
 func (q *Queries) PromoteUserToAdmin(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, promoteUserToAdmin, id)
+	return err
+}
+
+const setPasswordHash = `-- name: SetPasswordHash :exec
+UPDATE users SET password_hash = $2 WHERE id = $1
+`
+
+type SetPasswordHashParams struct {
+	ID           pgtype.UUID `json:"id"`
+	PasswordHash string      `json:"password_hash"`
+}
+
+// SetPasswordHash
+//
+//	UPDATE users SET password_hash = $2 WHERE id = $1
+func (q *Queries) SetPasswordHash(ctx context.Context, arg SetPasswordHashParams) error {
+	_, err := q.db.Exec(ctx, setPasswordHash, arg.ID, arg.PasswordHash)
 	return err
 }

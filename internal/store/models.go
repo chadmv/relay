@@ -81,11 +81,12 @@ type TaskLog struct {
 }
 
 type User struct {
-	ID        pgtype.UUID        `json:"id"`
-	Name      string             `json:"name"`
-	Email     string             `json:"email"`
-	IsAdmin   bool               `json:"is_admin"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID           pgtype.UUID        `json:"id"`
+	Name         string             `json:"name"`
+	Email        string             `json:"email"`
+	IsAdmin      bool               `json:"is_admin"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	PasswordHash string             `json:"password_hash"`
 }
 
 type Worker struct {
