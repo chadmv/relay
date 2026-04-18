@@ -36,7 +36,7 @@ func bootstrapAdmin(ctx context.Context, q *store.Queries, email, password strin
 		return fmt.Errorf("hash password: %w", err)
 	}
 
-	newUser, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+	_, err = q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
 		Name:         email,
 		Email:        email,
 		IsAdmin:      true,
@@ -47,14 +47,12 @@ func bootstrapAdmin(ctx context.Context, q *store.Queries, email, password strin
 		if lookupErr != nil {
 			return fmt.Errorf("create admin user: %w", err)
 		}
-		newUser = existingUser
-		if err := q.PromoteUserToAdmin(ctx, newUser.ID); err != nil {
+		if err := q.PromoteUserToAdmin(ctx, existingUser.ID); err != nil {
 			return fmt.Errorf("promote user to admin (concurrent startup): %w", err)
 		}
 		log.Printf("bootstrap admin ready (concurrent startup, promoted): %s", email)
 		return nil
 	}
-	_ = newUser
 	log.Printf("bootstrap admin ready (created new user): %s", email)
 	return nil
 }
