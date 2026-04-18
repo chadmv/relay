@@ -335,3 +335,120 @@ func TestLogin_UnknownEmail_SameErrorAsWrongPassword(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "invalid email or password", resp["error"])
 }
+
+// ── Change password ──────────────────────────────────────────────────────────
+
+func registerAndLogin(t *testing.T, srv *api.Server, q *store.Queries, email, password string) string {
+	t.Helper()
+	admin := createTestUser(t, q, "Admin", "admin-"+email, true)
+	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+
+	regBody, _ := json.Marshal(map[string]string{
+		"email": email, "password": password, "invite_token": inviteToken,
+	})
+	regReq := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(regBody)))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(regRec, regReq)
+	require.Equal(t, http.StatusCreated, regRec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(regRec.Body).Decode(&resp))
+	return resp["token"].(string)
+}
+
+func TestChangePassword_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+	token := registerAndLogin(t, srv, q, "alice@test.com", "oldpassword")
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "oldpassword", "new_password": "newpassword1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Old password no longer works.
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "oldpassword",
+	})
+	loginReq := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody)))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(loginRec, loginReq)
+	assert.Equal(t, http.StatusUnauthorized, loginRec.Code)
+
+	// New password works.
+	loginBody2, _ := json.Marshal(map[string]string{
+		"email": "alice@test.com", "password": "newpassword1",
+	})
+	loginReq2 := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody2)))
+	loginReq2.Header.Set("Content-Type", "application/json")
+	loginRec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(loginRec2, loginReq2)
+	assert.Equal(t, http.StatusCreated, loginRec2.Code)
+}
+
+func TestChangePassword_WrongCurrentPassword(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+	token := registerAndLogin(t, srv, q, "bob@test.com", "correctpassword")
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "wrongpassword", "new_password": "newpassword1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "current password is incorrect", resp["error"])
+}
+
+func TestChangePassword_NewPasswordTooShort(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+	token := registerAndLogin(t, srv, q, "carol@test.com", "correctpassword")
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "correctpassword", "new_password": "short",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "password must be at least 8 characters", resp["error"])
+}
+
+func TestChangePassword_NoToken(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), func() {})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "old", "new_password": "newpassword1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
