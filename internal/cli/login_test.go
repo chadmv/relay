@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// withMockPassword sets readPasswordFn to return a fixed password for the test.
+// Use a custom override when multiple calls need different return values.
 func withMockPassword(t *testing.T, password string) {
 	t.Helper()
 	orig := readPasswordFn

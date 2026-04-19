@@ -80,10 +80,6 @@ func TestRunRegister_PasswordMismatch(t *testing.T) {
 }
 
 func TestRunRegister_EmptyInviteToken(t *testing.T) {
-	orig := readPasswordFn
-	readPasswordFn = func(out io.Writer, prompt string) (string, error) { return "password1", nil }
-	t.Cleanup(func() { readPasswordFn = orig })
-
 	cfg := &Config{ServerURL: "http://localhost"}
 	input := strings.NewReader("\nuser@example.com\n\n\n") // blank invite token
 	var out strings.Builder
