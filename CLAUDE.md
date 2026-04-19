@@ -88,3 +88,7 @@ No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct
 **Task DAG:** Tasks within a job form a dependency DAG (`task_dependencies` table). The scheduler uses a recursive CTE (`FailDependentTasks`) for transitive cascade on failure.
 
 **Database:** migrations are embedded in the binary and run automatically on startup. Migration files live in `internal/store/migrations/` and use the `golang-migrate` format (`000N_name.up.sql` / `000N_name.down.sql`).
+
+## Session Continuity
+
+At the start of each session, read the most recent file in `docs/retros/` for context on prior work.
