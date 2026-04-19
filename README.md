@@ -681,3 +681,33 @@ proto/
 - Cancelling a job does not send cancellation signals to tasks that are already running on agents.
 - GPU detection covers NVIDIA only (via `nvidia-smi`).
 - No structured logging in relay-agent (errors go to stderr as plain text).
+
+---
+
+## Transport Security
+
+Relay's HTTP server does not handle TLS directly. When passwords are in use, deploy Relay behind a TLS-terminating reverse proxy to protect credentials in transit.
+
+**Example — Caddy (`Caddyfile`):**
+
+```
+relay.internal {
+    reverse_proxy localhost:8080
+}
+```
+
+Caddy automatically provisions a certificate from your internal CA or Let's Encrypt. No changes to Relay's configuration are needed.
+
+**Example — nginx (`/etc/nginx/conf.d/relay.conf`):**
+
+```
+server {
+    listen 443 ssl;
+    server_name relay.internal;
+    ssl_certificate     /etc/ssl/certs/relay.crt;
+    ssl_certificate_key /etc/ssl/private/relay.key;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
