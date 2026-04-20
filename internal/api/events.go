@@ -26,7 +26,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case e := <-ch:
+		case e, ok := <-ch:
+			if !ok {
+				return
+			}
 			// Replace newlines in data to keep SSE frame valid.
 			// Per SSE spec, each line in the data value needs its own "data:" prefix.
 			dataStr := strings.ReplaceAll(string(e.Data), "\n", "\ndata: ")

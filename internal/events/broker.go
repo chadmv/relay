@@ -37,6 +37,7 @@ func (b *Broker) Subscribe(jobID string) (<-chan Event, func()) {
 		b.mu.Lock()
 		if _, ok := b.subs[ch]; ok {
 			delete(b.subs, ch)
+			close(ch)
 		}
 		b.mu.Unlock()
 	}
