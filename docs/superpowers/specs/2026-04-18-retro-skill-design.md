@@ -5,7 +5,7 @@
 
 ## Overview
 
-A personal Claude Code skill (`/retro`) that writes a structured session retrospective to `docs/retros/YYYY-MM-DD-<topic>.md` at the end of any non-trivial session. Future sessions auto-load the latest retro via a CLAUDE.md directive for continuity.
+A personal Claude Code skill (`/retro`) that writes a structured session retrospective to `docs/retros/YYYY-MM-DD-<topic>.md` at the end of any non-trivial session. Future sessions auto-load the latest retro via a user-level `~/.claude/CLAUDE.md` directive for continuity.
 
 ## Skill Location
 
@@ -15,16 +15,27 @@ The skill is not project-specific. Any project that has a `docs/retros/` directo
 
 ## Mechanics
 
-When `/retro` is invoked, Claude:
+When `/retro` is invoked, Claude follows seven steps:
 
-1. **Non-trivial check** — Inspect `git log` and `git diff --stat`. If there are no commits newer than the most recent retro file (or no commits at all if no retro exists yet) and no staged/unstaged changes, output "Nothing to retro — no meaningful changes this session." and stop.
-2. **Derive topic slug** — Infer a 2–4 word kebab-case topic from the work (e.g., `auth-commands`, `scheduler-fix`, `retro-skill`).
-3. **Ensure directory** — Create `docs/retros/` if it does not exist.
-4. **Write retro file** — Save to `docs/retros/YYYY-MM-DD-<topic>.md` using today's date.
-5. **Commit** — Commit the file with message `docs: add session retro YYYY-MM-DD-<topic>`.
-6. **One-time CLAUDE.md update** — If the project's `CLAUDE.md` does not yet contain the session continuity directive, append it (idempotent).
+1. **Non-trivial check** — Find the most recent retro file in `docs/retros/`. If one exists, extract its ending SHA from the `Commit Range` section. If `git rev-list <SHA>..HEAD` is empty **and** `git status --porcelain` is empty, output "Nothing to retro — no meaningful changes this session." and stop.
+
+2. **Determine commit range** — If a prior retro exists, extract its ending SHA from the `Commit Range` section. The new range is `<that-SHA>..HEAD`. If no prior retro exists, use `$(git rev-list --max-parents=0 HEAD)..HEAD` (root to HEAD).
+
+3. **Derive topic slug** — Infer a 2–4 word kebab-case slug from the git log messages and changed files (e.g., `auth-commands`, `scheduler-fix`, `retro-skill`).
+
+4. **Ensure directory and resolve filename** — Create `docs/retros/` if needed. Use `docs/retros/YYYY-MM-DD-<slug>.md`. If that path already exists (same-day collision), append `-2`, `-3`, etc. until the path is free. If a same-day retro would share the same slug, prefer a more specific slug that reflects the *new* work.
+
+5. **Write retro file (draft)** — Populate from git history and session context. Do **not** commit yet. Output the path to the user and say: "Draft written. Review and edit if needed, then tell me to commit (or discard)." Wait for user confirmation.
+
+6. **Branch check + commit** — On user confirmation, run `git rev-parse --abbrev-ref HEAD`. If not `main`/`master`, warn the user: "Current branch is `<branch>`. The retro will be committed there and travel with any PR/merge/squash. Proceed, switch branches, or skip the commit?" Wait for direction, then commit with `docs: add session retro YYYY-MM-DD-<topic>`.
+
+7. **Ensure session-continuity directive (user-level, one-time)** — Check `~/.claude/CLAUDE.md` for the text `Session Continuity`. If absent, append the directive (see below). This is a file edit, not a git operation. Because it is user-level, it applies across all projects without mutating any project's CLAUDE.md.
 
 ## Retro Document Format
+
+The sections below are a **menu**, not a required skeleton. Write only sections that have meaningful content. **Always include `Commit Range`** — the next retro depends on its ending SHA to find its own start point. Never write "N/A" or emit empty headers.
+
+Available sections (include in this order when present):
 
 ```markdown
 # Session Retro: YYYY-MM-DD — <Topic>
@@ -57,24 +68,22 @@ When `/retro` is invoked, Claude:
 <!-- Short list of the most-changed files with one-line context each -->
 
 ## Commit Range
-<!-- First..Last SHA covered by this session, e.g. abc1234..def5678 -->
+<!-- First..Last SHA covered by this session, e.g. abc1234..def5678 — MANDATORY -->
 ```
-
-Sections with nothing to say are **omitted** — never written as "N/A" or left empty.
 
 ## Auto-Load Mechanism
 
-On the first `/retro` run in a project, the skill appends this block to `CLAUDE.md`:
+On the first `/retro` run ever, the skill appends this block to `~/.claude/CLAUDE.md` (user-level, not project-level):
 
 ```markdown
 ## Session Continuity
 
-At the start of each session, read the most recent file in `docs/retros/` for context on prior work.
+At the start of each session, if the current project has a `docs/retros/` directory, read the most recent file in it for context on prior work.
 ```
 
-The skill checks for the directive's presence before writing, so re-running `/retro` in a project that already has the directive does not duplicate it.
+Because this is user-level, it applies to all projects automatically. The skill checks for the directive's presence before writing, so re-running `/retro` will never duplicate it.
 
-At future session starts, Claude reads `CLAUDE.md`, sees the directive, and loads the latest retro file automatically.
+**Migration note:** Any existing project-level `Session Continuity` directive added to a project's `CLAUDE.md` before this design update is redundant and can be removed in a follow-up commit.
 
 ## Out of Scope
 
