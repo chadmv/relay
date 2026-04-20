@@ -41,14 +41,15 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return fmt.Errorf("first message must be RegisterRequest")
 	}
 
-	workerID, err := h.registerWorker(ctx, stream, reg)
+	workerID, sender, err := h.registerWorker(ctx, stream, reg)
 	if err != nil {
 		return fmt.Errorf("register worker: %w", err)
 	}
 
-	defer h.requeueWorkerTasks(workerID)    // runs 3rd
-	defer h.markWorkerOffline(workerID)     // runs 2nd
-	defer h.registry.Unregister(workerID)  // runs 1st
+	defer h.requeueWorkerTasks(workerID)   // runs 4th
+	defer h.markWorkerOffline(workerID)    // runs 3rd
+	defer sender.Close()                   // runs 2nd
+	defer h.registry.Unregister(workerID) // runs 1st
 
 	// Message loop.
 	for {
@@ -71,7 +72,7 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 
 // registerWorker upserts the worker, marks it online, sends the RegisterResponse,
 // publishes an SSE event, and triggers the dispatch loop.
-func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, error) {
+func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name:     reg.Hostname,
 		Hostname: reg.Hostname,
@@ -82,7 +83,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		Os:       reg.Os,
 	})
 	if err != nil {
-		return "", fmt.Errorf("upsert worker: %w", err)
+		return "", nil, fmt.Errorf("upsert worker: %w", err)
 	}
 
 	w, err = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
@@ -91,22 +92,24 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
-		return "", fmt.Errorf("update worker status: %w", err)
+		return "", nil, fmt.Errorf("update worker status: %w", err)
 	}
 
 	workerID := uuidStr(w.ID)
 
-	// Register in the in-memory registry so the dispatcher can send tasks.
-	h.registry.Register(workerID, stream)
-
+	// Send RegisterResponse on the raw stream. At this point the worker is not
+	// yet in the registry, so no other goroutine can race us on stream.Send.
 	if err := stream.Send(&relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_RegisterResponse{
 			RegisterResponse: &relayv1.RegisterResponse{WorkerId: workerID},
 		},
 	}); err != nil {
-		h.registry.Unregister(workerID)
-		return "", fmt.Errorf("send register response: %w", err)
+		return "", nil, fmt.Errorf("send register response: %w", err)
 	}
+
+	// From here on, all sends go through the serializing wrapper.
+	sender := NewWorkerSender(stream)
+	h.registry.Register(workerID, sender)
 
 	h.broker.Publish(events.Event{
 		Type: "worker",
@@ -115,7 +118,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 
 	go h.triggerDispatch()
 
-	return workerID, nil
+	return workerID, sender, nil
 }
 
 // handleTaskStatus processes a TaskStatusUpdate from an agent.
