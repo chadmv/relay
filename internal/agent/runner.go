@@ -155,7 +155,7 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 	select {
 	case r.sendCh <- msg:
 	case <-r.ctx.Done():
-		// Connection lost or task cancelled; drop. The coordinator will
+		// Connection lost; drop. The coordinator will
 		// requeue the task via RequeueWorkerTasks on disconnect.
 	}
 }
