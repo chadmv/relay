@@ -16,6 +16,7 @@ import (
 type Runner struct {
 	taskID    string
 	sendCh    chan *relayv1.AgentMessage
+	ctx       context.Context // parent (connection) context — cancelled only when the connection drops
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
 }
@@ -31,7 +32,7 @@ func newRunner(taskID string, sendCh chan *relayv1.AgentMessage, parent context.
 	} else {
 		runCtx, cancel = context.WithCancel(parent)
 	}
-	return &Runner{taskID: taskID, sendCh: sendCh, cancel: cancel}, runCtx
+	return &Runner{taskID: taskID, sendCh: sendCh, ctx: parent, cancel: cancel}, runCtx
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
@@ -153,7 +154,8 @@ func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
 func (r *Runner) send(msg *relayv1.AgentMessage) {
 	select {
 	case r.sendCh <- msg:
-	default:
-		// Channel full — drop. Shouldn't happen under normal load with a 64-slot buffer.
+	case <-r.ctx.Done():
+		// Connection lost or task cancelled; drop. The coordinator will
+		// requeue the task via RequeueWorkerTasks on disconnect.
 	}
 }

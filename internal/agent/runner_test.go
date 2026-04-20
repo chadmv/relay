@@ -137,3 +137,34 @@ func TestRunner_cancel(t *testing.T) {
 	}
 	assert.Equal(t, relayv1.TaskStatus_TASK_STATUS_FAILED, finalStatus)
 }
+
+func TestRunner_SendBlocksUntilCapacityOrCancel(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r, _ := NewRunnerForTest("task-x", sendCh, ctx, 0)
+
+	// First send fills the 1-slot buffer.
+	RunnerSendForTest(r, &relayv1.AgentMessage{})
+
+	// Second send must block (channel is full and nobody is reading).
+	sendReturned := make(chan struct{})
+	go func() {
+		RunnerSendForTest(r, &relayv1.AgentMessage{})
+		close(sendReturned)
+	}()
+
+	select {
+	case <-sendReturned:
+		t.Fatal("send returned while channel was full and context was live")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Cancelling the context must unblock the send.
+	cancel()
+	select {
+	case <-sendReturned:
+	case <-time.After(time.Second):
+		t.Fatal("send did not return after context cancel")
+	}
+}
