@@ -14,6 +14,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -143,4 +144,49 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	dt := sender.sent[0].GetDispatchTask()
 	require.NotNil(t, dt)
 	assert.Equal(t, uuidStr(task.ID), dt.TaskId)
+}
+
+func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	// Seed user, job, pending task, and worker.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "u@x.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Command: []string{"echo"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	w, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// First claim must succeed.
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", claimed.Status)
+
+	// Second claim of the same task must return ErrNoRows.
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// Revert with RequeueTask restores the task to pending.
+	err = q.RequeueTask(ctx, task.ID)
+	require.NoError(t, err)
+	reread, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", reread.Status)
+	assert.False(t, reread.WorkerID.Valid)
 }

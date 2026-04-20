@@ -77,3 +77,19 @@ WHERE worker_id = $1 AND status IN ('dispatched', 'running');
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, started_at = NULL
 WHERE status IN ('dispatched', 'running');
+
+-- name: ClaimTaskForWorker :one
+-- Atomically transition a pending task to 'dispatched' on the given worker.
+-- Returns pgx.ErrNoRows if the task is no longer pending (another dispatcher
+-- already claimed it, or the row vanished). Eliminates double-dispatch.
+UPDATE tasks
+SET status = 'dispatched', worker_id = $2
+WHERE id = $1 AND status = 'pending'
+RETURNING *;
+
+-- name: RequeueTask :exec
+-- Revert a single task from 'dispatched' back to 'pending'.
+-- Used when the registry send fails after the task has been claimed.
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE id = $1 AND status = 'dispatched';

@@ -29,6 +29,48 @@ func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) er
 	return err
 }
 
+const claimTaskForWorker = `-- name: ClaimTaskForWorker :one
+UPDATE tasks
+SET status = 'dispatched', worker_id = $2
+WHERE id = $1 AND status = 'pending'
+RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at
+`
+
+type ClaimTaskForWorkerParams struct {
+	ID       pgtype.UUID `json:"id"`
+	WorkerID pgtype.UUID `json:"worker_id"`
+}
+
+// Atomically transition a pending task to 'dispatched' on the given worker.
+// Returns pgx.ErrNoRows if the task is no longer pending (another dispatcher
+// already claimed it, or the row vanished). Eliminates double-dispatch.
+//
+//	UPDATE tasks
+//	SET status = 'dispatched', worker_id = $2
+//	WHERE id = $1 AND status = 'pending'
+//	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at
+func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorkerParams) (Task, error) {
+	row := q.db.QueryRow(ctx, claimTaskForWorker, arg.ID, arg.WorkerID)
+	var i Task
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.Name,
+		&i.Command,
+		&i.Env,
+		&i.Requires,
+		&i.TimeoutSeconds,
+		&i.Retries,
+		&i.RetryCount,
+		&i.Status,
+		&i.WorkerID,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')
@@ -386,6 +428,23 @@ WHERE status IN ('dispatched', 'running')
 //	WHERE status IN ('dispatched', 'running')
 func (q *Queries) RequeueAllActiveTasks(ctx context.Context) error {
 	_, err := q.db.Exec(ctx, requeueAllActiveTasks)
+	return err
+}
+
+const requeueTask = `-- name: RequeueTask :exec
+UPDATE tasks
+SET status = 'pending', worker_id = NULL, started_at = NULL
+WHERE id = $1 AND status = 'dispatched'
+`
+
+// Revert a single task from 'dispatched' back to 'pending'.
+// Used when the registry send fails after the task has been claimed.
+//
+//	UPDATE tasks
+//	SET status = 'pending', worker_id = NULL, started_at = NULL
+//	WHERE id = $1 AND status = 'dispatched'
+func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, requeueTask, id)
 	return err
 }
 

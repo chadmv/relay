@@ -146,12 +146,23 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		timeoutSecs = *task.TimeoutSeconds
 	}
 
+	// Atomically claim the task before dispatching. If another dispatcher or
+	// pass has already claimed it, ClaimTaskForWorker returns pgx.ErrNoRows and
+	// we skip silently — this is the critical race guard.
+	claimed, err := d.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID:       task.ID,
+		WorkerID: w.ID,
+	})
+	if err != nil {
+		return
+	}
+
 	msg := &relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_DispatchTask{
 			DispatchTask: &relayv1.DispatchTask{
-				TaskId:         uuidStr(task.ID),
-				JobId:          uuidStr(task.JobID),
-				Command:        task.Command,
+				TaskId:         uuidStr(claimed.ID),
+				JobId:          uuidStr(claimed.JobID),
+				Command:        claimed.Command,
 				Env:            env,
 				TimeoutSeconds: timeoutSecs,
 			},
@@ -159,22 +170,16 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	}
 
 	if err := d.registry.Send(uuidStr(w.ID), msg); err != nil {
-		// Worker disconnected between listing and sending.
+		// Worker disappeared between claim and send; revert so another pass
+		// (or another worker) can pick the task up.
+		_ = d.q.RequeueTask(ctx, claimed.ID)
 		return
 	}
 
-	_, _ = d.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
-		ID:         task.ID,
-		Status:     "dispatched",
-		WorkerID:   w.ID,
-		StartedAt:  pgtype.Timestamptz{},
-		FinishedAt: pgtype.Timestamptz{},
-	})
-
 	d.broker.Publish(events.Event{
 		Type:  "task",
-		JobID: uuidStr(task.JobID),
-		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"dispatched","worker_id":%q}`, uuidStr(task.ID), uuidStr(w.ID))),
+		JobID: uuidStr(claimed.JobID),
+		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"dispatched","worker_id":%q}`, uuidStr(claimed.ID), uuidStr(w.ID))),
 	})
 }
 
