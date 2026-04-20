@@ -1,6 +1,9 @@
 package events
 
-import "sync"
+import (
+	"log"
+	"sync"
+)
 
 // Event is published on any state change and delivered to SSE subscribers.
 type Event struct {
@@ -22,8 +25,9 @@ func NewBroker() *Broker {
 
 // Subscribe registers a new subscriber and returns a receive channel and a
 // cancel function. jobID="" receives all events; any other value receives only
-// events whose JobID matches. The channel has a buffer of 64; slow consumers
-// drop events. The caller must call cancel when done.
+// events whose JobID matches. The channel has a buffer of 64; if the buffer
+// fills, the broker unsubscribes and closes the channel — consumers should
+// treat channel close as "you fell behind, reconnect if you need more".
 func (b *Broker) Subscribe(jobID string) (<-chan Event, func()) {
 	ch := make(chan Event, 64)
 	b.mu.Lock()
@@ -31,21 +35,31 @@ func (b *Broker) Subscribe(jobID string) (<-chan Event, func()) {
 	b.mu.Unlock()
 	return ch, func() {
 		b.mu.Lock()
-		delete(b.subs, ch)
+		if _, ok := b.subs[ch]; ok {
+			delete(b.subs, ch)
+		}
 		b.mu.Unlock()
 	}
 }
 
-// Publish sends e to all subscribers whose filter matches e.JobID.
+// Publish sends e to all subscribers whose filter matches e.JobID. Subscribers
+// whose buffers are full are dropped: their channels are closed and removed.
 func (b *Broker) Publish(e Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var dropped []chan Event
 	for ch, filter := range b.subs {
 		if filter == "" || filter == e.JobID {
 			select {
 			case ch <- e:
-			default: // slow subscriber — drop
+			default:
+				dropped = append(dropped, ch)
 			}
 		}
+	}
+	for _, ch := range dropped {
+		delete(b.subs, ch)
+		close(ch)
+		log.Printf("events: dropped slow subscriber (buffer full)")
 	}
 }
