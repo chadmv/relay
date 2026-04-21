@@ -4,6 +4,7 @@ package worker_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -164,4 +165,90 @@ func TestHandler_RegisterNewWorker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for Connect to return")
 	}
+}
+
+func TestHandleTaskStatus_EpochGate(t *testing.T) {
+	ctx := context.Background()
+	q, _ := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, registry, broker, func() {})
+
+	// Create a user to satisfy the jobs.submitted_by foreign key.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name:         "test-user",
+		Email:        "test@example.com",
+		IsAdmin:      false,
+		PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	// Create a job.
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name:        "epoch-gate-job",
+		Priority:    "normal",
+		SubmittedBy: user.ID,
+		Labels:      []byte("{}"),
+	})
+	require.NoError(t, err)
+
+	// Create a task.
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID:    job.ID,
+		Name:     "epoch-gate-task",
+		Command:  []string{"echo", "hi"},
+		Env:      []byte("{}"),
+		Requires: []byte("[]"),
+		Retries:  0,
+	})
+	require.NoError(t, err)
+
+	// Create a worker to claim the task.
+	wk, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name:     "test-worker",
+		Hostname: "test-worker-01",
+		CpuCores: 4,
+		RamGb:    8,
+		GpuCount: 0,
+		GpuModel: "",
+		Os:       "linux",
+	})
+	require.NoError(t, err)
+
+	// Claim the task — epoch transitions from 0 → 1.
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID:       task.ID,
+		WorkerID: wk.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	require.Equal(t, "dispatched", claimed.Status)
+
+	taskIDStr := claimed.ID.Bytes
+	taskUUID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		taskIDStr[0:4], taskIDStr[4:6], taskIDStr[6:8], taskIDStr[8:10], taskIDStr[10:16])
+
+	// Send a stale update (epoch=0) — should be silently dropped.
+	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+		TaskId: taskUUID,
+		Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
+		Epoch:  0,
+	})
+
+	// Task must still be "dispatched".
+	afterStale, err := q.GetTask(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", afterStale.Status, "stale epoch update must be dropped")
+
+	// Send a valid update (epoch=1) — should be applied.
+	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+		TaskId: taskUUID,
+		Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
+		Epoch:  1,
+	})
+
+	// Task must now be "running".
+	afterValid, err := q.GetTask(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", afterValid.Status, "valid epoch update must be applied")
 }
