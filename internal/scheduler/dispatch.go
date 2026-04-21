@@ -165,6 +165,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 				Command:        claimed.Command,
 				Env:            env,
 				TimeoutSeconds: timeoutSecs,
+				Epoch:          int64(claimed.AssignmentEpoch),
 			},
 		},
 	}

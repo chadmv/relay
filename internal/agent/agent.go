@@ -177,7 +177,7 @@ func (a *Agent) connect(ctx context.Context) error {
 }
 
 func (a *Agent) handleDispatch(ctx context.Context, task *relayv1.DispatchTask) {
-	runner, runCtx := newRunner(task.TaskId, a.sendCh, ctx, task.TimeoutSeconds)
+	runner, runCtx := newRunner(task.TaskId, task.Epoch, a.sendCh, ctx, task.TimeoutSeconds)
 	a.mu.Lock()
 	a.runners[task.TaskId] = runner
 	a.mu.Unlock()

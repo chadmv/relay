@@ -15,6 +15,7 @@ import (
 // Runner manages the execution of a single dispatched task as a subprocess.
 type Runner struct {
 	taskID    string
+	epoch     int64
 	sendCh    chan *relayv1.AgentMessage
 	ctx       context.Context // parent (connection) context — cancelled only when the connection drops
 	cancel    context.CancelFunc
@@ -24,7 +25,7 @@ type Runner struct {
 // newRunner creates a Runner and its execution context.
 // If timeoutSec > 0, the context carries a deadline; otherwise it inherits
 // only the parent's cancellation.
-func newRunner(taskID string, sendCh chan *relayv1.AgentMessage, parent context.Context, timeoutSec int32) (*Runner, context.Context) {
+func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, parent context.Context, timeoutSec int32) (*Runner, context.Context) {
 	var runCtx context.Context
 	var cancel context.CancelFunc
 	if timeoutSec > 0 {
@@ -32,7 +33,7 @@ func newRunner(taskID string, sendCh chan *relayv1.AgentMessage, parent context.
 	} else {
 		runCtx, cancel = context.WithCancel(parent)
 	}
-	return &Runner{taskID: taskID, sendCh: sendCh, ctx: parent, cancel: cancel}, runCtx
+	return &Runner{taskID: taskID, epoch: epoch, sendCh: sendCh, ctx: parent, cancel: cancel}, runCtx
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
@@ -81,6 +82,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			TaskStatus: &relayv1.TaskStatusUpdate{
 				TaskId: r.taskID,
 				Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
+				Epoch:  r.epoch,
 			},
 		},
 	})
@@ -130,6 +132,7 @@ func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream) {
 						TaskId:  r.taskID,
 						Stream:  stream,
 						Content: chunk,
+						Epoch:   r.epoch,
 					},
 				},
 			})
@@ -145,6 +148,7 @@ func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
 		TaskId:   r.taskID,
 		Status:   status,
 		ExitCode: exitCode,
+		Epoch:    r.epoch,
 	}
 	r.send(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_TaskStatus{TaskStatus: upd},

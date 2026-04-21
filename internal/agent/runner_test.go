@@ -48,7 +48,7 @@ func TestRunner_done(t *testing.T) {
 	ctx := context.Background()
 
 	cmd := echoCmd()
-	runner, runCtx := newRunner("task-1", sendCh, ctx, 0)
+	runner, runCtx := newRunner("task-1", 0, sendCh, ctx, 0)
 	runner.Run(runCtx, &relayv1.DispatchTask{
 		TaskId:  "task-1",
 		Command: cmd,
@@ -83,7 +83,7 @@ func TestRunner_timeout(t *testing.T) {
 	sendCh := make(chan *relayv1.AgentMessage, 32)
 	ctx := context.Background()
 
-	runner, runCtx := newRunner("task-2", sendCh, ctx, 1) // 1 second timeout
+	runner, runCtx := newRunner("task-2", 0, sendCh, ctx, 1) // 1 second timeout
 	runner.Run(runCtx, &relayv1.DispatchTask{
 		TaskId:  "task-2",
 		Command: sleepCmd(),
@@ -101,7 +101,7 @@ func TestRunner_cancel(t *testing.T) {
 	sendCh := make(chan *relayv1.AgentMessage, 32)
 	ctx := context.Background()
 
-	runner, runCtx := newRunner("task-3", sendCh, ctx, 0)
+	runner, runCtx := newRunner("task-3", 0, sendCh, ctx, 0)
 
 	done := make(chan struct{})
 	go func() {
