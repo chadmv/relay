@@ -25,9 +25,6 @@ const (
 // AgentServiceClient is the client API for AgentService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// AgentService is the bidirectional gRPC stream between the coordinator
-// and each relay-agent. The agent opens the stream; both sides send messages.
 type AgentServiceClient interface {
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, CoordinatorMessage], error)
 }
@@ -56,9 +53,6 @@ type AgentService_ConnectClient = grpc.BidiStreamingClient[AgentMessage, Coordin
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
-//
-// AgentService is the bidirectional gRPC stream between the coordinator
-// and each relay-agent. The agent opens the stream; both sides send messages.
 type AgentServiceServer interface {
 	Connect(grpc.BidiStreamingServer[AgentMessage, CoordinatorMessage]) error
 	mustEmbedUnimplementedAgentServiceServer()

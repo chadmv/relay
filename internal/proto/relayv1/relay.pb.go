@@ -224,6 +224,9 @@ func (*AgentMessage_TaskStatus) isAgentMessage_Payload() {}
 func (*AgentMessage_TaskLog) isAgentMessage_Payload() {}
 
 // Sent once when the stream opens. worker_id is empty on first registration.
+// running_tasks is the agent's list of currently-executing tasks at reconnect
+// time (empty on first connect). The coordinator diffs against DB state and
+// replies with RegisterResponse.cancel_task_ids for any stale assignments.
 type RegisterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
@@ -233,6 +236,7 @@ type RegisterRequest struct {
 	GpuCount      int32                  `protobuf:"varint,5,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
 	GpuModel      string                 `protobuf:"bytes,6,opt,name=gpu_model,json=gpuModel,proto3" json:"gpu_model,omitempty"`
 	Os            string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
+	RunningTasks  []*RunningTask         `protobuf:"bytes,8,rep,name=running_tasks,json=runningTasks,proto3" json:"running_tasks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -316,20 +320,81 @@ func (x *RegisterRequest) GetOs() string {
 	return ""
 }
 
-// Sent when a task changes state.
+func (x *RegisterRequest) GetRunningTasks() []*RunningTask {
+	if x != nil {
+		return x.RunningTasks
+	}
+	return nil
+}
+
+// A task the agent believes it is currently running, with the epoch assigned
+// at dispatch time. The coordinator uses this to detect stale assignments.
+type RunningTask struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Epoch         int64                  `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunningTask) Reset() {
+	*x = RunningTask{}
+	mi := &file_relayv1_relay_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunningTask) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunningTask) ProtoMessage() {}
+
+func (x *RunningTask) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunningTask.ProtoReflect.Descriptor instead.
+func (*RunningTask) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RunningTask) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *RunningTask) GetEpoch() int64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type TaskStatusUpdate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Status        TaskStatus             `protobuf:"varint,2,opt,name=status,proto3,enum=relay.v1.TaskStatus" json:"status,omitempty"`
 	ExitCode      *int32                 `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
 	ErrorMessage  string                 `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	Epoch         int64                  `protobuf:"varint,5,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskStatusUpdate) Reset() {
 	*x = TaskStatusUpdate{}
-	mi := &file_relayv1_relay_proto_msgTypes[2]
+	mi := &file_relayv1_relay_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -341,7 +406,7 @@ func (x *TaskStatusUpdate) String() string {
 func (*TaskStatusUpdate) ProtoMessage() {}
 
 func (x *TaskStatusUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[2]
+	mi := &file_relayv1_relay_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -354,7 +419,7 @@ func (x *TaskStatusUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskStatusUpdate.ProtoReflect.Descriptor instead.
 func (*TaskStatusUpdate) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{2}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *TaskStatusUpdate) GetTaskId() string {
@@ -385,19 +450,26 @@ func (x *TaskStatusUpdate) GetErrorMessage() string {
 	return ""
 }
 
-// A chunk of captured output from a running task.
+func (x *TaskStatusUpdate) GetEpoch() int64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type TaskLogChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Stream        LogStream              `protobuf:"varint,2,opt,name=stream,proto3,enum=relay.v1.LogStream" json:"stream,omitempty"`
 	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
+	Epoch         int64                  `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TaskLogChunk) Reset() {
 	*x = TaskLogChunk{}
-	mi := &file_relayv1_relay_proto_msgTypes[3]
+	mi := &file_relayv1_relay_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -409,7 +481,7 @@ func (x *TaskLogChunk) String() string {
 func (*TaskLogChunk) ProtoMessage() {}
 
 func (x *TaskLogChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[3]
+	mi := &file_relayv1_relay_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -422,7 +494,7 @@ func (x *TaskLogChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskLogChunk.ProtoReflect.Descriptor instead.
 func (*TaskLogChunk) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{3}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *TaskLogChunk) GetTaskId() string {
@@ -446,6 +518,13 @@ func (x *TaskLogChunk) GetContent() []byte {
 	return nil
 }
 
+func (x *TaskLogChunk) GetEpoch() int64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type CoordinatorMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Payload:
@@ -460,7 +539,7 @@ type CoordinatorMessage struct {
 
 func (x *CoordinatorMessage) Reset() {
 	*x = CoordinatorMessage{}
-	mi := &file_relayv1_relay_proto_msgTypes[4]
+	mi := &file_relayv1_relay_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -472,7 +551,7 @@ func (x *CoordinatorMessage) String() string {
 func (*CoordinatorMessage) ProtoMessage() {}
 
 func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[4]
+	mi := &file_relayv1_relay_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -485,7 +564,7 @@ func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoordinatorMessage.ProtoReflect.Descriptor instead.
 func (*CoordinatorMessage) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{4}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CoordinatorMessage) GetPayload() isCoordinatorMessage_Payload {
@@ -544,17 +623,21 @@ func (*CoordinatorMessage_DispatchTask) isCoordinatorMessage_Payload() {}
 
 func (*CoordinatorMessage_CancelTask) isCoordinatorMessage_Payload() {}
 
-// Sent in response to RegisterRequest; assigns a stable worker ID.
+// Sent in response to RegisterRequest. cancel_task_ids lists tasks the agent
+// reported as running that the coordinator considers stale (reassigned during
+// grace expiry, or unknown). The agent must abandon these without sending a
+// final status update.
 type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	CancelTaskIds []string               `protobuf:"bytes,2,rep,name=cancel_task_ids,json=cancelTaskIds,proto3" json:"cancel_task_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_relayv1_relay_proto_msgTypes[5]
+	mi := &file_relayv1_relay_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -566,7 +649,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[5]
+	mi := &file_relayv1_relay_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -579,7 +662,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{5}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RegisterResponse) GetWorkerId() string {
@@ -589,7 +672,13 @@ func (x *RegisterResponse) GetWorkerId() string {
 	return ""
 }
 
-// Instructs the agent to execute a task.
+func (x *RegisterResponse) GetCancelTaskIds() []string {
+	if x != nil {
+		return x.CancelTaskIds
+	}
+	return nil
+}
+
 type DispatchTask struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
@@ -597,13 +686,14 @@ type DispatchTask struct {
 	Command        []string               `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"`
 	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	TimeoutSeconds int32                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	Epoch          int64                  `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DispatchTask) Reset() {
 	*x = DispatchTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[6]
+	mi := &file_relayv1_relay_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -615,7 +705,7 @@ func (x *DispatchTask) String() string {
 func (*DispatchTask) ProtoMessage() {}
 
 func (x *DispatchTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[6]
+	mi := &file_relayv1_relay_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -628,7 +718,7 @@ func (x *DispatchTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchTask.ProtoReflect.Descriptor instead.
 func (*DispatchTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{6}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DispatchTask) GetTaskId() string {
@@ -666,7 +756,13 @@ func (x *DispatchTask) GetTimeoutSeconds() int32 {
 	return 0
 }
 
-// Instructs the agent to kill a running task.
+func (x *DispatchTask) GetEpoch() int64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
 type CancelTask struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
@@ -676,7 +772,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[7]
+	mi := &file_relayv1_relay_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -688,7 +784,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[7]
+	mi := &file_relayv1_relay_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -701,7 +797,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{7}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -721,7 +817,7 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\vtask_status\x18\x02 \x01(\v2\x1a.relay.v1.TaskStatusUpdateH\x00R\n" +
 	"taskStatus\x123\n" +
 	"\btask_log\x18\x03 \x01(\v2\x16.relay.v1.TaskLogChunkH\x00R\ataskLogB\t\n" +
-	"\apayload\"\xc8\x01\n" +
+	"\apayload\"\x84\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1b\n" +
@@ -729,32 +825,40 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x06ram_gb\x18\x04 \x01(\x05R\x05ramGb\x12\x1b\n" +
 	"\tgpu_count\x18\x05 \x01(\x05R\bgpuCount\x12\x1b\n" +
 	"\tgpu_model\x18\x06 \x01(\tR\bgpuModel\x12\x0e\n" +
-	"\x02os\x18\a \x01(\tR\x02os\"\xae\x01\n" +
+	"\x02os\x18\a \x01(\tR\x02os\x12:\n" +
+	"\rrunning_tasks\x18\b \x03(\v2\x15.relay.v1.RunningTaskR\frunningTasks\"<\n" +
+	"\vRunningTask\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\"\xc4\x01\n" +
 	"\x10TaskStatusUpdate\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12,\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x14.relay.v1.TaskStatusR\x06status\x12 \n" +
 	"\texit_code\x18\x03 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12#\n" +
-	"\rerror_message\x18\x04 \x01(\tR\ferrorMessageB\f\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\x12\x14\n" +
+	"\x05epoch\x18\x05 \x01(\x03R\x05epochB\f\n" +
 	"\n" +
-	"_exit_code\"n\n" +
+	"_exit_code\"\x84\x01\n" +
 	"\fTaskLogChunk\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
 	"\x06stream\x18\x02 \x01(\x0e2\x13.relay.v1.LogStreamR\x06stream\x12\x18\n" +
-	"\acontent\x18\x03 \x01(\fR\acontent\"\xe2\x01\n" +
+	"\acontent\x18\x03 \x01(\fR\acontent\x12\x14\n" +
+	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\"\xe2\x01\n" +
 	"\x12CoordinatorMessage\x12I\n" +
 	"\x11register_response\x18\x01 \x01(\v2\x1a.relay.v1.RegisterResponseH\x00R\x10registerResponse\x12=\n" +
 	"\rdispatch_task\x18\x02 \x01(\v2\x16.relay.v1.DispatchTaskH\x00R\fdispatchTask\x127\n" +
 	"\vcancel_task\x18\x03 \x01(\v2\x14.relay.v1.CancelTaskH\x00R\n" +
 	"cancelTaskB\t\n" +
-	"\apayload\"/\n" +
+	"\apayload\"W\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
-	"\tworker_id\x18\x01 \x01(\tR\bworkerId\"\xec\x01\n" +
+	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
+	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\"\x82\x02\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x18\n" +
 	"\acommand\x18\x03 \x03(\tR\acommand\x121\n" +
 	"\x03env\x18\x04 \x03(\v2\x1f.relay.v1.DispatchTask.EnvEntryR\x03env\x12'\n" +
-	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x1a6\n" +
+	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
+	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"%\n" +
@@ -788,37 +892,39 @@ func file_relayv1_relay_proto_rawDescGZIP() []byte {
 }
 
 var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_relayv1_relay_proto_goTypes = []any{
 	(TaskStatus)(0),            // 0: relay.v1.TaskStatus
 	(LogStream)(0),             // 1: relay.v1.LogStream
 	(*AgentMessage)(nil),       // 2: relay.v1.AgentMessage
 	(*RegisterRequest)(nil),    // 3: relay.v1.RegisterRequest
-	(*TaskStatusUpdate)(nil),   // 4: relay.v1.TaskStatusUpdate
-	(*TaskLogChunk)(nil),       // 5: relay.v1.TaskLogChunk
-	(*CoordinatorMessage)(nil), // 6: relay.v1.CoordinatorMessage
-	(*RegisterResponse)(nil),   // 7: relay.v1.RegisterResponse
-	(*DispatchTask)(nil),       // 8: relay.v1.DispatchTask
-	(*CancelTask)(nil),         // 9: relay.v1.CancelTask
-	nil,                        // 10: relay.v1.DispatchTask.EnvEntry
+	(*RunningTask)(nil),        // 4: relay.v1.RunningTask
+	(*TaskStatusUpdate)(nil),   // 5: relay.v1.TaskStatusUpdate
+	(*TaskLogChunk)(nil),       // 6: relay.v1.TaskLogChunk
+	(*CoordinatorMessage)(nil), // 7: relay.v1.CoordinatorMessage
+	(*RegisterResponse)(nil),   // 8: relay.v1.RegisterResponse
+	(*DispatchTask)(nil),       // 9: relay.v1.DispatchTask
+	(*CancelTask)(nil),         // 10: relay.v1.CancelTask
+	nil,                        // 11: relay.v1.DispatchTask.EnvEntry
 }
 var file_relayv1_relay_proto_depIdxs = []int32{
 	3,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
-	4,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
-	5,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
-	0,  // 3: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
-	1,  // 4: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
-	7,  // 5: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
-	8,  // 6: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
-	9,  // 7: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
-	10, // 8: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
-	2,  // 9: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
-	6,  // 10: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
-	10, // [10:11] is the sub-list for method output_type
-	9,  // [9:10] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	5,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
+	6,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
+	4,  // 3: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
+	0,  // 4: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
+	1,  // 5: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
+	8,  // 6: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
+	9,  // 7: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
+	10, // 8: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
+	11, // 9: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
+	2,  // 10: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
+	7,  // 11: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
+	11, // [11:12] is the sub-list for method output_type
+	10, // [10:11] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_relayv1_relay_proto_init() }
@@ -831,8 +937,8 @@ func file_relayv1_relay_proto_init() {
 		(*AgentMessage_TaskStatus)(nil),
 		(*AgentMessage_TaskLog)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[2].OneofWrappers = []any{}
-	file_relayv1_relay_proto_msgTypes[4].OneofWrappers = []any{
+	file_relayv1_relay_proto_msgTypes[3].OneofWrappers = []any{}
+	file_relayv1_relay_proto_msgTypes[5].OneofWrappers = []any{
 		(*CoordinatorMessage_RegisterResponse)(nil),
 		(*CoordinatorMessage_DispatchTask)(nil),
 		(*CoordinatorMessage_CancelTask)(nil),
@@ -843,7 +949,7 @@ func file_relayv1_relay_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relayv1_relay_proto_rawDesc), len(file_relayv1_relay_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

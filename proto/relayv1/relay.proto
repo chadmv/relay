@@ -4,13 +4,9 @@ package relay.v1;
 
 option go_package = "relay/internal/proto/relayv1";
 
-// AgentService is the bidirectional gRPC stream between the coordinator
-// and each relay-agent. The agent opens the stream; both sides send messages.
 service AgentService {
   rpc Connect(stream AgentMessage) returns (stream CoordinatorMessage);
 }
-
-// ─── Agent → Coordinator ───────────────────────────────────────────────────
 
 message AgentMessage {
   oneof payload {
@@ -21,32 +17,41 @@ message AgentMessage {
 }
 
 // Sent once when the stream opens. worker_id is empty on first registration.
+// running_tasks is the agent's list of currently-executing tasks at reconnect
+// time (empty on first connect). The coordinator diffs against DB state and
+// replies with RegisterResponse.cancel_task_ids for any stale assignments.
 message RegisterRequest {
-  string worker_id  = 1;
-  string hostname   = 2;
-  int32  cpu_cores  = 3;
-  int32  ram_gb     = 4;
-  int32  gpu_count  = 5;
-  string gpu_model  = 6;
-  string os         = 7;
+  string worker_id                 = 1;
+  string hostname                  = 2;
+  int32  cpu_cores                 = 3;
+  int32  ram_gb                    = 4;
+  int32  gpu_count                 = 5;
+  string gpu_model                 = 6;
+  string os                        = 7;
+  repeated RunningTask running_tasks = 8;
 }
 
-// Sent when a task changes state.
+// A task the agent believes it is currently running, with the epoch assigned
+// at dispatch time. The coordinator uses this to detect stale assignments.
+message RunningTask {
+  string task_id = 1;
+  int64  epoch   = 2;
+}
+
 message TaskStatusUpdate {
-  string     task_id       = 1;
-  TaskStatus status        = 2;
-  optional int32 exit_code = 3;
-  string     error_message = 4;
+  string         task_id       = 1;
+  TaskStatus     status        = 2;
+  optional int32 exit_code     = 3;
+  string         error_message = 4;
+  int64          epoch         = 5;
 }
 
-// A chunk of captured output from a running task.
 message TaskLogChunk {
   string    task_id = 1;
   LogStream stream  = 2;
   bytes     content = 3;
+  int64     epoch   = 4;
 }
-
-// ─── Coordinator → Agent ───────────────────────────────────────────────────
 
 message CoordinatorMessage {
   oneof payload {
@@ -56,26 +61,27 @@ message CoordinatorMessage {
   }
 }
 
-// Sent in response to RegisterRequest; assigns a stable worker ID.
+// Sent in response to RegisterRequest. cancel_task_ids lists tasks the agent
+// reported as running that the coordinator considers stale (reassigned during
+// grace expiry, or unknown). The agent must abandon these without sending a
+// final status update.
 message RegisterResponse {
-  string worker_id = 1;
+  string          worker_id       = 1;
+  repeated string cancel_task_ids = 2;
 }
 
-// Instructs the agent to execute a task.
 message DispatchTask {
   string              task_id         = 1;
   string              job_id          = 2;
   repeated string     command         = 3;
   map<string, string> env             = 4;
   int32               timeout_seconds = 5;
+  int64               epoch           = 6;
 }
 
-// Instructs the agent to kill a running task.
 message CancelTask {
   string task_id = 1;
 }
-
-// ─── Enums ─────────────────────────────────────────────────────────────────
 
 enum TaskStatus {
   TASK_STATUS_UNSPECIFIED = 0;
