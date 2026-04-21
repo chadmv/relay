@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -140,4 +141,44 @@ func TestAssignmentEpochColumnExists(t *testing.T) {
 
 	// Freshly created tasks must start at epoch 0.
 	assert.Equal(t, int32(0), task.AssignmentEpoch)
+}
+
+func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Frank", "frank@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), task.AssignmentEpoch)
+
+	// First claim: epoch goes 0 -> 1.
+	claimed1, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), claimed1.AssignmentEpoch)
+
+	// Requeue so we can claim again.
+	require.NoError(t, q.RequeueTask(ctx, task.ID))
+
+	// Second claim: epoch goes 1 -> 2. Epoch never decreases.
+	claimed2, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), claimed2.AssignmentEpoch)
 }

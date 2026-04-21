@@ -80,10 +80,13 @@ WHERE status IN ('dispatched', 'running');
 
 -- name: ClaimTaskForWorker :one
 -- Atomically transition a pending task to 'dispatched' on the given worker.
--- Returns pgx.ErrNoRows if the task is no longer pending (another dispatcher
--- already claimed it, or the row vanished). Eliminates double-dispatch.
+-- Increments assignment_epoch so subsequent status updates from prior
+-- generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
+-- pending (another dispatcher already claimed it, or the row vanished).
 UPDATE tasks
-SET status = 'dispatched', worker_id = $2
+SET status = 'dispatched',
+    worker_id = $2,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'pending'
 RETURNING *;
 

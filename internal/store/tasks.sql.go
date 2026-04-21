@@ -31,7 +31,9 @@ func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) er
 
 const claimTaskForWorker = `-- name: ClaimTaskForWorker :one
 UPDATE tasks
-SET status = 'dispatched', worker_id = $2
+SET status = 'dispatched',
+    worker_id = $2,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'pending'
 RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch
 `
@@ -42,11 +44,14 @@ type ClaimTaskForWorkerParams struct {
 }
 
 // Atomically transition a pending task to 'dispatched' on the given worker.
-// Returns pgx.ErrNoRows if the task is no longer pending (another dispatcher
-// already claimed it, or the row vanished). Eliminates double-dispatch.
+// Increments assignment_epoch so subsequent status updates from prior
+// generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
+// pending (another dispatcher already claimed it, or the row vanished).
 //
 //	UPDATE tasks
-//	SET status = 'dispatched', worker_id = $2
+//	SET status = 'dispatched',
+//	    worker_id = $2,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status = 'pending'
 //	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch
 func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorkerParams) (Task, error) {
