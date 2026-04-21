@@ -133,6 +133,12 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 		return
 	}
 
+	// Epoch gate: reject any status update whose epoch doesn't match the
+	// current assignment. Retry logic below must not run on stale updates.
+	if int64(task.AssignmentEpoch) != upd.Epoch {
+		return
+	}
+
 	// Map proto enum to string status.
 	var statusStr string
 	switch upd.Status {
@@ -150,7 +156,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 
 	terminal := statusStr == "failed" || statusStr == "timed_out"
 
-	// Retry if applicable.
+	// Retry if applicable. Epoch guard above ensures we don't double-retry.
 	if terminal && task.RetryCount < task.Retries {
 		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err == nil {
 			updateJobStatusFromTasks(ctx, h.q, task.JobID)
@@ -170,11 +176,12 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	}
 
 	updated, err := h.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
-		ID:         taskID,
-		Status:     statusStr,
-		WorkerID:   task.WorkerID,
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
+		ID:              taskID,
+		Status:          statusStr,
+		WorkerID:        task.WorkerID,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
 		return

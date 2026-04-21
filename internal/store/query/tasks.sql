@@ -10,9 +10,12 @@ SELECT * FROM tasks WHERE id = $1;
 SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 
 -- name: UpdateTaskStatus :one
+-- Updates a task's status only if the caller's epoch matches the current
+-- assignment. Returns pgx.ErrNoRows if the caller's epoch is stale (zombie
+-- status update from a prior assignment).
 UPDATE tasks
 SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
-WHERE id = $1
+WHERE id = $1 AND assignment_epoch = $6
 RETURNING *;
 
 -- name: IncrementTaskRetryCount :one

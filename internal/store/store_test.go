@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,4 +182,51 @@ func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), claimed2.AssignmentEpoch)
+}
+
+func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Gina", "gina@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1-epoch", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Update with MATCHING epoch should succeed.
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID:              task.ID,
+		Status:          "running",
+		AssignmentEpoch: 1,
+	})
+	require.NoError(t, err)
+
+	// Update with STALE epoch should return pgx.ErrNoRows (0 rows affected).
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID:              task.ID,
+		Status:          "done",
+		AssignmentEpoch: 0, // stale
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// Task should still be "running" — the stale update did nothing.
+	fetched, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", fetched.Status)
 }

@@ -478,23 +478,26 @@ func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) 
 const updateTaskStatus = `-- name: UpdateTaskStatus :one
 UPDATE tasks
 SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
-WHERE id = $1
+WHERE id = $1 AND assignment_epoch = $6
 RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch
 `
 
 type UpdateTaskStatusParams struct {
-	ID         pgtype.UUID        `json:"id"`
-	Status     string             `json:"status"`
-	WorkerID   pgtype.UUID        `json:"worker_id"`
-	StartedAt  pgtype.Timestamptz `json:"started_at"`
-	FinishedAt pgtype.Timestamptz `json:"finished_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Status          string             `json:"status"`
+	WorkerID        pgtype.UUID        `json:"worker_id"`
+	StartedAt       pgtype.Timestamptz `json:"started_at"`
+	FinishedAt      pgtype.Timestamptz `json:"finished_at"`
+	AssignmentEpoch int32              `json:"assignment_epoch"`
 }
 
-// UpdateTaskStatus
+// Updates a task's status only if the caller's epoch matches the current
+// assignment. Returns pgx.ErrNoRows if the caller's epoch is stale (zombie
+// status update from a prior assignment).
 //
 //	UPDATE tasks
 //	SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
-//	WHERE id = $1
+//	WHERE id = $1 AND assignment_epoch = $6
 //	RETURNING id, job_id, name, command, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch
 func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusParams) (Task, error) {
 	row := q.db.QueryRow(ctx, updateTaskStatus,
@@ -503,6 +506,7 @@ func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusPara
 		arg.WorkerID,
 		arg.StartedAt,
 		arg.FinishedAt,
+		arg.AssignmentEpoch,
 	)
 	var i Task
 	err := row.Scan(
