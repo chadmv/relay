@@ -121,3 +121,23 @@ func TestTaskDependencyAndEligibility(t *testing.T) {
 	require.Len(t, eligible, 1)
 	assert.Equal(t, taskB.ID, eligible[0].ID)
 }
+
+func TestAssignmentEpochColumnExists(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Eve", "eve@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "epoch-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Freshly created tasks must start at epoch 0.
+	assert.Equal(t, int32(0), task.AssignmentEpoch)
+}

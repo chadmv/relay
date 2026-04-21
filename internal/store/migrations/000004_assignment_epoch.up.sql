@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN assignment_epoch INT NOT NULL DEFAULT 0;

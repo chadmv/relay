@@ -51,20 +51,21 @@ type Reservation struct {
 }
 
 type Task struct {
-	ID             pgtype.UUID        `json:"id"`
-	JobID          pgtype.UUID        `json:"job_id"`
-	Name           string             `json:"name"`
-	Command        []string           `json:"command"`
-	Env            []byte             `json:"env"`
-	Requires       []byte             `json:"requires"`
-	TimeoutSeconds *int32             `json:"timeout_seconds"`
-	Retries        int32              `json:"retries"`
-	RetryCount     int32              `json:"retry_count"`
-	Status         string             `json:"status"`
-	WorkerID       pgtype.UUID        `json:"worker_id"`
-	StartedAt      pgtype.Timestamptz `json:"started_at"`
-	FinishedAt     pgtype.Timestamptz `json:"finished_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ID              pgtype.UUID        `json:"id"`
+	JobID           pgtype.UUID        `json:"job_id"`
+	Name            string             `json:"name"`
+	Command         []string           `json:"command"`
+	Env             []byte             `json:"env"`
+	Requires        []byte             `json:"requires"`
+	TimeoutSeconds  *int32             `json:"timeout_seconds"`
+	Retries         int32              `json:"retries"`
+	RetryCount      int32              `json:"retry_count"`
+	Status          string             `json:"status"`
+	WorkerID        pgtype.UUID        `json:"worker_id"`
+	StartedAt       pgtype.Timestamptz `json:"started_at"`
+	FinishedAt      pgtype.Timestamptz `json:"finished_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	AssignmentEpoch int32              `json:"assignment_epoch"`
 }
 
 type TaskDependency struct {
