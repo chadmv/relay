@@ -280,7 +280,8 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 		})
 	}
 
-	if statusStr == "done" {
+	// Any terminal status or task completion frees a worker slot — wake dispatcher.
+	if terminal || statusStr == "done" {
 		_ = h.q.NotifyTaskCompleted(ctx)
 	}
 }

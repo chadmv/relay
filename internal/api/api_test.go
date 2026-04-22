@@ -30,7 +30,7 @@ func newTestServer(t *testing.T) (*api.Server, *store.Queries) {
 	q := store.New(pool)
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
-	srv := api.New(pool, q, broker, registry, func() {})
+	srv := api.New(pool, q, broker, registry)
 	return srv, q
 }
 

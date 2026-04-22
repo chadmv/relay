@@ -15,28 +15,24 @@ import (
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	pool            *pgxpool.Pool
-	q               *store.Queries
-	broker          *events.Broker
-	registry        *worker.Registry
-	triggerDispatch func()
+	pool     *pgxpool.Pool
+	q        *store.Queries
+	broker   *events.Broker
+	registry *worker.Registry
 }
 
-// New creates a Server. triggerDispatch is called after job submission and
-// task completion to wake the scheduler; pass a no-op if not yet wired.
+// New creates a Server.
 func New(
 	pool *pgxpool.Pool,
 	q *store.Queries,
 	broker *events.Broker,
 	registry *worker.Registry,
-	triggerDispatch func(),
 ) *Server {
 	return &Server{
-		pool:            pool,
-		q:               q,
-		broker:          broker,
-		registry:        registry,
-		triggerDispatch: triggerDispatch,
+		pool:     pool,
+		q:        q,
+		broker:   broker,
+		registry: registry,
 	}
 }
 

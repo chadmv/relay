@@ -106,7 +106,7 @@ func main() {
 	}
 
 	agentHandler := worker.NewHandlerWithGrace(q, registry, broker, dispatcher.Trigger, grace)
-	httpServer := api.New(pool, q, broker, registry, dispatcher.Trigger)
+	httpServer := api.New(pool, q, broker, registry)
 
 	// Start gRPC.
 	grpcSrv := grpc.NewServer()
