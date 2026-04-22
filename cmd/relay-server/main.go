@@ -106,7 +106,13 @@ func main() {
 	}
 
 	agentHandler := worker.NewHandlerWithGrace(q, registry, broker, dispatcher.Trigger, grace)
-	httpServer := api.New(pool, q, broker, registry)
+
+	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
+	if err != nil {
+		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)
+	}
+
+	httpServer := api.New(pool, q, broker, registry, corsOrigins)
 
 	// Start gRPC.
 	grpcSrv := grpc.NewServer()

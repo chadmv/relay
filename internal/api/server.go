@@ -15,10 +15,11 @@ import (
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	pool     *pgxpool.Pool
-	q        *store.Queries
-	broker   *events.Broker
-	registry *worker.Registry
+	pool        *pgxpool.Pool
+	q           *store.Queries
+	broker      *events.Broker
+	registry    *worker.Registry
+	CORSOrigins []string
 }
 
 // New creates a Server.
@@ -27,12 +28,14 @@ func New(
 	q *store.Queries,
 	broker *events.Broker,
 	registry *worker.Registry,
+	corsOrigins []string,
 ) *Server {
 	return &Server{
-		pool:     pool,
-		q:        q,
-		broker:   broker,
-		registry: registry,
+		pool:        pool,
+		q:           q,
+		broker:      broker,
+		registry:    registry,
+		CORSOrigins: corsOrigins,
 	}
 }
 
@@ -77,7 +80,7 @@ func (s *Server) Handler() http.Handler {
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
 
-	return mux
+	return CORS(s.CORSOrigins)(mux)
 }
 
 // ─── JSON helpers ────────────────────────────────────────────────────────────

@@ -37,6 +37,7 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum pgxpool connections to Postgres |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing a disconnected worker's tasks |
+| `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
 
 CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
 
