@@ -37,14 +37,16 @@ func (g *GraceRegistry) Start(workerID string) {
 	if g.stopped {
 		return
 	}
-	if t, ok := g.timers[workerID]; ok {
-		t.Stop()
+	if old, ok := g.timers[workerID]; ok {
+		old.Stop()
 	}
-	g.timers[workerID] = time.AfterFunc(g.window, func() {
+	var t *time.Timer
+	t = time.AfterFunc(g.window, func() {
 		g.mu.Lock()
-		// Re-check: the timer we're running under may have been replaced
-		// or cancelled between expiry and our lock acquisition.
-		if cur, ok := g.timers[workerID]; !ok || cur == nil {
+		// Guard against ABA: only fire if this specific timer is still
+		// the active one. A concurrent Start may have replaced the entry
+		// between timer expiry and lock acquisition.
+		if g.timers[workerID] != t {
 			g.mu.Unlock()
 			return
 		}
@@ -52,6 +54,7 @@ func (g *GraceRegistry) Start(workerID string) {
 		g.mu.Unlock()
 		g.onExpire(workerID)
 	})
+	g.timers[workerID] = t
 }
 
 // Cancel stops any pending timer for workerID. Safe to call if no timer exists.
