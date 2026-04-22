@@ -33,7 +33,7 @@ func (f *fakeSender) Send(msg *relayv1.CoordinatorMessage) error {
 	return nil
 }
 
-func newTestStore(t *testing.T) *store.Queries {
+func newTestStoreWithPool(t *testing.T) (*store.Queries, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -59,7 +59,18 @@ func newTestStore(t *testing.T) *store.Queries {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	return store.New(pool)
+	return store.New(pool), pool
+}
+
+// newTestStore kept for existing tests — discards pool.
+func newTestStore(t *testing.T) *store.Queries {
+	q, _ := newTestStoreWithPool(t)
+	return q
+}
+
+func newTestPoolFromQueries(t *testing.T) *pgxpool.Pool {
+	_, pool := newTestStoreWithPool(t)
+	return pool
 }
 
 func uuidStr(u pgtype.UUID) string {
