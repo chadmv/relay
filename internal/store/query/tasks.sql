@@ -106,3 +106,30 @@ RETURNING *;
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, started_at = NULL
 WHERE id = $1 AND status = 'dispatched';
+
+-- name: GetActiveTasksForWorker :many
+-- Returns all non-terminal tasks currently assigned to a given worker.
+-- Used at reconcile time to compare server's view with the agent's
+-- running_tasks report.
+SELECT id, assignment_epoch
+FROM tasks
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+ORDER BY id;
+
+-- name: ListWorkersWithActiveTasks :many
+-- Returns the distinct set of worker IDs with at least one non-terminal
+-- task assigned. Used at server startup to seed grace timers.
+SELECT DISTINCT worker_id
+FROM tasks
+WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running');
+
+-- name: RequeueTaskByID :exec
+-- Revert a single task back to 'pending' regardless of current status.
+-- Used by the reconcile path when the coordinator has a task assigned
+-- that the agent didn't report as running.
+UPDATE tasks
+SET status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    finished_at = NULL
+WHERE id = $1 AND status IN ('dispatched', 'running');

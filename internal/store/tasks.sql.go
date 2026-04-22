@@ -214,6 +214,46 @@ func (q *Queries) FailDependentTasks(ctx context.Context, failedTaskID pgtype.UU
 	return err
 }
 
+const getActiveTasksForWorker = `-- name: GetActiveTasksForWorker :many
+SELECT id, assignment_epoch
+FROM tasks
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+ORDER BY id
+`
+
+type GetActiveTasksForWorkerRow struct {
+	ID              pgtype.UUID `json:"id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
+}
+
+// Returns all non-terminal tasks currently assigned to a given worker.
+// Used at reconcile time to compare server's view with the agent's
+// running_tasks report.
+//
+//	SELECT id, assignment_epoch
+//	FROM tasks
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+//	ORDER BY id
+func (q *Queries) GetActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) ([]GetActiveTasksForWorkerRow, error) {
+	rows, err := q.db.Query(ctx, getActiveTasksForWorker, workerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetActiveTasksForWorkerRow
+	for rows.Next() {
+		var i GetActiveTasksForWorkerRow
+		if err := rows.Scan(&i.ID, &i.AssignmentEpoch); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getEligibleTasks = `-- name: GetEligibleTasks :many
 SELECT t.id, t.job_id, t.name, t.command, t.env, t.requires, t.timeout_seconds, t.retries, t.retry_count, t.status, t.worker_id, t.started_at, t.finished_at, t.created_at, t.assignment_epoch FROM tasks t
 WHERE t.status = 'pending'
@@ -442,6 +482,38 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task
 	return items, nil
 }
 
+const listWorkersWithActiveTasks = `-- name: ListWorkersWithActiveTasks :many
+SELECT DISTINCT worker_id
+FROM tasks
+WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running')
+`
+
+// Returns the distinct set of worker IDs with at least one non-terminal
+// task assigned. Used at server startup to seed grace timers.
+//
+//	SELECT DISTINCT worker_id
+//	FROM tasks
+//	WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running')
+func (q *Queries) ListWorkersWithActiveTasks(ctx context.Context) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listWorkersWithActiveTasks)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var worker_id pgtype.UUID
+		if err := rows.Scan(&worker_id); err != nil {
+			return nil, err
+		}
+		items = append(items, worker_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const requeueAllActiveTasks = `-- name: RequeueAllActiveTasks :exec
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, started_at = NULL
@@ -472,6 +544,30 @@ WHERE id = $1 AND status = 'dispatched'
 //	WHERE id = $1 AND status = 'dispatched'
 func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, requeueTask, id)
+	return err
+}
+
+const requeueTaskByID = `-- name: RequeueTaskByID :exec
+UPDATE tasks
+SET status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    finished_at = NULL
+WHERE id = $1 AND status IN ('dispatched', 'running')
+`
+
+// Revert a single task back to 'pending' regardless of current status.
+// Used by the reconcile path when the coordinator has a task assigned
+// that the agent didn't report as running.
+//
+//	UPDATE tasks
+//	SET status = 'pending',
+//	    worker_id = NULL,
+//	    started_at = NULL,
+//	    finished_at = NULL
+//	WHERE id = $1 AND status IN ('dispatched', 'running')
+func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, requeueTaskByID, id)
 	return err
 }
 

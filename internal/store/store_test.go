@@ -273,3 +273,78 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.Len(t, logs, 1)
 	assert.Equal(t, "hello\n", logs[0].Content)
 }
+
+func TestReconciliationQueries(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Ivy", "ivy@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	w1, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "recon-1", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w2, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w2", Hostname: "recon-2", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Task A: dispatched to w1
+	taskA, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "a", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskA.ID, WorkerID: pgtype.UUID{Bytes: w1.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Task B: also dispatched to w1
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "b", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskB.ID, WorkerID: pgtype.UUID{Bytes: w1.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Task C: dispatched to w2, then left dispatched
+	taskC, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "c", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskC.ID, WorkerID: pgtype.UUID{Bytes: w2.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// GetActiveTasksForWorker: w1 should return A and B.
+	w1Active, err := q.GetActiveTasksForWorker(ctx, pgtype.UUID{Bytes: w1.ID.Bytes, Valid: true})
+	require.NoError(t, err)
+	require.Len(t, w1Active, 2)
+
+	// ListWorkersWithActiveTasks: should return both w1 and w2.
+	workerIDs, err := q.ListWorkersWithActiveTasks(ctx)
+	require.NoError(t, err)
+	assert.Len(t, workerIDs, 2)
+
+	// RequeueTaskByID: requeue task A; it should be pending with worker_id cleared.
+	require.NoError(t, q.RequeueTaskByID(ctx, taskA.ID))
+	a, err := q.GetTask(ctx, taskA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", a.Status)
+	assert.False(t, a.WorkerID.Valid)
+
+	// After requeue, GetActiveTasksForWorker(w1) should only return B.
+	w1Active, err = q.GetActiveTasksForWorker(ctx, pgtype.UUID{Bytes: w1.ID.Bytes, Valid: true})
+	require.NoError(t, err)
+	require.Len(t, w1Active, 1)
+	assert.Equal(t, taskB.ID, w1Active[0].ID)
+}
