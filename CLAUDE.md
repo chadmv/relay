@@ -35,6 +35,8 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC listen address |
 | `RELAY_BOOTSTRAP_ADMIN` | — | Email of first admin to create on startup |
 | `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set |
+| `RELAY_DB_MAX_CONNS` | `25` | Maximum pgxpool connections to Postgres |
+| `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing a disconnected worker's tasks |
 
 CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
 

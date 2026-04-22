@@ -134,22 +134,6 @@ func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActi
 	return items, nil
 }
 
-const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
-SELECT COUNT(*) FROM tasks
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-`
-
-// CountActiveTasksForWorker
-//
-//	SELECT COUNT(*) FROM tasks
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-func (q *Queries) CountActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countActiveTasksForWorker, workerID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (job_id, name, command, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)

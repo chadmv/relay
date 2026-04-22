@@ -157,6 +157,79 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	assert.Equal(t, uuidStr(task.ID), dt.TaskId)
 }
 
+// TestDispatcher_UsesAggregateCountQuery verifies that the in-cycle activeByWorker
+// map prevents a single-slot worker from receiving more than one task per dispatch
+// cycle, even when multiple eligible tasks are available. This locks in the behavior
+// added by CountActiveTasksByAllWorkers: the map is pre-loaded from DB once, then
+// incremented on each successful dispatch so selectWorker sees the updated count.
+func TestDispatcher_UsesAggregateCountQuery(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "u@agg.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Create 3 independent pending tasks — all eligible, no dependencies.
+	taskIDs := make([]pgtype.UUID, 3)
+	for i := range taskIDs {
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID:   job.ID,
+			Name:    fmt.Sprintf("task-%d", i),
+			Command: []string{"echo", fmt.Sprintf("%d", i)},
+			Env:     []byte(`{}`),
+			Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		taskIDs[i] = task.ID
+	}
+
+	// Worker with MaxSlots=1 (the UpsertWorkerByHostname default).
+	w, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err = q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:         w.ID,
+		Status:     "online",
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), w.MaxSlots)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	broker := events.NewBroker()
+	d := scheduler.NewDispatcher(q, registry, broker)
+	d.RunOnce(ctx)
+
+	// Only 1 of the 3 tasks should have been dispatched despite all 3 being eligible.
+	assert.Len(t, sender.sent, 1, "single-slot worker must receive exactly 1 task per dispatch cycle")
+
+	dispatched := 0
+	pending := 0
+	for _, id := range taskIDs {
+		task, err := q.GetTask(ctx, id)
+		require.NoError(t, err)
+		switch task.Status {
+		case "dispatched":
+			dispatched++
+		case "pending":
+			pending++
+		}
+	}
+	assert.Equal(t, 1, dispatched, "exactly 1 task should be dispatched")
+	assert.Equal(t, 2, pending, "remaining 2 tasks should still be pending")
+}
+
 func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	ctx := context.Background()
 	q := newTestStore(t)
