@@ -115,6 +115,17 @@ func (a *Agent) connect(ctx context.Context) error {
 		}
 	}
 
+	// Coordinator may tell us to abandon some tasks (reassigned during grace
+	// expiry, or unknown to the coordinator). Abandon them silently.
+	for _, tid := range reg.CancelTaskIds {
+		a.mu.Lock()
+		r, ok := a.runners[tid]
+		a.mu.Unlock()
+		if ok {
+			r.Abandon()
+		}
+	}
+
 	log.Printf("connected to coordinator %s (worker ID: %s)", a.coord, a.workerID)
 
 	// Start send goroutine — gRPC streams are not concurrent-send-safe.

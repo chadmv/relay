@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
 
@@ -41,4 +42,55 @@ func TestRunnerTagsOutgoingMessagesWithEpoch(t *testing.T) {
 			assert.Equal(t, int64(42), tl.Epoch)
 		}
 	}
+}
+
+func TestRunnerAbandon_SuppressesFinalStatus(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sendCh := make(chan *relayv1.AgentMessage, 8)
+	runner, runCtx := newRunner("task-abandon", 1, sendCh, ctx, 0)
+
+	// Start a long-running subprocess that would normally report DONE.
+	done := make(chan struct{})
+	go func() {
+		runner.Run(runCtx, &relayv1.DispatchTask{
+			TaskId: "task-abandon", Command: sleepCmd(),
+		})
+		close(done)
+	}()
+
+	// Wait for RUNNING status, then abandon.
+	select {
+	case <-sendCh: // RUNNING message
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for RUNNING status")
+	}
+	runner.Abandon()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not exit after Abandon")
+	}
+
+	// Drain remaining messages on sendCh.
+	var sawFinal bool
+	for {
+		select {
+		case m := <-sendCh:
+			if ts := m.GetTaskStatus(); ts != nil {
+				switch ts.Status {
+				case relayv1.TaskStatus_TASK_STATUS_DONE,
+					relayv1.TaskStatus_TASK_STATUS_FAILED,
+					relayv1.TaskStatus_TASK_STATUS_TIMED_OUT:
+					sawFinal = true
+				}
+			}
+		default:
+			goto check
+		}
+	}
+check:
+	assert.False(t, sawFinal, "Abandon must suppress final status message")
 }

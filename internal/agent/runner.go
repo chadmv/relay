@@ -20,6 +20,7 @@ type Runner struct {
 	ctx       context.Context // parent (agent) context — lives for the agent lifetime, not the connection
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
+	abandoned atomic.Bool
 }
 
 // newRunner creates a Runner and its execution context.
@@ -39,6 +40,14 @@ func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, pa
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
 func (r *Runner) Cancel() {
 	r.cancelled.Store(true)
+	r.cancel()
+}
+
+// Abandon is like Cancel but suppresses the final status message. Used when
+// the coordinator's RegisterResponse.cancel_task_ids indicates this task was
+// reassigned to another worker during a grace-expiry requeue.
+func (r *Runner) Abandon() {
+	r.abandoned.Store(true)
 	r.cancel()
 }
 
@@ -144,6 +153,9 @@ func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream) {
 }
 
 func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
+	if r.abandoned.Load() {
+		return // coordinator reassigned this task; suppress final status
+	}
 	upd := &relayv1.TaskStatusUpdate{
 		TaskId:   r.taskID,
 		Status:   status,
