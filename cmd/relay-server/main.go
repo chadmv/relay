@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 )
@@ -46,18 +48,24 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	dbMaxConns := 25
+	if v := os.Getenv("RELAY_DB_MAX_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			dbMaxConns = n
+		}
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		log.Fatalf("parse dsn: %v", err)
+	}
+	cfg.MaxConns = int32(dbMaxConns)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("connect db: %v", err)
 	}
 	defer pool.Close()
 
 	q := store.New(pool)
-
-	// Re-queue in-flight tasks from prior unclean shutdown.
-	if err := q.RequeueAllActiveTasks(ctx); err != nil {
-		log.Printf("warn: requeue active tasks: %v", err)
-	}
 
 	if bootstrapEmail := os.Getenv("RELAY_BOOTSTRAP_ADMIN"); bootstrapEmail != "" {
 		bootstrapPassword := os.Getenv("RELAY_BOOTSTRAP_PASSWORD")
@@ -72,7 +80,30 @@ func main() {
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 	dispatcher := scheduler.NewDispatcher(q, registry, broker)
-	agentHandler := worker.NewHandler(q, registry, broker, dispatcher.Trigger)
+
+	graceWindow := 2 * time.Minute
+	if v := os.Getenv("RELAY_WORKER_GRACE_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			graceWindow = d
+		}
+	}
+	grace := worker.NewGraceRegistry(graceWindow, func(workerID string) {
+		var id pgtype.UUID
+		if err := id.Scan(workerID); err != nil {
+			return
+		}
+		_ = q.RequeueWorkerTasks(context.Background(), id)
+		dispatcher.Trigger()
+	})
+	defer grace.Stop()
+
+	// Seed grace timers for any workers with active tasks. If agents reconnect
+	// within the window they reconcile normally; if not, their tasks requeue.
+	if err := seedGraceTimersFromActiveTasks(ctx, q, grace); err != nil {
+		log.Printf("warn: seed grace timers: %v", err)
+	}
+
+	agentHandler := worker.NewHandlerWithGrace(q, registry, broker, dispatcher.Trigger, grace)
 	httpServer := api.New(pool, q, broker, registry, dispatcher.Trigger)
 
 	// Start gRPC.
@@ -122,4 +153,30 @@ func main() {
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
 	fmt.Println("relay-server stopped")
+}
+
+// seedGraceTimersFromActiveTasks enumerates workers that have non-terminal
+// tasks in the DB at startup and starts a grace timer for each. Agents that
+// reconnect within the window reconcile; agents that don't will have their
+// tasks requeued.
+func seedGraceTimersFromActiveTasks(ctx context.Context, q *store.Queries, grace *worker.GraceRegistry) error {
+	workerIDs, err := q.ListWorkersWithActiveTasks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, wID := range workerIDs {
+		grace.Start(uuidStrMain(wID))
+	}
+	return nil
+}
+
+// uuidStrMain converts a pgtype.UUID to its canonical string representation.
+// Named with Main suffix to avoid collision with any other helper in this file.
+func uuidStrMain(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
