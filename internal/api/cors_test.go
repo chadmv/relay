@@ -23,6 +23,31 @@ func TestCORS_EmptyAllowlistEmitsNoHeaders(t *testing.T) {
 	}
 }
 
+// Regression: empty allowlist must not intercept OPTIONS preflight requests
+// — the underlying handler should see them so it can return 405 as it did
+// before CORS was wired in.
+func TestCORS_EmptyAllowlistPassesPreflightThrough(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	h := CORS(nil)(next)
+
+	req := httptest.NewRequest("OPTIONS", "/v1/health", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("expected next handler to be called")
+	}
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 from underlying handler, got %d", rec.Code)
+	}
+}
+
 func TestCORS_AllowlistedOriginReceivesHeader(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := CORS([]string{"https://dashboard.studio.local"})(next)
