@@ -93,6 +93,47 @@ func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorker
 	return i, err
 }
 
+const countActiveTasksByAllWorkers = `-- name: CountActiveTasksByAllWorkers :many
+SELECT worker_id, count(*)::bigint AS active
+FROM tasks
+WHERE worker_id IS NOT NULL
+  AND status IN ('dispatched', 'running')
+GROUP BY worker_id
+`
+
+type CountActiveTasksByAllWorkersRow struct {
+	WorkerID pgtype.UUID `json:"worker_id"`
+	Active   int64       `json:"active"`
+}
+
+// Per-worker count of non-terminal tasks. Used by the dispatcher to compute
+// available slots in one query rather than N per cycle.
+//
+//	SELECT worker_id, count(*)::bigint AS active
+//	FROM tasks
+//	WHERE worker_id IS NOT NULL
+//	  AND status IN ('dispatched', 'running')
+//	GROUP BY worker_id
+func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActiveTasksByAllWorkersRow, error) {
+	rows, err := q.db.Query(ctx, countActiveTasksByAllWorkers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountActiveTasksByAllWorkersRow
+	for rows.Next() {
+		var i CountActiveTasksByAllWorkersRow
+		if err := rows.Scan(&i.WorkerID, &i.Active); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')

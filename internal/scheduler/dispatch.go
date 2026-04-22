@@ -79,19 +79,30 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		return
 	}
 
+	counts, err := d.q.CountActiveTasksByAllWorkers(ctx)
+	if err != nil {
+		return
+	}
+	activeByWorker := make(map[pgtype.UUID]int64, len(counts))
+	for _, c := range counts {
+		activeByWorker[c.WorkerID] = c.Active
+	}
+
 	for _, task := range tasks {
-		w := d.selectWorker(ctx, task, workers, reservations)
+		w := d.selectWorker(task, workers, reservations, activeByWorker)
 		if w != nil {
-			d.sendTask(ctx, task, *w)
+			if d.sendTask(ctx, task, *w) {
+				activeByWorker[w.ID]++ // track in-cycle dispatches
+			}
 		}
 	}
 }
 
 func (d *Dispatcher) selectWorker(
-	ctx context.Context,
 	task store.Task,
 	workers []store.Worker,
 	reservations []store.Reservation,
+	activeByWorker map[pgtype.UUID]int64,
 ) *store.Worker {
 	// Build set of reserved worker IDs.
 	reservedIDs := make(map[string]bool)
@@ -112,16 +123,11 @@ func (d *Dispatcher) selectWorker(
 		if reservedIDs[uuidStr(w.ID)] {
 			continue
 		}
-		// Check label match.
 		ok, err := LabelMatch(task.Requires, w.Labels)
 		if err != nil || !ok {
 			continue
 		}
-		active, err := d.q.CountActiveTasksForWorker(ctx, w.ID)
-		if err != nil {
-			continue
-		}
-		free := int64(w.MaxSlots) - active
+		free := int64(w.MaxSlots) - activeByWorker[w.ID]
 		if free <= 0 {
 			continue
 		}
@@ -134,7 +140,7 @@ func (d *Dispatcher) selectWorker(
 	return best
 }
 
-func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Worker) {
+func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Worker) bool {
 	var env map[string]string
 	if len(task.Env) > 0 {
 		if err := json.Unmarshal(task.Env, &env); err != nil {
@@ -155,7 +161,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		WorkerID: w.ID,
 	})
 	if err != nil {
-		return
+		return false
 	}
 
 	msg := &relayv1.CoordinatorMessage{
@@ -175,7 +181,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		// Worker disappeared between claim and send; revert so another pass
 		// (or another worker) can pick the task up.
 		_ = d.q.RequeueTask(ctx, claimed.ID)
-		return
+		return false
 	}
 
 	d.broker.Publish(events.Event{
@@ -183,6 +189,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		JobID: uuidStr(claimed.JobID),
 		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"dispatched","worker_id":%q}`, uuidStr(claimed.ID), uuidStr(w.ID))),
 	})
+	return true
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.

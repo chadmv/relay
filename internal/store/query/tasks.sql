@@ -142,3 +142,12 @@ SELECT pg_notify('relay_task_submitted', '');
 -- name: NotifyTaskCompleted :exec
 -- Wakes any LISTENers on relay_task_completed.
 SELECT pg_notify('relay_task_completed', '');
+
+-- name: CountActiveTasksByAllWorkers :many
+-- Per-worker count of non-terminal tasks. Used by the dispatcher to compute
+-- available slots in one query rather than N per cycle.
+SELECT worker_id, count(*)::bigint AS active
+FROM tasks
+WHERE worker_id IS NOT NULL
+  AND status IN ('dispatched', 'running')
+GROUP BY worker_id;
