@@ -112,7 +112,16 @@ func main() {
 		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)
 	}
 
-	httpServer := api.New(pool, q, broker, registry, corsOrigins)
+	loginN, loginWin, err := api.ParseRateLimit(envOrDefault("RELAY_LOGIN_RATE_LIMIT", "10:1m"))
+	if err != nil {
+		log.Fatalf("parse RELAY_LOGIN_RATE_LIMIT: %v", err)
+	}
+	registerN, registerWin, err := api.ParseRateLimit(envOrDefault("RELAY_REGISTER_RATE_LIMIT", "5:1m"))
+	if err != nil {
+		log.Fatalf("parse RELAY_REGISTER_RATE_LIMIT: %v", err)
+	}
+
+	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
 
 	// Start gRPC.
 	grpcSrv := grpc.NewServer()
@@ -187,4 +196,11 @@ func uuidStrMain(u pgtype.UUID) string {
 	b := u.Bytes
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

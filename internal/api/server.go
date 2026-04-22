@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"relay/internal/events"
 	"relay/internal/store"
@@ -15,11 +16,15 @@ import (
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	pool        *pgxpool.Pool
-	q           *store.Queries
-	broker      *events.Broker
-	registry    *worker.Registry
-	CORSOrigins []string
+	pool             *pgxpool.Pool
+	q                *store.Queries
+	broker           *events.Broker
+	registry         *worker.Registry
+	CORSOrigins      []string
+	LoginLimitN      int
+	LoginLimitWin    time.Duration
+	RegisterLimitN   int
+	RegisterLimitWin time.Duration
 }
 
 // New creates a Server.
@@ -29,13 +34,21 @@ func New(
 	broker *events.Broker,
 	registry *worker.Registry,
 	corsOrigins []string,
+	loginLimitN int,
+	loginLimitWin time.Duration,
+	registerLimitN int,
+	registerLimitWin time.Duration,
 ) *Server {
 	return &Server{
-		pool:        pool,
-		q:           q,
-		broker:      broker,
-		registry:    registry,
-		CORSOrigins: corsOrigins,
+		pool:             pool,
+		q:                q,
+		broker:           broker,
+		registry:         registry,
+		CORSOrigins:      corsOrigins,
+		LoginLimitN:      loginLimitN,
+		LoginLimitWin:    loginLimitWin,
+		RegisterLimitN:   registerLimitN,
+		RegisterLimitWin: registerLimitWin,
 	}
 }
 
@@ -49,8 +62,20 @@ func (s *Server) Handler() http.Handler {
 
 	// Public endpoints
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
-	mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
-	mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+
+	registerH := http.HandlerFunc(s.handleRegister)
+	if s.RegisterLimitN > 0 && s.RegisterLimitWin > 0 {
+		mux.Handle("POST /v1/auth/register", RateLimit(s.RegisterLimitN, s.RegisterLimitWin)(registerH))
+	} else {
+		mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
+	}
+
+	if s.LoginLimitN > 0 && s.LoginLimitWin > 0 {
+		mux.Handle("POST /v1/auth/login", RateLimit(s.LoginLimitN, s.LoginLimitWin)(http.HandlerFunc(s.handleLogin)))
+	} else {
+		mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+	}
+
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
 
 	// Jobs

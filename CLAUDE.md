@@ -38,6 +38,8 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum pgxpool connections to Postgres |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing a disconnected worker's tasks |
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
+| `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
+| `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
 
 CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
 
