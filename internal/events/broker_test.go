@@ -56,8 +56,12 @@ func TestBroker_Cancel(t *testing.T) {
 	b.Publish(events.Event{Type: "task", Data: []byte(`{}`)})
 
 	select {
-	case <-ch:
-		t.Fatal("cancelled subscriber should not receive events")
+	case e, ok := <-ch:
+		// Channel is closed on cancel — that is expected. A live event
+		// delivered after cancellation is not.
+		if ok {
+			t.Fatalf("cancelled subscriber should not receive events: got %+v", e)
+		}
 	case <-time.After(10 * time.Millisecond):
 	}
 }

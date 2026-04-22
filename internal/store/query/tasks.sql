@@ -133,3 +133,12 @@ SET status = 'pending',
     started_at = NULL,
     finished_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'running');
+
+-- name: NotifyTaskSubmitted :exec
+-- Wakes any LISTENers on relay_task_submitted. Payload is empty; listeners
+-- coalesce into a single dispatch trigger.
+SELECT pg_notify('relay_task_submitted', '');
+
+-- name: NotifyTaskCompleted :exec
+-- Wakes any LISTENers on relay_task_completed.
+SELECT pg_notify('relay_task_completed', '');

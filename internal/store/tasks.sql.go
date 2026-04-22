@@ -514,6 +514,31 @@ func (q *Queries) ListWorkersWithActiveTasks(ctx context.Context) ([]pgtype.UUID
 	return items, nil
 }
 
+const notifyTaskCompleted = `-- name: NotifyTaskCompleted :exec
+SELECT pg_notify('relay_task_completed', '')
+`
+
+// Wakes any LISTENers on relay_task_completed.
+//
+//	SELECT pg_notify('relay_task_completed', '')
+func (q *Queries) NotifyTaskCompleted(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, notifyTaskCompleted)
+	return err
+}
+
+const notifyTaskSubmitted = `-- name: NotifyTaskSubmitted :exec
+SELECT pg_notify('relay_task_submitted', '')
+`
+
+// Wakes any LISTENers on relay_task_submitted. Payload is empty; listeners
+// coalesce into a single dispatch trigger.
+//
+//	SELECT pg_notify('relay_task_submitted', '')
+func (q *Queries) NotifyTaskSubmitted(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, notifyTaskSubmitted)
+	return err
+}
+
 const requeueAllActiveTasks = `-- name: RequeueAllActiveTasks :exec
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, started_at = NULL

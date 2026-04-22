@@ -80,6 +80,8 @@ func main() {
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 	dispatcher := scheduler.NewDispatcher(q, registry, broker)
+	notifyListener := scheduler.NewNotifyListener(pool, dispatcher.Trigger)
+	go notifyListener.Run(ctx)
 
 	graceWindow := 2 * time.Minute
 	if v := os.Getenv("RELAY_WORKER_GRACE_WINDOW"); v != "" {

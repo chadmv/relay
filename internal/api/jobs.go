@@ -233,12 +233,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	_ = q.NotifyTaskSubmitted(ctx)
+
 	if err := tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "commit failed")
 		return
 	}
-
-	go s.triggerDispatch()
 
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks))
 }

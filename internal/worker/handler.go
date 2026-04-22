@@ -233,7 +233,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	if terminal && task.RetryCount < task.Retries {
 		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err == nil {
 			updateJobStatusFromTasks(ctx, h.q, task.JobID)
-			go h.triggerDispatch()
+			_ = h.q.NotifyTaskSubmitted(ctx)
 		}
 		return
 	}
@@ -281,7 +281,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	}
 
 	if statusStr == "done" {
-		go h.triggerDispatch()
+		_ = h.q.NotifyTaskCompleted(ctx)
 	}
 }
 

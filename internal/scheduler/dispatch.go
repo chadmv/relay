@@ -40,9 +40,10 @@ func (d *Dispatcher) Trigger() {
 	}
 }
 
-// Run blocks until ctx is cancelled; fires on Trigger() or every 5s.
+// Run blocks until ctx is cancelled; fires on Trigger(), on NOTIFY (via
+// NotifyListener), or every 30s as a safety-net poll.
 func (d *Dispatcher) Run(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
