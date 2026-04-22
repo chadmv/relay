@@ -67,13 +67,14 @@ func (s *Server) Handler() http.Handler {
 	if s.RegisterLimitN > 0 && s.RegisterLimitWin > 0 {
 		mux.Handle("POST /v1/auth/register", RateLimit(s.RegisterLimitN, s.RegisterLimitWin)(registerH))
 	} else {
-		mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
+		mux.Handle("POST /v1/auth/register", registerH)
 	}
 
+	loginH := http.HandlerFunc(s.handleLogin)
 	if s.LoginLimitN > 0 && s.LoginLimitWin > 0 {
-		mux.Handle("POST /v1/auth/login", RateLimit(s.LoginLimitN, s.LoginLimitWin)(http.HandlerFunc(s.handleLogin)))
+		mux.Handle("POST /v1/auth/login", RateLimit(s.LoginLimitN, s.LoginLimitWin)(loginH))
 	} else {
-		mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+		mux.Handle("POST /v1/auth/login", loginH)
 	}
 
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))

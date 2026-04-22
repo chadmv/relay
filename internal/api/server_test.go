@@ -74,3 +74,35 @@ func TestServer_RateLimitsLogin(t *testing.T) {
 		t.Fatalf("expected 429 on third login, got %d", rec.Code)
 	}
 }
+
+func TestServer_RateLimitsRegister(t *testing.T) {
+	s := &Server{
+		RegisterLimitN:   2,
+		RegisterLimitWin: time.Minute,
+	}
+	h := s.Handler()
+
+	body := `{"email":"a@b.co","password":"x"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(body))
+		req.RemoteAddr = "10.0.0.1:12345"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		func() {
+			defer func() { recover() }()
+			h.ServeHTTP(rec, req)
+		}()
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d: unexpected 429", i+1)
+		}
+	}
+
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(body))
+	req.RemoteAddr = "10.0.0.1:12345"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on third register, got %d", rec.Code)
+	}
+}
