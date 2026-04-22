@@ -365,3 +365,48 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "dispatched", fetchedStale.Status)
 }
+
+func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
+	ctx := context.Background()
+	q, _ := newTestStore(t)
+	broker := events.NewBroker()
+	registry := worker.NewRegistry()
+
+	var fired []string
+	grace := worker.NewGraceRegistry(50*time.Millisecond, func(workerID string) {
+		fired = append(fired, workerID)
+	})
+	defer grace.Stop()
+
+	h := worker.NewHandlerWithGrace(q, registry, broker, func() {}, grace)
+
+	stream := &fakeStream{
+		ctx: ctx,
+		msgs: []*relayv1.AgentMessage{{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "grace-host", CpuCores: 1, RamGb: 1, Os: "linux",
+				},
+			},
+		}},
+		sentCh: make(chan struct{}, 1),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+
+	select {
+	case <-stream.sentCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RegisterResponse never sent")
+	}
+	<-done
+
+	// Before the grace window elapses, no requeue.
+	time.Sleep(20 * time.Millisecond)
+	assert.Empty(t, fired)
+
+	// After the window elapses, the timer fires once for this worker.
+	time.Sleep(60 * time.Millisecond)
+	assert.Len(t, fired, 1)
+}
