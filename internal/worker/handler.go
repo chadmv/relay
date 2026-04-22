@@ -173,6 +173,7 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 	}
 
 	// Anything server has but agent didn't report → requeue.
+	requeued := 0
 	for taskIDStr := range serverSet {
 		if agentSet[taskIDStr] {
 			continue
@@ -182,6 +183,12 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 			continue
 		}
 		_ = h.q.RequeueTaskByID(ctx, tID)
+		requeued++
+	}
+
+	// Wake the scheduler so requeued tasks are dispatched immediately.
+	if requeued > 0 {
+		go h.triggerDispatch()
 	}
 
 	return cancelIDs, nil
