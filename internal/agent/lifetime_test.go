@@ -8,6 +8,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
@@ -28,14 +29,15 @@ func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
 		Epoch:   1,
 	})
 
-	// Wait for the runner to start.
-	time.Sleep(100 * time.Millisecond)
-	a.mu.Lock()
-	r, ok := a.runners["long-task"]
-	a.mu.Unlock()
-	if !ok {
-		t.Fatal("runner was not registered")
-	}
+	// Wait for the runner to be registered (subprocess startup can be slow on CI).
+	var r *Runner
+	require.Eventually(t, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		var ok bool
+		r, ok = a.runners["long-task"]
+		return ok
+	}, time.Second, 10*time.Millisecond, "runner was not registered within 1s")
 
 	// Cancel connCtx (simulates stream drop). Runner should NOT exit.
 	cancelConn()
