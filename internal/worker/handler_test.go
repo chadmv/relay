@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -372,9 +373,9 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 
-	var fired []string
+	var fired atomic.Int32
 	grace := worker.NewGraceRegistry(50*time.Millisecond, func(workerID string) {
-		fired = append(fired, workerID)
+		fired.Add(1)
 	})
 	defer grace.Stop()
 
@@ -404,9 +405,10 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 
 	// Before the grace window elapses, no requeue.
 	time.Sleep(20 * time.Millisecond)
-	assert.Empty(t, fired)
+	assert.Equal(t, int32(0), fired.Load())
 
 	// After the window elapses, the timer fires once for this worker.
-	time.Sleep(60 * time.Millisecond)
-	assert.Len(t, fired, 1)
+	require.Eventually(t, func() bool {
+		return fired.Load() == 1
+	}, 500*time.Millisecond, 5*time.Millisecond, "grace timer should fire once")
 }
