@@ -17,7 +17,7 @@ type Runner struct {
 	taskID    string
 	epoch     int64
 	sendCh    chan *relayv1.AgentMessage
-	ctx       context.Context // parent (connection) context — cancelled only when the connection drops
+	ctx       context.Context // parent (agent) context — lives for the agent lifetime, not the connection
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
 }
@@ -159,7 +159,6 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 	select {
 	case r.sendCh <- msg:
 	case <-r.ctx.Done():
-		// Connection lost; drop. The coordinator will
-		// requeue the task via RequeueWorkerTasks on disconnect.
+		// Connection lost; will be redelivered when agent reconnects.
 	}
 }

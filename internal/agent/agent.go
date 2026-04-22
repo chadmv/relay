@@ -21,9 +21,10 @@ type Agent struct {
 	caps     Capabilities
 	workerID string // only accessed from the single reconnect goroutine in Run; no mutex needed
 	sendCh   chan *relayv1.AgentMessage // buffered 64; shared across reconnects
+	runCtx   context.Context            // long-lived parent; set in Run, lives across reconnects
 	mu       sync.Mutex
 	runners  map[string]*Runner
-	runnerWG sync.WaitGroup // tracks active runner goroutines; waited before sendCh drain
+	runnerWG sync.WaitGroup // tracks active runner goroutines; waited on agent shutdown
 	saveID   func(string) error
 }
 
@@ -43,18 +44,22 @@ func NewAgent(coord string, caps Capabilities, workerID string, saveID func(stri
 // Run connects to the coordinator and reconnects with exponential backoff until
 // ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
+	a.runCtx = ctx
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
+			a.runnerWG.Wait()
 			return
 		}
 		if err := a.connect(ctx); err != nil {
 			if ctx.Err() != nil {
+				a.runnerWG.Wait()
 				return
 			}
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				a.runnerWG.Wait()
 				return
 			}
 			backoff *= 2
@@ -72,18 +77,6 @@ func (a *Agent) Run(ctx context.Context) {
 func (a *Agent) connect(ctx context.Context) error {
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
-
-	// Wait for all runner goroutines from the previous connection to finish before
-	// draining sendCh. Runners were cancelled when the previous stream closed;
-	// waiting here ensures no runner is still writing to sendCh during the drain.
-	a.runnerWG.Wait()
-
-	// Discard any messages queued from the previous connection. They were never
-	// sent on the old stream and sending them on a new stream would confuse the
-	// coordinator with stale task IDs.
-	for len(a.sendCh) > 0 {
-		<-a.sendCh
-	}
 
 	conn, err := grpc.NewClient(a.coord, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -151,18 +144,8 @@ func (a *Agent) connect(ctx context.Context) error {
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			// Cancel all runners for this connection.
-			a.mu.Lock()
-			count := len(a.runners)
-			for _, r := range a.runners {
-				r.Cancel()
-			}
-			a.mu.Unlock()
-			if count > 0 {
-				log.Printf("lost contact with coordinator: %d running task(s) cancelled; will restart once reconnected", count)
-			} else {
-				log.Printf("lost contact with coordinator; reconnecting...")
-			}
+			// Stream dropped. Runners survive (they bind to runCtx, not connCtx).
+			// Coordinator will start a grace timer; reconnect will reconcile.
 			connCancel()
 			return err
 		}
@@ -176,8 +159,10 @@ func (a *Agent) connect(ctx context.Context) error {
 	}
 }
 
-func (a *Agent) handleDispatch(ctx context.Context, task *relayv1.DispatchTask) {
-	runner, runCtx := newRunner(task.TaskId, task.Epoch, a.sendCh, ctx, task.TimeoutSeconds)
+func (a *Agent) handleDispatch(connCtx context.Context, task *relayv1.DispatchTask) {
+	// Runners bind to the long-lived runCtx, NOT the connection ctx. This is
+	// what lets subprocesses survive brief disconnects.
+	runner, runCtx := newRunner(task.TaskId, task.Epoch, a.sendCh, a.runCtx, task.TimeoutSeconds)
 	a.mu.Lock()
 	a.runners[task.TaskId] = runner
 	a.mu.Unlock()
@@ -189,6 +174,7 @@ func (a *Agent) handleDispatch(ctx context.Context, task *relayv1.DispatchTask) 
 		delete(a.runners, task.TaskId)
 		a.mu.Unlock()
 	}()
+	_ = connCtx // connCtx is no longer used by the runner
 }
 
 func (a *Agent) handleCancel(msg *relayv1.CancelTask) {
