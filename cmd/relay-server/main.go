@@ -75,6 +75,13 @@ func main() {
 		if err := bootstrapAdmin(ctx, q, bootstrapEmail, bootstrapPassword); err != nil {
 			log.Fatalf("bootstrap admin: %v", err)
 		}
+		// Clear from process env so it's not visible via /proc/<pid>/environ or
+		// inherited by any future child process. The string itself may linger
+		// in heap memory until GC; this is best-effort.
+		os.Unsetenv("RELAY_BOOTSTRAP_PASSWORD")
+		os.Unsetenv("RELAY_BOOTSTRAP_ADMIN")
+		bootstrapPassword = ""
+		_ = bootstrapPassword
 	}
 
 	broker := events.NewBroker()

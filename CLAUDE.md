@@ -33,8 +33,8 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | Postgres connection string |
 | `RELAY_HTTP_ADDR` | `:8080` | HTTP listen address |
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC listen address |
-| `RELAY_BOOTSTRAP_ADMIN` | — | Email of first admin to create on startup |
-| `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set |
+| `RELAY_BOOTSTRAP_ADMIN` | — | Email of first admin to create on startup. Cleared from process env after consumption. |
+| `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum pgxpool connections to Postgres |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing a disconnected worker's tasks |
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
