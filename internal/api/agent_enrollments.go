@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,11 +20,6 @@ const (
 )
 
 func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Request) {
-	u, ok := UserFromCtx(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
 	var req struct {
 		HostnameHint string `json:"hostname_hint"`
 		TTLSeconds   int64  `json:"ttl_seconds"`
@@ -42,10 +38,11 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if ttl > maxEnrollmentTTL {
-		writeError(w, http.StatusBadRequest, "ttl_seconds must not exceed 604800 (7 days)")
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("ttl_seconds must not exceed %d (7 days)", int(maxEnrollmentTTL.Seconds())))
 		return
 	}
 
+	u, _ := UserFromCtx(r.Context())
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
@@ -105,8 +102,13 @@ func (s *Server) handleDeleteWorkerToken(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid worker id")
 		return
 	}
-	if err := s.q.ClearWorkerAgentToken(r.Context(), id); err != nil {
+	n, err := s.q.ClearWorkerAgentToken(r.Context(), id)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to clear worker token")
+		return
+	}
+	if n == 0 {
+		writeError(w, http.StatusNotFound, "worker not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

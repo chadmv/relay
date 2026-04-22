@@ -40,7 +40,7 @@ RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_s
 -- name: SetWorkerAgentToken :exec
 UPDATE workers SET agent_token_hash = $2 WHERE id = $1;
 
--- name: ClearWorkerAgentToken :exec
+-- name: ClearWorkerAgentToken :execrows
 UPDATE workers
 SET agent_token_hash = NULL, status = 'revoked'
 WHERE id = $1;

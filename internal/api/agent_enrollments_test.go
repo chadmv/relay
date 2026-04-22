@@ -157,10 +157,17 @@ func TestDeleteWorkerToken_AdminOnly(t *testing.T) {
 	srv.Handler().ServeHTTP(rec2, req2)
 	assert.Equal(t, http.StatusNoContent, rec2.Code)
 
-	// Idempotent — second call also 204
+	// Idempotent — second call also 204 (worker row still exists; only agent_token_hash is cleared)
 	req3 := httptest.NewRequest("DELETE", "/v1/workers/"+workerID+"/token", nil)
 	req3.Header.Set("Authorization", "Bearer "+adminToken)
 	rec3 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusNoContent, rec3.Code)
+
+	// Non-existent worker UUID should get 404
+	req4 := httptest.NewRequest("DELETE", "/v1/workers/00000000-0000-0000-0000-000000000000/token", nil)
+	req4.Header.Set("Authorization", "Bearer "+adminToken)
+	rec4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec4, req4)
+	assert.Equal(t, http.StatusNotFound, rec4.Code)
 }

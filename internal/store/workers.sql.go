@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const clearWorkerAgentToken = `-- name: ClearWorkerAgentToken :exec
+const clearWorkerAgentToken = `-- name: ClearWorkerAgentToken :execrows
 UPDATE workers
 SET agent_token_hash = NULL, status = 'revoked'
 WHERE id = $1
@@ -22,9 +22,12 @@ WHERE id = $1
 //	UPDATE workers
 //	SET agent_token_hash = NULL, status = 'revoked'
 //	WHERE id = $1
-func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, clearWorkerAgentToken, id)
-	return err
+func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, clearWorkerAgentToken, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const createWorker = `-- name: CreateWorker :one
