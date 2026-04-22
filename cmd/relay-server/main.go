@@ -146,6 +146,9 @@ func main() {
 	// Start dispatcher.
 	go dispatcher.Run(ctx)
 
+	// Purge expired enrollment tokens hourly.
+	go runEnrollmentJanitor(ctx, q)
+
 	// Start HTTP.
 	srv := &http.Server{Addr: httpAddr, Handler: httpServer.Handler()}
 	go func() {
@@ -176,6 +179,21 @@ func main() {
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
 	fmt.Println("relay-server stopped")
+}
+
+func runEnrollmentJanitor(ctx context.Context, q *store.Queries) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := q.DeleteExpiredAgentEnrollments(ctx); err != nil {
+				log.Printf("enrollment janitor: %v", err)
+			}
+		}
+	}
 }
 
 // seedGraceTimersFromActiveTasks enumerates workers that have non-terminal
