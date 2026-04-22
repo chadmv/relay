@@ -93,15 +93,7 @@ func (a *Agent) connect(ctx context.Context) error {
 	// Send RegisterRequest.
 	if err := stream.Send(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_Register{
-			Register: &relayv1.RegisterRequest{
-				WorkerId: a.workerID,
-				Hostname: a.caps.Hostname,
-				CpuCores: a.caps.CPUCores,
-				RamGb:    a.caps.RAMGB,
-				GpuCount: a.caps.GPUCount,
-				GpuModel: a.caps.GPUModel,
-				Os:       a.caps.OS,
-			},
+			Register: a.buildRegisterRequest(),
 		},
 	}); err != nil {
 		return err
@@ -183,5 +175,31 @@ func (a *Agent) handleCancel(msg *relayv1.CancelTask) {
 	a.mu.Unlock()
 	if ok {
 		r.Cancel()
+	}
+}
+
+// buildRegisterRequest constructs the RegisterRequest sent on (re)connect.
+// Includes the caller's capabilities AND the list of currently-executing
+// tasks with their epochs, so the coordinator can reconcile.
+func (a *Agent) buildRegisterRequest() *relayv1.RegisterRequest {
+	a.mu.Lock()
+	running := make([]*relayv1.RunningTask, 0, len(a.runners))
+	for _, r := range a.runners {
+		running = append(running, &relayv1.RunningTask{
+			TaskId: r.taskID,
+			Epoch:  r.epoch,
+		})
+	}
+	a.mu.Unlock()
+
+	return &relayv1.RegisterRequest{
+		WorkerId:     a.workerID,
+		Hostname:     a.caps.Hostname,
+		CpuCores:     a.caps.CPUCores,
+		RamGb:        a.caps.RAMGB,
+		GpuCount:     a.caps.GPUCount,
+		GpuModel:     a.caps.GPUModel,
+		Os:           a.caps.OS,
+		RunningTasks: running,
 	}
 }

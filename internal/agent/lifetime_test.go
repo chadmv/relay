@@ -50,3 +50,24 @@ func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
 	cancelRun()
 	a.runnerWG.Wait()
 }
+
+func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
+	a := NewAgent("nowhere:0", Capabilities{
+		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
+	}, "worker-xyz", func(string) error { return nil })
+
+	// Simulate two active runners.
+	a.runners["task-1"] = &Runner{taskID: "task-1", epoch: 3}
+	a.runners["task-2"] = &Runner{taskID: "task-2", epoch: 7}
+
+	req := a.buildRegisterRequest()
+	assert.Equal(t, "worker-xyz", req.WorkerId)
+	assert.Len(t, req.RunningTasks, 2)
+
+	byID := map[string]int64{}
+	for _, rt := range req.RunningTasks {
+		byID[rt.TaskId] = rt.Epoch
+	}
+	assert.Equal(t, int64(3), byID["task-1"])
+	assert.Equal(t, int64(7), byID["task-2"])
+}
