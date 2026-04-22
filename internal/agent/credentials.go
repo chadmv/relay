@@ -35,6 +35,9 @@ func LoadCredentials(stateDir string) (*Credentials, error) {
 	return c, nil
 }
 
+// TokenFilePath returns the path to the persisted agent token file.
+func (c *Credentials) TokenFilePath() string { return c.tokenFilePath }
+
 // HasAgentToken reports whether a persisted agent token is available.
 func (c *Credentials) HasAgentToken() bool { return c.agentToken != "" }
 

@@ -11,7 +11,9 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // Agent manages the gRPC connection to the coordinator, dispatches tasks to
@@ -26,11 +28,12 @@ type Agent struct {
 	runners  map[string]*Runner
 	runnerWG sync.WaitGroup // tracks active runner goroutines; waited on agent shutdown
 	saveID   func(string) error
+	creds    *Credentials
 }
 
 // NewAgent constructs an Agent. workerID is empty on first run; saveID persists
 // the coordinator-assigned ID to the state file on every change.
-func NewAgent(coord string, caps Capabilities, workerID string, saveID func(string) error) *Agent {
+func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentials, saveID func(string) error) *Agent {
 	return &Agent{
 		coord:    coord,
 		caps:     caps,
@@ -38,6 +41,7 @@ func NewAgent(coord string, caps Capabilities, workerID string, saveID func(stri
 		sendCh:   make(chan *relayv1.AgentMessage, 64),
 		runners:  make(map[string]*Runner),
 		saveID:   saveID,
+		creds:    creds,
 	}
 }
 
@@ -53,6 +57,11 @@ func (a *Agent) Run(ctx context.Context) {
 		}
 		if err := a.connect(ctx); err != nil {
 			if ctx.Err() != nil {
+				a.runnerWG.Wait()
+				return
+			}
+			if status.Code(err) == codes.Unauthenticated {
+				log.Printf("agent: authentication failed — token may have been revoked; exiting")
 				a.runnerWG.Wait()
 				return
 			}
@@ -91,10 +100,12 @@ func (a *Agent) connect(ctx context.Context) error {
 	}
 
 	// Send RegisterRequest.
+	regReq, err := a.buildRegisterRequest()
+	if err != nil {
+		return fmt.Errorf("build register: %w", err)
+	}
 	if err := stream.Send(&relayv1.AgentMessage{
-		Payload: &relayv1.AgentMessage_Register{
-			Register: a.buildRegisterRequest(),
-		},
+		Payload: &relayv1.AgentMessage_Register{Register: regReq},
 	}); err != nil {
 		return err
 	}
@@ -107,6 +118,12 @@ func (a *Agent) connect(ctx context.Context) error {
 	reg := resp.GetRegisterResponse()
 	if reg == nil {
 		return fmt.Errorf("agent: expected RegisterResponse, got %T", resp.Payload)
+	}
+	if reg.AgentToken != "" {
+		if err := a.creds.Persist(reg.AgentToken); err != nil {
+			return fmt.Errorf("persist agent token: %w", err)
+		}
+		log.Printf("agent token persisted to %s", a.creds.TokenFilePath())
 	}
 	if reg.WorkerId != a.workerID {
 		a.workerID = reg.WorkerId
@@ -192,7 +209,7 @@ func (a *Agent) handleCancel(msg *relayv1.CancelTask) {
 // buildRegisterRequest constructs the RegisterRequest sent on (re)connect.
 // Includes the caller's capabilities AND the list of currently-executing
 // tasks with their epochs, so the coordinator can reconcile.
-func (a *Agent) buildRegisterRequest() *relayv1.RegisterRequest {
+func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 	a.mu.Lock()
 	running := make([]*relayv1.RunningTask, 0, len(a.runners))
 	for _, r := range a.runners {
@@ -203,7 +220,7 @@ func (a *Agent) buildRegisterRequest() *relayv1.RegisterRequest {
 	}
 	a.mu.Unlock()
 
-	return &relayv1.RegisterRequest{
+	req := &relayv1.RegisterRequest{
 		WorkerId:     a.workerID,
 		Hostname:     a.caps.Hostname,
 		CpuCores:     a.caps.CPUCores,
@@ -213,4 +230,14 @@ func (a *Agent) buildRegisterRequest() *relayv1.RegisterRequest {
 		Os:           a.caps.OS,
 		RunningTasks: running,
 	}
+
+	switch {
+	case a.creds.HasAgentToken():
+		req.Credential = &relayv1.RegisterRequest_AgentToken{AgentToken: a.creds.AgentToken()}
+	case a.creds.EnrollmentToken() != "":
+		req.Credential = &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: a.creds.EnrollmentToken()}
+	default:
+		return nil, fmt.Errorf("no credentials: set RELAY_AGENT_ENROLLMENT_TOKEN or provision the agent token file")
+	}
+	return req, nil
 }

@@ -40,6 +40,7 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
 | `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
+| `RELAY_AGENT_ENROLLMENT_TOKEN` | — | One-time enrollment credential for a fresh agent host. Read only when `<state-dir>/token` does not exist. |
 
 CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
 

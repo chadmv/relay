@@ -27,6 +27,21 @@ func main() {
 	workerIDFile := filepath.Join(*stateDir, "worker-id")
 	workerID := loadWorkerID(workerIDFile)
 
+	// Load or bootstrap credentials.
+	creds, err := agent.LoadCredentials(*stateDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-agent: load credentials: %v\n", err)
+		os.Exit(1)
+	}
+	if !creds.HasAgentToken() {
+		if t := os.Getenv("RELAY_AGENT_ENROLLMENT_TOKEN"); t != "" {
+			creds.SetEnrollmentToken(t)
+		} else {
+			fmt.Fprintf(os.Stderr, "relay-agent: no credentials available — set RELAY_AGENT_ENROLLMENT_TOKEN for first boot, or provision the agent token file\n")
+			os.Exit(1)
+		}
+	}
+
 	// Detect hardware capabilities.
 	caps := agent.Detect()
 
@@ -38,7 +53,7 @@ func main() {
 	}
 
 	// Wire up and run.
-	a := agent.NewAgent(addr, caps, workerID, func(id string) error {
+	a := agent.NewAgent(addr, caps, workerID, creds, func(id string) error {
 		return saveWorkerID(workerIDFile, id)
 	})
 
