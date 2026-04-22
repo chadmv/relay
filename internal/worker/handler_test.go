@@ -15,6 +15,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -251,4 +252,116 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 	afterValid, err := q.GetTask(ctx, claimed.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", afterValid.Status, "valid epoch update must be applied")
+}
+
+func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
+	ctx := context.Background()
+	q, _ := newTestStore(t)
+	broker := events.NewBroker()
+	registry := worker.NewRegistry()
+	grace := worker.NewGraceRegistry(1*time.Minute, func(string) {})
+	h := worker.NewHandlerWithGrace(q, registry, broker, func() {}, grace)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "recon@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	workerRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "recon", Hostname: "recon-host", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	tMatch, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "match", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	tMatchClaimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: tMatch.ID, WorkerID: pgtype.UUID{Bytes: workerRow.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	tStale, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "stale", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: tStale.ID, WorkerID: pgtype.UUID{Bytes: workerRow.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	tServerOnly, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "server-only", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: tServerOnly.ID, WorkerID: pgtype.UUID{Bytes: workerRow.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Helper to format UUID as string (same as uuidStr in worker package)
+	fmtUUID := func(u pgtype.UUID) string {
+		b := u.Bytes
+		return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	}
+	matchIDStr := fmtUUID(tMatchClaimed.ID)
+	staleIDStr := fmtUUID(tStale.ID)
+
+	stream := &fakeStream{
+		ctx: ctx,
+		msgs: []*relayv1.AgentMessage{{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "recon-host",
+					CpuCores: 1, RamGb: 1, Os: "linux",
+					RunningTasks: []*relayv1.RunningTask{
+						{TaskId: matchIDStr, Epoch: int64(tMatchClaimed.AssignmentEpoch)},
+						{TaskId: staleIDStr, Epoch: 999}, // stale epoch
+					},
+				},
+			},
+		}},
+		sentCh: make(chan struct{}, 1),
+		hold:   make(chan struct{}),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+
+	select {
+	case <-stream.sentCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RegisterResponse never sent")
+	}
+
+	close(stream.hold)
+	<-done
+
+	// RegisterResponse.cancel_task_ids must contain only tStale (stale epoch).
+	require.Len(t, stream.sent, 1)
+	resp := stream.sent[0].GetRegisterResponse()
+	require.NotNil(t, resp)
+	assert.ElementsMatch(t, []string{staleIDStr}, resp.CancelTaskIds)
+
+	// tServerOnly was not reported by agent → must be requeued.
+	fetchedServerOnly, err := q.GetTask(ctx, tServerOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", fetchedServerOnly.Status)
+
+	// tMatch reported with correct epoch → still dispatched.
+	fetchedMatch, err := q.GetTask(ctx, tMatch.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", fetchedMatch.Status)
+
+	// tStale reported with wrong epoch → server issued cancel but did not requeue yet.
+	fetchedStale, err := q.GetTask(ctx, tStale.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", fetchedStale.Status)
 }

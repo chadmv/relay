@@ -20,11 +20,18 @@ type Handler struct {
 	registry        *Registry
 	broker          *events.Broker
 	triggerDispatch func()
+	grace           *GraceRegistry
 }
 
 // NewHandler returns a Handler wired to the given dependencies.
 func NewHandler(q *store.Queries, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
 	return &Handler{q: q, registry: r, broker: b, triggerDispatch: triggerDispatch}
+}
+
+// NewHandlerWithGrace is like NewHandler but also wires in a GraceRegistry so
+// that agent disconnects start a grace timer instead of immediately requeueing.
+func NewHandlerWithGrace(q *store.Queries, r *Registry, b *events.Broker, triggerDispatch func(), g *GraceRegistry) *Handler {
+	return &Handler{q: q, registry: r, broker: b, triggerDispatch: triggerDispatch, grace: g}
 }
 
 // Connect implements relayv1.AgentServiceServer.
@@ -46,7 +53,11 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return fmt.Errorf("register worker: %w", err)
 	}
 
-	defer h.requeueWorkerTasks(workerID)   // runs 4th
+	if h.grace != nil {
+		defer h.grace.Start(workerID)  // runs 4th: grace timer will requeue after window
+	} else {
+		defer h.requeueWorkerTasks(workerID) // runs 4th: requeue immediately
+	}
 	defer h.markWorkerOffline(workerID)    // runs 3rd
 	defer sender.Close()                   // runs 2nd
 	defer h.registry.Unregister(workerID) // runs 1st
@@ -70,8 +81,9 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	}
 }
 
-// registerWorker upserts the worker, marks it online, sends the RegisterResponse,
-// publishes an SSE event, and triggers the dispatch loop.
+// registerWorker upserts the worker, marks it online, reconciles the agent's
+// running-task report against DB state, sends the RegisterResponse, publishes
+// an SSE event, and triggers the dispatch loop.
 func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name:     reg.Hostname,
@@ -97,11 +109,25 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 
 	workerID := uuidStr(w.ID)
 
+	// Agent reconnected within its grace window — stop the requeue timer.
+	if h.grace != nil {
+		h.grace.Cancel(workerID)
+	}
+
+	// Reconcile the agent's running-task report against DB state.
+	cancelIDs, err := h.reconcileRunningTasks(ctx, w.ID, reg.RunningTasks)
+	if err != nil {
+		return "", nil, fmt.Errorf("reconcile: %w", err)
+	}
+
 	// Send RegisterResponse on the raw stream. At this point the worker is not
 	// yet in the registry, so no other goroutine can race us on stream.Send.
 	if err := stream.Send(&relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_RegisterResponse{
-			RegisterResponse: &relayv1.RegisterResponse{WorkerId: workerID},
+			RegisterResponse: &relayv1.RegisterResponse{
+				WorkerId:      workerID,
+				CancelTaskIds: cancelIDs,
+			},
 		},
 	}); err != nil {
 		return "", nil, fmt.Errorf("send register response: %w", err)
@@ -119,6 +145,46 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 	go h.triggerDispatch()
 
 	return workerID, sender, nil
+}
+
+// reconcileRunningTasks compares the agent's reported running tasks against
+// the coordinator's DB state. Returns the list of task IDs the agent should
+// cancel (stale epoch or unknown to coordinator). Any task the coordinator
+// has assigned to this worker but the agent didn't report is requeued.
+func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUID, reported []*relayv1.RunningTask) ([]string, error) {
+	serverTasks, err := h.q.GetActiveTasksForWorker(ctx, workerID)
+	if err != nil {
+		return nil, err
+	}
+
+	serverSet := make(map[string]int64, len(serverTasks))
+	for _, t := range serverTasks {
+		serverSet[uuidStr(t.ID)] = int64(t.AssignmentEpoch)
+	}
+
+	var cancelIDs []string
+	agentSet := make(map[string]bool, len(reported))
+	for _, rt := range reported {
+		agentSet[rt.TaskId] = true
+		srvEpoch, ok := serverSet[rt.TaskId]
+		if !ok || srvEpoch != rt.Epoch {
+			cancelIDs = append(cancelIDs, rt.TaskId)
+		}
+	}
+
+	// Anything server has but agent didn't report → requeue.
+	for taskIDStr := range serverSet {
+		if agentSet[taskIDStr] {
+			continue
+		}
+		var tID pgtype.UUID
+		if err := tID.Scan(taskIDStr); err != nil {
+			continue
+		}
+		_ = h.q.RequeueTaskByID(ctx, tID)
+	}
+
+	return cancelIDs, nil
 }
 
 // handleTaskStatus processes a TaskStatusUpdate from an agent.
