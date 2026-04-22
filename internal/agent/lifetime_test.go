@@ -56,9 +56,11 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
 	}, "worker-xyz", func(string) error { return nil })
 
-	// Simulate two active runners.
+	// Simulate two active runners (hold mutex to match production invariant).
+	a.mu.Lock()
 	a.runners["task-1"] = &Runner{taskID: "task-1", epoch: 3}
 	a.runners["task-2"] = &Runner{taskID: "task-2", epoch: 7}
+	a.mu.Unlock()
 
 	req := a.buildRegisterRequest()
 	assert.Equal(t, "worker-xyz", req.WorkerId)
