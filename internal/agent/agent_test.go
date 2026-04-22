@@ -19,6 +19,17 @@ import (
 	"google.golang.org/grpc"
 )
 
+// testCreds returns a Credentials with an enrollment token set, suitable for tests.
+func testCreds(t *testing.T) *agent.Credentials {
+	t.Helper()
+	c, err := agent.LoadCredentials(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEnrollmentToken("test-enrollment")
+	return c
+}
+
 // echoTaskCmd returns a cross-platform command that prints a message to stdout.
 func echoTaskCmd(msg string) []string {
 	if runtime.GOOS == "windows" {
@@ -117,7 +128,7 @@ func TestAgent_registers(t *testing.T) {
 	}
 
 	var savedID string
-	a := agent.NewAgent(addr, caps, "", func(id string) error {
+	a := agent.NewAgent(addr, caps, "", testCreds(t), func(id string) error {
 		savedID = id
 		return nil
 	})
@@ -138,6 +149,7 @@ func TestAgent_registers(t *testing.T) {
 		assert.Equal(t, int32(32), reg.RamGb)
 		assert.Equal(t, int32(1), reg.GpuCount)
 		assert.Equal(t, "NVIDIA RTX 4090", reg.GpuModel)
+		assert.NotNil(t, reg.Credential, "RegisterRequest must carry a credential")
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for RegisterRequest")
 	}
@@ -151,7 +163,7 @@ func TestAgent_dispatchAndReceiveLogs(t *testing.T) {
 	coord, addr := startFakeCoord(t)
 
 	caps := agent.Capabilities{Hostname: "test-host", OS: "linux", CPUCores: 4, RAMGB: 8}
-	a := agent.NewAgent(addr, caps, "", func(string) error { return nil })
+	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -216,7 +228,7 @@ func TestAgent_reconnects(t *testing.T) {
 	defer srv.GracefulStop()
 
 	caps := agent.Capabilities{Hostname: "reconnect-test", OS: "linux", CPUCores: 2, RAMGB: 4}
-	a := agent.NewAgent(addr, caps, "", func(string) error { return nil })
+	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

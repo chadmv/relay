@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"relay/internal/events"
 	"relay/internal/store"
@@ -15,10 +16,15 @@ import (
 
 // Server holds shared dependencies for all HTTP handlers.
 type Server struct {
-	pool     *pgxpool.Pool
-	q        *store.Queries
-	broker   *events.Broker
-	registry *worker.Registry
+	pool             *pgxpool.Pool
+	q                *store.Queries
+	broker           *events.Broker
+	registry         *worker.Registry
+	CORSOrigins      []string
+	LoginLimitN      int
+	LoginLimitWin    time.Duration
+	RegisterLimitN   int
+	RegisterLimitWin time.Duration
 }
 
 // New creates a Server.
@@ -27,12 +33,22 @@ func New(
 	q *store.Queries,
 	broker *events.Broker,
 	registry *worker.Registry,
+	corsOrigins []string,
+	loginLimitN int,
+	loginLimitWin time.Duration,
+	registerLimitN int,
+	registerLimitWin time.Duration,
 ) *Server {
 	return &Server{
-		pool:     pool,
-		q:        q,
-		broker:   broker,
-		registry: registry,
+		pool:             pool,
+		q:                q,
+		broker:           broker,
+		registry:         registry,
+		CORSOrigins:      corsOrigins,
+		LoginLimitN:      loginLimitN,
+		LoginLimitWin:    loginLimitWin,
+		RegisterLimitN:   registerLimitN,
+		RegisterLimitWin: registerLimitWin,
 	}
 }
 
@@ -46,8 +62,21 @@ func (s *Server) Handler() http.Handler {
 
 	// Public endpoints
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
-	mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
-	mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+
+	registerH := http.HandlerFunc(s.handleRegister)
+	if s.RegisterLimitN > 0 && s.RegisterLimitWin > 0 {
+		mux.Handle("POST /v1/auth/register", RateLimit(s.RegisterLimitN, s.RegisterLimitWin)(registerH))
+	} else {
+		mux.Handle("POST /v1/auth/register", registerH)
+	}
+
+	loginH := http.HandlerFunc(s.handleLogin)
+	if s.LoginLimitN > 0 && s.LoginLimitWin > 0 {
+		mux.Handle("POST /v1/auth/login", RateLimit(s.LoginLimitN, s.LoginLimitWin)(loginH))
+	} else {
+		mux.Handle("POST /v1/auth/login", loginH)
+	}
+
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
 
 	// Jobs
@@ -74,10 +103,15 @@ func (s *Server) Handler() http.Handler {
 	// Invites (admin-only)
 	mux.Handle("POST /v1/invites", auth(admin(http.HandlerFunc(s.handleCreateInvite))))
 
+	// Agent enrollments (admin-only)
+	mux.Handle("POST /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleCreateAgentEnrollment))))
+	mux.Handle("GET /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleListAgentEnrollments))))
+	mux.Handle("DELETE /v1/workers/{id}/token", auth(admin(http.HandlerFunc(s.handleDeleteWorkerToken))))
+
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
 
-	return mux
+	return CORS(s.CORSOrigins)(mux)
 }
 
 // ─── JSON helpers ────────────────────────────────────────────────────────────

@@ -12,9 +12,11 @@ import (
 )
 
 func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
+	creds, _ := LoadCredentials(t.TempDir())
+	creds.SetEnrollmentToken("test-enrollment")
 	a := NewAgent("nowhere:0", Capabilities{
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
-	}, "", func(string) error { return nil })
+	}, "", creds, func(string) error { return nil })
 
 	// Simulate entering Run: set the long-lived runCtx.
 	runCtx, cancelRun := context.WithCancel(context.Background())
@@ -52,9 +54,11 @@ func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
 }
 
 func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
+	creds, _ := LoadCredentials(t.TempDir())
+	creds.SetEnrollmentToken("test-enrollment")
 	a := NewAgent("nowhere:0", Capabilities{
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
-	}, "worker-xyz", func(string) error { return nil })
+	}, "worker-xyz", creds, func(string) error { return nil })
 
 	// Simulate two active runners (hold mutex to match production invariant).
 	a.mu.Lock()
@@ -62,8 +66,11 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 	a.runners["task-2"] = &Runner{taskID: "task-2", epoch: 7}
 	a.mu.Unlock()
 
-	req := a.buildRegisterRequest()
+	req, err := a.buildRegisterRequest()
+	require.NoError(t, err)
 	assert.Equal(t, "worker-xyz", req.WorkerId)
+	assert.NotNil(t, req.Credential, "credential must be populated")
+	assert.Equal(t, "test-enrollment", req.GetEnrollmentToken())
 	assert.Len(t, req.RunningTasks, 2)
 
 	byID := map[string]int64{}

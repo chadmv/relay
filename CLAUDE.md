@@ -33,10 +33,14 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | Postgres connection string |
 | `RELAY_HTTP_ADDR` | `:8080` | HTTP listen address |
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC listen address |
-| `RELAY_BOOTSTRAP_ADMIN` | — | Email of first admin to create on startup |
-| `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set |
+| `RELAY_BOOTSTRAP_ADMIN` | — | Email of first admin to create on startup. Cleared from process env after consumption. |
+| `RELAY_BOOTSTRAP_PASSWORD` | — | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum pgxpool connections to Postgres |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing a disconnected worker's tasks |
+| `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
+| `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
+| `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
+| `RELAY_AGENT_ENROLLMENT_TOKEN` | — | One-time enrollment credential for a fresh agent host. Read only when `<state-dir>/token` does not exist. |
 
 CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
 
@@ -69,7 +73,7 @@ Relay is a render farm job coordinator with three binaries:
 
 ### relay-agent internals
 
-`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network.
+`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network. On first boot the agent uses a one-time `RELAY_AGENT_ENROLLMENT_TOKEN` env var; the server issues a long-lived agent token that is persisted to `<state-dir>/token` (0600 perms). Subsequent reconnects use the persisted token; revoked tokens cause the agent to exit with a log message.
 
 ### relay CLI internals
 

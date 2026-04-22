@@ -49,6 +49,9 @@ func ParseCORSOrigins(s string) ([]string, error) {
 // Never emits Access-Control-Allow-Credentials (bearer tokens ride in
 // Authorization headers, not cookies).
 func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
+	if len(allowedOrigins) == 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
 	set := make(map[string]struct{}, len(allowedOrigins))
 	for _, o := range allowedOrigins {
 		set[o] = struct{}{}

@@ -75,6 +75,12 @@ func main() {
 		if err := bootstrapAdmin(ctx, q, bootstrapEmail, bootstrapPassword); err != nil {
 			log.Fatalf("bootstrap admin: %v", err)
 		}
+		// Clear from process env so it's not visible via /proc/<pid>/environ or
+		// inherited by any future child process. The string itself may linger
+		// in heap memory until GC; this is best-effort.
+		os.Unsetenv("RELAY_BOOTSTRAP_PASSWORD")
+		os.Unsetenv("RELAY_BOOTSTRAP_ADMIN")
+		bootstrapPassword = ""
 	}
 
 	broker := events.NewBroker()
@@ -106,7 +112,22 @@ func main() {
 	}
 
 	agentHandler := worker.NewHandlerWithGrace(q, registry, broker, dispatcher.Trigger, grace)
-	httpServer := api.New(pool, q, broker, registry)
+
+	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
+	if err != nil {
+		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)
+	}
+
+	loginN, loginWin, err := api.ParseRateLimit(envOrDefault("RELAY_LOGIN_RATE_LIMIT", "10:1m"))
+	if err != nil {
+		log.Fatalf("parse RELAY_LOGIN_RATE_LIMIT: %v", err)
+	}
+	registerN, registerWin, err := api.ParseRateLimit(envOrDefault("RELAY_REGISTER_RATE_LIMIT", "5:1m"))
+	if err != nil {
+		log.Fatalf("parse RELAY_REGISTER_RATE_LIMIT: %v", err)
+	}
+
+	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
 
 	// Start gRPC.
 	grpcSrv := grpc.NewServer()
@@ -124,6 +145,9 @@ func main() {
 
 	// Start dispatcher.
 	go dispatcher.Run(ctx)
+
+	// Purge expired enrollment tokens hourly.
+	go runEnrollmentJanitor(ctx, q)
 
 	// Start HTTP.
 	srv := &http.Server{Addr: httpAddr, Handler: httpServer.Handler()}
@@ -157,6 +181,21 @@ func main() {
 	fmt.Println("relay-server stopped")
 }
 
+func runEnrollmentJanitor(ctx context.Context, q *store.Queries) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := q.DeleteExpiredAgentEnrollments(ctx); err != nil {
+				log.Printf("enrollment janitor: %v", err)
+			}
+		}
+	}
+}
+
 // seedGraceTimersFromActiveTasks enumerates workers that have non-terminal
 // tasks in the DB at startup and starts a grace timer for each. Agents that
 // reconnect within the window reconcile; agents that don't will have their
@@ -181,4 +220,11 @@ func uuidStrMain(u pgtype.UUID) string {
 	b := u.Bytes
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

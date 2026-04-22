@@ -2,6 +2,10 @@ package worker
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -10,7 +14,10 @@ import (
 	"relay/internal/events"
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Handler implements relayv1.AgentServiceServer.
@@ -38,7 +45,6 @@ func NewHandlerWithGrace(q *store.Queries, r *Registry, b *events.Broker, trigge
 func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	ctx := stream.Context()
 
-	// First message must be a RegisterRequest.
 	first, err := stream.Recv()
 	if err != nil {
 		return fmt.Errorf("recv first message: %w", err)
@@ -48,13 +54,13 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return fmt.Errorf("first message must be RegisterRequest")
 	}
 
-	workerID, sender, err := h.registerWorker(ctx, stream, reg)
+	workerID, sender, err := h.authenticateAndRegister(ctx, stream, reg)
 	if err != nil {
-		return fmt.Errorf("register worker: %w", err)
+		return err
 	}
 
 	if h.grace != nil {
-		defer h.grace.Start(workerID)  // runs 4th: grace timer will requeue after window
+		defer h.grace.Start(workerID) // runs 4th: grace timer will requeue after window
 	} else {
 		defer h.requeueWorkerTasks(workerID) // runs 4th: requeue immediately
 	}
@@ -81,10 +87,47 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	}
 }
 
-// registerWorker upserts the worker, marks it online, reconciles the agent's
-// running-task report against DB state, sends the RegisterResponse, publishes
-// an SSE event, and triggers the dispatch loop.
-func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
+// authenticateAndRegister dispatches to the appropriate auth path based on the credential type.
+func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
+	switch cred := reg.Credential.(type) {
+	case *relayv1.RegisterRequest_EnrollmentToken:
+		return h.enrollAndRegister(ctx, stream, reg, cred.EnrollmentToken)
+	case *relayv1.RegisterRequest_AgentToken:
+		return h.reconnectAndRegister(ctx, stream, reg, cred.AgentToken)
+	default:
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+}
+
+// enrollAndRegister handles first-time enrollment using an enrollment token.
+func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawEnroll string) (string, *workerSender, error) {
+	if rawEnroll == "" {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+
+	sum := sha256.Sum256([]byte(rawEnroll))
+	hash := hex.EncodeToString(sum[:])
+	enroll, err := h.q.GetAgentEnrollmentByTokenHash(ctx, hash)
+	if err != nil {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+	if enroll.ConsumedAt.Valid {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+	if time.Now().After(enroll.ExpiresAt.Time) {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+
+	// Generate fresh agent token.
+	rawBytes := make([]byte, 32)
+	if _, err := cryptorand.Read(rawBytes); err != nil {
+		return "", nil, status.Errorf(codes.Internal, "token gen failed")
+	}
+	rawAgent := hex.EncodeToString(rawBytes)
+	sumAgent := sha256.Sum256([]byte(rawAgent))
+	agentHash := hex.EncodeToString(sumAgent[:])
+
+	// Upsert worker first to obtain the stable worker ID for the consume record.
 	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name:     reg.Hostname,
 		Hostname: reg.Hostname,
@@ -98,8 +141,51 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		return "", nil, fmt.Errorf("upsert worker: %w", err)
 	}
 
-	w, err = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:         w.ID,
+	// Consume enrollment atomically before writing the agent token.
+	// Only one concurrent caller wins; the loser gets rows == 0.
+	// SetWorkerAgentToken happens after so that the winning token is
+	// always the one stored — concurrent callers cannot overwrite each other.
+	rows, err := h.q.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{
+		ID:         enroll.ID,
+		ConsumedBy: w.ID,
+	})
+	if err != nil || rows == 0 {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+
+	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: w.ID, AgentTokenHash: &agentHash,
+	}); err != nil {
+		return "", nil, fmt.Errorf("set agent token: %w", err)
+	}
+
+	return h.finishRegister(ctx, stream, reg, w.ID, rawAgent)
+}
+
+// reconnectAndRegister handles agent reconnection using a previously issued agent token.
+func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawAgent string) (string, *workerSender, error) {
+	if rawAgent == "" {
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+	sum := sha256.Sum256([]byte(rawAgent))
+	hash := hex.EncodeToString(sum[:])
+
+	w, err := h.q.GetWorkerByAgentTokenHash(ctx, &hash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		}
+		return "", nil, status.Errorf(codes.Internal, "token lookup failed")
+	}
+
+	return h.finishRegister(ctx, stream, reg, w.ID, "")
+}
+
+// finishRegister updates worker status, reconciles running tasks, sends RegisterResponse,
+// registers the sender, and triggers dispatch.
+func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, id pgtype.UUID, rawAgentToken string) (string, *workerSender, error) {
+	updated, err := h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:         id,
 		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
@@ -107,7 +193,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		return "", nil, fmt.Errorf("update worker status: %w", err)
 	}
 
-	workerID := uuidStr(w.ID)
+	workerID := uuidStr(updated.ID)
 
 	// Agent reconnected within its grace window — stop the requeue timer.
 	if h.grace != nil {
@@ -115,7 +201,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 	}
 
 	// Reconcile the agent's running-task report against DB state.
-	cancelIDs, err := h.reconcileRunningTasks(ctx, w.ID, reg.RunningTasks)
+	cancelIDs, err := h.reconcileRunningTasks(ctx, updated.ID, reg.RunningTasks)
 	if err != nil {
 		return "", nil, fmt.Errorf("reconcile: %w", err)
 	}
@@ -127,6 +213,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 			RegisterResponse: &relayv1.RegisterResponse{
 				WorkerId:      workerID,
 				CancelTaskIds: cancelIDs,
+				AgentToken:    rawAgentToken,
 			},
 		},
 	}); err != nil {
@@ -375,4 +462,3 @@ func uuidStr(u pgtype.UUID) string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
-

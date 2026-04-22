@@ -11,6 +11,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"golang.org/x/crypto/bcrypt"
 	"relay/internal/store"
 )
 
@@ -44,3 +45,33 @@ func newTestQueries(t *testing.T) *store.Queries {
 
 	return store.New(pool)
 }
+
+func newTestUser(t *testing.T, q *store.Queries, isAdmin bool) store.User {
+	t.Helper()
+	ctx := context.Background()
+	ph, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
+	require.NoError(t, err)
+	name := "user-" + t.Name()
+	email := name + "@example.com"
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: name, Email: email, IsAdmin: isAdmin, PasswordHash: string(ph),
+	})
+	require.NoError(t, err)
+	return user
+}
+
+func newTestWorker(t *testing.T, q *store.Queries) store.Worker {
+	t.Helper()
+	ctx := context.Background()
+	hostname := "test-worker-" + t.Name()
+	row, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: hostname, Hostname: hostname, CpuCores: 4, RamGb: 16,
+		GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.GetWorker(ctx, row.ID)
+	require.NoError(t, err)
+	return w
+}
+
+func ptrStr(s string) *string { return &s }

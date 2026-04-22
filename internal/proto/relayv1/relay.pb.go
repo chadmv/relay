@@ -227,16 +227,24 @@ func (*AgentMessage_TaskLog) isAgentMessage_Payload() {}
 // running_tasks is the agent's list of currently-executing tasks at reconnect
 // time (empty on first connect). The coordinator diffs against DB state and
 // replies with RegisterResponse.cancel_task_ids for any stale assignments.
+//
+// Exactly one credential field must be set. enrollment_token is used only on
+// first boot of a fresh agent; every subsequent reconnect sends agent_token.
 type RegisterRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	Hostname      string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	CpuCores      int32                  `protobuf:"varint,3,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
-	RamGb         int32                  `protobuf:"varint,4,opt,name=ram_gb,json=ramGb,proto3" json:"ram_gb,omitempty"`
-	GpuCount      int32                  `protobuf:"varint,5,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
-	GpuModel      string                 `protobuf:"bytes,6,opt,name=gpu_model,json=gpuModel,proto3" json:"gpu_model,omitempty"`
-	Os            string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
-	RunningTasks  []*RunningTask         `protobuf:"bytes,8,rep,name=running_tasks,json=runningTasks,proto3" json:"running_tasks,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId     string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	Hostname     string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	CpuCores     int32                  `protobuf:"varint,3,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
+	RamGb        int32                  `protobuf:"varint,4,opt,name=ram_gb,json=ramGb,proto3" json:"ram_gb,omitempty"`
+	GpuCount     int32                  `protobuf:"varint,5,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
+	GpuModel     string                 `protobuf:"bytes,6,opt,name=gpu_model,json=gpuModel,proto3" json:"gpu_model,omitempty"`
+	Os           string                 `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
+	RunningTasks []*RunningTask         `protobuf:"bytes,8,rep,name=running_tasks,json=runningTasks,proto3" json:"running_tasks,omitempty"`
+	// Types that are valid to be assigned to Credential:
+	//
+	//	*RegisterRequest_EnrollmentToken
+	//	*RegisterRequest_AgentToken
+	Credential    isRegisterRequest_Credential `protobuf_oneof:"credential"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -326,6 +334,47 @@ func (x *RegisterRequest) GetRunningTasks() []*RunningTask {
 	}
 	return nil
 }
+
+func (x *RegisterRequest) GetCredential() isRegisterRequest_Credential {
+	if x != nil {
+		return x.Credential
+	}
+	return nil
+}
+
+func (x *RegisterRequest) GetEnrollmentToken() string {
+	if x != nil {
+		if x, ok := x.Credential.(*RegisterRequest_EnrollmentToken); ok {
+			return x.EnrollmentToken
+		}
+	}
+	return ""
+}
+
+func (x *RegisterRequest) GetAgentToken() string {
+	if x != nil {
+		if x, ok := x.Credential.(*RegisterRequest_AgentToken); ok {
+			return x.AgentToken
+		}
+	}
+	return ""
+}
+
+type isRegisterRequest_Credential interface {
+	isRegisterRequest_Credential()
+}
+
+type RegisterRequest_EnrollmentToken struct {
+	EnrollmentToken string `protobuf:"bytes,9,opt,name=enrollment_token,json=enrollmentToken,proto3,oneof"`
+}
+
+type RegisterRequest_AgentToken struct {
+	AgentToken string `protobuf:"bytes,10,opt,name=agent_token,json=agentToken,proto3,oneof"`
+}
+
+func (*RegisterRequest_EnrollmentToken) isRegisterRequest_Credential() {}
+
+func (*RegisterRequest_AgentToken) isRegisterRequest_Credential() {}
 
 // A task the agent believes it is currently running, with the epoch assigned
 // at dispatch time. The coordinator uses this to detect stale assignments.
@@ -623,14 +672,16 @@ func (*CoordinatorMessage_DispatchTask) isCoordinatorMessage_Payload() {}
 
 func (*CoordinatorMessage_CancelTask) isCoordinatorMessage_Payload() {}
 
-// Sent in response to RegisterRequest. cancel_task_ids lists tasks the agent
-// reported as running that the coordinator considers stale (reassigned during
-// grace expiry, or unknown). The agent must abandon these without sending a
-// final status update.
+// Sent in response to RegisterRequest. agent_token is populated only on
+// successful enrollment (first connect with a valid enrollment_token); the
+// agent must persist it and send it as agent_token on every reconnect.
+// cancel_task_ids lists tasks the agent reported as running that the
+// coordinator considers stale.
 type RegisterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerId      string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
 	CancelTaskIds []string               `protobuf:"bytes,2,rep,name=cancel_task_ids,json=cancelTaskIds,proto3" json:"cancel_task_ids,omitempty"`
+	AgentToken    string                 `protobuf:"bytes,3,opt,name=agent_token,json=agentToken,proto3" json:"agent_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -677,6 +728,13 @@ func (x *RegisterResponse) GetCancelTaskIds() []string {
 		return x.CancelTaskIds
 	}
 	return nil
+}
+
+func (x *RegisterResponse) GetAgentToken() string {
+	if x != nil {
+		return x.AgentToken
+	}
+	return ""
 }
 
 type DispatchTask struct {
@@ -817,7 +875,7 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\vtask_status\x18\x02 \x01(\v2\x1a.relay.v1.TaskStatusUpdateH\x00R\n" +
 	"taskStatus\x123\n" +
 	"\btask_log\x18\x03 \x01(\v2\x16.relay.v1.TaskLogChunkH\x00R\ataskLogB\t\n" +
-	"\apayload\"\x84\x02\n" +
+	"\apayload\"\xe2\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1b\n" +
@@ -826,7 +884,13 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\tgpu_count\x18\x05 \x01(\x05R\bgpuCount\x12\x1b\n" +
 	"\tgpu_model\x18\x06 \x01(\tR\bgpuModel\x12\x0e\n" +
 	"\x02os\x18\a \x01(\tR\x02os\x12:\n" +
-	"\rrunning_tasks\x18\b \x03(\v2\x15.relay.v1.RunningTaskR\frunningTasks\"<\n" +
+	"\rrunning_tasks\x18\b \x03(\v2\x15.relay.v1.RunningTaskR\frunningTasks\x12+\n" +
+	"\x10enrollment_token\x18\t \x01(\tH\x00R\x0fenrollmentToken\x12!\n" +
+	"\vagent_token\x18\n" +
+	" \x01(\tH\x00R\n" +
+	"agentTokenB\f\n" +
+	"\n" +
+	"credential\"<\n" +
 	"\vRunningTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\"\xc4\x01\n" +
@@ -848,10 +912,12 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\rdispatch_task\x18\x02 \x01(\v2\x16.relay.v1.DispatchTaskH\x00R\fdispatchTask\x127\n" +
 	"\vcancel_task\x18\x03 \x01(\v2\x14.relay.v1.CancelTaskH\x00R\n" +
 	"cancelTaskB\t\n" +
-	"\apayload\"W\n" +
+	"\apayload\"x\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
-	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\"\x82\x02\n" +
+	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\x12\x1f\n" +
+	"\vagent_token\x18\x03 \x01(\tR\n" +
+	"agentToken\"\x82\x02\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x18\n" +
@@ -936,6 +1002,10 @@ func file_relayv1_relay_proto_init() {
 		(*AgentMessage_Register)(nil),
 		(*AgentMessage_TaskStatus)(nil),
 		(*AgentMessage_TaskLog)(nil),
+	}
+	file_relayv1_relay_proto_msgTypes[1].OneofWrappers = []any{
+		(*RegisterRequest_EnrollmentToken)(nil),
+		(*RegisterRequest_AgentToken)(nil),
 	}
 	file_relayv1_relay_proto_msgTypes[3].OneofWrappers = []any{}
 	file_relayv1_relay_proto_msgTypes[5].OneofWrappers = []any{

@@ -20,6 +20,9 @@ message AgentMessage {
 // running_tasks is the agent's list of currently-executing tasks at reconnect
 // time (empty on first connect). The coordinator diffs against DB state and
 // replies with RegisterResponse.cancel_task_ids for any stale assignments.
+//
+// Exactly one credential field must be set. enrollment_token is used only on
+// first boot of a fresh agent; every subsequent reconnect sends agent_token.
 message RegisterRequest {
   string worker_id                 = 1;
   string hostname                  = 2;
@@ -29,6 +32,10 @@ message RegisterRequest {
   string gpu_model                 = 6;
   string os                        = 7;
   repeated RunningTask running_tasks = 8;
+  oneof credential {
+    string enrollment_token = 9;
+    string agent_token      = 10;
+  }
 }
 
 // A task the agent believes it is currently running, with the epoch assigned
@@ -61,13 +68,15 @@ message CoordinatorMessage {
   }
 }
 
-// Sent in response to RegisterRequest. cancel_task_ids lists tasks the agent
-// reported as running that the coordinator considers stale (reassigned during
-// grace expiry, or unknown). The agent must abandon these without sending a
-// final status update.
+// Sent in response to RegisterRequest. agent_token is populated only on
+// successful enrollment (first connect with a valid enrollment_token); the
+// agent must persist it and send it as agent_token on every reconnect.
+// cancel_task_ids lists tasks the agent reported as running that the
+// coordinator considers stale.
 message RegisterResponse {
   string          worker_id       = 1;
   repeated string cancel_task_ids = 2;
+  string          agent_token     = 3;
 }
 
 message DispatchTask {
