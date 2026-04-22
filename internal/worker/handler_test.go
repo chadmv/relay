@@ -4,6 +4,8 @@ package worker_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -25,6 +27,20 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// seedWorkerWithAgentToken creates a worker in the DB with a known agent token.
+func seedWorkerWithAgentToken(t *testing.T, ctx context.Context, q *store.Queries, hostname string) (pgtype.UUID, string) {
+	t.Helper()
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: hostname, Hostname: hostname, CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+	raw := "test-agent-token-" + hostname
+	sum := sha256.Sum256([]byte(raw))
+	h := hex.EncodeToString(sum[:])
+	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{ID: w.ID, AgentTokenHash: &h}))
+	return w.ID, raw
+}
 
 // fakeStream implements grpc.BidiStreamingServer[relayv1.AgentMessage, relayv1.CoordinatorMessage].
 type fakeStream struct {
@@ -107,6 +123,8 @@ func TestHandler_RegisterNewWorker(t *testing.T) {
 		}
 	})
 
+	_, rawToken := seedWorkerWithAgentToken(t, context.Background(), q, "render-01")
+
 	// hold is closed by the test to let Connect proceed to io.EOF
 	hold := make(chan struct{})
 	stream := &fakeStream{
@@ -122,6 +140,7 @@ func TestHandler_RegisterNewWorker(t *testing.T) {
 					GpuCount: 2,
 					GpuModel: "RTX 4090",
 					Os:       "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
 				},
 			}},
 		},
@@ -276,6 +295,13 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	rawRecon := "test-token-recon"
+	sumRecon := sha256.Sum256([]byte(rawRecon))
+	h2 := hex.EncodeToString(sumRecon[:])
+	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: workerRow.ID, AgentTokenHash: &h2,
+	}))
+
 	tMatch, err := q.CreateTask(ctx, store.CreateTaskParams{
 		JobID: job.ID, Name: "match", Command: []string{"true"},
 		Env: []byte(`{}`), Requires: []byte(`{}`),
@@ -326,6 +352,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 						{TaskId: matchIDStr, Epoch: int64(tMatchClaimed.AssignmentEpoch)},
 						{TaskId: staleIDStr, Epoch: 999}, // stale epoch
 					},
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawRecon},
 				},
 			},
 		}},
@@ -381,12 +408,15 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 
 	h := worker.NewHandlerWithGrace(q, registry, broker, func() {}, grace)
 
+	_, rawToken := seedWorkerWithAgentToken(t, ctx, q, "grace-host")
+
 	stream := &fakeStream{
 		ctx: ctx,
 		msgs: []*relayv1.AgentMessage{{
 			Payload: &relayv1.AgentMessage_Register{
 				Register: &relayv1.RegisterRequest{
 					Hostname: "grace-host", CpuCores: 1, RamGb: 1, Os: "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
 				},
 			},
 		}},
