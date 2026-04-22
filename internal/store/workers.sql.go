@@ -11,10 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearWorkerAgentToken = `-- name: ClearWorkerAgentToken :exec
+UPDATE workers
+SET agent_token_hash = NULL, status = 'revoked'
+WHERE id = $1
+`
+
+// ClearWorkerAgentToken
+//
+//	UPDATE workers
+//	SET agent_token_hash = NULL, status = 'revoked'
+//	WHERE id = $1
+func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, clearWorkerAgentToken, id)
+	return err
+}
+
 const createWorker = `-- name: CreateWorker :one
 INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 `
 
 type CreateWorkerParams struct {
@@ -31,7 +47,7 @@ type CreateWorkerParams struct {
 //
 //	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, createWorker,
 		arg.Name,
@@ -57,17 +73,18 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.Status,
 		&i.LastSeenAt,
 		&i.CreatedAt,
+		&i.AgentTokenHash,
 	)
 	return i, err
 }
 
 const getWorker = `-- name: GetWorker :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE id = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers WHERE id = $1
 `
 
 // GetWorker
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE id = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers WHERE id = $1
 func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorker, id)
 	var i Worker
@@ -85,17 +102,49 @@ func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error)
 		&i.Status,
 		&i.LastSeenAt,
 		&i.CreatedAt,
+		&i.AgentTokenHash,
+	)
+	return i, err
+}
+
+const getWorkerByAgentTokenHash = `-- name: GetWorkerByAgentTokenHash :one
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers
+WHERE agent_token_hash = $1 AND status != 'revoked'
+`
+
+// GetWorkerByAgentTokenHash
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers
+//	WHERE agent_token_hash = $1 AND status != 'revoked'
+func (q *Queries) GetWorkerByAgentTokenHash(ctx context.Context, agentTokenHash *string) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorkerByAgentTokenHash, agentTokenHash)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Hostname,
+		&i.CpuCores,
+		&i.RamGb,
+		&i.GpuCount,
+		&i.GpuModel,
+		&i.Os,
+		&i.MaxSlots,
+		&i.Labels,
+		&i.Status,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.AgentTokenHash,
 	)
 	return i, err
 }
 
 const getWorkerByHostname = `-- name: GetWorkerByHostname :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE hostname = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers WHERE hostname = $1
 `
 
 // GetWorkerByHostname
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers WHERE hostname = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers WHERE hostname = $1
 func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostname, hostname)
 	var i Worker
@@ -113,17 +162,18 @@ func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Wor
 		&i.Status,
 		&i.LastSeenAt,
 		&i.CreatedAt,
+		&i.AgentTokenHash,
 	)
 	return i, err
 }
 
 const listWorkers = `-- name: ListWorkers :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers ORDER BY name
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers ORDER BY name
 `
 
 // ListWorkers
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at FROM workers ORDER BY name
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash FROM workers ORDER BY name
 func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkers)
 	if err != nil {
@@ -147,6 +197,7 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 			&i.Status,
 			&i.LastSeenAt,
 			&i.CreatedAt,
+			&i.AgentTokenHash,
 		); err != nil {
 			return nil, err
 		}
@@ -158,11 +209,28 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	return items, nil
 }
 
+const setWorkerAgentToken = `-- name: SetWorkerAgentToken :exec
+UPDATE workers SET agent_token_hash = $2 WHERE id = $1
+`
+
+type SetWorkerAgentTokenParams struct {
+	ID             pgtype.UUID `json:"id"`
+	AgentTokenHash *string     `json:"agent_token_hash"`
+}
+
+// SetWorkerAgentToken
+//
+//	UPDATE workers SET agent_token_hash = $2 WHERE id = $1
+func (q *Queries) SetWorkerAgentToken(ctx context.Context, arg SetWorkerAgentTokenParams) error {
+	_, err := q.db.Exec(ctx, setWorkerAgentToken, arg.ID, arg.AgentTokenHash)
+	return err
+}
+
 const updateWorker = `-- name: UpdateWorker :one
 UPDATE workers
 SET name = $2, labels = $3, max_slots = $4
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 `
 
 type UpdateWorkerParams struct {
@@ -177,7 +245,7 @@ type UpdateWorkerParams struct {
 //	UPDATE workers
 //	SET name = $2, labels = $3, max_slots = $4
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorker,
 		arg.ID,
@@ -200,6 +268,7 @@ func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Wor
 		&i.Status,
 		&i.LastSeenAt,
 		&i.CreatedAt,
+		&i.AgentTokenHash,
 	)
 	return i, err
 }
@@ -208,7 +277,7 @@ const updateWorkerStatus = `-- name: UpdateWorkerStatus :one
 UPDATE workers
 SET status = $2, last_seen_at = $3
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 `
 
 type UpdateWorkerStatusParams struct {
@@ -222,7 +291,7 @@ type UpdateWorkerStatusParams struct {
 //	UPDATE workers
 //	SET status = $2, last_seen_at = $3
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash
 func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatusParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorkerStatus, arg.ID, arg.Status, arg.LastSeenAt)
 	var i Worker
@@ -240,6 +309,7 @@ func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatus
 		&i.Status,
 		&i.LastSeenAt,
 		&i.CreatedAt,
+		&i.AgentTokenHash,
 	)
 	return i, err
 }
@@ -266,6 +336,22 @@ type UpsertWorkerByHostnameParams struct {
 	Os       string `json:"os"`
 }
 
+type UpsertWorkerByHostnameRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Name       string             `json:"name"`
+	Hostname   string             `json:"hostname"`
+	CpuCores   int32              `json:"cpu_cores"`
+	RamGb      int32              `json:"ram_gb"`
+	GpuCount   int32              `json:"gpu_count"`
+	GpuModel   string             `json:"gpu_model"`
+	Os         string             `json:"os"`
+	MaxSlots   int32              `json:"max_slots"`
+	Labels     []byte             `json:"labels"`
+	Status     string             `json:"status"`
+	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 // Insert a new worker or update hardware specs on reconnect.
 // Admin-managed fields (name, labels, max_slots) are preserved on conflict.
 //
@@ -278,7 +364,7 @@ type UpsertWorkerByHostnameParams struct {
 //	        gpu_model = EXCLUDED.gpu_model,
 //	        os        = EXCLUDED.os
 //	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at
-func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerByHostnameParams) (Worker, error) {
+func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerByHostnameParams) (UpsertWorkerByHostnameRow, error) {
 	row := q.db.QueryRow(ctx, upsertWorkerByHostname,
 		arg.Name,
 		arg.Hostname,
@@ -288,7 +374,7 @@ func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerBy
 		arg.GpuModel,
 		arg.Os,
 	)
-	var i Worker
+	var i UpsertWorkerByHostnameRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,

@@ -36,3 +36,15 @@ ON CONFLICT (hostname) DO UPDATE
         gpu_model = EXCLUDED.gpu_model,
         os        = EXCLUDED.os
 RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at;
+
+-- name: SetWorkerAgentToken :exec
+UPDATE workers SET agent_token_hash = $2 WHERE id = $1;
+
+-- name: ClearWorkerAgentToken :exec
+UPDATE workers
+SET agent_token_hash = NULL, status = 'revoked'
+WHERE id = $1;
+
+-- name: GetWorkerByAgentTokenHash :one
+SELECT * FROM workers
+WHERE agent_token_hash = $1 AND status != 'revoked';
