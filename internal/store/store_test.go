@@ -230,3 +230,46 @@ func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "running", fetched.Status)
 }
+
+func TestAppendTaskLog_EpochGuarded(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Hal", "hal@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1-logs", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Log with matching epoch.
+	err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1,
+	})
+	require.NoError(t, err)
+
+	// Log with stale epoch.
+	err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0,
+	})
+	require.NoError(t, err) // :exec returns nil even when 0 rows inserted
+
+	logs, err := q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "hello\n", logs[0].Content)
+}

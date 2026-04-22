@@ -225,9 +225,10 @@ func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk
 	}
 
 	_ = h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID:  taskID,
-		Stream:  stream,
-		Content: string(chunk.Content),
+		TaskID:          taskID,
+		Stream:          stream,
+		Content:         string(chunk.Content),
+		AssignmentEpoch: int32(chunk.Epoch),
 	})
 }
 

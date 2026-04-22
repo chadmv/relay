@@ -12,20 +12,36 @@ import (
 )
 
 const appendTaskLog = `-- name: AppendTaskLog :exec
-INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3)
+INSERT INTO task_logs (task_id, stream, content)
+SELECT $1, $2, $3
+WHERE EXISTS (
+    SELECT 1 FROM tasks WHERE id = $1 AND assignment_epoch = $4
+)
 `
 
 type AppendTaskLogParams struct {
-	TaskID  pgtype.UUID `json:"task_id"`
-	Stream  string      `json:"stream"`
-	Content string      `json:"content"`
+	TaskID          pgtype.UUID `json:"task_id"`
+	Stream          string      `json:"stream"`
+	Content         string      `json:"content"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
 }
 
-// AppendTaskLog
+// Inserts a log chunk only if the caller's epoch matches the task's current
+// assignment. Stale chunks (from a reassigned generation) silently insert
+// zero rows.
 //
-//	INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3)
+//	INSERT INTO task_logs (task_id, stream, content)
+//	SELECT $1, $2, $3
+//	WHERE EXISTS (
+//	    SELECT 1 FROM tasks WHERE id = $1 AND assignment_epoch = $4
+//	)
 func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) error {
-	_, err := q.db.Exec(ctx, appendTaskLog, arg.TaskID, arg.Stream, arg.Content)
+	_, err := q.db.Exec(ctx, appendTaskLog,
+		arg.TaskID,
+		arg.Stream,
+		arg.Content,
+		arg.AssignmentEpoch,
+	)
 	return err
 }
 

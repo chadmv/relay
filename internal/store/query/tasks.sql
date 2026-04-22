@@ -45,7 +45,14 @@ ON CONFLICT DO NOTHING;
 SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1;
 
 -- name: AppendTaskLog :exec
-INSERT INTO task_logs (task_id, stream, content) VALUES ($1, $2, $3);
+-- Inserts a log chunk only if the caller's epoch matches the task's current
+-- assignment. Stale chunks (from a reassigned generation) silently insert
+-- zero rows.
+INSERT INTO task_logs (task_id, stream, content)
+SELECT $1, $2, $3
+WHERE EXISTS (
+    SELECT 1 FROM tasks WHERE id = $1 AND assignment_epoch = $4
+);
 
 -- name: GetTaskLogs :many
 SELECT * FROM task_logs WHERE task_id = $1 ORDER BY id;
