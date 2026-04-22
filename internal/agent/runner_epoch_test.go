@@ -19,7 +19,7 @@ func TestRunnerTagsOutgoingMessagesWithEpoch(t *testing.T) {
 
 	go runner.Run(runCtx, &relayv1.DispatchTask{
 		TaskId:  "task-123",
-		Command: []string{"true"},
+		Command: echoCmd(), // cross-platform: "echo hello" on Unix, "cmd /c echo hello" on Windows
 	})
 
 	// Collect all messages until channel drains.
