@@ -81,7 +81,6 @@ func main() {
 		os.Unsetenv("RELAY_BOOTSTRAP_PASSWORD")
 		os.Unsetenv("RELAY_BOOTSTRAP_ADMIN")
 		bootstrapPassword = ""
-		_ = bootstrapPassword
 	}
 
 	broker := events.NewBroker()
