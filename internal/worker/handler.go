@@ -114,7 +114,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	if enroll.ConsumedAt.Valid {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
-	if !enroll.ExpiresAt.Valid || time.Now().After(enroll.ExpiresAt.Time) {
+	if time.Now().After(enroll.ExpiresAt.Time) {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
 
@@ -127,23 +127,36 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	sumAgent := sha256.Sum256([]byte(rawAgent))
 	agentHash := hex.EncodeToString(sumAgent[:])
 
-	workerID, sender, err := h.registerWorkerWithToken(ctx, stream, reg, agentHash, rawAgent)
+	// Upsert worker and set agent token before consuming the enrollment.
+	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name:     reg.Hostname,
+		Hostname: reg.Hostname,
+		CpuCores: reg.CpuCores,
+		RamGb:    reg.RamGb,
+		GpuCount: reg.GpuCount,
+		GpuModel: reg.GpuModel,
+		Os:       reg.Os,
+	})
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("upsert worker: %w", err)
+	}
+	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: w.ID, AgentTokenHash: &agentHash,
+	}); err != nil {
+		return "", nil, fmt.Errorf("set agent token: %w", err)
 	}
 
-	// Consume enrollment atomically — if 0 rows affected, a concurrent connect beat us.
-	var workerUUID pgtype.UUID
-	_ = workerUUID.Scan(workerID)
+	// Consume enrollment atomically before sending the response.
+	// If 0 rows affected, a concurrent connect beat us to this enrollment.
 	rows, err := h.q.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{
 		ID:         enroll.ID,
-		ConsumedBy: workerUUID,
+		ConsumedBy: w.ID,
 	})
 	if err != nil || rows == 0 {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
 
-	return workerID, sender, nil
+	return h.finishRegister(ctx, stream, reg, w.ID, rawAgent)
 }
 
 // reconnectAndRegister handles agent reconnection using a previously issued agent token.
@@ -163,30 +176,6 @@ func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.Agent
 	}
 
 	return h.finishRegister(ctx, stream, reg, w.ID, "")
-}
-
-// registerWorkerWithToken upserts the worker, sets its agent token, and calls finishRegister.
-func (h *Handler) registerWorkerWithToken(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, agentTokenHash string, rawAgentToken string) (string, *workerSender, error) {
-	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
-		Name:     reg.Hostname,
-		Hostname: reg.Hostname,
-		CpuCores: reg.CpuCores,
-		RamGb:    reg.RamGb,
-		GpuCount: reg.GpuCount,
-		GpuModel: reg.GpuModel,
-		Os:       reg.Os,
-	})
-	if err != nil {
-		return "", nil, fmt.Errorf("upsert worker: %w", err)
-	}
-
-	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
-		ID: w.ID, AgentTokenHash: &agentTokenHash,
-	}); err != nil {
-		return "", nil, fmt.Errorf("set agent token: %w", err)
-	}
-
-	return h.finishRegister(ctx, stream, reg, w.ID, rawAgentToken)
 }
 
 // finishRegister updates worker status, reconciles running tasks, sends RegisterResponse,
