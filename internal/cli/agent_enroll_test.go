@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -35,7 +34,6 @@ func TestAgentEnroll_HappyPath(t *testing.T) {
 	require.Contains(t, out.String(), "raw-token-abc")
 	require.Contains(t, errOut.String(), "enrollment expires at")
 	require.Contains(t, errOut.String(), "RELAY_AGENT_ENROLLMENT_TOKEN=raw-token-abc")
-	_ = time.Hour
 }
 
 func TestAgentEnroll_MissingToken(t *testing.T) {
