@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
+
+// echoTaskCmd returns a cross-platform command that prints a message to stdout.
+func echoTaskCmd(msg string) []string {
+	if runtime.GOOS == "windows" {
+		return []string{"cmd", "/c", "echo", msg}
+	}
+	return []string{"echo", msg}
+}
 
 // fakeCoord is a minimal in-process coordinator for testing.
 type fakeCoord struct {
@@ -158,7 +167,6 @@ func TestAgent_dispatchAndReceiveLogs(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Dispatch a task.
-	echoCmd := []string{"echo", "hello-from-task"}
 	if testing.Short() {
 		t.Skip("skipping in short mode")
 	}
@@ -167,7 +175,7 @@ func TestAgent_dispatchAndReceiveLogs(t *testing.T) {
 			DispatchTask: &relayv1.DispatchTask{
 				TaskId:  "task-abc",
 				JobId:   "job-xyz",
-				Command: echoCmd,
+				Command: echoTaskCmd("hello-from-task"),
 			},
 		},
 	}
