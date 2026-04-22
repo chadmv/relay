@@ -149,6 +149,7 @@ func TestAgent_registers(t *testing.T) {
 		assert.Equal(t, int32(32), reg.RamGb)
 		assert.Equal(t, int32(1), reg.GpuCount)
 		assert.Equal(t, "NVIDIA RTX 4090", reg.GpuModel)
+		assert.NotNil(t, reg.Credential, "RegisterRequest must carry a credential")
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for RegisterRequest")
 	}

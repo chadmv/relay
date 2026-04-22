@@ -69,6 +69,8 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 	req, err := a.buildRegisterRequest()
 	require.NoError(t, err)
 	assert.Equal(t, "worker-xyz", req.WorkerId)
+	assert.NotNil(t, req.Credential, "credential must be populated")
+	assert.Equal(t, "test-enrollment", req.GetEnrollmentToken())
 	assert.Len(t, req.RunningTasks, 2)
 
 	byID := map[string]int64{}

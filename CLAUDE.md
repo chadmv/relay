@@ -73,7 +73,7 @@ Relay is a render farm job coordinator with three binaries:
 
 ### relay-agent internals
 
-`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network.
+`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network. On first boot the agent uses a one-time `RELAY_AGENT_ENROLLMENT_TOKEN` env var; the server issues a long-lived agent token that is persisted to `<state-dir>/token` (0600 perms). Subsequent reconnects use the persisted token; revoked tokens cause the agent to exit with a log message.
 
 ### relay CLI internals
 
