@@ -25,6 +25,7 @@ func main() {
 		cli.RegisterCommand(),
 		cli.PasswdCommand(),
 		cli.InviteCommand(),
+		cli.AgentCommand(),
 		cli.SubmitCommand(),
 		cli.ListCommand(),
 		cli.GetCommand(),
