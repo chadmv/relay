@@ -36,6 +36,7 @@ func main() {
 	if !creds.HasAgentToken() {
 		if t := os.Getenv("RELAY_AGENT_ENROLLMENT_TOKEN"); t != "" {
 			creds.SetEnrollmentToken(t)
+			os.Unsetenv("RELAY_AGENT_ENROLLMENT_TOKEN") //nolint:errcheck // best-effort; token now in memory
 		} else {
 			fmt.Fprintf(os.Stderr, "relay-agent: no credentials available — set RELAY_AGENT_ENROLLMENT_TOKEN for first boot, or provision the agent token file\n")
 			os.Exit(1)

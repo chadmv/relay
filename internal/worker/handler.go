@@ -127,7 +127,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	sumAgent := sha256.Sum256([]byte(rawAgent))
 	agentHash := hex.EncodeToString(sumAgent[:])
 
-	// Upsert worker and set agent token before consuming the enrollment.
+	// Upsert worker first to obtain the stable worker ID for the consume record.
 	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name:     reg.Hostname,
 		Hostname: reg.Hostname,
@@ -140,20 +140,23 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	if err != nil {
 		return "", nil, fmt.Errorf("upsert worker: %w", err)
 	}
-	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
-		ID: w.ID, AgentTokenHash: &agentHash,
-	}); err != nil {
-		return "", nil, fmt.Errorf("set agent token: %w", err)
-	}
 
-	// Consume enrollment atomically before sending the response.
-	// If 0 rows affected, a concurrent connect beat us to this enrollment.
+	// Consume enrollment atomically before writing the agent token.
+	// Only one concurrent caller wins; the loser gets rows == 0.
+	// SetWorkerAgentToken happens after so that the winning token is
+	// always the one stored — concurrent callers cannot overwrite each other.
 	rows, err := h.q.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{
 		ID:         enroll.ID,
 		ConsumedBy: w.ID,
 	})
 	if err != nil || rows == 0 {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+	}
+
+	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: w.ID, AgentTokenHash: &agentHash,
+	}); err != nil {
+		return "", nil, fmt.Errorf("set agent token: %w", err)
 	}
 
 	return h.finishRegister(ctx, stream, reg, w.ID, rawAgent)
