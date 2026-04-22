@@ -14,8 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func ptrStr(s string) *string { return &s }
-
 func TestAgentEnrollments_CreateAndGet(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueries(t)

@@ -69,21 +69,9 @@ func newTestWorker(t *testing.T, q *store.Queries) store.Worker {
 		GpuCount: 0, GpuModel: "", Os: "linux",
 	})
 	require.NoError(t, err)
-	// Convert UpsertWorkerByHostnameRow to Worker
-	return store.Worker{
-		ID:             row.ID,
-		Name:           row.Name,
-		Hostname:       row.Hostname,
-		CpuCores:       row.CpuCores,
-		RamGb:          row.RamGb,
-		GpuCount:       row.GpuCount,
-		GpuModel:       row.GpuModel,
-		Os:             row.Os,
-		MaxSlots:       row.MaxSlots,
-		Labels:         row.Labels,
-		Status:         row.Status,
-		LastSeenAt:     row.LastSeenAt,
-		CreatedAt:      row.CreatedAt,
-		AgentTokenHash: nil,
-	}
+	w, err := q.GetWorker(ctx, row.ID)
+	require.NoError(t, err)
+	return w
 }
+
+func ptrStr(s string) *string { return &s }

@@ -98,7 +98,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		return "", nil, fmt.Errorf("upsert worker: %w", err)
 	}
 
-	w, err = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+	updated, err := h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
 		ID:         w.ID,
 		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
@@ -107,7 +107,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 		return "", nil, fmt.Errorf("update worker status: %w", err)
 	}
 
-	workerID := uuidStr(w.ID)
+	workerID := uuidStr(updated.ID)
 
 	// Agent reconnected within its grace window — stop the requeue timer.
 	if h.grace != nil {
@@ -115,7 +115,7 @@ func (h *Handler) registerWorker(ctx context.Context, stream relayv1.AgentServic
 	}
 
 	// Reconcile the agent's running-task report against DB state.
-	cancelIDs, err := h.reconcileRunningTasks(ctx, w.ID, reg.RunningTasks)
+	cancelIDs, err := h.reconcileRunningTasks(ctx, updated.ID, reg.RunningTasks)
 	if err != nil {
 		return "", nil, fmt.Errorf("reconcile: %w", err)
 	}
