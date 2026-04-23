@@ -39,9 +39,10 @@ func TestWorkerAgentToken_ClearSetsRevokedAndBlocksLookup(t *testing.T) {
 		AgentTokenHash: ptrStr("hash-xyz"),
 	}))
 
-	require.NoError(t, q.ClearWorkerAgentToken(ctx, w.ID))
+	_, err := q.ClearWorkerAgentToken(ctx, w.ID)
+	require.NoError(t, err)
 
-	_, err := q.GetWorkerByAgentTokenHash(ctx, ptrStr("hash-xyz"))
+	_, err = q.GetWorkerByAgentTokenHash(ctx, ptrStr("hash-xyz"))
 	require.Error(t, err)
 	require.True(t, errors.Is(err, pgx.ErrNoRows))
 
