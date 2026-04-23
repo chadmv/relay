@@ -27,10 +27,16 @@ type jobResp struct {
 }
 
 type taskResp struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	WorkerID string `json:"worker_id,omitempty"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Status         string          `json:"status"`
+	Command        []string        `json:"command"`
+	Env            json.RawMessage `json:"env"`
+	Requires       json.RawMessage `json:"requires"`
+	TimeoutSeconds *int32          `json:"timeout_seconds"`
+	Retries        int32           `json:"retries"`
+	DependsOn      []string        `json:"depends_on,omitempty"`
+	WorkerID       string          `json:"worker_id,omitempty"`
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────

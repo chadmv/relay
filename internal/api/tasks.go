@@ -24,7 +24,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]taskResponse, len(tasks))
 	for i, t := range tasks {
-		resp[i] = toTaskResponse(t)
+		resp[i] = toTaskResponse(t, nil)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -47,7 +47,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toTaskResponse(task))
+	writeJSON(w, http.StatusOK, toTaskResponse(task, nil))
 }
 
 func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {

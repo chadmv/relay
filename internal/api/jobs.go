@@ -43,6 +43,7 @@ type taskResponse struct {
 	TimeoutSeconds *int32          `json:"timeout_seconds"`
 	Retries        int32           `json:"retries"`
 	RetryCount     int32           `json:"retry_count"`
+	DependsOn      []string        `json:"depends_on,omitempty"`
 	WorkerID       string          `json:"worker_id,omitempty"`
 }
 
@@ -61,7 +62,7 @@ type jobResponse struct {
 
 // ─── Converters ───────────────────────────────────────────────────────────────
 
-func toTaskResponse(t store.Task) taskResponse {
+func toTaskResponse(t store.Task, dependsOn []string) taskResponse {
 	return taskResponse{
 		ID:             uuidStr(t.ID),
 		Name:           t.Name,
@@ -72,16 +73,17 @@ func toTaskResponse(t store.Task) taskResponse {
 		TimeoutSeconds: t.TimeoutSeconds,
 		Retries:        t.Retries,
 		RetryCount:     t.RetryCount,
+		DependsOn:      dependsOn,
 		WorkerID:       uuidStr(t.WorkerID),
 	}
 }
 
-func toJobResponse(j store.Job, email string, tasks []store.Task) jobResponse {
+func toJobResponse(j store.Job, email string, tasks []store.Task, taskDeps map[pgtype.UUID][]string) jobResponse {
 	var taskResps []taskResponse
 	if len(tasks) > 0 {
 		taskResps = make([]taskResponse, len(tasks))
 		for i, t := range tasks {
-			taskResps[i] = toTaskResponse(t)
+			taskResps[i] = toTaskResponse(t, taskDeps[t.ID])
 		}
 	}
 	return jobResponse{
@@ -240,7 +242,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks))
+	taskDeps := make(map[pgtype.UUID][]string, len(req.Tasks))
+	for _, ts := range req.Tasks {
+		taskDeps[nameToID[ts.Name]] = ts.DependsOn
+	}
+
+	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +281,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]jobResponse, len(rows))
 	for i, r := range rows {
-		resp[i] = toJobResponse(r.job, r.email, nil)
+		resp[i] = toJobResponse(r.job, r.email, nil, nil)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -299,7 +306,28 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 	job := store.Job{ID: row.ID, Name: row.Name, Priority: row.Priority, Status: row.Status, SubmittedBy: row.SubmittedBy, Labels: row.Labels, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 	tasks, _ := s.q.ListTasksByJob(ctx, row.ID)
-	writeJSON(w, http.StatusOK, toJobResponse(job, row.SubmittedByEmail, tasks))
+
+	uuidToName := make(map[pgtype.UUID]string, len(tasks))
+	for _, t := range tasks {
+		uuidToName[t.ID] = t.Name
+	}
+	taskDeps := make(map[pgtype.UUID][]string, len(tasks))
+	for _, t := range tasks {
+		depUUIDs, err := s.q.GetTaskDependencies(ctx, t.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		if len(depUUIDs) > 0 {
+			names := make([]string, len(depUUIDs))
+			for i, uid := range depUUIDs {
+				names[i] = uuidToName[uid]
+			}
+			taskDeps[t.ID] = names
+		}
+	}
+
+	writeJSON(w, http.StatusOK, toJobResponse(job, row.SubmittedByEmail, tasks, taskDeps))
 }
 
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
@@ -378,7 +406,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		Data:  []byte(`{"status":"cancelled"}`),
 	})
 
-	writeJSON(w, http.StatusOK, toJobResponse(job, "", nil))
+	writeJSON(w, http.StatusOK, toJobResponse(job, "", nil, nil))
 }
 
 // ─── Package-level helper ─────────────────────────────────────────────────────
