@@ -51,6 +51,7 @@ func TestStartupReconcile_SeedsGraceTimersForActiveWorkers(t *testing.T) {
 	require.NoError(t, err)
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{

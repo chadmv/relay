@@ -1,6 +1,6 @@
 -- name: CreateJob :one
-INSERT INTO jobs (name, priority, submitted_by, labels)
-VALUES ($1, $2, $3, $4)
+INSERT INTO jobs (name, priority, submitted_by, labels, scheduled_job_id)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: GetJob :one
@@ -39,3 +39,10 @@ RETURNING *;
 
 -- name: DeleteJob :exec
 DELETE FROM jobs WHERE id = $1;
+
+-- name: ListJobsByScheduledJob :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.scheduled_job_id = $1
+ORDER BY j.created_at DESC;

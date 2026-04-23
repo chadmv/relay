@@ -178,10 +178,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Create job
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
-		Name:        req.Name,
-		Priority:    req.Priority,
-		SubmittedBy: u.ID,
-		Labels:      labelsJSON,
+		Name:           req.Name,
+		Priority:       req.Priority,
+		SubmittedBy:    u.ID,
+		Labels:         labelsJSON,
+		ScheduledJobID: pgtype.UUID{}, // invalid → NULL
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create job failed")

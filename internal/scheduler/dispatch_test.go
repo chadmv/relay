@@ -97,10 +97,11 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 
 	// Create job.
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
-		Name:        "test-job",
-		Priority:    "normal",
-		SubmittedBy: user.ID,
-		Labels:      []byte(`{}`),
+		Name:           "test-job",
+		Priority:       "normal",
+		SubmittedBy:    user.ID,
+		Labels:         []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -173,6 +174,7 @@ func TestDispatcher_UsesAggregateCountQuery(t *testing.T) {
 
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -241,6 +243,7 @@ func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{

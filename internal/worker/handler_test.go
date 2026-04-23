@@ -206,10 +206,11 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 
 	// Create a job.
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
-		Name:        "epoch-gate-job",
-		Priority:    "normal",
-		SubmittedBy: user.ID,
-		Labels:      []byte("{}"),
+		Name:           "epoch-gate-job",
+		Priority:       "normal",
+		SubmittedBy:    user.ID,
+		Labels:         []byte("{}"),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -288,6 +289,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	require.NoError(t, err)
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	workerRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{

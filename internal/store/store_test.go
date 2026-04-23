@@ -32,10 +32,11 @@ func TestCreateAndGetJob(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Alice", "alice@example.com")
 
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
-		Name:        "test-job",
-		Priority:    "normal",
-		SubmittedBy: user.ID,
-		Labels:      []byte(`{}`),
+		Name:           "test-job",
+		Priority:       "normal",
+		SubmittedBy:    user.ID,
+		Labels:         []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "test-job", job.Name)
@@ -77,6 +78,7 @@ func TestTaskDependencyAndEligibility(t *testing.T) {
 
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "dag-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -131,6 +133,7 @@ func TestAssignmentEpochColumnExists(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Eve", "eve@example.com")
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "epoch-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -151,6 +154,7 @@ func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Frank", "frank@example.com")
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 
@@ -191,6 +195,7 @@ func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Gina", "gina@example.com")
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
@@ -238,6 +243,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Hal", "hal@example.com")
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
@@ -281,6 +287,7 @@ func TestReconciliationQueries(t *testing.T) {
 	user := makeTestUser(t, q, ctx, "Ivy", "ivy@example.com")
 	job, err := q.CreateJob(ctx, store.CreateJobParams{
 		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
 	})
 	require.NoError(t, err)
 	w1, err := q.CreateWorker(ctx, store.CreateWorkerParams{

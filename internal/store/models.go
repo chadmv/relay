@@ -39,14 +39,15 @@ type Invite struct {
 }
 
 type Job struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Priority    string             `json:"priority"`
-	Status      string             `json:"status"`
-	SubmittedBy pgtype.UUID        `json:"submitted_by"`
-	Labels      []byte             `json:"labels"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID             pgtype.UUID        `json:"id"`
+	Name           string             `json:"name"`
+	Priority       string             `json:"priority"`
+	Status         string             `json:"status"`
+	SubmittedBy    pgtype.UUID        `json:"submitted_by"`
+	Labels         []byte             `json:"labels"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID pgtype.UUID        `json:"scheduled_job_id"`
 }
 
 type Reservation struct {
@@ -59,6 +60,22 @@ type Reservation struct {
 	StartsAt  pgtype.Timestamptz `json:"starts_at"`
 	EndsAt    pgtype.Timestamptz `json:"ends_at"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type ScheduledJob struct {
+	ID            pgtype.UUID        `json:"id"`
+	Name          string             `json:"name"`
+	OwnerID       pgtype.UUID        `json:"owner_id"`
+	CronExpr      string             `json:"cron_expr"`
+	Timezone      string             `json:"timezone"`
+	JobSpec       []byte             `json:"job_spec"`
+	OverlapPolicy string             `json:"overlap_policy"`
+	Enabled       bool               `json:"enabled"`
+	NextRunAt     pgtype.Timestamptz `json:"next_run_at"`
+	LastRunAt     pgtype.Timestamptz `json:"last_run_at"`
+	LastJobID     pgtype.UUID        `json:"last_job_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Task struct {
