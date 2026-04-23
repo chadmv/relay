@@ -16,6 +16,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/api"
 	"relay/internal/events"
+	"relay/internal/schedrunner"
 	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/worker"
@@ -151,6 +152,12 @@ func main() {
 
 	// Start dispatcher.
 	go dispatcher.Run(ctx)
+
+	// Advance next_run_at past any triggers missed during downtime (never-catch-up policy).
+	if err := schedrunner.ReconcileOnStartup(ctx, q); err != nil {
+		log.Printf("warn: schedrunner reconcile: %v", err)
+	}
+	go schedrunner.NewRunner(pool, q).Run(ctx)
 
 	// Purge expired enrollment tokens hourly.
 	go runEnrollmentJanitor(ctx, q)
