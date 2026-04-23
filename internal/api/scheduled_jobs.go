@@ -95,6 +95,10 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if len(req.JobSpec) == 0 {
+		writeError(w, http.StatusBadRequest, "job_spec is required")
+		return
+	}
 	var spec JobSpec
 	if err := json.Unmarshal(req.JobSpec, &spec); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid job_spec JSON")
@@ -343,7 +347,7 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 
 	job, tasks, err := CreateJobFromSpec(ctx, s.q.WithTx(tx), spec, row.OwnerID, row.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create job failed: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "create job failed")
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {

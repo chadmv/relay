@@ -10,15 +10,13 @@ import (
 	"testing"
 
 	"relay/internal/api"
-	"relay/internal/store"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // createScheduleHelper creates a scheduled job via HTTP and returns its ID.
-func createScheduleHelper(t *testing.T, _ *pgxpool.Pool, _ *store.Queries, srv *api.Server, token, name string) string {
+func createScheduleHelper(t *testing.T, srv *api.Server, token, name string) string {
 	t.Helper()
 	body := `{
 		"name": "` + name + `",
@@ -146,9 +144,9 @@ func TestListScheduledJobs_OwnerOnlySeesOwn(t *testing.T) {
 	bobToken := createTestToken(t, qAlice, bob.ID)
 
 	// Alice creates one schedule
-	createScheduleHelper(t, nil, qAlice, srvAlice, aliceToken, "alice-schedule")
+	createScheduleHelper(t, srvAlice, aliceToken, "alice-schedule")
 	// Bob creates one schedule
-	createScheduleHelper(t, nil, qAlice, srvAlice, bobToken, "bob-schedule")
+	createScheduleHelper(t, srvAlice, bobToken, "bob-schedule")
 
 	// Alice lists: should only see hers
 	req := httptest.NewRequest("GET", "/v1/scheduled-jobs", nil)
@@ -171,9 +169,9 @@ func TestListScheduledJobs_AdminSeesAll(t *testing.T) {
 	adminToken := createTestToken(t, q, admin.ID)
 
 	// Alice creates a schedule
-	createScheduleHelper(t, nil, q, srv, aliceToken, "alice-job")
+	createScheduleHelper(t, srv, aliceToken, "alice-job")
 
-	// Admin lists: should see at least 1
+	// Admin lists: should see all (1 created above)
 	req := httptest.NewRequest("GET", "/v1/scheduled-jobs", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	rec := httptest.NewRecorder()
@@ -182,7 +180,7 @@ func TestListScheduledJobs_AdminSeesAll(t *testing.T) {
 
 	var items []map[string]any
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&items))
-	assert.GreaterOrEqual(t, len(items), 1)
+	assert.Len(t, items, 1)
 }
 
 func TestGetScheduledJob_NotOwner_Returns404(t *testing.T) {
@@ -193,7 +191,7 @@ func TestGetScheduledJob_NotOwner_Returns404(t *testing.T) {
 	bobToken := createTestToken(t, q, bob.ID)
 
 	// Alice creates a schedule
-	aliceSchedID := createScheduleHelper(t, nil, q, srv, aliceToken, "alice-private")
+	aliceSchedID := createScheduleHelper(t, srv, aliceToken, "alice-private")
 
 	// Bob tries to get Alice's schedule: should get 404
 	req := httptest.NewRequest("GET", "/v1/scheduled-jobs/"+aliceSchedID, nil)
@@ -208,7 +206,7 @@ func TestPatchScheduledJob_UpdatesCronExprAndRecomputesNextRun(t *testing.T) {
 	user := createTestUser(t, q, "Alice", "patch-alice@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
-	schedID := createScheduleHelper(t, nil, q, srv, token, "patch-me")
+	schedID := createScheduleHelper(t, srv, token, "patch-me")
 
 	// Patch just the cron_expr
 	patchBody := `{"cron_expr": "@hourly"}`
@@ -230,7 +228,7 @@ func TestDeleteScheduledJob(t *testing.T) {
 	user := createTestUser(t, q, "Alice", "delete-alice@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
-	schedID := createScheduleHelper(t, nil, q, srv, token, "delete-me")
+	schedID := createScheduleHelper(t, srv, token, "delete-me")
 
 	// DELETE → 204
 	req := httptest.NewRequest("DELETE", "/v1/scheduled-jobs/"+schedID, nil)
@@ -252,7 +250,7 @@ func TestRunScheduledJobNow_CreatesJob(t *testing.T) {
 	user := createTestUser(t, q, "Alice", "runnow-alice@example.com", false)
 	token := createTestToken(t, q, user.ID)
 
-	schedID := createScheduleHelper(t, nil, q, srv, token, "run-now-test")
+	schedID := createScheduleHelper(t, srv, token, "run-now-test")
 
 	// POST run-now → 201 with job response
 	req := httptest.NewRequest("POST", "/v1/scheduled-jobs/"+schedID+"/run-now", nil)
