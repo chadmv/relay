@@ -46,6 +46,11 @@ func (r *Runner) Run(ctx context.Context) {
 }
 
 // TickOnce performs one poll-and-fire cycle. Exposed for testing.
+//
+// All rows in a tick share one transaction. This means a failed fire (e.g.
+// DB error inside createJob) still advances next_run_at via the same tx,
+// preventing indefinite hot-loop retries on a broken schedule. last_job_id
+// is left unchanged on failure via COALESCE in AdvanceScheduledJob.
 func (r *Runner) TickOnce(ctx context.Context) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

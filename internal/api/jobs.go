@@ -167,6 +167,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid scheduled_job_id")
 			return
 		}
+		// Enforce ownership: non-admins may only list jobs for schedules they own.
+		// Reuse ownedScheduledJob which returns 404 for non-owner/non-admin callers,
+		// preventing enumeration of another user's job history.
+		if _, ok := s.ownedScheduledJob(w, r, schedID); !ok {
+			return
+		}
 		rs, err := s.q.ListJobsByScheduledJob(ctx, schedID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")

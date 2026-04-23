@@ -345,6 +345,9 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 	}
 	defer tx.Rollback(ctx)
 
+	// run-now submits the job as the schedule owner, not the calling admin.
+	// This preserves audit semantics: the job's submitted_by reflects whose
+	// template fired, regardless of who triggered the explicit run.
 	job, tasks, err := CreateJobFromSpec(ctx, s.q.WithTx(tx), spec, row.OwnerID, row.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "create job failed")

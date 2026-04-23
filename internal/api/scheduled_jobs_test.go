@@ -291,3 +291,20 @@ func TestListJobs_FilterByScheduledJobID(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&list))
 	assert.Len(t, list, 1)
 }
+
+func TestListJobs_FilterByScheduledJobID_NonOwnerReturns404(t *testing.T) {
+	srv, q := newTestServer(t)
+	alice := createTestUser(t, q, "Alice", "filterjobs-owner@example.com", false)
+	aliceToken := createTestToken(t, q, alice.ID)
+	bob := createTestUser(t, q, "Bob", "filterjobs-bob@example.com", false)
+	bobToken := createTestToken(t, q, bob.ID)
+
+	schedID := createScheduleHelper(t, srv, aliceToken, "owner-filter-test")
+
+	// Bob tries to list Alice's schedule's jobs — should get 404.
+	req := httptest.NewRequest("GET", "/v1/jobs?scheduled_job_id="+schedID, nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
