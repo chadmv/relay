@@ -140,6 +140,28 @@ Alternatively, install PostgreSQL natively via the [PostgreSQL Windows installer
 
 On first start the server runs all database migrations automatically. Default addresses: HTTP `:8080`, gRPC `:9090`.
 
+**First-time setup — create the initial admin user**
+
+On a fresh install there are no users. Set `RELAY_BOOTSTRAP_ADMIN` and `RELAY_BOOTSTRAP_PASSWORD` to create (or promote) an admin account on startup:
+
+**Linux / macOS**
+
+```sh
+RELAY_BOOTSTRAP_ADMIN=admin@example.com \
+RELAY_BOOTSTRAP_PASSWORD=changeme \
+./bin/relay-server
+```
+
+**Windows**
+
+```powershell
+$env:RELAY_BOOTSTRAP_ADMIN    = "admin@example.com"
+$env:RELAY_BOOTSTRAP_PASSWORD = "changeme"
+.\bin\relay-server.exe
+```
+
+Both variables are cleared from the process environment immediately after the account is created. On subsequent starts they are not needed — omit them and the server starts normally.
+
 ### 3 — Enroll and start one or more agents
 
 Before a new agent can connect, an admin must issue it a one-time enrollment token:
