@@ -107,6 +107,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
+	pretty := fs.Bool("pretty", false, "output indented JSON (implies --json)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
@@ -121,6 +122,11 @@ func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 	var job jobResp
 	if err := c.do(ctx, "GET", "/v1/jobs/"+fs.Arg(0), nil, &job); err != nil {
 		return err
+	}
+	if *pretty {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(job)
 	}
 	if *asJSON {
 		return json.NewEncoder(w).Encode(job)
