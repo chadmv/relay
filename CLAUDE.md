@@ -42,7 +42,12 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
 | `RELAY_AGENT_ENROLLMENT_TOKEN` | — | One-time enrollment credential for a fresh agent host. Read only when `<state-dir>/token` does not exist. |
 
-CLI reads `RELAY_URL` and `RELAY_TOKEN` as overrides for the config file values.
+## Environment Variables (relay CLI)
+
+| Variable | Purpose |
+|---|---|
+| `RELAY_URL` | Override server URL from config file |
+| `RELAY_TOKEN` | Override auth token from config file |
 
 ## Architecture
 
@@ -57,11 +62,13 @@ Relay is a render farm job coordinator with three binaries:
 `cmd/relay-server/main.go` wires everything together:
 
 1. Runs postgres migrations via `store.Migrate()`
-2. Creates shared dependencies: `*pgxpool.Pool`, `*store.Queries`, `*events.Broker`, `*worker.Registry`, `*scheduler.Dispatcher`
-3. Starts gRPC server (serves `worker.Handler`), the scheduler loop, and the HTTP server
-4. `dispatcher.Trigger` is passed as a callback into both the API server and the gRPC handler to avoid an api→scheduler import cycle
+2. Creates shared dependencies: `*pgxpool.Pool`, `*store.Queries`, `*events.Broker`, `*worker.Registry`, `*scheduler.Dispatcher`, `*scheduler.NotifyListener` (Postgres LISTEN/NOTIFY trigger for the dispatcher)
+3. Creates `*worker.GraceRegistry` and seeds it from any workers with active DB tasks at startup
+4. Parses `RELAY_CORS_ORIGINS` and rate-limit env vars — fatal on bad values
+5. Starts gRPC server, the dispatcher loop, the NotifyListener goroutine, an hourly enrollment-janitor goroutine (`runEnrollmentJanitor` → `q.DeleteExpiredAgentEnrollments`), and the HTTP server
+6. `dispatcher.Trigger` is passed as a callback into the API server, gRPC handler, and grace registry to avoid import cycles
 
-**`internal/api/`** — HTTP handlers. `server.go` registers all routes. Handler methods live in separate files by resource (`auth.go`, `jobs.go`, `tasks.go`, `workers.go`, etc.). The `BearerAuth` middleware validates tokens and injects `AuthUser` into the request context; `AdminOnly` chains after it for admin-only routes.
+**`internal/api/`** — HTTP handlers. `server.go` registers all routes. Handler methods live in separate files by resource (`auth.go`, `jobs.go`, `tasks.go`, `workers.go`, etc.). The `BearerAuth` middleware validates tokens and injects `AuthUser` into the request context; `AdminOnly` chains after it for admin-only routes. `agent_enrollments.go` adds three admin-only routes: `POST /v1/agent-enrollments` (create enrollment token), `GET /v1/agent-enrollments` (list active enrollments), `DELETE /v1/workers/{id}/token` (revoke agent long-lived token). `cors.go` provides `ParseCORSOrigins` and the `CORS` middleware (fail-closed; wildcard `*` rejected; never emits `Allow-Credentials`). `ratelimit.go` provides `ParseRateLimit` and the `RateLimit` middleware (sliding-window, per-IP via `RemoteAddr`; `X-Forwarded-For` is not trusted).
 
 **`internal/store/`** — sqlc-generated store layer (pgx/v5). SQL queries live in `internal/store/query/*.sql`. After editing any `.sql` file, run `make generate` to regenerate `*.sql.go` and `models.go`. Never edit generated files directly. `store.Queries` accepts any `DBTX` (pool or transaction); use `q.WithTx(tx)` for transactions.
 
@@ -69,15 +76,20 @@ Relay is a render farm job coordinator with three binaries:
 
 **`internal/events/`** — `Broker` fans out state-change events to SSE subscribers. Events carry a `JobID` filter; `""` = broadcast to all.
 
-**`internal/worker/`** — `Registry` holds in-memory connected gRPC streams (worker ID → sender). `Handler` implements `AgentServiceServer`, handles the `Connect` stream, persists workers, and receives task status updates.
+**`internal/worker/`** — `Registry` holds in-memory connected gRPC streams (worker ID → sender). `Handler` implements `AgentServiceServer`. `Connect()` dispatches authentication in `authenticateAndRegister()`:
+- `enrollAndRegister()` — validates enrollment token hash, checks consumed/expiry, upserts worker by hostname, atomically consumes token, generates and stores long-lived agent token hash
+- `reconnectAndRegister()` — hashes the presented agent token, looks up worker via `GetWorkerByAgentTokenHash`
+- `finishRegister()` — common path: marks worker online, cancels grace timer, reconciles agent's running-task list against DB, sends `RegisterResponse` (includes new agent token on first enroll), registers sender in registry, triggers dispatcher
 
 ### relay-agent internals
 
-`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network. On first boot the agent uses a one-time `RELAY_AGENT_ENROLLMENT_TOKEN` env var; the server issues a long-lived agent token that is persisted to `<state-dir>/token` (0600 perms). Subsequent reconnects use the persisted token; revoked tokens cause the agent to exit with a log message.
+`internal/agent/Agent` maintains one gRPC stream to the coordinator. A single send goroutine owns all writes to the stream (gRPC streams are not concurrent-send-safe); messages are queued on a buffered `sendCh` (capacity 64). The agent reconnects with exponential backoff. `internal/agent/Runner` executes each task as a subprocess and streams stdout/stderr back. Hardware capabilities are detected at startup (`internal/agent/capabilities.go`; GPU detection is NVIDIA-only via `nvidia-smi`). mDNS discovery (`internal/discovery/`) lets agents find the server automatically on the local network. `internal/agent/credentials.go` manages the `Credentials` struct: `LoadCredentials(stateDir)` reads `<stateDir>/token` (missing = no error); `SetEnrollmentToken` captures `RELAY_AGENT_ENROLLMENT_TOKEN` in memory then clears the env var; `Persist(agentToken)` writes the long-lived token to disk at 0600 perms and clears the in-memory enrollment token. On first boot the enrollment token is used; subsequent reconnects use the persisted agent token; revoked tokens cause the agent to exit with a log message.
 
 ### relay CLI internals
 
-No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct; `cli.Dispatch()` dispatches by name. Config is stored at `~/.relay/config.json` (Linux/Mac) or `%APPDATA%\relay\config.json` (Windows).
+No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct; `cli.Dispatch()` dispatches by name. Config is stored at `~/.relay/config.json` (Linux/Mac) or `%APPDATA%\relay\config.json` (Windows). Relevant subcommands for agent management:
+- `relay agent enroll [--hostname HINT] [--ttl DURATION]` — creates an enrollment token (admin only); token to stdout, metadata to stderr for easy script capture
+- `relay workers revoke <id-or-hostname>` — calls `DELETE /v1/workers/{id}/token`; accepts UUID or hostname (resolved via worker list)
 
 ## Key Design Decisions
 
