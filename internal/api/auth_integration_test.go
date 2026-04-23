@@ -54,7 +54,7 @@ func TestRegister_HappyPath(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "newuser@test.com", "name": "New User",
 		"password": "securepass1", "invite_token": inviteToken,
@@ -82,7 +82,7 @@ func TestRegister_PasswordTooShort(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "newuser@test.com", "password": "short",
 		"invite_token": inviteToken,
@@ -101,7 +101,7 @@ func TestRegister_PasswordTooShort(t *testing.T) {
 func TestRegister_MissingInviteToken(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "newuser@test.com", "password": "securepass1",
 	})
@@ -119,7 +119,7 @@ func TestRegister_MissingInviteToken(t *testing.T) {
 func TestRegister_InvalidInviteToken(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "newuser@test.com", "password": "securepass1",
 		"invite_token": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -141,7 +141,7 @@ func TestRegister_ExpiredInvite(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, -1*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "newuser@test.com", "password": "securepass1",
 		"invite_token": inviteToken,
@@ -163,7 +163,7 @@ func TestRegister_UsedInvite(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	// Use it once.
 	body, _ := json.Marshal(map[string]string{
@@ -199,7 +199,7 @@ func TestRegister_EmailBoundInvite_WrongEmail(t *testing.T) {
 	bound := "expected@test.com"
 	inviteToken := createTestInvite(t, q, admin.ID, &bound, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	body, _ := json.Marshal(map[string]string{
 		"email": "wrong@test.com", "password": "securepass1",
 		"invite_token": inviteToken,
@@ -222,7 +222,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	invite1 := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 	invite2 := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	// Register once.
 	body, _ := json.Marshal(map[string]string{
@@ -257,7 +257,7 @@ func TestLogin_HappyPath(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	// Register first.
 	regBody, _ := json.Marshal(map[string]string{
@@ -291,7 +291,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
 	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	regBody, _ := json.Marshal(map[string]string{
 		"email": "alice@test.com", "password": "correctpassword",
@@ -320,7 +320,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 func TestLogin_UnknownEmail_SameErrorAsWrongPassword(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	loginBody, _ := json.Marshal(map[string]string{
 		"email": "nobody@test.com", "password": "anypassword",
@@ -360,7 +360,7 @@ func registerAndLogin(t *testing.T, srv *api.Server, q *store.Queries, email, pa
 func TestChangePassword_HappyPath(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	token := registerAndLogin(t, srv, q, "alice@test.com", "oldpassword")
 
 	body, _ := json.Marshal(map[string]string{
@@ -398,7 +398,7 @@ func TestChangePassword_HappyPath(t *testing.T) {
 func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	token := registerAndLogin(t, srv, q, "bob@test.com", "correctpassword")
 
 	body, _ := json.Marshal(map[string]string{
@@ -419,7 +419,7 @@ func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 func TestChangePassword_NewPasswordTooShort(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	token := registerAndLogin(t, srv, q, "carol@test.com", "correctpassword")
 
 	body, _ := json.Marshal(map[string]string{
@@ -440,7 +440,7 @@ func TestChangePassword_NewPasswordTooShort(t *testing.T) {
 func TestChangePassword_NoToken(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	body, _ := json.Marshal(map[string]string{
 		"current_password": "old", "new_password": "newpassword1",

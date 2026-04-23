@@ -116,137 +116,43 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+	spec := JobSpec{
+		Name:     req.Name,
+		Priority: req.Priority,
+		Labels:   req.Labels,
+		Tasks:    make([]TaskSpec, len(req.Tasks)),
+	}
+	for i, t := range req.Tasks {
+		spec.Tasks[i] = TaskSpec(t)
+	}
+
+	if err := ValidateJobSpec(spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if len(req.Tasks) == 0 {
-		writeError(w, http.StatusBadRequest, "at least one task is required")
-		return
-	}
-
-	// Check unique task names and non-empty commands
-	nameSet := make(map[string]struct{}, len(req.Tasks))
-	for _, ts := range req.Tasks {
-		if ts.Name == "" {
-			writeError(w, http.StatusBadRequest, "task name is required")
-			return
-		}
-		if len(ts.Command) == 0 {
-			writeError(w, http.StatusBadRequest, "task command is required")
-			return
-		}
-		if _, dup := nameSet[ts.Name]; dup {
-			writeError(w, http.StatusBadRequest, "duplicate task name: "+ts.Name)
-			return
-		}
-		nameSet[ts.Name] = struct{}{}
-	}
-
-	// Validate depends_on references
-	for _, ts := range req.Tasks {
-		for _, dep := range ts.DependsOn {
-			if _, ok := nameSet[dep]; !ok {
-				writeError(w, http.StatusBadRequest, "unknown depends_on: "+dep)
-				return
-			}
-		}
-	}
-
-	if req.Priority == "" {
-		req.Priority = "normal"
 	}
 
 	ctx := r.Context()
-
-	// Begin transaction
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "begin transaction failed")
 		return
 	}
 	defer tx.Rollback(ctx)
-	q := s.q.WithTx(tx)
 
-	// Marshal labels
-	labelsJSON, err := json.Marshal(req.Labels)
+	job, tasks, err := CreateJobFromSpec(ctx, s.q.WithTx(tx), spec, u.ID, pgtype.UUID{})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "marshal labels failed")
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	// Create job
-	job, err := q.CreateJob(ctx, store.CreateJobParams{
-		Name:           req.Name,
-		Priority:       req.Priority,
-		SubmittedBy:    u.ID,
-		Labels:         labelsJSON,
-		ScheduledJobID: pgtype.UUID{}, // invalid → NULL
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create job failed")
-		return
-	}
-
-	// Create tasks and build name→ID map
-	nameToID := make(map[string]pgtype.UUID, len(req.Tasks))
-	tasks := make([]store.Task, 0, len(req.Tasks))
-
-	for _, ts := range req.Tasks {
-		envJSON, err := json.Marshal(ts.Env)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "marshal env failed")
-			return
-		}
-		requiresJSON, err := json.Marshal(ts.Requires)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "marshal requires failed")
-			return
-		}
-
-		task, err := q.CreateTask(ctx, store.CreateTaskParams{
-			JobID:          job.ID,
-			Name:           ts.Name,
-			Command:        ts.Command,
-			Env:            envJSON,
-			Requires:       requiresJSON,
-			TimeoutSeconds: ts.TimeoutSeconds,
-			Retries:        ts.Retries,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "create task failed")
-			return
-		}
-		nameToID[ts.Name] = task.ID
-		tasks = append(tasks, task)
-	}
-
-	// Wire dependencies
-	for _, ts := range req.Tasks {
-		taskID := nameToID[ts.Name]
-		for _, depName := range ts.DependsOn {
-			depID := nameToID[depName]
-			if err := q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
-				TaskID:        taskID,
-				DependsOnTaskID: depID,
-			}); err != nil {
-				writeError(w, http.StatusInternalServerError, "create dependency failed")
-				return
-			}
-		}
-	}
-
-	_ = q.NotifyTaskSubmitted(ctx)
 
 	if err := tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "commit failed")
 		return
 	}
 
-	taskDeps := make(map[pgtype.UUID][]string, len(req.Tasks))
-	for _, ts := range req.Tasks {
-		taskDeps[nameToID[ts.Name]] = ts.DependsOn
+	taskDeps := make(map[pgtype.UUID][]string, len(spec.Tasks))
+	for i, ts := range spec.Tasks {
+		taskDeps[tasks[i].ID] = ts.DependsOn
 	}
 
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))

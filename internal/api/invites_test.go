@@ -27,7 +27,7 @@ func TestCreateInvite_NonAdmin_Forbidden(t *testing.T) {
 	require.NoError(t, err)
 	token := createTestToken(t, q, user.ID)
 
-	srv := api.New(pool, q, nil, nil, nil)
+	srv := api.New(pool, q, nil, nil, nil, 0, 0, 0, 0)
 
 	req := httptest.NewRequest("POST", "/v1/invites", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -49,7 +49,7 @@ func TestCreateInvite_Admin_ReturnsToken(t *testing.T) {
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)
 
-	srv := api.New(pool, q, nil, nil, nil)
+	srv := api.New(pool, q, nil, nil, nil, 0, 0, 0, 0)
 
 	body := `{"expires_in": "24h"}`
 	req := httptest.NewRequest("POST", "/v1/invites", strings.NewReader(body))
@@ -79,7 +79,7 @@ func TestCreateInvite_InvalidExpiry_BadRequest(t *testing.T) {
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)
 
-	srv := api.New(pool, q, nil, nil, nil)
+	srv := api.New(pool, q, nil, nil, nil, 0, 0, 0, 0)
 
 	body := `{"expires_in":"notaduration"}`
 	req := httptest.NewRequest("POST", "/v1/invites", strings.NewReader(body))
@@ -102,7 +102,7 @@ func TestCreateInvite_Admin_EmailBound(t *testing.T) {
 	require.NoError(t, err)
 	token := createTestToken(t, q, admin.ID)
 
-	srv := api.New(pool, q, nil, nil, nil)
+	srv := api.New(pool, q, nil, nil, nil, 0, 0, 0, 0)
 
 	body := `{"email": "newuser@test.com", "expires_in": "24h"}`
 	req := httptest.NewRequest("POST", "/v1/invites", strings.NewReader(body))
