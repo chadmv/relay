@@ -160,6 +160,27 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if schedIDStr := r.URL.Query().Get("scheduled_job_id"); schedIDStr != "" {
+		schedID, err := parseUUID(schedIDStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid scheduled_job_id")
+			return
+		}
+		rs, err := s.q.ListJobsByScheduledJob(ctx, schedID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			return
+		}
+		resp := make([]jobResponse, len(rs))
+		for i, r := range rs {
+			job := store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+			resp[i] = toJobResponse(job, r.SubmittedByEmail, nil, nil)
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	status := r.URL.Query().Get("status")
 
 	type jobWithEmail struct {

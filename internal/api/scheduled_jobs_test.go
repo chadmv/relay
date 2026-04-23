@@ -265,3 +265,29 @@ func TestRunScheduledJobNow_CreatesJob(t *testing.T) {
 	// The job name should match the job_spec name from our helper: "run-now-test-job"
 	assert.Equal(t, "run-now-test-job", resp["name"])
 }
+
+func TestListJobs_FilterByScheduledJobID(t *testing.T) {
+	srv, q := newTestServer(t)
+	user := createTestUser(t, q, "Alice", "filterjobs-alice@example.com", false)
+	token := createTestToken(t, q, user.ID)
+
+	schedID := createScheduleHelper(t, srv, token, "filter-test")
+
+	// Fire the schedule once via run-now.
+	req := httptest.NewRequest("POST", "/v1/scheduled-jobs/"+schedID+"/run-now", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Filter jobs by scheduled_job_id — expect exactly the one job.
+	req2 := httptest.NewRequest("GET", "/v1/jobs?scheduled_job_id="+schedID, nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	var list []map[string]any
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&list))
+	assert.Len(t, list, 1)
+}
