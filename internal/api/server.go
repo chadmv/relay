@@ -108,6 +108,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleListAgentEnrollments))))
 	mux.Handle("DELETE /v1/workers/{id}/token", auth(admin(http.HandlerFunc(s.handleDeleteWorkerToken))))
 
+	// Scheduled jobs
+	mux.Handle("POST /v1/scheduled-jobs", auth(http.HandlerFunc(s.handleCreateScheduledJob)))
+	mux.Handle("GET /v1/scheduled-jobs", auth(http.HandlerFunc(s.handleListScheduledJobs)))
+	mux.Handle("GET /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleGetScheduledJob)))
+	mux.Handle("PATCH /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handlePatchScheduledJob)))
+	mux.Handle("DELETE /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleDeleteScheduledJob)))
+	mux.Handle("POST /v1/scheduled-jobs/{id}/run-now", auth(http.HandlerFunc(s.handleRunScheduledJobNow)))
+
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
 
