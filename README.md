@@ -164,6 +164,22 @@ Both variables are cleared from the process environment immediately after the ac
 
 ### 3 — Enroll and start one or more agents
 
+First, log in as the admin you created in step 2:
+
+**Linux / macOS**
+
+```sh
+./bin/relay login
+```
+
+**Windows**
+
+```powershell
+.\bin\relay.exe login
+```
+
+Enter the server URL (default `http://localhost:8080`) and the admin email and password from step 2. This saves a bearer token to your config file so subsequent `relay` commands are authenticated.
+
 Before a new agent can connect, an admin must issue it a one-time enrollment token:
 
 ```sh
