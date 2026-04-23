@@ -33,6 +33,7 @@ func main() {
 		cli.LogsCommand(),
 		cli.WorkersCommand(),
 		cli.ReservationsCommand(),
+		cli.SchedulesCommand(),
 	}
 
 	os.Exit(cli.Dispatch(ctx, commands, os.Args[1:], cfg))
