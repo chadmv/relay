@@ -67,12 +67,15 @@ Relay is a render farm job coordinator with three binaries:
 4. Parses `RELAY_CORS_ORIGINS` and rate-limit env vars — fatal on bad values
 5. Starts gRPC server, the dispatcher loop, the NotifyListener goroutine, an hourly enrollment-janitor goroutine (`runEnrollmentJanitor` → `q.DeleteExpiredAgentEnrollments`), and the HTTP server
 6. `dispatcher.Trigger` is passed as a callback into the API server, gRPC handler, and grace registry to avoid import cycles
+7. Calls `schedrunner.ReconcileOnStartup()` to advance `scheduled_jobs.next_run_at` past any missed triggers during downtime (never-catch-up policy), then starts the `schedrunner.Runner` goroutine (10s ticker) which fires eligible schedules by creating fresh `Job` rows via the store directly
 
 **`internal/api/`** — HTTP handlers. `server.go` registers all routes. Handler methods live in separate files by resource (`auth.go`, `jobs.go`, `tasks.go`, `workers.go`, etc.). The `BearerAuth` middleware validates tokens and injects `AuthUser` into the request context; `AdminOnly` chains after it for admin-only routes. `agent_enrollments.go` adds three admin-only routes: `POST /v1/agent-enrollments` (create enrollment token), `GET /v1/agent-enrollments` (list active enrollments), `DELETE /v1/workers/{id}/token` (revoke agent long-lived token). `cors.go` provides `ParseCORSOrigins` and the `CORS` middleware (fail-closed; wildcard `*` rejected; never emits `Allow-Credentials`). `ratelimit.go` provides `ParseRateLimit` and the `RateLimit` middleware (sliding-window, per-IP via `RemoteAddr`; `X-Forwarded-For` is not trusted).
 
 **`internal/store/`** — sqlc-generated store layer (pgx/v5). SQL queries live in `internal/store/query/*.sql`. After editing any `.sql` file, run `make generate` to regenerate `*.sql.go` and `models.go`. Never edit generated files directly. `store.Queries` accepts any `DBTX` (pool or transaction); use `q.WithTx(tx)` for transactions.
 
 **`internal/scheduler/`** — `Dispatcher` polls for eligible tasks and dispatches them to available workers via `worker.Registry`. Triggered by `Dispatcher.Trigger()` after job submission and task completion.
+
+**`internal/schedrunner/`** — Scheduled-jobs engine. `cron.go` parses cron expressions (standard 5-field, `@hourly`/`@daily`, `@every <dur>`) with IANA timezone support via `github.com/robfig/cron/v3`. `runner.go` implements `Runner.Run()` (10s ticker) and `ReconcileOnStartup()`. `internal/api/scheduled_jobs.go` adds six HTTP endpoints (`POST/GET/PATCH/DELETE /v1/scheduled-jobs`, `POST /v1/scheduled-jobs/{id}/run-now`) and `internal/api/job_spec.go` exports `JobSpec`, `TaskSpec`, `ValidateJobSpec`, and `CreateJobFromSpec` for reuse. The `schedrunner` package does NOT import `internal/api` to avoid a cycle; it calls store functions directly for job creation.
 
 **`internal/events/`** — `Broker` fans out state-change events to SSE subscribers. Events carry a `JobID` filter; `""` = broadcast to all.
 
@@ -90,6 +93,8 @@ Relay is a render farm job coordinator with three binaries:
 No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct; `cli.Dispatch()` dispatches by name. Config is stored at `~/.relay/config.json` (Linux/Mac) or `%APPDATA%\relay\config.json` (Windows). Relevant subcommands for agent management:
 - `relay agent enroll [--hostname HINT] [--ttl DURATION]` — creates an enrollment token (admin only); token to stdout, metadata to stderr for easy script capture
 - `relay workers revoke <id-or-hostname>` — calls `DELETE /v1/workers/{id}/token`; accepts UUID or hostname (resolved via worker list)
+- `relay schedules create --name NAME --cron EXPR [--tz ZONE] [--overlap skip|allow] --spec FILE.json` — create a recurring schedule; owner is the calling user
+- `relay schedules list` / `show <id>` / `update <id> [...]` / `delete <id>` / `run-now <id>` — manage schedules; non-admins see only their own
 
 ## Key Design Decisions
 
