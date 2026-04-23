@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"relay/internal/events"
+	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -361,14 +362,16 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel pending/queued tasks.
+	// Cancel all non-terminal tasks; collect running/dispatched ones for agent signals.
 	tasks, err := q.ListTasksByJob(ctx, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	var runningTasks []store.Task
 	for _, t := range tasks {
-		if t.Status == "pending" || t.Status == "queued" {
+		switch t.Status {
+		case "pending", "queued", "running", "dispatched":
 			if _, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 				ID:         t.ID,
 				Status:     "failed",
@@ -378,6 +381,9 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				writeError(w, http.StatusInternalServerError, "db error")
 				return
+			}
+			if (t.Status == "running" || t.Status == "dispatched") && t.WorkerID.Valid {
+				runningTasks = append(runningTasks, t)
 			}
 		}
 	}
@@ -398,6 +404,16 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
+	}
+
+	for _, t := range runningTasks {
+		_ = s.registry.Send(uuidStr(t.WorkerID), &relayv1.CoordinatorMessage{
+			Payload: &relayv1.CoordinatorMessage_CancelTask{
+				CancelTask: &relayv1.CancelTask{
+					TaskId: uuidStr(t.ID),
+				},
+			},
+		})
 	}
 
 	s.broker.Publish(events.Event{

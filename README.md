@@ -811,7 +811,6 @@ proto/
 
 - Task ordering within a job is by creation time only; priority-based scheduling is not implemented.
 - Reservation selectors are informational — only explicit `worker_ids` lists are enforced.
-- Cancelling a job does not send cancellation signals to tasks that are already running on agents.
 - GPU detection covers NVIDIA only (via `nvidia-smi`).
 - No structured logging in relay-agent (errors go to stderr as plain text).
 
