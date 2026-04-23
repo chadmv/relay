@@ -140,12 +140,24 @@ Alternatively, install PostgreSQL natively via the [PostgreSQL Windows installer
 
 On first start the server runs all database migrations automatically. Default addresses: HTTP `:8080`, gRPC `:9090`.
 
-### 3 — Start one or more agents
+### 3 — Enroll and start one or more agents
+
+Before a new agent can connect, an admin must issue it a one-time enrollment token:
+
+```sh
+./bin/relay agent enroll --hostname worker-01
+# relay-agent token: <token printed here>
+```
+
+Set that token as an environment variable before starting the agent for the first time. After enrollment the agent persists a long-lived token in `--state-dir` and the env var is no longer needed.
 
 **Linux / macOS**
 
 ```sh
-# mDNS discovery (same network as server)
+# First boot — provide the enrollment token
+RELAY_AGENT_ENROLLMENT_TOKEN=<token> ./bin/relay-agent
+
+# Subsequent starts — long-lived token read from state-dir automatically
 ./bin/relay-agent
 
 # Explicit coordinator address
@@ -155,7 +167,11 @@ On first start the server runs all database migrations automatically. Default ad
 **Windows**
 
 ```powershell
-# mDNS discovery
+# First boot
+$env:RELAY_AGENT_ENROLLMENT_TOKEN = "<token>"
+.\bin\relay-agent.exe
+
+# Subsequent starts
 .\bin\relay-agent.exe
 
 # Explicit coordinator address
@@ -231,6 +247,8 @@ All configuration is via environment variables:
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC server bind address |
 | `RELAY_BOOTSTRAP_ADMIN` | _(empty)_ | Email address — creates or promotes this user to admin on startup when no admin exists. Cleared from process env after consumption. |
 | `RELAY_BOOTSTRAP_PASSWORD` | _(empty)_ | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
+| `RELAY_DB_MAX_CONNS` | `25` | Maximum PostgreSQL connection pool size |
+| `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing tasks from a disconnected agent |
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
 | `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
@@ -256,10 +274,11 @@ $env:RELAY_GRPC_ADDR    = ":9090"
 ### Startup sequence
 
 1. Connect to PostgreSQL and run pending migrations
-2. Requeue any tasks that were `running` when the server last stopped
+2. Seed grace timers for any agents that had active tasks when the server last stopped (tasks requeue if the agent does not reconnect within `RELAY_WORKER_GRACE_WINDOW`)
 3. Start the gRPC server (agent connections)
-4. Start the task dispatch scheduler
-5. Start the HTTP server (CLI / API traffic)
+4. Start the task dispatch scheduler and Postgres LISTEN/NOTIFY trigger
+5. Start an hourly janitor that purges expired enrollment tokens
+6. Start the HTTP server (CLI / API traffic)
 
 ### Database schema
 
@@ -267,7 +286,8 @@ The server creates these tables on first run:
 
 - **users** — accounts with email and optional admin flag
 - **api_tokens** — SHA-256-hashed bearer tokens (30-day expiry)
-- **workers** — registered agents with hardware capabilities
+- **workers** — registered agents with hardware capabilities and persisted agent token hash
+- **agent_enrollments** — admin-issued one-time enrollment tokens (SHA-256 hashed, TTL-bounded, atomically consumed on first agent connection)
 - **jobs** — submitted job records
 - **tasks** — individual commands belonging to a job
 - **task_dependencies** — DAG edges expressing `depends_on` relationships
@@ -286,7 +306,17 @@ The server creates these tables on first run:
 | `--coordinator <host:port>` | *(mDNS discovery)* | Coordinator address; skips network discovery |
 | `--state-dir <path>` | `/var/lib/relay-agent` (Linux) · `%ProgramData%\relay` (Windows) | Directory for persistent state |
 
-The agent writes a `worker-id` file to `--state-dir` on first registration. Subsequent restarts reuse the same worker ID so the server recognises it as the same machine.
+The agent writes two files to `--state-dir`:
+- `worker-id` — UUID assigned on first registration; reused on reconnect so the server recognises the same machine
+- `token` — long-lived authentication token issued by the server on enrollment; written at 0600 permissions
+
+On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error.
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `RELAY_AGENT_ENROLLMENT_TOKEN` | One-time enrollment credential issued by an admin (`relay agent enroll`). Required on first boot when no `token` file exists. Cleared from process env immediately after capture. |
 
 ### Hardware detection
 
@@ -350,6 +380,18 @@ Invite token: <paste token here>
 
 ---
 
+#### `relay passwd`
+
+Change your password (requires your current password).
+
+```sh
+relay passwd
+# Current password:
+# New password:
+```
+
+---
+
 #### `relay invite create`
 
 Create a one-time invite token (admin only). The token can then be sent to the recipient out-of-band; they supply it when running `relay login` for the first time.
@@ -361,6 +403,20 @@ relay invite create --expires 24h           # custom expiry
 ```
 
 The raw token is printed to stdout and is never stored — it cannot be retrieved again.
+
+---
+
+#### `relay agent enroll`
+
+Issue a one-time enrollment token for a new agent (admin only). The token is printed to stdout; expiry metadata goes to stderr for easy script capture.
+
+```sh
+relay agent enroll                           # open enrollment, 24h expiry
+relay agent enroll --hostname worker-01      # informational hostname hint
+relay agent enroll --ttl 1h                  # custom expiry
+```
+
+Set the printed token as `RELAY_AGENT_ENROLLMENT_TOKEN` when starting the agent for the first time. The token is consumed on first use and cannot be retrieved again.
 
 ---
 
@@ -488,6 +544,17 @@ relay workers get <worker-id> --json
 
 ---
 
+#### `relay workers revoke`
+
+Revoke the long-lived authentication token for a worker (admin only). The agent exits immediately with an authentication error and will not reconnect until re-enrolled.
+
+```sh
+relay workers revoke <worker-id>
+relay workers revoke <hostname>
+```
+
+---
+
 #### `relay reservations list`
 
 ```sh
@@ -536,19 +603,34 @@ The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/v1/health` | Returns `{"status":"ok"}` |
-| `POST` | `/v1/auth/token` | Create / retrieve a bearer token |
+| `POST` | `/v1/auth/register` | Register a new account |
+| `POST` | `/v1/auth/login` | Log in and receive a bearer token |
 
-**POST `/v1/auth/token`** body:
+**POST `/v1/auth/register`** body:
 
 ```json
-{ "email": "you@example.com", "name": "Your Name", "invite_token": "<raw invite token>" }
+{ "email": "you@example.com", "name": "Your Name", "password": "...", "invite_token": "<raw invite token>" }
 ```
 
-If the email is known, a new API token is issued immediately. If the email is new, an `invite_token` must be supplied — obtain one from an admin with `relay invite create`. Returns:
+`invite_token` is required for new accounts — obtain one from an admin with `relay invite create`. Password must be at least 8 characters. Returns `201 Created`:
 
 ```json
 { "token": "<hex>", "expires_at": "2026-07-16T00:00:00Z" }
 ```
+
+**POST `/v1/auth/login`** body:
+
+```json
+{ "email": "you@example.com", "password": "..." }
+```
+
+Returns `201 Created`:
+
+```json
+{ "token": "<hex>", "expires_at": "2026-07-16T00:00:00Z" }
+```
+
+Tokens are valid for 30 days.
 
 ### Jobs
 
@@ -574,6 +656,7 @@ If the email is known, a new API token is issued immediately. If the email is ne
 | `GET` | `/v1/workers` | List workers |
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
+| `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
 
 ### Reservations
 
@@ -584,6 +667,29 @@ All reservation endpoints are admin-only.
 | `GET` | `/v1/reservations` | List reservations |
 | `POST` | `/v1/reservations` | Create a reservation |
 | `DELETE` | `/v1/reservations/{id}` | Delete a reservation |
+
+### Agent Enrollments
+
+All agent-enrollment endpoints are admin-only.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/agent-enrollments` | Create a one-time enrollment token |
+| `GET` | `/v1/agent-enrollments` | List active (unexpired, unconsumed) enrollments |
+
+**POST `/v1/agent-enrollments`** body:
+
+```json
+{ "hostname_hint": "worker-01", "ttl": "24h" }
+```
+
+Both fields are optional (`ttl` defaults to `24h`). Returns the raw token once:
+
+```json
+{ "id": "<uuid>", "token": "<raw token>", "expires_at": "..." }
+```
+
+Set the token as `RELAY_AGENT_ENROLLMENT_TOKEN` when starting a new agent. The token is consumed on first use and cannot be retrieved again.
 
 ### Invites
 
