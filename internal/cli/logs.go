@@ -43,14 +43,23 @@ func doLogs(ctx context.Context, cfg *Config, args []string, w io.Writer) error 
 // When a task reaches a terminal state its logs are fetched and printed.
 // Returns the final job status ("done", "failed", or "cancelled") and any error.
 func watchJobLogs(ctx context.Context, c *Client, jobID string, w io.Writer) (string, error) {
-	// Pre-fetch tasks to build id→name map.
-	var tasks []taskResp
-	if err := c.do(ctx, "GET", "/v1/jobs/"+jobID+"/tasks", nil, &tasks); err != nil {
-		return "", fmt.Errorf("list tasks: %w", err)
+	var job jobResp
+	if err := c.do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+		return "", fmt.Errorf("get job: %w", err)
 	}
-	taskNames := make(map[string]string, len(tasks))
-	for _, t := range tasks {
+
+	taskNames := make(map[string]string, len(job.Tasks))
+	for _, t := range job.Tasks {
 		taskNames[t.ID] = t.Name
+	}
+
+	if job.Status == "done" || job.Status == "failed" || job.Status == "cancelled" {
+		for _, t := range job.Tasks {
+			if t.Status == "done" || t.Status == "failed" || t.Status == "timed_out" {
+				printTaskLogs(ctx, c, t.ID, t.Name, w)
+			}
+		}
+		return job.Status, nil
 	}
 
 	var finalStatus string
