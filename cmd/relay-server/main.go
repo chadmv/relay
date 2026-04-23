@@ -83,6 +83,12 @@ func main() {
 		bootstrapPassword = ""
 	}
 
+	if adminExists, err := q.AdminExists(ctx); err != nil {
+		log.Printf("warn: check admin: %v", err)
+	} else if !adminExists {
+		log.Println("WARNING: no admin user exists — set RELAY_BOOTSTRAP_ADMIN and RELAY_BOOTSTRAP_PASSWORD on next startup to create one")
+	}
+
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 	dispatcher := scheduler.NewDispatcher(q, registry, broker)
