@@ -302,6 +302,7 @@ $env:RELAY_GRPC_ADDR    = ":9090"
 4. Start the task dispatch scheduler and Postgres LISTEN/NOTIFY trigger
 5. Start an hourly janitor that purges expired enrollment tokens
 6. Start the HTTP server (CLI / API traffic)
+7. Reconcile scheduled jobs (advance any `next_run_at` that fell in the past while the server was down, then start the scheduler polling loop)
 
 ### Database schema
 
@@ -317,6 +318,7 @@ The server creates these tables on first run:
 - **task_logs** — captured stdout/stderr per task
 - **reservations** — admin-managed worker allocations
 - **invites** — one-time invite tokens issued by admins; SHA-256 hashed; single-use with optional email binding and expiry
+- **scheduled_jobs** — cron-triggered job templates; each row stores the cron expression, timezone, overlap policy, and a `job_spec` JSONB payload fired on schedule
 
 ---
 
@@ -617,6 +619,95 @@ relay reservations delete <reservation-id>
 
 ---
 
+#### `relay schedules list`
+
+List all scheduled jobs owned by the current user (admins see all).
+
+```sh
+relay schedules list
+```
+
+Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time).
+
+---
+
+#### `relay schedules create`
+
+Create a new scheduled job from a job spec file.
+
+```sh
+relay schedules create \
+  --name nightly-render \
+  --cron "0 2 * * *" \
+  --spec job.json \
+  --tz America/Los_Angeles \
+  --overlap skip
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name NAME` | *(required)* | Human-readable schedule name |
+| `--cron EXPR` | *(required)* | Cron expression (5-field, or `@hourly`/`@daily`/`@every 30m`) |
+| `--spec FILE` | *(required)* | Path to job spec JSON file (same format as `relay submit`) |
+| `--tz ZONE` | `UTC` | IANA timezone (e.g. `America/Los_Angeles`) |
+| `--overlap skip\|allow` | `skip` | What to do when the previous run is still active: `skip` skips the new fire; `allow` submits anyway |
+
+The minimum supported interval is 30 seconds.
+
+---
+
+#### `relay schedules show`
+
+Print details for a single schedule.
+
+```sh
+relay schedules show <schedule-id>
+```
+
+---
+
+#### `relay schedules update`
+
+Modify a schedule in place. Only supplied flags are changed.
+
+```sh
+relay schedules update <schedule-id> --cron "0 4 * * *"
+relay schedules update <schedule-id> --disable
+relay schedules update <schedule-id> --enable --tz UTC
+```
+
+| Flag | Description |
+|------|-------------|
+| `--cron EXPR` | New cron expression |
+| `--tz ZONE` | New IANA timezone |
+| `--overlap skip\|allow` | New overlap policy |
+| `--enable` | Re-enable a disabled schedule |
+| `--disable` | Pause the schedule without deleting it |
+
+---
+
+#### `relay schedules delete`
+
+Delete a schedule. Already-submitted jobs are not affected.
+
+```sh
+relay schedules delete <schedule-id>
+```
+
+---
+
+#### `relay schedules run-now`
+
+Fire the schedule immediately, outside of its normal cron cadence (admin only).
+
+```sh
+relay schedules run-now <schedule-id>
+```
+
+Prints the ID and initial status of the job that was created.
+
+---
+
 ## REST API
 
 The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `/health` and `/auth/token` require `Authorization: Bearer <token>`.
@@ -660,7 +751,7 @@ Tokens are valid for 30 days.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/jobs` | Submit a job |
-| `GET` | `/v1/jobs` | List jobs (`?status=` filter optional) |
+| `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional) |
 | `GET` | `/v1/jobs/{id}` | Get a job |
 | `DELETE` | `/v1/jobs/{id}` | Cancel a job |
 | `GET` | `/v1/jobs/{id}/tasks` | List tasks for a job |
@@ -736,6 +827,48 @@ Returns the raw token once:
 { "id": "<uuid>", "token": "<raw token>", "expires_at": "2026-04-19T12:00:00Z" }
 ```
 
+### Scheduled Jobs
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/scheduled-jobs` | Create a scheduled job |
+| `GET` | `/v1/scheduled-jobs` | List scheduled jobs (own schedules; admins see all) |
+| `GET` | `/v1/scheduled-jobs/{id}` | Get a scheduled job |
+| `PATCH` | `/v1/scheduled-jobs/{id}` | Update a scheduled job |
+| `DELETE` | `/v1/scheduled-jobs/{id}` | Delete a scheduled job |
+| `POST` | `/v1/scheduled-jobs/{id}/run-now` | Fire the schedule immediately (admin only) |
+
+**POST `/v1/scheduled-jobs`** body:
+
+```json
+{
+  "name": "nightly-render",
+  "cron_expr": "0 2 * * *",
+  "timezone": "America/Los_Angeles",
+  "overlap_policy": "skip",
+  "job_spec": { ... }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Human-readable schedule name |
+| `cron_expr` | Yes | 5-field cron expression, or `@hourly`/`@daily`/`@every <duration>` |
+| `timezone` | No | IANA timezone (default `UTC`) |
+| `overlap_policy` | No | `skip` (default) or `allow` |
+| `job_spec` | Yes | Job definition — same structure as `POST /v1/jobs` body |
+
+**PATCH `/v1/scheduled-jobs/{id}`** — all fields optional, only supplied fields are updated:
+
+```json
+{
+  "cron_expr": "0 4 * * *",
+  "timezone": "UTC",
+  "overlap_policy": "allow",
+  "enabled": false
+}
+```
+
 ### Events (Server-Sent Events)
 
 ```
@@ -798,6 +931,7 @@ internal/
   discovery/       mDNS browse
   events/          SSE broker
   proto/relayv1/   Generated protobuf types
+  schedrunner/     Scheduled job polling loop and startup reconciliation
   scheduler/       Task dispatch loop
   store/           sqlc-generated queries, migrations
   worker/          gRPC handler for agent streams
