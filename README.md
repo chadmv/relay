@@ -162,7 +162,7 @@ $env:RELAY_BOOTSTRAP_PASSWORD = "changeme"
 
 Both variables are cleared from the process environment immediately after the account is created. On subsequent starts they are not needed — omit them and the server starts normally.
 
-### 3 — Enroll and start one or more agents
+### 3 — Configure the CLI
 
 First, log in as the admin you created in step 2:
 
@@ -178,7 +178,15 @@ First, log in as the admin you created in step 2:
 .\bin\relay.exe login
 ```
 
-Enter the server URL (default `http://localhost:8080`) and the admin email and password from step 2. This saves a bearer token to your config file so subsequent `relay` commands are authenticated.
+Enter the server URL (default `http://localhost:8080`) and the admin email and password from step 2.
+
+Credentials are saved to:
+- Linux/macOS: `~/.relay/config.json`
+- Windows: `%APPDATA%\relay\config.json`
+
+This saves a bearer token to your config file so subsequent `relay` commands are authenticated.
+
+### 4 — Enroll and start one or more agents
 
 Before a new agent can connect, an admin must issue it a one-time enrollment token:
 
@@ -232,29 +240,6 @@ When the agent connects successfully it prints:
 ```
 connected to coordinator <host>:9090 (worker ID: <uuid>)
 ```
-
-### 4 — Configure the CLI
-
-**Linux / macOS**
-
-```sh
-./bin/relay login
-```
-
-**Windows**
-
-```powershell
-.\bin\relay.exe login
-```
-
-```
-Server URL [http://localhost:8080]: (press Enter for default)
-Email: you@example.com
-```
-
-Credentials are saved to:
-- Linux/macOS: `~/.relay/config.json`
-- Windows: `%APPDATA%\relay\config.json`
 
 ### 5 — Submit a job
 
