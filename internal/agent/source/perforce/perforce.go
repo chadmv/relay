@@ -235,8 +235,7 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	if locked[shortID] {
 		return fmt.Errorf("workspace %s is currently in use", shortID)
 	}
-	regPath := filepath.Join(p.cfg.Root, ".relay-registry.json")
-	reg, err := LoadRegistry(regPath)
+	reg, err := p.loadRegistry()
 	if err != nil {
 		return fmt.Errorf("load registry: %w", err)
 	}

@@ -185,8 +185,9 @@ func (a *Agent) connect(ctx context.Context) error {
 					EvictWorkspace(ctx context.Context, shortID string) error
 				}); ok {
 					shortID := p.EvictWorkspace.ShortId
+					runCtx := a.runCtx
 					go func() {
-						if err := ev.EvictWorkspace(context.Background(), shortID); err != nil {
+						if err := ev.EvictWorkspace(runCtx, shortID); err != nil {
 							log.Printf("agent: evict workspace %s: %v", shortID, err)
 						}
 					}()

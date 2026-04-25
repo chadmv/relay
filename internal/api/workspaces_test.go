@@ -30,10 +30,8 @@ func TestListWorkerWorkspaces_AdminOnly(t *testing.T) {
 	srv, q := newTestServer(t)
 	ctx := context.Background()
 
-	regularUser := createTestUser(t, q, "regular", "regular@x", false)
-	regularTok := createTestToken(t, q, regularUser.ID)
-	adminUser := createTestUser(t, q, "admin", "admin@x", true)
-	adminTok := createTestToken(t, q, adminUser.ID)
+	regularTok := createTestToken(t, q, createTestUser(t, q, "regular", "regular@x", false).ID)
+	adminTok := createTestToken(t, q, createTestUser(t, q, "admin", "admin@x", true).ID)
 
 	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
 		Name: "h", Hostname: "h", CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
@@ -59,16 +57,13 @@ func TestListWorkerWorkspaces_AdminOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"//s/x"`)
 	require.Contains(t, rec.Body.String(), `"abc"`)
-	_ = adminUser
-	_ = regularUser
 }
 
 func TestEvictWorkerWorkspace_NotConnected_Returns202(t *testing.T) {
 	srv, q := newTestServer(t)
 	ctx := context.Background()
 
-	adminUser := createTestUser(t, q, "admin2", "admin2@x", true)
-	adminTok := createTestToken(t, q, adminUser.ID)
+	adminTok := createTestToken(t, q, createTestUser(t, q, "admin2", "admin2@x", true).ID)
 
 	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
 		Name: "h2", Hostname: "h2", CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
@@ -90,6 +85,22 @@ func TestEvictWorkerWorkspace_NotConnected_Returns202(t *testing.T) {
 	rows, err := q.ListWorkerWorkspaces(ctx, w.ID)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
+}
 
-	_ = adminUser
+func TestEvictWorkerWorkspace_NotFound_Returns404(t *testing.T) {
+	srv, q := newTestServer(t)
+	ctx := context.Background()
+
+	adminTok := createTestToken(t, q, createTestUser(t, q, "admin3", "admin3@x", true).ID)
+
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "h3", Hostname: "h3", CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/workers/"+fmtUUID(w.ID)+"/workspaces/doesnotexist/evict", nil)
+	req.Header.Set("Authorization", "Bearer "+adminTok)
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }

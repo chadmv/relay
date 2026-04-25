@@ -72,11 +72,10 @@ func (s *Server) handleEvictWorkerWorkspace(w http.ResponseWriter, r *http.Reque
 		SourceType: found.SourceType,
 		ShortId:    shortID,
 	}
-	// Best-effort: if the worker isn't connected, log and return 202 anyway.
+	// Best-effort: if the worker isn't connected, still return 202 anyway.
 	// The eviction will be retried when the worker reconnects (or the age-sweeper handles it).
-	if err := s.registry.SendEvictCommand(uuidStr(workerID), cmd); err != nil {
-		// Worker offline — still return 202; sweeper will handle it.
-		// Note: don't delete DB row here; agent confirms via WorkspaceInventoryUpdate.
-	}
+	// Note: don't delete DB row here; agent confirms via WorkspaceInventoryUpdate.
+	// Worker offline — still return 202; sweeper will handle it.
+	_ = s.registry.SendEvictCommand(uuidStr(workerID), cmd)
 	w.WriteHeader(http.StatusAccepted)
 }
