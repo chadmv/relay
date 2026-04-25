@@ -70,6 +70,7 @@ func TestRunner_PrepareEmitsPreparing(t *testing.T) {
 
 	var phases []relayv1.TaskStatus
 	var sawPrepareLog bool
+	var sawInventory bool
 	for {
 		select {
 		case m := <-sendCh:
@@ -78,6 +79,9 @@ func TestRunner_PrepareEmitsPreparing(t *testing.T) {
 			}
 			if log := m.GetTaskLog(); log != nil && log.Stream == relayv1.LogStream_LOG_STREAM_PREPARE {
 				sawPrepareLog = true
+			}
+			if inv := m.GetWorkspaceInventory(); inv != nil && inv.SourceType == "perforce" {
+				sawInventory = true
 			}
 		default:
 			goto done
@@ -91,6 +95,7 @@ done:
 	}, phases)
 	require.True(t, sawPrepareLog)
 	require.True(t, fh.finalized)
+	require.True(t, sawInventory, "expected a WorkspaceInventoryUpdate message")
 }
 
 func TestRunner_PrepareFailureEmitsPrepareFailed(t *testing.T) {

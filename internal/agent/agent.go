@@ -247,7 +247,10 @@ func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 
 	// Attach workspace inventory if the provider supports it.
 	if il, ok := a.provider.(source.InventoryLister); ok {
-		inv, _ := il.ListInventory()
+		inv, err := il.ListInventory()
+		if err != nil {
+			log.Printf("agent: list workspace inventory: %v", err)
+		}
 		for _, e := range inv {
 			req.Inventory = append(req.Inventory, &relayv1.WorkspaceInventoryUpdate{
 				SourceType:   e.SourceType,

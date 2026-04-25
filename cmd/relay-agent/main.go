@@ -54,6 +54,8 @@ func main() {
 	}
 
 	// Wire up and run.
+	// TODO(Task 20): replace nil with perforce.New(...) once RELAY_WORKSPACE_ROOT and
+	// sweeper config env vars are documented and wired.
 	a := agent.NewAgent(addr, caps, workerID, creds, func(id string) error {
 		return saveWorkerID(workerIDFile, id)
 	}, nil)

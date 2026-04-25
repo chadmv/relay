@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 )
 
@@ -15,3 +16,6 @@ func NewRunnerForTest(taskID string, sendCh chan *relayv1.AgentMessage, parent c
 func RunnerSendForTest(r *Runner, msg *relayv1.AgentMessage) {
 	r.send(msg)
 }
+
+// SetProviderForTest injects a source.Provider into a Runner for unit tests.
+func (r *Runner) SetProviderForTest(p source.Provider) { r.provider = p }

@@ -103,4 +103,5 @@ func TestAgent_BuildRegisterRequest_IncludesInventory(t *testing.T) {
 	require.Len(t, req.Inventory, 1)
 	require.Equal(t, "//s/x", req.Inventory[0].SourceKey)
 	require.Equal(t, "abcdef", req.Inventory[0].ShortId)
+	require.Equal(t, "deadbeef", req.Inventory[0].BaselineHash)
 }

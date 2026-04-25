@@ -27,9 +27,6 @@ type Runner struct {
 	provider  source.Provider
 }
 
-// SetProviderForTest injects a source.Provider for unit tests.
-func (r *Runner) SetProviderForTest(p source.Provider) { r.provider = p }
-
 // newRunner creates a Runner and its execution context.
 // If timeoutSec > 0, the context carries a deadline; otherwise it inherits
 // only the parent's cancellation.
@@ -73,7 +70,9 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 				Epoch:  r.epoch,
 			},
 		}})
-		handle, err := r.provider.Prepare(ctx, r.taskID, task.Source, r.makePrepareProgressFn())
+		progress, flushProgress := r.makePrepareProgressFn()
+		handle, err := r.provider.Prepare(ctx, r.taskID, task.Source, progress)
+		flushProgress() // drain any buffered tail lines whether Prepare succeeded or failed
 		if err != nil {
 			r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 				TaskStatus: &relayv1.TaskStatusUpdate{
@@ -222,13 +221,16 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 	}
 }
 
-// makePrepareProgressFn returns a callback that batches log lines and sends them
-// as LOG_STREAM_PREPARE chunks, rate-limited to one send per 500 ms.
-func (r *Runner) makePrepareProgressFn() func(line string) {
+// makePrepareProgressFn returns a progress callback and a flush function. The
+// callback batches log lines and sends them as LOG_STREAM_PREPARE chunks,
+// rate-limited to one send per 500 ms or 50 lines. The flush function drains
+// any remaining buffered lines and must be called after provider.Prepare
+// returns so tail-end progress lines are not silently dropped.
+func (r *Runner) makePrepareProgressFn() (progress func(line string), flush func()) {
 	var mu sync.Mutex
 	var buf []string
 	var lastFlush time.Time
-	flush := func() {
+	doFlush := func() {
 		if len(buf) == 0 {
 			return
 		}
@@ -244,18 +246,23 @@ func (r *Runner) makePrepareProgressFn() func(line string) {
 			},
 		}})
 	}
-	return func(line string) {
+	progress = func(line string) {
 		mu.Lock()
 		defer mu.Unlock()
 		buf = append(buf, line)
 		if time.Since(lastFlush) >= 500*time.Millisecond || len(buf) >= 50 {
-			flush()
+			doFlush()
 		}
 	}
+	flush = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		doFlush()
+	}
+	return
 }
 
 // sendInventory reports a workspace inventory entry to the coordinator.
-// Filled in Task 15.
 func (r *Runner) sendInventory(e source.InventoryEntry) {
 	r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_WorkspaceInventory{
 		WorkspaceInventory: &relayv1.WorkspaceInventoryUpdate{
@@ -263,6 +270,7 @@ func (r *Runner) sendInventory(e source.InventoryEntry) {
 			SourceKey:    e.SourceKey,
 			ShortId:      e.ShortID,
 			BaselineHash: e.BaselineHash,
+			LastUsedAt:   e.LastUsedAt.Format("2006-01-02T15:04:05Z07:00"),
 			Deleted:      e.Deleted,
 		},
 	}})
