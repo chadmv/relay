@@ -345,7 +345,7 @@ func TestDispatcher_PrefersWarmWorker(t *testing.T) {
 
 func TestDispatcher_ColdFallback_NoWarmWorker(t *testing.T) {
 	ctx := context.Background()
-	q, pool := newTestStoreWithPool(t)
+	q := newTestStore(t)
 
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
 		Name: "u2", Email: "cold@x", IsAdmin: false, PasswordHash: "x",
@@ -373,8 +373,6 @@ func TestDispatcher_ColdFallback_NoWarmWorker(t *testing.T) {
 		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	require.NoError(t, err)
-	_ = pool // pool available for direct SQL if needed
-
 	sender := &fakeSender{}
 	registry := worker.NewRegistry()
 	registry.Register(uuidStr(w.ID), sender)
