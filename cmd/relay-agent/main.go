@@ -7,11 +7,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"relay/internal/agent"
+	"relay/internal/agent/source"
+	"relay/internal/agent/source/perforce"
 	"relay/internal/discovery"
 )
 
@@ -54,11 +59,36 @@ func main() {
 	}
 
 	// Wire up and run.
-	// TODO(Task 20): replace nil with perforce.New(...) once RELAY_WORKSPACE_ROOT and
-	// sweeper config env vars are documented and wired.
+	// Build workspace provider if RELAY_WORKSPACE_ROOT is set.
+	var provider source.Provider
+	if root := os.Getenv("RELAY_WORKSPACE_ROOT"); root != "" {
+		pp := perforce.New(perforce.Config{
+			Root:     root,
+			Hostname: caps.Hostname,
+		})
+		provider = pp
+
+		// Start sweeper if age or disk-pressure threshold is configured.
+		maxAge := parseDurationEnv(os.Getenv("RELAY_WORKSPACE_MAX_AGE"), 0)
+		minFreeGB, _ := strconv.ParseInt(os.Getenv("RELAY_WORKSPACE_MIN_FREE_GB"), 10, 64)
+		sweepInterval := parseDurationEnv(os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
+		if maxAge > 0 || minFreeGB > 0 {
+			sw := &perforce.Sweeper{
+				Root:          root,
+				MaxAge:        maxAge,
+				MinFreeGB:     minFreeGB,
+				SweepInterval: sweepInterval,
+				Client:        pp.Client(),
+				ListLocked:    pp.LockedShortIDs,
+				FreeDiskGB:    freeDiskGB,
+			}
+			go sw.Run(ctx)
+		}
+	}
+
 	a := agent.NewAgent(addr, caps, workerID, creds, func(id string) error {
 		return saveWorkerID(workerIDFile, id)
-	}, nil)
+	}, provider)
 
 	a.Run(ctx)
 }
@@ -98,4 +128,30 @@ func resolveCoordinator(ctx context.Context, addr string) (string, error) {
 		return addr, nil
 	}
 	return discovery.Browse(ctx)
+}
+
+var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
+
+// parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
+// s (seconds), m (minutes), h (hours), or d (days). Returns fallback on empty or invalid input.
+func parseDurationEnv(v string, fallback time.Duration) time.Duration {
+	if v == "" {
+		return fallback
+	}
+	m := durRe.FindStringSubmatch(v)
+	if m == nil {
+		return fallback
+	}
+	n, _ := strconv.Atoi(m[1])
+	switch m[2] {
+	case "s":
+		return time.Duration(n) * time.Second
+	case "m":
+		return time.Duration(n) * time.Minute
+	case "h":
+		return time.Duration(n) * time.Hour
+	case "d":
+		return time.Duration(n) * 24 * time.Hour
+	}
+	return fallback
 }

@@ -247,6 +247,13 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	return sw.evict(ctx, reg, *e)
 }
 
+// Client returns the underlying Perforce client. Used by the sweeper in relay-agent main.
+func (p *Provider) Client() *Client { return p.cfg.Client }
+
+// LockedShortIDs returns the set of workspace short IDs currently held by active tasks.
+// This is the public wrapper of lockedShortIDs for use by the sweeper.
+func (p *Provider) LockedShortIDs() map[string]bool { return p.lockedShortIDs() }
+
 // lockedShortIDs returns the set of shortIDs that are currently held by tasks.
 func (p *Provider) lockedShortIDs() map[string]bool {
 	p.mu.Lock()

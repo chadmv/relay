@@ -49,6 +49,18 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_URL` | Override server URL from config file |
 | `RELAY_TOKEN` | Override auth token from config file |
 
+## Environment Variables (relay-agent)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RELAY_AGENT_ENROLLMENT_TOKEN` | — | One-time enrollment credential for a fresh agent host. Read only when `<state-dir>/token` does not exist. |
+| `RELAY_WORKSPACE_ROOT` | _(unset)_ | Absolute path under which Perforce workspaces are created. Required to enable workspace management for `source`-bearing tasks. When unset, source tasks are dispatched but no workspace preparation is performed. |
+| `RELAY_WORKSPACE_MAX_AGE` | _(unset)_ | Age threshold (e.g. `14d`, `8h`) past which idle workspaces are evicted. Requires `RELAY_WORKSPACE_ROOT`. |
+| `RELAY_WORKSPACE_MIN_FREE_GB` | _(unset)_ | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted. Requires `RELAY_WORKSPACE_ROOT`. |
+| `RELAY_WORKSPACE_SWEEP_INTERVAL` | `15m` | How often the eviction sweeper runs. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
+
+**Source providers:** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent host. Provision P4 tickets out-of-band (e.g. via `p4 login` in your system startup). Relay does not manage P4 credentials.
+
 ## Architecture
 
 Relay is a render farm job coordinator with three binaries:
