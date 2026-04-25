@@ -42,7 +42,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	prov := New(Config{Root: root, Hostname: "ci-integration"})
+	prov := New(Config{Root: root, Hostname: "ci"})
 
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
 		Perforce: &relayv1.PerforceSource{
@@ -64,7 +64,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 
 	// --- First prepare: creates workspace, syncs to head ---
 	var progressLines []string
-	h, err := prov.Prepare(ctx, "task-e2e-1", spec, func(s string) {
+	h, err := prov.Prepare(ctx, "task-1", spec, func(s string) {
 		progressLines = append(progressLines, s)
 	})
 	require.NoError(t, err, "Prepare should succeed")
@@ -92,7 +92,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	require.Empty(t, e.OpenTaskChangelists, "Finalize should clear pending changelists")
 
 	// --- Second prepare: same spec → should not re-sync (baseline matches) ---
-	h2, err := prov.Prepare(ctx, "task-e2e-2", spec, func(string) {})
+	h2, err := prov.Prepare(ctx, "task-2", spec, func(string) {})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
 	require.NoError(t, h2.Finalize(ctx), "second Finalize should succeed")
 
