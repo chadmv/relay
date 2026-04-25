@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 
 	"google.golang.org/grpc"
@@ -29,11 +30,13 @@ type Agent struct {
 	runnerWG sync.WaitGroup // tracks active runner goroutines; waited on agent shutdown
 	saveID   func(string) error
 	creds    *Credentials
+	provider source.Provider // optional; nil = no workspace management
 }
 
 // NewAgent constructs an Agent. workerID is empty on first run; saveID persists
-// the coordinator-assigned ID to the state file on every change.
-func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentials, saveID func(string) error) *Agent {
+// the coordinator-assigned ID to the state file on every change. provider may
+// be nil if workspace management is not needed.
+func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentials, saveID func(string) error, provider source.Provider) *Agent {
 	return &Agent{
 		coord:    coord,
 		caps:     caps,
@@ -42,6 +45,7 @@ func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentia
 		runners:  make(map[string]*Runner),
 		saveID:   saveID,
 		creds:    creds,
+		provider: provider,
 	}
 }
 
@@ -183,6 +187,7 @@ func (a *Agent) handleDispatch(connCtx context.Context, task *relayv1.DispatchTa
 	// Runners bind to the long-lived runCtx, NOT the connection ctx. This is
 	// what lets subprocesses survive brief disconnects.
 	runner, runCtx := newRunner(task.TaskId, task.Epoch, a.sendCh, a.runCtx, task.TimeoutSeconds)
+	runner.provider = a.provider
 	a.mu.Lock()
 	a.runners[task.TaskId] = runner
 	a.mu.Unlock()

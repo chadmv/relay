@@ -16,7 +16,7 @@ func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
 	creds.SetEnrollmentToken("test-enrollment")
 	a := NewAgent("nowhere:0", Capabilities{
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
-	}, "", creds, func(string) error { return nil })
+	}, "", creds, func(string) error { return nil }, nil)
 
 	// Simulate entering Run: set the long-lived runCtx.
 	runCtx, cancelRun := context.WithCancel(context.Background())
@@ -58,7 +58,7 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 	creds.SetEnrollmentToken("test-enrollment")
 	a := NewAgent("nowhere:0", Capabilities{
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
-	}, "worker-xyz", creds, func(string) error { return nil })
+	}, "worker-xyz", creds, func(string) error { return nil }, nil)
 
 	// Simulate two active runners (hold mutex to match production invariant).
 	a.mu.Lock()

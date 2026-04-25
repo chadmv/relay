@@ -3,12 +3,15 @@ package agent
 import (
 	"context"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 )
 
@@ -21,7 +24,11 @@ type Runner struct {
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
 	abandoned atomic.Bool
+	provider  source.Provider
 }
+
+// SetProviderForTest injects a source.Provider for unit tests.
+func (r *Runner) SetProviderForTest(p source.Provider) { r.provider = p }
 
 // newRunner creates a Runner and its execution context.
 // If timeoutSec > 0, the context carries a deadline; otherwise it inherits
@@ -55,20 +62,60 @@ func (r *Runner) Abandon() {
 func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	defer r.cancel() // always release context resources, even on normal exit
 
+	// 1) Prepare phase — acquire and sync workspace if a source spec is present.
+	var workDir string
+	var extraEnv map[string]string
+	if task.Source != nil && r.provider != nil {
+		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: r.taskID,
+				Status: relayv1.TaskStatus_TASK_STATUS_PREPARING,
+				Epoch:  r.epoch,
+			},
+		}})
+		handle, err := r.provider.Prepare(ctx, r.taskID, task.Source, r.makePrepareProgressFn())
+		if err != nil {
+			r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
+				TaskStatus: &relayv1.TaskStatusUpdate{
+					TaskId:       r.taskID,
+					Status:       relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+					ErrorMessage: err.Error(),
+					Epoch:        r.epoch,
+				},
+			}})
+			return
+		}
+		defer func() {
+			if finalErr := handle.Finalize(r.ctx); finalErr != nil {
+				log.Printf("runner: finalize failed for %s: %v", r.taskID, finalErr)
+			}
+			r.sendInventory(handle.Inventory())
+		}()
+		workDir = handle.WorkingDir()
+		extraEnv = handle.Env()
+	}
+
+	// 2) Command execution.
 	if len(task.Command) == 0 {
 		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
 		return
 	}
 
-	// Merge env: current process env first, task env overrides.
+	// Merge env: current process env first, task env overrides, then workspace env.
 	env := os.Environ()
 	for k, v := range task.Env {
+		env = append(env, k+"="+v)
+	}
+	for k, v := range extraEnv {
 		env = append(env, k+"="+v)
 	}
 
 	cmd := exec.CommandContext(ctx, task.Command[0], task.Command[1:]...)
 	cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
 	cmd.Env = env
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -173,4 +220,50 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 	case <-r.ctx.Done():
 		// Connection lost; will be redelivered when agent reconnects.
 	}
+}
+
+// makePrepareProgressFn returns a callback that batches log lines and sends them
+// as LOG_STREAM_PREPARE chunks, rate-limited to one send per 500 ms.
+func (r *Runner) makePrepareProgressFn() func(line string) {
+	var mu sync.Mutex
+	var buf []string
+	var lastFlush time.Time
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		content := []byte(strings.Join(buf, "\n") + "\n")
+		buf = nil
+		lastFlush = time.Now()
+		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId:  r.taskID,
+				Stream:  relayv1.LogStream_LOG_STREAM_PREPARE,
+				Content: content,
+				Epoch:   r.epoch,
+			},
+		}})
+	}
+	return func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		buf = append(buf, line)
+		if time.Since(lastFlush) >= 500*time.Millisecond || len(buf) >= 50 {
+			flush()
+		}
+	}
+}
+
+// sendInventory reports a workspace inventory entry to the coordinator.
+// Filled in Task 15.
+func (r *Runner) sendInventory(e source.InventoryEntry) {
+	r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_WorkspaceInventory{
+		WorkspaceInventory: &relayv1.WorkspaceInventoryUpdate{
+			SourceType:   e.SourceType,
+			SourceKey:    e.SourceKey,
+			ShortId:      e.ShortID,
+			BaselineHash: e.BaselineHash,
+			Deleted:      e.Deleted,
+		},
+	}})
 }

@@ -56,7 +56,7 @@ func main() {
 	// Wire up and run.
 	a := agent.NewAgent(addr, caps, workerID, creds, func(id string) error {
 		return saveWorkerID(workerIDFile, id)
-	})
+	}, nil)
 
 	a.Run(ctx)
 }

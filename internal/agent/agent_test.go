@@ -131,7 +131,7 @@ func TestAgent_registers(t *testing.T) {
 	a := agent.NewAgent(addr, caps, "", testCreds(t), func(id string) error {
 		savedID = id
 		return nil
-	})
+	}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -163,7 +163,7 @@ func TestAgent_dispatchAndReceiveLogs(t *testing.T) {
 	coord, addr := startFakeCoord(t)
 
 	caps := agent.Capabilities{Hostname: "test-host", OS: "linux", CPUCores: 4, RAMGB: 8}
-	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil })
+	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil }, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -228,7 +228,7 @@ func TestAgent_reconnects(t *testing.T) {
 	defer srv.GracefulStop()
 
 	caps := agent.Capabilities{Hostname: "reconnect-test", OS: "linux", CPUCores: 2, RAMGB: 4}
-	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil })
+	a := agent.NewAgent(addr, caps, "", testCreds(t), func(string) error { return nil }, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

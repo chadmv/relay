@@ -2,16 +2,131 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeProvider implements source.Provider for runner tests.
+type fakeProvider struct {
+	prepareErr error
+	handle     source.Handle
+}
+
+func (f *fakeProvider) Type() string { return "perforce" }
+func (f *fakeProvider) Prepare(ctx context.Context, taskID string, spec *relayv1.SourceSpec, p func(string)) (source.Handle, error) {
+	if f.prepareErr != nil {
+		return nil, f.prepareErr
+	}
+	p("simulated sync line")
+	return f.handle, nil
+}
+
+type fakeHandle struct {
+	dir       string
+	finalized bool
+}
+
+func (h *fakeHandle) WorkingDir() string                 { return h.dir }
+func (h *fakeHandle) Env() map[string]string             { return map[string]string{"P4CLIENT": "fake"} }
+func (h *fakeHandle) Finalize(ctx context.Context) error { h.finalized = true; return nil }
+func (h *fakeHandle) Inventory() source.InventoryEntry {
+	return source.InventoryEntry{SourceType: "perforce", SourceKey: "//s/x", ShortID: "abc"}
+}
+
+// echoTaskCmd returns a cross-platform command that echoes "hello".
+func echoTaskCmd() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"cmd", "/c", "echo", "hello"}
+	}
+	return []string{"echo", "hello"}
+}
+
+func TestRunner_PrepareEmitsPreparing(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:  "t1",
+		JobId:   "j1",
+		Command: echoTaskCmd(),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+	r.Run(runCtx, task)
+
+	var phases []relayv1.TaskStatus
+	var sawPrepareLog bool
+	for {
+		select {
+		case m := <-sendCh:
+			if ts := m.GetTaskStatus(); ts != nil {
+				phases = append(phases, ts.Status)
+			}
+			if log := m.GetTaskLog(); log != nil && log.Stream == relayv1.LogStream_LOG_STREAM_PREPARE {
+				sawPrepareLog = true
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	require.Equal(t, []relayv1.TaskStatus{
+		relayv1.TaskStatus_TASK_STATUS_PREPARING,
+		relayv1.TaskStatus_TASK_STATUS_RUNNING,
+		relayv1.TaskStatus_TASK_STATUS_DONE,
+	}, phases)
+	require.True(t, sawPrepareLog)
+	require.True(t, fh.finalized)
+}
+
+func TestRunner_PrepareFailureEmitsPrepareFailed(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+	prov := &fakeProvider{prepareErr: errors.New("p4 unreachable")}
+
+	task := &relayv1.DispatchTask{
+		TaskId:  "t1",
+		JobId:   "j1",
+		Command: echoTaskCmd(),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+	r.Run(runCtx, task)
+
+	var phases []relayv1.TaskStatus
+	for {
+		select {
+		case m := <-sendCh:
+			if ts := m.GetTaskStatus(); ts != nil {
+				phases = append(phases, ts.Status)
+			}
+		default:
+			goto done2
+		}
+	}
+done2:
+	require.Equal(t, []relayv1.TaskStatus{
+		relayv1.TaskStatus_TASK_STATUS_PREPARING,
+		relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+	}, phases)
+}
 
 // echoCmd returns a cross-platform command that prints "hello" to stdout.
 func echoCmd() []string {
