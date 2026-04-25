@@ -115,3 +115,23 @@ func TestWorkspace_UnshelvingBlocks(t *testing.T) {
 		"unshelve requires exclusive end-to-end")
 	h1.Release()
 }
+
+func TestWorkspace_AfterUnshelveRelease_NextTaskGetsExclusive(t *testing.T) {
+	ws := NewWorkspace("a")
+	ctx := context.Background()
+
+	// Task 1: sync BL1 to path //s/x/...
+	h1, _ := ws.Acquire(ctx, newReq("BL1", []string{"//s/x/..."}, nil, false))
+	h1.Release()
+
+	// Task 2: unshelve on BL1 (exclusive). After release, on-disk state is BL1 + unshelve artifacts.
+	h2, _ := ws.Acquire(ctx, newReq("BL1", []string{"//s/x/..."}, []int64{1234}, false))
+	require.Equal(t, ModeExclusive, h2.Mode())
+	h2.Release()
+
+	// Task 3: sync BL2 (different baseline). Must get ModeExclusive because workspace needs re-sync.
+	h3, err := ws.Acquire(ctx, newReq("BL2", []string{"//s/x/..."}, nil, false))
+	require.NoError(t, err)
+	require.Equal(t, ModeExclusive, h3.Mode(), "must be exclusive: workspace may have unshelve artifacts from BL1")
+	h3.Release()
+}

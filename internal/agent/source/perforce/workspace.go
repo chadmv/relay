@@ -182,15 +182,14 @@ func (w *Workspace) release(h *holder) {
 	defer w.mu.Unlock()
 
 	// Record what was synced so future callers can determine their mode.
-	// Only update for non-unshelve holds (unshelves leave the workspace in
-	// an undefined state, so we conservatively record the baseline anyway).
-	if len(h.req.Unshelves) == 0 {
-		if w.syncedPaths == nil {
-			w.syncedPaths = make(map[string]string)
-		}
-		for _, p := range h.req.SyncPaths {
-			w.syncedPaths[p] = h.req.BaselineHash
-		}
+	// Update for ALL holders (including unshelve holds) so that the next
+	// task for the same path sees the correct baseline and is not wrongly
+	// admitted as ModeShared when the workspace needs a re-sync.
+	if w.syncedPaths == nil {
+		w.syncedPaths = make(map[string]string)
+	}
+	for _, p := range h.req.SyncPaths {
+		w.syncedPaths[p] = h.req.BaselineHash
 	}
 
 	out := w.holders[:0]
