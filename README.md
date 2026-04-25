@@ -12,9 +12,9 @@ Relay has three components:
 
 | Binary | Role |
 |--------|------|
-| `relay-server` | Central coordinator — stores jobs in PostgreSQL, serves the REST API and gRPC endpoint |
-| `relay-agent` | Worker node — connects to the server, receives tasks, runs them, streams logs back |
-| `relay` | CLI — submit jobs, watch logs, manage workers and reservations |
+| `relay-server` | Central coordinator — stores jobs in PostgreSQL, serves the REST API and gRPC endpoint, runs the scheduler and the scheduled-job (cron) engine |
+| `relay-agent` | Worker node — connects to the server, receives tasks, runs them, streams logs back; can also manage source workspaces (e.g. Perforce stream clients) |
+| `relay` | CLI — submit jobs, watch logs, manage workers, reservations, and recurring schedules |
 
 ```
 relay (CLI)
@@ -319,6 +319,7 @@ The server creates these tables on first run:
 - **reservations** — admin-managed worker allocations
 - **invites** — one-time invite tokens issued by admins; SHA-256 hashed; single-use with optional email binding and expiry
 - **scheduled_jobs** — cron-triggered job templates; each row stores the cron expression, timezone, overlap policy, and a `job_spec` JSONB payload fired on schedule
+- **worker_workspaces** — server-side inventory of agent-side workspaces (e.g. Perforce stream clients); used by the dispatcher's warm-workspace preference and for admin visibility/eviction
 
 ---
 
@@ -342,6 +343,10 @@ On first boot the agent requires a one-time enrollment token. After successful e
 | Variable | Description |
 |----------|-------------|
 | `RELAY_AGENT_ENROLLMENT_TOKEN` | One-time enrollment credential issued by an admin (`relay agent enroll`). Required on first boot when no `token` file exists. Cleared from process env immediately after capture. |
+| `RELAY_WORKSPACE_ROOT` | Absolute path under which the agent creates source-controlled workspaces (e.g. Perforce stream clients). Setting this enables the workspace provider; tasks with a `source` field will fail if it is unset. |
+| `RELAY_WORKSPACE_MAX_AGE` | Idle workspace age threshold (e.g. `14d`, `8h`). Workspaces unused longer than this are evicted by the sweeper. |
+| `RELAY_WORKSPACE_MIN_FREE_GB` | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted until the threshold is met. |
+| `RELAY_WORKSPACE_SWEEP_INTERVAL` | How often the sweeper runs. Default `15m`. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
 
 ### Hardware detection
 
@@ -360,6 +365,52 @@ When `--coordinator` is not set, the agent browses the local network for `_relay
 ### Reconnection
 
 The agent maintains a persistent gRPC stream to the coordinator. On disconnect it reconnects with exponential backoff starting at 1 s and capping at 60 s.
+
+### Source workspaces
+
+Tasks can declare an optional `source` spec. When present, the agent prepares a managed workspace (syncs files, applies any shelved changes) before running the task's command, and the working directory passed to the subprocess is the workspace root.
+
+**v1 supports Perforce only.** A worker must have:
+
+- The `p4` CLI on `PATH`.
+- A valid P4 ticket — provision via `p4 login` out-of-band; relay does not manage P4 credentials.
+- `RELAY_WORKSPACE_ROOT` set to a directory the agent can write to.
+
+**`source` field shape (in a task):**
+
+```json
+{
+  "name": "render-shot-001",
+  "command": ["blender", "-b", "scene.blend", "-f", "1"],
+  "source": {
+    "type": "perforce",
+    "stream": "//depot/film-x/main",
+    "sync": [
+      { "path": "//depot/film-x/main/...", "rev": "#head" }
+    ],
+    "unshelves": [12345],
+    "workspace_exclusive": false
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | Source provider — `"perforce"` is the only v1 value. |
+| `stream` | Yes | Perforce stream path. Workspaces are keyed by stream and reused across tasks. |
+| `sync` | Yes | One or more paths to sync. Each entry has `path` (depot path or `...`) and `rev` (`"#head"`, `@CL`, or `@label`). |
+| `unshelves` | No | List of pending changelist numbers to unshelve into the workspace before running. Reverted automatically after the task. |
+| `workspace_exclusive` | No | If `true`, take an exclusive lock on the workspace (other tasks for the same stream queue). Default `false`. |
+
+**Workspace arbitration.** Multiple tasks targeting the same stream on the same worker share the workspace under a three-rule policy: tasks with the *same baseline* run concurrently; tasks needing additional but disjoint sync paths join additively; everything else serializes. Tasks with `workspace_exclusive: true` always serialize.
+
+**Warm-workspace preference.** The dispatcher prefers workers that already have a synced workspace for the task's stream — even if a colder worker has more free slots. The preference is a soft bias, not a hard pin: if no warm worker is free, a cold worker is used.
+
+**Eviction.** Workspaces persist between tasks. The sweeper goroutine evicts:
+- Workspaces idle longer than `RELAY_WORKSPACE_MAX_AGE`.
+- Oldest workspaces (LRU) when free disk drops below `RELAY_WORKSPACE_MIN_FREE_GB`.
+
+Active workspaces (held by a running task) are never evicted. Admins can also evict on demand via `relay workers evict-workspace`.
 
 ---
 
@@ -491,6 +542,7 @@ relay submit --detach job.json # submit and print job ID, then exit
 | `tasks[].timeout_seconds` | No | Kill task after this many seconds |
 | `tasks[].retries` | No | Retry up to this many times on failure (default 0) |
 | `tasks[].depends_on` | No | List of task names that must complete before this one starts |
+| `tasks[].source` | No | Workspace source spec — agent prepares this before running the task. See [Source workspaces](#source-workspaces). |
 
 When submitted without `--detach`, the CLI streams logs to stdout and exits with code 0 when all tasks succeed, or non-zero if any fail.
 
@@ -580,6 +632,31 @@ relay workers revoke <hostname>
 
 ---
 
+#### `relay workers workspaces`
+
+List managed source workspaces present on a worker (admin only).
+
+```sh
+relay workers workspaces <worker-id>
+relay workers workspaces <worker-id> --json
+```
+
+Output columns: `SHORT_ID`, `SOURCE_TYPE`, `SOURCE_KEY`, `BASELINE`, `LAST_USED`. The `SHORT_ID` is the local handle used by `relay workers evict-workspace`.
+
+---
+
+#### `relay workers evict-workspace`
+
+Ask a worker to delete one of its managed workspaces (admin only). The eviction is fire-and-forget — the command returns 202 even if the worker is offline; the agent confirms by sending an inventory update on its next connection.
+
+```sh
+relay workers evict-workspace <worker-id> <short-id>
+```
+
+Workspaces actively held by a running task cannot be evicted; the agent rejects the request and the workspace remains.
+
+---
+
 #### `relay reservations list`
 
 ```sh
@@ -616,6 +693,16 @@ relay reservations create reservation.json
 ```sh
 relay reservations delete <reservation-id>
 ```
+
+---
+
+### Scheduled jobs
+
+Recurring jobs are defined as **schedules** — a cron expression plus a stored job spec that the server submits as a fresh job on every fire. Schedules support standard 5-field cron, the `@hourly` / `@daily` shorthands, and `@every <duration>` (minimum 30 s). Each schedule has an IANA timezone and an overlap policy (`skip` if the previous run is still active, or `allow`).
+
+The server reconciles `next_run_at` on startup: any firings that fell during downtime are skipped (no catch-up), and the schedule resumes on its next eligible fire. A polling loop ticks every 10 s.
+
+Schedules are owned by the user who created them; non-admins see only their own. Admins can list and operate on all of them, and only admins can use `run-now` to fire a schedule immediately.
 
 ---
 
@@ -771,6 +858,8 @@ Tokens are valid for 30 days.
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
+| `GET` | `/v1/workers/{id}/workspaces` | List source workspaces on the worker (admin only) |
+| `POST` | `/v1/workers/{id}/workspaces/{short_id}/evict` | Request eviction of a workspace (admin only); returns 202 even if the worker is offline |
 
 ### Reservations
 
