@@ -90,8 +90,35 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		activeByWorker[c.WorkerID] = c.Active
 	}
 
+	// Build warm-workspace map for tasks that have a source spec.
+	streamsByType := make(map[string][]string) // source_type → []source_key
 	for _, task := range tasks {
-		w := d.selectWorker(task, workers, reservations, activeByWorker)
+		if len(task.Source) == 0 {
+			continue
+		}
+		var s api.SourceSpec
+		if err := json.Unmarshal(task.Source, &s); err != nil {
+			continue
+		}
+		if s.Type != "" && s.Stream != "" {
+			streamsByType[s.Type] = append(streamsByType[s.Type], s.Stream)
+		}
+	}
+	warmByWorker := make(map[pgtype.UUID][]store.WorkerWorkspace)
+	for typ, keys := range streamsByType {
+		rows, err := d.q.ListWarmWorkspacesForKeys(ctx, store.ListWarmWorkspacesForKeysParams{
+			SourceType: typ, SourceKeys: keys,
+		})
+		if err != nil {
+			continue // warm scoring is best-effort
+		}
+		for _, w := range rows {
+			warmByWorker[w.WorkerID] = append(warmByWorker[w.WorkerID], w)
+		}
+	}
+
+	for _, task := range tasks {
+		w := d.selectWorker(task, workers, reservations, activeByWorker, warmByWorker)
 		if w != nil {
 			if d.sendTask(ctx, task, *w) {
 				activeByWorker[w.ID]++ // track in-cycle dispatches
@@ -105,6 +132,7 @@ func (d *Dispatcher) selectWorker(
 	workers []store.Worker,
 	reservations []store.Reservation,
 	activeByWorker map[pgtype.UUID]int64,
+	warmByWorker map[pgtype.UUID][]store.WorkerWorkspace,
 ) *store.Worker {
 	// Build set of reserved worker IDs.
 	reservedIDs := make(map[string]bool)
@@ -114,8 +142,17 @@ func (d *Dispatcher) selectWorker(
 		}
 	}
 
+	// Parse task source (for warm scoring).
+	var taskSrc *api.SourceSpec
+	if len(task.Source) > 0 {
+		var s api.SourceSpec
+		if err := json.Unmarshal(task.Source, &s); err == nil {
+			taskSrc = &s
+		}
+	}
+
 	var best *store.Worker
-	var bestFree int64 = -1
+	var bestScore int64 = -1
 
 	for i := range workers {
 		w := &workers[i]
@@ -133,8 +170,22 @@ func (d *Dispatcher) selectWorker(
 		if free <= 0 {
 			continue
 		}
-		if free > bestFree {
-			bestFree = free
+		score := free
+		if taskSrc != nil {
+			for _, ws := range warmByWorker[w.ID] {
+				if ws.SourceType == taskSrc.Type && ws.SourceKey == taskSrc.Stream {
+					estimate := BaselineHashFromAPISpec(taskSrc)
+					if estimate != "" && ws.BaselineHash == estimate {
+						score += 10_000
+					} else {
+						score += 1_000
+					}
+					break
+				}
+			}
+		}
+		if score > bestScore {
+			bestScore = score
 			best = w
 		}
 	}

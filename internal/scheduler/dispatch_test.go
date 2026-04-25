@@ -279,6 +279,112 @@ func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	assert.False(t, reread.WorkerID.Valid)
 }
 
+func TestDispatcher_PrefersWarmWorker(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStoreWithPool(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "warm@x", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	src := []byte(`{"type":"perforce","stream":"//s/x","sync":[{"path":"//s/x/...","rev":"#head"}]}`)
+	_, err = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
+	})
+	require.NoError(t, err)
+
+	// Create two workers.
+	coldRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "cold", Hostname: "cold", CpuCores: 8, RamGb: 8, Os: "linux",
+	})
+	require.NoError(t, err)
+	cold, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: coldRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	// Give cold 8 slots so it would win on free slots alone.
+	_, err = pool.Exec(ctx, "UPDATE workers SET max_slots = 8 WHERE id = $1", cold.ID)
+	require.NoError(t, err)
+	cold.MaxSlots = 8
+
+	warmRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "warm", Hostname: "warm", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	warm, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: warmRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Give warm a workspace for the same stream (same source_key).
+	require.NoError(t, q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+		WorkerID: warm.ID, SourceType: "perforce", SourceKey: "//s/x", ShortID: "abc",
+		BaselineHash: "ignored", LastUsedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}))
+
+	coldSender := &fakeSender{}
+	warmSender := &fakeSender{}
+	registry := worker.NewRegistry()
+	registry.Register(uuidStr(cold.ID), coldSender)
+	registry.Register(uuidStr(warm.ID), warmSender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d.RunOnce(ctx)
+
+	// warm must win: score = 1 (free slot) + 1,000 (stream match) = 1001 vs cold = 8.
+	require.Len(t, warmSender.sent, 1, "warm worker (stream match) should be preferred")
+	require.Empty(t, coldSender.sent, "cold worker should not be chosen")
+}
+
+func TestDispatcher_ColdFallback_NoWarmWorker(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStoreWithPool(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u2", Email: "cold@x", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j2", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	src := []byte(`{"type":"perforce","stream":"//s/y","sync":[{"path":"//s/y/...","rev":"#head"}]}`)
+	_, err = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID: job.ID, Name: "t2", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
+	})
+	require.NoError(t, err)
+
+	// Only one worker, no warm workspace — dispatcher should still assign it.
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "only", Hostname: "only", CpuCores: 4, RamGb: 4, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	_ = pool // pool available for direct SQL if needed
+
+	sender := &fakeSender{}
+	registry := worker.NewRegistry()
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d.RunOnce(ctx)
+
+	require.Len(t, sender.sent, 1, "task must still be dispatched when no warm worker exists")
+}
+
 func TestDispatcher_PassesSourceToAgent(t *testing.T) {
 	ctx := context.Background()
 	q := newTestStore(t)
