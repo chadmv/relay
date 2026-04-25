@@ -229,6 +229,40 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}, nil
 }
 
+// EvictWorkspace deletes the workspace identified by shortID if it is not locked.
+func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
+	locked := p.lockedShortIDs()
+	if locked[shortID] {
+		return fmt.Errorf("workspace %s is currently in use", shortID)
+	}
+	regPath := filepath.Join(p.cfg.Root, ".relay-registry.json")
+	reg, err := LoadRegistry(regPath)
+	if err != nil {
+		return fmt.Errorf("load registry: %w", err)
+	}
+	e := reg.Get(shortID)
+	if e == nil {
+		return fmt.Errorf("workspace %s not found in registry", shortID)
+	}
+	sw := &Sweeper{Root: p.cfg.Root, Client: p.cfg.Client, ListLocked: p.lockedShortIDs}
+	return sw.evict(ctx, reg, *e)
+}
+
+// lockedShortIDs returns the set of shortIDs that are currently held by tasks.
+func (p *Provider) lockedShortIDs() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]bool)
+	for id, ws := range p.workspaces {
+		ws.mu.Lock()
+		if len(ws.holders) > 0 {
+			out[id] = true
+		}
+		ws.mu.Unlock()
+	}
+	return out
+}
+
 func (p *Provider) recoverOrphanedCLs(ctx context.Context, clientName string) error {
 	cls, err := p.cfg.Client.PendingChangesByDescPrefix(ctx, clientName, "relay-task-")
 	if err != nil {

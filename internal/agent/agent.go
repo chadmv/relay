@@ -179,6 +179,19 @@ func (a *Agent) connect(ctx context.Context) error {
 			a.handleDispatch(connCtx, p.DispatchTask)
 		case *relayv1.CoordinatorMessage_CancelTask:
 			a.handleCancel(p.CancelTask)
+		case *relayv1.CoordinatorMessage_EvictWorkspace:
+			if a.provider != nil {
+				if ev, ok := a.provider.(interface {
+					EvictWorkspace(ctx context.Context, shortID string) error
+				}); ok {
+					shortID := p.EvictWorkspace.ShortId
+					go func() {
+						if err := ev.EvictWorkspace(context.Background(), shortID); err != nil {
+							log.Printf("agent: evict workspace %s: %v", shortID, err)
+						}
+					}()
+				}
+			}
 		}
 	}
 }

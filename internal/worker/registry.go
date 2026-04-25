@@ -48,3 +48,11 @@ func (r *Registry) Send(workerID string, msg *relayv1.CoordinatorMessage) error 
 	}
 	return s.Send(msg)
 }
+
+// SendEvictCommand sends an EvictWorkspaceCommand to the named connected worker.
+// Returns an error if the worker is not connected.
+func (r *Registry) SendEvictCommand(workerID string, cmd *relayv1.EvictWorkspaceCommand) error {
+	return r.Send(workerID, &relayv1.CoordinatorMessage{
+		Payload: &relayv1.CoordinatorMessage_EvictWorkspace{EvictWorkspace: cmd},
+	})
+}
