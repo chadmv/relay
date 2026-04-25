@@ -24,11 +24,13 @@ const (
 type TaskStatus int32
 
 const (
-	TaskStatus_TASK_STATUS_UNSPECIFIED TaskStatus = 0
-	TaskStatus_TASK_STATUS_RUNNING     TaskStatus = 1
-	TaskStatus_TASK_STATUS_DONE        TaskStatus = 2
-	TaskStatus_TASK_STATUS_FAILED      TaskStatus = 3
-	TaskStatus_TASK_STATUS_TIMED_OUT   TaskStatus = 4
+	TaskStatus_TASK_STATUS_UNSPECIFIED    TaskStatus = 0
+	TaskStatus_TASK_STATUS_RUNNING        TaskStatus = 1
+	TaskStatus_TASK_STATUS_DONE           TaskStatus = 2
+	TaskStatus_TASK_STATUS_FAILED         TaskStatus = 3
+	TaskStatus_TASK_STATUS_TIMED_OUT      TaskStatus = 4
+	TaskStatus_TASK_STATUS_PREPARING      TaskStatus = 5
+	TaskStatus_TASK_STATUS_PREPARE_FAILED TaskStatus = 6
 )
 
 // Enum value maps for TaskStatus.
@@ -39,13 +41,17 @@ var (
 		2: "TASK_STATUS_DONE",
 		3: "TASK_STATUS_FAILED",
 		4: "TASK_STATUS_TIMED_OUT",
+		5: "TASK_STATUS_PREPARING",
+		6: "TASK_STATUS_PREPARE_FAILED",
 	}
 	TaskStatus_value = map[string]int32{
-		"TASK_STATUS_UNSPECIFIED": 0,
-		"TASK_STATUS_RUNNING":     1,
-		"TASK_STATUS_DONE":        2,
-		"TASK_STATUS_FAILED":      3,
-		"TASK_STATUS_TIMED_OUT":   4,
+		"TASK_STATUS_UNSPECIFIED":    0,
+		"TASK_STATUS_RUNNING":        1,
+		"TASK_STATUS_DONE":           2,
+		"TASK_STATUS_FAILED":         3,
+		"TASK_STATUS_TIMED_OUT":      4,
+		"TASK_STATUS_PREPARING":      5,
+		"TASK_STATUS_PREPARE_FAILED": 6,
 	}
 )
 
@@ -82,6 +88,7 @@ const (
 	LogStream_LOG_STREAM_UNSPECIFIED LogStream = 0
 	LogStream_LOG_STREAM_STDOUT      LogStream = 1
 	LogStream_LOG_STREAM_STDERR      LogStream = 2
+	LogStream_LOG_STREAM_PREPARE     LogStream = 3
 )
 
 // Enum value maps for LogStream.
@@ -90,11 +97,13 @@ var (
 		0: "LOG_STREAM_UNSPECIFIED",
 		1: "LOG_STREAM_STDOUT",
 		2: "LOG_STREAM_STDERR",
+		3: "LOG_STREAM_PREPARE",
 	}
 	LogStream_value = map[string]int32{
 		"LOG_STREAM_UNSPECIFIED": 0,
 		"LOG_STREAM_STDOUT":      1,
 		"LOG_STREAM_STDERR":      2,
+		"LOG_STREAM_PREPARE":     3,
 	}
 )
 
@@ -132,6 +141,7 @@ type AgentMessage struct {
 	//	*AgentMessage_Register
 	//	*AgentMessage_TaskStatus
 	//	*AgentMessage_TaskLog
+	//	*AgentMessage_WorkspaceInventory
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -201,6 +211,15 @@ func (x *AgentMessage) GetTaskLog() *TaskLogChunk {
 	return nil
 }
 
+func (x *AgentMessage) GetWorkspaceInventory() *WorkspaceInventoryUpdate {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_WorkspaceInventory); ok {
+			return x.WorkspaceInventory
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -217,11 +236,17 @@ type AgentMessage_TaskLog struct {
 	TaskLog *TaskLogChunk `protobuf:"bytes,3,opt,name=task_log,json=taskLog,proto3,oneof"`
 }
 
+type AgentMessage_WorkspaceInventory struct {
+	WorkspaceInventory *WorkspaceInventoryUpdate `protobuf:"bytes,4,opt,name=workspace_inventory,json=workspaceInventory,proto3,oneof"`
+}
+
 func (*AgentMessage_Register) isAgentMessage_Payload() {}
 
 func (*AgentMessage_TaskStatus) isAgentMessage_Payload() {}
 
 func (*AgentMessage_TaskLog) isAgentMessage_Payload() {}
+
+func (*AgentMessage_WorkspaceInventory) isAgentMessage_Payload() {}
 
 // Sent once when the stream opens. worker_id is empty on first registration.
 // running_tasks is the agent's list of currently-executing tasks at reconnect
@@ -245,6 +270,7 @@ type RegisterRequest struct {
 	//	*RegisterRequest_EnrollmentToken
 	//	*RegisterRequest_AgentToken
 	Credential    isRegisterRequest_Credential `protobuf_oneof:"credential"`
+	Inventory     []*WorkspaceInventoryUpdate  `protobuf:"bytes,11,rep,name=inventory,proto3" json:"inventory,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -358,6 +384,13 @@ func (x *RegisterRequest) GetAgentToken() string {
 		}
 	}
 	return ""
+}
+
+func (x *RegisterRequest) GetInventory() []*WorkspaceInventoryUpdate {
+	if x != nil {
+		return x.Inventory
+	}
+	return nil
 }
 
 type isRegisterRequest_Credential interface {
@@ -581,6 +614,7 @@ type CoordinatorMessage struct {
 	//	*CoordinatorMessage_RegisterResponse
 	//	*CoordinatorMessage_DispatchTask
 	//	*CoordinatorMessage_CancelTask
+	//	*CoordinatorMessage_EvictWorkspace
 	Payload       isCoordinatorMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -650,6 +684,15 @@ func (x *CoordinatorMessage) GetCancelTask() *CancelTask {
 	return nil
 }
 
+func (x *CoordinatorMessage) GetEvictWorkspace() *EvictWorkspaceCommand {
+	if x != nil {
+		if x, ok := x.Payload.(*CoordinatorMessage_EvictWorkspace); ok {
+			return x.EvictWorkspace
+		}
+	}
+	return nil
+}
+
 type isCoordinatorMessage_Payload interface {
 	isCoordinatorMessage_Payload()
 }
@@ -666,11 +709,17 @@ type CoordinatorMessage_CancelTask struct {
 	CancelTask *CancelTask `protobuf:"bytes,3,opt,name=cancel_task,json=cancelTask,proto3,oneof"`
 }
 
+type CoordinatorMessage_EvictWorkspace struct {
+	EvictWorkspace *EvictWorkspaceCommand `protobuf:"bytes,4,opt,name=evict_workspace,json=evictWorkspace,proto3,oneof"`
+}
+
 func (*CoordinatorMessage_RegisterResponse) isCoordinatorMessage_Payload() {}
 
 func (*CoordinatorMessage_DispatchTask) isCoordinatorMessage_Payload() {}
 
 func (*CoordinatorMessage_CancelTask) isCoordinatorMessage_Payload() {}
+
+func (*CoordinatorMessage_EvictWorkspace) isCoordinatorMessage_Payload() {}
 
 // Sent in response to RegisterRequest. agent_token is populated only on
 // successful enrollment (first connect with a valid enrollment_token); the
@@ -745,6 +794,7 @@ type DispatchTask struct {
 	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	TimeoutSeconds int32                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
 	Epoch          int64                  `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Source         *SourceSpec            `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -821,6 +871,13 @@ func (x *DispatchTask) GetEpoch() int64 {
 	return 0
 }
 
+func (x *DispatchTask) GetSource() *SourceSpec {
+	if x != nil {
+		return x.Source
+	}
+	return nil
+}
+
 type CancelTask struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
@@ -865,17 +922,348 @@ func (x *CancelTask) GetTaskId() string {
 	return ""
 }
 
+type SourceSpec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Provider:
+	//
+	//	*SourceSpec_Perforce
+	Provider      isSourceSpec_Provider `protobuf_oneof:"provider"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SourceSpec) Reset() {
+	*x = SourceSpec{}
+	mi := &file_relayv1_relay_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SourceSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SourceSpec) ProtoMessage() {}
+
+func (x *SourceSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SourceSpec.ProtoReflect.Descriptor instead.
+func (*SourceSpec) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SourceSpec) GetProvider() isSourceSpec_Provider {
+	if x != nil {
+		return x.Provider
+	}
+	return nil
+}
+
+func (x *SourceSpec) GetPerforce() *PerforceSource {
+	if x != nil {
+		if x, ok := x.Provider.(*SourceSpec_Perforce); ok {
+			return x.Perforce
+		}
+	}
+	return nil
+}
+
+type isSourceSpec_Provider interface {
+	isSourceSpec_Provider()
+}
+
+type SourceSpec_Perforce struct {
+	Perforce *PerforceSource `protobuf:"bytes,1,opt,name=perforce,proto3,oneof"`
+}
+
+func (*SourceSpec_Perforce) isSourceSpec_Provider() {}
+
+type PerforceSource struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Stream             string                 `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
+	Sync               []*SyncEntry           `protobuf:"bytes,2,rep,name=sync,proto3" json:"sync,omitempty"`
+	Unshelves          []int64                `protobuf:"varint,3,rep,packed,name=unshelves,proto3" json:"unshelves,omitempty"`
+	WorkspaceExclusive bool                   `protobuf:"varint,4,opt,name=workspace_exclusive,json=workspaceExclusive,proto3" json:"workspace_exclusive,omitempty"`
+	ClientTemplate     *string                `protobuf:"bytes,5,opt,name=client_template,json=clientTemplate,proto3,oneof" json:"client_template,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *PerforceSource) Reset() {
+	*x = PerforceSource{}
+	mi := &file_relayv1_relay_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PerforceSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PerforceSource) ProtoMessage() {}
+
+func (x *PerforceSource) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PerforceSource.ProtoReflect.Descriptor instead.
+func (*PerforceSource) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PerforceSource) GetStream() string {
+	if x != nil {
+		return x.Stream
+	}
+	return ""
+}
+
+func (x *PerforceSource) GetSync() []*SyncEntry {
+	if x != nil {
+		return x.Sync
+	}
+	return nil
+}
+
+func (x *PerforceSource) GetUnshelves() []int64 {
+	if x != nil {
+		return x.Unshelves
+	}
+	return nil
+}
+
+func (x *PerforceSource) GetWorkspaceExclusive() bool {
+	if x != nil {
+		return x.WorkspaceExclusive
+	}
+	return false
+}
+
+func (x *PerforceSource) GetClientTemplate() string {
+	if x != nil && x.ClientTemplate != nil {
+		return *x.ClientTemplate
+	}
+	return ""
+}
+
+type SyncEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Rev           string                 `protobuf:"bytes,2,opt,name=rev,proto3" json:"rev,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncEntry) Reset() {
+	*x = SyncEntry{}
+	mi := &file_relayv1_relay_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncEntry) ProtoMessage() {}
+
+func (x *SyncEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncEntry.ProtoReflect.Descriptor instead.
+func (*SyncEntry) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SyncEntry) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SyncEntry) GetRev() string {
+	if x != nil {
+		return x.Rev
+	}
+	return ""
+}
+
+type WorkspaceInventoryUpdate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SourceType    string                 `protobuf:"bytes,1,opt,name=source_type,json=sourceType,proto3" json:"source_type,omitempty"`
+	SourceKey     string                 `protobuf:"bytes,2,opt,name=source_key,json=sourceKey,proto3" json:"source_key,omitempty"`
+	ShortId       string                 `protobuf:"bytes,3,opt,name=short_id,json=shortId,proto3" json:"short_id,omitempty"`
+	BaselineHash  string                 `protobuf:"bytes,4,opt,name=baseline_hash,json=baselineHash,proto3" json:"baseline_hash,omitempty"`
+	Deleted       bool                   `protobuf:"varint,5,opt,name=deleted,proto3" json:"deleted,omitempty"`
+	LastUsedAt    string                 `protobuf:"bytes,6,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkspaceInventoryUpdate) Reset() {
+	*x = WorkspaceInventoryUpdate{}
+	mi := &file_relayv1_relay_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkspaceInventoryUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkspaceInventoryUpdate) ProtoMessage() {}
+
+func (x *WorkspaceInventoryUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkspaceInventoryUpdate.ProtoReflect.Descriptor instead.
+func (*WorkspaceInventoryUpdate) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *WorkspaceInventoryUpdate) GetSourceType() string {
+	if x != nil {
+		return x.SourceType
+	}
+	return ""
+}
+
+func (x *WorkspaceInventoryUpdate) GetSourceKey() string {
+	if x != nil {
+		return x.SourceKey
+	}
+	return ""
+}
+
+func (x *WorkspaceInventoryUpdate) GetShortId() string {
+	if x != nil {
+		return x.ShortId
+	}
+	return ""
+}
+
+func (x *WorkspaceInventoryUpdate) GetBaselineHash() string {
+	if x != nil {
+		return x.BaselineHash
+	}
+	return ""
+}
+
+func (x *WorkspaceInventoryUpdate) GetDeleted() bool {
+	if x != nil {
+		return x.Deleted
+	}
+	return false
+}
+
+func (x *WorkspaceInventoryUpdate) GetLastUsedAt() string {
+	if x != nil {
+		return x.LastUsedAt
+	}
+	return ""
+}
+
+type EvictWorkspaceCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SourceType    string                 `protobuf:"bytes,1,opt,name=source_type,json=sourceType,proto3" json:"source_type,omitempty"`
+	ShortId       string                 `protobuf:"bytes,2,opt,name=short_id,json=shortId,proto3" json:"short_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EvictWorkspaceCommand) Reset() {
+	*x = EvictWorkspaceCommand{}
+	mi := &file_relayv1_relay_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EvictWorkspaceCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EvictWorkspaceCommand) ProtoMessage() {}
+
+func (x *EvictWorkspaceCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EvictWorkspaceCommand.ProtoReflect.Descriptor instead.
+func (*EvictWorkspaceCommand) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *EvictWorkspaceCommand) GetSourceType() string {
+	if x != nil {
+		return x.SourceType
+	}
+	return ""
+}
+
+func (x *EvictWorkspaceCommand) GetShortId() string {
+	if x != nil {
+		return x.ShortId
+	}
+	return ""
+}
+
 var File_relayv1_relay_proto protoreflect.FileDescriptor
 
 const file_relayv1_relay_proto_rawDesc = "" +
 	"\n" +
-	"\x13relayv1/relay.proto\x12\brelay.v1\"\xc6\x01\n" +
+	"\x13relayv1/relay.proto\x12\brelay.v1\"\x9d\x02\n" +
 	"\fAgentMessage\x127\n" +
 	"\bregister\x18\x01 \x01(\v2\x19.relay.v1.RegisterRequestH\x00R\bregister\x12=\n" +
 	"\vtask_status\x18\x02 \x01(\v2\x1a.relay.v1.TaskStatusUpdateH\x00R\n" +
 	"taskStatus\x123\n" +
-	"\btask_log\x18\x03 \x01(\v2\x16.relay.v1.TaskLogChunkH\x00R\ataskLogB\t\n" +
-	"\apayload\"\xe2\x02\n" +
+	"\btask_log\x18\x03 \x01(\v2\x16.relay.v1.TaskLogChunkH\x00R\ataskLog\x12U\n" +
+	"\x13workspace_inventory\x18\x04 \x01(\v2\".relay.v1.WorkspaceInventoryUpdateH\x00R\x12workspaceInventoryB\t\n" +
+	"\apayload\"\xa4\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1b\n" +
@@ -888,7 +1276,8 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x10enrollment_token\x18\t \x01(\tH\x00R\x0fenrollmentToken\x12!\n" +
 	"\vagent_token\x18\n" +
 	" \x01(\tH\x00R\n" +
-	"agentTokenB\f\n" +
+	"agentToken\x12@\n" +
+	"\tinventory\x18\v \x03(\v2\".relay.v1.WorkspaceInventoryUpdateR\tinventoryB\f\n" +
 	"\n" +
 	"credential\"<\n" +
 	"\vRunningTask\x12\x17\n" +
@@ -906,42 +1295,76 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
 	"\x06stream\x18\x02 \x01(\x0e2\x13.relay.v1.LogStreamR\x06stream\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\fR\acontent\x12\x14\n" +
-	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\"\xe2\x01\n" +
+	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\"\xae\x02\n" +
 	"\x12CoordinatorMessage\x12I\n" +
 	"\x11register_response\x18\x01 \x01(\v2\x1a.relay.v1.RegisterResponseH\x00R\x10registerResponse\x12=\n" +
 	"\rdispatch_task\x18\x02 \x01(\v2\x16.relay.v1.DispatchTaskH\x00R\fdispatchTask\x127\n" +
 	"\vcancel_task\x18\x03 \x01(\v2\x14.relay.v1.CancelTaskH\x00R\n" +
-	"cancelTaskB\t\n" +
+	"cancelTask\x12J\n" +
+	"\x0fevict_workspace\x18\x04 \x01(\v2\x1f.relay.v1.EvictWorkspaceCommandH\x00R\x0eevictWorkspaceB\t\n" +
 	"\apayload\"x\n" +
 	"\x10RegisterResponse\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
 	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\x12\x1f\n" +
 	"\vagent_token\x18\x03 \x01(\tR\n" +
-	"agentToken\"\x82\x02\n" +
+	"agentToken\"\xb0\x02\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x18\n" +
 	"\acommand\x18\x03 \x03(\tR\acommand\x121\n" +
 	"\x03env\x18\x04 \x03(\v2\x1f.relay.v1.DispatchTask.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
-	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x1a6\n" +
+	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x12,\n" +
+	"\x06source\x18\a \x01(\v2\x14.relay.v1.SourceSpecR\x06source\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"%\n" +
 	"\n" +
 	"CancelTask\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId*\x8b\x01\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\"P\n" +
+	"\n" +
+	"SourceSpec\x126\n" +
+	"\bperforce\x18\x01 \x01(\v2\x18.relay.v1.PerforceSourceH\x00R\bperforceB\n" +
+	"\n" +
+	"\bprovider\"\xe2\x01\n" +
+	"\x0ePerforceSource\x12\x16\n" +
+	"\x06stream\x18\x01 \x01(\tR\x06stream\x12'\n" +
+	"\x04sync\x18\x02 \x03(\v2\x13.relay.v1.SyncEntryR\x04sync\x12\x1c\n" +
+	"\tunshelves\x18\x03 \x03(\x03R\tunshelves\x12/\n" +
+	"\x13workspace_exclusive\x18\x04 \x01(\bR\x12workspaceExclusive\x12,\n" +
+	"\x0fclient_template\x18\x05 \x01(\tH\x00R\x0eclientTemplate\x88\x01\x01B\x12\n" +
+	"\x10_client_template\"1\n" +
+	"\tSyncEntry\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n" +
+	"\x03rev\x18\x02 \x01(\tR\x03rev\"\xd6\x01\n" +
+	"\x18WorkspaceInventoryUpdate\x12\x1f\n" +
+	"\vsource_type\x18\x01 \x01(\tR\n" +
+	"sourceType\x12\x1d\n" +
+	"\n" +
+	"source_key\x18\x02 \x01(\tR\tsourceKey\x12\x19\n" +
+	"\bshort_id\x18\x03 \x01(\tR\ashortId\x12#\n" +
+	"\rbaseline_hash\x18\x04 \x01(\tR\fbaselineHash\x12\x18\n" +
+	"\adeleted\x18\x05 \x01(\bR\adeleted\x12 \n" +
+	"\flast_used_at\x18\x06 \x01(\tR\n" +
+	"lastUsedAt\"S\n" +
+	"\x15EvictWorkspaceCommand\x12\x1f\n" +
+	"\vsource_type\x18\x01 \x01(\tR\n" +
+	"sourceType\x12\x19\n" +
+	"\bshort_id\x18\x02 \x01(\tR\ashortId*\xc6\x01\n" +
 	"\n" +
 	"TaskStatus\x12\x1b\n" +
 	"\x17TASK_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13TASK_STATUS_RUNNING\x10\x01\x12\x14\n" +
 	"\x10TASK_STATUS_DONE\x10\x02\x12\x16\n" +
 	"\x12TASK_STATUS_FAILED\x10\x03\x12\x19\n" +
-	"\x15TASK_STATUS_TIMED_OUT\x10\x04*U\n" +
+	"\x15TASK_STATUS_TIMED_OUT\x10\x04\x12\x19\n" +
+	"\x15TASK_STATUS_PREPARING\x10\x05\x12\x1e\n" +
+	"\x1aTASK_STATUS_PREPARE_FAILED\x10\x06*m\n" +
 	"\tLogStream\x12\x1a\n" +
 	"\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n" +
-	"\x11LOG_STREAM_STDERR\x10\x022S\n" +
+	"\x11LOG_STREAM_STDERR\x10\x02\x12\x16\n" +
+	"\x12LOG_STREAM_PREPARE\x10\x032S\n" +
 	"\fAgentService\x12C\n" +
 	"\aConnect\x12\x16.relay.v1.AgentMessage\x1a\x1c.relay.v1.CoordinatorMessage(\x010\x01B\x1eZ\x1crelay/internal/proto/relayv1b\x06proto3"
 
@@ -958,39 +1381,50 @@ func file_relayv1_relay_proto_rawDescGZIP() []byte {
 }
 
 var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_relayv1_relay_proto_goTypes = []any{
-	(TaskStatus)(0),            // 0: relay.v1.TaskStatus
-	(LogStream)(0),             // 1: relay.v1.LogStream
-	(*AgentMessage)(nil),       // 2: relay.v1.AgentMessage
-	(*RegisterRequest)(nil),    // 3: relay.v1.RegisterRequest
-	(*RunningTask)(nil),        // 4: relay.v1.RunningTask
-	(*TaskStatusUpdate)(nil),   // 5: relay.v1.TaskStatusUpdate
-	(*TaskLogChunk)(nil),       // 6: relay.v1.TaskLogChunk
-	(*CoordinatorMessage)(nil), // 7: relay.v1.CoordinatorMessage
-	(*RegisterResponse)(nil),   // 8: relay.v1.RegisterResponse
-	(*DispatchTask)(nil),       // 9: relay.v1.DispatchTask
-	(*CancelTask)(nil),         // 10: relay.v1.CancelTask
-	nil,                        // 11: relay.v1.DispatchTask.EnvEntry
+	(TaskStatus)(0),                  // 0: relay.v1.TaskStatus
+	(LogStream)(0),                   // 1: relay.v1.LogStream
+	(*AgentMessage)(nil),             // 2: relay.v1.AgentMessage
+	(*RegisterRequest)(nil),          // 3: relay.v1.RegisterRequest
+	(*RunningTask)(nil),              // 4: relay.v1.RunningTask
+	(*TaskStatusUpdate)(nil),         // 5: relay.v1.TaskStatusUpdate
+	(*TaskLogChunk)(nil),             // 6: relay.v1.TaskLogChunk
+	(*CoordinatorMessage)(nil),       // 7: relay.v1.CoordinatorMessage
+	(*RegisterResponse)(nil),         // 8: relay.v1.RegisterResponse
+	(*DispatchTask)(nil),             // 9: relay.v1.DispatchTask
+	(*CancelTask)(nil),               // 10: relay.v1.CancelTask
+	(*SourceSpec)(nil),               // 11: relay.v1.SourceSpec
+	(*PerforceSource)(nil),           // 12: relay.v1.PerforceSource
+	(*SyncEntry)(nil),                // 13: relay.v1.SyncEntry
+	(*WorkspaceInventoryUpdate)(nil), // 14: relay.v1.WorkspaceInventoryUpdate
+	(*EvictWorkspaceCommand)(nil),    // 15: relay.v1.EvictWorkspaceCommand
+	nil,                              // 16: relay.v1.DispatchTask.EnvEntry
 }
 var file_relayv1_relay_proto_depIdxs = []int32{
 	3,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
 	5,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
 	6,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
-	4,  // 3: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
-	0,  // 4: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
-	1,  // 5: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
-	8,  // 6: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
-	9,  // 7: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
-	10, // 8: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
-	11, // 9: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
-	2,  // 10: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
-	7,  // 11: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
-	11, // [11:12] is the sub-list for method output_type
-	10, // [10:11] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	14, // 3: relay.v1.AgentMessage.workspace_inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	4,  // 4: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
+	14, // 5: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	0,  // 6: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
+	1,  // 7: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
+	8,  // 8: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
+	9,  // 9: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
+	10, // 10: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
+	15, // 11: relay.v1.CoordinatorMessage.evict_workspace:type_name -> relay.v1.EvictWorkspaceCommand
+	16, // 12: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
+	11, // 13: relay.v1.DispatchTask.source:type_name -> relay.v1.SourceSpec
+	12, // 14: relay.v1.SourceSpec.perforce:type_name -> relay.v1.PerforceSource
+	13, // 15: relay.v1.PerforceSource.sync:type_name -> relay.v1.SyncEntry
+	2,  // 16: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
+	7,  // 17: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
+	17, // [17:18] is the sub-list for method output_type
+	16, // [16:17] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_relayv1_relay_proto_init() }
@@ -1002,6 +1436,7 @@ func file_relayv1_relay_proto_init() {
 		(*AgentMessage_Register)(nil),
 		(*AgentMessage_TaskStatus)(nil),
 		(*AgentMessage_TaskLog)(nil),
+		(*AgentMessage_WorkspaceInventory)(nil),
 	}
 	file_relayv1_relay_proto_msgTypes[1].OneofWrappers = []any{
 		(*RegisterRequest_EnrollmentToken)(nil),
@@ -1012,14 +1447,19 @@ func file_relayv1_relay_proto_init() {
 		(*CoordinatorMessage_RegisterResponse)(nil),
 		(*CoordinatorMessage_DispatchTask)(nil),
 		(*CoordinatorMessage_CancelTask)(nil),
+		(*CoordinatorMessage_EvictWorkspace)(nil),
 	}
+	file_relayv1_relay_proto_msgTypes[9].OneofWrappers = []any{
+		(*SourceSpec_Perforce)(nil),
+	}
+	file_relayv1_relay_proto_msgTypes[10].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relayv1_relay_proto_rawDesc), len(file_relayv1_relay_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   10,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

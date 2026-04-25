@@ -10,9 +10,10 @@ service AgentService {
 
 message AgentMessage {
   oneof payload {
-    RegisterRequest  register    = 1;
-    TaskStatusUpdate task_status = 2;
-    TaskLogChunk     task_log    = 3;
+    RegisterRequest          register             = 1;
+    TaskStatusUpdate         task_status          = 2;
+    TaskLogChunk             task_log             = 3;
+    WorkspaceInventoryUpdate workspace_inventory  = 4;
   }
 }
 
@@ -36,6 +37,7 @@ message RegisterRequest {
     string enrollment_token = 9;
     string agent_token      = 10;
   }
+  repeated WorkspaceInventoryUpdate inventory = 11;
 }
 
 // A task the agent believes it is currently running, with the epoch assigned
@@ -62,9 +64,10 @@ message TaskLogChunk {
 
 message CoordinatorMessage {
   oneof payload {
-    RegisterResponse register_response = 1;
-    DispatchTask     dispatch_task     = 2;
-    CancelTask       cancel_task       = 3;
+    RegisterResponse     register_response = 1;
+    DispatchTask         dispatch_task     = 2;
+    CancelTask           cancel_task       = 3;
+    EvictWorkspaceCommand evict_workspace  = 4;
   }
 }
 
@@ -86,6 +89,7 @@ message DispatchTask {
   map<string, string> env             = 4;
   int32               timeout_seconds = 5;
   int64               epoch           = 6;
+  SourceSpec          source          = 7;
 }
 
 message CancelTask {
@@ -93,15 +97,51 @@ message CancelTask {
 }
 
 enum TaskStatus {
-  TASK_STATUS_UNSPECIFIED = 0;
-  TASK_STATUS_RUNNING     = 1;
-  TASK_STATUS_DONE        = 2;
-  TASK_STATUS_FAILED      = 3;
-  TASK_STATUS_TIMED_OUT   = 4;
+  TASK_STATUS_UNSPECIFIED    = 0;
+  TASK_STATUS_RUNNING        = 1;
+  TASK_STATUS_DONE           = 2;
+  TASK_STATUS_FAILED         = 3;
+  TASK_STATUS_TIMED_OUT      = 4;
+  TASK_STATUS_PREPARING      = 5;
+  TASK_STATUS_PREPARE_FAILED = 6;
 }
 
 enum LogStream {
   LOG_STREAM_UNSPECIFIED = 0;
   LOG_STREAM_STDOUT      = 1;
   LOG_STREAM_STDERR      = 2;
+  LOG_STREAM_PREPARE     = 3;
+}
+
+message SourceSpec {
+  oneof provider {
+    PerforceSource perforce = 1;
+  }
+}
+
+message PerforceSource {
+  string             stream              = 1;
+  repeated SyncEntry sync                = 2;
+  repeated int64     unshelves           = 3;
+  bool               workspace_exclusive = 4;
+  optional string    client_template     = 5;
+}
+
+message SyncEntry {
+  string path = 1;
+  string rev  = 2;
+}
+
+message WorkspaceInventoryUpdate {
+  string source_type   = 1;
+  string source_key    = 2;
+  string short_id      = 3;
+  string baseline_hash = 4;
+  bool   deleted       = 5;
+  string last_used_at  = 6;
+}
+
+message EvictWorkspaceCommand {
+  string source_type = 1;
+  string short_id    = 2;
 }
