@@ -20,6 +20,7 @@ The current relay dispatch pipeline assigns individual tasks to workers independ
 ## Non-Goals (v1)
 
 - Non-Perforce providers. The interface supports them; only the Perforce implementation ships.
+- Classic (non-stream) Perforce clients with manually-specified Views. v1 always creates stream-bound clients. The `SourceSpec.oneof` leaves room for a future sibling `PerforceClassicSource` message if a real use case appears.
 - Relay-managed Perforce credentials. Operators provision P4 tickets on worker machines out-of-band (imaging, config-management, manual `p4 login`). Relay assumes `p4` just works.
 - Job-level task pinning to a single worker. Parallelism across a job's tasks is preserved.
 - Distributed build artifact caching (FASTBuild/IncrediBuild-style). Unreal's own incremental build inside the warm workspace is sufficient.
@@ -105,11 +106,11 @@ message SourceSpec {
 }
 
 message PerforceSource {
-  string stream = 1;                      // e.g. "//streams/GameX/main"
+  string stream = 1;                      // e.g. "//streams/GameX/main"; client is bound to this stream
   repeated SyncEntry sync = 2;
   repeated int64 unshelves = 3;
   bool workspace_exclusive = 4;
-  optional string client_template = 5;    // passed to `p4 client -t <template>`
+  optional string client_template = 5;    // optional template for non-View fields (Options, SubmitOptions, LineEnd, Description); View is always from the stream
 }
 
 message SyncEntry {
@@ -267,8 +268,16 @@ On agent startup: scan the registry, reconcile with `p4 clients -u <user> -e 're
 
    2. Look up workspace by source_key in the registry.
       If missing: allocate short_id, create <root>/<short_id>/,
-                  create p4 client with View: derived from stream
-                  (optionally `p4 client -t <client_template>`).
+                  create a stream-bound p4 client:
+                    if spec.client_template is unset:
+                        p4 client -S <stream> -i           (View from stream, defaults elsewhere)
+                    else:
+                        p4 client -S <stream> -t <client_template> -i
+                                                            (View from stream; Options, SubmitOptions,
+                                                             LineEnd, Description from template)
+                  The Root: field is set to <root>/<short_id>/.
+                  The Host: field is left blank so the client can be reused if the agent
+                    machine is renamed, but the Owner: field is set to the configured p4 user.
 
    3. Arbitrate lock per the three rules above.
 
