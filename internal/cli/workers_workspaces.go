@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+	"time"
 )
 
 type workspaceResp struct {
-	SourceType   string `json:"source_type"`
-	SourceKey    string `json:"source_key"`
-	ShortID      string `json:"short_id"`
-	BaselineHash string `json:"baseline_hash"`
-	LastUsedAt   string `json:"last_used_at"`
+	SourceType   string     `json:"source_type"`
+	SourceKey    string     `json:"source_key"`
+	ShortID      string     `json:"short_id"`
+	BaselineHash string     `json:"baseline_hash"`
+	LastUsedAt   *time.Time `json:"last_used_at"`
 }
 
 func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Writer) error {
@@ -40,8 +41,12 @@ func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Wri
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SHORT_ID\tSOURCE_TYPE\tSOURCE_KEY\tBASELINE\tLAST_USED")
 	for _, ws := range workspaces {
+		lastUsed := ""
+		if ws.LastUsedAt != nil {
+			lastUsed = ws.LastUsedAt.Format(time.RFC3339)
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			ws.ShortID, ws.SourceType, ws.SourceKey, ws.BaselineHash, ws.LastUsedAt)
+			ws.ShortID, ws.SourceType, ws.SourceKey, ws.BaselineHash, lastUsed)
 	}
 	return tw.Flush()
 }
