@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS worker_workspaces;
+ALTER TABLE tasks DROP COLUMN IF EXISTS source;

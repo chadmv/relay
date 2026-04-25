@@ -94,6 +94,7 @@ type Task struct {
 	FinishedAt      pgtype.Timestamptz `json:"finished_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	AssignmentEpoch int32              `json:"assignment_epoch"`
+	Source          []byte             `json:"source"`
 }
 
 type TaskDependency struct {
@@ -133,4 +134,13 @@ type Worker struct {
 	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	AgentTokenHash *string            `json:"agent_token_hash"`
+}
+
+type WorkerWorkspace struct {
+	WorkerID     pgtype.UUID        `json:"worker_id"`
+	SourceType   string             `json:"source_type"`
+	SourceKey    string             `json:"source_key"`
+	ShortID      string             `json:"short_id"`
+	BaselineHash string             `json:"baseline_hash"`
+	LastUsedAt   pgtype.Timestamptz `json:"last_used_at"`
 }

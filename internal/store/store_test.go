@@ -5,6 +5,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -13,6 +14,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"relay/internal/store"
 )
+
+func makeTestWorker(t *testing.T, q *store.Queries, ctx context.Context, hostname string) store.Worker {
+	t.Helper()
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: hostname, Hostname: hostname, CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	return w
+}
 
 func makeTestUser(t *testing.T, q *store.Queries, ctx context.Context, name, email string) store.User {
 	t.Helper()
@@ -354,4 +364,51 @@ func TestReconciliationQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, w1Active, 1)
 	assert.Equal(t, taskB.ID, w1Active[0].ID)
+}
+
+func TestWorkerWorkspacesAndSourceColumn(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Wendy", "w@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "ws-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// tasks.source must be a nullable JSONB column
+	src := []byte(`{"type":"perforce","stream":"//streams/X/main"}`)
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID: job.ID, Name: "t", Command: []string{"true"},
+		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, string(src), string(task.Source))
+
+	// status must accept new enum values
+	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		ID: task.ID, Status: "preparing", Epoch: 0,
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		ID: task.ID, Status: "prepare_failed", Epoch: 0,
+	})
+	require.NoError(t, err)
+
+	// worker_workspaces upsert + list round-trip
+	worker := makeTestWorker(t, q, ctx, "render-07")
+	err = q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+		WorkerID:     worker.ID,
+		SourceType:   "perforce",
+		SourceKey:    "//streams/X/main",
+		ShortID:      "abcdef",
+		BaselineHash: "deadbeefdeadbeef",
+		LastUsedAt:   pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	rows, err := q.ListWorkerWorkspaces(ctx, worker.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "abcdef", rows[0].ShortID)
 }

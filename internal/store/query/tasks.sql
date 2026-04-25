@@ -147,3 +147,16 @@ FROM tasks
 WHERE worker_id IS NOT NULL
   AND status IN ('dispatched', 'running')
 GROUP BY worker_id;
+
+-- name: CreateTaskWithSource :one
+INSERT INTO tasks (job_id, name, command, env, requires, timeout_seconds, retries, source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING *;
+
+-- name: UpdateTaskStatusEpoch :one
+-- Updates a task's status only if the caller's epoch matches the current
+-- assignment_epoch. Returns pgx.ErrNoRows if the epoch is stale.
+UPDATE tasks
+SET status = sqlc.arg(status)
+WHERE id = sqlc.arg(id) AND assignment_epoch = sqlc.arg(epoch)
+RETURNING *;
