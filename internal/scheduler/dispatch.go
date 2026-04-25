@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"relay/internal/api"
@@ -175,9 +176,11 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	}
 	if len(claimed.Source) > 0 {
 		var ss api.SourceSpec
-		if err := json.Unmarshal(claimed.Source, &ss); err == nil {
-			dt.Source = sourceSpecToProto(&ss)
+		if err := json.Unmarshal(claimed.Source, &ss); err != nil {
+			log.Printf("dispatch: bad source JSON on task %s: %v", claimed.ID, err)
+			return false
 		}
+		dt.Source = sourceSpecToProto(&ss)
 	}
 	msg := &relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_DispatchTask{
