@@ -254,6 +254,17 @@ func (p *Provider) Client() *Client { return p.cfg.Client }
 // This is the public wrapper of lockedShortIDs for use by the sweeper.
 func (p *Provider) LockedShortIDs() map[string]bool { return p.lockedShortIDs() }
 
+// InvalidateWorkspace removes a workspace's in-memory state after external eviction.
+// This is called by the sweeper's OnEvictedCB to keep the provider cache consistent.
+func (p *Provider) InvalidateWorkspace(shortID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.workspaces, shortID)
+	// Nil out the registry cache so the next Prepare reloads from disk,
+	// picking up the eviction that the sweeper already wrote.
+	p.reg = nil
+}
+
 // lockedShortIDs returns the set of shortIDs that are currently held by tasks.
 func (p *Provider) lockedShortIDs() map[string]bool {
 	p.mu.Lock()
