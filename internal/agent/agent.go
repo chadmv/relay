@@ -244,5 +244,20 @@ func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 	default:
 		return nil, fmt.Errorf("no credentials: set RELAY_AGENT_ENROLLMENT_TOKEN or provision the agent token file")
 	}
+
+	// Attach workspace inventory if the provider supports it.
+	if il, ok := a.provider.(source.InventoryLister); ok {
+		inv, _ := il.ListInventory()
+		for _, e := range inv {
+			req.Inventory = append(req.Inventory, &relayv1.WorkspaceInventoryUpdate{
+				SourceType:   e.SourceType,
+				SourceKey:    e.SourceKey,
+				ShortId:      e.ShortID,
+				BaselineHash: e.BaselineHash,
+				LastUsedAt:   e.LastUsedAt.Format("2006-01-02T15:04:05Z07:00"),
+			})
+		}
+	}
+
 	return req, nil
 }

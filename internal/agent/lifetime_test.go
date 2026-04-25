@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
+	perforceProvider "relay/internal/agent/source/perforce"
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/assert"
@@ -79,4 +81,26 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 	}
 	assert.Equal(t, int64(3), byID["task-1"])
 	assert.Equal(t, int64(7), byID["task-2"])
+}
+
+func TestAgent_BuildRegisterRequest_IncludesInventory(t *testing.T) {
+	root := t.TempDir()
+	// Pre-seed a registry file.
+	reg, err := perforceProvider.LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	require.NoError(t, err)
+	reg.Upsert(perforceProvider.WorkspaceEntry{
+		ShortID: "abcdef", SourceKey: "//s/x", ClientName: "relay_h_abcdef",
+		BaselineHash: "deadbeef", LastUsedAt: time.Now(),
+	})
+	require.NoError(t, reg.Save())
+
+	p := perforceProvider.New(perforceProvider.Config{Root: root, Hostname: "h"})
+	creds, _ := LoadCredentials(t.TempDir())
+	creds.SetEnrollmentToken("test-enrollment")
+	a := NewAgent("addr", Capabilities{Hostname: "h"}, "", creds, func(string) error { return nil }, p)
+	req, err := a.buildRegisterRequest()
+	require.NoError(t, err)
+	require.Len(t, req.Inventory, 1)
+	require.Equal(t, "//s/x", req.Inventory[0].SourceKey)
+	require.Equal(t, "abcdef", req.Inventory[0].ShortId)
 }

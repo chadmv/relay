@@ -37,6 +37,12 @@ type InventoryEntry struct {
 	Deleted      bool
 }
 
+// InventoryLister is an optional extension of Provider that reports the
+// current on-disk workspace inventory for inclusion in RegisterRequest.
+type InventoryLister interface {
+	ListInventory() ([]InventoryEntry, error)
+}
+
 // ErrUnknownProvider is returned by Registry.Get when the type is not registered.
 var ErrUnknownProvider = errors.New("unknown source provider")
 

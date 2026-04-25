@@ -41,6 +41,28 @@ func New(cfg Config) *Provider {
 
 func (p *Provider) Type() string { return "perforce" }
 
+// ListInventory returns all workspaces recorded in the on-disk registry,
+// satisfying the source.InventoryLister interface.
+func (p *Provider) ListInventory() ([]source.InventoryEntry, error) {
+	reg, err := p.loadRegistry()
+	if err != nil {
+		return nil, err
+	}
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	out := make([]source.InventoryEntry, 0, len(reg.Workspaces))
+	for _, w := range reg.Workspaces {
+		out = append(out, source.InventoryEntry{
+			SourceType:   "perforce",
+			SourceKey:    w.SourceKey,
+			ShortID:      w.ShortID,
+			BaselineHash: w.BaselineHash,
+			LastUsedAt:   w.LastUsedAt,
+		})
+	}
+	return out, nil
+}
+
 func (p *Provider) loadRegistry() (*Registry, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
