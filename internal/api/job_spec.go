@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"relay/internal/store"
 
@@ -29,6 +31,23 @@ type TaskSpec struct {
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
 	Retries        int32             `json:"retries"`
 	DependsOn      []string          `json:"depends_on"`
+	Source         *SourceSpec       `json:"source,omitempty"`
+}
+
+// SourceSpec describes how to prepare a workspace before the task runs.
+type SourceSpec struct {
+	Type               string      `json:"type"`
+	Stream             string      `json:"stream,omitempty"`
+	Sync               []SyncEntry `json:"sync,omitempty"`
+	Unshelves          []int64     `json:"unshelves,omitempty"`
+	WorkspaceExclusive bool        `json:"workspace_exclusive,omitempty"`
+	ClientTemplate     *string     `json:"client_template,omitempty"`
+}
+
+// SyncEntry is a single depot path + revision to sync.
+type SyncEntry struct {
+	Path string `json:"path"`
+	Rev  string `json:"rev"`
 }
 
 // ValidateJobSpec applies the same validation as POST /v1/jobs. Returns an
@@ -59,6 +78,60 @@ func ValidateJobSpec(spec JobSpec) error {
 				return fmt.Errorf("unknown depends_on: %s", dep)
 			}
 		}
+	}
+	for _, ts := range spec.Tasks {
+		if err := validateSourceSpec(ts.Source); err != nil {
+			return fmt.Errorf("task %s: %w", ts.Name, err)
+		}
+	}
+	return nil
+}
+
+var (
+	revHeadRe    = regexp.MustCompile(`^#head$`)
+	revCLRe      = regexp.MustCompile(`^@\d+$`)
+	revLabelRe   = regexp.MustCompile(`^@[A-Za-z0-9._-]+$`)
+	revNumRe     = regexp.MustCompile(`^#\d+$`)
+	clientTmplRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+)
+
+func validateSourceSpec(s *SourceSpec) error {
+	if s == nil {
+		return nil
+	}
+	if s.Type != "perforce" {
+		return fmt.Errorf("unsupported source type: %s", s.Type)
+	}
+	if s.Stream == "" {
+		return errors.New("stream is required")
+	}
+	if !strings.HasPrefix(s.Stream, "//") {
+		return errors.New("stream must start with //")
+	}
+	if len(s.Sync) == 0 {
+		return errors.New("source.sync must have at least one sync entry")
+	}
+	for i, e := range s.Sync {
+		if !strings.HasPrefix(e.Path, "//") {
+			return fmt.Errorf("sync[%d].path must start with //", i)
+		}
+		if e.Path != s.Stream &&
+			e.Path != s.Stream+"/..." &&
+			!strings.HasPrefix(e.Path, s.Stream+"/") {
+			return fmt.Errorf("sync[%d].path must be under stream %s", i, s.Stream)
+		}
+		if !(revHeadRe.MatchString(e.Rev) || revCLRe.MatchString(e.Rev) ||
+			revLabelRe.MatchString(e.Rev) || revNumRe.MatchString(e.Rev)) {
+			return fmt.Errorf("sync[%d].rev: invalid rev %q", i, e.Rev)
+		}
+	}
+	for i, cl := range s.Unshelves {
+		if cl <= 0 {
+			return fmt.Errorf("unshelves[%d]: unshelve must be positive", i)
+		}
+	}
+	if s.ClientTemplate != nil && !clientTmplRe.MatchString(*s.ClientTemplate) {
+		return fmt.Errorf("invalid client_template %q", *s.ClientTemplate)
 	}
 	return nil
 }

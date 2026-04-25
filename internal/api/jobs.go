@@ -123,7 +123,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Tasks:    make([]TaskSpec, len(req.Tasks)),
 	}
 	for i, t := range req.Tasks {
-		spec.Tasks[i] = TaskSpec(t)
+		spec.Tasks[i] = TaskSpec{
+			Name:           t.Name,
+			Command:        t.Command,
+			Env:            t.Env,
+			Requires:       t.Requires,
+			TimeoutSeconds: t.TimeoutSeconds,
+			Retries:        t.Retries,
+			DependsOn:      t.DependsOn,
+		}
 	}
 
 	if err := ValidateJobSpec(spec); err != nil {
