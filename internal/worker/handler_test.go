@@ -112,11 +112,11 @@ func newTestStore(t *testing.T) (*store.Queries, *pgxpool.Pool) {
 }
 
 func TestHandler_RegisterNewWorker(t *testing.T) {
-	q, _ := newTestStore(t)
+	q, pool := newTestStore(t)
 	registry := worker.NewRegistry()
 	broker := events.NewBroker()
 	triggered := make(chan struct{}, 1)
-	h := worker.NewHandler(q, registry, broker, func() {
+	h := worker.NewHandler(q, pool, registry, broker, func() {
 		select {
 		case triggered <- struct{}{}:
 		default:
@@ -190,10 +190,10 @@ func TestHandler_RegisterNewWorker(t *testing.T) {
 
 func TestHandleTaskStatus_EpochGate(t *testing.T) {
 	ctx := context.Background()
-	q, _ := newTestStore(t)
+	q, pool := newTestStore(t)
 	registry := worker.NewRegistry()
 	broker := events.NewBroker()
-	h := worker.NewHandler(q, registry, broker, func() {})
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
 
 	// Create a user to satisfy the jobs.submitted_by foreign key.
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
@@ -277,11 +277,11 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 
 func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	ctx := context.Background()
-	q, _ := newTestStore(t)
+	q, pool := newTestStore(t)
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 	grace := worker.NewGraceRegistry(1*time.Minute, func(string) {})
-	h := worker.NewHandlerWithGrace(q, registry, broker, func() {}, grace)
+	h := worker.NewHandlerWithGrace(q, pool, registry, broker, func() {}, grace)
 
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
 		Name: "u", Email: "recon@example.com", IsAdmin: false, PasswordHash: "x",
@@ -398,7 +398,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 
 func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 	ctx := context.Background()
-	q, _ := newTestStore(t)
+	q, pool := newTestStore(t)
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
 
@@ -408,7 +408,7 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 	})
 	defer grace.Stop()
 
-	h := worker.NewHandlerWithGrace(q, registry, broker, func() {}, grace)
+	h := worker.NewHandlerWithGrace(q, pool, registry, broker, func() {}, grace)
 
 	_, rawToken := seedWorkerWithAgentToken(t, ctx, q, "grace-host")
 
@@ -443,4 +443,64 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return fired.Load() == 1
 	}, 500*time.Millisecond, 5*time.Millisecond, "grace timer should fire once")
+}
+
+func TestHandler_RegisterReplacesWorkerInventory(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	// Create a worker directly
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "h", Hostname: "h", CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Pre-seed stale workspace entry
+	require.NoError(t, q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+		WorkerID: w.ID, SourceType: "perforce", SourceKey: "//old", ShortID: "old",
+		BaselineHash: "x", LastUsedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}))
+
+	// Apply a full replacement inventory
+	inv := []*relayv1.WorkspaceInventoryUpdate{
+		{SourceType: "perforce", SourceKey: "//new", ShortId: "n",
+			BaselineHash: "y", LastUsedAt: time.Now().UTC().Format(time.RFC3339)},
+	}
+	require.NoError(t, h.ApplyInventory(ctx, w.ID, inv))
+
+	rows, err := q.ListWorkerWorkspaces(ctx, w.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "//new", rows[0].SourceKey)
+}
+
+func TestHandler_WorkspaceInventoryUpdate_Apply(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "h2", Hostname: "h2", CpuCores: 1, RamGb: 1, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	upd := &relayv1.WorkspaceInventoryUpdate{
+		SourceType: "perforce", SourceKey: "//s/x", ShortId: "abc",
+		BaselineHash: "xyz", LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	require.NoError(t, h.ApplyInventoryUpdate(ctx, w.ID, upd))
+	rows, err := q.ListWorkerWorkspaces(ctx, w.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	upd.Deleted = true
+	require.NoError(t, h.ApplyInventoryUpdate(ctx, w.ID, upd))
+	rows, err = q.ListWorkerWorkspaces(ctx, w.ID)
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }

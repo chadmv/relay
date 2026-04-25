@@ -125,7 +125,7 @@ func newWorkerTestFixture(t *testing.T) *workerTestFixture {
 
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
-	h := worker.NewHandler(q, registry, broker, func() {})
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
 
 	return &workerTestFixture{
 		Q:       q,

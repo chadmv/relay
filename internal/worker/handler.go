@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -24,6 +26,7 @@ import (
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
 	q               *store.Queries
+	pool            *pgxpool.Pool
 	registry        *Registry
 	broker          *events.Broker
 	triggerDispatch func()
@@ -31,14 +34,14 @@ type Handler struct {
 }
 
 // NewHandler returns a Handler wired to the given dependencies.
-func NewHandler(q *store.Queries, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
-	return &Handler{q: q, registry: r, broker: b, triggerDispatch: triggerDispatch}
+func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
+	return &Handler{q: q, pool: pool, registry: r, broker: b, triggerDispatch: triggerDispatch}
 }
 
 // NewHandlerWithGrace is like NewHandler but also wires in a GraceRegistry so
 // that agent disconnects start a grace timer instead of immediately requeueing.
-func NewHandlerWithGrace(q *store.Queries, r *Registry, b *events.Broker, triggerDispatch func(), g *GraceRegistry) *Handler {
-	return &Handler{q: q, registry: r, broker: b, triggerDispatch: triggerDispatch, grace: g}
+func NewHandlerWithGrace(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func(), g *GraceRegistry) *Handler {
+	return &Handler{q: q, pool: pool, registry: r, broker: b, triggerDispatch: triggerDispatch, grace: g}
 }
 
 // Connect implements relayv1.AgentServiceServer.
@@ -58,6 +61,9 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	if err != nil {
 		return err
 	}
+
+	var workerUUID pgtype.UUID
+	_ = workerUUID.Scan(workerID)
 
 	if h.grace != nil {
 		defer h.grace.Start(workerID) // runs 4th: grace timer will requeue after window
@@ -83,6 +89,10 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 			h.handleTaskStatus(ctx, p.TaskStatus)
 		case *relayv1.AgentMessage_TaskLog:
 			h.handleTaskLog(ctx, p.TaskLog)
+		case *relayv1.AgentMessage_WorkspaceInventory:
+			if err := h.applyInventoryUpdate(ctx, workerUUID, p.WorkspaceInventory); err != nil {
+				log.Printf("worker: inventory update failed: %v", err)
+			}
 		}
 	}
 }
@@ -204,6 +214,11 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	cancelIDs, err := h.reconcileRunningTasks(ctx, updated.ID, reg.RunningTasks)
 	if err != nil {
 		return "", nil, fmt.Errorf("reconcile: %w", err)
+	}
+
+	// Replace workspace inventory with what the agent reported at reconnect.
+	if err := h.applyInventory(ctx, updated.ID, reg.Inventory); err != nil {
+		log.Printf("worker: register inventory replace failed: %v", err)
 	}
 
 	// Send RegisterResponse on the raw stream. At this point the worker is not
@@ -451,6 +466,52 @@ func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtyp
 	}
 	_, _ = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{ID: jobID, Status: newStatus})
 	return newStatus
+}
+
+// applyInventory does a transactional full-replace of workspace inventory for
+// a worker: deletes all existing rows, then inserts each non-deleted entry.
+func (h *Handler) applyInventory(ctx context.Context, workerID pgtype.UUID, inv []*relayv1.WorkspaceInventoryUpdate) error {
+	return pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		q := h.q.WithTx(tx)
+		if err := q.ReplaceWorkerInventory(ctx, workerID); err != nil {
+			return err
+		}
+		for _, u := range inv {
+			if u.Deleted {
+				continue
+			}
+			ts, _ := time.Parse(time.RFC3339, u.LastUsedAt) // blank → zero time
+			if err := q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+				WorkerID:     workerID,
+				SourceType:   u.SourceType,
+				SourceKey:    u.SourceKey,
+				ShortID:      u.ShortId,
+				BaselineHash: u.BaselineHash,
+				LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// applyInventoryUpdate upserts or deletes a single workspace inventory row.
+func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUpdate) error {
+	if u.Deleted {
+		return h.q.DeleteWorkerWorkspace(ctx, store.DeleteWorkerWorkspaceParams{
+			WorkerID: workerID, SourceType: u.SourceType, SourceKey: u.SourceKey,
+		})
+	}
+	ts, _ := time.Parse(time.RFC3339, u.LastUsedAt)
+	return h.q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+		WorkerID:     workerID,
+		SourceType:   u.SourceType,
+		SourceKey:    u.SourceKey,
+		ShortID:      u.ShortId,
+		BaselineHash: u.BaselineHash,
+		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
+	})
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.

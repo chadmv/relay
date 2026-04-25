@@ -118,7 +118,7 @@ func main() {
 		log.Printf("warn: seed grace timers: %v", err)
 	}
 
-	agentHandler := worker.NewHandlerWithGrace(q, registry, broker, dispatcher.Trigger, grace)
+	agentHandler := worker.NewHandlerWithGrace(q, pool, registry, broker, dispatcher.Trigger, grace)
 
 	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 	if err != nil {
