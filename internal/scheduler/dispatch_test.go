@@ -4,6 +4,7 @@ package scheduler_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -117,7 +118,7 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	require.NoError(t, err)
 
 	// Upsert worker and set it online.
-	w, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name:     "worker-1",
 		Hostname: "worker-1",
 		CpuCores: 4,
@@ -128,8 +129,8 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	w, err = q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:         w.ID,
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:         wRow.ID,
 		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
@@ -193,12 +194,12 @@ func TestDispatcher_UsesAggregateCountQuery(t *testing.T) {
 	}
 
 	// Worker with MaxSlots=1 (the UpsertWorkerByHostname default).
-	w, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
 	})
 	require.NoError(t, err)
-	w, err = q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:         w.ID,
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:         wRow.ID,
 		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
@@ -276,4 +277,95 @@ func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pending", reread.Status)
 	assert.False(t, reread.WorkerID.Valid)
+}
+
+func TestDispatcher_PassesSourceToAgent(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	// Create user.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name:         "src-user",
+		Email:        "src@example.com",
+		IsAdmin:      false,
+		PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	// Create job.
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name:           "source-job",
+		Priority:       "normal",
+		SubmittedBy:    user.ID,
+		Labels:         []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	// Build and marshal a source spec JSON blob.
+	sourceJSON, err := json.Marshal(map[string]any{
+		"type":   "perforce",
+		"stream": "//streams/X/main",
+		"sync": []map[string]any{
+			{"path": "//streams/X/main/...", "rev": "#head"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create task with source.
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID:    job.ID,
+		Name:     "src-task",
+		Command:  []string{"echo", "source"},
+		Env:      []byte(`{}`),
+		Requires: []byte(`{}`),
+		Retries:  0,
+		Source:   sourceJSON,
+	})
+	require.NoError(t, err)
+
+	// Create worker and set online.
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name:     "src-worker",
+		Hostname: "src-worker",
+		CpuCores: 4,
+		RamGb:    8,
+		GpuCount: 0,
+		GpuModel: "",
+		Os:       "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:         wRow.ID,
+		Status:     "online",
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Register fake sender.
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	broker := events.NewBroker()
+	d := scheduler.NewDispatcher(q, registry, broker)
+	d.RunOnce(ctx)
+
+	// Task should be dispatched.
+	updated, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", updated.Status)
+
+	// Dispatched message should carry source.
+	require.Len(t, sender.sent, 1)
+	dt := sender.sent[0].GetDispatchTask()
+	require.NotNil(t, dt)
+	assert.Equal(t, uuidStr(task.ID), dt.TaskId)
+	require.NotNil(t, dt.Source, "DispatchTask.Source must be populated")
+	pf := dt.Source.GetPerforce()
+	require.NotNil(t, pf, "source provider must be perforce")
+	assert.Equal(t, "//streams/X/main", pf.Stream)
+	require.Len(t, pf.Sync, 1)
+	assert.Equal(t, "//streams/X/main/...", pf.Sync[0].Path)
+	assert.Equal(t, "#head", pf.Sync[0].Rev)
 }

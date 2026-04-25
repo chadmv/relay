@@ -25,6 +25,7 @@ type taskSpec struct {
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
 	Retries        int32             `json:"retries"`
 	DependsOn      []string          `json:"depends_on"`
+	Source         *SourceSpec       `json:"source,omitempty"`
 }
 
 type createJobRequest struct {
@@ -131,6 +132,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			TimeoutSeconds: t.TimeoutSeconds,
 			Retries:        t.Retries,
 			DependsOn:      t.DependsOn,
+			Source:         t.Source,
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"relay/internal/api"
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
 	"relay/internal/store"
@@ -164,16 +165,23 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		return false
 	}
 
+	dt := &relayv1.DispatchTask{
+		TaskId:         uuidStr(claimed.ID),
+		JobId:          uuidStr(claimed.JobID),
+		Command:        claimed.Command,
+		Env:            env,
+		TimeoutSeconds: timeoutSecs,
+		Epoch:          int64(claimed.AssignmentEpoch),
+	}
+	if len(claimed.Source) > 0 {
+		var ss api.SourceSpec
+		if err := json.Unmarshal(claimed.Source, &ss); err == nil {
+			dt.Source = sourceSpecToProto(&ss)
+		}
+	}
 	msg := &relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_DispatchTask{
-			DispatchTask: &relayv1.DispatchTask{
-				TaskId:         uuidStr(claimed.ID),
-				JobId:          uuidStr(claimed.JobID),
-				Command:        claimed.Command,
-				Env:            env,
-				TimeoutSeconds: timeoutSecs,
-				Epoch:          int64(claimed.AssignmentEpoch),
-			},
+			DispatchTask: dt,
 		},
 	}
 

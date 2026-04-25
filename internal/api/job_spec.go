@@ -184,17 +184,36 @@ func CreateJobFromSpec(
 		if err != nil {
 			return store.Job{}, nil, fmt.Errorf("marshal requires for %s: %w", ts.Name, err)
 		}
-		task, err := q.CreateTask(ctx, store.CreateTaskParams{
-			JobID:          job.ID,
-			Name:           ts.Name,
-			Command:        ts.Command,
-			Env:            envJSON,
-			Requires:       requiresJSON,
-			TimeoutSeconds: ts.TimeoutSeconds,
-			Retries:        ts.Retries,
-		})
-		if err != nil {
-			return store.Job{}, nil, fmt.Errorf("create task %s: %w", ts.Name, err)
+		var task store.Task
+		var taskErr error
+		if ts.Source != nil {
+			sourceJSON, merr := json.Marshal(ts.Source)
+			if merr != nil {
+				return store.Job{}, nil, fmt.Errorf("marshal source for %s: %w", ts.Name, merr)
+			}
+			task, taskErr = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+				JobID:          job.ID,
+				Name:           ts.Name,
+				Command:        ts.Command,
+				Env:            envJSON,
+				Requires:       requiresJSON,
+				TimeoutSeconds: ts.TimeoutSeconds,
+				Retries:        ts.Retries,
+				Source:         sourceJSON,
+			})
+		} else {
+			task, taskErr = q.CreateTask(ctx, store.CreateTaskParams{
+				JobID:          job.ID,
+				Name:           ts.Name,
+				Command:        ts.Command,
+				Env:            envJSON,
+				Requires:       requiresJSON,
+				TimeoutSeconds: ts.TimeoutSeconds,
+				Retries:        ts.Retries,
+			})
+		}
+		if taskErr != nil {
+			return store.Job{}, nil, fmt.Errorf("create task %s: %w", ts.Name, taskErr)
 		}
 		nameToID[ts.Name] = task.ID
 		tasks = append(tasks, task)

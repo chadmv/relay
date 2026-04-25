@@ -50,6 +50,38 @@ func TestCreateJobFromSpec_CreatesJobAndTasks(t *testing.T) {
 	require.Equal(t, "test", labels["project"])
 }
 
+func TestCreateJobFromSpec_PersistsSource(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	user := createTestUser(t, q, "Carol", "carol-source@example.com", false)
+
+	spec := api.JobSpec{
+		Name:     "j",
+		Priority: "normal",
+		Tasks: []api.TaskSpec{{
+			Name:    "t",
+			Command: []string{"true"},
+			Source: &api.SourceSpec{
+				Type:   "perforce",
+				Stream: "//streams/X/main",
+				Sync:   []api.SyncEntry{{Path: "//streams/X/main/...", Rev: "#head"}},
+			},
+		}},
+	}
+
+	tx, err := pool.Begin(context.Background())
+	require.NoError(t, err)
+	defer tx.Rollback(context.Background())
+
+	_, tasks, err := api.CreateJobFromSpec(context.Background(), q.WithTx(tx), spec, user.ID, pgtype.UUID{})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(context.Background()))
+
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].Source)
+	require.Contains(t, string(tasks[0].Source), `"//streams/X/main"`)
+}
+
 func TestCreateJobFromSpec_DefaultPriority(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
