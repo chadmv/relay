@@ -25,11 +25,11 @@ type workerResp struct {
 }
 
 // WorkersCommand returns the relay workers Command.
-// Subcommands: list, get, revoke
+// Subcommands: list, get, revoke, workspaces, evict-workspace
 func WorkersCommand() Command {
 	return Command{
 		Name:  "workers",
-		Usage: "workers <list|get|revoke> [args]",
+		Usage: "workers <list|get|revoke|workspaces|evict-workspace> [args]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doWorkers(ctx, cfg, args, os.Stdout)
 		},
@@ -38,7 +38,7 @@ func WorkersCommand() Command {
 
 func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay workers <list|get|revoke>")
+		return fmt.Errorf("usage: relay workers <list|get|revoke|workspaces|evict-workspace>")
 	}
 	if cfg.Token == "" {
 		return fmt.Errorf("no token configured — run 'relay login' first")
@@ -52,6 +52,10 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 		return doWorkersGet(ctx, c, args[1:], w)
 	case "revoke":
 		return doWorkersRevoke(ctx, c, args[1:], w)
+	case "workspaces":
+		return doWorkersWorkspaces(ctx, c, args[1:], w)
+	case "evict-workspace":
+		return doWorkersEvictWorkspace(ctx, c, args[1:], w)
 	default:
 		return fmt.Errorf("unknown workers subcommand: %s", args[0])
 	}
