@@ -59,7 +59,7 @@ func TestStartupReconcile_SeedsGraceTimersForActiveWorkers(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)

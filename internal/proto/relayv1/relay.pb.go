@@ -787,14 +787,16 @@ func (x *RegisterResponse) GetAgentToken() string {
 }
 
 type DispatchTask struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	JobId          string                 `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	Command        []string               `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"`
-	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	TimeoutSeconds int32                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	Epoch          int64                  `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	Source         *SourceSpec            `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	TaskId string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	JobId  string                 `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// Deprecated: Marked as deprecated in relayv1/relay.proto.
+	Command        []string          `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"` // superseded by commands; kept for one release
+	Env            map[string]string `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	TimeoutSeconds int32             `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	Epoch          int64             `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Source         *SourceSpec       `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	Commands       []*CommandLine    `protobuf:"bytes,8,rep,name=commands,proto3" json:"commands,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -843,6 +845,7 @@ func (x *DispatchTask) GetJobId() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in relayv1/relay.proto.
 func (x *DispatchTask) GetCommand() []string {
 	if x != nil {
 		return x.Command
@@ -878,6 +881,60 @@ func (x *DispatchTask) GetSource() *SourceSpec {
 	return nil
 }
 
+func (x *DispatchTask) GetCommands() []*CommandLine {
+	if x != nil {
+		return x.Commands
+	}
+	return nil
+}
+
+// CommandLine carries a single argv (executable + args). A task runs each
+// CommandLine in `DispatchTask.commands` sequentially in the same workspace
+// and environment; first non-zero exit fails the task.
+type CommandLine struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Argv          []string               `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommandLine) Reset() {
+	*x = CommandLine{}
+	mi := &file_relayv1_relay_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommandLine) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommandLine) ProtoMessage() {}
+
+func (x *CommandLine) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommandLine.ProtoReflect.Descriptor instead.
+func (*CommandLine) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CommandLine) GetArgv() []string {
+	if x != nil {
+		return x.Argv
+	}
+	return nil
+}
+
 type CancelTask struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
@@ -887,7 +944,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[8]
+	mi := &file_relayv1_relay_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -899,7 +956,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[8]
+	mi := &file_relayv1_relay_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -912,7 +969,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{8}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -934,7 +991,7 @@ type SourceSpec struct {
 
 func (x *SourceSpec) Reset() {
 	*x = SourceSpec{}
-	mi := &file_relayv1_relay_proto_msgTypes[9]
+	mi := &file_relayv1_relay_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -946,7 +1003,7 @@ func (x *SourceSpec) String() string {
 func (*SourceSpec) ProtoMessage() {}
 
 func (x *SourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[9]
+	mi := &file_relayv1_relay_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -959,7 +1016,7 @@ func (x *SourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SourceSpec.ProtoReflect.Descriptor instead.
 func (*SourceSpec) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{9}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SourceSpec) GetProvider() isSourceSpec_Provider {
@@ -1001,7 +1058,7 @@ type PerforceSource struct {
 
 func (x *PerforceSource) Reset() {
 	*x = PerforceSource{}
-	mi := &file_relayv1_relay_proto_msgTypes[10]
+	mi := &file_relayv1_relay_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1013,7 +1070,7 @@ func (x *PerforceSource) String() string {
 func (*PerforceSource) ProtoMessage() {}
 
 func (x *PerforceSource) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[10]
+	mi := &file_relayv1_relay_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1026,7 +1083,7 @@ func (x *PerforceSource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PerforceSource.ProtoReflect.Descriptor instead.
 func (*PerforceSource) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{10}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PerforceSource) GetStream() string {
@@ -1074,7 +1131,7 @@ type SyncEntry struct {
 
 func (x *SyncEntry) Reset() {
 	*x = SyncEntry{}
-	mi := &file_relayv1_relay_proto_msgTypes[11]
+	mi := &file_relayv1_relay_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1086,7 +1143,7 @@ func (x *SyncEntry) String() string {
 func (*SyncEntry) ProtoMessage() {}
 
 func (x *SyncEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[11]
+	mi := &file_relayv1_relay_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1099,7 +1156,7 @@ func (x *SyncEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncEntry.ProtoReflect.Descriptor instead.
 func (*SyncEntry) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{11}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SyncEntry) GetPath() string {
@@ -1130,7 +1187,7 @@ type WorkspaceInventoryUpdate struct {
 
 func (x *WorkspaceInventoryUpdate) Reset() {
 	*x = WorkspaceInventoryUpdate{}
-	mi := &file_relayv1_relay_proto_msgTypes[12]
+	mi := &file_relayv1_relay_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1142,7 +1199,7 @@ func (x *WorkspaceInventoryUpdate) String() string {
 func (*WorkspaceInventoryUpdate) ProtoMessage() {}
 
 func (x *WorkspaceInventoryUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[12]
+	mi := &file_relayv1_relay_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1155,7 +1212,7 @@ func (x *WorkspaceInventoryUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceInventoryUpdate.ProtoReflect.Descriptor instead.
 func (*WorkspaceInventoryUpdate) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{12}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *WorkspaceInventoryUpdate) GetSourceType() string {
@@ -1210,7 +1267,7 @@ type EvictWorkspaceCommand struct {
 
 func (x *EvictWorkspaceCommand) Reset() {
 	*x = EvictWorkspaceCommand{}
-	mi := &file_relayv1_relay_proto_msgTypes[13]
+	mi := &file_relayv1_relay_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1222,7 +1279,7 @@ func (x *EvictWorkspaceCommand) String() string {
 func (*EvictWorkspaceCommand) ProtoMessage() {}
 
 func (x *EvictWorkspaceCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[13]
+	mi := &file_relayv1_relay_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1235,7 +1292,7 @@ func (x *EvictWorkspaceCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvictWorkspaceCommand.ProtoReflect.Descriptor instead.
 func (*EvictWorkspaceCommand) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{13}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *EvictWorkspaceCommand) GetSourceType() string {
@@ -1307,18 +1364,21 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
 	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\x12\x1f\n" +
 	"\vagent_token\x18\x03 \x01(\tR\n" +
-	"agentToken\"\xb0\x02\n" +
+	"agentToken\"\xe7\x02\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
-	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x18\n" +
-	"\acommand\x18\x03 \x03(\tR\acommand\x121\n" +
+	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x1c\n" +
+	"\acommand\x18\x03 \x03(\tB\x02\x18\x01R\acommand\x121\n" +
 	"\x03env\x18\x04 \x03(\v2\x1f.relay.v1.DispatchTask.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x12,\n" +
-	"\x06source\x18\a \x01(\v2\x14.relay.v1.SourceSpecR\x06source\x1a6\n" +
+	"\x06source\x18\a \x01(\v2\x14.relay.v1.SourceSpecR\x06source\x121\n" +
+	"\bcommands\x18\b \x03(\v2\x15.relay.v1.CommandLineR\bcommands\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"%\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"!\n" +
+	"\vCommandLine\x12\x12\n" +
+	"\x04argv\x18\x01 \x03(\tR\x04argv\"%\n" +
 	"\n" +
 	"CancelTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\"P\n" +
@@ -1381,7 +1441,7 @@ func file_relayv1_relay_proto_rawDescGZIP() []byte {
 }
 
 var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_relayv1_relay_proto_goTypes = []any{
 	(TaskStatus)(0),                  // 0: relay.v1.TaskStatus
 	(LogStream)(0),                   // 1: relay.v1.LogStream
@@ -1393,38 +1453,40 @@ var file_relayv1_relay_proto_goTypes = []any{
 	(*CoordinatorMessage)(nil),       // 7: relay.v1.CoordinatorMessage
 	(*RegisterResponse)(nil),         // 8: relay.v1.RegisterResponse
 	(*DispatchTask)(nil),             // 9: relay.v1.DispatchTask
-	(*CancelTask)(nil),               // 10: relay.v1.CancelTask
-	(*SourceSpec)(nil),               // 11: relay.v1.SourceSpec
-	(*PerforceSource)(nil),           // 12: relay.v1.PerforceSource
-	(*SyncEntry)(nil),                // 13: relay.v1.SyncEntry
-	(*WorkspaceInventoryUpdate)(nil), // 14: relay.v1.WorkspaceInventoryUpdate
-	(*EvictWorkspaceCommand)(nil),    // 15: relay.v1.EvictWorkspaceCommand
-	nil,                              // 16: relay.v1.DispatchTask.EnvEntry
+	(*CommandLine)(nil),              // 10: relay.v1.CommandLine
+	(*CancelTask)(nil),               // 11: relay.v1.CancelTask
+	(*SourceSpec)(nil),               // 12: relay.v1.SourceSpec
+	(*PerforceSource)(nil),           // 13: relay.v1.PerforceSource
+	(*SyncEntry)(nil),                // 14: relay.v1.SyncEntry
+	(*WorkspaceInventoryUpdate)(nil), // 15: relay.v1.WorkspaceInventoryUpdate
+	(*EvictWorkspaceCommand)(nil),    // 16: relay.v1.EvictWorkspaceCommand
+	nil,                              // 17: relay.v1.DispatchTask.EnvEntry
 }
 var file_relayv1_relay_proto_depIdxs = []int32{
 	3,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
 	5,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
 	6,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
-	14, // 3: relay.v1.AgentMessage.workspace_inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	15, // 3: relay.v1.AgentMessage.workspace_inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
 	4,  // 4: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
-	14, // 5: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	15, // 5: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
 	0,  // 6: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
 	1,  // 7: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
 	8,  // 8: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
 	9,  // 9: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
-	10, // 10: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
-	15, // 11: relay.v1.CoordinatorMessage.evict_workspace:type_name -> relay.v1.EvictWorkspaceCommand
-	16, // 12: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
-	11, // 13: relay.v1.DispatchTask.source:type_name -> relay.v1.SourceSpec
-	12, // 14: relay.v1.SourceSpec.perforce:type_name -> relay.v1.PerforceSource
-	13, // 15: relay.v1.PerforceSource.sync:type_name -> relay.v1.SyncEntry
-	2,  // 16: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
-	7,  // 17: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
-	17, // [17:18] is the sub-list for method output_type
-	16, // [16:17] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	11, // 10: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
+	16, // 11: relay.v1.CoordinatorMessage.evict_workspace:type_name -> relay.v1.EvictWorkspaceCommand
+	17, // 12: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
+	12, // 13: relay.v1.DispatchTask.source:type_name -> relay.v1.SourceSpec
+	10, // 14: relay.v1.DispatchTask.commands:type_name -> relay.v1.CommandLine
+	13, // 15: relay.v1.SourceSpec.perforce:type_name -> relay.v1.PerforceSource
+	14, // 16: relay.v1.PerforceSource.sync:type_name -> relay.v1.SyncEntry
+	2,  // 17: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
+	7,  // 18: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
+	18, // [18:19] is the sub-list for method output_type
+	17, // [17:18] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_relayv1_relay_proto_init() }
@@ -1449,17 +1511,17 @@ func file_relayv1_relay_proto_init() {
 		(*CoordinatorMessage_CancelTask)(nil),
 		(*CoordinatorMessage_EvictWorkspace)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[9].OneofWrappers = []any{
+	file_relayv1_relay_proto_msgTypes[10].OneofWrappers = []any{
 		(*SourceSpec_Perforce)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[10].OneofWrappers = []any{}
+	file_relayv1_relay_proto_msgTypes[11].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relayv1_relay_proto_rawDesc), len(file_relayv1_relay_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

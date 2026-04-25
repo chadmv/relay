@@ -218,7 +218,7 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
 		JobID:    job.ID,
 		Name:     "epoch-gate-task",
-		Command:  []string{"echo", "hi"},
+		Commands: []byte(`[["echo","hi"]]`),
 		Env:      []byte("{}"),
 		Requires: []byte("[]"),
 		Retries:  0,
@@ -305,7 +305,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	}))
 
 	tMatch, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "match", Command: []string{"true"},
+		JobID: job.ID, Name: "match", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -315,7 +315,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	require.NoError(t, err)
 
 	tStale, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "stale", Command: []string{"true"},
+		JobID: job.ID, Name: "stale", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -325,7 +325,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	require.NoError(t, err)
 
 	tServerOnly, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "server-only", Command: []string{"true"},
+		JobID: job.ID, Name: "server-only", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)

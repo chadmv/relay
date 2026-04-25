@@ -23,9 +23,16 @@ type JobSpec struct {
 }
 
 // TaskSpec mirrors the existing taskSpec type, exported for reuse.
+//
+// A task carries one or more commands that the agent runs sequentially in the
+// same workspace and environment. Specs may set EITHER the legacy single
+// Command (a one-element argv) OR the multi-command Commands. Setting both is
+// rejected by ValidateJobSpec; a single Command is normalized into a
+// one-element Commands so downstream code only deals with Commands.
 type TaskSpec struct {
 	Name           string            `json:"name"`
-	Command        []string          `json:"command"`
+	Command        []string          `json:"command,omitempty"`
+	Commands       [][]string        `json:"commands,omitempty"`
 	Env            map[string]string `json:"env"`
 	Requires       map[string]string `json:"requires"`
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
@@ -50,8 +57,11 @@ type SyncEntry struct {
 	Rev  string `json:"rev"`
 }
 
-// ValidateJobSpec applies the same validation as POST /v1/jobs. Returns an
-// error with a caller-facing message on the first problem.
+// ValidateJobSpec applies the same validation as POST /v1/jobs. It also
+// normalizes each task's command form: a legacy single Command is rewritten
+// into a one-element Commands and Command is cleared. Setting both Command
+// and Commands is rejected. Returns an error with a caller-facing message
+// on the first problem.
 func ValidateJobSpec(spec JobSpec) error {
 	if spec.Name == "" {
 		return errors.New("name is required")
@@ -60,12 +70,13 @@ func ValidateJobSpec(spec JobSpec) error {
 		return errors.New("at least one task is required")
 	}
 	nameSet := make(map[string]struct{}, len(spec.Tasks))
-	for _, ts := range spec.Tasks {
+	for i := range spec.Tasks {
+		ts := &spec.Tasks[i]
 		if ts.Name == "" {
 			return errors.New("task name is required")
 		}
-		if len(ts.Command) == 0 {
-			return errors.New("task command is required")
+		if err := normalizeTaskCommands(ts); err != nil {
+			return fmt.Errorf("task %s: %w", ts.Name, err)
 		}
 		if _, dup := nameSet[ts.Name]; dup {
 			return fmt.Errorf("duplicate task name: %s", ts.Name)
@@ -82,6 +93,27 @@ func ValidateJobSpec(spec JobSpec) error {
 	for _, ts := range spec.Tasks {
 		if err := validateSourceSpec(ts.Source); err != nil {
 			return fmt.Errorf("task %s: %w", ts.Name, err)
+		}
+	}
+	return nil
+}
+
+// normalizeTaskCommands enforces command-form rules and collapses to Commands.
+func normalizeTaskCommands(ts *TaskSpec) error {
+	hasCommand := len(ts.Command) > 0
+	hasCommands := len(ts.Commands) > 0
+	switch {
+	case hasCommand && hasCommands:
+		return errors.New("set either command or commands, not both")
+	case hasCommand:
+		ts.Commands = [][]string{ts.Command}
+		ts.Command = nil
+	case !hasCommands:
+		return errors.New("commands is required")
+	}
+	for i, argv := range ts.Commands {
+		if len(argv) == 0 {
+			return fmt.Errorf("commands[%d]: argv must not be empty", i)
 		}
 	}
 	return nil
@@ -184,6 +216,10 @@ func CreateJobFromSpec(
 		if err != nil {
 			return store.Job{}, nil, fmt.Errorf("marshal requires for %s: %w", ts.Name, err)
 		}
+		commandsJSON, err := json.Marshal(ts.Commands)
+		if err != nil {
+			return store.Job{}, nil, fmt.Errorf("marshal commands for %s: %w", ts.Name, err)
+		}
 		var task store.Task
 		var taskErr error
 		if ts.Source != nil {
@@ -194,7 +230,7 @@ func CreateJobFromSpec(
 			task, taskErr = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
 				JobID:          job.ID,
 				Name:           ts.Name,
-				Command:        ts.Command,
+				Commands:       commandsJSON,
 				Env:            envJSON,
 				Requires:       requiresJSON,
 				TimeoutSeconds: ts.TimeoutSeconds,
@@ -205,7 +241,7 @@ func CreateJobFromSpec(
 			task, taskErr = q.CreateTask(ctx, store.CreateTaskParams{
 				JobID:          job.ID,
 				Name:           ts.Name,
-				Command:        ts.Command,
+				Commands:       commandsJSON,
 				Env:            envJSON,
 				Requires:       requiresJSON,
 				TimeoutSeconds: ts.TimeoutSeconds,

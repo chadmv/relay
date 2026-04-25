@@ -217,10 +217,22 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		return false
 	}
 
+	var commandsArgv [][]string
+	if len(claimed.Commands) > 0 {
+		if err := json.Unmarshal(claimed.Commands, &commandsArgv); err != nil {
+			log.Printf("dispatch: bad commands JSON on task %s: %v", claimed.ID, err)
+			_ = d.q.RequeueTask(ctx, claimed.ID)
+			return false
+		}
+	}
+	dtCommands := make([]*relayv1.CommandLine, 0, len(commandsArgv))
+	for _, argv := range commandsArgv {
+		dtCommands = append(dtCommands, &relayv1.CommandLine{Argv: argv})
+	}
 	dt := &relayv1.DispatchTask{
 		TaskId:         uuidStr(claimed.ID),
 		JobId:          uuidStr(claimed.JobID),
-		Command:        claimed.Command,
+		Commands:       dtCommands,
 		Env:            env,
 		TimeoutSeconds: timeoutSecs,
 		Epoch:          int64(claimed.AssignmentEpoch),

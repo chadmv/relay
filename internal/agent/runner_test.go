@@ -56,9 +56,9 @@ func TestRunner_PrepareEmitsPreparing(t *testing.T) {
 	prov := &fakeProvider{handle: fh}
 
 	task := &relayv1.DispatchTask{
-		TaskId:  "t1",
-		JobId:   "j1",
-		Command: echoTaskCmd(),
+		TaskId:   "t1",
+		JobId:    "j1",
+		Commands: singleCmd(echoTaskCmd()),
 		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
 			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
 		}},
@@ -103,9 +103,9 @@ func TestRunner_PrepareFailureEmitsPrepareFailed(t *testing.T) {
 	prov := &fakeProvider{prepareErr: errors.New("p4 unreachable")}
 
 	task := &relayv1.DispatchTask{
-		TaskId:  "t1",
-		JobId:   "j1",
-		Command: echoTaskCmd(),
+		TaskId:   "t1",
+		JobId:    "j1",
+		Commands: singleCmd(echoTaskCmd()),
 		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
 			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
 		}},
@@ -131,6 +131,11 @@ done2:
 		relayv1.TaskStatus_TASK_STATUS_PREPARING,
 		relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
 	}, phases)
+}
+
+// singleCmd wraps a single argv into the multi-command DispatchTask form.
+func singleCmd(argv []string) []*relayv1.CommandLine {
+	return []*relayv1.CommandLine{{Argv: argv}}
 }
 
 // echoCmd returns a cross-platform command that prints "hello" to stdout.
@@ -170,8 +175,8 @@ func TestRunner_done(t *testing.T) {
 	cmd := echoCmd()
 	runner, runCtx := newRunner("task-1", 0, sendCh, ctx, 0)
 	runner.Run(runCtx, &relayv1.DispatchTask{
-		TaskId:  "task-1",
-		Command: cmd,
+		TaskId:   "task-1",
+		Commands: singleCmd(cmd),
 	})
 
 	msgs := collectMessages(sendCh, 500*time.Millisecond)
@@ -205,8 +210,8 @@ func TestRunner_timeout(t *testing.T) {
 
 	runner, runCtx := newRunner("task-2", 0, sendCh, ctx, 1) // 1 second timeout
 	runner.Run(runCtx, &relayv1.DispatchTask{
-		TaskId:  "task-2",
-		Command: sleepCmd(),
+		TaskId:   "task-2",
+		Commands: singleCmd(sleepCmd()),
 	})
 
 	msgs := collectMessages(sendCh, 3*time.Second)
@@ -227,8 +232,8 @@ func TestRunner_cancel(t *testing.T) {
 	go func() {
 		defer close(done)
 		runner.Run(runCtx, &relayv1.DispatchTask{
-			TaskId:  "task-3",
-			Command: sleepCmd(),
+			TaskId:   "task-3",
+			Commands: singleCmd(sleepCmd()),
 		})
 	}()
 

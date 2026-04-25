@@ -28,9 +28,9 @@ func TestAgentRunnerSurvivesConnectionContextCancellation(t *testing.T) {
 	// Simulate the recv loop handling a dispatch with a connection-scoped ctx.
 	connCtx, cancelConn := context.WithCancel(runCtx)
 	a.handleDispatch(connCtx, &relayv1.DispatchTask{
-		TaskId:  "long-task",
-		Command: sleepCmd(), // cross-platform long-running command (~10s)
-		Epoch:   1,
+		TaskId:   "long-task",
+		Commands: singleCmd(sleepCmd()), // cross-platform long-running command (~10s)
+		Epoch:    1,
 	})
 
 	// Wait for the runner to be registered (subprocess startup can be slow on CI).

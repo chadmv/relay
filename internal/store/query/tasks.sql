@@ -1,5 +1,5 @@
 -- name: CreateTask :one
-INSERT INTO tasks (job_id, name, command, env, requires, timeout_seconds, retries)
+INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
@@ -149,7 +149,7 @@ WHERE worker_id IS NOT NULL
 GROUP BY worker_id;
 
 -- name: CreateTaskWithSource :one
-INSERT INTO tasks (job_id, name, command, env, requires, timeout_seconds, retries, source)
+INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries, source)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 

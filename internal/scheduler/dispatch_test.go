@@ -110,7 +110,7 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
 		JobID:    job.ID,
 		Name:     "test-task",
-		Command:  []string{"echo", "hello"},
+		Commands: []byte(`[["echo","hello"]]`),
 		Env:      []byte(`{}`),
 		Requires: []byte(`{}`),
 		Retries:  0,
@@ -183,10 +183,10 @@ func TestDispatcher_UsesAggregateCountQuery(t *testing.T) {
 	taskIDs := make([]pgtype.UUID, 3)
 	for i := range taskIDs {
 		task, err := q.CreateTask(ctx, store.CreateTaskParams{
-			JobID:   job.ID,
-			Name:    fmt.Sprintf("task-%d", i),
-			Command: []string{"echo", fmt.Sprintf("%d", i)},
-			Env:     []byte(`{}`),
+			JobID:    job.ID,
+			Name:     fmt.Sprintf("task-%d", i),
+			Commands: []byte(fmt.Sprintf(`[["echo","%d"]]`, i)),
+			Env:      []byte(`{}`),
 			Requires: []byte(`{}`),
 		})
 		require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"echo"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["echo"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -295,7 +295,7 @@ func TestDispatcher_PrefersWarmWorker(t *testing.T) {
 
 	src := []byte(`{"type":"perforce","stream":"//s/x","sync":[{"path":"//s/x/...","rev":"#head"}]}`)
 	_, err = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
 	})
 	require.NoError(t, err)
@@ -359,7 +359,7 @@ func TestDispatcher_ColdFallback_NoWarmWorker(t *testing.T) {
 
 	src := []byte(`{"type":"perforce","stream":"//s/y","sync":[{"path":"//s/y/...","rev":"#head"}]}`)
 	_, err = q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
-		JobID: job.ID, Name: "t2", Command: []string{"true"},
+		JobID: job.ID, Name: "t2", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
 	})
 	require.NoError(t, err)
@@ -420,7 +420,7 @@ func TestDispatcher_PassesSourceToAgent(t *testing.T) {
 	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
 		JobID:    job.ID,
 		Name:     "src-task",
-		Command:  []string{"echo", "source"},
+		Commands: []byte(`[["echo","source"]]`),
 		Env:      []byte(`{}`),
 		Requires: []byte(`{}`),
 		Retries:  0,

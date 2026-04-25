@@ -18,8 +18,8 @@ func TestRunnerTagsOutgoingMessagesWithEpoch(t *testing.T) {
 	runner, runCtx := newRunner("task-123", 42, sendCh, ctx, 0)
 
 	go runner.Run(runCtx, &relayv1.DispatchTask{
-		TaskId:  "task-123",
-		Command: echoCmd(), // cross-platform: "echo hello" on Unix, "cmd /c echo hello" on Windows
+		TaskId:   "task-123",
+		Commands: singleCmd(echoCmd()), // cross-platform: "echo hello" on Unix, "cmd /c echo hello" on Windows
 	})
 
 	// Collect all messages until channel drains.
@@ -55,7 +55,7 @@ func TestRunnerAbandon_SuppressesFinalStatus(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		runner.Run(runCtx, &relayv1.DispatchTask{
-			TaskId: "task-abandon", Command: sleepCmd(),
+			TaskId: "task-abandon", Commands: singleCmd(sleepCmd()),
 		})
 		close(done)
 	}()

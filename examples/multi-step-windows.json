@@ -1,0 +1,13 @@
+{
+  "name": "multi-step",
+  "tasks": [
+    {
+      "name": "build-and-greet",
+      "commands": [
+        ["cmd", "/c", "echo Step 1: building..."],
+        ["cmd", "/c", "echo Step 2: testing..."],
+        ["cmd", "/c", "echo Step 3: shipping it!"]
+      ]
+    }
+  ]
+}

@@ -185,9 +185,9 @@ func TestAgent_dispatchAndReceiveLogs(t *testing.T) {
 	coord.dispatch <- &relayv1.CoordinatorMessage{
 		Payload: &relayv1.CoordinatorMessage_DispatchTask{
 			DispatchTask: &relayv1.DispatchTask{
-				TaskId:  "task-abc",
-				JobId:   "job-xyz",
-				Command: echoTaskCmd("hello-from-task"),
+				TaskId:   "task-abc",
+				JobId:    "job-xyz",
+				Commands: []*relayv1.CommandLine{{Argv: echoTaskCmd("hello-from-task")}},
 			},
 		},
 	}

@@ -19,7 +19,8 @@ import (
 
 type taskSpec struct {
 	Name           string            `json:"name"`
-	Command        []string          `json:"command"`
+	Command        []string          `json:"command,omitempty"`
+	Commands       [][]string        `json:"commands,omitempty"`
 	Env            map[string]string `json:"env"`
 	Requires       map[string]string `json:"requires"`
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
@@ -39,7 +40,7 @@ type taskResponse struct {
 	ID             string          `json:"id"`
 	Name           string          `json:"name"`
 	Status         string          `json:"status"`
-	Command        []string        `json:"command"`
+	Commands       json.RawMessage `json:"commands"`
 	Env            json.RawMessage `json:"env"`
 	Requires       json.RawMessage `json:"requires"`
 	TimeoutSeconds *int32          `json:"timeout_seconds"`
@@ -69,7 +70,7 @@ func toTaskResponse(t store.Task, dependsOn []string) taskResponse {
 		ID:             uuidStr(t.ID),
 		Name:           t.Name,
 		Status:         t.Status,
-		Command:        t.Command,
+		Commands:       rawJSON(t.Commands),
 		Env:            rawJSON(t.Env),
 		Requires:       rawJSON(t.Requires),
 		TimeoutSeconds: t.TimeoutSeconds,
@@ -127,6 +128,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		spec.Tasks[i] = TaskSpec{
 			Name:           t.Name,
 			Command:        t.Command,
+			Commands:       t.Commands,
 			Env:            t.Env,
 			Requires:       t.Requires,
 			TimeoutSeconds: t.TimeoutSeconds,

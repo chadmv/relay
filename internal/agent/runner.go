@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,7 +96,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	}
 
 	// 2) Command execution.
-	if len(task.Command) == 0 {
+	if len(task.Commands) == 0 {
 		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
 		return
 	}
@@ -109,29 +110,9 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		env = append(env, k+"="+v)
 	}
 
-	cmd := exec.CommandContext(ctx, task.Command[0], task.Command[1:]...)
-	cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
-	cmd.Env = env
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		r.sendFinalStatus(relayv1.TaskStatus_TASK_STATUS_FAILED, nil)
-		return
-	}
-
+	// Send a single RUNNING status before the first step. Subsequent steps
+	// reuse the same RUNNING phase; the synthetic per-step marker lines in the
+	// log stream delineate progress.
 	r.send(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_TaskStatus{
 			TaskStatus: &relayv1.TaskStatusUpdate{
@@ -142,36 +123,85 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		},
 	})
 
-	// Drain stdout and stderr concurrently.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT) }()
-	go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR) }()
-	wg.Wait()
-
-	waitErr := cmd.Wait()
-
-	var exitCode *int32
-	if cmd.ProcessState != nil {
-		if code := cmd.ProcessState.ExitCode(); code >= 0 {
-			c := int32(code)
-			exitCode = &c
+	total := len(task.Commands)
+	var lastExitCode *int32
+	finalStatus := relayv1.TaskStatus_TASK_STATUS_DONE
+	for i, cl := range task.Commands {
+		if cl == nil || len(cl.Argv) == 0 {
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+			break
 		}
+		argv := cl.Argv
+		r.sendStepMarker(i+1, total, argv)
+
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
+		cmd.Env = env
+		if workDir != "" {
+			cmd.Dir = workDir
+		}
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+			break
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+			break
+		}
+
+		if err := cmd.Start(); err != nil {
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+			break
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT) }()
+		go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR) }()
+		wg.Wait()
+
+		waitErr := cmd.Wait()
+
+		lastExitCode = nil
+		if cmd.ProcessState != nil {
+			if code := cmd.ProcessState.ExitCode(); code >= 0 {
+				c := int32(code)
+				lastExitCode = &c
+			}
+		}
+
+		if waitErr == nil {
+			continue
+		}
+		switch {
+		case r.cancelled.Load():
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+		case ctx.Err() == context.DeadlineExceeded:
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_TIMED_OUT
+		default:
+			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
+		}
+		break
 	}
 
-	var status relayv1.TaskStatus
-	switch {
-	case waitErr == nil:
-		status = relayv1.TaskStatus_TASK_STATUS_DONE
-	case r.cancelled.Load():
-		status = relayv1.TaskStatus_TASK_STATUS_FAILED
-	case ctx.Err() == context.DeadlineExceeded:
-		status = relayv1.TaskStatus_TASK_STATUS_TIMED_OUT
-	default:
-		status = relayv1.TaskStatus_TASK_STATUS_FAILED
-	}
+	r.sendFinalStatus(finalStatus, lastExitCode)
+}
 
-	r.sendFinalStatus(status, exitCode)
+// sendStepMarker writes a synthetic delimiter line into the stdout stream so
+// the consolidated log can be split per step without a proto change.
+func (r *Runner) sendStepMarker(step, total int, argv []string) {
+	line := []byte("=== relay step " + strconv.Itoa(step) + "/" + strconv.Itoa(total) + " === " + strings.Join(argv, " ") + "\n")
+	r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskLog{
+		TaskLog: &relayv1.TaskLogChunk{
+			TaskId:  r.taskID,
+			Stream:  relayv1.LogStream_LOG_STREAM_STDOUT,
+			Content: line,
+			Epoch:   r.epoch,
+		},
+	}})
 }
 
 func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream) {

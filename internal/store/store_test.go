@@ -84,19 +84,19 @@ func TestTaskDependencyAndEligibility(t *testing.T) {
 	require.NoError(t, err)
 
 	taskA, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID:   job.ID,
-		Name:    "task-a",
-		Command: []string{"echo", "a"},
-		Env:     []byte(`{}`),
+		JobID:    job.ID,
+		Name:     "task-a",
+		Commands: []byte(`[["echo","a"]]`),
+		Env:      []byte(`{}`),
 		Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
 
 	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID:   job.ID,
-		Name:    "task-b",
-		Command: []string{"echo", "b"},
-		Env:     []byte(`{}`),
+		JobID:    job.ID,
+		Name:     "task-b",
+		Commands: []byte(`[["echo","b"]]`),
+		Env:      []byte(`{}`),
 		Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestAssignmentEpochColumnExists(t *testing.T) {
 	require.NoError(t, err)
 
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -165,7 +165,7 @@ func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
 	require.NoError(t, err)
 
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -252,7 +252,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	})
 	require.NoError(t, err)
 	task, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -302,7 +302,7 @@ func TestReconciliationQueries(t *testing.T) {
 
 	// Task A: dispatched to w1
 	taskA, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "a", Command: []string{"true"},
+		JobID: job.ID, Name: "a", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -313,7 +313,7 @@ func TestReconciliationQueries(t *testing.T) {
 
 	// Task B: also dispatched to w1
 	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "b", Command: []string{"true"},
+		JobID: job.ID, Name: "b", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -324,7 +324,7 @@ func TestReconciliationQueries(t *testing.T) {
 
 	// Task C: dispatched to w2, then left dispatched
 	taskC, err := q.CreateTask(ctx, store.CreateTaskParams{
-		JobID: job.ID, Name: "c", Command: []string{"true"},
+		JobID: job.ID, Name: "c", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestWorkerWorkspacesAndSourceColumn(t *testing.T) {
 	// tasks.source must be a nullable JSONB column
 	src := []byte(`{"type":"perforce","stream":"//streams/X/main"}`)
 	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
-		JobID: job.ID, Name: "t", Command: []string{"true"},
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`), Source: src,
 	})
 	require.NoError(t, err)

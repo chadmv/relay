@@ -80,7 +80,8 @@ type runnerSpec struct {
 
 type runnerTaskSpec struct {
 	Name           string            `json:"name"`
-	Command        []string          `json:"command"`
+	Command        []string          `json:"command,omitempty"`
+	Commands       [][]string        `json:"commands,omitempty"`
 	Env            map[string]string `json:"env"`
 	Requires       map[string]string `json:"requires"`
 	TimeoutSeconds *int32            `json:"timeout_seconds"`
@@ -152,10 +153,19 @@ func (r *Runner) createJob(ctx context.Context, q *store.Queries, spec runnerSpe
 	for _, ts := range spec.Tasks {
 		envJSON, _ := json.Marshal(ts.Env)
 		requiresJSON, _ := json.Marshal(ts.Requires)
+		// Normalize legacy command: a single argv becomes a one-element commands.
+		// Stored job_spec rows may predate the multi-command field; the API
+		// validator handles this on submission, so we mirror it here for
+		// schedules created before the migration.
+		commands := ts.Commands
+		if len(commands) == 0 && len(ts.Command) > 0 {
+			commands = [][]string{ts.Command}
+		}
+		commandsJSON, _ := json.Marshal(commands)
 		task, err := q.CreateTask(ctx, store.CreateTaskParams{
 			JobID:          job.ID,
 			Name:           ts.Name,
-			Command:        ts.Command,
+			Commands:       commandsJSON,
 			Env:            envJSON,
 			Requires:       requiresJSON,
 			TimeoutSeconds: ts.TimeoutSeconds,

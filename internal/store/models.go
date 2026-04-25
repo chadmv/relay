@@ -82,7 +82,6 @@ type Task struct {
 	ID              pgtype.UUID        `json:"id"`
 	JobID           pgtype.UUID        `json:"job_id"`
 	Name            string             `json:"name"`
-	Command         []string           `json:"command"`
 	Env             []byte             `json:"env"`
 	Requires        []byte             `json:"requires"`
 	TimeoutSeconds  *int32             `json:"timeout_seconds"`
@@ -95,6 +94,7 @@ type Task struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	AssignmentEpoch int32              `json:"assignment_epoch"`
 	Source          []byte             `json:"source"`
+	Commands        []byte             `json:"commands"`
 }
 
 type TaskDependency struct {
