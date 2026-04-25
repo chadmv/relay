@@ -218,7 +218,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 
 	// Replace workspace inventory with what the agent reported at reconnect.
 	if err := h.applyInventory(ctx, updated.ID, reg.Inventory); err != nil {
-		log.Printf("worker: register inventory replace failed: %v", err)
+		log.Printf("worker: register inventory replace failed for %s: %v", uuidStr(updated.ID), err)
 	}
 
 	// Send RegisterResponse on the raw stream. At this point the worker is not

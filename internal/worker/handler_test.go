@@ -504,3 +504,97 @@ func TestHandler_WorkspaceInventoryUpdate_Apply(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }
+
+// TestConnect_RegisterRequest_PersistsInventory verifies the full Connect path:
+// inventory in RegisterRequest is applied to the DB during registration.
+func TestConnect_RegisterRequest_PersistsInventory(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	broker := events.NewBroker()
+	registry := worker.NewRegistry()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	workerID, rawToken := seedWorkerWithAgentToken(t, ctx, q, "inv-host")
+
+	// Pre-seed a stale entry that the replacement should remove.
+	require.NoError(t, q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
+		WorkerID: workerID, SourceType: "perforce", SourceKey: "//stale/...", ShortID: "stale",
+		BaselineHash: "old", LastUsedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}))
+
+	stream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		hold:   make(chan struct{}),
+		msgs: []*relayv1.AgentMessage{{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "inv-host", CpuCores: 1, RamGb: 1, Os: "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
+					Inventory: []*relayv1.WorkspaceInventoryUpdate{
+						{SourceType: "perforce", SourceKey: "//s/main", ShortId: "abc",
+							BaselineHash: "deadbeef",
+							LastUsedAt:   time.Now().UTC().Format(time.RFC3339)},
+					},
+				},
+			},
+		}},
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+
+	select {
+	case <-stream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RegisterResponse never sent")
+	}
+
+	close(stream.hold)
+	require.NoError(t, <-done)
+
+	rows, err := q.ListWorkerWorkspaces(ctx, workerID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "stale entry should be replaced by inventory from RegisterRequest")
+	require.Equal(t, "//s/main", rows[0].SourceKey)
+	require.Equal(t, "deadbeef", rows[0].BaselineHash)
+}
+
+// TestConnect_WorkspaceInventoryUpdate_Message verifies that a WorkspaceInventoryUpdate
+// message sent after registration is persisted to the DB.
+func TestConnect_WorkspaceInventoryUpdate_Message(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	broker := events.NewBroker()
+	registry := worker.NewRegistry()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	workerID, rawToken := seedWorkerWithAgentToken(t, ctx, q, "inv-msg-host")
+
+	stream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "inv-msg-host", CpuCores: 1, RamGb: 1, Os: "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
+				},
+			}},
+			{Payload: &relayv1.AgentMessage_WorkspaceInventory{
+				WorkspaceInventory: &relayv1.WorkspaceInventoryUpdate{
+					SourceType: "perforce", SourceKey: "//s/x", ShortId: "xyz",
+					BaselineHash: "abc123", LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+				},
+			}},
+		},
+	}
+
+	require.NoError(t, h.Connect(stream))
+
+	rows, err := q.ListWorkerWorkspaces(ctx, workerID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "//s/x", rows[0].SourceKey)
+	require.Equal(t, "abc123", rows[0].BaselineHash)
+}
