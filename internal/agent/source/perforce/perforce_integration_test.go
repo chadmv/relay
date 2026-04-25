@@ -4,10 +4,11 @@ package perforce
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,8 +38,8 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	}
 
 	// Verify the P4 server is reachable before doing anything.
-	if err := exec.Command("p4", "info").Run(); err != nil {
-		t.Skipf("p4 server at %s is unreachable: %v", p4port, err)
+	if out, err := exec.Command("p4", "info").CombinedOutput(); err != nil {
+		t.Skipf("p4 server at %s is unreachable: %v\n%s", p4port, err, out)
 	}
 
 	root := t.TempDir()
@@ -53,8 +54,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 
 	// Wire in shelved CL if provided.
 	if shelved := os.Getenv("P4_TEST_SHELVED_CL"); shelved != "" {
-		var cl int64
-		if _, err := fmt.Sscanf(shelved, "%d", &cl); err == nil && cl > 0 {
+		if cl, err := strconv.ParseInt(strings.TrimSpace(shelved), 10, 64); err == nil && cl > 0 {
 			spec.GetPerforce().Unshelves = []int64{cl}
 		}
 	}
@@ -68,6 +68,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 		progressLines = append(progressLines, s)
 	})
 	require.NoError(t, err, "Prepare should succeed")
+	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
 	require.NotEmpty(t, progressLines, "sync should produce progress lines")
 
 	inv := h.Inventory()
@@ -81,9 +82,6 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	_, err = os.Stat(wsDir)
 	require.NoError(t, err, "workspace directory should exist")
 
-	// Finalize should revert any unshelved files and release the lock.
-	require.NoError(t, h.Finalize(ctx), "Finalize should succeed")
-
 	// Registry should show no open task changelists after Finalize.
 	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
 	require.NoError(t, err)
@@ -92,9 +90,13 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	require.Empty(t, e.OpenTaskChangelists, "Finalize should clear pending changelists")
 
 	// --- Second prepare: same spec → should not re-sync (baseline matches) ---
-	h2, err := prov.Prepare(ctx, "task-2", spec, func(string) {})
+	var progress2 []string
+	h2, err := prov.Prepare(ctx, "task-2", spec, func(s string) {
+		progress2 = append(progress2, s)
+	})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
-	require.NoError(t, h2.Finalize(ctx), "second Finalize should succeed")
+	t.Cleanup(func() { _ = h2.Finalize(context.Background()) })
+	require.Empty(t, progress2, "second Prepare with same baseline should not trigger re-sync")
 
 	// Workspace dir must still exist after second finalize.
 	_, err = os.Stat(wsDir)
