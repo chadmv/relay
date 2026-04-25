@@ -4,7 +4,6 @@ package api_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,16 +11,9 @@ import (
 
 	"relay/internal/store"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fmtUUID formats a pgtype.UUID as a canonical UUID string.
-func fmtUUID(u pgtype.UUID) string {
-	b := u.Bytes
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
 
 func TestCreateAgentEnrollment_AdminOnly(t *testing.T) {
 	srv, q := newTestServer(t)
