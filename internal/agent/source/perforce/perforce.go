@@ -143,11 +143,16 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		_ = reg.Save()
 	}
 
-	// Sync if needed: exclusive mode always syncs; shared mode syncs only if baseline changed.
+	// Trigger recovery and sync when we hold exclusive access OR when the
+	// registry shows a baseline mismatch on a shared-mode admit (which
+	// happens on first use after a fresh process start, before syncedPaths
+	// is populated). Both cases are functionally equivalent to gaining
+	// exclusive workspace ownership for the sync operation.
 	cur := reg.Get(shortID)
 	needsSync := handle.Mode() == ModeExclusive || (cur != nil && cur.BaselineHash != baseline)
 
-	// Crash-recovery: clean up any orphaned relay-owned pending CLs before re-syncing.
+	// Crash-recovery: clean up any relay-owned pending CLs left by a
+	// previous agent crash before we sync.
 	if needsSync {
 		if err := p.recoverOrphanedCLs(ctx, clientName); err != nil {
 			progress(fmt.Sprintf("[recover] %v", err))
