@@ -23,7 +23,7 @@ WHERE worker_id = $1 AND source_type = $2 AND source_key = $3;
 -- Used by dispatcher's warm-preference scoring. $1 is source_type, $2 is an
 -- array of source_keys observed in the current eligible-task batch.
 SELECT * FROM worker_workspaces
-WHERE source_type = $1 AND source_key = ANY($2::text[]);
+WHERE source_type = $1 AND source_key = ANY(sqlc.arg(source_keys)::text[]);
 
 -- name: ReplaceWorkerInventory :exec
 -- On agent reconnect: delete all existing rows for this worker and reinsert.

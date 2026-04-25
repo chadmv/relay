@@ -67,7 +67,7 @@ WHERE source_type = $1 AND source_key = ANY($2::text[])
 
 type ListWarmWorkspacesForKeysParams struct {
 	SourceType string   `json:"source_type"`
-	Column2    []string `json:"column_2"`
+	SourceKeys []string `json:"source_keys"`
 }
 
 // Used by dispatcher's warm-preference scoring. $1 is source_type, $2 is an
@@ -76,7 +76,7 @@ type ListWarmWorkspacesForKeysParams struct {
 //	SELECT worker_id, source_type, source_key, short_id, baseline_hash, last_used_at FROM worker_workspaces
 //	WHERE source_type = $1 AND source_key = ANY($2::text[])
 func (q *Queries) ListWarmWorkspacesForKeys(ctx context.Context, arg ListWarmWorkspacesForKeysParams) ([]WorkerWorkspace, error) {
-	rows, err := q.db.Query(ctx, listWarmWorkspacesForKeys, arg.SourceType, arg.Column2)
+	rows, err := q.db.Query(ctx, listWarmWorkspacesForKeys, arg.SourceType, arg.SourceKeys)
 	if err != nil {
 		return nil, err
 	}

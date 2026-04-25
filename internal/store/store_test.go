@@ -15,15 +15,6 @@ import (
 	"relay/internal/store"
 )
 
-func makeTestWorker(t *testing.T, q *store.Queries, ctx context.Context, hostname string) store.Worker {
-	t.Helper()
-	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
-		Name: hostname, Hostname: hostname, CpuCores: 4, RamGb: 16, Os: "linux",
-	})
-	require.NoError(t, err)
-	return w
-}
-
 func makeTestUser(t *testing.T, q *store.Queries, ctx context.Context, name, email string) store.User {
 	t.Helper()
 	ph, err := bcrypt.GenerateFromPassword([]byte("testpass"), bcrypt.MinCost)
@@ -396,7 +387,7 @@ func TestWorkerWorkspacesAndSourceColumn(t *testing.T) {
 	require.NoError(t, err)
 
 	// worker_workspaces upsert + list round-trip
-	worker := makeTestWorker(t, q, ctx, "render-07")
+	worker := newTestWorker(t, q)
 	err = q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
 		WorkerID:     worker.ID,
 		SourceType:   "perforce",
