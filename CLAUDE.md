@@ -110,7 +110,7 @@ No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct
 
 ## Key Design Decisions
 
-**Token format:** 32 random bytes → hex-encode → SHA-256(hex) → hex-encode → store hash in DB. The raw hex is returned to the client and never stored.
+**Token format:** 32 random bytes → hex-encode → SHA-256 of the hex string → hex-encode the digest → store hash in DB. The raw hex is returned to the client and never stored. All hashing goes through `internal/tokenhash.Hash`; never inline the SHA-256 call at a new site.
 
 **Password hashing:** bcrypt cost 12. The `bcryptCost` package variable in `internal/api/auth.go` is overridden to `bcrypt.MinCost` in integration tests via `SetBcryptCostForTest()` (exported from `internal/api/export_test.go` under the `integration` build tag).
 
