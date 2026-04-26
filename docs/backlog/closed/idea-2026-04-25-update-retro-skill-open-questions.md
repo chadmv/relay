@@ -1,8 +1,10 @@
 ---
 title: Update retro skill to spin out Open Questions and Known Limitations as backlog entries
 type: idea
-status: open
+status: closed
 created: 2026-04-25
+closed: 2026-04-25
+resolution: fixed
 source: brainstorming session for backlog skill design
 ---
 
@@ -18,3 +20,6 @@ After drafting `## Open Questions` or `## Known Limitations` sections, the retro
 - `docs/backlog/bug-2026-04-25-test-capture-skill-verification.md`
 - `docs/superpowers/specs/2026-04-25-backlog-skill-design.md` (Out of Scope section)
 - `~/.claude/skills/retro/SKILL.md`
+
+## Resolution
+Implemented via new Step 5 (offer to spin out Open Questions / Known Limitations as backlog entries) and modified Step 7 (drain the queue by invoking `/backlog` per item, then commit the retro). The retro skill now delegates backlog-item creation to the `/backlog` skill via its terse path rather than duplicating slug, frontmatter, and commit conventions. Plan: `docs/superpowers/plans/2026-04-25-retro-skill-backlog-spinout.md`.
