@@ -109,7 +109,7 @@ func TestEnrollAndRegister_HappyPathStillCommits(t *testing.T) {
 	agentHash := tokenhash.Hash(resp.AgentToken)
 	w, err := fx.Q.GetWorkerByAgentTokenHash(ctx, &agentHash)
 	require.NoError(t, err)
-	assert.NotNil(t, w)
+	assert.Equal(t, "happy-host", w.Hostname)
 
 	// Worker ID must match the response.
 	var wID pgtype.UUID
