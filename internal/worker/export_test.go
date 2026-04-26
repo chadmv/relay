@@ -4,6 +4,7 @@ package worker
 
 import (
 	"context"
+	"testing"
 
 	relayv1 "relay/internal/proto/relayv1"
 
@@ -24,4 +25,14 @@ func (h *Handler) ApplyInventory(ctx context.Context, workerID pgtype.UUID, inv 
 // ApplyInventoryUpdate exposes the unexported applyInventoryUpdate method for integration tests.
 func (h *Handler) ApplyInventoryUpdate(ctx context.Context, workerID pgtype.UUID, u *relayv1.WorkspaceInventoryUpdate) error {
 	return h.applyInventoryUpdate(ctx, workerID, u)
+}
+
+// SetAgentTokenGeneratorForTest replaces the random-token generator used by
+// enrollAndRegister for the duration of t. The generator returns (rawToken, hash);
+// in production these come from cryptorand + tokenhash.Hash.
+func SetAgentTokenGeneratorForTest(t *testing.T, fn func() (raw string, hash string)) {
+	t.Helper()
+	prev := agentTokenGenerator
+	agentTokenGenerator = fn
+	t.Cleanup(func() { agentTokenGenerator = prev })
 }

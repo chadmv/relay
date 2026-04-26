@@ -22,6 +22,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// agentTokenGenerator generates a fresh (rawHex, hash) pair for a new agent token.
+// Overridable in tests via SetAgentTokenGeneratorForTest.
+var agentTokenGenerator = func() (string, string) {
+	rawBytes := make([]byte, 32)
+	if _, err := cryptorand.Read(rawBytes); err != nil {
+		return "", ""
+	}
+	rawHex := hex.EncodeToString(rawBytes)
+	return rawHex, tokenhash.Hash(rawHex)
+}
+
+// errEnrollmentNotConsumable is returned inside the enrollment transaction when
+// ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
+var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
+
 // Handler implements relayv1.AgentServiceServer.
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
@@ -110,6 +125,9 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 }
 
 // enrollAndRegister handles first-time enrollment using an enrollment token.
+// All DB writes (worker upsert, enrollment consume, agent-token set) execute
+// inside a single transaction so that a failure anywhere leaves no partial
+// state — either the agent is fully enrolled or not at all.
 func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawEnroll string) (string, *workerSender, error) {
 	if rawEnroll == "" {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
@@ -127,47 +145,56 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
 
-	// Generate fresh agent token.
-	rawBytes := make([]byte, 32)
-	if _, err := cryptorand.Read(rawBytes); err != nil {
+	rawAgent, agentHash := agentTokenGenerator()
+	if rawAgent == "" || agentHash == "" {
 		return "", nil, status.Errorf(codes.Internal, "token gen failed")
 	}
-	rawAgent := hex.EncodeToString(rawBytes)
-	agentHash := tokenhash.Hash(rawAgent)
 
-	// Upsert worker first to obtain the stable worker ID for the consume record.
-	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
-		Name:     reg.Hostname,
-		Hostname: reg.Hostname,
-		CpuCores: reg.CpuCores,
-		RamGb:    reg.RamGb,
-		GpuCount: reg.GpuCount,
-		GpuModel: reg.GpuModel,
-		Os:       reg.Os,
+	var workerID pgtype.UUID
+	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		txq := h.q.WithTx(tx)
+
+		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+			Name:     reg.Hostname,
+			Hostname: reg.Hostname,
+			CpuCores: reg.CpuCores,
+			RamGb:    reg.RamGb,
+			GpuCount: reg.GpuCount,
+			GpuModel: reg.GpuModel,
+			Os:       reg.Os,
+		})
+		if err != nil {
+			return fmt.Errorf("upsert worker: %w", err)
+		}
+		workerID = w.ID
+
+		rows, err := txq.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{
+			ID:         enroll.ID,
+			ConsumedBy: w.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("consume enrollment: %w", err)
+		}
+		if rows == 0 {
+			return errEnrollmentNotConsumable
+		}
+
+		if err := txq.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+			ID: w.ID, AgentTokenHash: &agentHash,
+		}); err != nil {
+			return fmt.Errorf("set agent token: %w", err)
+		}
+		return nil
 	})
-	if err != nil {
-		return "", nil, fmt.Errorf("upsert worker: %w", err)
+
+	if txErr != nil {
+		if errors.Is(txErr, errEnrollmentNotConsumable) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		}
+		return "", nil, txErr
 	}
 
-	// Consume enrollment atomically before writing the agent token.
-	// Only one concurrent caller wins; the loser gets rows == 0.
-	// SetWorkerAgentToken happens after so that the winning token is
-	// always the one stored — concurrent callers cannot overwrite each other.
-	rows, err := h.q.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{
-		ID:         enroll.ID,
-		ConsumedBy: w.ID,
-	})
-	if err != nil || rows == 0 {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
-	}
-
-	if err := h.q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
-		ID: w.ID, AgentTokenHash: &agentHash,
-	}); err != nil {
-		return "", nil, fmt.Errorf("set agent token: %w", err)
-	}
-
-	return h.finishRegister(ctx, stream, reg, w.ID, rawAgent)
+	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
 
 // reconnectAndRegister handles agent reconnection using a previously issued agent token.
