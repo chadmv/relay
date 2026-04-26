@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	cryptorand "crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -115,8 +115,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
 
-	sum := sha256.Sum256([]byte(rawEnroll))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawEnroll)
 	enroll, err := h.q.GetAgentEnrollmentByTokenHash(ctx, hash)
 	if err != nil {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
@@ -134,8 +133,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		return "", nil, status.Errorf(codes.Internal, "token gen failed")
 	}
 	rawAgent := hex.EncodeToString(rawBytes)
-	sumAgent := sha256.Sum256([]byte(rawAgent))
-	agentHash := hex.EncodeToString(sumAgent[:])
+	agentHash := tokenhash.Hash(rawAgent)
 
 	// Upsert worker first to obtain the stable worker ID for the consume record.
 	w, err := h.q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
@@ -177,8 +175,7 @@ func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.Agent
 	if rawAgent == "" {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
-	sum := sha256.Sum256([]byte(rawAgent))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawAgent)
 
 	w, err := h.q.GetWorkerByAgentTokenHash(ctx, &hash)
 	if err != nil {

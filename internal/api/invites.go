@@ -2,13 +2,13 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
 	"net/mail"
 	"time"
 
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -54,8 +54,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rawHex := hex.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(rawHex))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawHex)
 
 	expiresAt := pgtype.Timestamptz{Time: time.Now().Add(dur), Valid: true}
 

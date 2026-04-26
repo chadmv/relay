@@ -1,13 +1,12 @@
 package api
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
 
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 )
 
 // BearerAuth returns middleware that validates the Authorization: Bearer
@@ -23,8 +22,7 @@ func BearerAuth(q *store.Queries) func(http.Handler) http.Handler {
 				return
 			}
 			raw := strings.TrimPrefix(hdr, "Bearer ")
-			sum := sha256.Sum256([]byte(raw))
-			hash := hex.EncodeToString(sum[:])
+			hash := tokenhash.Hash(raw)
 
 			row, err := q.GetTokenWithUser(r.Context(), hash)
 			if err != nil {

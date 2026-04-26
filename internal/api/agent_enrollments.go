@@ -2,13 +2,13 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"time"
 
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -49,8 +49,7 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	rawHex := hex.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(rawHex))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawHex)
 
 	params := store.CreateAgentEnrollmentParams{
 		TokenHash: hash,

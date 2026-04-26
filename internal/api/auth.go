@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -40,8 +40,7 @@ func (s *Server) issueToken(ctx context.Context, q *store.Queries, userID pgtype
 		return "", time.Time{}, err
 	}
 	rawHex := hex.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(rawHex))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawHex)
 	expires := time.Now().Add(30 * 24 * time.Hour)
 	if _, err := q.CreateToken(ctx, store.CreateTokenParams{
 		UserID:    userID,
@@ -83,8 +82,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	sum := sha256.Sum256([]byte(req.InviteToken))
-	tokenHash := hex.EncodeToString(sum[:])
+	tokenHash := tokenhash.Hash(req.InviteToken)
 	invite, err := s.q.GetInviteByTokenHash(ctx, tokenHash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
