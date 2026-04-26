@@ -4,8 +4,6 @@ package worker_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"sync"
 	"testing"
@@ -14,6 +12,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -139,8 +138,7 @@ func newWorkerTestFixture(t *testing.T) *workerTestFixture {
 func seedEnrollment(t *testing.T, ctx context.Context, q *store.Queries, adminID pgtype.UUID, ttl time.Duration) (rawToken string) {
 	t.Helper()
 	raw := "enroll-" + t.Name()
-	sum := sha256.Sum256([]byte(raw))
-	h := hex.EncodeToString(sum[:])
+	h := tokenhash.Hash(raw)
 	_, err := q.CreateAgentEnrollment(ctx, store.CreateAgentEnrollmentParams{
 		TokenHash: h,
 		CreatedBy: adminID,

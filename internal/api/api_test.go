@@ -4,7 +4,6 @@ package api_test
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -50,8 +50,7 @@ func createTestToken(t *testing.T, q *store.Queries, userID pgtype.UUID) string 
 	raw := make([]byte, 16)
 	_, _ = rand.Read(raw)
 	rawHex := hex.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(rawHex))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(rawHex)
 	_, err := q.CreateToken(t.Context(), store.CreateTokenParams{
 		UserID:    userID,
 		TokenHash: hash,

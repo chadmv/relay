@@ -4,8 +4,6 @@ package worker_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -16,6 +14,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -36,8 +35,7 @@ func seedWorkerWithAgentToken(t *testing.T, ctx context.Context, q *store.Querie
 	})
 	require.NoError(t, err)
 	raw := "test-agent-token-" + hostname
-	sum := sha256.Sum256([]byte(raw))
-	h := hex.EncodeToString(sum[:])
+	h := tokenhash.Hash(raw)
 	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{ID: w.ID, AgentTokenHash: &h}))
 	return w.ID, raw
 }
@@ -298,8 +296,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	require.NoError(t, err)
 
 	rawRecon := "test-token-recon"
-	sumRecon := sha256.Sum256([]byte(rawRecon))
-	h2 := hex.EncodeToString(sumRecon[:])
+	h2 := tokenhash.Hash(rawRecon)
 	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
 		ID: workerRow.ID, AgentTokenHash: &h2,
 	}))

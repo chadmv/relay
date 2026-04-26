@@ -3,14 +3,13 @@
 package api_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"relay/internal/api"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
@@ -38,8 +37,7 @@ func TestBearerAuth_ValidToken(t *testing.T) {
 	require.NoError(t, err)
 
 	raw := "test-token-12345"
-	sum := sha256.Sum256([]byte(raw))
-	hash := hex.EncodeToString(sum[:])
+	hash := tokenhash.Hash(raw)
 
 	_, err = q.CreateToken(ctx, store.CreateTokenParams{
 		UserID:    user.ID,
