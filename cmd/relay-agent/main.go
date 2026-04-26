@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -69,9 +70,9 @@ func main() {
 		provider = pp
 
 		// Start sweeper if age or disk-pressure threshold is configured.
-		maxAge := parseDurationEnv(os.Getenv("RELAY_WORKSPACE_MAX_AGE"), 0)
+		maxAge := parseDurationEnv("RELAY_WORKSPACE_MAX_AGE", os.Getenv("RELAY_WORKSPACE_MAX_AGE"), 0)
 		minFreeGB, _ := strconv.ParseInt(os.Getenv("RELAY_WORKSPACE_MIN_FREE_GB"), 10, 64)
-		sweepInterval := parseDurationEnv(os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
+		sweepInterval := parseDurationEnv("RELAY_WORKSPACE_SWEEP_INTERVAL", os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
 		if maxAge > 0 || minFreeGB > 0 {
 			sw := &perforce.Sweeper{
 				Root:          root,
@@ -135,12 +136,14 @@ var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 
 // parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
 // s (seconds), m (minutes), h (hours), or d (days). Returns fallback on empty or invalid input.
-func parseDurationEnv(v string, fallback time.Duration) time.Duration {
+// If v is non-empty but unparseable, a warning is logged naming the env var.
+func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 	if v == "" {
 		return fallback
 	}
 	m := durRe.FindStringSubmatch(v)
 	if m == nil {
+		log.Printf("warning: %s=%q is not a valid duration (want e.g. 14d, 8h, 30m); using fallback %v", name, v, fallback)
 		return fallback
 	}
 	n, _ := strconv.Atoi(m[1])

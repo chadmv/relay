@@ -1,7 +1,7 @@
 ---
 title: "`parseDurationEnv` silently falls back on garbage input"
 type: bug
-status: open
+status: closed
 created: 2026-04-25
 source: 2026-04-25 perforce-workspace-management retro — Known Limitations
 ---
