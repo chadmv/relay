@@ -127,3 +127,7 @@ No cobra/viper — uses stdlib `flag`. Each subcommand is a `cli.Command` struct
 ## Session Continuity
 
 At the start of each session, read the most recent file in `docs/retros/` for context on prior work.
+
+## Backlog
+
+At the start of each session, if `docs/backlog/` exists, list the open backlog files (`find docs/backlog -maxdepth 1 -name "*.md" 2>/dev/null`) and surface a one-line summary: count by type, plus the titles of any `priority: high` items. Do not read full files unless asked.
