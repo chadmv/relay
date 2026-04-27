@@ -41,6 +41,47 @@ func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (ApiTo
 	return i, err
 }
 
+const deleteOtherTokensForUser = `-- name: DeleteOtherTokensForUser :exec
+DELETE FROM api_tokens WHERE user_id = $1 AND id <> $2
+`
+
+type DeleteOtherTokensForUserParams struct {
+	UserID pgtype.UUID `json:"user_id"`
+	ID     pgtype.UUID `json:"id"`
+}
+
+// DeleteOtherTokensForUser
+//
+//	DELETE FROM api_tokens WHERE user_id = $1 AND id <> $2
+func (q *Queries) DeleteOtherTokensForUser(ctx context.Context, arg DeleteOtherTokensForUserParams) error {
+	_, err := q.db.Exec(ctx, deleteOtherTokensForUser, arg.UserID, arg.ID)
+	return err
+}
+
+const deleteToken = `-- name: DeleteToken :exec
+DELETE FROM api_tokens WHERE id = $1
+`
+
+// DeleteToken
+//
+//	DELETE FROM api_tokens WHERE id = $1
+func (q *Queries) DeleteToken(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteToken, id)
+	return err
+}
+
+const deleteTokensForUser = `-- name: DeleteTokensForUser :exec
+DELETE FROM api_tokens WHERE user_id = $1
+`
+
+// DeleteTokensForUser
+//
+//	DELETE FROM api_tokens WHERE user_id = $1
+func (q *Queries) DeleteTokensForUser(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteTokensForUser, userID)
+	return err
+}
+
 const getTokenWithUser = `-- name: GetTokenWithUser :one
 SELECT
     t.id          AS token_id,

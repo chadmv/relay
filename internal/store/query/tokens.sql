@@ -17,3 +17,12 @@ SELECT
 FROM api_tokens t
 JOIN users u ON u.id = t.user_id
 WHERE t.token_hash = $1;
+
+-- name: DeleteToken :exec
+DELETE FROM api_tokens WHERE id = $1;
+
+-- name: DeleteTokensForUser :exec
+DELETE FROM api_tokens WHERE user_id = $1;
+
+-- name: DeleteOtherTokensForUser :exec
+DELETE FROM api_tokens WHERE user_id = $1 AND id <> $2;
