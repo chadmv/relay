@@ -111,6 +111,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleListAgentEnrollments))))
 	mux.Handle("DELETE /v1/workers/{id}/token", auth(admin(http.HandlerFunc(s.handleDeleteWorkerToken))))
 
+	// User management (admin-only)
+	mux.Handle("POST /v1/users/password-reset", auth(admin(http.HandlerFunc(s.handleAdminPasswordReset))))
+
 	// Worker workspaces (admin-only)
 	mux.Handle("GET /v1/workers/{id}/workspaces", auth(admin(http.HandlerFunc(s.handleListWorkerWorkspaces))))
 	mux.Handle("POST /v1/workers/{id}/workspaces/{short_id}/evict", auth(admin(http.HandlerFunc(s.handleEvictWorkerWorkspace))))
