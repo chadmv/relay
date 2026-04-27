@@ -95,9 +95,15 @@ TDD per repo convention. New/extended tests:
   - `logout_test.go` (new) — stub `readPasswordFn` (not needed for logout) and `saveConfigFn`; assert config is cleared on success.
   - `admin_passwd_test.go` (new) — stub `readPasswordFn`; httptest server returns 204; assert correct request body.
 
-## Out-of-Scope Cleanup
+## Backlog Housekeeping (Required)
 
-- Backlog housekeeping: at PR completion, move all three closed backlog items to `docs/backlog/closed/` per the lesson from the 2026-04-26 multi-command-tech-debt retro. Use `git mv`, not `Write` + `git rm`.
+When the work lands, move all three closed backlog items to `docs/backlog/closed/` in the same PR as the implementation:
+
+- `docs/backlog/bug-2026-04-25-relay-passwd-no-admin-reset.md`
+- `docs/backlog/idea-2026-04-25-logout-endpoint.md`
+- `docs/backlog/idea-2026-04-25-password-change-invalidates-tokens.md`
+
+Each moved file gets `status: closed`, `closed: <date>`, `resolution: fixed` in frontmatter, plus a `## Resolution` section noting the implementing commit. Use `git mv` (not `Write` + `git rm`) per the 2026-04-26 multi-command-tech-debt retro lesson.
 
 ## Open Questions
 
