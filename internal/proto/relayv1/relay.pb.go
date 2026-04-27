@@ -545,6 +545,8 @@ type TaskLogChunk struct {
 	Stream        LogStream              `protobuf:"varint,2,opt,name=stream,proto3,enum=relay.v1.LogStream" json:"stream,omitempty"`
 	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
 	Epoch         int64                  `protobuf:"varint,4,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	StepIndex     int32                  `protobuf:"varint,5,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"` // 1-indexed step number; 0 = not part of a numbered step (e.g. PREPARE chunks)
+	StepTotal     int32                  `protobuf:"varint,6,opt,name=step_total,json=stepTotal,proto3" json:"step_total,omitempty"` // total step count for the task; 0 when step_index == 0
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -603,6 +605,20 @@ func (x *TaskLogChunk) GetContent() []byte {
 func (x *TaskLogChunk) GetEpoch() int64 {
 	if x != nil {
 		return x.Epoch
+	}
+	return 0
+}
+
+func (x *TaskLogChunk) GetStepIndex() int32 {
+	if x != nil {
+		return x.StepIndex
+	}
+	return 0
+}
+
+func (x *TaskLogChunk) GetStepTotal() int32 {
+	if x != nil {
+		return x.StepTotal
 	}
 	return 0
 }
@@ -1337,12 +1353,16 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\x12\x14\n" +
 	"\x05epoch\x18\x05 \x01(\x03R\x05epochB\f\n" +
 	"\n" +
-	"_exit_code\"\x84\x01\n" +
+	"_exit_code\"\xc2\x01\n" +
 	"\fTaskLogChunk\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12+\n" +
 	"\x06stream\x18\x02 \x01(\x0e2\x13.relay.v1.LogStreamR\x06stream\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\fR\acontent\x12\x14\n" +
-	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\"\xae\x02\n" +
+	"\x05epoch\x18\x04 \x01(\x03R\x05epoch\x12\x1d\n" +
+	"\n" +
+	"step_index\x18\x05 \x01(\x05R\tstepIndex\x12\x1d\n" +
+	"\n" +
+	"step_total\x18\x06 \x01(\x05R\tstepTotal\"\xae\x02\n" +
 	"\x12CoordinatorMessage\x12I\n" +
 	"\x11register_response\x18\x01 \x01(\v2\x1a.relay.v1.RegisterResponseH\x00R\x10registerResponse\x12=\n" +
 	"\rdispatch_task\x18\x02 \x01(\v2\x16.relay.v1.DispatchTaskH\x00R\fdispatchTask\x127\n" +

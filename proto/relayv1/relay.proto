@@ -56,10 +56,12 @@ message TaskStatusUpdate {
 }
 
 message TaskLogChunk {
-  string    task_id = 1;
-  LogStream stream  = 2;
-  bytes     content = 3;
-  int64     epoch   = 4;
+  string    task_id    = 1;
+  LogStream stream     = 2;
+  bytes     content    = 3;
+  int64     epoch      = 4;
+  int32     step_index = 5; // 1-indexed step number; 0 = not part of a numbered step (e.g. PREPARE chunks)
+  int32     step_total = 6; // total step count for the task; 0 when step_index == 0
 }
 
 message CoordinatorMessage {

@@ -132,7 +132,9 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			break
 		}
 		argv := cl.Argv
-		r.sendStepMarker(i+1, total, argv)
+		step := int32(i + 1)
+		stepTotal := int32(total)
+		r.sendStepMarker(step, stepTotal, argv)
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
@@ -159,8 +161,8 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT) }()
-		go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR) }()
+		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT, step, stepTotal) }()
+		go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR, step, stepTotal) }()
 		wg.Wait()
 
 		waitErr := cmd.Wait()
@@ -191,20 +193,24 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 }
 
 // sendStepMarker writes a synthetic delimiter line into the stdout stream so
-// the consolidated log can be split per step without a proto change.
-func (r *Runner) sendStepMarker(step, total int, argv []string) {
-	line := []byte("=== relay step " + strconv.Itoa(step) + "/" + strconv.Itoa(total) + " === " + strings.Join(argv, " ") + "\n")
+// the consolidated log can be split per step. step_index and step_total are
+// also stamped onto the chunk for structured consumers; the text marker is
+// retained for log-tailing tools that don't (yet) read the structured fields.
+func (r *Runner) sendStepMarker(step, total int32, argv []string) {
+	line := []byte("=== relay step " + strconv.Itoa(int(step)) + "/" + strconv.Itoa(int(total)) + " === " + strings.Join(argv, " ") + "\n")
 	r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskLog{
 		TaskLog: &relayv1.TaskLogChunk{
-			TaskId:  r.taskID,
-			Stream:  relayv1.LogStream_LOG_STREAM_STDOUT,
-			Content: line,
-			Epoch:   r.epoch,
+			TaskId:    r.taskID,
+			Stream:    relayv1.LogStream_LOG_STREAM_STDOUT,
+			Content:   line,
+			Epoch:     r.epoch,
+			StepIndex: step,
+			StepTotal: total,
 		},
 	}})
 }
 
-func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream) {
+func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream, stepIndex, stepTotal int32) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := pipe.Read(buf)
@@ -214,10 +220,12 @@ func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream) {
 			r.send(&relayv1.AgentMessage{
 				Payload: &relayv1.AgentMessage_TaskLog{
 					TaskLog: &relayv1.TaskLogChunk{
-						TaskId:  r.taskID,
-						Stream:  stream,
-						Content: chunk,
-						Epoch:   r.epoch,
+						TaskId:    r.taskID,
+						Stream:    stream,
+						Content:   chunk,
+						Epoch:     r.epoch,
+						StepIndex: stepIndex,
+						StepTotal: stepTotal,
 					},
 				},
 			})
