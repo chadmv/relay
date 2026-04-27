@@ -85,7 +85,8 @@ message RegisterResponse {
 message DispatchTask {
   string              task_id         = 1;
   string              job_id          = 2;
-  repeated string     command         = 3 [deprecated = true]; // superseded by commands; kept for one release
+  reserved 3;
+  reserved "command";
   map<string, string> env             = 4;
   int32               timeout_seconds = 5;
   int64               epoch           = 6;

@@ -787,16 +787,14 @@ func (x *RegisterResponse) GetAgentToken() string {
 }
 
 type DispatchTask struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	TaskId string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	JobId  string                 `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// Deprecated: Marked as deprecated in relayv1/relay.proto.
-	Command        []string          `protobuf:"bytes,3,rep,name=command,proto3" json:"command,omitempty"` // superseded by commands; kept for one release
-	Env            map[string]string `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	TimeoutSeconds int32             `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
-	Epoch          int64             `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
-	Source         *SourceSpec       `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
-	Commands       []*CommandLine    `protobuf:"bytes,8,rep,name=commands,proto3" json:"commands,omitempty"`
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	TaskId         string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	JobId          string                 `protobuf:"bytes,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Env            map[string]string      `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	TimeoutSeconds int32                  `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	Epoch          int64                  `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	Source         *SourceSpec            `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	Commands       []*CommandLine         `protobuf:"bytes,8,rep,name=commands,proto3" json:"commands,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -843,14 +841,6 @@ func (x *DispatchTask) GetJobId() string {
 		return x.JobId
 	}
 	return ""
-}
-
-// Deprecated: Marked as deprecated in relayv1/relay.proto.
-func (x *DispatchTask) GetCommand() []string {
-	if x != nil {
-		return x.Command
-	}
-	return nil
 }
 
 func (x *DispatchTask) GetEnv() map[string]string {
@@ -1364,11 +1354,10 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
 	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\x12\x1f\n" +
 	"\vagent_token\x18\x03 \x01(\tR\n" +
-	"agentToken\"\xe7\x02\n" +
+	"agentToken\"\xd8\x02\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
-	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x12\x1c\n" +
-	"\acommand\x18\x03 \x03(\tB\x02\x18\x01R\acommand\x121\n" +
+	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x121\n" +
 	"\x03env\x18\x04 \x03(\v2\x1f.relay.v1.DispatchTask.EnvEntryR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x12,\n" +
@@ -1376,7 +1365,7 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\bcommands\x18\b \x03(\v2\x15.relay.v1.CommandLineR\bcommands\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"!\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04R\acommand\"!\n" +
 	"\vCommandLine\x12\x12\n" +
 	"\x04argv\x18\x01 \x03(\tR\x04argv\"%\n" +
 	"\n" +
