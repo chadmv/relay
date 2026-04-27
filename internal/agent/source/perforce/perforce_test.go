@@ -160,3 +160,14 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	// Must NOT touch CL 99999 (not relay-owned)
 	require.False(t, found([]string{"change", "-d", "99999"}))
 }
+
+func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
+	root := t.TempDir()
+	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: newFakeP4Fixture()}})
+
+	r1, err := p.Registry()
+	require.NoError(t, err)
+	r2, err := p.Registry()
+	require.NoError(t, err)
+	require.Same(t, r1, r2, "Registry() must return the same cached instance")
+}

@@ -74,8 +74,13 @@ func main() {
 		minFreeGB, _ := strconv.ParseInt(os.Getenv("RELAY_WORKSPACE_MIN_FREE_GB"), 10, 64)
 		sweepInterval := parseDurationEnv("RELAY_WORKSPACE_SWEEP_INTERVAL", os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
 		if maxAge > 0 || minFreeGB > 0 {
+			reg, err := pp.Registry()
+			if err != nil {
+				log.Fatalf("workspace registry: %v", err)
+			}
 			sw := &perforce.Sweeper{
 				Root:          root,
+				Reg:           reg,
 				MaxAge:        maxAge,
 				MinFreeGB:     minFreeGB,
 				SweepInterval: sweepInterval,

@@ -26,6 +26,7 @@ func TestSweeper_AgeEviction(t *testing.T) {
 
 	s := &Sweeper{
 		Root:       root,
+		Reg:        reg,
 		MaxAge:     14 * 24 * time.Hour,
 		Client:     &Client{r: fr},
 		ListLocked: func() map[string]bool { return nil },
@@ -56,7 +57,7 @@ func TestSweeper_PressureEviction(t *testing.T) {
 
 	var freeGB int64 = 50
 	s := &Sweeper{
-		Root: root, MinFreeGB: 100, Client: &Client{r: fr},
+		Root: root, Reg: reg, MinFreeGB: 100, Client: &Client{r: fr},
 		FreeDiskGB:  func(string) (int64, error) { return freeGB, nil },
 		ListLocked:  func() map[string]bool { return nil },
 		OnEvictedCB: func(string) { freeGB = 200 },
@@ -64,6 +65,32 @@ func TestSweeper_PressureEviction(t *testing.T) {
 	evicted, err := s.SweepOnce(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, []string{"a"}, evicted)
+}
+
+func TestSweeper_UsesInjectedRegistry(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture()
+	fr.set("client -d relay_h_old", "Client deleted.\n")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "old", SourceKey: "//s/x",
+		ClientName: "relay_h_old", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "old"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+	evicted, err := s.SweepOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"old"}, evicted)
+
+	// The eviction must be visible directly on the injected registry pointer.
+	require.Nil(t, reg.Get("old"))
 }
 
 func TestSweeper_SkipsLockedWorkspaces(t *testing.T) {
@@ -76,7 +103,7 @@ func TestSweeper_SkipsLockedWorkspaces(t *testing.T) {
 	require.NoError(t, reg.Save())
 
 	s := &Sweeper{
-		Root: root, MaxAge: 14 * 24 * time.Hour, Client: &Client{r: fr},
+		Root: root, Reg: reg, MaxAge: 14 * 24 * time.Hour, Client: &Client{r: fr},
 		ListLocked: func() map[string]bool { return map[string]bool{"locked": true} },
 	}
 	evicted, err := s.SweepOnce(context.Background())

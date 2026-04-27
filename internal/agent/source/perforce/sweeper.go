@@ -2,6 +2,7 @@ package perforce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,9 @@ type Sweeper struct {
 	MaxAge        time.Duration // 0 = disabled
 	MinFreeGB     int64         // 0 = disabled
 	SweepInterval time.Duration // 0 = 15m default
+
+	// Reg is the shared on-disk workspace registry. Required.
+	Reg *Registry
 
 	Client      *Client
 	ListLocked  func() map[string]bool           // returns short_ids of currently-held workspaces
@@ -44,10 +48,10 @@ func (s *Sweeper) Run(ctx context.Context) {
 
 // SweepOnce performs one sweep pass. Returns short_ids of evicted workspaces.
 func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
-	reg, err := LoadRegistry(filepath.Join(s.Root, ".relay-registry.json"))
-	if err != nil {
-		return nil, err
+	if s.Reg == nil {
+		return nil, errors.New("sweeper: Reg is required")
 	}
+	reg := s.Reg
 
 	locked := map[string]bool{}
 	if s.ListLocked != nil {

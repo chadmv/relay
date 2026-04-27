@@ -77,6 +77,15 @@ func (p *Provider) loadRegistry() (*Registry, error) {
 	return r, nil
 }
 
+// Registry returns the single shared on-disk workspace registry instance for
+// this provider, loading it on first call. Safe for concurrent use via the
+// Registry's internal lock. Used by the sweeper to share state with the
+// provider so eviction is immediately visible to subsequent ListInventory
+// and Prepare calls.
+func (p *Provider) Registry() (*Registry, error) {
+	return p.loadRegistry()
+}
+
 // Prepare acquires a workspace for the given task and syncs it if needed.
 // taskID is used to scope the per-task pending changelist for unshelves.
 func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.SourceSpec, progress func(line string)) (source.Handle, error) {
@@ -243,7 +252,7 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	if e == nil {
 		return fmt.Errorf("workspace %s not found in registry", shortID)
 	}
-	sw := &Sweeper{Root: p.cfg.Root, Client: p.cfg.Client, ListLocked: p.lockedShortIDs}
+	sw := &Sweeper{Root: p.cfg.Root, Reg: reg, Client: p.cfg.Client, ListLocked: p.lockedShortIDs}
 	return sw.evict(ctx, reg, *e)
 }
 
@@ -254,15 +263,15 @@ func (p *Provider) Client() *Client { return p.cfg.Client }
 // This is the public wrapper of lockedShortIDs for use by the sweeper.
 func (p *Provider) LockedShortIDs() map[string]bool { return p.lockedShortIDs() }
 
-// InvalidateWorkspace removes a workspace's in-memory state after external eviction.
-// This is called by the sweeper's OnEvictedCB to keep the provider cache consistent.
+// InvalidateWorkspace removes a workspace's per-task in-memory state after
+// external eviction. Called by the sweeper's OnEvictedCB. The shared registry
+// (p.reg) does not need to be nilled because the sweeper now mutates it in
+// place via the shared *Registry pointer; this call only clears the per-task
+// workspace cache.
 func (p *Provider) InvalidateWorkspace(shortID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.workspaces, shortID)
-	// Nil out the registry cache so the next Prepare reloads from disk,
-	// picking up the eviction that the sweeper already wrote.
-	p.reg = nil
 }
 
 // lockedShortIDs returns the set of shortIDs that are currently held by tasks.
