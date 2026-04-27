@@ -35,6 +35,7 @@ func BearerAuth(q *store.Queries) func(http.Handler) http.Handler {
 			}
 			u := AuthUser{
 				ID:      row.UserID,
+				TokenID: row.TokenID,
 				Name:    row.UserName,
 				Email:   row.UserEmail,
 				IsAdmin: row.UserIsAdmin,

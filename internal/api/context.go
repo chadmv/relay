@@ -13,6 +13,7 @@ const authUserKey contextKey = iota
 // AuthUser holds the authenticated user identity, injected by BearerAuth.
 type AuthUser struct {
 	ID      pgtype.UUID
+	TokenID pgtype.UUID
 	Name    string
 	Email   string
 	IsAdmin bool

@@ -62,6 +62,7 @@ func TestBearerAuth_ValidToken(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "alice@test.com", gotUser.Email)
 	assert.False(t, gotUser.IsAdmin)
+	assert.True(t, gotUser.TokenID.Valid, "TokenID should be populated")
 }
 
 func TestAdminOnly_NonAdmin(t *testing.T) {
