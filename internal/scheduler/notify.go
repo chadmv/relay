@@ -65,6 +65,10 @@ func (n *NotifyListener) session(ctx context.Context) error {
 		return err
 	}
 
+	// Drain anything submitted during a startup or reconnect gap. The
+	// dispatcher's Trigger is idempotent.
+	n.trigger()
+
 	for {
 		_, err := raw.WaitForNotification(ctx)
 		if err != nil {

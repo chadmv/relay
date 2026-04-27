@@ -53,3 +53,24 @@ func TestNotifyListener_TriggersOnNotify(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(t, before, triggered.Load())
 }
+
+func TestNotifyListener_TriggersOnceAtStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool := newTestPoolFromQueries(t)
+
+	var triggered atomic.Int32
+	l := scheduler.NewNotifyListener(pool, func() {
+		triggered.Add(1)
+	})
+
+	go l.Run(ctx)
+
+	// Without any pg_notify, the listener must still fire trigger() once
+	// after LISTEN succeeds. This covers both initial startup and
+	// post-reconnect dispatch-gap drain.
+	require.Eventually(t, func() bool {
+		return triggered.Load() >= 1
+	}, 2*time.Second, 20*time.Millisecond)
+}
