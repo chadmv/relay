@@ -360,20 +360,9 @@ func TestChangePassword_HappyPath(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
 	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
-	token := registerAndLogin(t, srv, q, "alice@test.com", "oldpassword")
+	tokenA := registerAndLogin(t, srv, q, "alice@test.com", "oldpassword")
 
-	body, _ := json.Marshal(map[string]string{
-		"current_password": "oldpassword", "new_password": "newpassword1",
-	})
-	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-
-	// Old password no longer works.
+	// Issue a second token via login (simulates a second device).
 	loginBody, _ := json.Marshal(map[string]string{
 		"email": "alice@test.com", "password": "oldpassword",
 	})
@@ -381,17 +370,51 @@ func TestChangePassword_HappyPath(t *testing.T) {
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(loginRec, loginReq)
-	assert.Equal(t, http.StatusUnauthorized, loginRec.Code)
+	require.Equal(t, http.StatusCreated, loginRec.Code)
+	var loginResp map[string]any
+	require.NoError(t, json.NewDecoder(loginRec.Body).Decode(&loginResp))
+	tokenB := loginResp["token"].(string)
+
+	// Change password using tokenA.
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "oldpassword", "new_password": "newpassword1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+tokenA)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// tokenA (the one used to change) still works.
+	probeA := httptest.NewRequest("GET", "/v1/jobs", nil)
+	probeA.Header.Set("Authorization", "Bearer "+tokenA)
+	probeARec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(probeARec, probeA)
+	assert.Equal(t, http.StatusOK, probeARec.Code, "current token should still work")
+
+	// tokenB (the other session) is now 401.
+	probeB := httptest.NewRequest("GET", "/v1/jobs", nil)
+	probeB.Header.Set("Authorization", "Bearer "+tokenB)
+	probeBRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(probeBRec, probeB)
+	assert.Equal(t, http.StatusUnauthorized, probeBRec.Code, "other tokens should be revoked")
+
+	// Old password no longer works.
+	old, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "oldpassword"})
+	oldReq := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(old)))
+	oldReq.Header.Set("Content-Type", "application/json")
+	oldRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(oldRec, oldReq)
+	assert.Equal(t, http.StatusUnauthorized, oldRec.Code)
 
 	// New password works.
-	loginBody2, _ := json.Marshal(map[string]string{
-		"email": "alice@test.com", "password": "newpassword1",
-	})
-	loginReq2 := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody2)))
-	loginReq2.Header.Set("Content-Type", "application/json")
-	loginRec2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(loginRec2, loginReq2)
-	assert.Equal(t, http.StatusCreated, loginRec2.Code)
+	new, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "newpassword1"})
+	newReq := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(new)))
+	newReq.Header.Set("Content-Type", "application/json")
+	newRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(newRec, newReq)
+	assert.Equal(t, http.StatusCreated, newRec.Code)
 }
 
 func TestChangePassword_WrongCurrentPassword(t *testing.T) {

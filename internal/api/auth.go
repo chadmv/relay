@@ -252,6 +252,14 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.q.DeleteOtherTokensForUser(ctx, store.DeleteOtherTokensForUserParams{
+		UserID: authUser.ID,
+		ID:     authUser.TokenID,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "password updated but failed to revoke other sessions")
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
