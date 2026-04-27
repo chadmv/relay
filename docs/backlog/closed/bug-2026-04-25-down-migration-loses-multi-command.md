@@ -1,8 +1,9 @@
 ---
 title: Down migration loses information for multi-command rows
 type: bug
-status: open
+status: closed
 created: 2026-04-25
+closed: 2026-04-26
 source: 2026-04-25 multi-command-tasks retro — Known Limitations
 ---
 
