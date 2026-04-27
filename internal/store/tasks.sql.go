@@ -524,6 +524,46 @@ func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (
 	return i, err
 }
 
+const listGraceCandidates = `-- name: ListGraceCandidates :many
+SELECT DISTINCT w.id, w.disconnected_at
+FROM workers w
+JOIN tasks t ON t.worker_id = w.id
+WHERE t.status IN ('dispatched', 'running')
+`
+
+type ListGraceCandidatesRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	DisconnectedAt pgtype.Timestamptz `json:"disconnected_at"`
+}
+
+// Returns id and disconnected_at for each worker that has at least one
+// non-terminal task assigned. Used at server startup to seed grace timers
+// with the correct remaining duration based on persisted disconnect time.
+//
+//	SELECT DISTINCT w.id, w.disconnected_at
+//	FROM workers w
+//	JOIN tasks t ON t.worker_id = w.id
+//	WHERE t.status IN ('dispatched', 'running')
+func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listGraceCandidates)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGraceCandidatesRow
+	for rows.Next() {
+		var i ListGraceCandidatesRow
+		if err := rows.Scan(&i.ID, &i.DisconnectedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTasksByJob = `-- name: ListTasksByJob :many
 SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands FROM tasks WHERE job_id = $1 ORDER BY created_at
 `
@@ -561,38 +601,6 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listWorkersWithActiveTasks = `-- name: ListWorkersWithActiveTasks :many
-SELECT DISTINCT worker_id
-FROM tasks
-WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running')
-`
-
-// Returns the distinct set of worker IDs with at least one non-terminal
-// task assigned. Used at server startup to seed grace timers.
-//
-//	SELECT DISTINCT worker_id
-//	FROM tasks
-//	WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running')
-func (q *Queries) ListWorkersWithActiveTasks(ctx context.Context) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, listWorkersWithActiveTasks)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []pgtype.UUID
-	for rows.Next() {
-		var worker_id pgtype.UUID
-		if err := rows.Scan(&worker_id); err != nil {
-			return nil, err
-		}
-		items = append(items, worker_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

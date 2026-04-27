@@ -20,7 +20,7 @@ RETURNING *;
 
 -- name: UpdateWorkerStatus :one
 UPDATE workers
-SET status = $2, last_seen_at = $3
+SET status = $2, last_seen_at = $3, disconnected_at = $4
 WHERE id = $1
 RETURNING *;
 

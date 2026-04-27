@@ -112,12 +112,14 @@ FROM tasks
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')
 ORDER BY id;
 
--- name: ListWorkersWithActiveTasks :many
--- Returns the distinct set of worker IDs with at least one non-terminal
--- task assigned. Used at server startup to seed grace timers.
-SELECT DISTINCT worker_id
-FROM tasks
-WHERE worker_id IS NOT NULL AND status IN ('dispatched', 'running');
+-- name: ListGraceCandidates :many
+-- Returns id and disconnected_at for each worker that has at least one
+-- non-terminal task assigned. Used at server startup to seed grace timers
+-- with the correct remaining duration based on persisted disconnect time.
+SELECT DISTINCT w.id, w.disconnected_at
+FROM workers w
+JOIN tasks t ON t.worker_id = w.id
+WHERE t.status IN ('dispatched', 'running');
 
 -- name: RequeueTaskByID :exec
 -- Revert a single task back to 'pending' regardless of current status.

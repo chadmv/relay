@@ -595,3 +595,38 @@ func TestConnect_WorkspaceInventoryUpdate_Message(t *testing.T) {
 	require.Equal(t, "//s/x", rows[0].SourceKey)
 	require.Equal(t, "abc123", rows[0].BaselineHash)
 }
+
+func TestHandler_DisconnectAndRegisterTrackDisconnectedAt(t *testing.T) {
+	ctx := context.Background()
+	q, _ := newTestStore(t)
+
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-dc", Hostname: "host-dc", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_, err = q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:             w.ID,
+		Status:         "offline",
+		LastSeenAt:     pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	})
+	require.NoError(t, err)
+
+	fetched, err := q.GetWorker(ctx, w.ID)
+	require.NoError(t, err)
+	require.True(t, fetched.DisconnectedAt.Valid, "disconnected_at must be set after offline transition")
+
+	_, err = q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID:             w.ID,
+		Status:         "online",
+		LastSeenAt:     pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt: pgtype.Timestamptz{},
+	})
+	require.NoError(t, err)
+
+	fetched, err = q.GetWorker(ctx, w.ID)
+	require.NoError(t, err)
+	require.False(t, fetched.DisconnectedAt.Valid, "disconnected_at must be NULL after register")
+}

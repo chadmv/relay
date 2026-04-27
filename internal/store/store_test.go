@@ -338,10 +338,10 @@ func TestReconciliationQueries(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, w1Active, 2)
 
-	// ListWorkersWithActiveTasks: should return both w1 and w2.
-	workerIDs, err := q.ListWorkersWithActiveTasks(ctx)
+	// ListGraceCandidates: should return both w1 and w2.
+	candidates, err := q.ListGraceCandidates(ctx)
 	require.NoError(t, err)
-	assert.Len(t, workerIDs, 2)
+	assert.Len(t, candidates, 2)
 
 	// RequeueTaskByID: requeue task A; it should be pending with worker_id cleared.
 	require.NoError(t, q.RequeueTaskByID(ctx, taskA.ID))

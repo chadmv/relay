@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN disconnected_at TIMESTAMPTZ NULL;

@@ -114,7 +114,7 @@ func main() {
 
 	// Seed grace timers for any workers with active tasks. If agents reconnect
 	// within the window they reconcile normally; if not, their tasks requeue.
-	if err := seedGraceTimersFromActiveTasks(ctx, q, grace); err != nil {
+	if err := seedGraceTimersFromActiveTasks(ctx, q, grace, graceWindow); err != nil {
 		log.Printf("warn: seed grace timers: %v", err)
 	}
 
@@ -210,16 +210,29 @@ func runEnrollmentJanitor(ctx context.Context, q *store.Queries) {
 }
 
 // seedGraceTimersFromActiveTasks enumerates workers that have non-terminal
-// tasks in the DB at startup and starts a grace timer for each. Agents that
-// reconnect within the window reconcile; agents that don't will have their
-// tasks requeued.
-func seedGraceTimersFromActiveTasks(ctx context.Context, q *store.Queries, grace *worker.GraceRegistry) error {
-	workerIDs, err := q.ListWorkersWithActiveTasks(ctx)
+// tasks and schedules grace timers honoring any persisted disconnect time.
+//   - disconnected_at IS NULL → start full window (server crashed while worker
+//     was online; we don't know when it dropped).
+//   - remaining > 0 → start with remaining duration.
+//   - remaining <= 0 → fire onExpire synchronously to requeue immediately.
+func seedGraceTimersFromActiveTasks(ctx context.Context, q *store.Queries, grace *worker.GraceRegistry, window time.Duration) error {
+	candidates, err := q.ListGraceCandidates(ctx)
 	if err != nil {
 		return err
 	}
-	for _, wID := range workerIDs {
-		grace.Start(uuidStrMain(wID))
+	now := time.Now()
+	for _, c := range candidates {
+		id := uuidStrMain(c.ID)
+		if !c.DisconnectedAt.Valid {
+			grace.Start(id)
+			continue
+		}
+		remaining := c.DisconnectedAt.Time.Add(window).Sub(now)
+		if remaining > 0 {
+			grace.StartWithDuration(id, remaining)
+		} else {
+			grace.ExpireNow(id)
+		}
 	}
 	return nil
 }

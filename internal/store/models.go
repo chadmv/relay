@@ -134,6 +134,7 @@ type Worker struct {
 	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	AgentTokenHash *string            `json:"agent_token_hash"`
+	DisconnectedAt pgtype.Timestamptz `json:"disconnected_at"`
 }
 
 type WorkerWorkspace struct {

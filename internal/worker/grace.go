@@ -29,9 +29,16 @@ func NewGraceRegistry(window time.Duration, onExpire func(workerID string)) *Gra
 	}
 }
 
-// Start schedules onExpire(workerID) to fire after window. If a timer already
-// exists for workerID, it is reset to the full window (idempotent).
+// Start schedules onExpire(workerID) to fire after g.window. If a timer
+// already exists for workerID, it is reset to the full window (idempotent).
 func (g *GraceRegistry) Start(workerID string) {
+	g.StartWithDuration(workerID, g.window)
+}
+
+// StartWithDuration schedules onExpire(workerID) to fire after d. If a timer
+// already exists for workerID, it is replaced. Used by startup reconciliation
+// to honor remaining grace from a persisted disconnect time.
+func (g *GraceRegistry) StartWithDuration(workerID string, d time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.stopped {
@@ -41,7 +48,7 @@ func (g *GraceRegistry) Start(workerID string) {
 		old.Stop()
 	}
 	var t *time.Timer
-	t = time.AfterFunc(g.window, func() {
+	t = time.AfterFunc(d, func() {
 		g.mu.Lock()
 		// Guard against ABA: only fire if this specific timer is still
 		// the active one. A concurrent Start may have replaced the entry
@@ -55,6 +62,25 @@ func (g *GraceRegistry) Start(workerID string) {
 		g.onExpire(workerID)
 	})
 	g.timers[workerID] = t
+}
+
+// ExpireNow invokes onExpire(workerID) synchronously without scheduling a
+// timer. If a timer was already pending for workerID, it is cancelled to
+// preserve the ABA-safety invariant. No-op if the registry has been Stopped.
+// Used by startup reconciliation when persisted grace has already expired
+// during downtime.
+func (g *GraceRegistry) ExpireNow(workerID string) {
+	g.mu.Lock()
+	if g.stopped {
+		g.mu.Unlock()
+		return
+	}
+	if old, ok := g.timers[workerID]; ok {
+		old.Stop()
+		delete(g.timers, workerID)
+	}
+	g.mu.Unlock()
+	g.onExpire(workerID)
 }
 
 // Cancel stops any pending timer for workerID. Safe to call if no timer exists.

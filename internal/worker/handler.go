@@ -439,10 +439,12 @@ func (h *Handler) markWorkerOffline(workerID string) {
 		return
 	}
 	ctx := context.Background()
+	now := time.Now()
 	_, _ = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:         id,
-		Status:     "offline",
-		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		ID:             id,
+		Status:         "offline",
+		LastSeenAt:     pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt: pgtype.Timestamptz{Time: now, Valid: true},
 	})
 	h.broker.Publish(events.Event{
 		Type: "worker",
