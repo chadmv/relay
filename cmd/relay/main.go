@@ -22,6 +22,7 @@ func main() {
 
 	commands := []cli.Command{
 		cli.LoginCommand(),
+		cli.LogoutCommand(),
 		cli.RegisterCommand(),
 		cli.PasswdCommand(),
 		cli.InviteCommand(),
@@ -34,6 +35,7 @@ func main() {
 		cli.WorkersCommand(),
 		cli.ReservationsCommand(),
 		cli.SchedulesCommand(),
+		cli.AdminCommand(),
 	}
 
 	os.Exit(cli.Dispatch(ctx, commands, os.Args[1:], cfg))
