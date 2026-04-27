@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -256,8 +257,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		UserID: authUser.ID,
 		ID:     authUser.TokenID,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "password updated but failed to revoke other sessions")
-		return
+		log.Printf("handleChangePassword: failed to revoke other sessions for user %s: %v", uuidStr(authUser.ID), err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

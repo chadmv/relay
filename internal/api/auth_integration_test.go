@@ -409,8 +409,8 @@ func TestChangePassword_HappyPath(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, oldRec.Code)
 
 	// New password works.
-	new, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "newpassword1"})
-	newReq := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(new)))
+	newLoginBody, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "newpassword1"})
+	newReq := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(newLoginBody)))
 	newReq.Header.Set("Content-Type", "application/json")
 	newRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(newRec, newReq)
