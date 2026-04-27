@@ -263,3 +263,12 @@ func (s *Server) handleLogoutCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
+	authUser, _ := UserFromCtx(r.Context())
+	if err := s.q.DeleteTokensForUser(r.Context(), authUser.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke tokens")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

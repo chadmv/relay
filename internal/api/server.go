@@ -77,8 +77,10 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /v1/auth/login", loginH)
 	}
 
+	// Auth (self-service)
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
 	mux.Handle("DELETE /v1/auth/token", auth(http.HandlerFunc(s.handleLogoutCurrent)))
+	mux.Handle("DELETE /v1/auth/tokens", auth(http.HandlerFunc(s.handleLogoutAll)))
 
 	// Jobs
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
