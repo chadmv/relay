@@ -126,7 +126,6 @@ func TestAdminPasswordReset_PasswordTooShort_Returns400(t *testing.T) {
 	q := store.New(pool)
 	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
-	_ = registerAndLogin(t, srv, q, "target@test.com", "oldpassword")
 
 	body, _ := json.Marshal(map[string]string{
 		"email": "target@test.com", "new_password": "short",

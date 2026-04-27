@@ -325,7 +325,8 @@ func (s *Server) handleAdminPasswordReset(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.q.DeleteTokensForUser(ctx, target.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "password updated but failed to revoke target's tokens")
+		log.Printf("handleAdminPasswordReset: failed to revoke sessions for user %s: %v", uuidStr(target.ID), err)
+		writeError(w, http.StatusInternalServerError, "failed to revoke target's sessions")
 		return
 	}
 
