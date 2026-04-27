@@ -254,3 +254,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (s *Server) handleLogoutCurrent(w http.ResponseWriter, r *http.Request) {
+	authUser, _ := UserFromCtx(r.Context())
+	if err := s.q.DeleteToken(r.Context(), authUser.TokenID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

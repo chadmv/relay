@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
+	mux.Handle("DELETE /v1/auth/token", auth(http.HandlerFunc(s.handleLogoutCurrent)))
 
 	// Jobs
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
