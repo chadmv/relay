@@ -112,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/workers/{id}/token", auth(admin(http.HandlerFunc(s.handleDeleteWorkerToken))))
 
 	// User management (admin-only)
+	mux.Handle("GET /v1/users", auth(admin(http.HandlerFunc(s.handleListUsers))))
 	mux.Handle("POST /v1/users/password-reset", auth(admin(http.HandlerFunc(s.handleAdminPasswordReset))))
 
 	// Worker workspaces (admin-only)
