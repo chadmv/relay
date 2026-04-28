@@ -108,6 +108,51 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 	return i, err
 }
 
+const listUsers = `-- name: ListUsers :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+ORDER BY created_at
+`
+
+type ListUsersRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsers
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	ORDER BY created_at
+func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersRow
+	for rows.Next() {
+		var i ListUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const promoteUserToAdmin = `-- name: PromoteUserToAdmin :exec
 UPDATE users SET is_admin = TRUE WHERE id = $1
 `
