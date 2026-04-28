@@ -19,3 +19,8 @@ SELECT EXISTS(
 
 -- name: PromoteUserToAdmin :exec
 UPDATE users SET is_admin = TRUE WHERE id = $1;
+
+-- name: ListUsers :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+ORDER BY created_at;
