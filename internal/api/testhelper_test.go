@@ -4,6 +4,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"relay/internal/store"
@@ -14,6 +15,23 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// installFailDeleteTrigger attaches a BEFORE DELETE trigger to the named table
+// that raises a SQL error on every DELETE. Used to simulate a DB error on the
+// session-revocation step of password handlers without breaking SELECTs that
+// run earlier in the same request (e.g. BearerAuth).
+func installFailDeleteTrigger(t *testing.T, pool *pgxpool.Pool, table string) {
+	t.Helper()
+	stmt := fmt.Sprintf(`
+		CREATE OR REPLACE FUNCTION fail_delete_%[1]s() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'forced delete failure for test'; END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER block_delete_%[1]s BEFORE DELETE ON %[1]s
+		FOR EACH STATEMENT EXECUTE FUNCTION fail_delete_%[1]s();
+	`, table)
+	_, err := pool.Exec(t.Context(), stmt)
+	require.NoError(t, err)
+}
 
 func newTestQueries(t *testing.T) *store.Queries {
 	t.Helper()

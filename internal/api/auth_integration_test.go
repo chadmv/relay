@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func init() {
@@ -473,4 +474,33 @@ func TestChangePassword_NoToken(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestChangePassword_TokenDeleteFails_RollsBackPassword verifies that if the
+// session-revocation step fails mid-handler, the password update is rolled back
+// so the user cannot end up with a new password while old sessions are still
+// alive. Forces failure with a BEFORE DELETE trigger on api_tokens so SELECT
+// (BearerAuth) and UPDATE (SetPasswordHash) still work but DELETE raises.
+func TestChangePassword_TokenDeleteFails_RollsBackPassword(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	token := registerAndLogin(t, srv, q, "dave@test.com", "oldpassword")
+
+	installFailDeleteTrigger(t, pool, "api_tokens")
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password": "oldpassword", "new_password": "newpassword1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/users/me/password", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	user, err := q.GetUserByEmail(t.Context(), "dave@test.com")
+	require.NoError(t, err)
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte("oldpassword")),
+		"password should not have been updated when the tx rolled back")
 }

@@ -121,6 +121,35 @@ func TestAdminPasswordReset_UnknownEmail_Returns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestAdminPasswordReset_TokenDeleteFails_RollsBackPassword verifies that if
+// the session-revocation step fails mid-handler, the password update is rolled
+// back. Forces failure with a BEFORE DELETE trigger on api_tokens.
+func TestAdminPasswordReset_TokenDeleteFails_RollsBackPassword(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	_ = registerAndLogin(t, srv, q, "target@test.com", "oldpassword")
+
+	installFailDeleteTrigger(t, pool, "api_tokens")
+
+	body, _ := json.Marshal(map[string]string{
+		"email": "target@test.com", "new_password": "resetpass1",
+	})
+	req := httptest.NewRequest("POST", "/v1/users/password-reset", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	target, err := q.GetUserByEmail(t.Context(), "target@test.com")
+	require.NoError(t, err)
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(target.PasswordHash), []byte("oldpassword")),
+		"password should not have been updated when the tx rolled back")
+}
+
 func TestAdminPasswordReset_PasswordTooShort_Returns400(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)

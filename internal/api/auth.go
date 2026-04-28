@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"log"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -245,7 +244,15 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.q.SetPasswordHash(ctx, store.SetPasswordHashParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(ctx)
+	txq := s.q.WithTx(tx)
+
+	if err := txq.SetPasswordHash(ctx, store.SetPasswordHashParams{
 		ID:           authUser.ID,
 		PasswordHash: string(newHash),
 	}); err != nil {
@@ -253,11 +260,17 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.q.DeleteOtherTokensForUser(ctx, store.DeleteOtherTokensForUserParams{
+	if err := txq.DeleteOtherTokensForUser(ctx, store.DeleteOtherTokensForUserParams{
 		UserID: authUser.ID,
 		ID:     authUser.TokenID,
 	}); err != nil {
-		log.Printf("handleChangePassword: failed to revoke other sessions for user %s: %v", uuidStr(authUser.ID), err)
+		writeError(w, http.StatusInternalServerError, "failed to revoke other sessions")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit password change")
+		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -316,7 +329,15 @@ func (s *Server) handleAdminPasswordReset(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.q.SetPasswordHash(ctx, store.SetPasswordHashParams{
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(ctx)
+	txq := s.q.WithTx(tx)
+
+	if err := txq.SetPasswordHash(ctx, store.SetPasswordHashParams{
 		ID:           target.ID,
 		PasswordHash: string(newHash),
 	}); err != nil {
@@ -324,9 +345,13 @@ func (s *Server) handleAdminPasswordReset(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.q.DeleteTokensForUser(ctx, target.ID); err != nil {
-		log.Printf("handleAdminPasswordReset: failed to revoke sessions for user %s: %v", uuidStr(target.ID), err)
+	if err := txq.DeleteTokensForUser(ctx, target.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to revoke target's sessions")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit password reset")
 		return
 	}
 
