@@ -133,6 +133,7 @@ func TestListUsers_OrderedByCreatedAt(t *testing.T) {
 	// Sleep 10ms between inserts to guarantee distinct created_at values
 	// (Postgres timestamptz has microsecond precision but sequential inserts
 	// can collide on some systems).
+	time.Sleep(10 * time.Millisecond)
 	seedUser(t, q, "alice@test.com", "Alice")
 	time.Sleep(10 * time.Millisecond)
 	seedUser(t, q, "bob@test.com", "Bob")
