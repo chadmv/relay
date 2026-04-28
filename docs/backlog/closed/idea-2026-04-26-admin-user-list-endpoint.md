@@ -1,7 +1,9 @@
 ---
 title: Admin user list/lookup endpoint (`GET /v1/users`)
 type: idea
-status: open
+status: closed
+closed: 2026-04-27
+resolution: fixed
 created: 2026-04-26
 source: deferred from 2026-04-26 token-lifecycle brainstorm
 ---
@@ -19,3 +21,6 @@ Came up while brainstorming the admin password-reset flow. To keep that work sco
 - Optional `?email=<exact-match>` query param for direct lookup.
 - Pagination can be deferred until the user count makes it necessary.
 - CLI: `relay admin users list` and `relay admin users get <email>`.
+
+## Resolution
+Implemented as `GET /v1/users` (admin-only) with optional `?email=` exact-match filter, plus `relay admin users list` / `relay admin users get <email>` CLI subcommands. Spec: [`docs/superpowers/specs/2026-04-27-admin-user-list-endpoint-design.md`](../../superpowers/specs/2026-04-27-admin-user-list-endpoint-design.md).
