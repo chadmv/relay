@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"text/tabwriter"
 	"time"
 )
@@ -62,5 +63,32 @@ func printUsersTable(out io.Writer, users []userListItem) {
 }
 
 func doAdminUsersGet(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
-	return fmt.Errorf("not implemented")
+	if cfg.Token == "" {
+		return fmt.Errorf("not logged in — run 'relay login' first")
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: relay admin users get <email>")
+	}
+	email := args[0]
+
+	c := cfg.NewClient()
+	var users []userListItem
+	path := "/v1/users?email=" + url.QueryEscape(email)
+	if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	if len(users) == 0 {
+		return fmt.Errorf("user not found: %s", email)
+	}
+	u := users[0]
+	admin := "no"
+	if u.IsAdmin {
+		admin = "yes"
+	}
+	fmt.Fprintf(out, "ID:       %s\n", u.ID)
+	fmt.Fprintf(out, "Email:    %s\n", u.Email)
+	fmt.Fprintf(out, "Name:     %s\n", u.Name)
+	fmt.Fprintf(out, "Admin:    %s\n", admin)
+	fmt.Fprintf(out, "Created:  %s\n", u.CreatedAt.Format(time.RFC3339))
+	return nil
 }
