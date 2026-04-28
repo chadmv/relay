@@ -11,7 +11,7 @@ import (
 func AdminCommand() Command {
 	return Command{
 		Name:  "admin",
-		Usage: "admin <passwd> [args]",
+		Usage: "admin <passwd|users> [args]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doAdmin(ctx, cfg, args, stderrWriter())
 		},
@@ -20,11 +20,13 @@ func AdminCommand() Command {
 
 func doAdmin(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay admin <passwd> [args]")
+		return fmt.Errorf("usage: relay admin <passwd|users> [args]")
 	}
 	switch args[0] {
 	case "passwd":
 		return doAdminPasswd(ctx, cfg, args[1:], out)
+	case "users":
+		return doAdminUsers(ctx, cfg, args[1:], out)
 	default:
 		return fmt.Errorf("unknown admin subcommand: %s", args[0])
 	}
