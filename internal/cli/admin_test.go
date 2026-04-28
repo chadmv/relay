@@ -83,3 +83,11 @@ func TestAdmin_UnknownSubcommand(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown admin subcommand")
 }
+
+func TestAdmin_UsersUnknownSubcommand(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost", Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "wat"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown admin users subcommand")
+}
