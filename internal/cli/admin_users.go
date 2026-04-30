@@ -80,7 +80,11 @@ func doAdminUsersGet(ctx context.Context, cfg *Config, args []string, out io.Wri
 	if len(users) == 0 {
 		return fmt.Errorf("user not found: %s", email)
 	}
-	u := users[0]
+	printUserDetail(out, users[0])
+	return nil
+}
+
+func printUserDetail(out io.Writer, u userListItem) {
 	admin := "no"
 	if u.IsAdmin {
 		admin = "yes"
@@ -90,5 +94,4 @@ func doAdminUsersGet(ctx context.Context, cfg *Config, args []string, out io.Wri
 	fmt.Fprintf(out, "Name:     %s\n", u.Name)
 	fmt.Fprintf(out, "Admin:    %s\n", admin)
 	fmt.Fprintf(out, "Created:  %s\n", u.CreatedAt.Format(time.RFC3339))
-	return nil
 }
