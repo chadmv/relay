@@ -149,3 +149,24 @@ func TestListUsers_OrderedByCreatedAt(t *testing.T) {
 		assert.Equal(t, want, users[i]["email"], "users[%d]", i)
 	}
 }
+
+func TestListUsers_FilterByEmailHit_NoPasswordHash(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	seedUser(t, q, "alice@test.com", "Alice")
+
+	code, users, _ := getUsers(t, srv, adminToken, "email=alice@test.com")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, users, 1)
+	_, hasHash := users[0]["password_hash"]
+	assert.False(t, hasHash, "email-filter hit must not include password_hash")
+	// Public columns still present.
+	assert.Equal(t, "alice@test.com", users[0]["email"])
+	assert.Equal(t, "Alice", users[0]["name"])
+	assert.Equal(t, false, users[0]["is_admin"])
+	assert.NotEmpty(t, users[0]["id"])
+	assert.NotEmpty(t, users[0]["created_at"])
+}
