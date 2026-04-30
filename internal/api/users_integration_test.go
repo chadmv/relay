@@ -173,9 +173,9 @@ func TestListUsers_FilterByEmailHit_NoPasswordHash(t *testing.T) {
 	assert.NotEmpty(t, users[0]["created_at"])
 }
 
-// patchJSON sends a PATCH with a JSON body and returns (status, parsedBody, errBody).
-// parsedBody is non-nil when the response is a JSON object; errBody is non-nil
-// when the response is an error envelope.
+// patchJSON sends a PATCH with a JSON body and returns (status code, parsed response body).
+// The body map is non-nil for any response that decodes as a JSON object, including error
+// envelopes (which have an "error" key).
 func patchJSON(t *testing.T, srv *api.Server, token, path string, body any) (int, map[string]any) {
 	t.Helper()
 	bodyBytes, err := json.Marshal(body)

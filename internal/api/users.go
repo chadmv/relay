@@ -86,11 +86,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := UserFromCtx(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
+	authUser, _ := UserFromCtx(r.Context())
 
 	name, ok := parseUpdateUserRequest(w, r)
 	if !ok {
