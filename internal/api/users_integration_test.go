@@ -332,6 +332,8 @@ func TestAdminUpdateUser_HappyPath(t *testing.T) {
 	assert.Equal(t, "alice@test.com", body["email"])
 	assert.Equal(t, "Alice Anderson", body["name"])
 	assert.Equal(t, false, body["is_admin"])
+	assert.NotEmpty(t, body["id"])
+	assert.NotEmpty(t, body["created_at"])
 }
 
 func TestAdminUpdateUser_NonAdminForbidden(t *testing.T) {
