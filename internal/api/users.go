@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"relay/internal/store"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -81,4 +83,27 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
+	authUser, ok := UserFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	name, ok := parseUpdateUserRequest(w, r)
+	if !ok {
+		return
+	}
+
+	row, err := s.q.UpdateUserName(r.Context(), store.UpdateUserNameParams{
+		ID:   authUser.ID,
+		Name: name,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user")
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt))
 }

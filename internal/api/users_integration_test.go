@@ -3,9 +3,11 @@
 package api_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,4 +171,130 @@ func TestListUsers_FilterByEmailHit_NoPasswordHash(t *testing.T) {
 	assert.Equal(t, false, users[0]["is_admin"])
 	assert.NotEmpty(t, users[0]["id"])
 	assert.NotEmpty(t, users[0]["created_at"])
+}
+
+// patchJSON sends a PATCH with a JSON body and returns (status, parsedBody, errBody).
+// parsedBody is non-nil when the response is a JSON object; errBody is non-nil
+// when the response is an error envelope.
+func patchJSON(t *testing.T, srv *api.Server, token, path string, body any) (int, map[string]any) {
+	t.Helper()
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest("PATCH", path, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var obj map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &obj)
+	return rec.Code, obj
+}
+
+func TestUpdateMe_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, body := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{"name": "New Name"})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "user@test.com", body["email"])
+	assert.Equal(t, "New Name", body["name"])
+	assert.Equal(t, false, body["is_admin"])
+	assert.NotEmpty(t, body["id"])
+	assert.NotEmpty(t, body["created_at"])
+	_, hasHash := body["password_hash"]
+	assert.False(t, hasHash)
+}
+
+func TestUpdateMe_EmptyName(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, body := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{"name": ""})
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body["error"], "name is required")
+}
+
+func TestUpdateMe_WhitespaceOnlyName(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, body := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{"name": "   "})
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body["error"], "name is required")
+}
+
+func TestUpdateMe_TrimsSurroundingWhitespace(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, body := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{"name": "  Padded Name  "})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "Padded Name", body["name"])
+}
+
+func TestUpdateMe_MissingNameField(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, body := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{})
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body["error"], "name is required")
+}
+
+func TestUpdateMe_InvalidJSON(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	req := httptest.NewRequest("PATCH", "/v1/users/me", strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpdateMe_NoToken(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	code, _ := patchJSON(t, srv, "", "/v1/users/me", map[string]any{"name": "x"})
+	require.Equal(t, http.StatusUnauthorized, code)
+}
+
+func TestUpdateMe_PersistsAcrossList(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+
+	code, _ := patchJSON(t, srv, userToken, "/v1/users/me", map[string]any{"name": "Persisted"})
+	require.Equal(t, http.StatusOK, code)
+
+	code, users, _ := getUsers(t, srv, adminToken, "email=user@test.com")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, users, 1)
+	assert.Equal(t, "Persisted", users[0]["name"])
 }
