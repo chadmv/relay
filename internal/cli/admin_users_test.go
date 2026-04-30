@@ -121,3 +121,133 @@ func TestAdminUsersGet_NotLoggedIn(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not logged in")
 }
+
+func TestAdminUsersUpdate_ByUUID(t *testing.T) {
+	const targetID = "22222222-2222-2222-2222-222222222222"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "PATCH", r.Method)
+		require.Equal(t, "/v1/users/"+targetID, r.URL.Path)
+		require.Equal(t, "Bearer admintoken", r.Header.Get("Authorization"))
+
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, "Renamed", body["name"])
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":         targetID,
+			"email":      "alice@test.com",
+			"name":       "Renamed",
+			"is_admin":   false,
+			"created_at": "2026-04-02T12:00:00Z",
+		})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update", targetID, "--name", "Renamed"}, &out)
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "Renamed")
+}
+
+func TestAdminUsersUpdate_ByEmail(t *testing.T) {
+	const targetID = "22222222-2222-2222-2222-222222222222"
+	var calls []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/users":
+			require.Equal(t, "email=alice%40test.com", r.URL.RawQuery)
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         targetID,
+				"email":      "alice@test.com",
+				"name":       "Alice",
+				"is_admin":   false,
+				"created_at": "2026-04-02T12:00:00Z",
+			}})
+		case r.Method == "PATCH" && r.URL.Path == "/v1/users/"+targetID:
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, "Renamed", body["name"])
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":         targetID,
+				"email":      "alice@test.com",
+				"name":       "Renamed",
+				"is_admin":   false,
+				"created_at": "2026-04-02T12:00:00Z",
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update", "alice@test.com", "--name", "Renamed"}, &out)
+	require.NoError(t, err)
+	require.Len(t, calls, 2)
+	require.Contains(t, calls[0], "GET /v1/users")
+	require.Contains(t, calls[1], "PATCH /v1/users/"+targetID)
+}
+
+func TestAdminUsersUpdate_EmailNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "GET", r.Method, "should not call PATCH when email lookup misses")
+		require.Equal(t, "/v1/users", r.URL.Path)
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update", "nobody@test.com", "--name", "x"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "user not found: nobody@test.com")
+}
+
+func TestAdminUsersUpdate_EmptyName(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost", Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update", "alice@test.com", "--name", ""}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--name is required")
+}
+
+func TestAdminUsersUpdate_MissingPositional(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost", Token: "admintoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "usage: relay admin users update")
+}
+
+func TestAdminUsersUpdate_NotLoggedIn(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "update", "alice@test.com", "--name", "x"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not logged in")
+}
+
+func TestAdminUsersUpdate_Forbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const targetID = "22222222-2222-2222-2222-222222222222"
+		require.Equal(t, "PATCH", r.Method)
+		require.Equal(t, "/v1/users/"+targetID, r.URL.Path)
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "admin only"})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "usertoken"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "update",
+		"22222222-2222-2222-2222-222222222222",
+		"--name", "x",
+	}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "admin only")
+}

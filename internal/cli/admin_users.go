@@ -2,22 +2,26 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
 
 func doAdminUsers(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay admin users <list|get> [args]")
+		return fmt.Errorf("usage: relay admin users <list|get|update> [args]")
 	}
 	switch args[0] {
 	case "list":
 		return doAdminUsersList(ctx, cfg, args[1:], out)
 	case "get":
 		return doAdminUsersGet(ctx, cfg, args[1:], out)
+	case "update":
+		return doAdminUsersUpdate(ctx, cfg, args[1:], out)
 	default:
 		return fmt.Errorf("unknown admin users subcommand: %s", args[0])
 	}
@@ -95,3 +99,51 @@ func printUserDetail(out io.Writer, u userListItem) {
 	fmt.Fprintf(out, "Admin:    %s\n", admin)
 	fmt.Fprintf(out, "Created:  %s\n", u.CreatedAt.Format(time.RFC3339))
 }
+
+func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
+	if cfg.Token == "" {
+		return fmt.Errorf("not logged in — run 'relay login' first")
+	}
+
+	fs := flag.NewFlagSet("admin users update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "new display name (required)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: relay admin users update <email-or-id> --name \"<name>\"")
+	}
+	target := fs.Arg(0)
+
+	trimmed := strings.TrimSpace(*name)
+	if trimmed == "" {
+		return fmt.Errorf("--name is required")
+	}
+
+	c := cfg.NewClient()
+
+	// Resolve target → UUID. If the positional looks like a UUID, use it
+	// directly; otherwise treat it as an email and look up via /v1/users.
+	id := target
+	if !looksLikeUUID(target) {
+		var users []userListItem
+		path := "/v1/users?email=" + url.QueryEscape(target)
+		if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+			return fmt.Errorf("look up user: %w", err)
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("user not found: %s", target)
+		}
+		id = users[0].ID
+	}
+
+	var u userListItem
+	body := map[string]string{"name": trimmed}
+	if err := c.do(ctx, "PATCH", "/v1/users/"+id, body, &u); err != nil {
+		return fmt.Errorf("update user: %w", err)
+	}
+	printUserDetail(out, u)
+	return nil
+}
+
