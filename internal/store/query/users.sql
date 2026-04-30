@@ -24,3 +24,11 @@ UPDATE users SET is_admin = TRUE WHERE id = $1;
 SELECT id, email, name, is_admin, created_at
 FROM users
 ORDER BY created_at;
+
+-- name: GetUserByEmailPublic :one
+SELECT id, email, name, is_admin, created_at
+FROM users WHERE email = $1;
+
+-- name: UpdateUserName :one
+UPDATE users SET name = $2 WHERE id = $1
+RETURNING id, email, name, is_admin, created_at;

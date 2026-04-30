@@ -108,6 +108,36 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 	return i, err
 }
 
+const getUserByEmailPublic = `-- name: GetUserByEmailPublic :one
+SELECT id, email, name, is_admin, created_at
+FROM users WHERE email = $1
+`
+
+type GetUserByEmailPublicRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// GetUserByEmailPublic
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users WHERE email = $1
+func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUserByEmailPublicRow, error) {
+	row := q.db.QueryRow(ctx, getUserByEmailPublic, email)
+	var i GetUserByEmailPublicRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, email, name, is_admin, created_at
 FROM users
@@ -180,4 +210,39 @@ type SetPasswordHashParams struct {
 func (q *Queries) SetPasswordHash(ctx context.Context, arg SetPasswordHashParams) error {
 	_, err := q.db.Exec(ctx, setPasswordHash, arg.ID, arg.PasswordHash)
 	return err
+}
+
+const updateUserName = `-- name: UpdateUserName :one
+UPDATE users SET name = $2 WHERE id = $1
+RETURNING id, email, name, is_admin, created_at
+`
+
+type UpdateUserNameParams struct {
+	ID   pgtype.UUID `json:"id"`
+	Name string      `json:"name"`
+}
+
+type UpdateUserNameRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// UpdateUserName
+//
+//	UPDATE users SET name = $2 WHERE id = $1
+//	RETURNING id, email, name, is_admin, created_at
+func (q *Queries) UpdateUserName(ctx context.Context, arg UpdateUserNameParams) (UpdateUserNameRow, error) {
+	row := q.db.QueryRow(ctx, updateUserName, arg.ID, arg.Name)
+	var i UpdateUserNameRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+	)
+	return i, err
 }
