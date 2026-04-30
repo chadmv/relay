@@ -16,6 +16,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -297,4 +298,93 @@ func TestUpdateMe_PersistsAcrossList(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	require.Len(t, users, 1)
 	assert.Equal(t, "Persisted", users[0]["name"])
+}
+
+// uuidString converts a pgtype.UUID into the canonical hyphenated string form
+// (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) used in URL paths.
+func uuidString(id pgtype.UUID) string {
+	b := id.Bytes
+	const hex = "0123456789abcdef"
+	out := make([]byte, 36)
+	for i, j := 0, 0; i < 16; i++ {
+		if j == 8 || j == 13 || j == 18 || j == 23 {
+			out[j] = '-'
+			j++
+		}
+		out[j] = hex[b[i]>>4]
+		out[j+1] = hex[b[i]&0x0f]
+		j += 2
+	}
+	return string(out)
+}
+
+func TestAdminUpdateUser_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	target := seedUser(t, q, "alice@test.com", "Alice")
+
+	path := "/v1/users/" + uuidString(target.ID)
+	code, body := patchJSON(t, srv, adminToken, path, map[string]any{"name": "Alice Anderson"})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "alice@test.com", body["email"])
+	assert.Equal(t, "Alice Anderson", body["name"])
+	assert.Equal(t, false, body["is_admin"])
+}
+
+func TestAdminUpdateUser_NonAdminForbidden(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	userToken := registerAndLogin(t, srv, q, "user@test.com", "userpassword")
+	target := seedUser(t, q, "alice@test.com", "Alice")
+
+	path := "/v1/users/" + uuidString(target.ID)
+	code, body := patchJSON(t, srv, userToken, path, map[string]any{"name": "x"})
+	require.Equal(t, http.StatusForbidden, code)
+	assert.NotEmpty(t, body["error"])
+}
+
+func TestAdminUpdateUser_NotFound(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	path := "/v1/users/00000000-0000-0000-0000-000000000000"
+	code, body := patchJSON(t, srv, adminToken, path, map[string]any{"name": "Nobody"})
+	require.Equal(t, http.StatusNotFound, code)
+	assert.Contains(t, body["error"], "user not found")
+}
+
+func TestAdminUpdateUser_InvalidUUID(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	code, body := patchJSON(t, srv, adminToken, "/v1/users/not-a-uuid", map[string]any{"name": "x"})
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body["error"], "invalid user id")
+}
+
+func TestAdminUpdateUser_AdminUpdatesSelfViaAdminPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	admin, err := q.GetUserByEmail(t.Context(), "admin@test.com")
+	require.NoError(t, err)
+
+	path := "/v1/users/" + uuidString(admin.ID)
+	code, body := patchJSON(t, srv, adminToken, path, map[string]any{"name": "Renamed Admin"})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "Renamed Admin", body["name"])
+	assert.Equal(t, true, body["is_admin"])
 }
