@@ -36,6 +36,7 @@ func main() {
 		cli.ReservationsCommand(),
 		cli.SchedulesCommand(),
 		cli.AdminCommand(),
+		cli.ProfileCommand(),
 	}
 
 	os.Exit(cli.Dispatch(ctx, commands, os.Args[1:], cfg))
