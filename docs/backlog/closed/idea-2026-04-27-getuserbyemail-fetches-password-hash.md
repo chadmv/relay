@@ -1,7 +1,8 @@
 ---
 title: GetUserByEmail fetches password_hash unnecessarily on email filter path
 type: idea
-status: open
+status: closed
+closed: 2026-04-29
 created: 2026-04-27
 source: noticed during 2026-04-27 admin user list endpoint retro
 ---

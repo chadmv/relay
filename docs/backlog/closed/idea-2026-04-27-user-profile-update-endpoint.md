@@ -1,7 +1,8 @@
 ---
 title: User profile update endpoint (name, email)
 type: idea
-status: open
+status: closed
+closed: 2026-04-29
 created: 2026-04-27
 source: deferred from 2026-04-27 admin user list endpoint brainstorm
 ---
