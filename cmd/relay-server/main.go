@@ -136,6 +136,14 @@ func main() {
 
 	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
 
+	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
+		allow, err := strconv.ParseBool(v)
+		if err != nil {
+			log.Fatalf("parse RELAY_ALLOW_SELF_REGISTER: %v", err)
+		}
+		httpServer.AllowSelfRegister = allow
+	}
+
 	// Start gRPC.
 	grpcSrv := grpc.NewServer()
 	relayv1.RegisterAgentServiceServer(grpcSrv, agentHandler)
