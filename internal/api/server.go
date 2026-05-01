@@ -25,6 +25,11 @@ type Server struct {
 	LoginLimitWin    time.Duration
 	RegisterLimitN   int
 	RegisterLimitWin time.Duration
+
+	// AllowSelfRegister, when true, lets POST /v1/auth/register succeed without
+	// an invite_token. Set by main.go from RELAY_ALLOW_SELF_REGISTER. Defaults
+	// to false so existing deployments continue to require invites.
+	AllowSelfRegister bool
 }
 
 // New creates a Server.
