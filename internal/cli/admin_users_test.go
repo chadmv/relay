@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -250,4 +253,139 @@ func TestAdminUsersUpdate_Forbidden(t *testing.T) {
 	}, &out)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "admin only")
+}
+
+func TestAdminUsersCreate_HappyPath(t *testing.T) {
+	var capturedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "POST", r.Method)
+		require.Equal(t, "/v1/users", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         "00000000-0000-0000-0000-000000000001",
+			"email":      capturedBody["email"],
+			"name":       capturedBody["name"],
+			"is_admin":   capturedBody["is_admin"],
+			"created_at": time.Now(),
+		})
+	}))
+	defer srv.Close()
+
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		return "newpassword1", nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-token"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "create",
+		"--email", "ops@test.com",
+		"--name", "Ops Bot",
+	}, &out)
+	require.NoError(t, err)
+
+	assert.Equal(t, "ops@test.com", capturedBody["email"])
+	assert.Equal(t, "Ops Bot", capturedBody["name"])
+	assert.Equal(t, "newpassword1", capturedBody["password"])
+	assert.Equal(t, false, capturedBody["is_admin"])
+	assert.Contains(t, out.String(), "ops@test.com")
+}
+
+func TestAdminUsersCreate_AdminFlag(t *testing.T) {
+	var capturedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedBody))
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":         "00000000-0000-0000-0000-000000000002",
+			"email":      capturedBody["email"],
+			"name":       capturedBody["email"],
+			"is_admin":   true,
+			"created_at": time.Now(),
+		})
+	}))
+	defer srv.Close()
+
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		return "adminpass1", nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-token"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "create",
+		"--email", "newadmin@test.com",
+		"--admin",
+	}, &out)
+	require.NoError(t, err)
+	assert.Equal(t, true, capturedBody["is_admin"])
+}
+
+func TestAdminUsersCreate_MissingEmail(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost", Token: "admin-token"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{"users", "create"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--email")
+}
+
+func TestAdminUsersCreate_PasswordMismatch(t *testing.T) {
+	callCount := 0
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		callCount++
+		if callCount == 1 {
+			return "first1234", nil
+		}
+		return "second1234", nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+
+	cfg := &Config{ServerURL: "http://localhost", Token: "admin-token"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "create",
+		"--email", "x@test.com",
+	}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "passwords do not match")
+}
+
+func TestAdminUsersCreate_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "email already registered"})
+	}))
+	defer srv.Close()
+
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		return "anypassword1", nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-token"}
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "create",
+		"--email", "dup@test.com",
+	}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "email already registered")
+}
+
+func TestAdminUsersCreate_NotLoggedIn(t *testing.T) {
+	cfg := &Config{ServerURL: "http://localhost"} // no Token
+	var out strings.Builder
+	err := doAdmin(context.Background(), cfg, []string{
+		"users", "create",
+		"--email", "x@test.com",
+	}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not logged in")
 }
