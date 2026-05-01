@@ -75,13 +75,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
 	}
-	if req.InviteToken == "" {
-		writeError(w, http.StatusBadRequest, "invite_token is required")
-		return
-	}
 
 	ctx := r.Context()
 
+	if req.InviteToken == "" {
+		if !s.AllowSelfRegister {
+			writeError(w, http.StatusBadRequest, "invite_token is required")
+			return
+		}
+		s.registerSelfServe(ctx, w, req.Email, req.Name, req.Password)
+		return
+	}
+
+	// Invite-redemption path (unchanged behavior).
 	tokenHash := tokenhash.Hash(req.InviteToken)
 	invite, err := s.q.GetInviteByTokenHash(ctx, tokenHash)
 	if err != nil {
@@ -149,6 +155,60 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if rowsAffected == 0 {
 		writeError(w, http.StatusBadRequest, "invite already used")
+		return
+	}
+
+	token, expires, err := s.issueToken(ctx, txq, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit registration")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token":      token,
+		"expires_at": expires,
+	})
+}
+
+// registerSelfServe creates a non-admin user with a fresh session token. Caller
+// is responsible for prior validation of email and password length, and for
+// confirming that AllowSelfRegister is true.
+func (s *Server) registerSelfServe(ctx context.Context, w http.ResponseWriter, email, name, password string) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(ctx)
+	txq := s.q.WithTx(tx)
+
+	if name == "" {
+		name = email
+	}
+	user, err := txq.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name:         name,
+		Email:        email,
+		IsAdmin:      false, // hardcoded; never admin via self-serve
+		PasswordHash: string(passwordHash),
+	})
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeError(w, http.StatusConflict, "email already registered")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to create user")
+		}
 		return
 	}
 
