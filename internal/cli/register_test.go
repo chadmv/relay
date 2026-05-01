@@ -79,11 +79,42 @@ func TestRunRegister_PasswordMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "passwords do not match")
 }
 
-func TestRunRegister_EmptyInviteToken(t *testing.T) {
-	cfg := &Config{ServerURL: "http://localhost"}
-	input := strings.NewReader("\nuser@example.com\n\n\n") // blank invite token
+func TestRunRegister_NoInviteToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "POST", r.Method)
+		require.Equal(t, "/v1/auth/register", r.URL.Path)
+		var body map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, "user@example.com", body["email"])
+		require.Equal(t, "mypassword1", body["password"])
+		// invite_token is either absent or empty — both are acceptable.
+		require.Empty(t, body["invite_token"])
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"token":      "tok-self",
+			"expires_at": time.Now().Add(30 * 24 * time.Hour),
+		})
+	}))
+	defer srv.Close()
+
+	var saved *Config
+	origSave := saveConfigFn
+	saveConfigFn = func(cfg *Config) error { saved = cfg; return nil }
+	t.Cleanup(func() { saveConfigFn = origSave })
+
+	orig := readPasswordFn
+	readPasswordFn = func(out io.Writer, prompt string) (string, error) {
+		return "mypassword1", nil
+	}
+	t.Cleanup(func() { readPasswordFn = orig })
+
+	cfg := &Config{ServerURL: srv.URL}
+	// URL (accept), email, name (blank), invite token (blank)
+	input := strings.NewReader("\nuser@example.com\n\n\n")
 	var out strings.Builder
 	err := doRegister(context.Background(), cfg, input, &out)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invite token is required")
+	require.NoError(t, err)
+
+	require.NotNil(t, saved)
+	require.Equal(t, "tok-self", saved.Token)
 }

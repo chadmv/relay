@@ -476,6 +476,114 @@ func TestChangePassword_NoToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+// ── Self-serve registration ───────────────────────────────────────────────────
+
+func TestRegister_SelfServe_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	ctx := t.Context()
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv.AllowSelfRegister = true
+
+	body, _ := json.Marshal(map[string]string{
+		"email":    "selfserve@test.com",
+		"name":     "Self Serve",
+		"password": "securepass1",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.NotEmpty(t, resp["token"])
+	assert.NotEmpty(t, resp["expires_at"])
+
+	user, err := q.GetUserByEmail(ctx, "selfserve@test.com")
+	require.NoError(t, err)
+	assert.Equal(t, "Self Serve", user.Name)
+	assert.False(t, user.IsAdmin, "self-serve users must never be admins")
+	assert.NotEmpty(t, user.PasswordHash)
+}
+
+func TestRegister_SelfServe_DisabledByDefault(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	// srv.AllowSelfRegister left at default false.
+
+	body, _ := json.Marshal(map[string]string{
+		"email":    "denied@test.com",
+		"password": "securepass1",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "invite_token is required", resp["error"])
+}
+
+func TestRegister_SelfServe_FlagOnInviteStillWorks(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	ctx := t.Context()
+	admin := createTestUser(t, q, "Admin", "admin@test.com", true)
+	inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv.AllowSelfRegister = true // both paths active
+
+	body, _ := json.Marshal(map[string]string{
+		"email":        "invited@test.com",
+		"name":         "Invited User",
+		"password":     "securepass1",
+		"invite_token": inviteToken,
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Invite is consumed even though self-serve is on.
+	hash := tokenhash.Hash(inviteToken)
+	invite, err := q.GetInviteByTokenHash(ctx, hash)
+	require.NoError(t, err)
+	assert.True(t, invite.UsedAt.Valid, "invite should be marked used")
+}
+
+func TestRegister_SelfServe_DuplicateEmail(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	createTestUser(t, q, "Existing", "dup@test.com", false)
+
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv.AllowSelfRegister = true
+
+	body, _ := json.Marshal(map[string]string{
+		"email":    "dup@test.com",
+		"password": "securepass1",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "email already registered", resp["error"])
+}
+
 // TestChangePassword_TokenDeleteFails_RollsBackPassword verifies that if the
 // session-revocation step fails mid-handler, the password update is rolled back
 // so the user cannot end up with a new password while old sessions are still

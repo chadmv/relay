@@ -44,12 +44,9 @@ func doRegister(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) e
 	name, _ := r.ReadString('\n')
 	name = strings.TrimSpace(name)
 
-	fmt.Fprint(out, "Invite token: ")
+	fmt.Fprint(out, "Invite token (leave blank if your server allows self-serve registration): ")
 	inviteToken, _ := r.ReadString('\n')
 	inviteToken = strings.TrimSpace(inviteToken)
-	if inviteToken == "" {
-		return fmt.Errorf("invite token is required")
-	}
 
 	password, err := readPasswordFn(out, "Password: ")
 	if err != nil {

@@ -390,3 +390,174 @@ func TestAdminUpdateUser_AdminUpdatesSelfViaAdminPath(t *testing.T) {
 	assert.Equal(t, "Renamed Admin", body["name"])
 	assert.Equal(t, true, body["is_admin"])
 }
+
+// loginAs logs in as any user and returns the bearer token.
+func loginAs(t *testing.T, srv *api.Server, email, password string) string {
+	t.Helper()
+	b, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp map[string]string
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp["token"]
+}
+
+// postJSON sends a POST with a JSON body and returns (status code, parsed response body).
+func postJSON(t *testing.T, srv *api.Server, token, path string, body any) (int, map[string]any) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", path, strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var resp map[string]any
+	if rec.Body.Len() > 0 {
+		_ = json.NewDecoder(rec.Body).Decode(&resp)
+	}
+	return rec.Code, resp
+}
+
+func TestAdminCreateUser_HappyPath(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email":    "newhire@test.com",
+		"name":     "New Hire",
+		"password": "securepass1",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	require.Equal(t, http.StatusCreated, code)
+
+	assert.NotEmpty(t, resp["id"])
+	assert.Equal(t, "newhire@test.com", resp["email"])
+	assert.Equal(t, "New Hire", resp["name"])
+	assert.Equal(t, false, resp["is_admin"])
+	assert.NotEmpty(t, resp["created_at"])
+	assert.Nil(t, resp["password_hash"], "password_hash must never be returned")
+
+	// New user can log in.
+	loginBody, _ := json.Marshal(map[string]string{
+		"email":    "newhire@test.com",
+		"password": "securepass1",
+	})
+	req := httptest.NewRequest("POST", "/v1/auth/login", strings.NewReader(string(loginBody)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestAdminCreateUser_CreatesAdmin(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email":    "admin2@test.com",
+		"name":     "Second Admin",
+		"password": "securepass1",
+		"is_admin": true,
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	require.Equal(t, http.StatusCreated, code)
+	assert.Equal(t, true, resp["is_admin"])
+
+	// Sanity-check via the store: row truly has is_admin=true.
+	u, err := q.GetUserByEmail(t.Context(), "admin2@test.com")
+	require.NoError(t, err)
+	assert.True(t, u.IsAdmin)
+}
+
+func TestAdminCreateUser_NonAdminForbidden(t *testing.T) {
+	srv, q := newTestServer(t)
+	createTestUser(t, q, "Plain User", "user@test.com", false)
+	userToken := loginAs(t, srv, "user@test.com", "testpassword1")
+
+	body := map[string]any{
+		"email":    "shouldfail@test.com",
+		"password": "securepass1",
+	}
+	code, _ := postJSON(t, srv, userToken, "/v1/users", body)
+	assert.Equal(t, http.StatusForbidden, code)
+}
+
+func TestAdminCreateUser_Unauthenticated(t *testing.T) {
+	srv, _ := newTestServer(t)
+	body := map[string]any{
+		"email":    "x@test.com",
+		"password": "securepass1",
+	}
+	code, _ := postJSON(t, srv, "", "/v1/users", body)
+	assert.Equal(t, http.StatusUnauthorized, code)
+}
+
+func TestAdminCreateUser_DuplicateEmail(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	seedUser(t, q, "dup@test.com", "Existing")
+
+	body := map[string]any{
+		"email":    "dup@test.com",
+		"password": "securepass1",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	assert.Equal(t, http.StatusConflict, code)
+	assert.Equal(t, "email already registered", resp["error"])
+}
+
+func TestAdminCreateUser_InvalidEmail(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email":    "not-an-email",
+		"password": "securepass1",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "invalid email address", resp["error"])
+}
+
+func TestAdminCreateUser_WeakPassword(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email":    "weak@test.com",
+		"password": "short",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "password must be at least 8 characters", resp["error"])
+}
+
+func TestAdminCreateUser_MissingPassword(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email": "nopw@test.com",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "password must be at least 8 characters", resp["error"])
+}
+
+func TestAdminCreateUser_NameDefaultsToEmail(t *testing.T) {
+	srv, q := newTestServer(t)
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	body := map[string]any{
+		"email":    "noname@test.com",
+		"password": "securepass1",
+	}
+	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
+	require.Equal(t, http.StatusCreated, code)
+	assert.Equal(t, "noname@test.com", resp["name"])
+}

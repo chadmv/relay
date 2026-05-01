@@ -25,6 +25,11 @@ type Server struct {
 	LoginLimitWin    time.Duration
 	RegisterLimitN   int
 	RegisterLimitWin time.Duration
+
+	// AllowSelfRegister, when true, lets POST /v1/auth/register succeed without
+	// an invite_token. Set by main.go from RELAY_ALLOW_SELF_REGISTER. Defaults
+	// to false so existing deployments continue to require invites.
+	AllowSelfRegister bool
 }
 
 // New creates a Server.
@@ -113,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 
 	// User management
 	mux.Handle("GET /v1/users", auth(admin(http.HandlerFunc(s.handleListUsers))))
+	mux.Handle("POST /v1/users", auth(admin(http.HandlerFunc(s.handleAdminCreateUser))))
 	mux.Handle("POST /v1/users/password-reset", auth(admin(http.HandlerFunc(s.handleAdminPasswordReset))))
 	mux.Handle("PATCH /v1/users/me", auth(http.HandlerFunc(s.handleUpdateMe)))
 	mux.Handle("PATCH /v1/users/{id}", auth(admin(http.HandlerFunc(s.handleAdminUpdateUser))))
