@@ -13,13 +13,15 @@ import (
 
 func doAdminUsers(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay admin users <list|get|update> [args]")
+		return fmt.Errorf("usage: relay admin users <list|get|create|update> [args]")
 	}
 	switch args[0] {
 	case "list":
 		return doAdminUsersList(ctx, cfg, args[1:], out)
 	case "get":
 		return doAdminUsersGet(ctx, cfg, args[1:], out)
+	case "create":
+		return doAdminUsersCreate(ctx, cfg, args[1:], out)
 	case "update":
 		return doAdminUsersUpdate(ctx, cfg, args[1:], out)
 	default:
@@ -142,6 +144,56 @@ func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.
 	body := map[string]string{"name": trimmed}
 	if err := c.do(ctx, "PATCH", "/v1/users/"+id, body, &u); err != nil {
 		return fmt.Errorf("update user: %w", err)
+	}
+	printUserDetail(out, u)
+	return nil
+}
+
+func doAdminUsersCreate(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
+	if cfg.Token == "" {
+		return fmt.Errorf("not logged in — run 'relay login' first")
+	}
+
+	fs := flag.NewFlagSet("admin users create", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	email := fs.String("email", "", "email address (required)")
+	name := fs.String("name", "", "display name (optional, defaults to email)")
+	isAdmin := fs.Bool("admin", false, "create the user as an admin")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*email) == "" {
+		return fmt.Errorf("--email is required")
+	}
+
+	password, err := readPasswordFn(out, "Password: ")
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	if password == "" {
+		return fmt.Errorf("password is required")
+	}
+	confirm, err := readPasswordFn(out, "Confirm password: ")
+	if err != nil {
+		return fmt.Errorf("read password: %w", err)
+	}
+	if password != confirm {
+		return fmt.Errorf("passwords do not match")
+	}
+
+	body := map[string]any{
+		"email":    *email,
+		"password": password,
+		"is_admin": *isAdmin,
+	}
+	if trimmed := strings.TrimSpace(*name); trimmed != "" {
+		body["name"] = trimmed
+	}
+
+	c := cfg.NewClient()
+	var u userListItem
+	if err := c.do(ctx, "POST", "/v1/users", body, &u); err != nil {
+		return fmt.Errorf("create user: %w", err)
 	}
 	printUserDetail(out, u)
 	return nil
