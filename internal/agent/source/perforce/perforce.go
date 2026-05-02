@@ -206,7 +206,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// Unshelves: create a per-task pending CL so Finalize can cleanly revert.
 	var pendingCL int64
 	if len(pf.Unshelves) > 0 {
-		cl, err := p.cfg.Client.CreatePendingCL(ctx, "relay-task-"+taskID)
+		cl, err := p.cfg.Client.CreatePendingCL(ctx, wsRoot, clientName, "relay-task-"+taskID)
 		if err != nil {
 			handle.Release()
 			return nil, fmt.Errorf("create pending CL: %w", err)

@@ -128,16 +128,16 @@ func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []str
 	return c.r.Stream(ctx, cwd, args, onLine)
 }
 
-// CreatePendingCL creates an empty pending changelist with the given description.
-// Returns the new CL number.
-func (c *Client) CreatePendingCL(ctx context.Context, description string) (int64, error) {
-	spec, err := c.r.Run(ctx, "", []string{"change", "-o"}, nil)
+// CreatePendingCL creates an empty pending changelist on the named client
+// with the given description. Returns the new CL number.
+func (c *Client) CreatePendingCL(ctx context.Context, cwd, client, description string) (int64, error) {
+	spec, err := c.r.Run(ctx, cwd, []string{"-c", client, "change", "-o"}, nil)
 	if err != nil {
 		return 0, err
 	}
 	spec = setSpecField(spec, "Description", description)
 	spec = removeSpecBlock(spec, "Files")
-	out, err := c.r.Run(ctx, "", []string{"change", "-i"}, bytes.NewReader(spec))
+	out, err := c.r.Run(ctx, cwd, []string{"-c", client, "change", "-i"}, bytes.NewReader(spec))
 	if err != nil {
 		return 0, err
 	}
