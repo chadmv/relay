@@ -13,9 +13,11 @@ import (
 )
 
 // Runner is the interface used to invoke p4 commands. Swappable in tests.
+// cwd, when non-empty, sets the child process's working directory; pass ""
+// for server-global operations that aren't tied to a specific workspace.
 type Runner interface {
-	Run(ctx context.Context, args []string, stdin io.Reader) ([]byte, error)
-	Stream(ctx context.Context, args []string, onLine func(string)) error
+	Run(ctx context.Context, cwd string, args []string, stdin io.Reader) ([]byte, error)
+	Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error
 }
 
 // execRunner uses os/exec to invoke the p4 binary on PATH.
@@ -23,8 +25,11 @@ type execRunner struct{ binary string }
 
 func newExecRunner() *execRunner { return &execRunner{binary: "p4"} }
 
-func (e *execRunner) Run(ctx context.Context, args []string, stdin io.Reader) ([]byte, error) {
+func (e *execRunner) Run(ctx context.Context, cwd string, args []string, stdin io.Reader) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, e.binary, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	if stdin != nil {
 		cmd.Stdin = stdin
 	}
@@ -37,8 +42,11 @@ func (e *execRunner) Run(ctx context.Context, args []string, stdin io.Reader) ([
 	return out, nil
 }
 
-func (e *execRunner) Stream(ctx context.Context, args []string, onLine func(string)) error {
+func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
 	cmd := exec.CommandContext(ctx, e.binary, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -75,7 +83,7 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 		args = append(args, "-t", template)
 	}
 	args = append(args, name)
-	spec, err := c.r.Run(ctx, args, nil)
+	spec, err := c.r.Run(ctx, "", args, nil)
 	if err != nil {
 		return err
 	}
@@ -85,7 +93,7 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 	spec = setSpecField(spec, "Host", "")   // blank Host: portable across renames
 	spec = setSpecField(spec, "Owner", "")  // let p4 default to the caller
 
-	if _, err := c.r.Run(ctx, []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
+	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err
 	}
 	return nil
@@ -93,7 +101,7 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 
 // DeleteClient deletes the named p4 client.
 func (c *Client) DeleteClient(ctx context.Context, name string) error {
-	_, err := c.r.Run(ctx, []string{"client", "-d", name}, nil)
+	_, err := c.r.Run(ctx, "", []string{"client", "-d", name}, nil)
 	return err
 }
 
@@ -101,7 +109,7 @@ var changeFirstLine = regexp.MustCompile(`^Change (\d+) `)
 
 // ResolveHead resolves a depot path to its head CL number via `p4 changes -m1`.
 func (c *Client) ResolveHead(ctx context.Context, path string) (int64, error) {
-	out, err := c.r.Run(ctx, []string{"changes", "-m1", path + "#head"}, nil)
+	out, err := c.r.Run(ctx, "", []string{"changes", "-m1", path + "#head"}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -117,19 +125,19 @@ func (c *Client) ResolveHead(ctx context.Context, path string) (int64, error) {
 // Caller is responsible for setting P4CLIENT in env before calling.
 func (c *Client) SyncStream(ctx context.Context, specs []string, onLine func(string)) error {
 	args := append([]string{"sync", "-q", "--parallel=4"}, specs...)
-	return c.r.Stream(ctx, args, onLine)
+	return c.r.Stream(ctx, "", args, onLine)
 }
 
 // CreatePendingCL creates an empty pending changelist with the given description.
 // Returns the new CL number.
 func (c *Client) CreatePendingCL(ctx context.Context, description string) (int64, error) {
-	spec, err := c.r.Run(ctx, []string{"change", "-o"}, nil)
+	spec, err := c.r.Run(ctx, "", []string{"change", "-o"}, nil)
 	if err != nil {
 		return 0, err
 	}
 	spec = setSpecField(spec, "Description", description)
 	spec = removeSpecBlock(spec, "Files")
-	out, err := c.r.Run(ctx, []string{"change", "-i"}, bytes.NewReader(spec))
+	out, err := c.r.Run(ctx, "", []string{"change", "-i"}, bytes.NewReader(spec))
 	if err != nil {
 		return 0, err
 	}
@@ -143,7 +151,7 @@ func (c *Client) CreatePendingCL(ctx context.Context, description string) (int64
 
 // Unshelve unshelves files from sourceCL into targetCL.
 func (c *Client) Unshelve(ctx context.Context, sourceCL, targetCL int64) error {
-	_, err := c.r.Run(ctx, []string{
+	_, err := c.r.Run(ctx, "", []string{
 		"unshelve", "-s", strconv.FormatInt(sourceCL, 10),
 		"-c", strconv.FormatInt(targetCL, 10),
 	}, nil)
@@ -152,20 +160,20 @@ func (c *Client) Unshelve(ctx context.Context, sourceCL, targetCL int64) error {
 
 // RevertCL reverts all files in the given pending CL.
 func (c *Client) RevertCL(ctx context.Context, cl int64) error {
-	_, err := c.r.Run(ctx, []string{"revert", "-c", strconv.FormatInt(cl, 10), "//..."}, nil)
+	_, err := c.r.Run(ctx, "", []string{"revert", "-c", strconv.FormatInt(cl, 10), "//..."}, nil)
 	return err
 }
 
 // DeleteCL deletes an empty pending CL.
 func (c *Client) DeleteCL(ctx context.Context, cl int64) error {
-	_, err := c.r.Run(ctx, []string{"change", "-d", strconv.FormatInt(cl, 10)}, nil)
+	_, err := c.r.Run(ctx, "", []string{"change", "-d", strconv.FormatInt(cl, 10)}, nil)
 	return err
 }
 
 // PendingChangesByDescPrefix returns relay-owned pending CLs on this client
 // whose description starts with the given prefix.
 func (c *Client) PendingChangesByDescPrefix(ctx context.Context, client, prefix string) ([]int64, error) {
-	out, err := c.r.Run(ctx, []string{"changes", "-c", client, "-s", "pending", "-l"}, nil)
+	out, err := c.r.Run(ctx, "", []string{"changes", "-c", client, "-s", "pending", "-l"}, nil)
 	if err != nil {
 		return nil, err
 	}

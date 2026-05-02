@@ -16,6 +16,7 @@ type fakeRunner struct {
 }
 
 type runCall struct {
+	cwd   string
 	args  []string
 	stdin string
 }
@@ -49,7 +50,7 @@ func (f *fakeRunner) argHistory() [][]string {
 	return result
 }
 
-func (f *fakeRunner) Run(ctx context.Context, args []string, stdin io.Reader) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin io.Reader) ([]byte, error) {
 	key := strings.Join(args, " ")
 	if e, ok := f.err[key]; ok && e != nil {
 		return nil, e
@@ -59,11 +60,11 @@ func (f *fakeRunner) Run(ctx context.Context, args []string, stdin io.Reader) ([
 		b, _ := io.ReadAll(stdin)
 		sb.Write(b)
 	}
-	f.calls = append(f.calls, runCall{args: append([]string{}, args...), stdin: sb.String()})
+	f.calls = append(f.calls, runCall{cwd: cwd, args: append([]string{}, args...), stdin: sb.String()})
 	return []byte(f.out[key]), nil
 }
 
-func (f *fakeRunner) Stream(ctx context.Context, args []string, onLine func(string)) error {
+func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
 	key := strings.Join(args, " ")
 	if e, ok := f.streamErr[key]; ok && e != nil {
 		return e
@@ -73,7 +74,7 @@ func (f *fakeRunner) Stream(ctx context.Context, args []string, onLine func(stri
 			onLine(line)
 		}
 	}
-	f.calls = append(f.calls, runCall{args: append([]string{}, args...)})
+	f.calls = append(f.calls, runCall{cwd: cwd, args: append([]string{}, args...)})
 	return nil
 }
 
