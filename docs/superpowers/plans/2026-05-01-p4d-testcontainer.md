@@ -312,6 +312,9 @@ package perforce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base32"
+	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
@@ -400,6 +403,23 @@ func readShelvedCL(t *testing.T, ctx context.Context, container testcontainers.C
 	return cl
 }
 
+// expectedClientName mirrors allocateShortID for an empty registry: first
+// 6 chars of lowercase base32(sha256(sourceKey)). The agent in production
+// uses allocateShortID to derive its workspace shortID; this duplicates
+// that logic so the test can set P4CLIENT before Prepare runs.
+//
+// Brittle by design: if allocateShortID's collision-resolution loop ever
+// has to advance past the 6-char prefix (because of a real shortID
+// collision in the registry), this helper would disagree. For a fresh
+// test workspace that's not a concern.
+func expectedClientName(hostname, sourceKey string) string {
+	sum := sha256.Sum256([]byte(sourceKey))
+	enc := strings.ToLower(base32.StdEncoding.EncodeToString(sum[:]))
+	enc = strings.TrimRight(enc, "=")
+	shortID := enc[:6]
+	return fmt.Sprintf("relay_%s_%s", hostname, shortID)
+}
+
 // isDockerUnavailable inspects an error from testcontainers-go to decide
 // whether it indicates that Docker is unreachable on this host (legitimate
 // skip) versus a hard test failure. testcontainers-go does not expose a
@@ -482,6 +502,20 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	p4d := startP4dContainer(t)
 	t.Setenv("P4PORT", p4d.P4Port)
 	t.Setenv("P4USER", p4d.P4User)
+	// Override host-side P4 environment that may be persisted via `p4 set` so
+	// the test isolates from operator config. Without these, a developer
+	// running the test on a workstation with a unicode-mode `p4` client or
+	// a previously-set P4CLIENT will see the wrong client/charset get
+	// inherited by the agent's p4 subprocess calls.
+	t.Setenv("P4CHARSET", "none")
+	t.Setenv("P4CONFIG", "")
+	// The agent creates a stream-bound client named relay_<hostname>_<shortid>
+	// where shortid = first 6 chars of lowercase base32(sha256(stream)). Compute
+	// the same value here and inject it as P4CLIENT so the agent's `p4 sync`
+	// (which the production code currently relies on env to provide; see
+	// client.go's "Caller is responsible for setting P4CLIENT" comment) finds
+	// the right client.
+	t.Setenv("P4CLIENT", expectedClientName("ci", "//test/main"))
 
 	root := t.TempDir()
 	prov := New(Config{Root: root, Hostname: "ci"})
@@ -498,13 +532,15 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	defer cancel()
 
 	// --- First prepare: creates workspace, syncs to head, unshelves the CL ---
-	var progressLines []string
+	// Note: progress callback is not asserted on here. Production code runs
+	// `p4 sync -q` which suppresses per-file output entirely; with the
+	// fixture's single readme.txt baseline, the sync emits zero lines on
+	// success. We retain the callback to surface unexpected `[recover] ...`
+	// diagnostic lines in test output if a crash-recovery path fires.
 	h, err := prov.Prepare(ctx, "task-1", spec, func(s string) {
-		progressLines = append(progressLines, s)
+		t.Logf("prepare-progress: %s", s)
 	})
 	require.NoError(t, err, "Prepare should succeed")
-	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
-	require.NotEmpty(t, progressLines, "sync should produce progress lines")
 
 	inv := h.Inventory()
 	require.Equal(t, "perforce", inv.SourceType)
@@ -516,6 +552,12 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	wsDir := filepath.Join(root, inv.ShortID)
 	_, err = os.Stat(wsDir)
 	require.NoError(t, err, "workspace directory should exist")
+
+	// Finalize must run before checking the registry: the unshelve created a
+	// pending CL that's only cleared in Finalize. Call it explicitly here
+	// rather than via t.Cleanup so the assertions below see the post-Finalize
+	// state.
+	require.NoError(t, h.Finalize(ctx), "Finalize should succeed")
 
 	// Registry should show no open task changelists after Finalize.
 	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -530,8 +572,8 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 		progress2 = append(progress2, s)
 	})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
-	t.Cleanup(func() { _ = h2.Finalize(context.Background()) })
 	require.Empty(t, progress2, "second Prepare with same baseline should not trigger re-sync")
+	require.NoError(t, h2.Finalize(ctx), "second Finalize should succeed")
 
 	// Workspace dir must still exist after second finalize.
 	_, err = os.Stat(wsDir)
