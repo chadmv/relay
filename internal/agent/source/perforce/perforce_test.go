@@ -105,7 +105,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 		}
 		return false
 	}
-	require.True(t, found([]string{"change", "-i"}), "expected change -i (create CL)")
+	require.True(t, found([]string{"-c", expectedClient, "change", "-i"}), "expected change -i (create CL)")
 	require.True(t, found([]string{"unshelve", "-s", "12346", "-c", "91244"}))
 	require.True(t, found([]string{"revert", "-c", "91244", "//..."}))
 	require.True(t, found([]string{"change", "-d", "91244"}))
