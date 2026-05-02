@@ -176,10 +176,15 @@ func (c *Client) DeleteCL(ctx context.Context, cwd, client string, cl int64) err
 	return err
 }
 
-// PendingChangesByDescPrefix returns relay-owned pending CLs on this client
-// whose description starts with the given prefix.
-func (c *Client) PendingChangesByDescPrefix(ctx context.Context, client, prefix string) ([]int64, error) {
-	out, err := c.r.Run(ctx, "", []string{"changes", "-c", client, "-s", "pending", "-l"}, nil)
+// PendingChangesByDescPrefix returns relay-owned pending CLs on the named
+// client whose description starts with the given prefix. The global -c flag
+// scopes the invocation; the inner `changes -c <client>` is the subcommand's
+// "filter by client" option — both are required.
+func (c *Client) PendingChangesByDescPrefix(ctx context.Context, cwd, client, prefix string) ([]int64, error) {
+	out, err := c.r.Run(ctx, cwd, []string{
+		"-c", client,
+		"changes", "-c", client, "-s", "pending", "-l",
+	}, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -290,7 +290,7 @@ func (p *Provider) lockedShortIDs() map[string]bool {
 }
 
 func (p *Provider) recoverOrphanedCLs(ctx context.Context, wsRoot, clientName string) error {
-	cls, err := p.cfg.Client.PendingChangesByDescPrefix(ctx, clientName, "relay-task-")
+	cls, err := p.cfg.Client.PendingChangesByDescPrefix(ctx, wsRoot, clientName, "relay-task-")
 	if err != nil {
 		return err
 	}

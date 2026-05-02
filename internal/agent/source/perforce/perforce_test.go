@@ -135,11 +135,11 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
 
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
-	fr.set("changes -c "+clientName+" -s pending -l",
+	fr.set("-c "+clientName+" changes -c "+clientName+" -s pending -l",
 		"Change 91244 on 2026-04-24 by relay@h *pending*\n\trelay-task-old\n\nChange 99999 on 2026-04-24 by other@h *pending*\n\thuman work\n")
 	fr.set("-c "+clientName+" revert -c 91244 //...", "//... - reverted\n")
 	fr.set("-c "+clientName+" change -d 91244", "Change 91244 deleted.\n")
-	fr.setStream("sync -q --parallel=4 //s/x/...@12345", "ok\n")
+	fr.setStream("-c "+clientName+" sync -q --parallel=4 //s/x/...@12345", "ok\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
