@@ -71,7 +71,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	fr.set("-c "+expectedClient+" change -i", "Change 91244 created.\n")
 	fr.set("-c "+expectedClient+" unshelve -s 12346 -c 91244", "//s/x/foo - unshelved\n")
 	fr.set("-c "+expectedClient+" revert -c 91244 //...", "//s/x/foo - reverted\n")
-	fr.set("change -d 91244", "Change 91244 deleted.\n")
+	fr.set("-c "+expectedClient+" change -d 91244", "Change 91244 deleted.\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -108,7 +108,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	require.True(t, found([]string{"-c", expectedClient, "change", "-i"}), "expected change -i (create CL)")
 	require.True(t, found([]string{"-c", expectedClient, "unshelve", "-s", "12346", "-c", "91244"}))
 	require.True(t, found([]string{"-c", expectedClient, "revert", "-c", "91244", "//..."}))
-	require.True(t, found([]string{"change", "-d", "91244"}))
+	require.True(t, found([]string{"-c", expectedClient, "change", "-d", "91244"}))
 
 	// Registry must be clean after Finalize.
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -138,7 +138,7 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	fr.set("changes -c "+clientName+" -s pending -l",
 		"Change 91244 on 2026-04-24 by relay@h *pending*\n\trelay-task-old\n\nChange 99999 on 2026-04-24 by other@h *pending*\n\thuman work\n")
 	fr.set("-c "+clientName+" revert -c 91244 //...", "//... - reverted\n")
-	fr.set("change -d 91244", "Change 91244 deleted.\n")
+	fr.set("-c "+clientName+" change -d 91244", "Change 91244 deleted.\n")
 	fr.setStream("sync -q --parallel=4 //s/x/...@12345", "ok\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
@@ -171,9 +171,9 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 		return false
 	}
 	require.True(t, found([]string{"-c", clientName, "revert", "-c", "91244", "//..."}))
-	require.True(t, found([]string{"change", "-d", "91244"}))
+	require.True(t, found([]string{"-c", clientName, "change", "-d", "91244"}))
 	// Must NOT touch CL 99999 (not relay-owned)
-	require.False(t, found([]string{"change", "-d", "99999"}))
+	require.False(t, found([]string{"-c", clientName, "change", "-d", "99999"}))
 }
 
 func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {

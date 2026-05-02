@@ -168,9 +168,11 @@ func (c *Client) RevertCL(ctx context.Context, cwd, client string, cl int64) err
 	return err
 }
 
-// DeleteCL deletes an empty pending CL.
-func (c *Client) DeleteCL(ctx context.Context, cl int64) error {
-	_, err := c.r.Run(ctx, "", []string{"change", "-d", strconv.FormatInt(cl, 10)}, nil)
+// DeleteCL deletes an empty pending CL on the named client.
+func (c *Client) DeleteCL(ctx context.Context, cwd, client string, cl int64) error {
+	_, err := c.r.Run(ctx, cwd, []string{
+		"-c", client, "change", "-d", strconv.FormatInt(cl, 10),
+	}, nil)
 	return err
 }
 

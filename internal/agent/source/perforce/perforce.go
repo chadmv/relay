@@ -298,7 +298,7 @@ func (p *Provider) recoverOrphanedCLs(ctx context.Context, wsRoot, clientName st
 		if err := p.cfg.Client.RevertCL(ctx, wsRoot, clientName, cl); err != nil {
 			return fmt.Errorf("revert orphan CL %d: %w", cl, err)
 		}
-		if err := p.cfg.Client.DeleteCL(ctx, cl); err != nil {
+		if err := p.cfg.Client.DeleteCL(ctx, wsRoot, clientName, cl); err != nil {
 			return fmt.Errorf("delete orphan CL %d: %w", cl, err)
 		}
 	}
@@ -338,7 +338,7 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 		return nil
 	}
 	revertErr := h.provider.cfg.Client.RevertCL(ctx, h.workspaceDir, h.clientName, h.pendingCL)
-	delErr := h.provider.cfg.Client.DeleteCL(ctx, h.pendingCL)
+	delErr := h.provider.cfg.Client.DeleteCL(ctx, h.workspaceDir, h.clientName, h.pendingCL)
 	reg, err := h.provider.loadRegistry()
 	if err == nil {
 		_ = reg.RemovePendingCL(h.shortID, h.taskID)
