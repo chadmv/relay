@@ -37,13 +37,6 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	// more variable from "why did this fail on developer X's box?".
 	t.Setenv("P4PASSWD", "")
 	t.Setenv("P4TICKETS", "")
-	// The agent creates a stream-bound client named relay_<hostname>_<shortid>
-	// where shortid = first 6 chars of lowercase base32(sha256(stream)). Compute
-	// the same value here and inject it as P4CLIENT so the agent's `p4 sync`
-	// (which the production code currently relies on env to provide; see
-	// client.go's "Caller is responsible for setting P4CLIENT" comment) finds
-	// the right client.
-	t.Setenv("P4CLIENT", expectedClientName("ci", "//test/main"))
 
 	root := t.TempDir()
 	prov := New(Config{Root: root, Hostname: "ci"})
