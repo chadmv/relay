@@ -31,7 +31,7 @@ Three units with clear boundaries:
 
 **Dockerfile:**
 - Base: `debian:bookworm-slim`.
-- Build ARG: `P4D_VERSION=r26.1` (current latest stable as of 2026-05-01; Perforce's quarterly release cadence means a one-line bump every ~3 months if we choose to track).
+- Build ARG: `P4D_VERSION=r25.2`. Perforce reorganized `bin.linux26x86_64/` in r26.1 — the standalone `p4d`/`p4` binaries are no longer published there. r25.2 is the latest release that exposes the bare executables at a stable URL. Re-evaluate when r26.x's layout stabilizes.
 - Install `curl`, download `p4d` and `p4` binaries from `https://ftp.perforce.com/perforce/${P4D_VERSION}/bin.linux26x86_64/`, `chmod +x`, place under `/usr/local/bin/`.
 - Create unprivileged `perforce` user; set `P4ROOT=/var/p4root`, owned by `perforce`.
 - `EXPOSE 1666`.
@@ -158,4 +158,4 @@ Update the `make test-integration` comment to mention p4d alongside Postgres:
 - **First-run build cost.** ~2–3 minutes downloading the p4d binary and configuring the depot. Acceptable on a one-time basis; subsequent runs reuse the cached image. No mitigation needed for v1.
 - **Apple Silicon emulation.** Running `linux/amd64` under Rosetta on M-series Macs is slower (~30–50%) but functional. If a maintainer hits real friction here, add a multiarch build later.
 - **`ftp.perforce.com` availability.** The image build downloads p4d at build time. If the FTP is down, image build fails and the test fails to start. Acceptable risk — Perforce's FTP is reliable. Could be mitigated later by hosting a copy in our own registry, but YAGNI for now.
-- **p4d release cadence.** Perforce ships quarterly (rNN.1 / rNN.2). The pinned `r26.1` will go stale; bumping is one line. Worth a calendar reminder when the agent host's production p4d version moves significantly past the test version.
+- **p4d release cadence.** Perforce ships quarterly (rNN.1 / rNN.2). The pinned `r25.2` will go stale; bumping is one line. Re-evaluating to r26.x once Perforce's directory layout stabilizes is a good follow-up — track via a backlog item if it becomes load-bearing.
