@@ -69,7 +69,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
 	fr.set("-c "+expectedClient+" change -o", "Change: new\nDescription:\t<enter description here>\n")
 	fr.set("-c "+expectedClient+" change -i", "Change 91244 created.\n")
-	fr.set("unshelve -s 12346 -c 91244", "//s/x/foo - unshelved\n")
+	fr.set("-c "+expectedClient+" unshelve -s 12346 -c 91244", "//s/x/foo - unshelved\n")
 	fr.set("revert -c 91244 //...", "//s/x/foo - reverted\n")
 	fr.set("change -d 91244", "Change 91244 deleted.\n")
 
@@ -106,7 +106,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 		return false
 	}
 	require.True(t, found([]string{"-c", expectedClient, "change", "-i"}), "expected change -i (create CL)")
-	require.True(t, found([]string{"unshelve", "-s", "12346", "-c", "91244"}))
+	require.True(t, found([]string{"-c", expectedClient, "unshelve", "-s", "12346", "-c", "91244"}))
 	require.True(t, found([]string{"revert", "-c", "91244", "//..."}))
 	require.True(t, found([]string{"change", "-d", "91244"}))
 

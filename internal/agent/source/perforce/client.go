@@ -149,10 +149,12 @@ func (c *Client) CreatePendingCL(ctx context.Context, cwd, client, description s
 	return strconv.ParseInt(string(m[1]), 10, 64)
 }
 
-// Unshelve unshelves files from sourceCL into targetCL.
-func (c *Client) Unshelve(ctx context.Context, sourceCL, targetCL int64) error {
-	_, err := c.r.Run(ctx, "", []string{
-		"unshelve", "-s", strconv.FormatInt(sourceCL, 10),
+// Unshelve unshelves files from sourceCL into targetCL on the named client.
+func (c *Client) Unshelve(ctx context.Context, cwd, client string, sourceCL, targetCL int64) error {
+	_, err := c.r.Run(ctx, cwd, []string{
+		"-c", client,
+		"unshelve",
+		"-s", strconv.FormatInt(sourceCL, 10),
 		"-c", strconv.FormatInt(targetCL, 10),
 	}, nil)
 	return err

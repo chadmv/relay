@@ -218,7 +218,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		}
 		_ = reg.Save()
 		for _, src := range pf.Unshelves {
-			if err := p.cfg.Client.Unshelve(ctx, src, cl); err != nil {
+			if err := p.cfg.Client.Unshelve(ctx, wsRoot, clientName, src, cl); err != nil {
 				handle.Release()
 				return nil, fmt.Errorf("unshelve %d: %w", src, err)
 			}
