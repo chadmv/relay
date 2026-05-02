@@ -191,7 +191,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	if needsSync {
-		if err := p.cfg.Client.SyncStream(ctx, syncSpecs, progress); err != nil {
+		if err := p.cfg.Client.SyncStream(ctx, wsRoot, clientName, syncSpecs, progress); err != nil {
 			handle.Release()
 			return nil, fmt.Errorf("p4 sync: %w", err)
 		}

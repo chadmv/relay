@@ -121,11 +121,11 @@ func (c *Client) ResolveHead(ctx context.Context, path string) (int64, error) {
 	return strconv.ParseInt(m[1], 10, 64)
 }
 
-// SyncStream runs `p4 sync -q --parallel=4 <specs...>` streaming lines to onLine.
-// Caller is responsible for setting P4CLIENT in env before calling.
-func (c *Client) SyncStream(ctx context.Context, specs []string, onLine func(string)) error {
-	args := append([]string{"sync", "-q", "--parallel=4"}, specs...)
-	return c.r.Stream(ctx, "", args, onLine)
+// SyncStream runs `p4 -c <client> sync -q --parallel=4 <specs...>` from cwd,
+// streaming lines to onLine.
+func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []string, onLine func(string)) error {
+	args := append([]string{"-c", client, "sync", "-q", "--parallel=4"}, specs...)
+	return c.r.Stream(ctx, cwd, args, onLine)
 }
 
 // CreatePendingCL creates an empty pending changelist with the given description.

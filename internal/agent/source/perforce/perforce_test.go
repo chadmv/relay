@@ -15,12 +15,13 @@ import (
 func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture()
+	expectedClient := expectedClientName("h", "//s/x")
 	// ResolveHead: "changes -m1 //s/x/...#head" → CL 12345
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	// CreateStreamClient: "client -i" succeeds; "client -o -S //s/x <name>" returns empty (ok)
 	fr.set("client -i", "Client saved.\n")
-	// SyncStream: "sync -q --parallel=4 //s/x/...@12345"
-	fr.setStream("sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
+	// SyncStream: now invoked with global -c <client>.
+	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -44,6 +45,19 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	require.Contains(t, h.WorkingDir(), inv.ShortID)
 	require.Contains(t, h.Env()["P4CLIENT"], inv.ShortID)
 	require.NotEmpty(t, lines, "sync stream should have produced progress lines")
+
+	// Pin the contract: the sync invocation MUST start with `-c <client>`.
+	// This guards against a future refactor silently dropping the global flag.
+	var syncCall []string
+	for _, c := range fr.argHistory() {
+		if len(c) >= 3 && c[2] == "sync" {
+			syncCall = c
+			break
+		}
+	}
+	require.NotNil(t, syncCall, "expected a sync invocation in argHistory")
+	require.Equal(t, []string{"-c", expectedClient}, syncCall[:2],
+		"sync invocation must begin with -c <client>")
 }
 
 func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
