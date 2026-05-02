@@ -1,8 +1,10 @@
 ---
 title: Production agent relies on env-var P4CLIENT but no caller sets it
 type: bug
-status: open
+status: closed
 created: 2026-05-01
+closed: 2026-05-01
+resolution: fixed
 source: 2026-05-01 p4d-testcontainer Task 4 fix and final review
 ---
 
@@ -33,3 +35,6 @@ Option 1 is more explicit and easier to reason about under concurrency; recommen
 - `internal/agent/source/perforce/client.go:117` — the comment that documents the unfulfilled contract.
 - `internal/agent/source/perforce/perforce.go` — the `Provider.Prepare` site that should set or pass the client.
 - `internal/agent/source/perforce/perforce_integration_test.go` — the test workaround that surfaces this gap.
+
+## Resolution
+Fixed in branch `claude/p4client-explicit-flag`, merged at commit 4fc9bc5. The six workspace-scoped `Client` methods (`SyncStream`, `CreatePendingCL`, `Unshelve`, `RevertCL`, `DeleteCL`, `PendingChangesByDescPrefix`) now accept `(cwd, client string)` and prepend `-c <client>` to every p4 invocation, using p4's documented highest-priority client-resolution flag. The `Runner` interface also gained a `cwd` parameter so each invocation runs from the workspace directory. The integration test's `t.Setenv("P4CLIENT", ...)` workaround was removed and the test continues to pass.
