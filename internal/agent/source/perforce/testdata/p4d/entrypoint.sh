@@ -6,6 +6,10 @@ set -euo pipefail
 P4ROOT=/var/p4root
 
 echo "[entrypoint] starting p4d..."
+# `p4d -r ROOT` sets the database root. NOTE: `-d` means "daemonize" in
+# p4d (not "set root" as in some other servers); using -d here would
+# detach p4d and exit immediately because $P4ROOT is then a positional
+# arg, not a flag value.
 p4d -r "$P4ROOT" -p 0.0.0.0:1666 &
 P4D_PID=$!
 
@@ -30,6 +34,8 @@ echo "[entrypoint] disabling auth (security=0)..."
 p4 configure set security=0 >/dev/null
 
 echo "[entrypoint] creating depot //test ..."
+# Stream depots in p4d r25.x require the `StreamDepth` field; without it
+# the form is rejected with "type stream requires StreamDepth field".
 p4 depot -i <<'EOF'
 Depot:        test
 Owner:        perforce
@@ -39,6 +45,9 @@ Map:          test/...
 EOF
 
 echo "[entrypoint] creating stream //test/main ..."
+# Mainline streams in p4d r25.x require the `ParentView` field even when
+# Parent is `none`; `noinherit` is the conventional value for a mainline
+# without an inherited parent view.
 p4 stream -i <<'EOF'
 Stream:      //test/main
 Owner:       perforce
