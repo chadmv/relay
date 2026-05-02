@@ -989,7 +989,7 @@ go test ./... -timeout 120s
 go test -tags integration -p 1 ./... -timeout 300s
 ```
 
-> Integration tests use [testcontainers-go](https://golang.testcontainers.org/) to spin up a real PostgreSQL container per test. Docker Desktop must be running. The `-p 1` flag is required on Windows to prevent container provider conflicts when multiple packages run in parallel.
+> Integration tests use [testcontainers-go](https://golang.testcontainers.org/) to spin up real PostgreSQL and p4d containers per test. Docker Desktop must be running, and the `p4` CLI must be on PATH (the Perforce test fixture shells out to it). The `-p 1` flag is required on Windows to prevent container provider conflicts when multiple packages run in parallel.
 
 ### Regenerate code
 
