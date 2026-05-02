@@ -9,6 +9,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Standalone p4d / p4 binaries are published as bare executables in this directory in r25.2.
+# NOTE: no SHA-256 pin. We trust HTTPS + Perforce's CDN here. Acceptable for a
+# test-only image that never ships to production; tracked as a follow-up backlog
+# item to revisit if the supply-chain assumption gets weaker.
 RUN curl -fsSL -o /usr/local/bin/p4d "${P4_BIN_BASE}/p4d" \
  && curl -fsSL -o /usr/local/bin/p4  "${P4_BIN_BASE}/p4" \
  && chmod +x /usr/local/bin/p4d /usr/local/bin/p4
