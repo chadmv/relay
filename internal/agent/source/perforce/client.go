@@ -160,9 +160,11 @@ func (c *Client) Unshelve(ctx context.Context, cwd, client string, sourceCL, tar
 	return err
 }
 
-// RevertCL reverts all files in the given pending CL.
-func (c *Client) RevertCL(ctx context.Context, cl int64) error {
-	_, err := c.r.Run(ctx, "", []string{"revert", "-c", strconv.FormatInt(cl, 10), "//..."}, nil)
+// RevertCL reverts all files in the given pending CL on the named client.
+func (c *Client) RevertCL(ctx context.Context, cwd, client string, cl int64) error {
+	_, err := c.r.Run(ctx, cwd, []string{
+		"-c", client, "revert", "-c", strconv.FormatInt(cl, 10), "//...",
+	}, nil)
 	return err
 }
 

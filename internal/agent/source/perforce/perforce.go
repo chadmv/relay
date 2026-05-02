@@ -185,7 +185,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// Crash-recovery: clean up any relay-owned pending CLs left by a
 	// previous agent crash before we sync.
 	if needsSync {
-		if err := p.recoverOrphanedCLs(ctx, clientName); err != nil {
+		if err := p.recoverOrphanedCLs(ctx, wsRoot, clientName); err != nil {
 			progress(fmt.Sprintf("[recover] %v", err))
 		}
 	}
@@ -289,13 +289,13 @@ func (p *Provider) lockedShortIDs() map[string]bool {
 	return out
 }
 
-func (p *Provider) recoverOrphanedCLs(ctx context.Context, clientName string) error {
+func (p *Provider) recoverOrphanedCLs(ctx context.Context, wsRoot, clientName string) error {
 	cls, err := p.cfg.Client.PendingChangesByDescPrefix(ctx, clientName, "relay-task-")
 	if err != nil {
 		return err
 	}
 	for _, cl := range cls {
-		if err := p.cfg.Client.RevertCL(ctx, cl); err != nil {
+		if err := p.cfg.Client.RevertCL(ctx, wsRoot, clientName, cl); err != nil {
 			return fmt.Errorf("revert orphan CL %d: %w", cl, err)
 		}
 		if err := p.cfg.Client.DeleteCL(ctx, cl); err != nil {
@@ -337,7 +337,7 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 	if h.pendingCL == 0 {
 		return nil
 	}
-	revertErr := h.provider.cfg.Client.RevertCL(ctx, h.pendingCL)
+	revertErr := h.provider.cfg.Client.RevertCL(ctx, h.workspaceDir, h.clientName, h.pendingCL)
 	delErr := h.provider.cfg.Client.DeleteCL(ctx, h.pendingCL)
 	reg, err := h.provider.loadRegistry()
 	if err == nil {
