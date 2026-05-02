@@ -106,7 +106,11 @@ set -euo pipefail
 P4ROOT=/var/p4root
 
 echo "[entrypoint] starting p4d..."
-p4d -d "$P4ROOT" -p 0.0.0.0:1666 &
+# `p4d -r ROOT` sets the database root. NOTE: `-d` means "daemonize" in
+# p4d (not "set root" as in some other servers); using -d here would
+# detach p4d and exit immediately because $P4ROOT is then a positional
+# arg, not a flag value.
+p4d -r "$P4ROOT" -p 0.0.0.0:1666 &
 P4D_PID=$!
 
 # Talk to local p4d on loopback during setup.
@@ -130,21 +134,28 @@ echo "[entrypoint] disabling auth (security=0)..."
 p4 configure set security=0 >/dev/null
 
 echo "[entrypoint] creating depot //test ..."
+# Stream depots in p4d r25.x require the `StreamDepth` field; without it
+# the form is rejected with "type stream requires StreamDepth field".
 p4 depot -i <<'EOF'
-Depot:    test
-Owner:    perforce
-Type:     stream
-Map:      test/...
+Depot:        test
+Owner:        perforce
+Type:         stream
+StreamDepth:  //test/1
+Map:          test/...
 EOF
 
 echo "[entrypoint] creating stream //test/main ..."
+# Mainline streams in p4d r25.x require the `ParentView` field even when
+# Parent is `none`; `noinherit` is the conventional value for a mainline
+# without an inherited parent view.
 p4 stream -i <<'EOF'
-Stream:    //test/main
-Owner:     perforce
-Name:      main
-Parent:    none
-Type:      mainline
-Paths:     share ...
+Stream:      //test/main
+Owner:       perforce
+Name:        main
+Parent:      none
+Type:        mainline
+ParentView:  noinherit
+Paths:       share ...
 EOF
 
 WORKDIR=$(mktemp -d)
@@ -301,6 +312,7 @@ package perforce
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
@@ -389,6 +401,15 @@ func readShelvedCL(t *testing.T, ctx context.Context, container testcontainers.C
 	return cl
 }
 
+// expectedClientName predicts the stream-bound client name the agent will
+// create in Provider.Prepare so the test can set P4CLIENT before Prepare
+// runs. Calls allocateShortID directly with an empty registry so the
+// helper tracks any future change to the production shortID derivation
+// (including the collision-resolution loop, if it ever fires).
+func expectedClientName(hostname, sourceKey string) string {
+	return fmt.Sprintf("relay_%s_%s", hostname, allocateShortID(sourceKey, &Registry{}))
+}
+
 // isDockerUnavailable inspects an error from testcontainers-go to decide
 // whether it indicates that Docker is unreachable on this host (legitimate
 // skip) versus a hard test failure. testcontainers-go does not expose a
@@ -471,6 +492,26 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	p4d := startP4dContainer(t)
 	t.Setenv("P4PORT", p4d.P4Port)
 	t.Setenv("P4USER", p4d.P4User)
+	// Override host-side P4 environment that may be persisted via `p4 set` so
+	// the test isolates from operator config. Without these, a developer
+	// running the test on a workstation with a unicode-mode `p4` client or
+	// a previously-set P4CLIENT will see the wrong client/charset get
+	// inherited by the agent's p4 subprocess calls.
+	t.Setenv("P4CHARSET", "none")
+	t.Setenv("P4CONFIG", "")
+	// Defense in depth against host-leaked credentials. The fixture's p4d
+	// runs at security level 0 (no auth required), so leaked tickets
+	// won't actively break the test, but neutralizing them removes one
+	// more variable from "why did this fail on developer X's box?".
+	t.Setenv("P4PASSWD", "")
+	t.Setenv("P4TICKETS", "")
+	// The agent creates a stream-bound client named relay_<hostname>_<shortid>
+	// where shortid = first 6 chars of lowercase base32(sha256(stream)). Compute
+	// the same value here and inject it as P4CLIENT so the agent's `p4 sync`
+	// (which the production code currently relies on env to provide; see
+	// client.go's "Caller is responsible for setting P4CLIENT" comment) finds
+	// the right client.
+	t.Setenv("P4CLIENT", expectedClientName("ci", "//test/main"))
 
 	root := t.TempDir()
 	prov := New(Config{Root: root, Hostname: "ci"})
@@ -487,13 +528,15 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	defer cancel()
 
 	// --- First prepare: creates workspace, syncs to head, unshelves the CL ---
-	var progressLines []string
+	// Note: progress callback is not asserted on here. Production code runs
+	// `p4 sync -q` which suppresses per-file output entirely; with the
+	// fixture's single readme.txt baseline, the sync emits zero lines on
+	// success. We retain the callback to surface unexpected `[recover] ...`
+	// diagnostic lines in test output if a crash-recovery path fires.
 	h, err := prov.Prepare(ctx, "task-1", spec, func(s string) {
-		progressLines = append(progressLines, s)
+		t.Logf("prepare-progress: %s", s)
 	})
 	require.NoError(t, err, "Prepare should succeed")
-	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
-	require.NotEmpty(t, progressLines, "sync should produce progress lines")
 
 	inv := h.Inventory()
 	require.Equal(t, "perforce", inv.SourceType)
@@ -505,6 +548,12 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	wsDir := filepath.Join(root, inv.ShortID)
 	_, err = os.Stat(wsDir)
 	require.NoError(t, err, "workspace directory should exist")
+
+	// Finalize must run before checking the registry: the unshelve created a
+	// pending CL that's only cleared in Finalize. Call it explicitly here
+	// rather than via t.Cleanup so the assertions below see the post-Finalize
+	// state.
+	require.NoError(t, h.Finalize(ctx), "Finalize should succeed")
 
 	// Registry should show no open task changelists after Finalize.
 	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -519,8 +568,8 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 		progress2 = append(progress2, s)
 	})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
-	t.Cleanup(func() { _ = h2.Finalize(context.Background()) })
 	require.Empty(t, progress2, "second Prepare with same baseline should not trigger re-sync")
+	require.NoError(t, h2.Finalize(ctx), "second Finalize should succeed")
 
 	// Workspace dir must still exist after second finalize.
 	_, err = os.Stat(wsDir)

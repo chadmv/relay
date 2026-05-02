@@ -11,7 +11,8 @@ make build
 # Unit tests (no Docker required)
 make test
 
-# Integration tests (requires Docker Desktop running; -p 1 prevents parallel container conflicts)
+# Integration tests (requires Docker Desktop running and the `p4` CLI on PATH;
+# spins up Postgres and p4d containers; -p 1 prevents parallel container conflicts)
 make test-integration
 
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
@@ -60,7 +61,7 @@ Integration tests use `//go:build integration` and spin up real Postgres contain
 | `RELAY_WORKSPACE_MIN_FREE_GB` | _(unset)_ | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted. Requires `RELAY_WORKSPACE_ROOT`. |
 | `RELAY_WORKSPACE_SWEEP_INTERVAL` | `15m` | How often the eviction sweeper runs. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
 
-**Source providers:** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent host. Provision P4 tickets out-of-band (e.g. via `p4 login` in your system startup). Relay does not manage P4 credentials.
+**Source providers:** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent host. Provision P4 tickets out-of-band (e.g. via `p4 login` in your system startup). Relay does not manage P4 credentials. The Perforce integration test (`perforce_integration_test.go`) spins up a `p4d` container via testcontainers-go; it requires Docker and the `p4` CLI on PATH but no external Perforce server.
 
 ## Architecture
 
