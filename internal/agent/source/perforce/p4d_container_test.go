@@ -4,7 +4,6 @@ package perforce
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
@@ -91,15 +90,6 @@ func readShelvedCL(t *testing.T, ctx context.Context, container testcontainers.C
 	cl, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	require.NoError(t, err, "parse shelved CL")
 	return cl
-}
-
-// expectedClientName predicts the stream-bound client name the agent will
-// create in Provider.Prepare so the test can set P4CLIENT before Prepare
-// runs. Calls allocateShortID directly with an empty registry so the
-// helper tracks any future change to the production shortID derivation
-// (including the collision-resolution loop, if it ever fires).
-func expectedClientName(hostname, sourceKey string) string {
-	return fmt.Sprintf("relay_%s_%s", hostname, allocateShortID(sourceKey, &Registry{}))
 }
 
 // isDockerUnavailable inspects an error from testcontainers-go to decide

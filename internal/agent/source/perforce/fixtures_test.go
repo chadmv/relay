@@ -2,6 +2,7 @@ package perforce
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -74,4 +75,12 @@ func (f *fakeRunner) Stream(ctx context.Context, args []string, onLine func(stri
 	}
 	f.calls = append(f.calls, runCall{args: append([]string{}, args...)})
 	return nil
+}
+
+// expectedClientName predicts the stream-bound client name that
+// Provider.Prepare creates. Calls allocateShortID directly with an empty
+// registry so the helper tracks any future change to the production shortID
+// derivation (including the collision-resolution loop, if it ever fires).
+func expectedClientName(hostname, sourceKey string) string {
+	return fmt.Sprintf("relay_%s_%s", hostname, allocateShortID(sourceKey, &Registry{}))
 }
