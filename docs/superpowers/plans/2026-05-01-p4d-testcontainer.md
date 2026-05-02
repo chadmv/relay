@@ -312,8 +312,6 @@ package perforce
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base32"
 	"fmt"
 	"io"
 	"os/exec"
@@ -403,21 +401,13 @@ func readShelvedCL(t *testing.T, ctx context.Context, container testcontainers.C
 	return cl
 }
 
-// expectedClientName mirrors allocateShortID for an empty registry: first
-// 6 chars of lowercase base32(sha256(sourceKey)). The agent in production
-// uses allocateShortID to derive its workspace shortID; this duplicates
-// that logic so the test can set P4CLIENT before Prepare runs.
-//
-// Brittle by design: if allocateShortID's collision-resolution loop ever
-// has to advance past the 6-char prefix (because of a real shortID
-// collision in the registry), this helper would disagree. For a fresh
-// test workspace that's not a concern.
+// expectedClientName predicts the stream-bound client name the agent will
+// create in Provider.Prepare so the test can set P4CLIENT before Prepare
+// runs. Calls allocateShortID directly with an empty registry so the
+// helper tracks any future change to the production shortID derivation
+// (including the collision-resolution loop, if it ever fires).
 func expectedClientName(hostname, sourceKey string) string {
-	sum := sha256.Sum256([]byte(sourceKey))
-	enc := strings.ToLower(base32.StdEncoding.EncodeToString(sum[:]))
-	enc = strings.TrimRight(enc, "=")
-	shortID := enc[:6]
-	return fmt.Sprintf("relay_%s_%s", hostname, shortID)
+	return fmt.Sprintf("relay_%s_%s", hostname, allocateShortID(sourceKey, &Registry{}))
 }
 
 // isDockerUnavailable inspects an error from testcontainers-go to decide
@@ -509,6 +499,12 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	// inherited by the agent's p4 subprocess calls.
 	t.Setenv("P4CHARSET", "none")
 	t.Setenv("P4CONFIG", "")
+	// Defense in depth against host-leaked credentials. The fixture's p4d
+	// runs at security level 0 (no auth required), so leaked tickets
+	// won't actively break the test, but neutralizing them removes one
+	// more variable from "why did this fail on developer X's box?".
+	t.Setenv("P4PASSWD", "")
+	t.Setenv("P4TICKETS", "")
 	// The agent creates a stream-bound client named relay_<hostname>_<shortid>
 	// where shortid = first 6 chars of lowercase base32(sha256(stream)). Compute
 	// the same value here and inject it as P4CLIENT so the agent's `p4 sync`
