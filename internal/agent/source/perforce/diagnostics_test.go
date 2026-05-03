@@ -59,9 +59,9 @@ func TestClassifyP4Error(t *testing.T) {
 				return
 			}
 			if tc.wantSub == "" {
-				// Passthrough: same string, same identity (errors.Is to itself).
-				if got.Error() != tc.in.Error() {
-					t.Errorf("expected passthrough; got=%q in=%q", got, tc.in)
+				// Passthrough: implementation must return err unchanged (same pointer).
+				if !errors.Is(got, tc.in) {
+					t.Errorf("expected passthrough (errors.Is failed); got=%v in=%v", got, tc.in)
 				}
 				return
 			}

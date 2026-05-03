@@ -21,6 +21,7 @@ func classifyP4Error(err error) error {
 	case strings.Contains(msg, "your session has expired"):
 		return fmt.Errorf("p4 ticket expired on this agent — operator must run 'p4 login' on the worker host: %w", err)
 	case strings.Contains(msg, "connect to server failed"),
+		// A || (B && C): comma = case-OR, && binds tighter
 		strings.Contains(msg, "tcp connect to") && strings.Contains(msg, "failed"):
 		return fmt.Errorf("cannot reach Perforce server from this agent — check P4PORT and network connectivity: %w", err)
 	default:
