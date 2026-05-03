@@ -25,9 +25,12 @@ func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Wri
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: relay workers workspaces <worker-id>")
+		return fmt.Errorf("usage: relay workers workspaces <worker-id-or-hostname>")
 	}
-	workerID := fs.Arg(0)
+	workerID, err := resolveWorkerID(ctx, c, fs.Arg(0))
+	if err != nil {
+		return err
+	}
 
 	var workspaces []workspaceResp
 	if err := c.do(ctx, "GET", "/v1/workers/"+workerID+"/workspaces", nil, &workspaces); err != nil {
@@ -57,9 +60,13 @@ func doWorkersEvictWorkspace(ctx context.Context, c *Client, args []string, w io
 		return err
 	}
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: relay workers evict-workspace <worker-id> <short-id>")
+		return fmt.Errorf("usage: relay workers evict-workspace <worker-id-or-hostname> <short-id>")
 	}
-	workerID, shortID := fs.Arg(0), fs.Arg(1)
+	workerID, err := resolveWorkerID(ctx, c, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	shortID := fs.Arg(1)
 
 	if err := c.do(ctx, "POST",
 		fmt.Sprintf("/v1/workers/%s/workspaces/%s/evict", workerID, shortID),

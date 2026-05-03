@@ -1,7 +1,8 @@
 ---
 title: No client-side UUID validation in workspaces CLI
 type: bug
-status: open
+status: closed
+resolved: 2026-05-02
 created: 2026-04-25
 source: 2026-04-25 perforce-workspace-management retro — Known Limitations
 ---

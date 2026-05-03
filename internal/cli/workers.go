@@ -119,33 +119,33 @@ func doWorkersRevoke(ctx context.Context, c *Client, args []string, w io.Writer)
 	if fs.NArg() == 0 {
 		return fmt.Errorf("usage: relay workers revoke <worker-id-or-hostname>")
 	}
-	target := fs.Arg(0)
-
-	id := target
-	if !looksLikeUUID(target) {
-		// Resolve hostname to ID by listing workers.
-		var workers []workerResp
-		if err := c.do(ctx, "GET", "/v1/workers", nil, &workers); err != nil {
-			return fmt.Errorf("list workers: %w", err)
-		}
-		found := false
-		for _, wk := range workers {
-			if wk.Hostname == target {
-				id = wk.ID
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("no worker found with hostname %q", target)
-		}
+	id, err := resolveWorkerID(ctx, c, fs.Arg(0))
+	if err != nil {
+		return err
 	}
-
 	if err := c.do(ctx, "DELETE", "/v1/workers/"+id+"/token", nil, nil); err != nil {
 		return fmt.Errorf("revoke token: %w", err)
 	}
 	fmt.Fprintln(w, "revoked.")
 	return nil
+}
+
+// resolveWorkerID returns the UUID for target, resolving a hostname via GET
+// /v1/workers when target is not already UUID-shaped.
+func resolveWorkerID(ctx context.Context, c *Client, target string) (string, error) {
+	if looksLikeUUID(target) {
+		return target, nil
+	}
+	var workers []workerResp
+	if err := c.do(ctx, "GET", "/v1/workers", nil, &workers); err != nil {
+		return "", fmt.Errorf("list workers: %w", err)
+	}
+	for _, wk := range workers {
+		if wk.Hostname == target {
+			return wk.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no worker found with hostname %q", target)
 }
 
 // looksLikeUUID reports whether s is a UUID-shaped string (8-4-4-4-12 hex).

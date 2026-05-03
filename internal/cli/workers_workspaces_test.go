@@ -99,3 +99,62 @@ func TestDoWorkersEvictWorkspace_MissingArgs(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "usage")
 }
+
+func TestDoWorkersWorkspaces_ResolvesHostname(t *testing.T) {
+	const workerID = "00000000-0000-0000-0000-000000000001"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/workers" {
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"id": workerID, "hostname": "builder-01"},
+			})
+			return
+		}
+		require.Equal(t, "/v1/workers/"+workerID+"/workspaces", r.URL.Path)
+		json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doWorkers(context.Background(), cfg, []string{"workspaces", "builder-01"}, &out)
+	require.NoError(t, err)
+}
+
+func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
+	const workerID = "00000000-0000-0000-0000-000000000001"
+	var evictCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/workers" {
+			json.NewEncoder(w).Encode([]map[string]any{
+				{"id": workerID, "hostname": "builder-01"},
+			})
+			return
+		}
+		require.Equal(t, "/v1/workers/"+workerID+"/workspaces/abc123/evict", r.URL.Path)
+		evictCalled = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doWorkers(context.Background(), cfg, []string{"evict-workspace", "builder-01", "abc123"}, &out)
+	require.NoError(t, err)
+	require.True(t, evictCalled)
+}
+
+func TestDoWorkersWorkspaces_UnknownHostname(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/workers", r.URL.Path)
+		json.NewEncoder(w).Encode([]map[string]any{
+			{"id": "00000000-0000-0000-0000-000000000001", "hostname": "other-host"},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doWorkers(context.Background(), cfg, []string{"workspaces", "builder-01"}, &out)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "builder-01")
+}
