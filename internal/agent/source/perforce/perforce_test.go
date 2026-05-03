@@ -186,3 +186,24 @@ func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, r1, r2, "Registry() must return the same cached instance")
 }
+
+func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture()
+	// ResolveHead is the first p4 call inside Prepare. Inject the canonical
+	// "ticket invalid" stderr that execRunner would surface in production.
+	fr.setErr("changes -m1 //s/x/...#head",
+		fmt.Errorf("p4 changes -m1 //s/x/...#head: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+		Perforce: &relayv1.PerforceSource{
+			Stream: "//s/x",
+			Sync:   []*relayv1.SyncEntry{{Path: "//s/x/...", Rev: "#head"}},
+		},
+	}}
+	_, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "operator must run 'p4 login'",
+		"Prepare must surface the classified message so it appears in task failure logs")
+}
