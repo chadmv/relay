@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +16,15 @@ import (
 	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 )
+
+// ErrP4BinaryMissing indicates the p4 CLI is not on PATH on this host.
+// Returned by (*Provider).Preflight; cmd/relay-agent uses errors.Is to
+// recognize it and degrade gracefully.
+var ErrP4BinaryMissing = errors.New("p4 binary not found on PATH")
+
+// lookPath is exec.LookPath; overridable in tests via the package-level var
+// pattern used elsewhere in this codebase.
+var lookPath = exec.LookPath
 
 // Config holds constructor parameters for the Perforce provider.
 type Config struct {
@@ -40,6 +51,21 @@ func New(cfg Config) *Provider {
 }
 
 func (p *Provider) Type() string { return "perforce" }
+
+// Preflight verifies the agent host is configured for Perforce work.
+// Currently checks only that the p4 binary exists on PATH. Does not contact
+// the Perforce server, by design — startup must remain fast and offline.
+//
+// The ctx parameter is currently unused but is part of the signature so
+// future preflight checks can be cancellable without a breaking change.
+func (p *Provider) Preflight(ctx context.Context) error {
+	_ = ctx
+	if _, err := lookPath("p4"); err != nil {
+		return fmt.Errorf("%w: install Perforce CLI on this worker or unset RELAY_WORKSPACE_ROOT: %v",
+			ErrP4BinaryMissing, err)
+	}
+	return nil
+}
 
 // ListInventory returns all workspaces recorded in the on-disk registry,
 // satisfying the source.InventoryLister interface.
@@ -108,7 +134,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		if rev == "#head" {
 			cl, err := p.cfg.Client.ResolveHead(ctx, e.Path)
 			if err != nil {
-				return nil, fmt.Errorf("resolve head for %s: %w", e.Path, err)
+				return nil, classifyP4Error(fmt.Errorf("resolve head for %s: %w", e.Path, err))
 			}
 			rev = fmt.Sprintf("@%d", cl)
 			resolved[e.Path] = rev
@@ -162,7 +188,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		}
 		if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
 			handle.Release()
-			return nil, fmt.Errorf("create client: %w", err)
+			return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
 		}
 		reg.Upsert(WorkspaceEntry{
 			ShortID:      shortID,
@@ -193,7 +219,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if needsSync {
 		if err := p.cfg.Client.SyncStream(ctx, wsRoot, clientName, syncSpecs, progress); err != nil {
 			handle.Release()
-			return nil, fmt.Errorf("p4 sync: %w", err)
+			return nil, classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 		}
 		if cur != nil {
 			cur.BaselineHash = baseline
@@ -209,7 +235,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		cl, err := p.cfg.Client.CreatePendingCL(ctx, wsRoot, clientName, "relay-task-"+taskID)
 		if err != nil {
 			handle.Release()
-			return nil, fmt.Errorf("create pending CL: %w", err)
+			return nil, classifyP4Error(fmt.Errorf("create pending CL: %w", err))
 		}
 		pendingCL = cl
 		if err := reg.AddPendingCL(shortID, taskID, cl); err != nil {
@@ -220,7 +246,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		for _, src := range pf.Unshelves {
 			if err := p.cfg.Client.Unshelve(ctx, wsRoot, clientName, src, cl); err != nil {
 				handle.Release()
-				return nil, fmt.Errorf("unshelve %d: %w", src, err)
+				return nil, classifyP4Error(fmt.Errorf("unshelve %d: %w", src, err))
 			}
 		}
 	}
@@ -292,14 +318,14 @@ func (p *Provider) lockedShortIDs() map[string]bool {
 func (p *Provider) recoverOrphanedCLs(ctx context.Context, wsRoot, clientName string) error {
 	cls, err := p.cfg.Client.PendingChangesByDescPrefix(ctx, wsRoot, clientName, "relay-task-")
 	if err != nil {
-		return err
+		return classifyP4Error(err)
 	}
 	for _, cl := range cls {
 		if err := p.cfg.Client.RevertCL(ctx, wsRoot, clientName, cl); err != nil {
-			return fmt.Errorf("revert orphan CL %d: %w", cl, err)
+			return classifyP4Error(fmt.Errorf("revert orphan CL %d: %w", cl, err))
 		}
 		if err := p.cfg.Client.DeleteCL(ctx, wsRoot, clientName, cl); err != nil {
-			return fmt.Errorf("delete orphan CL %d: %w", cl, err)
+			return classifyP4Error(fmt.Errorf("delete orphan CL %d: %w", cl, err))
 		}
 	}
 	return nil
@@ -345,10 +371,10 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 		_ = reg.Save()
 	}
 	if revertErr != nil {
-		return fmt.Errorf("revert CL %d: %w", h.pendingCL, revertErr)
+		return classifyP4Error(fmt.Errorf("revert CL %d: %w", h.pendingCL, revertErr))
 	}
 	if delErr != nil {
-		return fmt.Errorf("delete CL %d: %w", h.pendingCL, delErr)
+		return classifyP4Error(fmt.Errorf("delete CL %d: %w", h.pendingCL, delErr))
 	}
 	return nil
 }

@@ -67,29 +67,36 @@ func main() {
 			Root:     root,
 			Hostname: caps.Hostname,
 		})
-		provider = pp
+		if err := pp.Preflight(ctx); err != nil {
+			// Non-fatal: log loudly and run without the workspace provider.
+			// Source-bearing tasks will fail at dispatch with the existing
+			// "no source provider" path; non-source tasks still run.
+			log.Printf("relay-agent: workspace provider disabled: %v", err)
+		} else {
+			provider = pp
 
-		// Start sweeper if age or disk-pressure threshold is configured.
-		maxAge := parseDurationEnv("RELAY_WORKSPACE_MAX_AGE", os.Getenv("RELAY_WORKSPACE_MAX_AGE"), 0)
-		minFreeGB, _ := strconv.ParseInt(os.Getenv("RELAY_WORKSPACE_MIN_FREE_GB"), 10, 64)
-		sweepInterval := parseDurationEnv("RELAY_WORKSPACE_SWEEP_INTERVAL", os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
-		if maxAge > 0 || minFreeGB > 0 {
-			reg, err := pp.Registry()
-			if err != nil {
-				log.Fatalf("workspace registry: %v", err)
+			// Start sweeper if age or disk-pressure threshold is configured.
+			maxAge := parseDurationEnv("RELAY_WORKSPACE_MAX_AGE", os.Getenv("RELAY_WORKSPACE_MAX_AGE"), 0)
+			minFreeGB, _ := strconv.ParseInt(os.Getenv("RELAY_WORKSPACE_MIN_FREE_GB"), 10, 64)
+			sweepInterval := parseDurationEnv("RELAY_WORKSPACE_SWEEP_INTERVAL", os.Getenv("RELAY_WORKSPACE_SWEEP_INTERVAL"), 15*time.Minute)
+			if maxAge > 0 || minFreeGB > 0 {
+				reg, err := pp.Registry()
+				if err != nil {
+					log.Fatalf("workspace registry: %v", err)
+				}
+				sw := &perforce.Sweeper{
+					Root:          root,
+					Reg:           reg,
+					MaxAge:        maxAge,
+					MinFreeGB:     minFreeGB,
+					SweepInterval: sweepInterval,
+					Client:        pp.Client(),
+					ListLocked:    pp.LockedShortIDs,
+					FreeDiskGB:    freeDiskGB,
+					OnEvictedCB:   pp.InvalidateWorkspace,
+				}
+				go sw.Run(ctx)
 			}
-			sw := &perforce.Sweeper{
-				Root:          root,
-				Reg:           reg,
-				MaxAge:        maxAge,
-				MinFreeGB:     minFreeGB,
-				SweepInterval: sweepInterval,
-				Client:        pp.Client(),
-				ListLocked:    pp.LockedShortIDs,
-				FreeDiskGB:    freeDiskGB,
-				OnEvictedCB:   pp.InvalidateWorkspace,
-			}
-			go sw.Run(ctx)
 		}
 	}
 
