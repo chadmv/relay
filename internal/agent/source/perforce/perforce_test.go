@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,4 +207,41 @@ func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "operator must run 'p4 login'",
 		"Prepare must surface the classified message so it appears in task failure logs")
+}
+
+func TestProvider_Prepare_ClassifiesRecoverError(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture()
+	expectedClient := expectedClientName("h", "//s/x")
+
+	// Set up a dirty workspace so needsSync=true and recoverOrphanedCLs is called.
+	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("client -i", "Client saved.\n")
+	// PendingChangesByDescPrefix is called before sync; inject auth error.
+	fr.setErr("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l",
+		fmt.Errorf("p4 changes ...: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+		Perforce: &relayv1.PerforceSource{
+			Stream: "//s/x",
+			Sync:   []*relayv1.SyncEntry{{Path: "//s/x/...", Rev: "#head"}},
+		},
+	}}
+	var progressLines []string
+	_, _ = p.Prepare(context.Background(), "task-1", spec, func(s string) {
+		progressLines = append(progressLines, s)
+	})
+	// recoverOrphanedCLs errors are logged via progress(), not returned as task failure.
+	// Verify the classified message appears in progress output.
+	found := false
+	for _, line := range progressLines {
+		if strings.Contains(line, "operator must run 'p4 login'") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected classified auth error in progress lines, got: %v", progressLines)
+	}
 }
