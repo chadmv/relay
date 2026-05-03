@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +16,15 @@ import (
 	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 )
+
+// ErrP4BinaryMissing indicates the p4 CLI is not on PATH on this host.
+// Returned by (*Provider).Preflight; cmd/relay-agent uses errors.Is to
+// recognize it and degrade gracefully.
+var ErrP4BinaryMissing = errors.New("p4 binary not found on PATH")
+
+// lookPath is exec.LookPath; overridable in tests via the package-level var
+// pattern used elsewhere in this codebase.
+var lookPath = exec.LookPath
 
 // Config holds constructor parameters for the Perforce provider.
 type Config struct {
@@ -40,6 +51,21 @@ func New(cfg Config) *Provider {
 }
 
 func (p *Provider) Type() string { return "perforce" }
+
+// Preflight verifies the agent host is configured for Perforce work.
+// Currently checks only that the p4 binary exists on PATH. Does not contact
+// the Perforce server, by design — startup must remain fast and offline.
+//
+// The ctx parameter is currently unused but is part of the signature so
+// future preflight checks can be cancellable without a breaking change.
+func (p *Provider) Preflight(ctx context.Context) error {
+	_ = ctx
+	if _, err := lookPath("p4"); err != nil {
+		return fmt.Errorf("%w: install Perforce CLI on this worker or unset RELAY_WORKSPACE_ROOT: %v",
+			ErrP4BinaryMissing, err)
+	}
+	return nil
+}
 
 // ListInventory returns all workspaces recorded in the on-disk registry,
 // satisfying the source.InventoryLister interface.
