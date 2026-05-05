@@ -64,7 +64,7 @@ func GetCommand() Command {
 func CancelCommand() Command {
 	return Command{
 		Name:  "cancel",
-		Usage: "cancel <job-id>",
+		Usage: "cancel [--force] <job-id>",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doCancelJob(ctx, cfg, args, os.Stdout)
 		},
@@ -149,16 +149,25 @@ func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 }
 
 func doCancelJob(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: relay cancel <job-id>")
+	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
+	force := fs.Bool("force", false, "force termination: kills the entire process tree immediately and skips workspace cleanup. May leave workspaces in a dirty state.")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay cancel [--force] <job-id>")
 	}
 	if cfg.Token == "" {
 		return fmt.Errorf("no token configured — run 'relay login' first")
 	}
 	c := cfg.NewClient()
 
+	path := "/v1/jobs/" + fs.Arg(0)
+	if *force {
+		path += "?force=true"
+	}
 	var job jobResp
-	if err := c.do(ctx, "DELETE", "/v1/jobs/"+args[0], nil, &job); err != nil {
+	if err := c.do(ctx, "DELETE", path, nil, &job); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Job %s: %s\n", job.ID, job.Status)
