@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"relay/internal/events"
@@ -284,6 +285,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid job id")
 		return
 	}
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -357,6 +359,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 			Payload: &relayv1.CoordinatorMessage_CancelTask{
 				CancelTask: &relayv1.CancelTask{
 					TaskId: uuidStr(t.ID),
+					Force:  force,
 				},
 			},
 		})
