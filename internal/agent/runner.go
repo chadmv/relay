@@ -185,6 +185,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
+		setupProcTree(cmd, r)
 		cmd.Env = env
 		if workDir != "" {
 			cmd.Dir = workDir
