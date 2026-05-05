@@ -76,6 +76,7 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) {
 		jobMu.Unlock()
 		if h != 0 {
 			_ = windows.TerminateJobObject(h, 1)
+			_ = windows.CloseHandle(h)
 		} else if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
