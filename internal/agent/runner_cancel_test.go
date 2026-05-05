@@ -5,8 +5,11 @@ package agent
 import (
 	"context"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
+
+	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/require"
 )
@@ -33,4 +36,78 @@ func TestSetupProcTree_Unix_SetsPgid(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("process did not exit within 2s after cancel")
 	}
+}
+
+func TestRunner_ForceCancel_SkipsWorkspaceFinalize(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 256)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	// A long-running command so we have time to cancel mid-flight.
+	longCmd := []string{"sleep", "30"}
+	if runtime.GOOS == "windows" {
+		longCmd = []string{"cmd", "/c", "ping", "127.0.0.1", "-n", "30"}
+	}
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-force",
+		JobId:    "j-force",
+		Commands: singleCmd(longCmd),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	// Wait for the subprocess to actually start before we cancel.
+	time.Sleep(200 * time.Millisecond)
+	r.Cancel(true)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not exit within 5s after force cancel")
+	}
+
+	require.False(t, fh.finalized, "Finalize must not be called on forced cancel")
+}
+
+func TestRunner_DefaultCancel_RunsWorkspaceFinalize(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 256)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	longCmd := []string{"sleep", "30"}
+	if runtime.GOOS == "windows" {
+		longCmd = []string{"cmd", "/c", "ping", "127.0.0.1", "-n", "30"}
+	}
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-default",
+		JobId:    "j-default",
+		Commands: singleCmd(longCmd),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	time.Sleep(200 * time.Millisecond)
+	r.Cancel(false)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("runner did not exit within 8s after default cancel")
+	}
+
+	require.True(t, fh.finalized, "Finalize must be called on default cancel")
 }

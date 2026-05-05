@@ -133,6 +133,10 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			return
 		}
 		defer func() {
+			if r.forced.Load() {
+				log.Printf("runner: skipping workspace finalize for %s (forced cancel)", r.taskID)
+				return
+			}
 			if finalErr := handle.Finalize(r.ctx); finalErr != nil {
 				log.Printf("runner: finalize failed for %s: %v", r.taskID, finalErr)
 			}
