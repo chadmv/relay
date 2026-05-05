@@ -3,10 +3,7 @@
 package agent
 
 import (
-	"context"
 	"os/exec"
-	"runtime"
-	"syscall"
 	"testing"
 	"time"
 
@@ -16,9 +13,6 @@ import (
 // TestSetupProcTree_Unix_SetsPgid verifies that setupProcTree configures the
 // child to start a new process group via Setpgid.
 func TestSetupProcTree_Unix_SetsPgid(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix-only test")
-	}
 	cmd := exec.Command("sleep", "30")
 	r := &Runner{}
 	setupProcTree(cmd, r)
@@ -38,6 +32,4 @@ func TestSetupProcTree_Unix_SetsPgid(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("process did not exit within 2s after cancel")
 	}
-	_ = syscall.SIGKILL
-	_ = context.Background
 }
