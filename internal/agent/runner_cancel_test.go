@@ -102,3 +102,36 @@ func TestRunner_DefaultCancel_RunsWorkspaceFinalize(t *testing.T) {
 
 	require.True(t, fh.finalized, "Finalize must be called on default cancel")
 }
+
+func TestRunner_ForceCancel_ReturnsQuickly(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4096)
+
+	// Spawn something that produces a steady stream of stdout, so the kernel
+	// pipe buffer always has bytes the agent's pipeLog goroutine could be
+	// reading. On a non-forced cancel, draining this would burn the
+	// 5s WaitDelay; on a forced cancel, closeStepPipesForForce should
+	// short-circuit it.
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-quick",
+		JobId:    "j-quick",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo line; done"}),
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	time.Sleep(300 * time.Millisecond) // let it start producing output
+	start := time.Now()
+	r.Cancel(true)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("forced cancel did not return within 3s")
+	}
+	elapsed := time.Since(start)
+	require.Less(t, elapsed, 2*time.Second,
+		"forced cancel should return well under WaitDelay (5s); took %s", elapsed)
+}
