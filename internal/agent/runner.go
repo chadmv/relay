@@ -27,6 +27,15 @@ type Runner struct {
 	forced    atomic.Bool
 	abandoned atomic.Bool
 	provider  source.Provider
+
+	// stepPipes guards the live stdout/stderr pipe handles for the currently
+	// executing step. Set in Run before cmd.Start; cleared on step completion.
+	// Accessed by the cmd.Cancel callback to force-close pipes when forced.
+	stepPipes struct {
+		mu     sync.Mutex
+		stdout io.Closer
+		stderr io.Closer
+	}
 }
 
 // newRunner creates a Runner and its execution context.
@@ -60,6 +69,38 @@ func (r *Runner) Cancel(force bool) {
 func (r *Runner) Abandon() {
 	r.abandoned.Store(true)
 	r.cancel()
+}
+
+// setStepPipes records the pipe handles for the currently executing step so
+// the cmd.Cancel callback can force-close them on a forced cancel.
+func (r *Runner) setStepPipes(stdout, stderr io.Closer) {
+	r.stepPipes.mu.Lock()
+	r.stepPipes.stdout = stdout
+	r.stepPipes.stderr = stderr
+	r.stepPipes.mu.Unlock()
+}
+
+// clearStepPipes drops the references after a step completes. Safe to call
+// even if setStepPipes wasn't called (no-op).
+func (r *Runner) clearStepPipes() {
+	r.stepPipes.mu.Lock()
+	r.stepPipes.stdout = nil
+	r.stepPipes.stderr = nil
+	r.stepPipes.mu.Unlock()
+}
+
+// closeStepPipesForForce closes the live pipe handles, unblocking pipeLog
+// readers immediately. Called from the cmd.Cancel callback only when forced.
+func (r *Runner) closeStepPipesForForce() {
+	r.stepPipes.mu.Lock()
+	stdout, stderr := r.stepPipes.stdout, r.stepPipes.stderr
+	r.stepPipes.mu.Unlock()
+	if stdout != nil {
+		_ = stdout.Close()
+	}
+	if stderr != nil {
+		_ = stderr.Close()
+	}
 }
 
 // Run executes the task and sends status/log messages to sendCh. Blocks until done.
@@ -165,6 +206,8 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			break
 		}
 
+		r.setStepPipes(stdout, stderr)
+
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT, step, stepTotal) }()
@@ -172,6 +215,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		wg.Wait()
 
 		waitErr := cmd.Wait()
+		r.clearStepPipes()
 
 		lastExitCode = nil
 		if cmd.ProcessState != nil {
