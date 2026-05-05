@@ -221,7 +221,7 @@ func (a *Agent) handleCancel(msg *relayv1.CancelTask) {
 	r, ok := a.runners[msg.TaskId]
 	a.mu.Unlock()
 	if ok {
-		r.Cancel()
+		r.Cancel(msg.Force)
 	}
 }
 

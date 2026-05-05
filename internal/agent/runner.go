@@ -24,6 +24,7 @@ type Runner struct {
 	ctx       context.Context // parent (agent) context — lives for the agent lifetime, not the connection
 	cancel    context.CancelFunc
 	cancelled atomic.Bool
+	forced    atomic.Bool
 	abandoned atomic.Bool
 	provider  source.Provider
 }
@@ -43,7 +44,12 @@ func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, pa
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
-func (r *Runner) Cancel() {
+// If force is true, the runner skips workspace finalize and bypasses pipe drain
+// when killing the subprocess.
+func (r *Runner) Cancel(force bool) {
+	if force {
+		r.forced.Store(true)
+	}
 	r.cancelled.Store(true)
 	r.cancel()
 }

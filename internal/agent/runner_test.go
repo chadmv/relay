@@ -250,7 +250,7 @@ func TestRunner_cancel(t *testing.T) {
 		}
 	}
 
-	runner.Cancel()
+	runner.Cancel(false)
 	<-done
 
 	msgs := collectMessages(sendCh, 500*time.Millisecond)
