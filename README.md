@@ -576,10 +576,13 @@ relay get <job-id> --json
 
 #### `relay cancel`
 
-Cancel a job. Pending and queued tasks are cancelled immediately; running tasks complete their current execution.
+Cancel a job. Pending and queued tasks are marked failed immediately. For tasks already running on an agent, the agent terminates the entire subprocess tree (the direct child and any descendants), then runs workspace cleanup before reporting the task as failed. A brief pipe-drain budget (5 s) gives the subprocess one last chance to flush stdout/stderr to the relay log.
+
+Use `--force` to skip pipe drain and workspace cleanup so the agent is freed as quickly as possible. This is the right choice when a task is genuinely stuck or you don't care about the last few KB of log output. Forced cancel may leave a Perforce workspace in a partial state; the next sync on that worker treats it as a cold target.
 
 ```sh
-relay cancel <job-id>
+relay cancel <job-id>           # tree-kill, drain logs, cleanup workspace
+relay cancel <job-id> --force   # tree-kill, skip drain, skip cleanup
 ```
 
 ---
@@ -841,7 +844,7 @@ Tokens are valid for 30 days.
 | `POST` | `/v1/jobs` | Submit a job |
 | `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional) |
 | `GET` | `/v1/jobs/{id}` | Get a job |
-| `DELETE` | `/v1/jobs/{id}` | Cancel a job |
+| `DELETE` | `/v1/jobs/{id}` | Cancel a job (`?force=true` for forced termination, skips pipe drain and workspace cleanup) |
 | `GET` | `/v1/jobs/{id}/tasks` | List tasks for a job |
 
 ### Tasks
