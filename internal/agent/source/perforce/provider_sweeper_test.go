@@ -15,7 +15,7 @@ import (
 // Provider.ListInventory without relying on OnEvictedCB to nil out p.reg.
 func TestProviderSweeper_CoherentWithoutInvalidateCallback(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -d relay_h_stale", "Client deleted.\n")
 
 	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: fr}})

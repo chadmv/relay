@@ -17,7 +17,7 @@ func TestPreflight_BinaryPresent(t *testing.T) {
 		}
 		return "/usr/bin/p4", nil
 	}
-	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture()}})
+	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)}})
 	if err := p.Preflight(context.Background()); err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestPreflight_BinaryMissing(t *testing.T) {
 	lookPath = func(name string) (string, error) {
 		return "", exec.ErrNotFound
 	}
-	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture()}})
+	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)}})
 	err := p.Preflight(context.Background())
 	if !errors.Is(err, ErrP4BinaryMissing) {
 		t.Fatalf("expected errors.Is(err, ErrP4BinaryMissing) to be true, got %v", err)

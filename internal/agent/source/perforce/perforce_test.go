@@ -15,12 +15,15 @@ import (
 
 func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	expectedClient := expectedClientName("h", "//s/x")
 	// ResolveHead: "changes -m1 //s/x/...#head" → CL 12345
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
-	// CreateStreamClient: "client -i" succeeds; "client -o -S //s/x <name>" returns empty (ok)
+	// CreateStreamClient: fetch existing spec (empty = new client), then write it back.
+	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
+	// recoverOrphanedCLs: no pending CLs on a fresh workspace.
+	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
 	// SyncStream: now invoked with global -c <client>.
 	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
 
@@ -63,10 +66,12 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 
 func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	expectedClient := expectedClientName("h", "//s/x")
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
 	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
 	fr.set("-c "+expectedClient+" change -o", "Change: new\nDescription:\t<enter description here>\n")
 	fr.set("-c "+expectedClient+" change -i", "Change 91244 created.\n")
@@ -120,7 +125,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 
 func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 
 	// Pre-seed registry with an existing workspace that has an orphaned CL
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -179,7 +184,7 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 
 func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
 	root := t.TempDir()
-	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: newFakeP4Fixture()}})
+	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: newFakeP4Fixture(t)}})
 
 	r1, err := p.Registry()
 	require.NoError(t, err)
@@ -190,7 +195,7 @@ func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
 
 func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	// ResolveHead is the first p4 call inside Prepare. Inject the canonical
 	// "ticket invalid" stderr that execRunner would surface in production.
 	fr.setErr("changes -m1 //s/x/...#head",
@@ -211,15 +216,18 @@ func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 
 func TestProvider_Prepare_ClassifiesRecoverError(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	expectedClient := expectedClientName("h", "//s/x")
 
 	// Set up a dirty workspace so needsSync=true and recoverOrphanedCLs is called.
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
-	// PendingChangesByDescPrefix is called before sync; inject auth error.
+	// recoverOrphanedCLs: inject auth error so it surfaces in progress output.
 	fr.setErr("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l",
 		fmt.Errorf("p4 changes ...: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
+	// Sync proceeds after recovery error (which only goes to progress, not task failure).
+	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{

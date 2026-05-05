@@ -7,7 +7,16 @@ import (
 	"strings"
 )
 
+// tHelper is the subset of testing.TB that fakeRunner needs to report fixture
+// misses. Using an interface lets regression tests pass a spy instead of the
+// real *testing.T.
+type tHelper interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
 type fakeRunner struct {
+	t         tHelper
 	calls     []runCall
 	out       map[string]string
 	err       map[string]error
@@ -21,8 +30,9 @@ type runCall struct {
 	stdin string
 }
 
-func newFakeP4Fixture() *fakeRunner {
+func newFakeP4Fixture(t tHelper) *fakeRunner {
 	return &fakeRunner{
+		t:         t,
 		out:       map[string]string{},
 		err:       map[string]error{},
 		streamOut: map[string]string{},
@@ -55,6 +65,11 @@ func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 	if e, ok := f.err[key]; ok && e != nil {
 		return nil, e
 	}
+	if _, ok := f.out[key]; !ok {
+		f.t.Helper()
+		f.t.Errorf("fakeRunner.Run: no fixture for args %q (cwd=%q)", key, cwd)
+		return nil, fmt.Errorf("fakeRunner: no fixture for %q", key)
+	}
 	var sb strings.Builder
 	if stdin != nil {
 		b, _ := io.ReadAll(stdin)
@@ -68,6 +83,11 @@ func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	key := strings.Join(args, " ")
 	if e, ok := f.streamErr[key]; ok && e != nil {
 		return e
+	}
+	if _, ok := f.streamOut[key]; !ok {
+		f.t.Helper()
+		f.t.Errorf("fakeRunner.Stream: no fixture for args %q (cwd=%q)", key, cwd)
+		return fmt.Errorf("fakeRunner: no fixture for %q", key)
 	}
 	for _, line := range strings.Split(f.streamOut[key], "\n") {
 		if line != "" {

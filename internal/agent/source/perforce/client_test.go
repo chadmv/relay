@@ -9,7 +9,7 @@ import (
 )
 
 func TestClient_CreateStreamClient_Default(t *testing.T) {
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -o -S //streams/X/main relay_h_abc", `Client: relay_h_abc
 Owner: relay
 Root: D:\rw\abcdef
@@ -28,7 +28,7 @@ View: //streams/X/main/... //relay_h_abc/...
 }
 
 func TestClient_CreateStreamClient_WithTemplate(t *testing.T) {
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -o -S //streams/X/main -t base relay_h_abc", `Client: relay_h_abc
 Stream: //streams/X/main
 Options: clobber
@@ -42,7 +42,7 @@ View: //streams/X/main/... //relay_h_abc/...
 }
 
 func TestClient_ResolveHead(t *testing.T) {
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("changes -m1 //streams/X/main/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	c := &Client{r: fr}
 	cl, err := c.ResolveHead(context.Background(), "//streams/X/main/...")
@@ -51,7 +51,7 @@ func TestClient_ResolveHead(t *testing.T) {
 }
 
 func TestClient_RunFailureBubbles(t *testing.T) {
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.setErr("changes -m1 //x/...#head", errors.New("Perforce password (P4PASSWD) invalid or unset."))
 	c := &Client{r: fr}
 	_, err := c.ResolveHead(context.Background(), "//x/...")

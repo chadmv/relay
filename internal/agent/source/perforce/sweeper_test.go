@@ -12,7 +12,7 @@ import (
 
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -d relay_h_old", "Client deleted.\n")
 
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -43,7 +43,7 @@ func TestSweeper_AgeEviction(t *testing.T) {
 
 func TestSweeper_PressureEviction(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -d relay_h_a", "Client deleted.\n")
 
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -69,7 +69,7 @@ func TestSweeper_PressureEviction(t *testing.T) {
 
 func TestSweeper_UsesInjectedRegistry(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 	fr.set("client -d relay_h_old", "Client deleted.\n")
 
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -95,7 +95,7 @@ func TestSweeper_UsesInjectedRegistry(t *testing.T) {
 
 func TestSweeper_SkipsLockedWorkspaces(t *testing.T) {
 	root := t.TempDir()
-	fr := newFakeP4Fixture()
+	fr := newFakeP4Fixture(t)
 
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
 	reg.Upsert(WorkspaceEntry{ShortID: "locked", SourceKey: "//s/x",
