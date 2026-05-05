@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"context"
 	"os/exec"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 // TestSetupProcTree_Unix_SetsPgid verifies that setupProcTree configures the
 // child to start a new process group via Setpgid.
 func TestSetupProcTree_Unix_SetsPgid(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
+	cmd := exec.CommandContext(context.Background(), "sleep", "30")
 	r := &Runner{}
 	setupProcTree(cmd, r)
 	require.NotNil(t, cmd.SysProcAttr, "SysProcAttr should be set")
