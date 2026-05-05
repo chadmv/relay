@@ -5,7 +5,6 @@ package agent
 import (
 	"context"
 	"os/exec"
-	"runtime"
 	"testing"
 	"time"
 
@@ -44,14 +43,10 @@ func TestRunner_ForceCancel_SkipsWorkspaceFinalize(t *testing.T) {
 	prov := &fakeProvider{handle: fh}
 
 	// A long-running command so we have time to cancel mid-flight.
-	longCmd := []string{"sleep", "30"}
-	if runtime.GOOS == "windows" {
-		longCmd = []string{"cmd", "/c", "ping", "127.0.0.1", "-n", "30"}
-	}
 	task := &relayv1.DispatchTask{
 		TaskId:   "t-force",
 		JobId:    "j-force",
-		Commands: singleCmd(longCmd),
+		Commands: singleCmd([]string{"sleep", "30"}),
 		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
 			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
 		}},
@@ -81,14 +76,10 @@ func TestRunner_DefaultCancel_RunsWorkspaceFinalize(t *testing.T) {
 	fh := &fakeHandle{dir: t.TempDir()}
 	prov := &fakeProvider{handle: fh}
 
-	longCmd := []string{"sleep", "30"}
-	if runtime.GOOS == "windows" {
-		longCmd = []string{"cmd", "/c", "ping", "127.0.0.1", "-n", "30"}
-	}
 	task := &relayv1.DispatchTask{
 		TaskId:   "t-default",
 		JobId:    "j-default",
-		Commands: singleCmd(longCmd),
+		Commands: singleCmd([]string{"sleep", "30"}),
 		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
 			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
 		}},
