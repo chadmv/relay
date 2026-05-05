@@ -944,6 +944,7 @@ func (x *CommandLine) GetArgv() []string {
 type CancelTask struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Force         bool                   `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"` // skip workspace finalize and pipe drain; tree-kill is always on
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -983,6 +984,13 @@ func (x *CancelTask) GetTaskId() string {
 		return x.TaskId
 	}
 	return ""
+}
+
+func (x *CancelTask) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type SourceSpec struct {
@@ -1387,10 +1395,11 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04R\acommand\"!\n" +
 	"\vCommandLine\x12\x12\n" +
-	"\x04argv\x18\x01 \x03(\tR\x04argv\"%\n" +
+	"\x04argv\x18\x01 \x03(\tR\x04argv\";\n" +
 	"\n" +
 	"CancelTask\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\"P\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
+	"\x05force\x18\x02 \x01(\bR\x05force\"P\n" +
 	"\n" +
 	"SourceSpec\x126\n" +
 	"\bperforce\x18\x01 \x01(\v2\x18.relay.v1.PerforceSourceH\x00R\bperforceB\n" +

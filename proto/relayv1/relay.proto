@@ -105,6 +105,7 @@ message CommandLine {
 
 message CancelTask {
   string task_id = 1;
+  bool   force   = 2;  // skip workspace finalize and pipe drain; tree-kill is always on
 }
 
 enum TaskStatus {
