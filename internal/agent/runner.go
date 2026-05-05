@@ -29,7 +29,7 @@ type Runner struct {
 	provider  source.Provider
 
 	// stepPipes guards the live stdout/stderr pipe handles for the currently
-	// executing step. Set in Run before cmd.Start; cleared on step completion.
+	// executing step. Set in Run after cmd.Start; cleared on step completion.
 	// Accessed by the cmd.Cancel callback to force-close pipes when forced.
 	stepPipes struct {
 		mu     sync.Mutex
