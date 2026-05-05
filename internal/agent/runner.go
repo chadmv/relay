@@ -189,7 +189,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
-		setupProcTree(cmd, r)
+		cleanupProcTree := setupProcTree(cmd, r)
 		cmd.Env = env
 		if workDir != "" {
 			cmd.Dir = workDir
@@ -220,6 +220,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		wg.Wait()
 
 		waitErr := cmd.Wait()
+		cleanupProcTree()
 		r.clearStepPipes()
 
 		lastExitCode = nil

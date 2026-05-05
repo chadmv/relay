@@ -5,7 +5,9 @@ package agent
 import (
 	"log"
 	"os/exec"
+	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,7 +22,10 @@ import (
 //   - if r.forced is set at cancel time, stdout/stderr pipe handles are
 //     closed immediately, bypassing the pipe-buffer drain bounded by
 //     cmd.WaitDelay.
-func setupProcTree(cmd *exec.Cmd, r *Runner) {
+//
+// Returns a cleanup function that must be called after cmd.Wait returns to
+// close the Job Object handle when the process completes without cancellation.
+func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
 	var (
 		jobMu sync.Mutex
 		job   windows.Handle
@@ -73,6 +78,7 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) {
 		ensureAssigned()
 		jobMu.Lock()
 		h := job
+		job = 0 // claim ownership so cleanup won't double-close
 		jobMu.Unlock()
 		if h != 0 {
 			_ = windows.TerminateJobObject(h, 1)
@@ -86,12 +92,31 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) {
 		return nil
 	}
 
-	// Eagerly assign the process to the job object as soon as cmd.Start
-	// sets cmd.Process. cmd.Start sets Process synchronously, so this
-	// goroutine should complete almost immediately after Start returns.
+	// Eagerly assign the process to the job as soon as cmd.Start sets
+	// cmd.Process. Start is synchronous so the loop exits almost immediately.
+	// The deadline prevents a goroutine leak if Start fails and Process is
+	// never set.
 	go func() {
-		for cmd.Process == nil {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if cmd.Process != nil {
+				ensureAssigned()
+				return
+			}
+			runtime.Gosched()
 		}
-		ensureAssigned()
 	}()
+
+	// cleanup closes the Job Object handle when the process completes without
+	// cancellation. cmd.Cancel zeros job before closing, so this is a no-op
+	// if cancel already ran.
+	return func() {
+		jobMu.Lock()
+		h := job
+		job = 0
+		jobMu.Unlock()
+		if h != 0 {
+			_ = windows.CloseHandle(h)
+		}
+	}
 }

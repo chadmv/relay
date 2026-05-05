@@ -16,7 +16,7 @@ import (
 //   - if r.forced is set at cancel time, the runner's stdout/stderr pipe
 //     handles are closed immediately, unblocking pipeLog readers without
 //     waiting on the kernel pipe-buffer drain bounded by cmd.WaitDelay.
-func setupProcTree(cmd *exec.Cmd, r *Runner) {
+func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -37,4 +37,5 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) {
 		}
 		return nil
 	}
+	return func() {} // no kernel handle to release on Unix
 }
