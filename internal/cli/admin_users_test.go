@@ -449,3 +449,23 @@ func TestAdminUsersArchive_MissingArg(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "usage:")
 }
+
+func TestAdminUsersList_IncludeArchived(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`[
+			{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"A","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null},
+			{"id":"00000000-0000-0000-0000-000000000002","email":"bob@test.com","name":"B","is_admin":false,"created_at":"2026-01-02T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "t"}
+	out := &bytes.Buffer{}
+	err := doAdminUsers(context.Background(), cfg, []string{"list", "--include-archived"}, out)
+	require.NoError(t, err)
+	assert.Equal(t, "include_archived=true", gotQuery)
+	assert.Contains(t, out.String(), "ARCHIVED")
+	assert.Contains(t, out.String(), "2026-05-05")
+}

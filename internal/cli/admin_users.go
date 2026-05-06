@@ -46,29 +46,53 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	if cfg.Token == "" {
 		return fmt.Errorf("not logged in — run 'relay login' first")
 	}
-	if len(args) > 0 {
-		return fmt.Errorf("usage: relay admin users list")
+
+	fs := flag.NewFlagSet("admin users list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	includeArchived := fs.Bool("include-archived", false, "include archived users in the list")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: relay admin users list [--include-archived]")
 	}
 
 	c := cfg.NewClient()
+	path := "/v1/users"
+	if *includeArchived {
+		path += "?include_archived=true"
+	}
 	var users []userListItem
-	if err := c.do(ctx, "GET", "/v1/users", nil, &users); err != nil {
+	if err := c.do(ctx, "GET", path, nil, &users); err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
-	printUsersTable(out, users)
+	printUsersTable(out, users, *includeArchived)
 	return nil
 }
 
-func printUsersTable(out io.Writer, users []userListItem) {
+func printUsersTable(out io.Writer, users []userListItem, includeArchived bool) {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tEMAIL\tNAME\tADMIN\tCREATED")
+	if includeArchived {
+		fmt.Fprintln(tw, "ID\tEMAIL\tNAME\tADMIN\tCREATED\tARCHIVED")
+	} else {
+		fmt.Fprintln(tw, "ID\tEMAIL\tNAME\tADMIN\tCREATED")
+	}
 	for _, u := range users {
 		admin := "no"
 		if u.IsAdmin {
 			admin = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			u.ID, u.Email, u.Name, admin, u.CreatedAt.Format("2006-01-02"))
+		if includeArchived {
+			archived := "no"
+			if u.ArchivedAt != nil {
+				archived = u.ArchivedAt.Format("2006-01-02")
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				u.ID, u.Email, u.Name, admin, u.CreatedAt.Format("2006-01-02"), archived)
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				u.ID, u.Email, u.Name, admin, u.CreatedAt.Format("2006-01-02"))
+		}
 	}
 	_ = tw.Flush()
 }
