@@ -787,3 +787,73 @@ func TestArchiveUser_InvalidUUID(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, code)
 	assert.Equal(t, "invalid user id", body["error"])
 }
+
+func unarchiveUser(t *testing.T, srv *api.Server, token, userID string) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/v1/users/"+userID+"/unarchive", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body
+}
+
+func TestUnarchiveUser_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	aliceToken := createAndLoginUser(t, srv, q, "alice@test.com", "alicepass")
+	target, err := q.GetUserByEmail(t.Context(), "alice@test.com")
+	require.NoError(t, err)
+
+	// Archive, then unarchive.
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	code, body := unarchiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusOK, code)
+	assert.Nil(t, body["archived_at"])
+
+	// Old token still revoked.
+	req := httptest.NewRequest("GET", "/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// New login succeeds.
+	loginBody, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "alicepass"})
+	req = httptest.NewRequest("POST", "/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestUnarchiveUser_NotArchived(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	target := seedUser(t, q, "alice@test.com", "Alice")
+
+	code, body := unarchiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusConflict, code)
+	assert.Equal(t, "user is not archived", body["error"])
+}
+
+func TestUnarchiveUser_NotFound(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	code, body := unarchiveUser(t, srv, adminToken, "00000000-0000-0000-0000-000000000000")
+	require.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, "user not found", body["error"])
+}

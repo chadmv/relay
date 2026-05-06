@@ -209,6 +209,43 @@ func (s *Server) handleAdminArchiveUser(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
 }
 
+func (s *Server) handleAdminUnarchiveUser(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	authUser, _ := UserFromCtx(r.Context())
+	if authUser.ID == id {
+		writeError(w, http.StatusBadRequest, "cannot unarchive yourself")
+		return
+	}
+
+	ctx := r.Context()
+
+	if _, err := s.q.GetUser(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "user not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to look up user")
+		}
+		return
+	}
+
+	row, err := s.q.UnarchiveUser(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "user is not archived")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to unarchive user")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
+}
+
 // createUserRequest is the request body for POST /v1/users (admin-only).
 type createUserRequest struct {
 	Email    string `json:"email"`

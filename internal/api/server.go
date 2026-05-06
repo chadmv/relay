@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /v1/users/me", auth(http.HandlerFunc(s.handleUpdateMe)))
 	mux.Handle("PATCH /v1/users/{id}", auth(admin(http.HandlerFunc(s.handleAdminUpdateUser))))
 	mux.Handle("POST /v1/users/{id}/archive", auth(admin(http.HandlerFunc(s.handleAdminArchiveUser))))
+	mux.Handle("POST /v1/users/{id}/unarchive", auth(admin(http.HandlerFunc(s.handleAdminUnarchiveUser))))
 
 	// Worker workspaces (admin-only)
 	mux.Handle("GET /v1/workers/{id}/workspaces", auth(admin(http.HandlerFunc(s.handleListWorkerWorkspaces))))
