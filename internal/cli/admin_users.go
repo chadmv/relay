@@ -13,7 +13,7 @@ import (
 
 func doAdminUsers(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay admin users <list|get|create|update> [args]")
+		return fmt.Errorf("usage: relay admin users <list|get|create|update|archive|unarchive> [args]")
 	}
 	switch args[0] {
 	case "list":
@@ -24,17 +24,22 @@ func doAdminUsers(ctx context.Context, cfg *Config, args []string, out io.Writer
 		return doAdminUsersCreate(ctx, cfg, args[1:], out)
 	case "update":
 		return doAdminUsersUpdate(ctx, cfg, args[1:], out)
+	case "archive":
+		return doAdminUsersArchive(ctx, cfg, args[1:], out)
+	case "unarchive":
+		return doAdminUsersUnarchive(ctx, cfg, args[1:], out)
 	default:
 		return fmt.Errorf("unknown admin users subcommand: %s", args[0])
 	}
 }
 
 type userListItem struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
-	IsAdmin   bool      `json:"is_admin"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	Email      string     `json:"email"`
+	Name       string     `json:"name"`
+	IsAdmin    bool       `json:"is_admin"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ArchivedAt *time.Time `json:"archived_at"`
 }
 
 func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
@@ -100,6 +105,11 @@ func printUserDetail(out io.Writer, u userListItem) {
 	fmt.Fprintf(out, "Name:     %s\n", u.Name)
 	fmt.Fprintf(out, "Admin:    %s\n", admin)
 	fmt.Fprintf(out, "Created:  %s\n", u.CreatedAt.Format(time.RFC3339))
+	archived := "no"
+	if u.ArchivedAt != nil {
+		archived = u.ArchivedAt.Format(time.RFC3339)
+	}
+	fmt.Fprintf(out, "Archived: %s\n", archived)
 }
 
 func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
@@ -194,6 +204,49 @@ func doAdminUsersCreate(ctx context.Context, cfg *Config, args []string, out io.
 	var u userListItem
 	if err := c.do(ctx, "POST", "/v1/users", body, &u); err != nil {
 		return fmt.Errorf("create user: %w", err)
+	}
+	printUserDetail(out, u)
+	return nil
+}
+
+func doAdminUsersArchive(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
+	return doAdminUsersArchiveAction(ctx, cfg, args, out, "archive")
+}
+
+func doAdminUsersUnarchive(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
+	return doAdminUsersArchiveAction(ctx, cfg, args, out, "unarchive")
+}
+
+// doAdminUsersArchiveAction implements both archive and unarchive — they share
+// the same shape: resolve target email-or-id, then POST to the corresponding
+// action endpoint.
+func doAdminUsersArchiveAction(ctx context.Context, cfg *Config, args []string, out io.Writer, action string) error {
+	if cfg.Token == "" {
+		return fmt.Errorf("not logged in — run 'relay login' first")
+	}
+	if len(args) < 1 {
+		return fmt.Errorf("usage: relay admin users %s <email-or-id>", action)
+	}
+	target := args[0]
+
+	c := cfg.NewClient()
+
+	id := target
+	if !looksLikeUUID(target) {
+		var users []userListItem
+		path := "/v1/users?email=" + url.QueryEscape(target) + "&include_archived=true"
+		if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+			return fmt.Errorf("look up user: %w", err)
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("user not found: %s", target)
+		}
+		id = users[0].ID
+	}
+
+	var u userListItem
+	if err := c.do(ctx, "POST", "/v1/users/"+id+"/"+action, nil, &u); err != nil {
+		return fmt.Errorf("%s user: %w", action, err)
 	}
 	printUserDetail(out, u)
 	return nil
