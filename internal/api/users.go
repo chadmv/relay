@@ -19,20 +19,27 @@ import (
 // endpoints. Defined as a private struct (not the store row) to guarantee the
 // password hash never leaks even if a store row type changes.
 type userResponse struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
-	IsAdmin   bool      `json:"is_admin"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	Email      string     `json:"email"`
+	Name       string     `json:"name"`
+	IsAdmin    bool       `json:"is_admin"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ArchivedAt *time.Time `json:"archived_at"`
 }
 
-func toUserResponse(id pgtype.UUID, email, name string, isAdmin bool, createdAt pgtype.Timestamptz) userResponse {
+func toUserResponse(id pgtype.UUID, email, name string, isAdmin bool, createdAt, archivedAt pgtype.Timestamptz) userResponse {
+	var arch *time.Time
+	if archivedAt.Valid {
+		t := archivedAt.Time
+		arch = &t
+	}
 	return userResponse{
-		ID:        uuidStr(id),
-		Email:     email,
-		Name:      name,
-		IsAdmin:   isAdmin,
-		CreatedAt: createdAt.Time,
+		ID:         uuidStr(id),
+		Email:      email,
+		Name:       name,
+		IsAdmin:    isAdmin,
+		CreatedAt:  createdAt.Time,
+		ArchivedAt: arch,
 	}
 }
 
@@ -71,7 +78,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, []userResponse{
-			toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt),
+			toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt),
 		})
 		return
 	}
@@ -83,7 +90,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]userResponse, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt))
+		out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, pgtype.Timestamptz{}))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -104,7 +111,7 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update user")
 		return
 	}
-	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt))
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
 }
 
 func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +138,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update user")
 		return
 	}
-	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt))
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
 }
 
 // createUserRequest is the request body for POST /v1/users (admin-only).
@@ -188,5 +195,5 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt))
+	writeJSON(w, http.StatusCreated, toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt))
 }
