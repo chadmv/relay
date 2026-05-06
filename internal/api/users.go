@@ -67,6 +67,8 @@ func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, boo
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	includeArchived := r.URL.Query().Get("include_archived") == "true"
+
 	if email := r.URL.Query().Get("email"); email != "" {
 		u, err := s.q.GetUserByEmailPublic(r.Context(), email)
 		if err != nil {
@@ -77,9 +79,27 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to look up user")
 			return
 		}
+		if u.ArchivedAt.Valid && !includeArchived {
+			writeJSON(w, http.StatusOK, []userResponse{})
+			return
+		}
 		writeJSON(w, http.StatusOK, []userResponse{
 			toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt),
 		})
+		return
+	}
+
+	if includeArchived {
+		rows, err := s.q.ListUsersIncludingArchived(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return
+		}
+		out := make([]userResponse, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
+		}
+		writeJSON(w, http.StatusOK, out)
 		return
 	}
 

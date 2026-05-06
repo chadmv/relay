@@ -857,3 +857,84 @@ func TestUnarchiveUser_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, code)
 	assert.Equal(t, "user not found", body["error"])
 }
+
+func TestListUsers_FiltersArchivedByDefault(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	_ = seedUser(t, q, "bob@test.com", "Bob")
+
+	// Archive alice.
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	// Default list excludes alice.
+	code, users, _ := getUsers(t, srv, adminToken, "")
+	require.Equal(t, http.StatusOK, code)
+	emails := emailSet(users)
+	assert.NotContains(t, emails, "alice@test.com")
+	assert.Contains(t, emails, "bob@test.com")
+	assert.Contains(t, emails, "admin@test.com")
+}
+
+func TestListUsers_IncludeArchived(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	_ = seedUser(t, q, "bob@test.com", "Bob")
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	code, users, _ := getUsers(t, srv, adminToken, "include_archived=true")
+	require.Equal(t, http.StatusOK, code)
+	emails := emailSet(users)
+	assert.Contains(t, emails, "alice@test.com")
+	assert.Contains(t, emails, "bob@test.com")
+
+	// And the archived row carries archived_at.
+	for _, u := range users {
+		if u["email"] == "alice@test.com" {
+			assert.NotNil(t, u["archived_at"])
+		} else {
+			assert.Nil(t, u["archived_at"])
+		}
+	}
+}
+
+func TestListUsers_EmailLookupHidesArchived(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	_, _ = archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+
+	// Without include_archived, lookup returns [].
+	code, users, _ := getUsers(t, srv, adminToken, "email=alice%40test.com")
+	require.Equal(t, http.StatusOK, code)
+	assert.Len(t, users, 0)
+
+	// With include_archived, lookup returns the archived user.
+	code, users, _ = getUsers(t, srv, adminToken, "email=alice%40test.com&include_archived=true")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, users, 1)
+	assert.Equal(t, "alice@test.com", users[0]["email"])
+	assert.NotNil(t, users[0]["archived_at"])
+}
+
+// emailSet extracts the email field from a list of decoded user rows.
+func emailSet(users []map[string]any) map[string]bool {
+	out := make(map[string]bool, len(users))
+	for _, u := range users {
+		out[u["email"].(string)] = true
+	}
+	return out
+}
