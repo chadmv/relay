@@ -141,6 +141,74 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
 }
 
+func (s *Server) handleAdminArchiveUser(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	authUser, _ := UserFromCtx(r.Context())
+	if authUser.ID == id {
+		writeError(w, http.StatusBadRequest, "cannot archive yourself")
+		return
+	}
+
+	ctx := r.Context()
+
+	target, err := s.q.GetUser(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "user not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to look up user")
+		}
+		return
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	txq := s.q.WithTx(tx)
+
+	if target.IsAdmin && !target.ArchivedAt.Valid {
+		n, err := txq.CountActiveAdmins(ctx)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to count admins")
+			return
+		}
+		if n <= 1 {
+			writeError(w, http.StatusBadRequest, "cannot archive the last active admin")
+			return
+		}
+	}
+
+	row, err := txq.ArchiveUser(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "user is already archived")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to archive user")
+		}
+		return
+	}
+
+	if _, err := txq.DeleteUserAPITokens(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to revoke tokens")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit archive")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
+}
+
 // createUserRequest is the request body for POST /v1/users (admin-only).
 type createUserRequest struct {
 	Email    string `json:"email"`

@@ -5,6 +5,7 @@ package api_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -560,4 +562,228 @@ func TestAdminCreateUser_NameDefaultsToEmail(t *testing.T) {
 	code, resp := postJSON(t, srv, adminToken, "/v1/users", body)
 	require.Equal(t, http.StatusCreated, code)
 	assert.Equal(t, "noname@test.com", resp["name"])
+}
+
+// ─── Archive helpers ─────────────────────────────────────────────────────────
+
+// seedAdmin creates an admin user directly via the store. Does not log in.
+func seedAdmin(t *testing.T, q *store.Queries, email, name string) store.User {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte("placeholder"), bcrypt.MinCost)
+	require.NoError(t, err)
+	u, err := q.CreateUserWithPassword(t.Context(), store.CreateUserWithPasswordParams{
+		Name: name, Email: email, IsAdmin: true, PasswordHash: string(hash),
+	})
+	require.NoError(t, err)
+	return u
+}
+
+// archiveUser sends POST /v1/users/{id}/archive as the given admin. Returns
+// the response code and decoded body (object on error or success).
+func archiveUser(t *testing.T, srv *api.Server, token, userID string) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/v1/users/"+userID+"/archive", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body
+}
+
+// countAPITokens returns the number of api_tokens rows for a user — used
+// to verify the cascade in archive.
+func countAPITokens(t *testing.T, pool *pgxpool.Pool, userID pgtype.UUID) int {
+	t.Helper()
+	var n int
+	err := pool.QueryRow(t.Context(),
+		`SELECT COUNT(*) FROM api_tokens WHERE user_id = $1`, userID).Scan(&n)
+	require.NoError(t, err)
+	return n
+}
+
+// createAndLoginUser seeds a non-admin user with the given password, then
+// logs in and returns the token. Mirrors loginAsAdmin but without IsAdmin.
+// IMPORTANT: do not call seedUser separately for the same email — this
+// helper already creates the row.
+func createAndLoginUser(t *testing.T, srv *api.Server, q *store.Queries, email, password string) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	require.NoError(t, err)
+	_, err = q.CreateUserWithPassword(t.Context(), store.CreateUserWithPasswordParams{
+		Name: email, Email: email, IsAdmin: false, PasswordHash: string(hash),
+	})
+	require.NoError(t, err)
+
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	req := httptest.NewRequest("POST", "/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp["token"].(string)
+}
+
+// mustGetUser is a small helper for store-level tests.
+func mustGetUser(t *testing.T, q *store.Queries, email string) store.User {
+	t.Helper()
+	u, err := q.GetUserByEmail(t.Context(), email)
+	require.NoError(t, err)
+	return u
+}
+
+// uuidStrTest is a tiny helper duplicating the package-private uuidStr so the
+// _test package can stringify pgtype.UUID without exporting the helper.
+func uuidStrTest(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// ─── Archive tests ────────────────────────────────────────────────────────────
+
+func TestArchiveUser_HappyPath(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	// Create alice with a known password and log her in (creates+logs in in
+	// one shot — do NOT seedUser separately or you'll get a unique-violation
+	// on email).
+	aliceToken := createAndLoginUser(t, srv, q, "alice@test.com", "alicepass")
+	target, err := q.GetUserByEmail(t.Context(), "alice@test.com")
+	require.NoError(t, err)
+
+	code, body := archiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusOK, code)
+	require.NotNil(t, body["archived_at"])
+
+	// Pre-existing alice token must now be rejected.
+	req := httptest.NewRequest("GET", "/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// Login attempt now returns generic 401.
+	loginBody, _ := json.Marshal(map[string]string{"email": "alice@test.com", "password": "alicepass"})
+	req = httptest.NewRequest("POST", "/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// api_tokens cascade.
+	assert.Equal(t, 0, countAPITokens(t, pool, target.ID))
+}
+
+func TestArchiveUser_SelfArchiveForbidden(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	admin, err := q.GetUserByEmail(t.Context(), "admin@test.com")
+	require.NoError(t, err)
+
+	code, body := archiveUser(t, srv, adminToken, uuidStrTest(admin.ID))
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "cannot archive yourself", body["error"])
+}
+
+// TestArchiveUser_LastAdminGuard exercises the last-admin guard by simulating
+// a race: admin A authenticates, then A's row is archived externally (e.g.,
+// by another admin in a parallel request) before A's archive call reaches the
+// guard. BearerAuth does not filter on archived_at (see middleware.go), so
+// A's still-valid token passes auth; the guard then catches the inconsistent
+// state when A tries to archive admin B (the only remaining active admin).
+func TestArchiveUser_LastAdminGuard(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminAToken := loginAsAdmin(t, srv, q, "admin-a@test.com", "passa")
+	adminB := seedAdmin(t, q, "admin-b@test.com", "Admin B")
+
+	// Simulate the race: archive A directly in the DB, leaving B as the only
+	// active admin. A's token is still valid because we used direct SQL.
+	_, err := pool.Exec(t.Context(),
+		`UPDATE users SET archived_at = NOW() WHERE email = 'admin-a@test.com'`)
+	require.NoError(t, err)
+
+	// A (using their still-valid token) tries to archive B. CountActiveAdmins
+	// returns 1 (just B). Guard fires.
+	code, body := archiveUser(t, srv, adminAToken, uuidStrTest(adminB.ID))
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "cannot archive the last active admin", body["error"])
+}
+
+func TestCountActiveAdmins(t *testing.T) {
+	q := newTestQueries(t)
+
+	// 0 admins.
+	n, err := q.CountActiveAdmins(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+
+	// Seed two admins, count = 2.
+	_ = seedAdmin(t, q, "a@test.com", "A")
+	_ = seedAdmin(t, q, "b@test.com", "B")
+	n, err = q.CountActiveAdmins(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+
+	// Archive one, count = 1.
+	_, err = q.ArchiveUser(t.Context(), mustGetUser(t, q, "b@test.com").ID)
+	require.NoError(t, err)
+	n, err = q.CountActiveAdmins(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+}
+
+func TestArchiveUser_AlreadyArchived(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	target := seedUser(t, q, "alice@test.com", "Alice")
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	code, body := archiveUser(t, srv, adminToken, uuidStrTest(target.ID))
+	require.Equal(t, http.StatusConflict, code)
+	assert.Equal(t, "user is already archived", body["error"])
+}
+
+func TestArchiveUser_NotFound(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	code, body := archiveUser(t, srv, adminToken, "00000000-0000-0000-0000-000000000000")
+	require.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, "user not found", body["error"])
+}
+
+func TestArchiveUser_InvalidUUID(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+
+	code, body := archiveUser(t, srv, adminToken, "not-a-uuid")
+	require.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "invalid user id", body["error"])
 }
