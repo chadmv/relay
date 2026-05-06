@@ -258,6 +258,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if user.ArchivedAt.Valid {
+		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
+
 	token, expires, err := s.issueToken(ctx, s.q, user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
