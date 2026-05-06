@@ -29,10 +29,60 @@ func (q *Queries) AdminExists(ctx context.Context) (bool, error) {
 	return exists, err
 }
 
+const archiveUser = `-- name: ArchiveUser :one
+UPDATE users SET archived_at = NOW()
+WHERE id = $1 AND archived_at IS NULL
+RETURNING id, email, name, is_admin, created_at, archived_at
+`
+
+type ArchiveUserRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ArchiveUser
+//
+//	UPDATE users SET archived_at = NOW()
+//	WHERE id = $1 AND archived_at IS NULL
+//	RETURNING id, email, name, is_admin, created_at, archived_at
+func (q *Queries) ArchiveUser(ctx context.Context, id pgtype.UUID) (ArchiveUserRow, error) {
+	row := q.db.QueryRow(ctx, archiveUser, id)
+	var i ArchiveUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+		&i.ArchivedAt,
+	)
+	return i, err
+}
+
+const countActiveAdmins = `-- name: CountActiveAdmins :one
+SELECT COUNT(*) FROM users
+WHERE is_admin = TRUE AND archived_at IS NULL
+`
+
+// CountActiveAdmins
+//
+//	SELECT COUNT(*) FROM users
+//	WHERE is_admin = TRUE AND archived_at IS NULL
+func (q *Queries) CountActiveAdmins(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveAdmins)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createUserWithPassword = `-- name: CreateUserWithPassword :one
 INSERT INTO users (name, email, is_admin, password_hash)
 VALUES ($1, $2, $3, $4)
-RETURNING id, name, email, is_admin, created_at, password_hash
+RETURNING id, name, email, is_admin, created_at, password_hash, archived_at
 `
 
 type CreateUserWithPasswordParams struct {
@@ -46,7 +96,7 @@ type CreateUserWithPasswordParams struct {
 //
 //	INSERT INTO users (name, email, is_admin, password_hash)
 //	VALUES ($1, $2, $3, $4)
-//	RETURNING id, name, email, is_admin, created_at, password_hash
+//	RETURNING id, name, email, is_admin, created_at, password_hash, archived_at
 func (q *Queries) CreateUserWithPassword(ctx context.Context, arg CreateUserWithPasswordParams) (User, error) {
 	row := q.db.QueryRow(ctx, createUserWithPassword,
 		arg.Name,
@@ -62,17 +112,33 @@ func (q *Queries) CreateUserWithPassword(ctx context.Context, arg CreateUserWith
 		&i.IsAdmin,
 		&i.CreatedAt,
 		&i.PasswordHash,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
 
+const deleteUserAPITokens = `-- name: DeleteUserAPITokens :execrows
+DELETE FROM api_tokens WHERE user_id = $1
+`
+
+// DeleteUserAPITokens
+//
+//	DELETE FROM api_tokens WHERE user_id = $1
+func (q *Queries) DeleteUserAPITokens(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUserAPITokens, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getUser = `-- name: GetUser :one
-SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE id = $1
+SELECT id, name, email, is_admin, created_at, password_hash, archived_at FROM users WHERE id = $1
 `
 
 // GetUser
 //
-//	SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE id = $1
+//	SELECT id, name, email, is_admin, created_at, password_hash, archived_at FROM users WHERE id = $1
 func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	row := q.db.QueryRow(ctx, getUser, id)
 	var i User
@@ -83,17 +149,18 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 		&i.IsAdmin,
 		&i.CreatedAt,
 		&i.PasswordHash,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE email = $1
+SELECT id, name, email, is_admin, created_at, password_hash, archived_at FROM users WHERE email = $1
 `
 
 // GetUserByEmail
 //
-//	SELECT id, name, email, is_admin, created_at, password_hash FROM users WHERE email = $1
+//	SELECT id, name, email, is_admin, created_at, password_hash, archived_at FROM users WHERE email = $1
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	row := q.db.QueryRow(ctx, getUserByEmail, email)
 	var i User
@@ -104,26 +171,28 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.IsAdmin,
 		&i.CreatedAt,
 		&i.PasswordHash,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
 
 const getUserByEmailPublic = `-- name: GetUserByEmailPublic :one
-SELECT id, email, name, is_admin, created_at
+SELECT id, email, name, is_admin, created_at, archived_at
 FROM users WHERE email = $1
 `
 
 type GetUserByEmailPublicRow struct {
-	ID        pgtype.UUID        `json:"id"`
-	Email     string             `json:"email"`
-	Name      string             `json:"name"`
-	IsAdmin   bool               `json:"is_admin"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
 }
 
 // GetUserByEmailPublic
 //
-//	SELECT id, email, name, is_admin, created_at
+//	SELECT id, email, name, is_admin, created_at, archived_at
 //	FROM users WHERE email = $1
 func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUserByEmailPublicRow, error) {
 	row := q.db.QueryRow(ctx, getUserByEmailPublic, email)
@@ -134,6 +203,7 @@ func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUs
 		&i.Name,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.ArchivedAt,
 	)
 	return i, err
 }
@@ -141,6 +211,7 @@ func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUs
 const listUsers = `-- name: ListUsers :many
 SELECT id, email, name, is_admin, created_at
 FROM users
+WHERE archived_at IS NULL
 ORDER BY created_at
 `
 
@@ -156,6 +227,7 @@ type ListUsersRow struct {
 //
 //	SELECT id, email, name, is_admin, created_at
 //	FROM users
+//	WHERE archived_at IS NULL
 //	ORDER BY created_at
 func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 	rows, err := q.db.Query(ctx, listUsers)
@@ -172,6 +244,53 @@ func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 			&i.Name,
 			&i.IsAdmin,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersIncludingArchived = `-- name: ListUsersIncludingArchived :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+ORDER BY created_at
+`
+
+type ListUsersIncludingArchivedRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchived
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	ORDER BY created_at
+func (q *Queries) ListUsersIncludingArchived(ctx context.Context) ([]ListUsersIncludingArchivedRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchived)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -212,9 +331,43 @@ func (q *Queries) SetPasswordHash(ctx context.Context, arg SetPasswordHashParams
 	return err
 }
 
+const unarchiveUser = `-- name: UnarchiveUser :one
+UPDATE users SET archived_at = NULL
+WHERE id = $1 AND archived_at IS NOT NULL
+RETURNING id, email, name, is_admin, created_at, archived_at
+`
+
+type UnarchiveUserRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// UnarchiveUser
+//
+//	UPDATE users SET archived_at = NULL
+//	WHERE id = $1 AND archived_at IS NOT NULL
+//	RETURNING id, email, name, is_admin, created_at, archived_at
+func (q *Queries) UnarchiveUser(ctx context.Context, id pgtype.UUID) (UnarchiveUserRow, error) {
+	row := q.db.QueryRow(ctx, unarchiveUser, id)
+	var i UnarchiveUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.IsAdmin,
+		&i.CreatedAt,
+		&i.ArchivedAt,
+	)
+	return i, err
+}
+
 const updateUserName = `-- name: UpdateUserName :one
 UPDATE users SET name = $2 WHERE id = $1
-RETURNING id, email, name, is_admin, created_at
+RETURNING id, email, name, is_admin, created_at, archived_at
 `
 
 type UpdateUserNameParams struct {
@@ -223,17 +376,18 @@ type UpdateUserNameParams struct {
 }
 
 type UpdateUserNameRow struct {
-	ID        pgtype.UUID        `json:"id"`
-	Email     string             `json:"email"`
-	Name      string             `json:"name"`
-	IsAdmin   bool               `json:"is_admin"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
 }
 
 // UpdateUserName
 //
 //	UPDATE users SET name = $2 WHERE id = $1
-//	RETURNING id, email, name, is_admin, created_at
+//	RETURNING id, email, name, is_admin, created_at, archived_at
 func (q *Queries) UpdateUserName(ctx context.Context, arg UpdateUserNameParams) (UpdateUserNameRow, error) {
 	row := q.db.QueryRow(ctx, updateUserName, arg.ID, arg.Name)
 	var i UpdateUserNameRow
@@ -243,6 +397,7 @@ func (q *Queries) UpdateUserName(ctx context.Context, arg UpdateUserNameParams) 
 		&i.Name,
 		&i.IsAdmin,
 		&i.CreatedAt,
+		&i.ArchivedAt,
 	)
 	return i, err
 }

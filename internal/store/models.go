@@ -117,6 +117,7 @@ type User struct {
 	IsAdmin      bool               `json:"is_admin"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	PasswordHash string             `json:"password_hash"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
 }
 
 type Worker struct {
