@@ -1,11 +1,11 @@
-# relay-sdk
+# relay-jobs
 
 Python SDK for relay job submission. See full quickstart below.
 
 ## Install
 
 ```bash
-pip install relay-sdk
+pip install relay-jobs
 ```
 
 ## Quickstart
