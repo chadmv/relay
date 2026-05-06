@@ -449,10 +449,29 @@ relay login
 
 Tokens are valid for 30 days. Re-run `relay login` to refresh.
 
-If the email is not yet registered, the server will require an invite token. The CLI prompts for it automatically:
+`relay login` authenticates existing accounts only. To create a new account, use `relay register` (below).
 
+---
+
+#### `relay register`
+
+Create a new account interactively. The CLI prompts for server URL, email, optional display name, invite token, and password, then saves the resulting bearer token to your config file.
+
+```sh
+relay register
 ```
-Invite token: <paste token here>
+
+Use this for first-time non-admin sign-up. Existing accounts should use `relay login`. If `RELAY_ALLOW_SELF_REGISTER=true` on the server, the invite-token prompt may be left blank; otherwise an invite from an admin (`relay invite create`) is required.
+
+---
+
+#### `relay logout`
+
+Revoke the bearer token saved in your config file and clear it locally.
+
+```sh
+relay logout         # revoke just this session
+relay logout --all   # revoke every active session for your account
 ```
 
 ---
@@ -465,6 +484,16 @@ Change your password (requires your current password).
 relay passwd
 # Current password:
 # New password:
+```
+
+---
+
+#### `relay profile update`
+
+Update your own display name.
+
+```sh
+relay profile update --name "Your Name"
 ```
 
 ---
@@ -799,9 +828,72 @@ Prints the ID and initial status of the job that was created.
 
 ---
 
+### Admin commands
+
+The `relay admin` subcommand group bundles operations that require an admin token.
+
+#### `relay admin users list`
+
+List every user in the system.
+
+```sh
+relay admin users list
+```
+
+Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`.
+
+---
+
+#### `relay admin users get`
+
+Look up a single user by email.
+
+```sh
+relay admin users get user@example.com
+```
+
+---
+
+#### `relay admin users create`
+
+Create a user account directly, bypassing the invite flow. The password is read from a prompt.
+
+```sh
+relay admin users create --email user@example.com --name "Some User"
+relay admin users create --email admin@example.com --admin
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--email` | Yes | Email address |
+| `--name` | No | Display name (defaults to email) |
+| `--admin` | No | Create the user as an admin |
+
+---
+
+#### `relay admin users update`
+
+Update a user's display name. The positional argument may be either an email or a UUID.
+
+```sh
+relay admin users update user@example.com --name "New Name"
+```
+
+---
+
+#### `relay admin passwd`
+
+Reset another user's password (admin only). Prompts for the new password twice. **All of the target user's sessions are revoked** — they will need to log in again.
+
+```sh
+relay admin passwd user@example.com
+```
+
+---
+
 ## REST API
 
-The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `/health` and `/auth/token` require `Authorization: Bearer <token>`.
+The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `/health`, `/auth/login`, and `/auth/register` require `Authorization: Bearer <token>`.
 
 ### Public
 
@@ -836,6 +928,26 @@ Returns `201 Created`:
 ```
 
 Tokens are valid for 30 days.
+
+### Session
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `PUT` | `/v1/users/me/password` | Change own password (body: `current_password`, `new_password`) |
+| `DELETE` | `/v1/auth/token` | Revoke the bearer token used on this request |
+| `DELETE` | `/v1/auth/tokens` | Revoke every active bearer token for the calling user |
+
+### Users
+
+All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup) |
+| `POST` | `/v1/users` | Create a user (body: `email`, `password`, optional `name`, optional `is_admin`) |
+| `POST` | `/v1/users/password-reset` | Reset a user's password (body: `email`, `new_password`); revokes all of their sessions |
+| `PATCH` | `/v1/users/me` | Update own profile (body: `name`) |
+| `PATCH` | `/v1/users/{id}` | Update a user (body: `name`) |
 
 ### Jobs
 
