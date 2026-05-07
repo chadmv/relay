@@ -85,13 +85,6 @@ func (p pageParams) CursorTs() pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: p.Cursor.T, Valid: p.Cursor.Set}
 }
 
-// LimitPlusOne returns Limit+1 — handlers pass this to the SQL layer so
-// queries fetch one extra row, used by buildPage to detect "more available"
-// without a follow-up COUNT.
-func (p pageParams) LimitPlusOne() int32 {
-	return p.Limit + 1
-}
-
 // parsePage extracts ?limit= and ?cursor= from the request. On invalid
 // input it writes the 400 response itself and returns ok=false. Defaults:
 // limit=50. Range: [1, 200]. Bad cursor → 400 with body "invalid cursor".

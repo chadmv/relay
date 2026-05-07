@@ -171,19 +171,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
-// jobsRowKey_* extract the (created_at, id) sort key from paginated job rows.
-// Each query returns a distinct row type, so we have small per-type adapters.
-func jobsRowKey_default(r store.ListJobsWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyDefault(r store.ListJobsWithEmailPageRow) (time.Time, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
-func jobsRowKey_byStatus(r store.ListJobsByStatusWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyByStatus(r store.ListJobsByStatusWithEmailPageRow) (time.Time, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
-func jobsRowKey_byScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) (time.Time, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
 
-func jobRowToResponse_default(r store.ListJobsWithEmailPageRow) jobResponse {
+func jobRowToResponseDefault(r store.ListJobsWithEmailPageRow) jobResponse {
 	job := store.Job{
 		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
@@ -191,7 +189,7 @@ func jobRowToResponse_default(r store.ListJobsWithEmailPageRow) jobResponse {
 	}
 	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
 }
-func jobRowToResponse_byStatus(r store.ListJobsByStatusWithEmailPageRow) jobResponse {
+func jobRowToResponseByStatus(r store.ListJobsByStatusWithEmailPageRow) jobResponse {
 	job := store.Job{
 		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
@@ -199,7 +197,7 @@ func jobRowToResponse_byStatus(r store.ListJobsByStatusWithEmailPageRow) jobResp
 	}
 	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
 }
-func jobRowToResponse_byScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) jobResponse {
+func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) jobResponse {
 	job := store.Job{
 		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
@@ -243,7 +241,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, jobRowToResponse_byScheduled, jobsRowKey_byScheduled)
+		items, next := buildPage(rows, pp.Limit, jobRowToResponseByScheduled, jobsRowKeyByScheduled)
 		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -266,7 +264,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, jobRowToResponse_byStatus, jobsRowKey_byStatus)
+		items, next := buildPage(rows, pp.Limit, jobRowToResponseByStatus, jobsRowKeyByStatus)
 		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -287,7 +285,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "count jobs failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, jobRowToResponse_default, jobsRowKey_default)
+	items, next := buildPage(rows, pp.Limit, jobRowToResponseDefault, jobsRowKeyDefault)
 	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
