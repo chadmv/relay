@@ -9,6 +9,7 @@ import (
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type workerResponse struct {
@@ -48,19 +49,35 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	}
 }
 
+func workersRowKey(w store.Worker) (time.Time, pgtype.UUID) {
+	return w.CreatedAt.Time, w.ID
+}
+
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	workers, err := s.q.ListWorkers(ctx)
+
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := s.q.ListWorkersPage(ctx, store.ListWorkersPageParams{
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list workers failed")
 		return
 	}
-
-	resp := make([]workerResponse, len(workers))
-	for i, wk := range workers {
-		resp[i] = toWorkerResponse(wk)
+	total, err := s.q.CountWorkers(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count workers failed")
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	items, next := buildPage(rows, pp.Limit, toWorkerResponse, workersRowKey)
+	writeJSON(w, http.StatusOK, page[workerResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
