@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "relay-sdk"
+name = "relay-jobs"
 version = "0.1.0"
 description = "Python SDK for relay job submission"
 readme = "README.md"
