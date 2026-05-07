@@ -155,8 +155,9 @@ func TestListScheduledJobs_OwnerOnlySeesOwn(t *testing.T) {
 	srvAlice.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var items []map[string]any
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&items))
+	var envelope pageEnvelope[map[string]any]
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+	items := envelope.Items
 	assert.Len(t, items, 1)
 	assert.Equal(t, "alice-schedule", items[0]["name"])
 }
@@ -178,9 +179,9 @@ func TestListScheduledJobs_AdminSeesAll(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var items []map[string]any
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&items))
-	assert.Len(t, items, 1)
+	var envelope2 pageEnvelope[map[string]any]
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope2))
+	assert.Len(t, envelope2.Items, 1)
 }
 
 func TestGetScheduledJob_NotOwner_Returns404(t *testing.T) {
@@ -287,9 +288,9 @@ func TestListJobs_FilterByScheduledJobID(t *testing.T) {
 	srv.Handler().ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusOK, rec2.Code)
 
-	var list []map[string]any
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&list))
-	assert.Len(t, list, 1)
+	var listEnvelope pageEnvelope[map[string]any]
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&listEnvelope))
+	assert.Len(t, listEnvelope.Items, 1)
 }
 
 func TestListJobs_FilterByScheduledJobID_NonOwnerReturns404(t *testing.T) {

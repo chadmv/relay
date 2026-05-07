@@ -48,10 +48,13 @@ func getUsers(t *testing.T, srv *api.Server, token, query string) (int, []map[st
 	srv.Handler().ServeHTTP(rec, req)
 
 	body := rec.Body.Bytes()
-	// Try array first (success), then object (error).
-	var arr []map[string]any
-	if err := json.Unmarshal(body, &arr); err == nil {
-		return rec.Code, arr, nil
+	// Try envelope (success path), then object (error path).
+	var env pageEnvelope[map[string]any]
+	if err := json.Unmarshal(body, &env); err == nil && rec.Code == http.StatusOK {
+		if env.Items == nil {
+			env.Items = []map[string]any{}
+		}
+		return rec.Code, env.Items, nil
 	}
 	var obj map[string]any
 	_ = json.Unmarshal(body, &obj)
@@ -149,7 +152,8 @@ func TestListUsers_OrderedByCreatedAt(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	require.Len(t, users, 4)
 
-	expected := []string{"admin@test.com", "alice@test.com", "bob@test.com", "carol@test.com"}
+	// Paginated query orders by created_at DESC, so newest users appear first.
+	expected := []string{"carol@test.com", "bob@test.com", "alice@test.com", "admin@test.com"}
 	for i, want := range expected {
 		assert.Equal(t, want, users[i]["email"], "users[%d]", i)
 	}
