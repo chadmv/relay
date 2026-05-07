@@ -73,26 +73,48 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func enrollmentRowToMap(row store.ListActiveAgentEnrollmentsPageRow) map[string]any {
+	entry := map[string]any{
+		"id":         uuidStr(row.ID),
+		"created_at": row.CreatedAt.Time,
+		"expires_at": row.ExpiresAt.Time,
+		"created_by": uuidStr(row.CreatedBy),
+	}
+	if row.HostnameHint != nil {
+		entry["hostname_hint"] = *row.HostnameHint
+	}
+	return entry
+}
+
+func enrollmentRowKey(row store.ListActiveAgentEnrollmentsPageRow) (time.Time, pgtype.UUID) {
+	return row.CreatedAt.Time, row.ID
+}
+
 func (s *Server) handleListAgentEnrollments(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.q.ListActiveAgentEnrollments(r.Context())
+	ctx := r.Context()
+
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := s.q.ListActiveAgentEnrollmentsPage(ctx, store.ListActiveAgentEnrollmentsPageParams{
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list enrollments")
 		return
 	}
-	out := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		entry := map[string]any{
-			"id":         uuidStr(row.ID),
-			"created_at": row.CreatedAt.Time,
-			"expires_at": row.ExpiresAt.Time,
-			"created_by": uuidStr(row.CreatedBy),
-		}
-		if row.HostnameHint != nil {
-			entry["hostname_hint"] = *row.HostnameHint
-		}
-		out = append(out, entry)
+	total, err := s.q.CountActiveAgentEnrollments(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count enrollments")
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	items, next := buildPage(rows, pp.Limit, enrollmentRowToMap, enrollmentRowKey)
+	writeJSON(w, http.StatusOK, page[map[string]any]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleDeleteWorkerToken(w http.ResponseWriter, r *http.Request) {
