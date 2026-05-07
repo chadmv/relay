@@ -35,6 +35,22 @@ func (q *Queries) ConsumeAgentEnrollment(ctx context.Context, arg ConsumeAgentEn
 	return result.RowsAffected(), nil
 }
 
+const countActiveAgentEnrollments = `-- name: CountActiveAgentEnrollments :one
+SELECT COUNT(*) FROM agent_enrollments
+WHERE consumed_at IS NULL AND expires_at > NOW()
+`
+
+// CountActiveAgentEnrollments
+//
+//	SELECT COUNT(*) FROM agent_enrollments
+//	WHERE consumed_at IS NULL AND expires_at > NOW()
+func (q *Queries) CountActiveAgentEnrollments(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveAgentEnrollments)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAgentEnrollment = `-- name: CreateAgentEnrollment :one
 INSERT INTO agent_enrollments (token_hash, hostname_hint, created_by, expires_at)
 VALUES ($1, $2, $3, $4)
@@ -142,6 +158,73 @@ func (q *Queries) ListActiveAgentEnrollments(ctx context.Context) ([]ListActiveA
 	var items []ListActiveAgentEnrollmentsRow
 	for rows.Next() {
 		var i ListActiveAgentEnrollmentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HostnameHint,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveAgentEnrollmentsPage = `-- name: ListActiveAgentEnrollmentsPage :many
+SELECT id, hostname_hint, created_by, created_at, expires_at
+FROM agent_enrollments
+WHERE consumed_at IS NULL
+  AND expires_at > NOW()
+  AND ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListActiveAgentEnrollmentsPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveAgentEnrollmentsPageRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	HostnameHint *string            `json:"hostname_hint"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
+// ListActiveAgentEnrollmentsPage
+//
+//	SELECT id, hostname_hint, created_by, created_at, expires_at
+//	FROM agent_enrollments
+//	WHERE consumed_at IS NULL
+//	  AND expires_at > NOW()
+//	  AND ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListActiveAgentEnrollmentsPage(ctx context.Context, arg ListActiveAgentEnrollmentsPageParams) ([]ListActiveAgentEnrollmentsPageRow, error) {
+	rows, err := q.db.Query(ctx, listActiveAgentEnrollmentsPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveAgentEnrollmentsPageRow
+	for rows.Next() {
+		var i ListActiveAgentEnrollmentsPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.HostnameHint,

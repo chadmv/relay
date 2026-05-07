@@ -50,7 +50,8 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	fs := flag.NewFlagSet("admin users list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	includeArchived := fs.Bool("include-archived", false, "include archived users in the list")
-	if err := fs.Parse(args); err != nil {
+	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
@@ -58,14 +59,15 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	}
 
 	c := cfg.NewClient()
-	path := "/v1/users"
+	params := url.Values{}
 	if *includeArchived {
-		path += "?include_archived=true"
+		params.Set("include_archived", "true")
 	}
-	var users []userListItem
-	if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+	users, total, err := fetchAllPages[userListItem](ctx, c, "/v1/users", params, *limitFlag)
+	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
+	fmt.Fprintf(out, "Total: %d\n", total)
 	printUsersTable(out, users, *includeArchived)
 	return nil
 }
@@ -107,15 +109,15 @@ func doAdminUsersGet(ctx context.Context, cfg *Config, args []string, out io.Wri
 	email := args[0]
 
 	c := cfg.NewClient()
-	var users []userListItem
+	var envelope pageEnvelope[userListItem]
 	path := "/v1/users?email=" + url.QueryEscape(email)
-	if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+	if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
-	if len(users) == 0 {
+	if len(envelope.Items) == 0 {
 		return fmt.Errorf("user not found: %s", email)
 	}
-	printUserDetail(out, users[0])
+	printUserDetail(out, envelope.Items[0])
 	return nil
 }
 
@@ -163,15 +165,15 @@ func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.
 	// directly; otherwise treat it as an email and look up via /v1/users.
 	id := target
 	if !looksLikeUUID(target) {
-		var users []userListItem
+		var envelope pageEnvelope[userListItem]
 		path := "/v1/users?email=" + url.QueryEscape(target)
-		if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+		if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
 			return fmt.Errorf("look up user: %w", err)
 		}
-		if len(users) == 0 {
+		if len(envelope.Items) == 0 {
 			return fmt.Errorf("user not found: %s", target)
 		}
-		id = users[0].ID
+		id = envelope.Items[0].ID
 	}
 
 	var u userListItem
@@ -257,15 +259,15 @@ func doAdminUsersArchiveAction(ctx context.Context, cfg *Config, args []string, 
 
 	id := target
 	if !looksLikeUUID(target) {
-		var users []userListItem
+		var envelope pageEnvelope[userListItem]
 		path := "/v1/users?email=" + url.QueryEscape(target) + "&include_archived=true"
-		if err := c.do(ctx, "GET", path, nil, &users); err != nil {
+		if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
 			return fmt.Errorf("look up user: %w", err)
 		}
-		if len(users) == 0 {
+		if len(envelope.Items) == 0 {
 			return fmt.Errorf("user not found: %s", target)
 		}
-		id = users[0].ID
+		id = envelope.Items[0].ID
 	}
 
 	var u userListItem

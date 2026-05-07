@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -53,10 +54,20 @@ func doReservations(ctx context.Context, cfg *Config, args []string, w io.Writer
 }
 
 func doReservationsList(ctx context.Context, c *Client, args []string, w io.Writer) error {
-	var reservations []reservationResp
-	if err := c.do(ctx, "GET", "/v1/reservations", nil, &reservations); err != nil {
+	fs := flag.NewFlagSet("reservations list", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "output raw JSON")
+	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
+	reservations, total, err := fetchAllPages[reservationResp](ctx, c, "/v1/reservations", nil, *limitFlag)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(w).Encode(reservations)
+	}
+	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tPROJECT\tSTARTS\tENDS")
 	for _, res := range reservations {

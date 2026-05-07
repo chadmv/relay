@@ -171,67 +171,122 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
+func jobsRowKeyDefault(r store.ListJobsWithEmailPageRow) (time.Time, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+func jobsRowKeyByStatus(r store.ListJobsByStatusWithEmailPageRow) (time.Time, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+func jobsRowKeyByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) (time.Time, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+
+func jobRowToResponseDefault(r store.ListJobsWithEmailPageRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+func jobRowToResponseByStatus(r store.ListJobsByStatusWithEmailPageRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+
+	// Branch 1: ?scheduled_job_id=<uuid>
 	if schedIDStr := r.URL.Query().Get("scheduled_job_id"); schedIDStr != "" {
 		schedID, err := parseUUID(schedIDStr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid scheduled_job_id")
 			return
 		}
-		// Enforce ownership: non-admins may only list jobs for schedules they own.
-		// Reuse ownedScheduledJob which returns 404 for non-owner/non-admin callers,
-		// preventing enumeration of another user's job history.
+		// Auth gate runs BEFORE pagination — non-owners get 404, not a paginated empty result.
 		if _, ok := s.ownedScheduledJob(w, r, schedID); !ok {
 			return
 		}
-		rs, err := s.q.ListJobsByScheduledJob(ctx, schedID)
+		rows, err := s.q.ListJobsByScheduledJobWithEmailPage(ctx, store.ListJobsByScheduledJobWithEmailPageParams{
+			ScheduledJobID: schedID,
+			CursorSet:      pp.Cursor.Set,
+			CursorTs:       pp.CursorTs(),
+			CursorID:       pp.Cursor.ID,
+			PageLimit:      pp.Limit,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		resp := make([]jobResponse, len(rs))
-		for i, r := range rs {
-			job := store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
-			resp[i] = toJobResponse(job, r.SubmittedByEmail, nil, nil)
+		total, err := s.q.CountJobsByScheduledJob(ctx, schedID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "count jobs failed")
+			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		items, next := buildPage(rows, pp.Limit, jobRowToResponseByScheduled, jobsRowKeyByScheduled)
+		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
 
-	status := r.URL.Query().Get("status")
-
-	type jobWithEmail struct {
-		job   store.Job
-		email string
-	}
-	var rows []jobWithEmail
-	if status != "" {
-		rs, err := s.q.ListJobsByStatusWithEmail(ctx, status)
+	// Branch 2: ?status=<status>
+	if status := r.URL.Query().Get("status"); status != "" {
+		rows, err := s.q.ListJobsByStatusWithEmailPage(ctx, store.ListJobsByStatusWithEmailPageParams{
+			Status:    status,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		for _, r := range rs {
-			rows = append(rows, jobWithEmail{store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, r.SubmittedByEmail})
-		}
-	} else {
-		rs, err := s.q.ListJobsWithEmail(ctx)
+		total, err := s.q.CountJobsByStatus(ctx, status)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
 		}
-		for _, r := range rs {
-			rows = append(rows, jobWithEmail{store.Job{ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status, SubmittedBy: r.SubmittedBy, Labels: r.Labels, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, r.SubmittedByEmail})
-		}
+		items, next := buildPage(rows, pp.Limit, jobRowToResponseByStatus, jobsRowKeyByStatus)
+		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
+		return
 	}
 
-	resp := make([]jobResponse, len(rows))
-	for i, r := range rows {
-		resp[i] = toJobResponse(r.job, r.email, nil, nil)
+	// Default branch: no filter
+	rows, err := s.q.ListJobsWithEmailPage(ctx, store.ListJobsWithEmailPageParams{
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list jobs failed")
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	total, err := s.q.CountJobs(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count jobs failed")
+		return
+	}
+	items, next := buildPage(rows, pp.Limit, jobRowToResponseDefault, jobsRowKeyDefault)
+	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

@@ -57,6 +57,34 @@ func (q *Queries) CountActiveJobsForSchedule(ctx context.Context, scheduledJobID
 	return count, err
 }
 
+const countScheduledJobs = `-- name: CountScheduledJobs :one
+SELECT COUNT(*) FROM scheduled_jobs
+`
+
+// CountScheduledJobs
+//
+//	SELECT COUNT(*) FROM scheduled_jobs
+func (q *Queries) CountScheduledJobs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countScheduledJobs)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countScheduledJobsByOwner = `-- name: CountScheduledJobsByOwner :one
+SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1
+`
+
+// CountScheduledJobsByOwner
+//
+//	SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1
+func (q *Queries) CountScheduledJobsByOwner(ctx context.Context, ownerID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countScheduledJobsByOwner, ownerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createScheduledJob = `-- name: CreateScheduledJob :one
 INSERT INTO scheduled_jobs (
     name, owner_id, cron_expr, timezone, job_spec,
@@ -252,15 +280,39 @@ func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]Sch
 	return items, nil
 }
 
-const listScheduledJobs = `-- name: ListScheduledJobs :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs ORDER BY created_at DESC
+const listScheduledJobsByOwnerPage = `-- name: ListScheduledJobsByOwnerPage :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND ($2::bool = FALSE
+       OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $5::int + 1
 `
 
-// ListScheduledJobs
+type ListScheduledJobsByOwnerPageParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+// ListScheduledJobsByOwnerPage
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs ORDER BY created_at DESC
-func (q *Queries) ListScheduledJobs(ctx context.Context) ([]ScheduledJob, error) {
-	rows, err := q.db.Query(ctx, listScheduledJobs)
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND ($2::bool = FALSE
+//	       OR (created_at, id) < ($3::timestamptz, $4::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $5::int + 1
+func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListScheduledJobsByOwnerPageParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPage,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -293,15 +345,35 @@ func (q *Queries) ListScheduledJobs(ctx context.Context) ([]ScheduledJob, error)
 	return items, nil
 }
 
-const listScheduledJobsByOwner = `-- name: ListScheduledJobsByOwner :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs WHERE owner_id = $1 ORDER BY created_at DESC
+const listScheduledJobsPage = `-- name: ListScheduledJobsPage :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
 `
 
-// ListScheduledJobsByOwner
+type ListScheduledJobsPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+// ListScheduledJobsPage
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs WHERE owner_id = $1 ORDER BY created_at DESC
-func (q *Queries) ListScheduledJobsByOwner(ctx context.Context, ownerID pgtype.UUID) ([]ScheduledJob, error) {
-	rows, err := q.db.Query(ctx, listScheduledJobsByOwner, ownerID)
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJobsPageParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

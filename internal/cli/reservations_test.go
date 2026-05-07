@@ -20,8 +20,11 @@ func TestReservations_ListCreateDelete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/reservations":
-			json.NewEncoder(w).Encode([]reservationResp{
-				{ID: "res-1", Name: "film-x-weekend", StartsAt: &now},
+			json.NewEncoder(w).Encode(pageEnvelope[reservationResp]{
+				Items: []reservationResp{
+					{ID: "res-1", Name: "film-x-weekend", StartsAt: &now},
+				},
+				Total: 1,
 			})
 
 		case r.Method == "POST" && r.URL.Path == "/v1/reservations":

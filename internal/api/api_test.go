@@ -155,9 +155,9 @@ func TestListWorkers(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	var workers []any
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&workers))
-	assert.Empty(t, workers)
+	var resp pageEnvelope[any]
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Items)
 }
 
 func TestSSESubscribe(t *testing.T) {

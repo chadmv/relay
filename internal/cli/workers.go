@@ -64,16 +64,18 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 func doWorkersList(ctx context.Context, c *Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
+	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	var workers []workerResp
-	if err := c.do(ctx, "GET", "/v1/workers", nil, &workers); err != nil {
+	workers, total, err := fetchAllPages[workerResp](ctx, c, "/v1/workers", nil, *limitFlag)
+	if err != nil {
 		return err
 	}
 	if *asJSON {
 		return json.NewEncoder(w).Encode(workers)
 	}
+	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tCPU\tRAM GB\tGPUS\tGPU MODEL")
 	for _, wk := range workers {
@@ -136,8 +138,8 @@ func resolveWorkerID(ctx context.Context, c *Client, target string) (string, err
 	if looksLikeUUID(target) {
 		return target, nil
 	}
-	var workers []workerResp
-	if err := c.do(ctx, "GET", "/v1/workers", nil, &workers); err != nil {
+	workers, _, err := fetchAllPages[workerResp](ctx, c, "/v1/workers", nil, 0)
+	if err != nil {
 		return "", fmt.Errorf("list workers: %w", err)
 	}
 	for _, wk := range workers {

@@ -585,6 +585,7 @@ List jobs.
 ```sh
 relay list                     # all jobs, table format
 relay list --status running    # filter by status
+relay list --limit 10          # first 10 jobs
 relay list --json              # JSON output
 ```
 
@@ -636,8 +637,11 @@ Output format:
 
 #### `relay workers list`
 
+> **Note:** order changed to `created_at DESC` (previously alphabetical by name).
+
 ```sh
 relay workers list
+relay workers list --limit 10
 relay workers list --json
 ```
 
@@ -834,14 +838,17 @@ The `relay admin` subcommand group bundles operations that require an admin toke
 
 #### `relay admin users list`
 
+> **Note:** order changed to `created_at DESC` (previously `created_at ASC`). Output includes a `Total: N` header line.
+
 List every user in the system.
 
 ```sh
 relay admin users list
 relay admin users list --include-archived
+relay admin users list --limit 25
 ```
 
-Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`. Pass `--include-archived` to include archived users in the output.
+Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`. Pass `--include-archived` to include archived users in the output. Pass `--limit N` to control page size (default 50, max 200).
 
 ---
 
@@ -916,6 +923,37 @@ relay admin passwd user@example.com
 
 The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `/health`, `/auth/login`, and `/auth/register` require `Authorization: Bearer <token>`.
 
+### Pagination
+
+List endpoints that can return large result sets support cursor-based pagination via two query parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `limit` | 50 | Rows per page. Range: 1–200. Out-of-range → 400. |
+| `cursor` | _(none)_ | Opaque cursor from the previous page's `next_cursor` field. Absent on the first request. |
+
+All paginated endpoints return this envelope:
+
+```json
+{
+  "items": [ ... ],
+  "next_cursor": "eyJ0IjoiMjAyNi0wNC0xNlQxMDowMDowMFoiLCJpIjoiYWJjZCJ9",
+  "total": 274
+}
+```
+
+- `items` — the rows for this page (up to `limit` rows)
+- `next_cursor` — opaque base64 token for the next page; empty string `""` means this is the last page
+- `total` — server-side count of all matching rows (consistent across pages)
+
+**Clients must treat `next_cursor` as opaque.** Its format is server-internal and may change without notice.
+
+Paginated endpoints sort by `created_at DESC, id DESC`.
+
+**Ordering notes:**
+- `GET /v1/workers` changed from alphabetical-by-name to `created_at DESC, id DESC`.
+- `GET /v1/users` changed from `created_at ASC` to `created_at DESC`.
+
 ### Public
 
 | Method | Path | Description |
@@ -964,7 +1002,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. |
+| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. Paginated. |
 | `POST` | `/v1/users` | Create a user (body: `email`, `password`, optional `name`, optional `is_admin`) |
 | `POST` | `/v1/users/password-reset` | Reset a user's password (body: `email`, `new_password`); revokes all of their sessions |
 | `PATCH` | `/v1/users/me` | Update own profile (body: `name`) |
@@ -977,7 +1015,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/jobs` | Submit a job |
-| `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional) |
+| `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional). Paginated. |
 | `GET` | `/v1/jobs/{id}` | Get a job |
 | `DELETE` | `/v1/jobs/{id}` | Cancel a job (`?force=true` for forced termination, skips pipe drain and workspace cleanup) |
 | `GET` | `/v1/jobs/{id}/tasks` | List tasks for a job |
@@ -993,7 +1031,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/workers` | List workers |
+| `GET` | `/v1/workers` | List workers. Paginated. Order: created_at DESC (changed from name ASC). |
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
@@ -1006,7 +1044,7 @@ All reservation endpoints are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/reservations` | List reservations |
+| `GET` | `/v1/reservations` | List reservations. Paginated. |
 | `POST` | `/v1/reservations` | Create a reservation |
 | `DELETE` | `/v1/reservations/{id}` | Delete a reservation |
 
@@ -1017,7 +1055,7 @@ All agent-enrollment endpoints are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/agent-enrollments` | Create a one-time enrollment token |
-| `GET` | `/v1/agent-enrollments` | List active (unexpired, unconsumed) enrollments |
+| `GET` | `/v1/agent-enrollments` | List active (unexpired, unconsumed) enrollments. Paginated. |
 
 **POST `/v1/agent-enrollments`** body:
 
@@ -1060,7 +1098,7 @@ Returns the raw token once:
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/scheduled-jobs` | Create a scheduled job |
-| `GET` | `/v1/scheduled-jobs` | List scheduled jobs (own schedules; admins see all) |
+| `GET` | `/v1/scheduled-jobs` | List scheduled jobs (own schedules; admins see all). Paginated. |
 | `GET` | `/v1/scheduled-jobs/{id}` | Get a scheduled job |
 | `PATCH` | `/v1/scheduled-jobs/{id}` | Update a scheduled job |
 | `DELETE` | `/v1/scheduled-jobs/{id}` | Delete a scheduled job |

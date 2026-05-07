@@ -39,8 +39,11 @@ func TestWorkersRevoke_ByHostname(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/workers":
-			json.NewEncoder(w).Encode([]workerResp{
-				{ID: workerID, Hostname: "render-node-42", Status: "online"},
+			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+				Items: []workerResp{
+					{ID: workerID, Hostname: "render-node-42", Status: "online"},
+				},
+				Total: 1,
 			})
 		case r.Method == "DELETE" && r.URL.Path == "/v1/workers/"+workerID+"/token":
 			deleted = true
@@ -64,8 +67,11 @@ func TestWorkersRevoke_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method)
 		require.Equal(t, "/v1/workers", r.URL.Path)
-		json.NewEncoder(w).Encode([]workerResp{
-			{ID: "00000000-0000-0000-0000-000000000003", Hostname: "other-node", Status: "online"},
+		json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			Items: []workerResp{
+				{ID: "00000000-0000-0000-0000-000000000003", Hostname: "other-node", Status: "online"},
+			},
+			Total: 1,
 		})
 	}))
 	defer srv.Close()

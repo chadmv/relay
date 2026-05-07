@@ -12,24 +12,43 @@ FROM jobs j
 JOIN users u ON u.id = j.submitted_by
 WHERE j.id = $1;
 
--- name: ListJobs :many
-SELECT * FROM jobs ORDER BY created_at DESC;
-
--- name: ListJobsWithEmail :many
+-- name: ListJobsWithEmailPage :many
 SELECT j.*, u.email AS submitted_by_email
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
-ORDER BY j.created_at DESC;
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY j.created_at DESC, j.id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
 
--- name: ListJobsByStatus :many
-SELECT * FROM jobs WHERE status = $1 ORDER BY created_at DESC;
+-- name: CountJobs :one
+SELECT COUNT(*) FROM jobs;
 
--- name: ListJobsByStatusWithEmail :many
+-- name: ListJobsByStatusWithEmailPage :many
 SELECT j.*, u.email AS submitted_by_email
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
-WHERE j.status = $1
-ORDER BY j.created_at DESC;
+WHERE j.status = sqlc.arg(status)::text
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY j.created_at DESC, j.id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountJobsByStatus :one
+SELECT COUNT(*) FROM jobs WHERE status = $1;
+
+-- name: ListJobsByScheduledJobWithEmailPage :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.scheduled_job_id = sqlc.arg(scheduled_job_id)::uuid
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY j.created_at DESC, j.id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountJobsByScheduledJob :one
+SELECT COUNT(*) FROM jobs WHERE scheduled_job_id = $1;
 
 -- name: UpdateJobStatus :one
 UPDATE jobs
@@ -41,6 +60,7 @@ RETURNING *;
 DELETE FROM jobs WHERE id = $1;
 
 -- name: ListJobsByScheduledJob :many
+-- Internal use only (schedrunner tests). Not paginated.
 SELECT j.*, u.email AS submitted_by_email
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by

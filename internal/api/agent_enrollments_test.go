@@ -106,8 +106,9 @@ func TestListAgentEnrollments_AdminOnly(t *testing.T) {
 	srv.Handler().ServeHTTP(rec2, req2)
 	require.Equal(t, http.StatusOK, rec2.Code)
 
-	var items []map[string]any
-	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&items))
+	var envelope pageEnvelope[map[string]any]
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&envelope))
+	items := envelope.Items
 	assert.GreaterOrEqual(t, len(items), 1)
 
 	// Items must NOT have "token" or "token_hash" keys

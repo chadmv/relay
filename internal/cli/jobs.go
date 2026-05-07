@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -44,7 +45,7 @@ type taskResp struct {
 func ListCommand() Command {
 	return Command{
 		Name:  "list",
-		Usage: "list jobs [--status <status>] [--json]",
+		Usage: "list jobs [--status <status>] [--limit N] [--json]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doListJobs(ctx, cfg, args, os.Stdout)
 		},
@@ -77,6 +78,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	status := fs.String("status", "", "filter by status")
 	asJSON := fs.Bool("json", false, "output raw JSON")
+	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
@@ -85,17 +87,18 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	}
 	c := cfg.NewClient()
 
-	path := "/v1/jobs"
+	params := url.Values{}
 	if *status != "" {
-		path += "?status=" + *status
+		params.Set("status", *status)
 	}
-	var jobs []jobResp
-	if err := c.do(ctx, "GET", path, nil, &jobs); err != nil {
+	jobs, total, err := fetchAllPages[jobResp](ctx, c, "/v1/jobs", params, *limitFlag)
+	if err != nil {
 		return err
 	}
 	if *asJSON {
 		return json.NewEncoder(w).Encode(jobs)
 	}
+	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tSUBMITTED BY\tCREATED")
 	for _, j := range jobs {

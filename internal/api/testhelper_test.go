@@ -16,6 +16,14 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// pageEnvelope mirrors the API's response envelope so tests can decode list
+// endpoints without depending on the api package's internal page[T] type.
+type pageEnvelope[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"next_cursor"`
+	Total      int64  `json:"total"`
+}
+
 // installFailDeleteTrigger attaches a BEFORE DELETE trigger to the named table
 // that raises a SQL error on every DELETE. Used to simulate a DB error on the
 // session-revocation step of password handlers without breaking SELECTs that
