@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -388,4 +389,83 @@ func TestAdminUsersCreate_NotLoggedIn(t *testing.T) {
 	}, &out)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not logged in")
+}
+
+func TestAdminUsersArchive_HappyPath(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path+"?"+r.URL.RawQuery
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/users":
+			// email lookup
+			_, _ = w.Write([]byte(`[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null}]`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/archive"):
+			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "t"}
+	out := &bytes.Buffer{}
+	err := doAdminUsers(context.Background(), cfg, []string{"archive", "alice@test.com"}, out)
+	require.NoError(t, err)
+	assert.Equal(t, "POST", gotMethod)
+	assert.Contains(t, gotPath, "/archive")
+	assert.Contains(t, out.String(), "Archived: 2026-05-05T12:00:00Z")
+}
+
+func TestAdminUsersUnarchive_HappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/users":
+			_, _ = w.Write([]byte(`[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}]`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/unarchive"):
+			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null}`))
+		default:
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "t"}
+	out := &bytes.Buffer{}
+	err := doAdminUsers(context.Background(), cfg, []string{"unarchive", "alice@test.com"}, out)
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "Archived: no")
+}
+
+func TestAdminUsersArchive_NotLoggedIn(t *testing.T) {
+	cfg := &Config{ServerURL: "http://unused", Token: ""}
+	err := doAdminUsers(context.Background(), cfg, []string{"archive", "alice@test.com"}, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not logged in")
+}
+
+func TestAdminUsersArchive_MissingArg(t *testing.T) {
+	cfg := &Config{ServerURL: "http://unused", Token: "t"}
+	err := doAdminUsers(context.Background(), cfg, []string{"archive"}, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "usage:")
+}
+
+func TestAdminUsersList_IncludeArchived(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`[
+			{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"A","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null},
+			{"id":"00000000-0000-0000-0000-000000000002","email":"bob@test.com","name":"B","is_admin":false,"created_at":"2026-01-02T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "t"}
+	out := &bytes.Buffer{}
+	err := doAdminUsers(context.Background(), cfg, []string{"list", "--include-archived"}, out)
+	require.NoError(t, err)
+	assert.Equal(t, "include_archived=true", gotQuery)
+	assert.Contains(t, out.String(), "ARCHIVED")
+	assert.Contains(t, out.String(), "2026-05-05")
 }

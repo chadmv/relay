@@ -838,9 +838,10 @@ List every user in the system.
 
 ```sh
 relay admin users list
+relay admin users list --include-archived
 ```
 
-Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`.
+Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`. Pass `--include-archived` to include archived users in the output.
 
 ---
 
@@ -877,6 +878,26 @@ Update a user's display name. The positional argument may be either an email or 
 
 ```sh
 relay admin users update user@example.com --name "New Name"
+```
+
+---
+
+#### `relay admin users archive`
+
+Soft-delete a user (admin only). The user can no longer log in and all of their API tokens are revoked. The account record is retained and can be restored with `relay admin users unarchive`. The positional argument may be either an email or a UUID.
+
+```sh
+relay admin users archive user@example.com
+```
+
+---
+
+#### `relay admin users unarchive`
+
+Restore an archived user (admin only). The account is re-activated but previously revoked tokens are not restored — the user will need to log in again. The positional argument may be either an email or a UUID.
+
+```sh
+relay admin users unarchive user@example.com
 ```
 
 ---
@@ -943,11 +964,13 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup) |
+| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. |
 | `POST` | `/v1/users` | Create a user (body: `email`, `password`, optional `name`, optional `is_admin`) |
 | `POST` | `/v1/users/password-reset` | Reset a user's password (body: `email`, `new_password`); revokes all of their sessions |
 | `PATCH` | `/v1/users/me` | Update own profile (body: `name`) |
 | `PATCH` | `/v1/users/{id}` | Update a user (body: `name`) |
+| `POST` | `/v1/users/{id}/archive` | Archive (soft-delete) a user. Revokes all of their API tokens. |
+| `POST` | `/v1/users/{id}/unarchive` | Restore an archived user. Old tokens stay revoked. |
 
 ### Jobs
 

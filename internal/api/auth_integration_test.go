@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -582,6 +583,46 @@ func TestRegister_SelfServe_DuplicateEmail(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "email already registered", resp["error"])
+}
+
+func TestLogin_ArchivedUserRejectedGenericMessage(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+
+	// Set alice's password so we can attempt login with the correct one.
+	hash, err := bcrypt.GenerateFromPassword([]byte("alicepass"), bcrypt.MinCost)
+	require.NoError(t, err)
+	require.NoError(t, q.SetPasswordHash(t.Context(), store.SetPasswordHashParams{
+		ID: alice.ID, PasswordHash: string(hash),
+	}))
+
+	// Archive alice.
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	tries := []struct {
+		email, password string
+	}{
+		{"alice@test.com", "alicepass"},  // archived + correct password
+		{"alice@test.com", "wrongpass"},  // archived + wrong password
+		{"nobody@test.com", "anything"},  // unknown email
+		{"admin@test.com", "wrongpass"},  // active + wrong password
+	}
+	for _, tt := range tries {
+		body, _ := json.Marshal(map[string]string{"email": tt.email, "password": tt.password})
+		req := httptest.NewRequest("POST", "/v1/auth/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "case %+v", tt)
+		var resp map[string]any
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, "invalid email or password", resp["error"], "case %+v", tt)
+	}
 }
 
 // TestChangePassword_TokenDeleteFails_RollsBackPassword verifies that if the
