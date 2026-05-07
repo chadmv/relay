@@ -21,7 +21,12 @@ func TestSchedulesList_Success(t *testing.T) {
 		require.Equal(t, "/v1/scheduled-jobs", r.URL.Path)
 		require.Equal(t, "Bearer tkn", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `[{"id":"abc","name":"n","cron_expr":"@hourly","timezone":"UTC","enabled":true,"next_run_at":"2026-04-22T00:00:00Z"}]`)
+		json.NewEncoder(w).Encode(pageEnvelope[scheduleResp]{
+			Items: []scheduleResp{
+				{ID: "abc", Name: "n", CronExpr: "@hourly", Timezone: "UTC", Enabled: true},
+			},
+			Total: 1,
+		})
 	}))
 	defer srv.Close()
 	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}

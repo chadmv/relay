@@ -104,8 +104,9 @@ func TestDoWorkersWorkspaces_ResolvesHostname(t *testing.T) {
 	const workerID = "00000000-0000-0000-0000-000000000001"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/workers" {
-			json.NewEncoder(w).Encode([]map[string]any{
-				{"id": workerID, "hostname": "builder-01"},
+			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+				Items: []workerResp{{ID: workerID, Hostname: "builder-01"}},
+				Total: 1,
 			})
 			return
 		}
@@ -125,8 +126,9 @@ func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
 	var evictCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/workers" {
-			json.NewEncoder(w).Encode([]map[string]any{
-				{"id": workerID, "hostname": "builder-01"},
+			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+				Items: []workerResp{{ID: workerID, Hostname: "builder-01"}},
+				Total: 1,
 			})
 			return
 		}
@@ -146,8 +148,9 @@ func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
 func TestDoWorkersWorkspaces_UnknownHostname(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/workers", r.URL.Path)
-		json.NewEncoder(w).Encode([]map[string]any{
-			{"id": "00000000-0000-0000-0000-000000000001", "hostname": "other-host"},
+		json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			Items: []workerResp{{ID: "00000000-0000-0000-0000-000000000001", Hostname: "other-host"}},
+			Total: 1,
 		})
 	}))
 	defer srv.Close()

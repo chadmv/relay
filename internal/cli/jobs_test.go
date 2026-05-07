@@ -20,8 +20,11 @@ func TestListJobs_TableOutput(t *testing.T) {
 		require.Equal(t, "GET", r.Method)
 		require.Equal(t, "/v1/jobs", r.URL.Path)
 		require.Equal(t, "Bearer tok", r.Header.Get("Authorization"))
-		json.NewEncoder(w).Encode([]jobResp{
-			{ID: "job-1", Name: "render-a", Status: "done", CreatedAt: time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)},
+		json.NewEncoder(w).Encode(pageEnvelope[jobResp]{
+			Items: []jobResp{
+				{ID: "job-1", Name: "render-a", Status: "done", CreatedAt: time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)},
+			},
+			Total: 1,
 		})
 	}))
 	defer srv.Close()
@@ -33,12 +36,13 @@ func TestListJobs_TableOutput(t *testing.T) {
 	require.Contains(t, out.String(), "job-1")
 	require.Contains(t, out.String(), "render-a")
 	require.Contains(t, out.String(), "done")
+	require.Contains(t, out.String(), "Total:")
 }
 
 func TestListJobs_StatusFilter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "running", r.URL.Query().Get("status"))
-		json.NewEncoder(w).Encode([]jobResp{})
+		json.NewEncoder(w).Encode(pageEnvelope[jobResp]{Items: []jobResp{}, Total: 0})
 	}))
 	defer srv.Close()
 
@@ -87,7 +91,10 @@ func TestCancelJob_PrintsID(t *testing.T) {
 
 func TestListJobs_JSONFlag(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]jobResp{{ID: "job-1", Name: "render-a", Status: "done"}})
+		json.NewEncoder(w).Encode(pageEnvelope[jobResp]{
+			Items: []jobResp{{ID: "job-1", Name: "render-a", Status: "done"}},
+			Total: 1,
+		})
 	}))
 	defer srv.Close()
 

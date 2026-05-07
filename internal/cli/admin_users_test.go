@@ -19,23 +19,25 @@ func TestAdminUsersList_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method)
 		require.Equal(t, "/v1/users", r.URL.Path)
-		require.Equal(t, "", r.URL.RawQuery)
 		require.Equal(t, "Bearer admintoken", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{
-				"id":         "11111111-1111-1111-1111-111111111111",
-				"email":      "admin@test.com",
-				"name":       "Admin",
-				"is_admin":   true,
-				"created_at": "2026-04-01T12:00:00Z",
+		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+			Items: []map[string]any{
+				{
+					"id":         "11111111-1111-1111-1111-111111111111",
+					"email":      "admin@test.com",
+					"name":       "Admin",
+					"is_admin":   true,
+					"created_at": "2026-04-01T12:00:00Z",
+				},
+				{
+					"id":         "22222222-2222-2222-2222-222222222222",
+					"email":      "alice@test.com",
+					"name":       "Alice",
+					"is_admin":   false,
+					"created_at": "2026-04-02T12:00:00Z",
+				},
 			},
-			{
-				"id":         "22222222-2222-2222-2222-222222222222",
-				"email":      "alice@test.com",
-				"name":       "Alice",
-				"is_admin":   false,
-				"created_at": "2026-04-02T12:00:00Z",
-			},
+			Total: 2,
 		})
 	}))
 	defer srv.Close()
@@ -52,6 +54,7 @@ func TestAdminUsersList_Success(t *testing.T) {
 	require.Contains(t, got, "Alice")
 	require.Contains(t, got, "yes") // is_admin=true
 	require.Contains(t, got, "no")  // is_admin=false
+	require.Contains(t, got, "Total:")
 }
 
 func TestAdminUsersList_NotLoggedIn(t *testing.T) {
@@ -68,14 +71,15 @@ func TestAdminUsersGet_Success(t *testing.T) {
 		require.Equal(t, "/v1/users", r.URL.Path)
 		require.Equal(t, "email=alice%40test.com", r.URL.RawQuery)
 		require.Equal(t, "Bearer admintoken", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{
+		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+			Items: []map[string]any{{
 				"id":         "22222222-2222-2222-2222-222222222222",
 				"email":      "alice@test.com",
 				"name":       "Alice",
 				"is_admin":   false,
 				"created_at": "2026-04-02T12:00:00Z",
-			},
+			}},
+			Total: 1,
 		})
 	}))
 	defer srv.Close()
@@ -99,7 +103,7 @@ func TestAdminUsersGet_Success(t *testing.T) {
 
 func TestAdminUsersGet_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]map[string]any{})
+		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
 	}))
 	defer srv.Close()
 
@@ -163,13 +167,16 @@ func TestAdminUsersUpdate_ByEmail(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/users":
 			require.Equal(t, "email=alice%40test.com", r.URL.RawQuery)
-			_ = json.NewEncoder(w).Encode([]map[string]any{{
-				"id":         targetID,
-				"email":      "alice@test.com",
-				"name":       "Alice",
-				"is_admin":   false,
-				"created_at": "2026-04-02T12:00:00Z",
-			}})
+			_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+				Items: []map[string]any{{
+					"id":         targetID,
+					"email":      "alice@test.com",
+					"name":       "Alice",
+					"is_admin":   false,
+					"created_at": "2026-04-02T12:00:00Z",
+				}},
+				Total: 1,
+			})
 		case r.Method == "PATCH" && r.URL.Path == "/v1/users/"+targetID:
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
@@ -200,7 +207,7 @@ func TestAdminUsersUpdate_EmailNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method, "should not call PATCH when email lookup misses")
 		require.Equal(t, "/v1/users", r.URL.Path)
-		_ = json.NewEncoder(w).Encode([]map[string]any{})
+		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
 	}))
 	defer srv.Close()
 
@@ -398,7 +405,7 @@ func TestAdminUsersArchive_HappyPath(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/users":
 			// email lookup
-			_, _ = w.Write([]byte(`[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null}]`))
+			_, _ = w.Write([]byte(`{"items":[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null}],"next_cursor":"","total":1}`))
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/archive"):
 			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}`))
 		default:
@@ -420,7 +427,7 @@ func TestAdminUsersUnarchive_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/users":
-			_, _ = w.Write([]byte(`[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}]`))
+			_, _ = w.Write([]byte(`{"items":[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}],"next_cursor":"","total":1}`))
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/unarchive"):
 			_, _ = w.Write([]byte(`{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"Alice","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null}`))
 		default:
@@ -454,10 +461,7 @@ func TestAdminUsersList_IncludeArchived(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		_, _ = w.Write([]byte(`[
-			{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"A","is_admin":false,"created_at":"2026-01-01T00:00:00Z","archived_at":null},
-			{"id":"00000000-0000-0000-0000-000000000002","email":"bob@test.com","name":"B","is_admin":false,"created_at":"2026-01-02T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}
-		]`))
+		_, _ = w.Write([]byte(`{"items":[{"id":"00000000-0000-0000-0000-000000000001","email":"alice@test.com","name":"A","is_admin":false,"created_at":"2026-01-01T00:00:00Z"},{"id":"00000000-0000-0000-0000-000000000002","email":"bob@test.com","name":"B","is_admin":false,"created_at":"2026-01-02T00:00:00Z","archived_at":"2026-05-05T12:00:00Z"}],"next_cursor":"","total":2}`))
 	}))
 	defer srv.Close()
 
@@ -465,7 +469,8 @@ func TestAdminUsersList_IncludeArchived(t *testing.T) {
 	out := &bytes.Buffer{}
 	err := doAdminUsers(context.Background(), cfg, []string{"list", "--include-archived"}, out)
 	require.NoError(t, err)
-	assert.Equal(t, "include_archived=true", gotQuery)
+	assert.Contains(t, gotQuery, "include_archived=true")
+	assert.Contains(t, gotQuery, "limit=200")
 	assert.Contains(t, out.String(), "ARCHIVED")
 	assert.Contains(t, out.String(), "2026-05-05")
 }
