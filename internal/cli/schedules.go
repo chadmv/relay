@@ -59,14 +59,24 @@ func doSchedules(ctx context.Context, cfg *Config, args []string, w io.Writer) e
 	}
 }
 
-func doSchedulesList(ctx context.Context, c *Client, _ []string, w io.Writer) error {
-	var out []scheduleResp
-	if err := c.do(ctx, "GET", "/v1/scheduled-jobs", nil, &out); err != nil {
+func doSchedulesList(ctx context.Context, c *Client, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("schedules list", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "output raw JSON")
+	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
+	schedules, total, err := fetchAllPages[scheduleResp](ctx, c, "/v1/scheduled-jobs", nil, *limitFlag)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(w).Encode(schedules)
+	}
+	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tCRON\tTZ\tENABLED\tNEXT")
-	for _, s := range out {
+	for _, s := range schedules {
 		next := ""
 		if s.NextRunAt != nil {
 			next = s.NextRunAt.Format("2006-01-02 15:04")
