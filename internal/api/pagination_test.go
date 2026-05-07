@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -53,4 +54,48 @@ func TestCursor_InvalidJSON(t *testing.T) {
 	// Valid base64 wrapping non-JSON contents.
 	_, err := decodeCursor("bm90LWpzb24") // base64url("not-json")
 	assert.ErrorIs(t, err, errBadCursor)
+}
+
+func TestParsePage_Defaults(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v1/jobs", nil)
+	w := httptest.NewRecorder()
+	pp, ok := parsePage(w, r)
+	require.True(t, ok)
+	assert.Equal(t, defaultLimit, pp.Limit)
+	assert.False(t, pp.Cursor.Set)
+}
+
+func TestParsePage_LimitClamping(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantOK  bool
+		wantLim int32
+	}{
+		{"valid mid", "?limit=37", true, 37},
+		{"max", "?limit=200", true, 200},
+		{"zero rejected", "?limit=0", false, 0},
+		{"negative rejected", "?limit=-5", false, 0},
+		{"over max rejected", "?limit=201", false, 0},
+		{"non-numeric rejected", "?limit=abc", false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/v1/jobs"+tc.query, nil)
+			w := httptest.NewRecorder()
+			pp, ok := parsePage(w, r)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.wantLim, pp.Limit)
+			}
+		})
+	}
+}
+
+func TestParsePage_BadCursor(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v1/jobs?cursor=garbage!!!", nil)
+	w := httptest.NewRecorder()
+	_, ok := parsePage(w, r)
+	assert.False(t, ok)
+	assert.Equal(t, 400, w.Code)
 }

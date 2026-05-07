@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -63,4 +65,53 @@ func decodeCursor(s string) (cursor, error) {
 		return cursor{}, errBadCursor
 	}
 	return cursor{Set: true, T: t, ID: id}, nil
+}
+
+const (
+	defaultLimit int32 = 50
+	maxLimit     int32 = 200
+)
+
+// pageParams captures validated pagination input from the URL query string.
+type pageParams struct {
+	Limit  int32
+	Cursor cursor
+}
+
+// CursorTs returns the cursor timestamp as a pgtype.Timestamptz. The Valid
+// flag tracks whether the cursor was actually sent (first-page requests
+// produce a zero, invalid value).
+func (p pageParams) CursorTs() pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: p.Cursor.T, Valid: p.Cursor.Set}
+}
+
+// LimitPlusOne returns Limit+1 — handlers pass this to the SQL layer so
+// queries fetch one extra row, used by buildPage to detect "more available"
+// without a follow-up COUNT.
+func (p pageParams) LimitPlusOne() int32 {
+	return p.Limit + 1
+}
+
+// parsePage extracts ?limit= and ?cursor= from the request. On invalid
+// input it writes the 400 response itself and returns ok=false. Defaults:
+// limit=50. Range: [1, 200]. Bad cursor → 400 with body "invalid cursor".
+func parsePage(w http.ResponseWriter, r *http.Request) (pageParams, bool) {
+	pp := pageParams{Limit: defaultLimit}
+
+	if s := r.URL.Query().Get("limit"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 32)
+		if err != nil || n < 1 || n > int64(maxLimit) {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return pageParams{}, false
+		}
+		pp.Limit = int32(n)
+	}
+
+	c, err := decodeCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return pageParams{}, false
+	}
+	pp.Cursor = c
+	return pp, true
 }
