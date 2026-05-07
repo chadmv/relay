@@ -45,7 +45,7 @@ type taskResp struct {
 func ListCommand() Command {
 	return Command{
 		Name:  "list",
-		Usage: "list jobs [--status <status>] [--json]",
+		Usage: "list jobs [--status <status>] [--limit N] [--json]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doListJobs(ctx, cfg, args, os.Stdout)
 		},

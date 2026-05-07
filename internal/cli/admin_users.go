@@ -51,7 +51,7 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	fs.SetOutput(io.Discard)
 	includeArchived := fs.Bool("include-archived", false, "include archived users in the list")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
