@@ -167,28 +167,61 @@ func (s *Server) ownedScheduledJob(w http.ResponseWriter, r *http.Request, id pg
 	return row, true
 }
 
+func scheduledJobsRowKey(s store.ScheduledJob) (time.Time, pgtype.UUID) {
+	return s.CreatedAt.Time, s.ID
+}
+
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
 	u, ok := UserFromCtx(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	var rows []store.ScheduledJob
-	var err error
-	if u.IsAdmin {
-		rows, err = s.q.ListScheduledJobs(r.Context())
-	} else {
-		rows, err = s.q.ListScheduledJobsByOwner(r.Context(), u.ID)
+
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
 	}
+
+	if u.IsAdmin {
+		rows, err := s.q.ListScheduledJobsPage(r.Context(), store.ListScheduledJobsPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		total, err := s.q.CountScheduledJobs(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+			return
+		}
+		items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
+		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
+		return
+	}
+
+	rows, err := s.q.ListScheduledJobsByOwnerPage(r.Context(), store.ListScheduledJobsByOwnerPageParams{
+		OwnerID:   u.ID,
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
 		return
 	}
-	out := make([]scheduledJobResponse, len(rows))
-	for i, row := range rows {
-		out[i] = toScheduledJobResponse(row)
+	total, err := s.q.CountScheduledJobsByOwner(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
+	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleGetScheduledJob(w http.ResponseWriter, r *http.Request) {
