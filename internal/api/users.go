@@ -66,53 +66,90 @@ func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, boo
 	return name, true
 }
 
+func usersListRowKey(r store.ListUsersPageRow) (time.Time, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+func usersListIncArchivedRowKey(r store.ListUsersIncludingArchivedPageRow) (time.Time, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+
+func usersListRowToResponse(r store.ListUsersPageRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+func usersListIncArchivedRowToResponse(r store.ListUsersIncludingArchivedPageRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	includeArchived := r.URL.Query().Get("include_archived") == "true"
 
+	// ?email=<exact> branch — at most one row, but still wrapped in the envelope
+	// for shape uniformity (so SPA clients parse one shape per endpoint).
 	if email := r.URL.Query().Get("email"); email != "" {
 		u, err := s.q.GetUserByEmailPublic(r.Context(), email)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				writeJSON(w, http.StatusOK, []userResponse{})
+				writeJSON(w, http.StatusOK, page[userResponse]{Items: []userResponse{}, NextCursor: "", Total: 0})
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to look up user")
 			return
 		}
 		if u.ArchivedAt.Valid && !includeArchived {
-			writeJSON(w, http.StatusOK, []userResponse{})
+			writeJSON(w, http.StatusOK, page[userResponse]{Items: []userResponse{}, NextCursor: "", Total: 0})
 			return
 		}
-		writeJSON(w, http.StatusOK, []userResponse{
-			toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt),
+		writeJSON(w, http.StatusOK, page[userResponse]{
+			Items:      []userResponse{toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt)},
+			NextCursor: "",
+			Total:      1,
 		})
 		return
 	}
 
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+
 	if includeArchived {
-		rows, err := s.q.ListUsersIncludingArchived(r.Context())
+		rows, err := s.q.ListUsersIncludingArchivedPage(r.Context(), store.ListUsersIncludingArchivedPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list users")
 			return
 		}
-		out := make([]userResponse, 0, len(rows))
-		for _, row := range rows {
-			out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
+		total, err := s.q.CountUsersIncludingArchived(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to count users")
+			return
 		}
-		writeJSON(w, http.StatusOK, out)
+		items, next := buildPage(rows, pp.Limit, usersListIncArchivedRowToResponse, usersListIncArchivedRowKey)
+		writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
 
-	rows, err := s.q.ListUsers(r.Context())
+	rows, err := s.q.ListUsersPage(r.Context(), store.ListUsersPageParams{
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
-	out := make([]userResponse, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, pgtype.Timestamptz{}))
+	total, err := s.q.CountUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count users")
+		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	items, next := buildPage(rows, pp.Limit, usersListRowToResponse, usersListRowKey)
+	writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
