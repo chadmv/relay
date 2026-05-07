@@ -8,11 +8,26 @@ RETURNING *;
 -- name: GetScheduledJob :one
 SELECT * FROM scheduled_jobs WHERE id = $1;
 
--- name: ListScheduledJobs :many
-SELECT * FROM scheduled_jobs ORDER BY created_at DESC;
+-- name: ListScheduledJobsPage :many
+SELECT * FROM scheduled_jobs
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
 
--- name: ListScheduledJobsByOwner :many
-SELECT * FROM scheduled_jobs WHERE owner_id = $1 ORDER BY created_at DESC;
+-- name: CountScheduledJobs :one
+SELECT COUNT(*) FROM scheduled_jobs;
+
+-- name: ListScheduledJobsByOwnerPage :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = sqlc.arg(owner_id)::uuid
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountScheduledJobsByOwner :one
+SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1;
 
 -- name: UpdateScheduledJob :one
 UPDATE scheduled_jobs

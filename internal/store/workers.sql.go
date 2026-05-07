@@ -30,6 +30,20 @@ func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) (in
 	return result.RowsAffected(), nil
 }
 
+const countWorkers = `-- name: CountWorkers :one
+SELECT COUNT(*) FROM workers
+`
+
+// CountWorkers
+//
+//	SELECT COUNT(*) FROM workers
+func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countWorkers)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createWorker = `-- name: CreateWorker :one
 INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -183,6 +197,69 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers ORDER BY name
 func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPage = `-- name: ListWorkersPage :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers
+WHERE ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListWorkersPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+// ListWorkersPage
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers
+//	WHERE ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

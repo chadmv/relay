@@ -48,3 +48,13 @@ WHERE id = $1;
 -- name: GetWorkerByAgentTokenHash :one
 SELECT * FROM workers
 WHERE agent_token_hash = $1 AND status != 'revoked';
+
+-- name: ListWorkersPage :many
+SELECT * FROM workers
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountWorkers :one
+SELECT COUNT(*) FROM workers;

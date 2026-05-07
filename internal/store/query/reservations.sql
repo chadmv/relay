@@ -6,8 +6,15 @@ RETURNING *;
 -- name: GetReservation :one
 SELECT * FROM reservations WHERE id = $1;
 
--- name: ListReservations :many
-SELECT * FROM reservations ORDER BY created_at DESC;
+-- name: ListReservationsPage :many
+SELECT * FROM reservations
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountReservations :one
+SELECT COUNT(*) FROM reservations;
 
 -- name: ListActiveReservations :many
 SELECT * FROM reservations

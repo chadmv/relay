@@ -20,16 +20,28 @@ SELECT EXISTS(
 -- name: PromoteUserToAdmin :exec
 UPDATE users SET is_admin = TRUE WHERE id = $1;
 
--- name: ListUsers :many
+-- name: ListUsersPage :many
 SELECT id, email, name, is_admin, created_at
 FROM users
 WHERE archived_at IS NULL
-ORDER BY created_at;
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
 
--- name: ListUsersIncludingArchived :many
+-- name: CountUsers :one
+SELECT COUNT(*) FROM users WHERE archived_at IS NULL;
+
+-- name: ListUsersIncludingArchivedPage :many
 SELECT id, email, name, is_admin, created_at, archived_at
 FROM users
-ORDER BY created_at;
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountUsersIncludingArchived :one
+SELECT COUNT(*) FROM users;
 
 -- name: GetUserByEmailPublic :one
 SELECT id, email, name, is_admin, created_at, archived_at

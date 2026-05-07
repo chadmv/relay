@@ -11,6 +11,20 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countReservations = `-- name: CountReservations :one
+SELECT COUNT(*) FROM reservations
+`
+
+// CountReservations
+//
+//	SELECT COUNT(*) FROM reservations
+func (q *Queries) CountReservations(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countReservations)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createReservation = `-- name: CreateReservation :one
 INSERT INTO reservations (name, selector, worker_ids, user_id, project, starts_at, ends_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -136,15 +150,35 @@ func (q *Queries) ListActiveReservations(ctx context.Context) ([]Reservation, er
 	return items, nil
 }
 
-const listReservations = `-- name: ListReservations :many
-SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations ORDER BY created_at DESC
+const listReservationsPage = `-- name: ListReservationsPage :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
 `
 
-// ListReservations
+type ListReservationsPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+// ListReservationsPage
 //
-//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations ORDER BY created_at DESC
-func (q *Queries) ListReservations(ctx context.Context) ([]Reservation, error) {
-	rows, err := q.db.Query(ctx, listReservations)
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListReservationsPage(ctx context.Context, arg ListReservationsPageParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

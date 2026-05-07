@@ -79,6 +79,34 @@ func (q *Queries) CountActiveAdmins(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const countUsers = `-- name: CountUsers :one
+SELECT COUNT(*) FROM users WHERE archived_at IS NULL
+`
+
+// CountUsers
+//
+//	SELECT COUNT(*) FROM users WHERE archived_at IS NULL
+func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsers)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countUsersIncludingArchived = `-- name: CountUsersIncludingArchived :one
+SELECT COUNT(*) FROM users
+`
+
+// CountUsersIncludingArchived
+//
+//	SELECT COUNT(*) FROM users
+func (q *Queries) CountUsersIncludingArchived(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsersIncludingArchived)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createUserWithPassword = `-- name: CreateUserWithPassword :one
 INSERT INTO users (name, email, is_admin, password_hash)
 VALUES ($1, $2, $3, $4)
@@ -208,42 +236,60 @@ func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUs
 	return i, err
 }
 
-const listUsers = `-- name: ListUsers :many
-SELECT id, email, name, is_admin, created_at
+const listUsersIncludingArchivedPage = `-- name: ListUsersIncludingArchivedPage :many
+SELECT id, email, name, is_admin, created_at, archived_at
 FROM users
-WHERE archived_at IS NULL
-ORDER BY created_at
+WHERE ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
 `
 
-type ListUsersRow struct {
-	ID        pgtype.UUID        `json:"id"`
-	Email     string             `json:"email"`
-	Name      string             `json:"name"`
-	IsAdmin   bool               `json:"is_admin"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+type ListUsersIncludingArchivedPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
 }
 
-// ListUsers
+type ListUsersIncludingArchivedPageRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPage
 //
-//	SELECT id, email, name, is_admin, created_at
+//	SELECT id, email, name, is_admin, created_at, archived_at
 //	FROM users
-//	WHERE archived_at IS NULL
-//	ORDER BY created_at
-func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
-	rows, err := q.db.Query(ctx, listUsers)
+//	WHERE ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPage(ctx context.Context, arg ListUsersIncludingArchivedPageParams) ([]ListUsersIncludingArchivedPageRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListUsersRow
+	var items []ListUsersIncludingArchivedPageRow
 	for rows.Next() {
-		var i ListUsersRow
+		var i ListUsersIncludingArchivedPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Email,
 			&i.Name,
 			&i.IsAdmin,
 			&i.CreatedAt,
+			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -255,42 +301,60 @@ func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 	return items, nil
 }
 
-const listUsersIncludingArchived = `-- name: ListUsersIncludingArchived :many
-SELECT id, email, name, is_admin, created_at, archived_at
+const listUsersPage = `-- name: ListUsersPage :many
+SELECT id, email, name, is_admin, created_at
 FROM users
-ORDER BY created_at
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $4::int + 1
 `
 
-type ListUsersIncludingArchivedRow struct {
-	ID         pgtype.UUID        `json:"id"`
-	Email      string             `json:"email"`
-	Name       string             `json:"name"`
-	IsAdmin    bool               `json:"is_admin"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+type ListUsersPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
 }
 
-// ListUsersIncludingArchived
+type ListUsersPageRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPage
 //
-//	SELECT id, email, name, is_admin, created_at, archived_at
+//	SELECT id, email, name, is_admin, created_at
 //	FROM users
-//	ORDER BY created_at
-func (q *Queries) ListUsersIncludingArchived(ctx context.Context) ([]ListUsersIncludingArchivedRow, error) {
-	rows, err := q.db.Query(ctx, listUsersIncludingArchived)
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPage(ctx context.Context, arg ListUsersPageParams) ([]ListUsersPageRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListUsersIncludingArchivedRow
+	var items []ListUsersPageRow
 	for rows.Next() {
-		var i ListUsersIncludingArchivedRow
+		var i ListUsersPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Email,
 			&i.Name,
 			&i.IsAdmin,
 			&i.CreatedAt,
-			&i.ArchivedAt,
 		); err != nil {
 			return nil, err
 		}

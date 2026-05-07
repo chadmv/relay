@@ -19,3 +19,17 @@ ORDER BY created_at DESC;
 
 -- name: DeleteExpiredAgentEnrollments :execrows
 DELETE FROM agent_enrollments WHERE expires_at <= NOW() AND consumed_at IS NULL;
+
+-- name: ListActiveAgentEnrollmentsPage :many
+SELECT id, hostname_hint, created_by, created_at, expires_at
+FROM agent_enrollments
+WHERE consumed_at IS NULL
+  AND expires_at > NOW()
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountActiveAgentEnrollments :one
+SELECT COUNT(*) FROM agent_enrollments
+WHERE consumed_at IS NULL AND expires_at > NOW();
