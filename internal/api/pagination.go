@@ -115,3 +115,41 @@ func parsePage(w http.ResponseWriter, r *http.Request) (pageParams, bool) {
 	pp.Cursor = c
 	return pp, true
 }
+
+// page is the JSON envelope for paginated list endpoints.
+type page[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"next_cursor"`
+	Total      int64  `json:"total"`
+}
+
+// buildPage trims a (limit+1)-row fetch result to limit rows and emits the
+// cursor pointing at the LAST KEPT row's key — never the trimmed extra row.
+//
+// - Fewer than limit+1 rows fetched → no cursor (last page).
+// - Empty input → empty items, empty cursor (do not echo input cursor).
+// - Otherwise → trim to limit, encode cursor from items[limit-1].
+func buildPage[Row, Out any](
+	rows []Row,
+	limit int32,
+	conv func(Row) Out,
+	key func(Row) (time.Time, pgtype.UUID),
+) ([]Out, string) {
+	if len(rows) == 0 {
+		return []Out{}, ""
+	}
+	hasMore := int32(len(rows)) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items := make([]Out, len(rows))
+	for i, r := range rows {
+		items[i] = conv(r)
+	}
+	if !hasMore {
+		return items, ""
+	}
+	last := rows[len(rows)-1]
+	t, id := key(last)
+	return items, encodeCursor(t, id)
+}

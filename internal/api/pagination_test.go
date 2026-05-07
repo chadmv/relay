@@ -99,3 +99,56 @@ func TestParsePage_BadCursor(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, 400, w.Code)
 }
+
+func TestBuildPage_NoMore(t *testing.T) {
+	type row struct {
+		t  time.Time
+		id pgtype.UUID
+	}
+	id := pgtype.UUID{Valid: true}
+	rows := []row{
+		{time.Now(), id},
+		{time.Now(), id},
+	}
+	conv := func(r row) string { return "x" }
+	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
+	items, next := buildPage(rows, 50, conv, key)
+	assert.Len(t, items, 2)
+	assert.Empty(t, next, "next_cursor must be empty when fewer rows than limit")
+}
+
+func TestBuildPage_HasMore(t *testing.T) {
+	type row struct {
+		t  time.Time
+		id pgtype.UUID
+	}
+	id := pgtype.UUID{Valid: true}
+	t0 := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	rows := []row{
+		{t0.Add(3 * time.Second), id},
+		{t0.Add(2 * time.Second), id},
+		{t0.Add(1 * time.Second), id},
+	}
+	conv := func(r row) string { return "x" }
+	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
+	items, next := buildPage(rows, 2, conv, key) // limit=2, got 3 ⇒ trim, emit cursor
+	assert.Len(t, items, 2)
+	require.NotEmpty(t, next, "must emit cursor when limit+1 rows fetched")
+
+	// Cursor must encode the LAST kept row's (t, id), not the trimmed extra.
+	c, err := decodeCursor(next)
+	require.NoError(t, err)
+	assert.True(t, c.T.Equal(rows[1].t.Truncate(time.Microsecond)))
+}
+
+func TestBuildPage_EmptyResult(t *testing.T) {
+	type row struct {
+		t  time.Time
+		id pgtype.UUID
+	}
+	conv := func(r row) string { return "x" }
+	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
+	items, next := buildPage([]row{}, 50, conv, key)
+	assert.Empty(t, items)
+	assert.Empty(t, next, "empty result must yield empty cursor, not echo input")
+}
