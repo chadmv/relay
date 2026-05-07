@@ -1,6 +1,6 @@
 ---
 title: List endpoint pagination
-status: draft
+status: approved
 created: 2026-05-06
 ---
 
