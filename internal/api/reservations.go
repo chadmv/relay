@@ -52,19 +52,35 @@ func toReservationResponse(res store.Reservation) reservationResponse {
 	}
 }
 
+func reservationsRowKey(res store.Reservation) (time.Time, pgtype.UUID) {
+	return res.CreatedAt.Time, res.ID
+}
+
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	reservations, err := s.q.ListReservations(ctx)
+
+	pp, ok := parsePage(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := s.q.ListReservationsPage(ctx, store.ListReservationsPageParams{
+		CursorSet: pp.Cursor.Set,
+		CursorTs:  pp.CursorTs(),
+		CursorID:  pp.Cursor.ID,
+		PageLimit: pp.Limit,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list reservations failed")
 		return
 	}
-
-	resp := make([]reservationResponse, len(reservations))
-	for i, res := range reservations {
-		resp[i] = toReservationResponse(res)
+	total, err := s.q.CountReservations(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count reservations failed")
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	items, next := buildPage(rows, pp.Limit, toReservationResponse, reservationsRowKey)
+	writeJSON(w, http.StatusOK, page[reservationResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request) {
