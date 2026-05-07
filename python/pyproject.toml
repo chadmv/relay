@@ -34,8 +34,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/relay-project/relay"
-Source = "https://github.com/relay-project/relay/tree/main/python"
+Homepage = "https://github.com/chadmv/relay"
+Source = "https://github.com/chadmv/relay/tree/master/python"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/relay"]
