@@ -9,6 +9,8 @@ import (
 	"os"
 	"text/tabwriter"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 type scheduleResp struct {
@@ -59,14 +61,14 @@ func doSchedules(ctx context.Context, cfg *Config, args []string, w io.Writer) e
 	}
 }
 
-func doSchedulesList(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesList(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("schedules list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	schedules, total, err := fetchAllPages[scheduleResp](ctx, c, "/v1/scheduled-jobs", nil, *limitFlag)
+	schedules, total, err := relayclient.FetchAllPages[scheduleResp](ctx, c, "/v1/scheduled-jobs", nil, *limitFlag)
 	if err != nil {
 		return err
 	}
@@ -86,7 +88,7 @@ func doSchedulesList(ctx context.Context, c *Client, args []string, w io.Writer)
 	return tw.Flush()
 }
 
-func doSchedulesCreate(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesCreate(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	name := fs.String("name", "", "schedule name (required)")
 	cronExpr := fs.String("cron", "", "cron expression (required)")
@@ -117,19 +119,19 @@ func doSchedulesCreate(ctx context.Context, c *Client, args []string, w io.Write
 		"job_spec":       spec,
 	}
 	var out scheduleResp
-	if err := c.do(ctx, "POST", "/v1/scheduled-jobs", body, &out); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/scheduled-jobs", body, &out); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Schedule %s created: %s\n", out.ID, out.Name)
 	return nil
 }
 
-func doSchedulesShow(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesShow(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: relay schedules show <id>")
 	}
 	var out scheduleResp
-	if err := c.do(ctx, "GET", "/v1/scheduled-jobs/"+args[0], nil, &out); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/scheduled-jobs/"+args[0], nil, &out); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "ID:       %s\n", out.ID)
@@ -143,7 +145,7 @@ func doSchedulesShow(ctx context.Context, c *Client, args []string, w io.Writer)
 	return nil
 }
 
-func doSchedulesUpdate(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesUpdate(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	cronExpr := fs.String("cron", "", "new cron expression")
 	tz := fs.String("tz", "", "new IANA timezone")
@@ -179,30 +181,30 @@ func doSchedulesUpdate(ctx context.Context, c *Client, args []string, w io.Write
 	}
 
 	var out scheduleResp
-	if err := c.do(ctx, "PATCH", "/v1/scheduled-jobs/"+id, body, &out); err != nil {
+	if err := c.Do(ctx, "PATCH", "/v1/scheduled-jobs/"+id, body, &out); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Schedule %s updated.\n", out.ID)
 	return nil
 }
 
-func doSchedulesDelete(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesDelete(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: relay schedules delete <id>")
 	}
-	if err := c.do(ctx, "DELETE", "/v1/scheduled-jobs/"+args[0], nil, nil); err != nil {
+	if err := c.Do(ctx, "DELETE", "/v1/scheduled-jobs/"+args[0], nil, nil); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Schedule %s deleted.\n", args[0])
 	return nil
 }
 
-func doSchedulesRunNow(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doSchedulesRunNow(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: relay schedules run-now <id>")
 	}
 	var job map[string]any
-	if err := c.do(ctx, "POST", "/v1/scheduled-jobs/"+args[0]+"/run-now", nil, &job); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/scheduled-jobs/"+args[0]+"/run-now", nil, &job); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Job %v created for schedule %s (status: %v)\n", job["id"], args[0], job["status"])

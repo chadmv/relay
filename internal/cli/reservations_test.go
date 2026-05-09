@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestReservations_ListCreateDelete(t *testing.T) {
@@ -20,7 +22,7 @@ func TestReservations_ListCreateDelete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/reservations":
-			json.NewEncoder(w).Encode(pageEnvelope[reservationResp]{
+			json.NewEncoder(w).Encode(relayclient.PageEnvelope[reservationResp]{
 				Items: []reservationResp{
 					{ID: "res-1", Name: "film-x-weekend", StartsAt: &now},
 				},

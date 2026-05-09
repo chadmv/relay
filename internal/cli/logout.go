@@ -36,7 +36,7 @@ func doLogout(ctx context.Context, cfg *Config, args []string, out io.Writer) er
 	if *all {
 		path = "/v1/auth/tokens"
 	}
-	if err := c.do(ctx, "DELETE", path, nil, nil); err != nil {
+	if err := c.Do(ctx, "DELETE", path, nil, nil); err != nil {
 		return fmt.Errorf("logout failed: %w", err)
 	}
 

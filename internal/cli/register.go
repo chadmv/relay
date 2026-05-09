@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 // RegisterCommand returns the relay register Command.
@@ -71,12 +73,12 @@ func doRegister(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) e
 		InviteToken string `json:"invite_token"`
 	}
 
-	c := NewClient(serverURL, "")
+	c := relayclient.NewClient(serverURL, "")
 	var resp struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := c.do(ctx, "POST", "/v1/auth/register", registerRequest{
+	if err := c.Do(ctx, "POST", "/v1/auth/register", registerRequest{
 		Email:       email,
 		Name:        name,
 		Password:    password,

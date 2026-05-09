@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestWorkersRevoke_ByID(t *testing.T) {
@@ -39,7 +41,7 @@ func TestWorkersRevoke_ByHostname(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/workers":
-			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 				Items: []workerResp{
 					{ID: workerID, Hostname: "render-node-42", Status: "online"},
 				},
@@ -67,7 +69,7 @@ func TestWorkersRevoke_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method)
 		require.Equal(t, "/v1/workers", r.URL.Path)
-		json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 			Items: []workerResp{
 				{ID: "00000000-0000-0000-0000-000000000003", Hostname: "other-node", Status: "online"},
 			},

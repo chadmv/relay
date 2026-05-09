@@ -49,7 +49,7 @@ func doInviteCreate(ctx context.Context, args []string, cfg *Config, out io.Writ
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := c.do(ctx, "POST", "/v1/invites", req, &resp); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/invites", req, &resp); err != nil {
 		return fmt.Errorf("create invite: %w", err)
 	}
 

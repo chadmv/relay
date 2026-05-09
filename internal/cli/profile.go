@@ -51,7 +51,7 @@ func doProfileUpdate(ctx context.Context, cfg *Config, args []string, out io.Wri
 	c := cfg.NewClient()
 	var u userListItem
 	body := map[string]string{"name": trimmed}
-	if err := c.do(ctx, "PATCH", "/v1/users/me", body, &u); err != nil {
+	if err := c.Do(ctx, "PATCH", "/v1/users/me", body, &u); err != nil {
 		return fmt.Errorf("update profile: %w", err)
 	}
 	printUserDetail(out, u)

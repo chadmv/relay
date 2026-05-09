@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"relay/internal/relayclient"
 )
 
 // LogsCommand returns the relay logs Command.
@@ -42,9 +44,9 @@ func doLogs(ctx context.Context, cfg *Config, args []string, w io.Writer) error 
 // watchJobLogs watches SSE events for jobID.
 // When a task reaches a terminal state its logs are fetched and printed.
 // Returns the final job status ("done", "failed", or "cancelled") and any error.
-func watchJobLogs(ctx context.Context, c *Client, jobID string, w io.Writer) (string, error) {
+func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io.Writer) (string, error) {
 	var job jobResp
-	if err := c.do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
 		return "", fmt.Errorf("get job: %w", err)
 	}
 
@@ -63,7 +65,7 @@ func watchJobLogs(ctx context.Context, c *Client, jobID string, w io.Writer) (st
 	}
 
 	var finalStatus string
-	err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, func(e SSEEvent) bool {
+	err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, func(e relayclient.SSEEvent) bool {
 		switch e.Type {
 		case "task":
 			var data struct {
@@ -101,12 +103,12 @@ func watchJobLogs(ctx context.Context, c *Client, jobID string, w io.Writer) (st
 
 // printTaskLogs fetches and prints all log lines for a task.
 // Errors are silently ignored — best-effort output.
-func printTaskLogs(ctx context.Context, c *Client, taskID, taskName string, w io.Writer) {
+func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, w io.Writer) {
 	var logs []struct {
 		Stream  string `json:"stream"`
 		Content string `json:"content"`
 	}
-	if err := c.do(ctx, "GET", "/v1/tasks/"+taskID+"/logs", nil, &logs); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/tasks/"+taskID+"/logs", nil, &logs); err != nil {
 		return
 	}
 	for _, l := range logs {

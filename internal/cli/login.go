@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"relay/internal/relayclient"
 )
 
 // saveConfigFn is a variable so tests can override it.
@@ -71,13 +73,13 @@ func doLogin(ctx context.Context, cfg *Config, in io.Reader, out io.Writer) erro
 		Password string `json:"password"`
 	}
 
-	c := NewClient(serverURL, "")
+	c := relayclient.NewClient(serverURL, "")
 	var resp struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 
-	if err := c.do(ctx, "POST", "/v1/auth/login", loginRequest{Email: email, Password: password}, &resp); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/auth/login", loginRequest{Email: email, Password: password}, &resp); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 

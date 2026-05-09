@@ -10,13 +10,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestWorkersListGet_Dispatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/workers":
-			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 				Items: []workerResp{
 					{ID: "w-1", Name: "render-node-1", Status: "online", CpuCores: 32, RamGb: 128, GpuCount: 2, GpuModel: "RTX 4090"},
 				},
