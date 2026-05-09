@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestSchedulesList_Success(t *testing.T) {
@@ -21,7 +23,7 @@ func TestSchedulesList_Success(t *testing.T) {
 		require.Equal(t, "/v1/scheduled-jobs", r.URL.Path)
 		require.Equal(t, "Bearer tkn", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pageEnvelope[scheduleResp]{
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[scheduleResp]{
 			Items: []scheduleResp{
 				{ID: "abc", Name: "n", CronExpr: "@hourly", Timezone: "UTC", Enabled: true},
 			},

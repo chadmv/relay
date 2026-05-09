@@ -1,5 +1,5 @@
-// internal/cli/client_test.go
-package cli
+// internal/relayclient/client_test.go
+package relayclient
 
 import (
 	"context"
@@ -66,7 +66,7 @@ func TestClientDo_4xxReturnsErrorField(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "tok")
-	err := c.do(context.Background(), "GET", "/v1/jobs/x", nil, nil)
+	err := c.Do(context.Background(), "GET", "/v1/jobs/x", nil, nil)
 	require.EqualError(t, err, "job not found")
 }
 
@@ -78,6 +78,6 @@ func TestClientDo_5xxReturnsGenericMessage(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "tok")
-	err := c.do(context.Background(), "GET", "/v1/jobs/x", nil, nil)
+	err := c.Do(context.Background(), "GET", "/v1/jobs/x", nil, nil)
 	require.EqualError(t, err, "server error (500) — try again")
 }

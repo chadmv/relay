@@ -11,6 +11,8 @@ import (
 	"os"
 	"text/tabwriter"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 // ─── Response types (mirror api package JSON output) ─────────────────────────
@@ -91,7 +93,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	if *status != "" {
 		params.Set("status", *status)
 	}
-	jobs, total, err := fetchAllPages[jobResp](ctx, c, "/v1/jobs", params, *limitFlag)
+	jobs, total, err := relayclient.FetchAllPages[jobResp](ctx, c, "/v1/jobs", params, *limitFlag)
 	if err != nil {
 		return err
 	}
@@ -123,7 +125,7 @@ func doGetJob(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 	c := cfg.NewClient()
 
 	var job jobResp
-	if err := c.do(ctx, "GET", "/v1/jobs/"+fs.Arg(0), nil, &job); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/jobs/"+fs.Arg(0), nil, &job); err != nil {
 		return err
 	}
 	if *pretty {
@@ -170,7 +172,7 @@ func doCancelJob(ctx context.Context, cfg *Config, args []string, w io.Writer) e
 		path += "?force=true"
 	}
 	var job jobResp
-	if err := c.do(ctx, "DELETE", path, nil, &job); err != nil {
+	if err := c.Do(ctx, "DELETE", path, nil, &job); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Job %s: %s\n", job.ID, job.Status)
@@ -212,7 +214,7 @@ func doSubmit(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 
 	c := cfg.NewClient()
 	var job jobResp
-	if err := c.do(ctx, "POST", "/v1/jobs", body, &job); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/jobs", body, &job); err != nil {
 		return err
 	}
 	fmt.Fprintln(w, job.ID)

@@ -1,5 +1,5 @@
-// internal/cli/client.go
-package cli
+// internal/relayclient/client.go
+package relayclient
 
 import (
 	"bufio"
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// ResponseError is returned by Client.do for non-2xx responses.
+// ResponseError is returned by Client.Do for non-2xx responses.
 // Callers can inspect StatusCode to handle specific HTTP errors.
 type ResponseError struct {
 	StatusCode int
@@ -33,9 +33,12 @@ func NewClient(serverURL, token string) *Client {
 	return &Client{base: serverURL, token: token, http: &http.Client{}}
 }
 
-// do sends a JSON request and decodes the response into out (may be nil).
+// BaseURL returns the base server URL this client connects to.
+func (c *Client) BaseURL() string { return c.base }
+
+// Do sends a JSON request and decodes the response into out (may be nil).
 // Returns an error for non-2xx responses using the server's "error" field when available.
-func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
 	var bodyBytes []byte
 	if body != nil {
 		var err error

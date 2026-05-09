@@ -49,7 +49,7 @@ func doAgentEnroll(ctx context.Context, args []string, cfg *Config, out, errOut 
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := c.do(ctx, "POST", "/v1/agent-enrollments", body, &resp); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/agent-enrollments", body, &resp); err != nil {
 		return fmt.Errorf("create enrollment: %w", err)
 	}
 

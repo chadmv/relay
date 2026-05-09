@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"relay/internal/relayclient"
 )
 
 // Config holds all settings the CLI needs to talk to relay-server.
@@ -56,8 +58,8 @@ func SaveConfig(cfg *Config) error {
 }
 
 // NewClient constructs an authenticated HTTP client from cfg.
-func (cfg *Config) NewClient() *Client {
-	return NewClient(cfg.ServerURL, cfg.Token)
+func (cfg *Config) NewClient() *relayclient.Client {
+	return relayclient.NewClient(cfg.ServerURL, cfg.Token)
 }
 
 func defaultConfigFilePath() (string, error) {

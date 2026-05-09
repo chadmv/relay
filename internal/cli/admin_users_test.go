@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestAdminUsersList_Success(t *testing.T) {
@@ -20,7 +22,7 @@ func TestAdminUsersList_Success(t *testing.T) {
 		require.Equal(t, "GET", r.Method)
 		require.Equal(t, "/v1/users", r.URL.Path)
 		require.Equal(t, "Bearer admintoken", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
 			Items: []map[string]any{
 				{
 					"id":         "11111111-1111-1111-1111-111111111111",
@@ -71,7 +73,7 @@ func TestAdminUsersGet_Success(t *testing.T) {
 		require.Equal(t, "/v1/users", r.URL.Path)
 		require.Equal(t, "email=alice%40test.com", r.URL.RawQuery)
 		require.Equal(t, "Bearer admintoken", r.Header.Get("Authorization"))
-		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
 			Items: []map[string]any{{
 				"id":         "22222222-2222-2222-2222-222222222222",
 				"email":      "alice@test.com",
@@ -103,7 +105,7 @@ func TestAdminUsersGet_Success(t *testing.T) {
 
 func TestAdminUsersGet_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
+		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
 	}))
 	defer srv.Close()
 
@@ -167,7 +169,7 @@ func TestAdminUsersUpdate_ByEmail(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/users":
 			require.Equal(t, "email=alice%40test.com", r.URL.RawQuery)
-			_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{
+			_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
 				Items: []map[string]any{{
 					"id":         targetID,
 					"email":      "alice@test.com",
@@ -207,7 +209,7 @@ func TestAdminUsersUpdate_EmailNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method, "should not call PATCH when email lookup misses")
 		require.Equal(t, "/v1/users", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(pageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
+		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{Items: []map[string]any{}, Total: 0})
 	}))
 	defer srv.Close()
 

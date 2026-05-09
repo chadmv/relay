@@ -919,6 +919,65 @@ relay admin passwd user@example.com
 
 ---
 
+## MCP integration
+
+Relay ships an [MCP](https://modelcontextprotocol.io) server as the `relay mcp` subcommand. Connecting your MCP client (Claude Desktop, Claude Code, etc.) gives the model a curated set of tools for managing your relay deployment as the user you logged in with via `relay login`.
+
+### Prerequisites
+
+Run `relay login` once. The MCP server reads the saved bearer token from `~/.relay/config.json` (Linux/macOS) or `%APPDATA%\relay\config.json` (Windows). Environment overrides `RELAY_URL` / `RELAY_TOKEN` are honored.
+
+### Configure your client
+
+Add an entry to your MCP client's config file. For Claude Desktop on Windows the file is `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "relay": {
+      "command": "relay",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For Claude Code, add it via `claude mcp add relay -- relay mcp` or by editing `~/.claude.json` directly. Restart the client. The relay tools (prefixed `relay_*`) and resources (`relay://server-info`, `relay://recent-jobs`) become available.
+
+### Tools (v1)
+
+Read tools (any logged-in user):
+
+| Tool | Purpose |
+|---|---|
+| `relay_whoami` | Identity of the calling user. |
+| `relay_list_jobs` | Cursor-paginated list of jobs. |
+| `relay_get_job` | Fetch one job. |
+| `relay_list_tasks` | Tasks for a job. |
+| `relay_get_task` | Fetch one task. |
+| `relay_get_task_logs` | Page of log lines (`since_seq`/`limit`). |
+| `relay_list_workers` / `relay_get_worker` | Worker inventory. |
+| `relay_list_schedules` / `relay_get_schedule` | Scheduled jobs. |
+| `relay_list_reservations` | Worker reservations (admin-only). |
+
+Write tools (any logged-in user):
+
+| Tool | Purpose |
+|---|---|
+| `relay_submit_job` | Submit a job from an inline `job_spec`. |
+| `relay_cancel_job` | Cancel a job (no force in v1). |
+| `relay_wait_for_job` | Block until terminal or timeout (default 60s, max 300s). |
+| `relay_create_schedule` / `relay_update_schedule` / `relay_delete_schedule` | Schedule CRUD. |
+| `relay_run_schedule_now` | Fire a schedule immediately (admin-only). |
+
+Calls that map to admin-only endpoints return a `forbidden` error when invoked by a non-admin token.
+
+### Deferred to a later release
+
+Worker mutations (revoke token, evict workspace), agent enrollment, invite creation, all user mutations (create/update/archive/passwd), force-cancel, password reset, and reservation create/delete. Multi-user remote MCP (HTTP transport) is also out of scope for v1.
+
+---
+
 ## REST API
 
 The server exposes a REST API at `http://<host>:8080/v1`. All endpoints except `/health`, `/auth/login`, and `/auth/register` require `Authorization: Bearer <token>`.

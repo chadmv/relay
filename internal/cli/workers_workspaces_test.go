@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 func TestDoWorkersWorkspaces_Lists(t *testing.T) {
@@ -104,7 +106,7 @@ func TestDoWorkersWorkspaces_ResolvesHostname(t *testing.T) {
 	const workerID = "00000000-0000-0000-0000-000000000001"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/workers" {
-			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 				Items: []workerResp{{ID: workerID, Hostname: "builder-01"}},
 				Total: 1,
 			})
@@ -126,7 +128,7 @@ func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
 	var evictCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/workers" {
-			json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+			json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 				Items: []workerResp{{ID: workerID, Hostname: "builder-01"}},
 				Total: 1,
 			})
@@ -148,7 +150,7 @@ func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
 func TestDoWorkersWorkspaces_UnknownHostname(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/workers", r.URL.Path)
-		json.NewEncoder(w).Encode(pageEnvelope[workerResp]{
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
 			Items: []workerResp{{ID: "00000000-0000-0000-0000-000000000001", Hostname: "other-host"}},
 			Total: 1,
 		})

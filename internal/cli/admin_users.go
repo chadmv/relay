@@ -9,6 +9,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 func doAdminUsers(ctx context.Context, cfg *Config, args []string, out io.Writer) error {
@@ -63,7 +65,7 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	if *includeArchived {
 		params.Set("include_archived", "true")
 	}
-	users, total, err := fetchAllPages[userListItem](ctx, c, "/v1/users", params, *limitFlag)
+	users, total, err := relayclient.FetchAllPages[userListItem](ctx, c, "/v1/users", params, *limitFlag)
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
 	}
@@ -109,9 +111,9 @@ func doAdminUsersGet(ctx context.Context, cfg *Config, args []string, out io.Wri
 	email := args[0]
 
 	c := cfg.NewClient()
-	var envelope pageEnvelope[userListItem]
+	var envelope relayclient.PageEnvelope[userListItem]
 	path := "/v1/users?email=" + url.QueryEscape(email)
-	if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
+	if err := c.Do(ctx, "GET", path, nil, &envelope); err != nil {
 		return fmt.Errorf("get user: %w", err)
 	}
 	if len(envelope.Items) == 0 {
@@ -165,9 +167,9 @@ func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.
 	// directly; otherwise treat it as an email and look up via /v1/users.
 	id := target
 	if !looksLikeUUID(target) {
-		var envelope pageEnvelope[userListItem]
+		var envelope relayclient.PageEnvelope[userListItem]
 		path := "/v1/users?email=" + url.QueryEscape(target)
-		if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
+		if err := c.Do(ctx, "GET", path, nil, &envelope); err != nil {
 			return fmt.Errorf("look up user: %w", err)
 		}
 		if len(envelope.Items) == 0 {
@@ -178,7 +180,7 @@ func doAdminUsersUpdate(ctx context.Context, cfg *Config, args []string, out io.
 
 	var u userListItem
 	body := map[string]string{"name": trimmed}
-	if err := c.do(ctx, "PATCH", "/v1/users/"+id, body, &u); err != nil {
+	if err := c.Do(ctx, "PATCH", "/v1/users/"+id, body, &u); err != nil {
 		return fmt.Errorf("update user: %w", err)
 	}
 	printUserDetail(out, u)
@@ -228,7 +230,7 @@ func doAdminUsersCreate(ctx context.Context, cfg *Config, args []string, out io.
 
 	c := cfg.NewClient()
 	var u userListItem
-	if err := c.do(ctx, "POST", "/v1/users", body, &u); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/users", body, &u); err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}
 	printUserDetail(out, u)
@@ -259,9 +261,9 @@ func doAdminUsersArchiveAction(ctx context.Context, cfg *Config, args []string, 
 
 	id := target
 	if !looksLikeUUID(target) {
-		var envelope pageEnvelope[userListItem]
+		var envelope relayclient.PageEnvelope[userListItem]
 		path := "/v1/users?email=" + url.QueryEscape(target) + "&include_archived=true"
-		if err := c.do(ctx, "GET", path, nil, &envelope); err != nil {
+		if err := c.Do(ctx, "GET", path, nil, &envelope); err != nil {
 			return fmt.Errorf("look up user: %w", err)
 		}
 		if len(envelope.Items) == 0 {
@@ -271,7 +273,7 @@ func doAdminUsersArchiveAction(ctx context.Context, cfg *Config, args []string, 
 	}
 
 	var u userListItem
-	if err := c.do(ctx, "POST", "/v1/users/"+id+"/"+action, nil, &u); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/users/"+id+"/"+action, nil, &u); err != nil {
 		return fmt.Errorf("%s user: %w", action, err)
 	}
 	printUserDetail(out, u)

@@ -58,7 +58,7 @@ func doAdminPasswd(ctx context.Context, cfg *Config, args []string, out io.Write
 	}
 
 	c := cfg.NewClient()
-	if err := c.do(ctx, "POST", "/v1/users/password-reset", map[string]string{
+	if err := c.Do(ctx, "POST", "/v1/users/password-reset", map[string]string{
 		"email":        email,
 		"new_password": newPass,
 	}, nil); err != nil {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"text/tabwriter"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 type workspaceResp struct {
@@ -18,7 +20,7 @@ type workspaceResp struct {
 	LastUsedAt   *time.Time `json:"last_used_at"`
 }
 
-func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doWorkersWorkspaces(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers workspaces", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
@@ -33,7 +35,7 @@ func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Wri
 	}
 
 	var workspaces []workspaceResp
-	if err := c.do(ctx, "GET", "/v1/workers/"+workerID+"/workspaces", nil, &workspaces); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/workers/"+workerID+"/workspaces", nil, &workspaces); err != nil {
 		return err
 	}
 
@@ -54,7 +56,7 @@ func doWorkersWorkspaces(ctx context.Context, c *Client, args []string, w io.Wri
 	return tw.Flush()
 }
 
-func doWorkersEvictWorkspace(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doWorkersEvictWorkspace(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers evict-workspace", flag.ContinueOnError)
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
@@ -68,7 +70,7 @@ func doWorkersEvictWorkspace(ctx context.Context, c *Client, args []string, w io
 	}
 	shortID := fs.Arg(1)
 
-	if err := c.do(ctx, "POST",
+	if err := c.Do(ctx, "POST",
 		fmt.Sprintf("/v1/workers/%s/workspaces/%s/evict", workerID, shortID),
 		nil, nil); err != nil {
 		return err

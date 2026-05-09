@@ -1,4 +1,4 @@
-package cli
+package relayclient
 
 import (
 	"context"
@@ -7,22 +7,22 @@ import (
 	"strconv"
 )
 
-// pageEnvelope mirrors the server's pagination envelope.
-type pageEnvelope[T any] struct {
+// PageEnvelope mirrors the server's pagination envelope.
+type PageEnvelope[T any] struct {
 	Items      []T    `json:"items"`
 	NextCursor string `json:"next_cursor"`
 	Total      int64  `json:"total"`
 }
 
-// pageRequestLimit is the per-request limit the CLI uses when auto-paginating.
+// PageRequestLimit is the per-request limit the CLI uses when auto-paginating.
 // 200 matches the server's max so we minimize round-trips.
-const pageRequestLimit = 200
+const PageRequestLimit = 200
 
-// fetchAllPages walks ?cursor= until next_cursor is empty, or until userLimit
+// FetchAllPages walks ?cursor= until next_cursor is empty, or until userLimit
 // rows have been collected (when userLimit > 0). Returns the merged slice and
 // the total reported by the first page response. Caller-supplied params are
 // forwarded on every page request alongside ?limit=200&cursor=<...>.
-func fetchAllPages[T any](
+func FetchAllPages[T any](
 	ctx context.Context,
 	c *Client,
 	basePath string,
@@ -32,7 +32,7 @@ func fetchAllPages[T any](
 	if params == nil {
 		params = url.Values{}
 	}
-	params.Set("limit", strconv.Itoa(pageRequestLimit))
+	params.Set("limit", strconv.Itoa(PageRequestLimit))
 
 	var (
 		out    []T
@@ -50,8 +50,8 @@ func fetchAllPages[T any](
 		if encoded := params.Encode(); encoded != "" {
 			path += "?" + encoded
 		}
-		var resp pageEnvelope[T]
-		if err := c.do(ctx, "GET", path, nil, &resp); err != nil {
+		var resp PageEnvelope[T]
+		if err := c.Do(ctx, "GET", path, nil, &resp); err != nil {
 			return nil, 0, fmt.Errorf("paginate %s: %w", basePath, err)
 		}
 		if first {

@@ -135,6 +135,20 @@ func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActi
 	return items, nil
 }
 
+const countTaskLogs = `-- name: CountTaskLogs :one
+SELECT COUNT(*) FROM task_logs WHERE task_id = $1
+`
+
+// CountTaskLogs
+//
+//	SELECT COUNT(*) FROM task_logs WHERE task_id = $1
+func (q *Queries) CountTaskLogs(ctx context.Context, taskID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countTaskLogs, taskID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -463,6 +477,53 @@ SELECT id, task_id, stream, content, created_at FROM task_logs WHERE task_id = $
 //	SELECT id, task_id, stream, content, created_at FROM task_logs WHERE task_id = $1 ORDER BY id
 func (q *Queries) GetTaskLogs(ctx context.Context, taskID pgtype.UUID) ([]TaskLog, error) {
 	rows, err := q.db.Query(ctx, getTaskLogs, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskLog
+	for rows.Next() {
+		var i TaskLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.TaskID,
+			&i.Stream,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getTaskLogsPage = `-- name: GetTaskLogsPage :many
+SELECT id, task_id, stream, content, created_at
+FROM task_logs
+WHERE task_id = $1 AND id > $2
+ORDER BY id
+LIMIT $3
+`
+
+type GetTaskLogsPageParams struct {
+	TaskID pgtype.UUID `json:"task_id"`
+	ID     int64       `json:"id"`
+	Limit  int32       `json:"limit"`
+}
+
+// Returns up to $3 log rows for the task with id > $2, ordered ascending.
+//
+//	SELECT id, task_id, stream, content, created_at
+//	FROM task_logs
+//	WHERE task_id = $1 AND id > $2
+//	ORDER BY id
+//	LIMIT $3
+func (q *Queries) GetTaskLogsPage(ctx context.Context, arg GetTaskLogsPageParams) ([]TaskLog, error) {
+	rows, err := q.db.Query(ctx, getTaskLogsPage, arg.TaskID, arg.ID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

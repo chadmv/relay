@@ -10,6 +10,8 @@ import (
 	"os"
 	"text/tabwriter"
 	"time"
+
+	"relay/internal/relayclient"
 )
 
 type reservationResp struct {
@@ -53,14 +55,14 @@ func doReservations(ctx context.Context, cfg *Config, args []string, w io.Writer
 	}
 }
 
-func doReservationsList(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doReservationsList(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("reservations list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	reservations, total, err := fetchAllPages[reservationResp](ctx, c, "/v1/reservations", nil, *limitFlag)
+	reservations, total, err := relayclient.FetchAllPages[reservationResp](ctx, c, "/v1/reservations", nil, *limitFlag)
 	if err != nil {
 		return err
 	}
@@ -87,7 +89,7 @@ func doReservationsList(ctx context.Context, c *Client, args []string, w io.Writ
 	return tw.Flush()
 }
 
-func doReservationsCreate(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doReservationsCreate(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: relay reservations create <reservation.json>")
 	}
@@ -100,18 +102,18 @@ func doReservationsCreate(ctx context.Context, c *Client, args []string, w io.Wr
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	var res reservationResp
-	if err := c.do(ctx, "POST", "/v1/reservations", body, &res); err != nil {
+	if err := c.Do(ctx, "POST", "/v1/reservations", body, &res); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Reservation %s created: %s\n", res.ID, res.Name)
 	return nil
 }
 
-func doReservationsDelete(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doReservationsDelete(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: relay reservations delete <reservation-id>")
 	}
-	if err := c.do(ctx, "DELETE", "/v1/reservations/"+args[0], nil, nil); err != nil {
+	if err := c.Do(ctx, "DELETE", "/v1/reservations/"+args[0], nil, nil); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "Reservation %s deleted.\n", args[0])

@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"relay/internal/relayclient"
 )
 
 // fakeJobServer serves:
@@ -79,7 +81,7 @@ func TestWatchJobLogs_DoneExits0(t *testing.T) {
 	srv := fakeJobServer(t, jobID, taskID, "done")
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "tok")
+	c := relayclient.NewClient(srv.URL, "tok")
 	var out strings.Builder
 	status, err := watchJobLogs(context.Background(), c, jobID, &out)
 	require.NoError(t, err)
@@ -92,7 +94,7 @@ func TestWatchJobLogs_FailedReturnsFailed(t *testing.T) {
 	srv := fakeJobServer(t, jobID, taskID, "failed")
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "tok")
+	c := relayclient.NewClient(srv.URL, "tok")
 	var out strings.Builder
 	status, err := watchJobLogs(context.Background(), c, jobID, &out)
 	require.NoError(t, err)
@@ -128,7 +130,7 @@ func TestWatchJobLogs_AlreadyDone_PrintsLogsAndExits(t *testing.T) {
 	srv := fakeCompletedJobServer(t, jobID, taskID, "done")
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "tok")
+	c := relayclient.NewClient(srv.URL, "tok")
 	var out strings.Builder
 	status, err := watchJobLogs(context.Background(), c, jobID, &out)
 	require.NoError(t, err)
@@ -141,7 +143,7 @@ func TestWatchJobLogs_AlreadyCancelled_ReturnsCancelled(t *testing.T) {
 	srv := fakeCompletedJobServer(t, jobID, taskID, "cancelled")
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "tok")
+	c := relayclient.NewClient(srv.URL, "tok")
 	var out strings.Builder
 	status, err := watchJobLogs(context.Background(), c, jobID, &out)
 	require.NoError(t, err)

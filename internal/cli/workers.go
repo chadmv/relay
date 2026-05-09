@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"text/tabwriter"
+
+	"relay/internal/relayclient"
 )
 
 type workerResp struct {
@@ -61,14 +63,14 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 	}
 }
 
-func doWorkersList(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doWorkersList(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	workers, total, err := fetchAllPages[workerResp](ctx, c, "/v1/workers", nil, *limitFlag)
+	workers, total, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", nil, *limitFlag)
 	if err != nil {
 		return err
 	}
@@ -85,7 +87,7 @@ func doWorkersList(ctx context.Context, c *Client, args []string, w io.Writer) e
 	return tw.Flush()
 }
 
-func doWorkersGet(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doWorkersGet(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers get", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
@@ -95,7 +97,7 @@ func doWorkersGet(ctx context.Context, c *Client, args []string, w io.Writer) er
 		return fmt.Errorf("usage: relay workers get <worker-id>")
 	}
 	var wk workerResp
-	if err := c.do(ctx, "GET", "/v1/workers/"+fs.Arg(0), nil, &wk); err != nil {
+	if err := c.Do(ctx, "GET", "/v1/workers/"+fs.Arg(0), nil, &wk); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -113,7 +115,7 @@ func doWorkersGet(ctx context.Context, c *Client, args []string, w io.Writer) er
 	return nil
 }
 
-func doWorkersRevoke(ctx context.Context, c *Client, args []string, w io.Writer) error {
+func doWorkersRevoke(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("workers revoke", flag.ContinueOnError)
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
@@ -125,7 +127,7 @@ func doWorkersRevoke(ctx context.Context, c *Client, args []string, w io.Writer)
 	if err != nil {
 		return err
 	}
-	if err := c.do(ctx, "DELETE", "/v1/workers/"+id+"/token", nil, nil); err != nil {
+	if err := c.Do(ctx, "DELETE", "/v1/workers/"+id+"/token", nil, nil); err != nil {
 		return fmt.Errorf("revoke token: %w", err)
 	}
 	fmt.Fprintln(w, "revoked.")
@@ -134,11 +136,11 @@ func doWorkersRevoke(ctx context.Context, c *Client, args []string, w io.Writer)
 
 // resolveWorkerID returns the UUID for target, resolving a hostname via GET
 // /v1/workers when target is not already UUID-shaped.
-func resolveWorkerID(ctx context.Context, c *Client, target string) (string, error) {
+func resolveWorkerID(ctx context.Context, c *relayclient.Client, target string) (string, error) {
 	if looksLikeUUID(target) {
 		return target, nil
 	}
-	workers, _, err := fetchAllPages[workerResp](ctx, c, "/v1/workers", nil, 0)
+	workers, _, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", nil, 0)
 	if err != nil {
 		return "", fmt.Errorf("list workers: %w", err)
 	}

@@ -48,7 +48,7 @@ func doPasswd(ctx context.Context, cfg *Config, out io.Writer) error {
 	}
 
 	c := cfg.NewClient()
-	if err := c.do(ctx, "PUT", "/v1/users/me/password", map[string]string{
+	if err := c.Do(ctx, "PUT", "/v1/users/me/password", map[string]string{
 		"current_password": current,
 		"new_password":     newPass,
 	}, nil); err != nil {
