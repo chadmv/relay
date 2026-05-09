@@ -37,6 +37,7 @@ func main() {
 		cli.SchedulesCommand(),
 		cli.AdminCommand(),
 		cli.ProfileCommand(),
+		cli.MCPCommand(),
 	}
 
 	os.Exit(cli.Dispatch(ctx, commands, os.Args[1:], cfg))
