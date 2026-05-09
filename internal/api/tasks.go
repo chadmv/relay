@@ -53,11 +53,28 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toTaskResponse(task, nil))
 }
 
+type logEntry struct {
+	Seq       int64     `json:"seq"`
+	Stream    string    `json:"stream"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := parseUUID(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+
+	// Verify the task exists before paginating its logs.
+	if _, err := s.q.GetTask(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "get task failed")
 		return
 	}
 
@@ -97,12 +114,6 @@ func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type logEntry struct {
-		Seq       int64     `json:"seq"`
-		Stream    string    `json:"stream"`
-		Content   string    `json:"content"`
-		CreatedAt time.Time `json:"created_at"`
-	}
 	items := make([]logEntry, len(logs))
 	var nextSeq int64
 	for i, l := range logs {

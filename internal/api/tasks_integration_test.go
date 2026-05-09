@@ -69,7 +69,6 @@ func newTestServerWithPool(t *testing.T) (*api.Server, *store.Queries, *pgxpool.
 
 func TestTaskLogs_Pagination(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
-	_ = q // unused but available
 
 	user := createTestUser(t, q, "Alice", "alice@logs-test.com", false)
 	token := createTestToken(t, q, user.ID)
