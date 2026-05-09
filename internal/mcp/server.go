@@ -54,8 +54,10 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	return s.mcp.Run(ctx, transport)
 }
 
-// registerTools wires relay operations as MCP tools. Stub for now.
-func (s *Server) registerTools() {}
+// registerTools wires relay operations as MCP tools.
+func (s *Server) registerTools() {
+	s.registerWhoami()
+}
 
 // registerResources exposes relay resources via MCP. Stub for now.
 func (s *Server) registerResources() {}

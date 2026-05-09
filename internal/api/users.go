@@ -152,6 +152,16 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 }
 
+func (s *Server) handleGetMe(w http.ResponseWriter, r *http.Request) {
+	authUser, _ := UserFromCtx(r.Context())
+	row, err := s.q.GetUser(r.Context(), authUser.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to look up user")
+		return
+	}
+	writeJSON(w, http.StatusOK, toUserResponse(row.ID, row.Email, row.Name, row.IsAdmin, row.CreatedAt, row.ArchivedAt))
+}
+
 func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	authUser, _ := UserFromCtx(r.Context())
 

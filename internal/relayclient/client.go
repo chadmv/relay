@@ -33,6 +33,9 @@ func NewClient(serverURL, token string) *Client {
 	return &Client{base: serverURL, token: token, http: &http.Client{}}
 }
 
+// BaseURL returns the base server URL this client connects to.
+func (c *Client) BaseURL() string { return c.base }
+
 // Do sends a JSON request and decodes the response into out (may be nil).
 // Returns an error for non-2xx responses using the server's "error" field when available.
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
