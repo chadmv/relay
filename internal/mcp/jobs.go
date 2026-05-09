@@ -12,13 +12,13 @@ import (
 )
 
 type listJobsArgs struct {
-	Status string `json:"status" jsonschema:"description=Filter by job status (e.g. running, done, failed, cancelled). Empty returns all."`
-	Limit  int    `json:"limit"  jsonschema:"description=Maximum number of jobs to return (1-200). Defaults to 50 when 0."`
-	Cursor string `json:"cursor" jsonschema:"description=Pagination cursor from a previous response."`
+	Status string `json:"status" jsonschema:"Filter by job status (running, done, failed, cancelled). Empty returns all."`
+	Limit  int    `json:"limit"  jsonschema:"Maximum number of jobs to return (1-200). Defaults to 50 when 0."`
+	Cursor string `json:"cursor" jsonschema:"Pagination cursor from a previous response."`
 }
 
 type getJobArgs struct {
-	JobID string `json:"job_id" jsonschema:"description=The job ID to fetch.,required"`
+	JobID string `json:"job_id" jsonschema:"The job ID to fetch."`
 }
 
 func (s *Server) registerJobs() {

@@ -58,6 +58,7 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 func (s *Server) registerTools() {
 	s.registerWhoami()
 	s.registerJobs()
+	s.registerTasks()
 }
 
 // registerResources exposes relay resources via MCP. Stub for now.
