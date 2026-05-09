@@ -72,8 +72,10 @@ func (s *Server) registerTools() {
 	s.registerRunNow()
 }
 
-// registerResources exposes relay resources via MCP. Stub for now.
-func (s *Server) registerResources() {}
+// registerResources exposes relay resources via MCP.
+func (s *Server) registerResources() {
+	s.registerResourcesImpl()
+}
 
 // nopWriteCloser wraps an io.Writer with a no-op Close so it satisfies io.WriteCloser.
 type nopWriteCloser struct{ io.Writer }
