@@ -162,3 +162,14 @@ UPDATE tasks
 SET status = sqlc.arg(status)
 WHERE id = sqlc.arg(id) AND assignment_epoch = sqlc.arg(epoch)
 RETURNING *;
+
+-- name: GetTaskLogsPage :many
+-- Returns up to $3 log rows for the task with id > $2, ordered ascending.
+SELECT id, task_id, stream, content, created_at
+FROM task_logs
+WHERE task_id = $1 AND id > $2
+ORDER BY id
+LIMIT $3;
+
+-- name: CountTaskLogs :one
+SELECT COUNT(*) FROM task_logs WHERE task_id = $1;
