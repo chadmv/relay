@@ -62,6 +62,7 @@ func (s *Server) registerTools() {
 	s.registerTaskLogs()
 	s.registerWorkers()
 	s.registerSchedules()
+	s.registerReservations()
 }
 
 // registerResources exposes relay resources via MCP. Stub for now.
