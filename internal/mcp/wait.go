@@ -13,7 +13,6 @@ const (
 	defaultWaitTimeout = 60 * time.Second
 	maxWaitTimeout     = 300 * time.Second
 	defaultWaitPoll    = 2 * time.Second
-	minWaitTimeout     = 1 * time.Second
 )
 
 var terminalStatuses = map[string]bool{
@@ -24,7 +23,7 @@ var terminalStatuses = map[string]bool{
 
 type waitForJobArgs struct {
 	JobID          string `json:"job_id"          jsonschema:"The job ID to wait for."`
-	TimeoutSeconds int    `json:"timeout_seconds" jsonschema:"Seconds to wait before returning (0=immediate check only, negative=default 60s, max 300)."`
+	TimeoutSeconds int    `json:"timeout_seconds" jsonschema:"Seconds to wait before returning (0=use default 60s, max 300)."`
 }
 
 func (s *Server) registerWait() {
@@ -48,26 +47,20 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 		return nil, &ToolError{Code: "validation", Message: "job_id is required"}
 	}
 
-	// Validate upper bound first.
-	if args.TimeoutSeconds > int(maxWaitTimeout.Seconds()) {
-		return nil, &ToolError{
-			Code:    "validation",
-			Message: fmt.Sprintf("timeout_seconds must be ≤ %d", int(maxWaitTimeout.Seconds())),
-			Hint:    "use a smaller value or 0 for the default (60s)",
-		}
-	}
-
 	// Determine timeout duration.
-	// TimeoutSeconds == 0: poll once and return immediately (zero timeout).
-	// TimeoutSeconds < 0 (or we choose a sentinel): use default.
-	// For this implementation: 0 = zero duration timeout (poll once then done).
-	var timeout time.Duration
-	if args.TimeoutSeconds == 0 {
-		timeout = 0
-	} else if args.TimeoutSeconds < int(minWaitTimeout.Seconds()) {
-		timeout = minWaitTimeout
-	} else {
-		timeout = time.Duration(args.TimeoutSeconds) * time.Second
+	timeout := defaultWaitTimeout
+	if args.TimeoutSeconds != 0 {
+		if args.TimeoutSeconds < 0 {
+			return nil, &ToolError{Code: "validation", Message: "timeout_seconds must be non-negative"}
+		}
+		t := time.Duration(args.TimeoutSeconds) * time.Second
+		if t > maxWaitTimeout {
+			return nil, &ToolError{
+				Code:    "validation",
+				Message: fmt.Sprintf("timeout_seconds must be <= %d", int(maxWaitTimeout/time.Second)),
+			}
+		}
+		timeout = t
 	}
 
 	// Determine poll interval.

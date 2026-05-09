@@ -55,10 +55,16 @@ func TestWaitForJob_Timeout(t *testing.T) {
 	s, _ := NewServer(srv.URL, "t")
 	s.waitPoll = 10 * time.Millisecond
 
-	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 0})
+	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 1})
 	require.Nil(t, terr)
 	require.Equal(t, true, out["timed_out"])
 	require.Equal(t, "running", out["last_state"].(map[string]any)["status"])
+}
+
+func TestWaitForJob_NegativeTimeout(t *testing.T) {
+	s, _ := NewServer("http://x", "t")
+	_, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j", TimeoutSeconds: -1})
+	require.Equal(t, "validation", terr.Code)
 }
 
 func TestWaitForJob_TimeoutTooLarge(t *testing.T) {
