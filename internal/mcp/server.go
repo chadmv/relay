@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"relay/internal/relayclient"
@@ -14,8 +15,9 @@ import (
 
 // Server wraps the MCP SDK server and a relay API client.
 type Server struct {
-	client *relayclient.Client
-	mcp    *mcpsdk.Server
+	client   *relayclient.Client
+	mcp      *mcpsdk.Server
+	waitPoll time.Duration // overridable in tests; 0 means use defaultWaitPoll
 }
 
 // NewServer constructs a Server that talks to the relay API at serverURL
@@ -62,7 +64,12 @@ func (s *Server) registerTools() {
 	s.registerTaskLogs()
 	s.registerWorkers()
 	s.registerSchedules()
+	s.registerSchedulesWrite()
 	s.registerReservations()
+	s.registerSubmit()
+	s.registerCancel()
+	s.registerWait()
+	s.registerRunNow()
 }
 
 // registerResources exposes relay resources via MCP. Stub for now.
