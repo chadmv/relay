@@ -272,6 +272,8 @@ All configuration is via environment variables:
 | `RELAY_BOOTSTRAP_PASSWORD` | _(empty)_ | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum PostgreSQL connection pool size |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing tasks from a disconnected agent |
+| `RELAY_TELEMETRY_WINDOW` | `30m` | Retention window for the in-memory worker utilization ring buffer |
+| `RELAY_TELEMETRY_STALE_AFTER` | `30s` | A connected worker with no telemetry received for longer than this is marked `stale`. Should be greater than `RELAY_TELEMETRY_INTERVAL`. |
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
 | `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
@@ -344,6 +346,7 @@ On first boot the agent requires a one-time enrollment token. After successful e
 | Variable | Description |
 |----------|-------------|
 | `RELAY_AGENT_ENROLLMENT_TOKEN` | One-time enrollment credential issued by an admin (`relay agent enroll`). Required on first boot when no `token` file exists. Cleared from process env immediately after capture. |
+| `RELAY_TELEMETRY_INTERVAL` | How often the agent samples host CPU/memory/GPU utilization and reports it to the server. Default `10s`. |
 | `RELAY_WORKSPACE_ROOT` | Absolute path under which the agent creates source-controlled workspaces (e.g. Perforce stream clients). Setting this enables the workspace provider; tasks with a `source` field will fail if it is unset. |
 | `RELAY_WORKSPACE_MAX_AGE` | Idle workspace age threshold (e.g. `14d`, `8h`). Workspaces unused longer than this are evicted by the sweeper. |
 | `RELAY_WORKSPACE_MIN_FREE_GB` | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted until the threshold is met. |
@@ -1096,6 +1099,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
 | `GET` | `/v1/workers/{id}/workspaces` | List source workspaces on the worker (admin only) |
 | `POST` | `/v1/workers/{id}/workspaces/{short_id}/evict` | Request eviction of a workspace (admin only); returns 202 even if the worker is offline |
+| `GET` | `/v1/workers/{id}/metrics` | Get the worker's short-term utilization history (CPU, memory, GPU). Returns an empty `samples` array for offline workers or workers with no data yet. 404 if the worker does not exist. Same bearer-auth as `GET /v1/workers/{id}`. |
 
 ### Reservations
 
