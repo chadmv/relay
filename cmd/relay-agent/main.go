@@ -104,6 +104,11 @@ func main() {
 		return saveWorkerID(workerIDFile, id)
 	}, provider)
 
+	if v := os.Getenv("RELAY_TELEMETRY_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			a.TelemetryInterval = d
+		}
+	}
 	a.Run(ctx)
 }
 

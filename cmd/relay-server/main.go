@@ -16,6 +16,7 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/api"
 	"relay/internal/events"
+	"relay/internal/metrics"
 	"relay/internal/schedrunner"
 	"relay/internal/scheduler"
 	"relay/internal/store"
@@ -92,6 +93,21 @@ func main() {
 
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
+
+	telemetryWindow := 30 * time.Minute
+	if v := os.Getenv("RELAY_TELEMETRY_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			telemetryWindow = d
+		}
+	}
+	staleAfter := 30 * time.Second
+	if v := os.Getenv("RELAY_TELEMETRY_STALE_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			staleAfter = d
+		}
+	}
+	metricsStore := metrics.NewStore(int(telemetryWindow / metrics.DefaultSampleInterval))
+
 	dispatcher := scheduler.NewDispatcher(q, registry, broker)
 	notifyListener := scheduler.NewNotifyListener(pool, dispatcher.Trigger)
 	go notifyListener.Run(ctx)
@@ -119,6 +135,7 @@ func main() {
 	}
 
 	agentHandler := worker.NewHandlerWithGrace(q, pool, registry, broker, dispatcher.Trigger, grace)
+	agentHandler.Metrics = metricsStore
 
 	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 	if err != nil {
@@ -135,6 +152,7 @@ func main() {
 	}
 
 	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
+	httpServer.Metrics = metricsStore
 
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
@@ -166,6 +184,9 @@ func main() {
 		log.Printf("warn: schedrunner reconcile: %v", err)
 	}
 	go schedrunner.NewRunner(pool, q).Run(ctx)
+
+	// Mark connected-but-silent workers stale based on telemetry age.
+	go metrics.NewSweeper(q, broker, metricsStore, staleAfter).Run(ctx)
 
 	// Purge expired enrollment tokens hourly.
 	go runEnrollmentJanitor(ctx, q)
