@@ -231,6 +231,49 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	return items, nil
 }
 
+const listWorkersByLiveness = `-- name: ListWorkersByLiveness :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers WHERE status IN ('online', 'stale')
+`
+
+// Workers eligible for staleness sweeping: those currently connected.
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers WHERE status IN ('online', 'stale')
+func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersByLiveness)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkersPage = `-- name: ListWorkersPage :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at FROM workers
 WHERE ($1::bool = FALSE
@@ -308,6 +351,24 @@ type SetWorkerAgentTokenParams struct {
 //	UPDATE workers SET agent_token_hash = $2 WHERE id = $1
 func (q *Queries) SetWorkerAgentToken(ctx context.Context, arg SetWorkerAgentTokenParams) error {
 	_, err := q.db.Exec(ctx, setWorkerAgentToken, arg.ID, arg.AgentTokenHash)
+	return err
+}
+
+const setWorkerStatus = `-- name: SetWorkerStatus :exec
+UPDATE workers SET status = $2 WHERE id = $1
+`
+
+type SetWorkerStatusParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+// Updates only the status column, leaving last_seen_at and disconnected_at
+// untouched. Used by the liveness sweeper for online<->stale transitions.
+//
+//	UPDATE workers SET status = $2 WHERE id = $1
+func (q *Queries) SetWorkerStatus(ctx context.Context, arg SetWorkerStatusParams) error {
+	_, err := q.db.Exec(ctx, setWorkerStatus, arg.ID, arg.Status)
 	return err
 }
 
