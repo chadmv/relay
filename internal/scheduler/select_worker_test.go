@@ -88,11 +88,10 @@ func TestSelectWorker_OfflineWorkerIsExcluded(t *testing.T) {
 	assert.Nil(t, got, "offline worker must NOT be selected for dispatch")
 }
 
-func TestSelectWorker_PrefersOnlineOverStaleWhenSlotsEqual(t *testing.T) {
-	// Both workers have the same free slots; online should win as it has
-	// a marginally higher score only if we were to distinguish, but the
-	// current scoring treats them equally - this test just ensures both
-	// are candidates and one is returned.
+func TestSelectWorker_BothOnlineAndStaleAreEligibleCandidates(t *testing.T) {
+	// Both workers have the same free slots; the scheduler scores them equally
+	// because there is no status-based preference - both online and stale are
+	// eligible candidates, and this test simply ensures one of them is returned.
 	d := newDispatcherForTest()
 	task := baseTask()
 	workers := []store.Worker{
