@@ -70,3 +70,14 @@ func TestStore_ClearStopsTracking(t *testing.T) {
 	assert.False(t, ok)
 	assert.Empty(t, s.Snapshot("w1"))
 }
+
+func TestStore_RingBufferBackingArrayStaysBounded(t *testing.T) {
+	s := NewStore(3)
+	s.Activate("w1", time.Unix(0, 0))
+	for i := 1; i <= 100; i++ {
+		s.Append("w1", Sample{At: time.Unix(int64(i), 0), CPUPercent: float64(i)})
+	}
+	r := s.workers["w1"]
+	assert.Equal(t, 3, len(r.samples))
+	assert.Equal(t, 3, cap(r.samples), "backing array must stay bounded to capacity")
+}

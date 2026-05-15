@@ -69,7 +69,11 @@ func (s *Store) Append(workerID string, sample Sample) {
 	}
 	r.samples = append(r.samples, sample)
 	if len(r.samples) > s.capacity {
-		r.samples = r.samples[len(r.samples)-s.capacity:]
+		// Copy into a fresh slice so the backing array stays exactly capacity
+		// rather than retaining evicted elements until the next reallocation.
+		trimmed := make([]Sample, s.capacity)
+		copy(trimmed, r.samples[len(r.samples)-s.capacity:])
+		r.samples = trimmed
 	}
 }
 
