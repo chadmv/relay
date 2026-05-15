@@ -142,6 +142,7 @@ type AgentMessage struct {
 	//	*AgentMessage_TaskStatus
 	//	*AgentMessage_TaskLog
 	//	*AgentMessage_WorkspaceInventory
+	//	*AgentMessage_Telemetry
 	Payload       isAgentMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -220,6 +221,15 @@ func (x *AgentMessage) GetWorkspaceInventory() *WorkspaceInventoryUpdate {
 	return nil
 }
 
+func (x *AgentMessage) GetTelemetry() *WorkerTelemetry {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentMessage_Telemetry); ok {
+			return x.Telemetry
+		}
+	}
+	return nil
+}
+
 type isAgentMessage_Payload interface {
 	isAgentMessage_Payload()
 }
@@ -240,6 +250,10 @@ type AgentMessage_WorkspaceInventory struct {
 	WorkspaceInventory *WorkspaceInventoryUpdate `protobuf:"bytes,4,opt,name=workspace_inventory,json=workspaceInventory,proto3,oneof"`
 }
 
+type AgentMessage_Telemetry struct {
+	Telemetry *WorkerTelemetry `protobuf:"bytes,5,opt,name=telemetry,proto3,oneof"`
+}
+
 func (*AgentMessage_Register) isAgentMessage_Payload() {}
 
 func (*AgentMessage_TaskStatus) isAgentMessage_Payload() {}
@@ -247,6 +261,104 @@ func (*AgentMessage_TaskStatus) isAgentMessage_Payload() {}
 func (*AgentMessage_TaskLog) isAgentMessage_Payload() {}
 
 func (*AgentMessage_WorkspaceInventory) isAgentMessage_Payload() {}
+
+func (*AgentMessage_Telemetry) isAgentMessage_Payload() {}
+
+// WorkerTelemetry is a periodic host-utilization sample sent by the agent. It
+// doubles as an application-level heartbeat. The server stamps receipt time on
+// arrival, so the message carries no timestamp. has_gpu distinguishes a host
+// with no NVIDIA GPU from one whose GPU is idle at 0%.
+type WorkerTelemetry struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	CpuPercent       float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"` // 0-100, host-wide
+	MemUsedBytes     uint64                 `protobuf:"varint,2,opt,name=mem_used_bytes,json=memUsedBytes,proto3" json:"mem_used_bytes,omitempty"`
+	MemTotalBytes    uint64                 `protobuf:"varint,3,opt,name=mem_total_bytes,json=memTotalBytes,proto3" json:"mem_total_bytes,omitempty"`
+	HasGpu           bool                   `protobuf:"varint,4,opt,name=has_gpu,json=hasGpu,proto3" json:"has_gpu,omitempty"`
+	GpuUtilPercent   float64                `protobuf:"fixed64,5,opt,name=gpu_util_percent,json=gpuUtilPercent,proto3" json:"gpu_util_percent,omitempty"`     // averaged across GPUs
+	GpuMemUsedBytes  uint64                 `protobuf:"varint,6,opt,name=gpu_mem_used_bytes,json=gpuMemUsedBytes,proto3" json:"gpu_mem_used_bytes,omitempty"` // summed across GPUs
+	GpuMemTotalBytes uint64                 `protobuf:"varint,7,opt,name=gpu_mem_total_bytes,json=gpuMemTotalBytes,proto3" json:"gpu_mem_total_bytes,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *WorkerTelemetry) Reset() {
+	*x = WorkerTelemetry{}
+	mi := &file_relayv1_relay_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkerTelemetry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkerTelemetry) ProtoMessage() {}
+
+func (x *WorkerTelemetry) ProtoReflect() protoreflect.Message {
+	mi := &file_relayv1_relay_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkerTelemetry.ProtoReflect.Descriptor instead.
+func (*WorkerTelemetry) Descriptor() ([]byte, []int) {
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *WorkerTelemetry) GetCpuPercent() float64 {
+	if x != nil {
+		return x.CpuPercent
+	}
+	return 0
+}
+
+func (x *WorkerTelemetry) GetMemUsedBytes() uint64 {
+	if x != nil {
+		return x.MemUsedBytes
+	}
+	return 0
+}
+
+func (x *WorkerTelemetry) GetMemTotalBytes() uint64 {
+	if x != nil {
+		return x.MemTotalBytes
+	}
+	return 0
+}
+
+func (x *WorkerTelemetry) GetHasGpu() bool {
+	if x != nil {
+		return x.HasGpu
+	}
+	return false
+}
+
+func (x *WorkerTelemetry) GetGpuUtilPercent() float64 {
+	if x != nil {
+		return x.GpuUtilPercent
+	}
+	return 0
+}
+
+func (x *WorkerTelemetry) GetGpuMemUsedBytes() uint64 {
+	if x != nil {
+		return x.GpuMemUsedBytes
+	}
+	return 0
+}
+
+func (x *WorkerTelemetry) GetGpuMemTotalBytes() uint64 {
+	if x != nil {
+		return x.GpuMemTotalBytes
+	}
+	return 0
+}
 
 // Sent once when the stream opens. worker_id is empty on first registration.
 // running_tasks is the agent's list of currently-executing tasks at reconnect
@@ -277,7 +389,7 @@ type RegisterRequest struct {
 
 func (x *RegisterRequest) Reset() {
 	*x = RegisterRequest{}
-	mi := &file_relayv1_relay_proto_msgTypes[1]
+	mi := &file_relayv1_relay_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -289,7 +401,7 @@ func (x *RegisterRequest) String() string {
 func (*RegisterRequest) ProtoMessage() {}
 
 func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[1]
+	mi := &file_relayv1_relay_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -302,7 +414,7 @@ func (x *RegisterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterRequest.ProtoReflect.Descriptor instead.
 func (*RegisterRequest) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{1}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *RegisterRequest) GetWorkerId() string {
@@ -421,7 +533,7 @@ type RunningTask struct {
 
 func (x *RunningTask) Reset() {
 	*x = RunningTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[2]
+	mi := &file_relayv1_relay_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -433,7 +545,7 @@ func (x *RunningTask) String() string {
 func (*RunningTask) ProtoMessage() {}
 
 func (x *RunningTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[2]
+	mi := &file_relayv1_relay_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -446,7 +558,7 @@ func (x *RunningTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunningTask.ProtoReflect.Descriptor instead.
 func (*RunningTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{2}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RunningTask) GetTaskId() string {
@@ -476,7 +588,7 @@ type TaskStatusUpdate struct {
 
 func (x *TaskStatusUpdate) Reset() {
 	*x = TaskStatusUpdate{}
-	mi := &file_relayv1_relay_proto_msgTypes[3]
+	mi := &file_relayv1_relay_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -488,7 +600,7 @@ func (x *TaskStatusUpdate) String() string {
 func (*TaskStatusUpdate) ProtoMessage() {}
 
 func (x *TaskStatusUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[3]
+	mi := &file_relayv1_relay_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -501,7 +613,7 @@ func (x *TaskStatusUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskStatusUpdate.ProtoReflect.Descriptor instead.
 func (*TaskStatusUpdate) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{3}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *TaskStatusUpdate) GetTaskId() string {
@@ -553,7 +665,7 @@ type TaskLogChunk struct {
 
 func (x *TaskLogChunk) Reset() {
 	*x = TaskLogChunk{}
-	mi := &file_relayv1_relay_proto_msgTypes[4]
+	mi := &file_relayv1_relay_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -565,7 +677,7 @@ func (x *TaskLogChunk) String() string {
 func (*TaskLogChunk) ProtoMessage() {}
 
 func (x *TaskLogChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[4]
+	mi := &file_relayv1_relay_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -578,7 +690,7 @@ func (x *TaskLogChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskLogChunk.ProtoReflect.Descriptor instead.
 func (*TaskLogChunk) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{4}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *TaskLogChunk) GetTaskId() string {
@@ -638,7 +750,7 @@ type CoordinatorMessage struct {
 
 func (x *CoordinatorMessage) Reset() {
 	*x = CoordinatorMessage{}
-	mi := &file_relayv1_relay_proto_msgTypes[5]
+	mi := &file_relayv1_relay_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +762,7 @@ func (x *CoordinatorMessage) String() string {
 func (*CoordinatorMessage) ProtoMessage() {}
 
 func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[5]
+	mi := &file_relayv1_relay_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +775,7 @@ func (x *CoordinatorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CoordinatorMessage.ProtoReflect.Descriptor instead.
 func (*CoordinatorMessage) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{5}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CoordinatorMessage) GetPayload() isCoordinatorMessage_Payload {
@@ -753,7 +865,7 @@ type RegisterResponse struct {
 
 func (x *RegisterResponse) Reset() {
 	*x = RegisterResponse{}
-	mi := &file_relayv1_relay_proto_msgTypes[6]
+	mi := &file_relayv1_relay_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +877,7 @@ func (x *RegisterResponse) String() string {
 func (*RegisterResponse) ProtoMessage() {}
 
 func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[6]
+	mi := &file_relayv1_relay_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +890,7 @@ func (x *RegisterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterResponse.ProtoReflect.Descriptor instead.
 func (*RegisterResponse) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{6}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RegisterResponse) GetWorkerId() string {
@@ -817,7 +929,7 @@ type DispatchTask struct {
 
 func (x *DispatchTask) Reset() {
 	*x = DispatchTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[7]
+	mi := &file_relayv1_relay_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -829,7 +941,7 @@ func (x *DispatchTask) String() string {
 func (*DispatchTask) ProtoMessage() {}
 
 func (x *DispatchTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[7]
+	mi := &file_relayv1_relay_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -842,7 +954,7 @@ func (x *DispatchTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchTask.ProtoReflect.Descriptor instead.
 func (*DispatchTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{7}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DispatchTask) GetTaskId() string {
@@ -906,7 +1018,7 @@ type CommandLine struct {
 
 func (x *CommandLine) Reset() {
 	*x = CommandLine{}
-	mi := &file_relayv1_relay_proto_msgTypes[8]
+	mi := &file_relayv1_relay_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -918,7 +1030,7 @@ func (x *CommandLine) String() string {
 func (*CommandLine) ProtoMessage() {}
 
 func (x *CommandLine) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[8]
+	mi := &file_relayv1_relay_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -931,7 +1043,7 @@ func (x *CommandLine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandLine.ProtoReflect.Descriptor instead.
 func (*CommandLine) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{8}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CommandLine) GetArgv() []string {
@@ -951,7 +1063,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_relayv1_relay_proto_msgTypes[9]
+	mi := &file_relayv1_relay_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -963,7 +1075,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[9]
+	mi := &file_relayv1_relay_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -976,7 +1088,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{9}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -1005,7 +1117,7 @@ type SourceSpec struct {
 
 func (x *SourceSpec) Reset() {
 	*x = SourceSpec{}
-	mi := &file_relayv1_relay_proto_msgTypes[10]
+	mi := &file_relayv1_relay_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1017,7 +1129,7 @@ func (x *SourceSpec) String() string {
 func (*SourceSpec) ProtoMessage() {}
 
 func (x *SourceSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[10]
+	mi := &file_relayv1_relay_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1030,7 +1142,7 @@ func (x *SourceSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SourceSpec.ProtoReflect.Descriptor instead.
 func (*SourceSpec) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{10}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SourceSpec) GetProvider() isSourceSpec_Provider {
@@ -1072,7 +1184,7 @@ type PerforceSource struct {
 
 func (x *PerforceSource) Reset() {
 	*x = PerforceSource{}
-	mi := &file_relayv1_relay_proto_msgTypes[11]
+	mi := &file_relayv1_relay_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1084,7 +1196,7 @@ func (x *PerforceSource) String() string {
 func (*PerforceSource) ProtoMessage() {}
 
 func (x *PerforceSource) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[11]
+	mi := &file_relayv1_relay_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1097,7 +1209,7 @@ func (x *PerforceSource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PerforceSource.ProtoReflect.Descriptor instead.
 func (*PerforceSource) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{11}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PerforceSource) GetStream() string {
@@ -1145,7 +1257,7 @@ type SyncEntry struct {
 
 func (x *SyncEntry) Reset() {
 	*x = SyncEntry{}
-	mi := &file_relayv1_relay_proto_msgTypes[12]
+	mi := &file_relayv1_relay_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1157,7 +1269,7 @@ func (x *SyncEntry) String() string {
 func (*SyncEntry) ProtoMessage() {}
 
 func (x *SyncEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[12]
+	mi := &file_relayv1_relay_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1170,7 +1282,7 @@ func (x *SyncEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncEntry.ProtoReflect.Descriptor instead.
 func (*SyncEntry) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{12}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SyncEntry) GetPath() string {
@@ -1201,7 +1313,7 @@ type WorkspaceInventoryUpdate struct {
 
 func (x *WorkspaceInventoryUpdate) Reset() {
 	*x = WorkspaceInventoryUpdate{}
-	mi := &file_relayv1_relay_proto_msgTypes[13]
+	mi := &file_relayv1_relay_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1213,7 +1325,7 @@ func (x *WorkspaceInventoryUpdate) String() string {
 func (*WorkspaceInventoryUpdate) ProtoMessage() {}
 
 func (x *WorkspaceInventoryUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[13]
+	mi := &file_relayv1_relay_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1226,7 +1338,7 @@ func (x *WorkspaceInventoryUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceInventoryUpdate.ProtoReflect.Descriptor instead.
 func (*WorkspaceInventoryUpdate) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{13}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WorkspaceInventoryUpdate) GetSourceType() string {
@@ -1281,7 +1393,7 @@ type EvictWorkspaceCommand struct {
 
 func (x *EvictWorkspaceCommand) Reset() {
 	*x = EvictWorkspaceCommand{}
-	mi := &file_relayv1_relay_proto_msgTypes[14]
+	mi := &file_relayv1_relay_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1293,7 +1405,7 @@ func (x *EvictWorkspaceCommand) String() string {
 func (*EvictWorkspaceCommand) ProtoMessage() {}
 
 func (x *EvictWorkspaceCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_relayv1_relay_proto_msgTypes[14]
+	mi := &file_relayv1_relay_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1306,7 +1418,7 @@ func (x *EvictWorkspaceCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvictWorkspaceCommand.ProtoReflect.Descriptor instead.
 func (*EvictWorkspaceCommand) Descriptor() ([]byte, []int) {
-	return file_relayv1_relay_proto_rawDescGZIP(), []int{14}
+	return file_relayv1_relay_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *EvictWorkspaceCommand) GetSourceType() string {
@@ -1327,14 +1439,24 @@ var File_relayv1_relay_proto protoreflect.FileDescriptor
 
 const file_relayv1_relay_proto_rawDesc = "" +
 	"\n" +
-	"\x13relayv1/relay.proto\x12\brelay.v1\"\x9d\x02\n" +
+	"\x13relayv1/relay.proto\x12\brelay.v1\"\xd8\x02\n" +
 	"\fAgentMessage\x127\n" +
 	"\bregister\x18\x01 \x01(\v2\x19.relay.v1.RegisterRequestH\x00R\bregister\x12=\n" +
 	"\vtask_status\x18\x02 \x01(\v2\x1a.relay.v1.TaskStatusUpdateH\x00R\n" +
 	"taskStatus\x123\n" +
 	"\btask_log\x18\x03 \x01(\v2\x16.relay.v1.TaskLogChunkH\x00R\ataskLog\x12U\n" +
-	"\x13workspace_inventory\x18\x04 \x01(\v2\".relay.v1.WorkspaceInventoryUpdateH\x00R\x12workspaceInventoryB\t\n" +
-	"\apayload\"\xa4\x03\n" +
+	"\x13workspace_inventory\x18\x04 \x01(\v2\".relay.v1.WorkspaceInventoryUpdateH\x00R\x12workspaceInventory\x129\n" +
+	"\ttelemetry\x18\x05 \x01(\v2\x19.relay.v1.WorkerTelemetryH\x00R\ttelemetryB\t\n" +
+	"\apayload\"\x9f\x02\n" +
+	"\x0fWorkerTelemetry\x12\x1f\n" +
+	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
+	"cpuPercent\x12$\n" +
+	"\x0emem_used_bytes\x18\x02 \x01(\x04R\fmemUsedBytes\x12&\n" +
+	"\x0fmem_total_bytes\x18\x03 \x01(\x04R\rmemTotalBytes\x12\x17\n" +
+	"\ahas_gpu\x18\x04 \x01(\bR\x06hasGpu\x12(\n" +
+	"\x10gpu_util_percent\x18\x05 \x01(\x01R\x0egpuUtilPercent\x12+\n" +
+	"\x12gpu_mem_used_bytes\x18\x06 \x01(\x04R\x0fgpuMemUsedBytes\x12-\n" +
+	"\x13gpu_mem_total_bytes\x18\a \x01(\x04R\x10gpuMemTotalBytes\"\xa4\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1b\n" +
@@ -1459,52 +1581,54 @@ func file_relayv1_relay_proto_rawDescGZIP() []byte {
 }
 
 var file_relayv1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_relayv1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_relayv1_relay_proto_goTypes = []any{
 	(TaskStatus)(0),                  // 0: relay.v1.TaskStatus
 	(LogStream)(0),                   // 1: relay.v1.LogStream
 	(*AgentMessage)(nil),             // 2: relay.v1.AgentMessage
-	(*RegisterRequest)(nil),          // 3: relay.v1.RegisterRequest
-	(*RunningTask)(nil),              // 4: relay.v1.RunningTask
-	(*TaskStatusUpdate)(nil),         // 5: relay.v1.TaskStatusUpdate
-	(*TaskLogChunk)(nil),             // 6: relay.v1.TaskLogChunk
-	(*CoordinatorMessage)(nil),       // 7: relay.v1.CoordinatorMessage
-	(*RegisterResponse)(nil),         // 8: relay.v1.RegisterResponse
-	(*DispatchTask)(nil),             // 9: relay.v1.DispatchTask
-	(*CommandLine)(nil),              // 10: relay.v1.CommandLine
-	(*CancelTask)(nil),               // 11: relay.v1.CancelTask
-	(*SourceSpec)(nil),               // 12: relay.v1.SourceSpec
-	(*PerforceSource)(nil),           // 13: relay.v1.PerforceSource
-	(*SyncEntry)(nil),                // 14: relay.v1.SyncEntry
-	(*WorkspaceInventoryUpdate)(nil), // 15: relay.v1.WorkspaceInventoryUpdate
-	(*EvictWorkspaceCommand)(nil),    // 16: relay.v1.EvictWorkspaceCommand
-	nil,                              // 17: relay.v1.DispatchTask.EnvEntry
+	(*WorkerTelemetry)(nil),          // 3: relay.v1.WorkerTelemetry
+	(*RegisterRequest)(nil),          // 4: relay.v1.RegisterRequest
+	(*RunningTask)(nil),              // 5: relay.v1.RunningTask
+	(*TaskStatusUpdate)(nil),         // 6: relay.v1.TaskStatusUpdate
+	(*TaskLogChunk)(nil),             // 7: relay.v1.TaskLogChunk
+	(*CoordinatorMessage)(nil),       // 8: relay.v1.CoordinatorMessage
+	(*RegisterResponse)(nil),         // 9: relay.v1.RegisterResponse
+	(*DispatchTask)(nil),             // 10: relay.v1.DispatchTask
+	(*CommandLine)(nil),              // 11: relay.v1.CommandLine
+	(*CancelTask)(nil),               // 12: relay.v1.CancelTask
+	(*SourceSpec)(nil),               // 13: relay.v1.SourceSpec
+	(*PerforceSource)(nil),           // 14: relay.v1.PerforceSource
+	(*SyncEntry)(nil),                // 15: relay.v1.SyncEntry
+	(*WorkspaceInventoryUpdate)(nil), // 16: relay.v1.WorkspaceInventoryUpdate
+	(*EvictWorkspaceCommand)(nil),    // 17: relay.v1.EvictWorkspaceCommand
+	nil,                              // 18: relay.v1.DispatchTask.EnvEntry
 }
 var file_relayv1_relay_proto_depIdxs = []int32{
-	3,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
-	5,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
-	6,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
-	15, // 3: relay.v1.AgentMessage.workspace_inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
-	4,  // 4: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
-	15, // 5: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
-	0,  // 6: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
-	1,  // 7: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
-	8,  // 8: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
-	9,  // 9: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
-	11, // 10: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
-	16, // 11: relay.v1.CoordinatorMessage.evict_workspace:type_name -> relay.v1.EvictWorkspaceCommand
-	17, // 12: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
-	12, // 13: relay.v1.DispatchTask.source:type_name -> relay.v1.SourceSpec
-	10, // 14: relay.v1.DispatchTask.commands:type_name -> relay.v1.CommandLine
-	13, // 15: relay.v1.SourceSpec.perforce:type_name -> relay.v1.PerforceSource
-	14, // 16: relay.v1.PerforceSource.sync:type_name -> relay.v1.SyncEntry
-	2,  // 17: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
-	7,  // 18: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
-	18, // [18:19] is the sub-list for method output_type
-	17, // [17:18] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	4,  // 0: relay.v1.AgentMessage.register:type_name -> relay.v1.RegisterRequest
+	6,  // 1: relay.v1.AgentMessage.task_status:type_name -> relay.v1.TaskStatusUpdate
+	7,  // 2: relay.v1.AgentMessage.task_log:type_name -> relay.v1.TaskLogChunk
+	16, // 3: relay.v1.AgentMessage.workspace_inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	3,  // 4: relay.v1.AgentMessage.telemetry:type_name -> relay.v1.WorkerTelemetry
+	5,  // 5: relay.v1.RegisterRequest.running_tasks:type_name -> relay.v1.RunningTask
+	16, // 6: relay.v1.RegisterRequest.inventory:type_name -> relay.v1.WorkspaceInventoryUpdate
+	0,  // 7: relay.v1.TaskStatusUpdate.status:type_name -> relay.v1.TaskStatus
+	1,  // 8: relay.v1.TaskLogChunk.stream:type_name -> relay.v1.LogStream
+	9,  // 9: relay.v1.CoordinatorMessage.register_response:type_name -> relay.v1.RegisterResponse
+	10, // 10: relay.v1.CoordinatorMessage.dispatch_task:type_name -> relay.v1.DispatchTask
+	12, // 11: relay.v1.CoordinatorMessage.cancel_task:type_name -> relay.v1.CancelTask
+	17, // 12: relay.v1.CoordinatorMessage.evict_workspace:type_name -> relay.v1.EvictWorkspaceCommand
+	18, // 13: relay.v1.DispatchTask.env:type_name -> relay.v1.DispatchTask.EnvEntry
+	13, // 14: relay.v1.DispatchTask.source:type_name -> relay.v1.SourceSpec
+	11, // 15: relay.v1.DispatchTask.commands:type_name -> relay.v1.CommandLine
+	14, // 16: relay.v1.SourceSpec.perforce:type_name -> relay.v1.PerforceSource
+	15, // 17: relay.v1.PerforceSource.sync:type_name -> relay.v1.SyncEntry
+	2,  // 18: relay.v1.AgentService.Connect:input_type -> relay.v1.AgentMessage
+	8,  // 19: relay.v1.AgentService.Connect:output_type -> relay.v1.CoordinatorMessage
+	19, // [19:20] is the sub-list for method output_type
+	18, // [18:19] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_relayv1_relay_proto_init() }
@@ -1517,29 +1641,30 @@ func file_relayv1_relay_proto_init() {
 		(*AgentMessage_TaskStatus)(nil),
 		(*AgentMessage_TaskLog)(nil),
 		(*AgentMessage_WorkspaceInventory)(nil),
+		(*AgentMessage_Telemetry)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[1].OneofWrappers = []any{
+	file_relayv1_relay_proto_msgTypes[2].OneofWrappers = []any{
 		(*RegisterRequest_EnrollmentToken)(nil),
 		(*RegisterRequest_AgentToken)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[3].OneofWrappers = []any{}
-	file_relayv1_relay_proto_msgTypes[5].OneofWrappers = []any{
+	file_relayv1_relay_proto_msgTypes[4].OneofWrappers = []any{}
+	file_relayv1_relay_proto_msgTypes[6].OneofWrappers = []any{
 		(*CoordinatorMessage_RegisterResponse)(nil),
 		(*CoordinatorMessage_DispatchTask)(nil),
 		(*CoordinatorMessage_CancelTask)(nil),
 		(*CoordinatorMessage_EvictWorkspace)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[10].OneofWrappers = []any{
+	file_relayv1_relay_proto_msgTypes[11].OneofWrappers = []any{
 		(*SourceSpec_Perforce)(nil),
 	}
-	file_relayv1_relay_proto_msgTypes[11].OneofWrappers = []any{}
+	file_relayv1_relay_proto_msgTypes[12].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relayv1_relay_proto_rawDesc), len(file_relayv1_relay_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

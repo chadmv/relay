@@ -14,7 +14,22 @@ message AgentMessage {
     TaskStatusUpdate         task_status          = 2;
     TaskLogChunk             task_log             = 3;
     WorkspaceInventoryUpdate workspace_inventory  = 4;
+    WorkerTelemetry          telemetry            = 5;
   }
+}
+
+// WorkerTelemetry is a periodic host-utilization sample sent by the agent. It
+// doubles as an application-level heartbeat. The server stamps receipt time on
+// arrival, so the message carries no timestamp. has_gpu distinguishes a host
+// with no NVIDIA GPU from one whose GPU is idle at 0%.
+message WorkerTelemetry {
+  double cpu_percent         = 1;  // 0-100, host-wide
+  uint64 mem_used_bytes      = 2;
+  uint64 mem_total_bytes     = 3;
+  bool   has_gpu             = 4;
+  double gpu_util_percent    = 5;  // averaged across GPUs
+  uint64 gpu_mem_used_bytes  = 6;  // summed across GPUs
+  uint64 gpu_mem_total_bytes = 7;
 }
 
 // Sent once when the stream opens. worker_id is empty on first registration.
