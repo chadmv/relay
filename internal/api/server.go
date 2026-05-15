@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"relay/internal/events"
+	"relay/internal/metrics"
 	"relay/internal/store"
 	"relay/internal/worker"
 
@@ -30,6 +31,10 @@ type Server struct {
 	// an invite_token. Set by main.go from RELAY_ALLOW_SELF_REGISTER. Defaults
 	// to false so existing deployments continue to require invites.
 	AllowSelfRegister bool
+
+	// Metrics, when non-nil, supplies worker utilization history. Set by
+	// cmd/relay-server after construction.
+	Metrics *metrics.Store
 }
 
 // New creates a Server.
@@ -102,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	// Workers (PATCH is admin-only)
 	mux.Handle("GET /v1/workers", auth(http.HandlerFunc(s.handleListWorkers)))
 	mux.Handle("GET /v1/workers/{id}", auth(http.HandlerFunc(s.handleGetWorker)))
+	mux.Handle("GET /v1/workers/{id}/metrics", auth(http.HandlerFunc(s.handleGetWorkerMetrics)))
 	mux.Handle("PATCH /v1/workers/{id}", auth(admin(http.HandlerFunc(s.handleUpdateWorker))))
 
 	// Reservations (admin-only)
