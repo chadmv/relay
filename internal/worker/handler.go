@@ -12,6 +12,7 @@ import (
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
+	"relay/internal/metrics"
 	"relay/internal/store"
 	"relay/internal/tokenhash"
 
@@ -46,6 +47,10 @@ type Handler struct {
 	broker          *events.Broker
 	triggerDispatch func()
 	grace           *GraceRegistry
+
+	// Metrics, when non-nil, receives worker utilization samples and tracks
+	// per-worker liveness. Set by cmd/relay-server after construction.
+	Metrics *metrics.Store
 }
 
 // NewHandler returns a Handler wired to the given dependencies.
@@ -108,6 +113,8 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 			if err := h.applyInventoryUpdate(ctx, workerUUID, p.WorkspaceInventory); err != nil {
 				log.Printf("worker: inventory update failed: %v", err)
 			}
+		case *relayv1.AgentMessage_Telemetry:
+			h.handleTelemetry(workerID, p.Telemetry)
 		}
 	}
 }
@@ -262,6 +269,10 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// From here on, all sends go through the serializing wrapper.
 	sender := NewWorkerSender(stream)
 	h.registry.Register(workerID, sender)
+
+	if h.Metrics != nil {
+		h.Metrics.Activate(workerID, time.Now())
+	}
 
 	h.broker.Publish(events.Event{
 		Type: "worker",
@@ -432,6 +443,24 @@ func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk
 	})
 }
 
+// handleTelemetry records a host-utilization sample from an agent, stamped
+// with the server's receipt time.
+func (h *Handler) handleTelemetry(workerID string, t *relayv1.WorkerTelemetry) {
+	if h.Metrics == nil {
+		return
+	}
+	h.Metrics.Append(workerID, metrics.Sample{
+		At:             time.Now(),
+		CPUPercent:     t.CpuPercent,
+		MemUsedBytes:   t.MemUsedBytes,
+		MemTotalBytes:  t.MemTotalBytes,
+		HasGPU:         t.HasGpu,
+		GPUUtilPercent: t.GpuUtilPercent,
+		GPUMemUsed:     t.GpuMemUsedBytes,
+		GPUMemTotal:    t.GpuMemTotalBytes,
+	})
+}
+
 // markWorkerOffline is called in a defer after the stream ends.
 func (h *Handler) markWorkerOffline(workerID string) {
 	var id pgtype.UUID
@@ -450,6 +479,9 @@ func (h *Handler) markWorkerOffline(workerID string) {
 		Type: "worker",
 		Data: []byte(fmt.Sprintf(`{"id":%q,"status":"offline"}`, workerID)),
 	})
+	if h.Metrics != nil {
+		h.Metrics.Clear(workerID)
+	}
 }
 
 // requeueWorkerTasks requeues dispatched/running tasks for a disconnected worker.

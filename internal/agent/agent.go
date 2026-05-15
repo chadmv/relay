@@ -31,6 +31,10 @@ type Agent struct {
 	saveID   func(string) error
 	creds    *Credentials
 	provider source.Provider // optional; nil = no workspace management
+
+	// TelemetryInterval is the host-utilization sampling cadence. NewAgent sets
+	// a default; cmd/relay-agent overrides it from RELAY_TELEMETRY_INTERVAL.
+	TelemetryInterval time.Duration
 }
 
 // NewAgent constructs an Agent. workerID is empty on first run; saveID persists
@@ -45,7 +49,8 @@ func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentia
 		runners:  make(map[string]*Runner),
 		saveID:   saveID,
 		creds:    creds,
-		provider: provider,
+		provider:          provider,
+		TelemetryInterval: 10 * time.Second,
 	}
 }
 
@@ -53,6 +58,7 @@ func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentia
 // ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
 	a.runCtx = ctx
+	go a.runTelemetry(ctx)
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {

@@ -24,7 +24,8 @@ type workerResponse struct {
 	MaxSlots   int32           `json:"max_slots"`
 	Labels     json.RawMessage `json:"labels"`
 	Status     string          `json:"status"`
-	LastSeenAt *time.Time      `json:"last_seen_at,omitempty"`
+	LastSeenAt   *time.Time      `json:"last_seen_at,omitempty"`
+	LastSampleAt *time.Time      `json:"last_sample_at,omitempty"`
 }
 
 func toWorkerResponse(w store.Worker) workerResponse {
@@ -77,6 +78,13 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, next := buildPage(rows, pp.Limit, toWorkerResponse, workersRowKey)
+	if s.Metrics != nil {
+		for i := range items {
+			if at, ok := s.Metrics.LastSampleAt(items[i].ID); ok {
+				items[i].LastSampleAt = &at
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, page[workerResponse]{Items: items, NextCursor: next, Total: total})
 }
 
@@ -98,7 +106,13 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toWorkerResponse(worker))
+	resp := toWorkerResponse(worker)
+	if s.Metrics != nil {
+		if at, ok := s.Metrics.LastSampleAt(uuidStr(worker.ID)); ok {
+			resp.LastSampleAt = &at
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {

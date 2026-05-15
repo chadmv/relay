@@ -58,3 +58,12 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountWorkers :one
 SELECT COUNT(*) FROM workers;
+
+-- name: ListWorkersByLiveness :many
+-- Workers eligible for staleness sweeping: those currently connected.
+SELECT * FROM workers WHERE status IN ('online', 'stale');
+
+-- name: SetWorkerStatus :exec
+-- Updates only the status column, leaving last_seen_at and disconnected_at
+-- untouched. Used by the liveness sweeper for online<->stale transitions.
+UPDATE workers SET status = $2 WHERE id = $1;

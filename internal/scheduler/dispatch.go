@@ -156,7 +156,10 @@ func (d *Dispatcher) selectWorker(
 
 	for i := range workers {
 		w := &workers[i]
-		if w.Status != "online" {
+		// A "stale" worker is still connected and able to run tasks; the
+		// status only signals missing telemetry, so it stays dispatch-eligible.
+		// Only non-connected statuses (e.g. "offline") are excluded.
+		if w.Status != "online" && w.Status != "stale" {
 			continue
 		}
 		if reservedIDs[uuidStr(w.ID)] {
