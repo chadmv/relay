@@ -27,11 +27,11 @@ type workerResp struct {
 }
 
 // WorkersCommand returns the relay workers Command.
-// Subcommands: list, get, revoke, workspaces, evict-workspace
+// Subcommands: list, get, disable, enable, revoke, workspaces, evict-workspace
 func WorkersCommand() Command {
 	return Command{
 		Name:  "workers",
-		Usage: "workers <list|get|revoke|workspaces|evict-workspace> [args]",
+		Usage: "workers <list|get|disable|enable|revoke|workspaces|evict-workspace> [args]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doWorkers(ctx, cfg, args, os.Stdout)
 		},
@@ -40,7 +40,7 @@ func WorkersCommand() Command {
 
 func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay workers <list|get|revoke|workspaces|evict-workspace>")
+		return fmt.Errorf("usage: relay workers <list|get|disable|enable|revoke|workspaces|evict-workspace>")
 	}
 	if cfg.Token == "" {
 		return fmt.Errorf("no token configured — run 'relay login' first")
@@ -52,6 +52,10 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 		return doWorkersList(ctx, c, args[1:], w)
 	case "get":
 		return doWorkersGet(ctx, c, args[1:], w)
+	case "disable":
+		return doWorkersDisable(ctx, c, args[1:], w)
+	case "enable":
+		return doWorkersEnable(ctx, c, args[1:], w)
 	case "revoke":
 		return doWorkersRevoke(ctx, c, args[1:], w)
 	case "workspaces":
@@ -170,4 +174,57 @@ func looksLikeUUID(s string) bool {
 		}
 	}
 	return true
+}
+
+// disableResp decodes the relevant fields of the disable endpoint response.
+type disableResp struct {
+	RequeuedTasks int `json:"requeued_tasks"`
+}
+
+func doWorkersDisable(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("workers disable", flag.ContinueOnError)
+	requeue := fs.Bool("requeue", false, "requeue active tasks immediately instead of draining")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay workers disable [--requeue] <worker-id-or-hostname>")
+	}
+	id, err := resolveWorkerID(ctx, c, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	path := "/v1/workers/" + id + "/disable"
+	if *requeue {
+		path += "?requeue=true"
+	}
+	var resp disableResp
+	if err := c.Do(ctx, "POST", path, nil, &resp); err != nil {
+		return fmt.Errorf("disable worker: %w", err)
+	}
+	if *requeue {
+		fmt.Fprintf(w, "disabled; %d task(s) requeued.\n", resp.RequeuedTasks)
+	} else {
+		fmt.Fprintln(w, "disabled.")
+	}
+	return nil
+}
+
+func doWorkersEnable(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("workers enable", flag.ContinueOnError)
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay workers enable <worker-id-or-hostname>")
+	}
+	id, err := resolveWorkerID(ctx, c, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if err := c.Do(ctx, "POST", "/v1/workers/"+id+"/enable", nil, nil); err != nil {
+		return fmt.Errorf("enable worker: %w", err)
+	}
+	fmt.Fprintln(w, "enabled.")
+	return nil
 }
