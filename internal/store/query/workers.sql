@@ -35,7 +35,7 @@ ON CONFLICT (hostname) DO UPDATE
         gpu_count = EXCLUDED.gpu_count,
         gpu_model = EXCLUDED.gpu_model,
         os        = EXCLUDED.os
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at;
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at;
 
 -- name: SetWorkerAgentToken :exec
 UPDATE workers SET agent_token_hash = $2 WHERE id = $1;
@@ -67,3 +67,12 @@ SELECT * FROM workers WHERE status IN ('online', 'stale');
 -- Updates only the status column, leaving last_seen_at and disconnected_at
 -- untouched. Used by the liveness sweeper for online<->stale transitions.
 UPDATE workers SET status = $2 WHERE id = $1;
+
+-- name: DisableWorker :execrows
+-- Marks a worker disabled. Idempotent: the disabled_at IS NULL guard means a
+-- second call affects zero rows and does not re-stamp the timestamp.
+UPDATE workers SET disabled_at = NOW() WHERE id = $1 AND disabled_at IS NULL;
+
+-- name: EnableWorker :execrows
+-- Clears the disabled flag. Idempotent: affects zero rows if already enabled.
+UPDATE workers SET disabled_at = NULL WHERE id = $1 AND disabled_at IS NOT NULL;

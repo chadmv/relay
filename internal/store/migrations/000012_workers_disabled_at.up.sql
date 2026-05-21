@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN disabled_at TIMESTAMPTZ NULL;
