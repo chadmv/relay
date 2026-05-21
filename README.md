@@ -1133,8 +1133,8 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
-| `POST` | `/v1/workers/{id}/disable` | Disable a worker so the scheduler assigns it no new tasks. Pass `?requeue=true` to requeue and cancel its active tasks immediately; the default drains (running tasks finish). The token and connection are kept. Admin only. |
-| `POST` | `/v1/workers/{id}/enable` | Re-enable a disabled worker. Admin only. |
+| `POST` | `/v1/workers/{id}/disable` | Stop the scheduler from dispatching new tasks to a worker (admin only); its token and connection are kept. `?requeue=true` also requeues and cancels the worker's active tasks; the default leaves running tasks to finish. |
+| `POST` | `/v1/workers/{id}/enable` | Re-enable a disabled worker (admin only). |
 | `GET` | `/v1/workers/{id}/workspaces` | List source workspaces on the worker (admin only) |
 | `POST` | `/v1/workers/{id}/workspaces/{short_id}/evict` | Request eviction of a workspace (admin only); returns 202 even if the worker is offline |
 | `GET` | `/v1/workers/{id}/metrics` | Get the worker's short-term utilization history (CPU, memory, GPU). Returns an empty `samples` array for offline workers or workers with no data yet. 404 if the worker does not exist. Same bearer-auth as `GET /v1/workers/{id}`. |
