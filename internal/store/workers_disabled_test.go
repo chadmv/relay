@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 	"relay/internal/store"
 )
@@ -94,5 +95,9 @@ func TestRequeueWorkerTasksWithEpoch_BumpsEpochAndFencesStaleUpdates(t *testing.
 		Status: "done",
 		Epoch:  1,
 	})
-	require.Error(t, err, "stale update at epoch 1 must be rejected after requeue")
+	require.ErrorIs(t, err, pgx.ErrNoRows, "stale update at epoch 1 must be rejected after requeue")
+
+	got2, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got2.Status, "stale update must not have changed task status")
 }
