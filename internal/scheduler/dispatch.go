@@ -162,6 +162,11 @@ func (d *Dispatcher) selectWorker(
 		if w.Status != "online" && w.Status != "stale" {
 			continue
 		}
+		// A disabled worker keeps its connection and liveness status but must
+		// not receive new task dispatches.
+		if w.DisabledAt.Valid {
+			continue
+		}
 		if reservedIDs[uuidStr(w.ID)] {
 			continue
 		}
