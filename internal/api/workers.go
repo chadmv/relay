@@ -240,8 +240,24 @@ func (s *Server) handleDisableWorker(w http.ResponseWriter, r *http.Request) {
 
 		// Set disabled_at first so a dispatcher woken by NotifyTaskSubmitted
 		// already sees the worker as ineligible and won't re-dispatch to it.
-		if _, err := q.DisableWorker(ctx, id); err != nil {
+		// The :execrows count is the atomic check-and-set: a zero count means a
+		// concurrent request disabled the worker first, so roll back and return
+		// the no-op response rather than requeueing tasks it already handled.
+		n, err := q.DisableWorker(ctx, id)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "disable worker failed")
+			return
+		}
+		if n == 0 {
+			_ = tx.Rollback(ctx)
+			refreshed, err := s.q.GetWorker(ctx, id)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "db error")
+				return
+			}
+			writeJSON(w, http.StatusOK, disableWorkerResponse{
+				workerResponse: toWorkerResponse(refreshed),
+			})
 			return
 		}
 		requeuedIDs, err = q.RequeueWorkerTasksWithEpoch(ctx, id)
@@ -305,15 +321,19 @@ func (s *Server) handleEnableWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.q.EnableWorker(ctx, id); err != nil {
+	n, err := s.q.EnableWorker(ctx, id)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "enable worker failed")
 		return
 	}
 	// Wake the dispatcher so the re-enabled worker can pick up pending tasks
-	// immediately rather than waiting for the next ticker cycle.
-	if err := s.q.NotifyTaskSubmitted(ctx); err != nil {
-		writeError(w, http.StatusInternalServerError, "db error")
-		return
+	// immediately. Skip the notify when the worker was already enabled (n == 0)
+	// to avoid a spurious dispatch cycle.
+	if n > 0 {
+		if err := s.q.NotifyTaskSubmitted(ctx); err != nil {
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
 	}
 
 	updated, err := s.q.GetWorker(ctx, id)
