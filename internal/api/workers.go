@@ -26,6 +26,7 @@ type workerResponse struct {
 	Status     string          `json:"status"`
 	LastSeenAt   *time.Time      `json:"last_seen_at,omitempty"`
 	LastSampleAt *time.Time      `json:"last_sample_at,omitempty"`
+	DisabledAt   *time.Time      `json:"disabled_at,omitempty"`
 }
 
 func toWorkerResponse(w store.Worker) workerResponse {
@@ -33,6 +34,16 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	if w.LastSeenAt.Valid {
 		t := w.LastSeenAt.Time
 		lastSeen = &t
+	}
+	// A disabled worker keeps its live liveness status internally, but the API
+	// reports "disabled" so existing consumers that read only `status` treat it
+	// as unavailable. `disabled_at` is also exposed so both states are visible.
+	status := w.Status
+	var disabledAt *time.Time
+	if w.DisabledAt.Valid {
+		t := w.DisabledAt.Time
+		disabledAt = &t
+		status = "disabled"
 	}
 	return workerResponse{
 		ID:         uuidStr(w.ID),
@@ -45,8 +56,9 @@ func toWorkerResponse(w store.Worker) workerResponse {
 		Os:         w.Os,
 		MaxSlots:   w.MaxSlots,
 		Labels:     rawJSON(w.Labels),
-		Status:     w.Status,
+		Status:     status,
 		LastSeenAt: lastSeen,
+		DisabledAt: disabledAt,
 	}
 }
 
