@@ -173,3 +173,16 @@ LIMIT $3;
 
 -- name: CountTaskLogs :one
 SELECT COUNT(*) FROM task_logs WHERE task_id = $1;
+
+-- name: RequeueWorkerTasksWithEpoch :many
+-- Re-queue dispatched/running tasks for a worker that is being disabled.
+-- Unlike RequeueWorkerTasks, this bumps assignment_epoch so a stale status
+-- update from the still-connected agent (whose subprocess we are about to
+-- cancel) is rejected by the epoch fence. Returns the affected task ids.
+UPDATE tasks
+SET status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+RETURNING id;

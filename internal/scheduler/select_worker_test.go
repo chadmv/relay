@@ -7,6 +7,7 @@ package scheduler
 
 import (
 	"testing"
+	"time"
 
 	"relay/internal/store"
 
@@ -122,4 +123,19 @@ func TestSelectWorker_StaleAndOfflineMixed_StaleSelected(t *testing.T) {
 
 	require.NotNil(t, got, "stale worker must be selected when offline worker is also present")
 	assert.Equal(t, workers[1].ID, got.ID, "the stale worker (index 1) must be chosen, not the offline one")
+}
+
+func TestSelectWorker_DisabledWorkerIsNotEligible(t *testing.T) {
+	d := newDispatcherForTest()
+	task := baseTask()
+	wk := baseWorker(60, "online")
+	wk.DisabledAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	workers := []store.Worker{wk}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	assert.Nil(t, got, "a disabled worker must NOT be selected for dispatch")
 }

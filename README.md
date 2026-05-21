@@ -341,6 +341,14 @@ The agent writes two files to `--state-dir`:
 
 On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error.
 
+**Disable vs revoke.** *Disabling* a worker (`relay workers disable`) takes it
+out of the scheduler's rotation while keeping its token and connection, so it
+can be re-enabled instantly with `relay workers enable`. *Revoking* a worker
+(`relay workers revoke`) destroys its agent token and forces a fresh enrollment
+before it can rejoin. The two are independent: a worker can be both disabled and
+revoked, and re-enrollment clears the revoked state but leaves a disabled worker
+disabled.
+
 ### Environment variables
 
 | Variable | Description |
@@ -668,6 +676,34 @@ Revoke the long-lived authentication token for a worker (admin only). The agent 
 ```sh
 relay workers revoke <worker-id>
 relay workers revoke <hostname>
+```
+
+---
+
+#### `relay workers disable <id-or-hostname> [--requeue]`
+
+Disable a worker (admin only). A disabled worker keeps its agent token and gRPC
+connection but receives no new task dispatches. By default running tasks are
+left to finish (drain); pass `--requeue` to requeue the worker's active tasks
+immediately and cancel their subprocesses on the agent. The positional argument
+may be a worker UUID or a hostname.
+
+```sh
+relay workers disable <worker-id>
+relay workers disable <hostname>
+relay workers disable <worker-id> --requeue
+```
+
+---
+
+#### `relay workers enable <id-or-hostname>`
+
+Re-enable a disabled worker (admin only). Takes effect immediately. The
+positional argument may be a worker UUID or a hostname.
+
+```sh
+relay workers enable <worker-id>
+relay workers enable <hostname>
 ```
 
 ---
@@ -1097,6 +1133,8 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
+| `POST` | `/v1/workers/{id}/disable` | Stop the scheduler from dispatching new tasks to a worker (admin only); its token and connection are kept. `?requeue=true` also requeues and cancels the worker's active tasks; the default leaves running tasks to finish. |
+| `POST` | `/v1/workers/{id}/enable` | Re-enable a disabled worker (admin only). |
 | `GET` | `/v1/workers/{id}/workspaces` | List source workspaces on the worker (admin only) |
 | `POST` | `/v1/workers/{id}/workspaces/{short_id}/evict` | Request eviction of a workspace (admin only); returns 202 even if the worker is offline |
 | `GET` | `/v1/workers/{id}/metrics` | Get the worker's short-term utilization history (CPU, memory, GPU). Returns an empty `samples` array for offline workers or workers with no data yet. 404 if the worker does not exist. Same bearer-auth as `GET /v1/workers/{id}`. |
