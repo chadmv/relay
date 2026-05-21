@@ -32,16 +32,18 @@ func TestWorkersDisable_Drain(t *testing.T) {
 	err := doWorkers(context.Background(), cfg, []string{"disable", workerID}, &out)
 	require.NoError(t, err)
 	require.True(t, called)
-	require.Contains(t, out.String(), "disabled.")
+	require.Equal(t, "disabled.\n", out.String())
 }
 
 func TestWorkersDisable_Requeue(t *testing.T) {
 	const workerID = "00000000-0000-0000-0000-000000000012"
+	called := false
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
 		require.Equal(t, "/v1/workers/"+workerID+"/disable", r.URL.Path)
 		require.Equal(t, "true", r.URL.Query().Get("requeue"))
+		called = true
 		json.NewEncoder(w).Encode(map[string]any{"status": "disabled", "requeued_tasks": 3})
 	}))
 	defer srv.Close()
@@ -50,6 +52,7 @@ func TestWorkersDisable_Requeue(t *testing.T) {
 	var out strings.Builder
 	err := doWorkers(context.Background(), cfg, []string{"disable", "--requeue", workerID}, &out)
 	require.NoError(t, err)
+	require.True(t, called)
 	require.Contains(t, out.String(), "3 task(s) requeued")
 }
 
