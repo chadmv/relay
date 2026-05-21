@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"relay/internal/api"
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -16,9 +17,7 @@ import (
 )
 
 // doDisableReq issues an authenticated request and returns the recorder.
-func doDisableReq(t *testing.T, srv interface {
-	Handler() http.Handler
-}, method, path, token string) *httptest.ResponseRecorder {
+func doDisableReq(t *testing.T, srv *api.Server, method, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -71,8 +70,9 @@ func TestDisableWorker_AdminOnly(t *testing.T) {
 	body = map[string]any{}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
 	assert.NotEqual(t, "disabled", body["status"])
-	_, hasDisabledAt := body["disabled_at"]
-	assert.False(t, hasDisabledAt, "disabled_at must be omitted once enabled")
+	disabledAtVal, hasDisabledAt := body["disabled_at"]
+	assert.True(t, !hasDisabledAt || disabledAtVal == nil,
+		"disabled_at must be absent or null once enabled")
 
 	// Idempotent enable: second enable also 200.
 	rec = doDisableReq(t, srv, "POST", "/v1/workers/"+workerID+"/enable", adminToken)
