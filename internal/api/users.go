@@ -67,12 +67,12 @@ func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, boo
 	return name, true
 }
 
-var usersSortSpec = sortSpec{
+var UsersSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"name":       sortKeyText,
-		"email":      sortKeyText,
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"name":       SortKeyText,
+		"email":      SortKeyText,
 	},
 }
 
@@ -175,7 +175,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pp, ok := parsePage(w, r, usersSortSpec)
+	pp, ok := parsePage(w, r, UsersSortSpec)
 	if !ok {
 		return
 	}
@@ -210,7 +210,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 // listUsersBySort dispatches to the correct active-only query for pp.Sort.
 // Returns (nil, "") and writes a 500 on DB error. Panics for unknown sort keys
-// (indicates a mismatch between usersSortSpec and this switch, which is a
+// (indicates a mismatch between UsersSortSpec and this switch, which is a
 // programmer error).
 func (s *Server) listUsersBySort(w http.ResponseWriter, ctx context.Context, pp pageParams) ([]userResponse, string) { //nolint:contextcheck
 	switch pp.Sort {

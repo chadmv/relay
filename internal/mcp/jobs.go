@@ -15,6 +15,7 @@ type listJobsArgs struct {
 	Status string `json:"status" jsonschema:"Filter by job status (running, done, failed, cancelled). Empty returns all."`
 	Limit  int    `json:"limit"  jsonschema:"Maximum number of jobs to return (1-200). Defaults to 50 when 0."`
 	Cursor string `json:"cursor" jsonschema:"Pagination cursor from a previous response."`
+	Sort   string `json:"sort"   jsonschema:"Sort order. One of \"created_at\", \"-created_at\" (default), \"name\", \"-name\", \"priority\", \"-priority\", \"status\", \"-status\", \"updated_at\", \"-updated_at\". Prefix '-' reverses to descending."`
 }
 
 type getJobArgs struct {
@@ -63,6 +64,9 @@ func (s *Server) callListJobs(ctx context.Context, args listJobsArgs) (map[strin
 	params.Set("limit", strconv.Itoa(limit))
 	if args.Cursor != "" {
 		params.Set("cursor", args.Cursor)
+	}
+	if args.Sort != "" {
+		params.Set("sort", args.Sort)
 	}
 
 	path := "/v1/jobs"

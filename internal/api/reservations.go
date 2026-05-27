@@ -52,13 +52,13 @@ func toReservationResponse(res store.Reservation) reservationResponse {
 	}
 }
 
-var reservationsSortSpec = sortSpec{
+var ReservationsSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"name":       sortKeyText,
-		"starts_at":  sortKeyTimestamp,
-		"ends_at":    sortKeyTimestamp,
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"name":       SortKeyText,
+		"starts_at":  SortKeyTimestamp,
+		"ends_at":    SortKeyTimestamp,
 	},
 }
 
@@ -89,7 +89,7 @@ func reservationsRowKeyByEnds(res store.Reservation) (anySortVal, pgtype.UUID) {
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r, reservationsSortSpec)
+	pp, ok := parsePage(w, r, ReservationsSortSpec)
 	if !ok {
 		return
 	}

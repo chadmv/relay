@@ -73,11 +73,11 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-var agentEnrollmentsSortSpec = sortSpec{
+var AgentEnrollmentsSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"expires_at": sortKeyTimestamp,
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"expires_at": SortKeyTimestamp,
 	},
 }
 
@@ -152,7 +152,7 @@ func enrollmentByExpiresAscRowKey(row store.ListActiveAgentEnrollmentsPageByExpi
 func (s *Server) handleListAgentEnrollments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r, agentEnrollmentsSortSpec)
+	pp, ok := parsePage(w, r, AgentEnrollmentsSortSpec)
 	if !ok {
 		return
 	}

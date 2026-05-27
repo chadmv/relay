@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scheduledJobsSortKeys enumerates every (key, direction) in scheduledJobsSortSpec.
+// scheduledJobsSortKeys enumerates every (key, direction) in ScheduledJobsSortSpec.
 var scheduledJobsSortKeys = []string{
 	"-created_at", "created_at",
 	"-name", "name",

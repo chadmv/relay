@@ -58,11 +58,11 @@ func TestCursor_InvalidJSON(t *testing.T) {
 	assert.ErrorIs(t, err, errBadCursor)
 }
 
-var testDefaultSpec = sortSpec{
+var testDefaultSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"name":       sortKeyText,
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"name":       SortKeyText,
 	},
 }
 
@@ -298,42 +298,42 @@ func TestCursor_RejectsMultipleValueIndicators(t *testing.T) {
 }
 
 func TestParseSort_DefaultWhenAbsent(t *testing.T) {
-	spec := sortSpec{
+	spec := SortSpec{
 		Default: "-created_at",
-		Keys: map[string]sortKeyKind{
-			"created_at": sortKeyTimestamp,
-			"name":       sortKeyText,
+		Keys: map[string]SortKeyKind{
+			"created_at": SortKeyTimestamp,
+			"name":       SortKeyText,
 		},
 	}
 	got, kind, err := parseSort("", spec)
 	require.NoError(t, err)
 	assert.Equal(t, "-created_at", got)
-	assert.Equal(t, sortKeyTimestamp, kind)
+	assert.Equal(t, SortKeyTimestamp, kind)
 }
 
 func TestParseSort_AscAndDesc(t *testing.T) {
-	spec := sortSpec{
+	spec := SortSpec{
 		Default: "-created_at",
-		Keys: map[string]sortKeyKind{
-			"created_at": sortKeyTimestamp,
-			"name":       sortKeyText,
+		Keys: map[string]SortKeyKind{
+			"created_at": SortKeyTimestamp,
+			"name":       SortKeyText,
 		},
 	}
 	asc, kind, err := parseSort("name", spec)
 	require.NoError(t, err)
 	assert.Equal(t, "name", asc)
-	assert.Equal(t, sortKeyText, kind)
+	assert.Equal(t, SortKeyText, kind)
 
 	desc, kind, err := parseSort("-name", spec)
 	require.NoError(t, err)
 	assert.Equal(t, "-name", desc)
-	assert.Equal(t, sortKeyText, kind)
+	assert.Equal(t, SortKeyText, kind)
 }
 
 func TestParseSort_UnknownKey(t *testing.T) {
-	spec := sortSpec{
+	spec := SortSpec{
 		Default: "-created_at",
-		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp, "name": sortKeyText},
+		Keys:    map[string]SortKeyKind{"created_at": SortKeyTimestamp, "name": SortKeyText},
 	}
 	_, _, err := parseSort("labels", spec)
 	require.Error(t, err)
@@ -343,7 +343,7 @@ func TestParseSort_UnknownKey(t *testing.T) {
 }
 
 func TestParseSort_RejectsEmptyAndWrongSyntax(t *testing.T) {
-	spec := sortSpec{Default: "-created_at", Keys: map[string]sortKeyKind{"name": sortKeyText}}
+	spec := SortSpec{Default: "-created_at", Keys: map[string]SortKeyKind{"name": SortKeyText}}
 	for _, bad := range []string{"-", "--name", "name asc", "name:desc"} {
 		_, _, err := parseSort(bad, spec)
 		assert.Error(t, err, "expected error for sort=%q", bad)
@@ -356,7 +356,7 @@ func TestParsePage_SortKeyAccepted(t *testing.T) {
 	pp, ok := parsePage(w, r, testDefaultSpec)
 	require.True(t, ok)
 	assert.Equal(t, "name", pp.Sort)
-	assert.Equal(t, sortKeyText, pp.SortKind)
+	assert.Equal(t, SortKeyText, pp.SortKind)
 }
 
 func TestParsePage_UnknownSortKey_400(t *testing.T) {

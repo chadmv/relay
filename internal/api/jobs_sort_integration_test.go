@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// jobsSortKeys enumerates every (key, direction) in the server's jobsSortSpec.
+// jobsSortKeys enumerates every (key, direction) in the server's JobsSortSpec.
 // New keys added to the allowlist must be added here.
 var jobsSortKeys = []string{
 	"-created_at", "created_at",

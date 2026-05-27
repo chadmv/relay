@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// usersSortKeys enumerates every (key, direction) in the server's usersSortSpec.
+// usersSortKeys enumerates every (key, direction) in the server's UsersSortSpec.
 var usersSortKeys = []string{
 	"-created_at", "created_at",
 	"-name", "name",

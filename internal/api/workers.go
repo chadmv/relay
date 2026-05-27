@@ -72,13 +72,13 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	}
 }
 
-var workersSortSpec = sortSpec{
+var WorkersSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at":   sortKeyTimestamp,
-		"name":         sortKeyText,
-		"status":       sortKeyText,
-		"last_seen_at": sortKeyTimestamp,
+	Keys: map[string]SortKeyKind{
+		"created_at":   SortKeyTimestamp,
+		"name":         SortKeyText,
+		"status":       SortKeyText,
+		"last_seen_at": SortKeyTimestamp,
 	},
 }
 
@@ -97,7 +97,7 @@ func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r, workersSortSpec)
+	pp, ok := parsePage(w, r, WorkersSortSpec)
 	if !ok {
 		return
 	}

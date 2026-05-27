@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// workersSortKeys enumerates every (key, direction) in the server's workersSortSpec.
+// workersSortKeys enumerates every (key, direction) in the server's WorkersSortSpec.
 var workersSortKeys = []string{
 	"-created_at", "created_at",
 	"-name", "name",

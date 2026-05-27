@@ -43,7 +43,7 @@ type anySortVal any
 // encodeCursorV2 serializes (sort, val, id) as base64url(JSON). val must be
 // time.Time or *time.Time (for timestamp sort keys) or string (for text sort
 // keys); any other type causes a panic — that's a programmer error in the
-// per-endpoint sortSpec, not user input.
+// per-endpoint SortSpec, not user input.
 //
 // Timestamps are truncated to microsecond precision: Postgres timestamptz
 // is µs-precise, and a nanosecond-precise cursor would skip the boundary
@@ -137,27 +137,27 @@ func decodeCursor(s string) (cursor, error) {
 	return c, nil
 }
 
-// sortKeyKind tells parsePage how to populate the cursor from the value
+// SortKeyKind tells parsePage how to populate the cursor from the value
 // returned by buildPage's row-key callback for this column.
-type sortKeyKind int
+type SortKeyKind int
 
 const (
-	sortKeyTimestamp sortKeyKind = iota // populates cursor.T
-	sortKeyText                         // populates cursor.StrVal
+	SortKeyTimestamp SortKeyKind = iota // populates cursor.T
+	SortKeyText                         // populates cursor.StrVal
 )
 
-// sortSpec is the per-endpoint allowlist. Default is the canonical sort
+// SortSpec is the per-endpoint allowlist. Default is the canonical sort
 // string used when the client sends no ?sort= param; Keys maps each
 // allowed key name (without leading dash) to its value kind.
-type sortSpec struct {
+type SortSpec struct {
 	Default string
-	Keys    map[string]sortKeyKind
+	Keys    map[string]SortKeyKind
 }
 
 // parseSort validates and canonicalizes the raw ?sort= value against the
 // allowlist. Returns the canonical sort string ("name" / "-name") and the
 // value kind. Empty raw input resolves to spec.Default.
-func parseSort(raw string, spec sortSpec) (canonical string, kind sortKeyKind, err error) {
+func parseSort(raw string, spec SortSpec) (canonical string, kind SortKeyKind, err error) {
 	if raw == "" {
 		raw = spec.Default
 	}
@@ -208,7 +208,7 @@ type pageParams struct {
 	Limit    int32
 	Cursor   cursor
 	Sort     string      // canonical sort string ("name" / "-name" / "-created_at")
-	SortKind sortKeyKind // value type for the active sort key
+	SortKind SortKeyKind // value type for the active sort key
 }
 
 // CursorTs returns the cursor timestamp as a pgtype.Timestamptz. The Valid
@@ -222,7 +222,7 @@ func (p pageParams) CursorTs() pgtype.Timestamptz {
 // invalid input it writes the 400 response itself and returns ok=false.
 // Defaults: limit=50, sort=spec.Default. Range: limit [1, 200]. Bad cursor
 // or sort -> 400.
-func parsePage(w http.ResponseWriter, r *http.Request, spec sortSpec) (pageParams, bool) {
+func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParams, bool) {
 	pp := pageParams{Limit: defaultLimit}
 
 	if s := r.URL.Query().Get("limit"); s != "" {

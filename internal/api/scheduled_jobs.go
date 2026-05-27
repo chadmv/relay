@@ -167,13 +167,13 @@ func (s *Server) ownedScheduledJob(w http.ResponseWriter, r *http.Request, id pg
 	return row, true
 }
 
-var scheduledJobsSortSpec = sortSpec{
+var ScheduledJobsSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at":  sortKeyTimestamp,
-		"name":        sortKeyText,
-		"next_run_at": sortKeyTimestamp,
-		"updated_at":  sortKeyTimestamp,
+	Keys: map[string]SortKeyKind{
+		"created_at":  SortKeyTimestamp,
+		"name":        SortKeyText,
+		"next_run_at": SortKeyTimestamp,
+		"updated_at":  SortKeyTimestamp,
 	},
 }
 
@@ -200,7 +200,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pp, ok := parsePage(w, r, scheduledJobsSortSpec)
+	pp, ok := parsePage(w, r, ScheduledJobsSortSpec)
 	if !ok {
 		return
 	}

@@ -171,15 +171,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
-// jobsSortSpec is the allowlist for ?sort= on the unfiltered /v1/jobs endpoint.
-var jobsSortSpec = sortSpec{
+// JobsSortSpec is the allowlist for ?sort= on the unfiltered /v1/jobs endpoint.
+var JobsSortSpec = SortSpec{
 	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"name":       sortKeyText,
-		"priority":   sortKeyText,
-		"status":     sortKeyText,
-		"updated_at": sortKeyTimestamp,
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"name":       SortKeyText,
+		"priority":   SortKeyText,
+		"status":     SortKeyText,
+		"updated_at": SortKeyTimestamp,
 	},
 }
 
@@ -331,7 +331,7 @@ func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r, jobsSortSpec)
+	pp, ok := parsePage(w, r, JobsSortSpec)
 	if !ok {
 		return
 	}
