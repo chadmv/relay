@@ -70,3 +70,94 @@ WHERE id = $1;
 SELECT COUNT(*) FROM jobs
  WHERE scheduled_job_id = $1
    AND status IN ('pending','queued','running','dispatched');
+
+-- name: ListScheduledJobsPageByCreatedAsc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByNameDesc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY name DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByNameAsc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY name ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByNextRunDesc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (next_run_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY next_run_at DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByNextRunAsc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (next_run_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY next_run_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByUpdatedDesc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (updated_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY updated_at DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsPageByUpdatedAsc :many
+SELECT * FROM scheduled_jobs
+WHERE NOT @cursor_set::bool OR (updated_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY updated_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByNameDesc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid))
+ORDER BY name DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByNameAsc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid))
+ORDER BY name ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (next_run_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+ORDER BY next_run_at DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (next_run_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+ORDER BY next_run_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (updated_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+ORDER BY updated_at DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
+SELECT * FROM scheduled_jobs
+WHERE owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (updated_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+ORDER BY updated_at ASC, id ASC
+LIMIT @page_limit + 1;
