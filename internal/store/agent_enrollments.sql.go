@@ -241,3 +241,204 @@ func (q *Queries) ListActiveAgentEnrollmentsPage(ctx context.Context, arg ListAc
 	}
 	return items, nil
 }
+
+const listActiveAgentEnrollmentsPageByCreatedAsc = `-- name: ListActiveAgentEnrollmentsPageByCreatedAsc :many
+SELECT id, hostname_hint, created_by, created_at, expires_at
+FROM agent_enrollments
+WHERE consumed_at IS NULL
+  AND expires_at > NOW()
+  AND ($1::bool = FALSE
+       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListActiveAgentEnrollmentsPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveAgentEnrollmentsPageByCreatedAscRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	HostnameHint *string            `json:"hostname_hint"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
+// ListActiveAgentEnrollmentsPageByCreatedAsc
+//
+//	SELECT id, hostname_hint, created_by, created_at, expires_at
+//	FROM agent_enrollments
+//	WHERE consumed_at IS NULL
+//	  AND expires_at > NOW()
+//	  AND ($1::bool = FALSE
+//	       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListActiveAgentEnrollmentsPageByCreatedAsc(ctx context.Context, arg ListActiveAgentEnrollmentsPageByCreatedAscParams) ([]ListActiveAgentEnrollmentsPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listActiveAgentEnrollmentsPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveAgentEnrollmentsPageByCreatedAscRow
+	for rows.Next() {
+		var i ListActiveAgentEnrollmentsPageByCreatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HostnameHint,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveAgentEnrollmentsPageByExpiresAsc = `-- name: ListActiveAgentEnrollmentsPageByExpiresAsc :many
+SELECT id, hostname_hint, created_by, created_at, expires_at
+FROM agent_enrollments
+WHERE consumed_at IS NULL
+  AND expires_at > NOW()
+  AND ($1::bool = FALSE
+       OR (expires_at, id) > ($2::timestamptz, $3::uuid))
+ORDER BY expires_at ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListActiveAgentEnrollmentsPageByExpiresAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveAgentEnrollmentsPageByExpiresAscRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	HostnameHint *string            `json:"hostname_hint"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
+// ListActiveAgentEnrollmentsPageByExpiresAsc
+//
+//	SELECT id, hostname_hint, created_by, created_at, expires_at
+//	FROM agent_enrollments
+//	WHERE consumed_at IS NULL
+//	  AND expires_at > NOW()
+//	  AND ($1::bool = FALSE
+//	       OR (expires_at, id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY expires_at ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListActiveAgentEnrollmentsPageByExpiresAsc(ctx context.Context, arg ListActiveAgentEnrollmentsPageByExpiresAscParams) ([]ListActiveAgentEnrollmentsPageByExpiresAscRow, error) {
+	rows, err := q.db.Query(ctx, listActiveAgentEnrollmentsPageByExpiresAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveAgentEnrollmentsPageByExpiresAscRow
+	for rows.Next() {
+		var i ListActiveAgentEnrollmentsPageByExpiresAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HostnameHint,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveAgentEnrollmentsPageByExpiresDesc = `-- name: ListActiveAgentEnrollmentsPageByExpiresDesc :many
+SELECT id, hostname_hint, created_by, created_at, expires_at
+FROM agent_enrollments
+WHERE consumed_at IS NULL
+  AND expires_at > NOW()
+  AND ($1::bool = FALSE
+       OR (expires_at, id) < ($2::timestamptz, $3::uuid))
+ORDER BY expires_at DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListActiveAgentEnrollmentsPageByExpiresDescParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveAgentEnrollmentsPageByExpiresDescRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	HostnameHint *string            `json:"hostname_hint"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt    pgtype.Timestamptz `json:"expires_at"`
+}
+
+// ListActiveAgentEnrollmentsPageByExpiresDesc
+//
+//	SELECT id, hostname_hint, created_by, created_at, expires_at
+//	FROM agent_enrollments
+//	WHERE consumed_at IS NULL
+//	  AND expires_at > NOW()
+//	  AND ($1::bool = FALSE
+//	       OR (expires_at, id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY expires_at DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListActiveAgentEnrollmentsPageByExpiresDesc(ctx context.Context, arg ListActiveAgentEnrollmentsPageByExpiresDescParams) ([]ListActiveAgentEnrollmentsPageByExpiresDescRow, error) {
+	rows, err := q.db.Query(ctx, listActiveAgentEnrollmentsPageByExpiresDesc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveAgentEnrollmentsPageByExpiresDescRow
+	for rows.Next() {
+		var i ListActiveAgentEnrollmentsPageByExpiresDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.HostnameHint,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

@@ -206,3 +206,470 @@ func (q *Queries) ListReservationsPage(ctx context.Context, arg ListReservations
 	}
 	return items, nil
 }
+
+const listReservationsPageByCreatedAsc = `-- name: ListReservationsPageByCreatedAsc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListReservationsPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListReservationsPageByCreatedAsc
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListReservationsPageByCreatedAsc(ctx context.Context, arg ListReservationsPageByCreatedAscParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByEndsAsc = `-- name: ListReservationsPageByEndsAsc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            (ends_at IS NULL AND id > $3::uuid)
+         OR ends_at IS NOT NULL
+       ELSE
+            ends_at IS NOT NULL AND
+            (ends_at, id) > ($4::timestamptz, $3::uuid)
+       END
+   )
+ORDER BY ends_at ASC NULLS FIRST, id ASC
+LIMIT $5+ 1
+`
+
+type ListReservationsPageByEndsAscParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// ASC NULLS FIRST. Mirror.
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool
+//	   OR (
+//	       CASE WHEN $2::bool THEN
+//	            (ends_at IS NULL AND id > $3::uuid)
+//	         OR ends_at IS NOT NULL
+//	       ELSE
+//	            ends_at IS NOT NULL AND
+//	            (ends_at, id) > ($4::timestamptz, $3::uuid)
+//	       END
+//	   )
+//	ORDER BY ends_at ASC NULLS FIRST, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListReservationsPageByEndsAsc(ctx context.Context, arg ListReservationsPageByEndsAscParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByEndsAsc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByEndsDesc = `-- name: ListReservationsPageByEndsDesc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            ends_at IS NULL AND id < $3::uuid
+       ELSE
+            (ends_at IS NOT NULL AND
+             (ends_at, id) < ($4::timestamptz, $3::uuid))
+         OR ends_at IS NULL
+       END
+   )
+ORDER BY ends_at DESC NULLS LAST, id DESC
+LIMIT $5+ 1
+`
+
+type ListReservationsPageByEndsDescParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// DESC NULLS LAST. Cursor null -> in NULL tail (id < cursor_id, AND null).
+// Cursor non-null -> in non-null head; qualify non-nulls below cursor or any null.
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool
+//	   OR (
+//	       CASE WHEN $2::bool THEN
+//	            ends_at IS NULL AND id < $3::uuid
+//	       ELSE
+//	            (ends_at IS NOT NULL AND
+//	             (ends_at, id) < ($4::timestamptz, $3::uuid))
+//	         OR ends_at IS NULL
+//	       END
+//	   )
+//	ORDER BY ends_at DESC NULLS LAST, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListReservationsPageByEndsDesc(ctx context.Context, arg ListReservationsPageByEndsDescParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByEndsDesc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByNameAsc = `-- name: ListReservationsPageByNameAsc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+ORDER BY name ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListReservationsPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListReservationsPageByNameAsc
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+//	ORDER BY name ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListReservationsPageByNameAsc(ctx context.Context, arg ListReservationsPageByNameAscParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByNameDesc = `-- name: ListReservationsPageByNameDesc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+ORDER BY name DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListReservationsPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListReservationsPageByNameDesc
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+//	ORDER BY name DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListReservationsPageByNameDesc(ctx context.Context, arg ListReservationsPageByNameDescParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByStartsAsc = `-- name: ListReservationsPageByStartsAsc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            (starts_at IS NULL AND id > $3::uuid)
+         OR starts_at IS NOT NULL
+       ELSE
+            starts_at IS NOT NULL AND
+            (starts_at, id) > ($4::timestamptz, $3::uuid)
+       END
+   )
+ORDER BY starts_at ASC NULLS FIRST, id ASC
+LIMIT $5+ 1
+`
+
+type ListReservationsPageByStartsAscParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// ASC NULLS FIRST. Mirror.
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool
+//	   OR (
+//	       CASE WHEN $2::bool THEN
+//	            (starts_at IS NULL AND id > $3::uuid)
+//	         OR starts_at IS NOT NULL
+//	       ELSE
+//	            starts_at IS NOT NULL AND
+//	            (starts_at, id) > ($4::timestamptz, $3::uuid)
+//	       END
+//	   )
+//	ORDER BY starts_at ASC NULLS FIRST, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListReservationsPageByStartsAsc(ctx context.Context, arg ListReservationsPageByStartsAscParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByStartsAsc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationsPageByStartsDesc = `-- name: ListReservationsPageByStartsDesc :many
+SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            starts_at IS NULL AND id < $3::uuid
+       ELSE
+            (starts_at IS NOT NULL AND
+             (starts_at, id) < ($4::timestamptz, $3::uuid))
+         OR starts_at IS NULL
+       END
+   )
+ORDER BY starts_at DESC NULLS LAST, id DESC
+LIMIT $5+ 1
+`
+
+type ListReservationsPageByStartsDescParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// DESC NULLS LAST. Cursor null -> in NULL tail (id < cursor_id, AND null).
+// Cursor non-null -> in non-null head; qualify non-nulls below cursor or any null.
+//
+//	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
+//	WHERE NOT $1::bool
+//	   OR (
+//	       CASE WHEN $2::bool THEN
+//	            starts_at IS NULL AND id < $3::uuid
+//	       ELSE
+//	            (starts_at IS NOT NULL AND
+//	             (starts_at, id) < ($4::timestamptz, $3::uuid))
+//	         OR starts_at IS NULL
+//	       END
+//	   )
+//	ORDER BY starts_at DESC NULLS LAST, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListReservationsPageByStartsDesc(ctx context.Context, arg ListReservationsPageByStartsDescParams) ([]Reservation, error) {
+	rows, err := q.db.Query(ctx, listReservationsPageByStartsDesc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reservation
+	for rows.Next() {
+		var i Reservation
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Selector,
+			&i.WorkerIds,
+			&i.UserID,
+			&i.Project,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

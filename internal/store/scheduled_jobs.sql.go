@@ -345,6 +345,447 @@ func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListSche
 	return items, nil
 }
 
+const listScheduledJobsByOwnerPageByCreatedAsc = `-- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByCreatedAscParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByCreatedAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByCreatedAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByCreatedAsc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByNameAsc = `-- name: ListScheduledJobsByOwnerPageByNameAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
+ORDER BY name ASC, id ASC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByNameAscParams struct {
+	OwnerID   pgtype.UUID `json:"owner_id"`
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByNameAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
+//	ORDER BY name ASC, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNameAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNameAsc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByNameDesc = `-- name: ListScheduledJobsByOwnerPageByNameDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
+ORDER BY name DESC, id DESC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByNameDescParams struct {
+	OwnerID   pgtype.UUID `json:"owner_id"`
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByNameDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
+//	ORDER BY name DESC, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNameDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNameDesc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByNextRunAsc = `-- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
+ORDER BY next_run_at ASC, id ASC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByNextRunAscParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByNextRunAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
+//	ORDER BY next_run_at ASC, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNextRunAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNextRunAsc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByNextRunDesc = `-- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
+ORDER BY next_run_at DESC, id DESC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByNextRunDescParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByNextRunDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
+//	ORDER BY next_run_at DESC, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNextRunDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNextRunDesc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByUpdatedAsc = `-- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
+ORDER BY updated_at ASC, id ASC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByUpdatedAscParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByUpdatedAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
+//	ORDER BY updated_at ASC, id ASC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByUpdatedAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByUpdatedAsc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsByOwnerPageByUpdatedDesc = `-- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE owner_id = $1::uuid
+  AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
+ORDER BY updated_at DESC, id DESC
+LIMIT $5+ 1
+`
+
+type ListScheduledJobsByOwnerPageByUpdatedDescParams struct {
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsByOwnerPageByUpdatedDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
+//	ORDER BY updated_at DESC, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByUpdatedDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByUpdatedDesc,
+		arg.OwnerID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listScheduledJobsPage = `-- name: ListScheduledJobsPage :many
 SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
 WHERE ($1::bool = FALSE
@@ -369,6 +810,419 @@ type ListScheduledJobsPageParams struct {
 //	LIMIT $4::int + 1
 func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJobsPageParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByCreatedAsc = `-- name: ListScheduledJobsPageByCreatedAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByCreatedAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg ListScheduledJobsPageByCreatedAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByNameAsc = `-- name: ListScheduledJobsPageByNameAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+ORDER BY name ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByNameAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+//	ORDER BY name ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListScheduledJobsPageByNameAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByNameDesc = `-- name: ListScheduledJobsPageByNameDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+ORDER BY name DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByNameDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+//	ORDER BY name DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListScheduledJobsPageByNameDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByNextRunAsc = `-- name: ListScheduledJobsPageByNextRunAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
+ORDER BY next_run_at ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByNextRunAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByNextRunAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY next_run_at ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg ListScheduledJobsPageByNextRunAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByNextRunAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByNextRunDesc = `-- name: ListScheduledJobsPageByNextRunDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
+ORDER BY next_run_at DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByNextRunDescParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByNextRunDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
+//	ORDER BY next_run_at DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg ListScheduledJobsPageByNextRunDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByNextRunDesc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByUpdatedAsc = `-- name: ListScheduledJobsPageByUpdatedAsc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
+ORDER BY updated_at ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByUpdatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByUpdatedAsc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY updated_at ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg ListScheduledJobsPageByUpdatedAscParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByUpdatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listScheduledJobsPageByUpdatedDesc = `-- name: ListScheduledJobsPageByUpdatedDesc :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
+ORDER BY updated_at DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListScheduledJobsPageByUpdatedDescParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListScheduledJobsPageByUpdatedDesc
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
+//	ORDER BY updated_at DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg ListScheduledJobsPageByUpdatedDescParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listScheduledJobsPageByUpdatedDesc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,

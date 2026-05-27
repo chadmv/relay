@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -59,10 +60,16 @@ func doReservationsList(ctx context.Context, c *relayclient.Client, args []strin
 	fs := flag.NewFlagSet("reservations list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	sortFlag := fs.String("sort", "", "sort order; e.g. -starts_at or name (server-validated)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	reservations, total, err := relayclient.FetchAllPages[reservationResp](ctx, c, "/v1/reservations", nil, *limitFlag)
+	var params url.Values
+	if *sortFlag != "" {
+		params = url.Values{}
+		params.Set("sort", *sortFlag)
+	}
+	reservations, total, err := relayclient.FetchAllPages[reservationResp](ctx, c, "/v1/reservations", params, *limitFlag)
 	if err != nil {
 		return err
 	}

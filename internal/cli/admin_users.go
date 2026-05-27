@@ -53,6 +53,7 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	fs.SetOutput(io.Discard)
 	includeArchived := fs.Bool("include-archived", false, "include archived users in the list")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	sortFlag := fs.String("sort", "", "sort order; e.g. -created_at or email (server-validated)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
@@ -64,6 +65,9 @@ func doAdminUsersList(ctx context.Context, cfg *Config, args []string, out io.Wr
 	params := url.Values{}
 	if *includeArchived {
 		params.Set("include_archived", "true")
+	}
+	if *sortFlag != "" {
+		params.Set("sort", *sortFlag)
 	}
 	users, total, err := relayclient.FetchAllPages[userListItem](ctx, c, "/v1/users", params, *limitFlag)
 	if err != nil {

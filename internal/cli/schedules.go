@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"text/tabwriter"
 	"time"
@@ -65,10 +66,16 @@ func doSchedulesList(ctx context.Context, c *relayclient.Client, args []string, 
 	fs := flag.NewFlagSet("schedules list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	sortFlag := fs.String("sort", "", "sort order; e.g. -name or next_run_at (server-validated)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	schedules, total, err := relayclient.FetchAllPages[scheduleResp](ctx, c, "/v1/scheduled-jobs", nil, *limitFlag)
+	var params url.Values
+	if *sortFlag != "" {
+		params = url.Values{}
+		params.Set("sort", *sortFlag)
+	}
+	schedules, total, err := relayclient.FetchAllPages[scheduleResp](ctx, c, "/v1/scheduled-jobs", params, *limitFlag)
 	if err != nil {
 		return err
 	}

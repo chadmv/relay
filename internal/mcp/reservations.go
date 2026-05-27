@@ -13,6 +13,7 @@ import (
 type listReservationsArgs struct {
 	Limit  int    `json:"limit"  jsonschema:"Maximum number of reservations to return (1-200). Defaults to 50 when 0."`
 	Cursor string `json:"cursor" jsonschema:"Pagination cursor from a previous response."`
+	Sort   string `json:"sort"   jsonschema:"Sort order. One of \"created_at\", \"-created_at\" (default), \"name\", \"-name\", \"starts_at\", \"-starts_at\", \"ends_at\", \"-ends_at\". Prefix '-' reverses to descending."`
 }
 
 func (s *Server) registerReservations() {
@@ -40,6 +41,9 @@ func (s *Server) callListReservations(ctx context.Context, args listReservations
 	params.Set("limit", strconv.Itoa(limit))
 	if args.Cursor != "" {
 		params.Set("cursor", args.Cursor)
+	}
+	if args.Sort != "" {
+		params.Set("sort", args.Sort)
 	}
 
 	path := "/v1/reservations?" + params.Encode()

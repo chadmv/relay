@@ -100,6 +100,22 @@ func TestSchedulesRunNow_Success(t *testing.T) {
 	require.Contains(t, buf.String(), "jobxyz")
 }
 
+func TestSchedulesList_SortFlag(t *testing.T) {
+	var capturedRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[scheduleResp]{Items: []scheduleResp{}, Total: 0})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+	var buf bytes.Buffer
+	err := doSchedules(context.Background(), cfg, []string{"list", "--sort", "-priority"}, &buf)
+	require.NoError(t, err)
+	require.Contains(t, capturedRawQuery, "sort=-priority")
+}
+
 func TestSchedulesUnknownSubcommand(t *testing.T) {
 	cfg := &Config{ServerURL: "http://x", Token: "t"}
 	err := doSchedules(context.Background(), cfg, []string{"bogus"}, io.Discard)

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"text/tabwriter"
 
@@ -71,10 +72,16 @@ func doWorkersList(ctx context.Context, c *relayclient.Client, args []string, w 
 	fs := flag.NewFlagSet("workers list", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	sortFlag := fs.String("sort", "", "sort order; e.g. -name or status (server-validated)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
-	workers, total, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", nil, *limitFlag)
+	var params url.Values
+	if *sortFlag != "" {
+		params = url.Values{}
+		params.Set("sort", *sortFlag)
+	}
+	workers, total, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", params, *limitFlag)
 	if err != nil {
 		return err
 	}

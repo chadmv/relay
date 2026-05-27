@@ -52,34 +52,170 @@ func toReservationResponse(res store.Reservation) reservationResponse {
 	}
 }
 
-func reservationsRowKey(res store.Reservation) (time.Time, pgtype.UUID) {
+var ReservationsSortSpec = SortSpec{
+	Default: "-created_at",
+	Keys: map[string]SortKeyKind{
+		"created_at": SortKeyTimestamp,
+		"name":       SortKeyText,
+		"starts_at":  SortKeyTimestamp,
+		"ends_at":    SortKeyTimestamp,
+	},
+}
+
+func reservationsRowKey(res store.Reservation) (anySortVal, pgtype.UUID) {
 	return res.CreatedAt.Time, res.ID
+}
+
+func reservationsRowKeyByName(res store.Reservation) (anySortVal, pgtype.UUID) {
+	return res.Name, res.ID
+}
+
+func reservationsRowKeyByStarts(res store.Reservation) (anySortVal, pgtype.UUID) {
+	if !res.StartsAt.Valid {
+		return (*time.Time)(nil), res.ID
+	}
+	t := res.StartsAt.Time
+	return &t, res.ID
+}
+
+func reservationsRowKeyByEnds(res store.Reservation) (anySortVal, pgtype.UUID) {
+	if !res.EndsAt.Valid {
+		return (*time.Time)(nil), res.ID
+	}
+	t := res.EndsAt.Time
+	return &t, res.ID
 }
 
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r)
+	pp, ok := parsePage(w, r, ReservationsSortSpec)
 	if !ok {
 		return
 	}
 
-	rows, err := s.q.ListReservationsPage(ctx, store.ListReservationsPageParams{
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list reservations failed")
-		return
-	}
 	total, err := s.q.CountReservations(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count reservations failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, toReservationResponse, reservationsRowKey)
+
+	var items []reservationResponse
+	var next string
+
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListReservationsPage(ctx, store.ListReservationsPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKey)
+
+	case "created_at":
+		rows, err := s.q.ListReservationsPageByCreatedAsc(ctx, store.ListReservationsPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKey)
+
+	case "-name":
+		rows, err := s.q.ListReservationsPageByNameDesc(ctx, store.ListReservationsPageByNameDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByName)
+
+	case "name":
+		rows, err := s.q.ListReservationsPageByNameAsc(ctx, store.ListReservationsPageByNameAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByName)
+
+	case "-starts_at":
+		rows, err := s.q.ListReservationsPageByStartsDesc(ctx, store.ListReservationsPageByStartsDescParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByStarts)
+
+	case "starts_at":
+		rows, err := s.q.ListReservationsPageByStartsAsc(ctx, store.ListReservationsPageByStartsAscParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByStarts)
+
+	case "-ends_at":
+		rows, err := s.q.ListReservationsPageByEndsDesc(ctx, store.ListReservationsPageByEndsDescParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByEnds)
+
+	case "ends_at":
+		rows, err := s.q.ListReservationsPageByEndsAsc(ctx, store.ListReservationsPageByEndsAscParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list reservations failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKeyByEnds)
+
+	default:
+		panic("handleListReservations: missing dispatch arm for sort key " + pp.Sort)
+	}
+
 	writeJSON(w, http.StatusOK, page[reservationResponse]{Items: items, NextCursor: next, Total: total})
 }
 

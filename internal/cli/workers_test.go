@@ -14,6 +14,22 @@ import (
 	"relay/internal/relayclient"
 )
 
+func TestWorkersList_SortFlag(t *testing.T) {
+	var capturedRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{Items: []workerResp{}, Total: 0})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doWorkers(context.Background(), cfg, []string{"list", "--sort", "-priority"}, &out)
+	require.NoError(t, err)
+	require.Contains(t, capturedRawQuery, "sort=-priority")
+}
+
 func TestWorkersListGet_Dispatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -598,9 +598,13 @@ relay list                     # all jobs, table format
 relay list --status running    # filter by status
 relay list --limit 10          # first 10 jobs
 relay list --json              # JSON output
+relay list --sort -priority    # group by priority label (desc; text sort)
+relay list --sort name         # alphabetical
 ```
 
 Statuses: `pending`, `running`, `done`, `failed`, `cancelled`
+
+The `--sort` flag against a pre-feature server silently falls back to the default ordering - old servers ignore unknown query parameters.
 
 ---
 
@@ -1011,6 +1015,8 @@ Write tools (any logged-in user):
 
 Calls that map to admin-only endpoints return a `forbidden` error when invoked by a non-admin token.
 
+The four list tools (`relay_list_jobs`, `relay_list_workers`, `relay_list_schedules`, `relay_list_reservations`) accept an optional `sort` parameter; see [Configurable sort order](#configurable-sort-order) for the per-endpoint allowlist.
+
 ### Deferred to a later release
 
 Worker mutations (revoke token, evict workspace), agent enrollment, invite creation, all user mutations (create/update/archive/passwd), force-cancel, password reset, and reservation create/delete. Multi-user remote MCP (HTTP transport) is also out of scope for v1.
@@ -1051,6 +1057,35 @@ Paginated endpoints sort by `created_at DESC, id DESC`.
 **Ordering notes:**
 - `GET /v1/workers` changed from alphabetical-by-name to `created_at DESC, id DESC`.
 - `GET /v1/users` changed from `created_at ASC` to `created_at DESC`.
+
+#### Configurable sort order
+
+Each list endpoint accepts an optional `?sort=<key>` query parameter to override the default ordering. Prefix the key with `-` for descending order; absent dash means ascending. Absent `?sort=` keeps the default `created_at DESC, id DESC`.
+
+| Endpoint | Default | Allowed keys |
+|----------|---------|--------------|
+| `GET /v1/jobs` | `-created_at` | `created_at`, `name`, `priority`, `status`, `updated_at` |
+| `GET /v1/workers` | `-created_at` | `created_at`, `name`, `status`, `last_seen_at` |
+| `GET /v1/users` | `-created_at` | `created_at`, `name`, `email` |
+| `GET /v1/scheduled-jobs` | `-created_at` | `created_at`, `name`, `next_run_at`, `updated_at` |
+| `GET /v1/reservations` | `-created_at` | `created_at`, `name`, `starts_at`, `ends_at` |
+| `GET /v1/agent-enrollments` | `-created_at` | `created_at`, `expires_at` |
+
+Each key supports both directions, e.g. `?sort=name` (ascending) and `?sort=-name` (descending).
+
+**Examples:**
+
+```
+GET /v1/jobs?sort=-priority           # group by priority label (desc; text sort)
+GET /v1/workers?sort=name             # alphabetical
+GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
+```
+
+**Cursor semantics:** A cursor is valid only for the sort it was issued under. Resending a cursor with a different `?sort=` returns `400 cursor sort key does not match requested sort`. Drop the cursor when changing sort.
+
+**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. Other endpoints' filters do not currently combine with sort.
+
+**Unknown keys:** `?sort=<key>` where `<key>` is not in the allowlist returns `400 unsupported sort key '<key>'; supported: <list>`.
 
 ### Public
 

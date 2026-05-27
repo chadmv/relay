@@ -14,6 +14,7 @@ import (
 type listSchedulesArgs struct {
 	Limit  int    `json:"limit"  jsonschema:"Maximum number of scheduled jobs to return (1-200). Defaults to 50 when 0."`
 	Cursor string `json:"cursor" jsonschema:"Pagination cursor from a previous response."`
+	Sort   string `json:"sort"   jsonschema:"Sort order. One of \"created_at\", \"-created_at\" (default), \"name\", \"-name\", \"next_run_at\", \"-next_run_at\", \"updated_at\", \"-updated_at\". Prefix '-' reverses to descending."`
 }
 
 type getScheduleArgs struct {
@@ -59,6 +60,9 @@ func (s *Server) callListSchedules(ctx context.Context, args listSchedulesArgs) 
 	params.Set("limit", strconv.Itoa(limit))
 	if args.Cursor != "" {
 		params.Set("cursor", args.Cursor)
+	}
+	if args.Sort != "" {
+		params.Set("sort", args.Sort)
 	}
 
 	path := "/v1/scheduled-jobs?" + params.Encode()

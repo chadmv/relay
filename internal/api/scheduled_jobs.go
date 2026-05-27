@@ -167,8 +167,30 @@ func (s *Server) ownedScheduledJob(w http.ResponseWriter, r *http.Request, id pg
 	return row, true
 }
 
-func scheduledJobsRowKey(s store.ScheduledJob) (time.Time, pgtype.UUID) {
+var ScheduledJobsSortSpec = SortSpec{
+	Default: "-created_at",
+	Keys: map[string]SortKeyKind{
+		"created_at":  SortKeyTimestamp,
+		"name":        SortKeyText,
+		"next_run_at": SortKeyTimestamp,
+		"updated_at":  SortKeyTimestamp,
+	},
+}
+
+func scheduledJobsRowKey(s store.ScheduledJob) (anySortVal, pgtype.UUID) {
 	return s.CreatedAt.Time, s.ID
+}
+
+func scheduledJobsRowKeyByName(s store.ScheduledJob) (anySortVal, pgtype.UUID) {
+	return s.Name, s.ID
+}
+
+func scheduledJobsRowKeyByNextRun(s store.ScheduledJob) (anySortVal, pgtype.UUID) {
+	return s.NextRunAt.Time, s.ID
+}
+
+func scheduledJobsRowKeyByUpdated(s store.ScheduledJob) (anySortVal, pgtype.UUID) {
+	return s.UpdatedAt.Time, s.ID
 }
 
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
@@ -178,13 +200,147 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pp, ok := parsePage(w, r)
+	pp, ok := parsePage(w, r, ScheduledJobsSortSpec)
 	if !ok {
 		return
 	}
 
+	ctx := r.Context()
+
 	if u.IsAdmin {
-		rows, err := s.q.ListScheduledJobsPage(r.Context(), store.ListScheduledJobsPageParams{
+		var rows []store.ScheduledJob
+		var err error
+		var items []scheduledJobResponse
+		var next string
+
+		switch pp.Sort {
+		case "-created_at":
+			rows, err = s.q.ListScheduledJobsPage(ctx, store.ListScheduledJobsPageParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
+
+		case "created_at":
+			rows, err = s.q.ListScheduledJobsPageByCreatedAsc(ctx, store.ListScheduledJobsPageByCreatedAscParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
+
+		case "-name":
+			rows, err = s.q.ListScheduledJobsPageByNameDesc(ctx, store.ListScheduledJobsPageByNameDescParams{
+				CursorSet: pp.Cursor.Set,
+				CursorV:   pp.Cursor.StrVal,
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
+
+		case "name":
+			rows, err = s.q.ListScheduledJobsPageByNameAsc(ctx, store.ListScheduledJobsPageByNameAscParams{
+				CursorSet: pp.Cursor.Set,
+				CursorV:   pp.Cursor.StrVal,
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
+
+		case "-next_run_at":
+			rows, err = s.q.ListScheduledJobsPageByNextRunDesc(ctx, store.ListScheduledJobsPageByNextRunDescParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
+
+		case "next_run_at":
+			rows, err = s.q.ListScheduledJobsPageByNextRunAsc(ctx, store.ListScheduledJobsPageByNextRunAscParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
+
+		case "-updated_at":
+			rows, err = s.q.ListScheduledJobsPageByUpdatedDesc(ctx, store.ListScheduledJobsPageByUpdatedDescParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
+
+		case "updated_at":
+			rows, err = s.q.ListScheduledJobsPageByUpdatedAsc(ctx, store.ListScheduledJobsPageByUpdatedAscParams{
+				CursorSet: pp.Cursor.Set,
+				CursorTs:  pp.CursorTs(),
+				CursorID:  pp.Cursor.ID,
+				PageLimit: pp.Limit,
+			})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				return
+			}
+			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
+
+		default:
+			panic("handleListScheduledJobs admin: missing dispatch arm for sort key " + pp.Sort)
+		}
+
+		total, err := s.q.CountScheduledJobs(ctx)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
+		return
+	}
+
+	// Non-admin: owner-scoped queries.
+	var rows []store.ScheduledJob
+	var err error
+	var items []scheduledJobResponse
+	var next string
+
+	switch pp.Sort {
+	case "-created_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPage(ctx, store.ListScheduledJobsByOwnerPageParams{
+			OwnerID:   u.ID,
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
@@ -194,33 +350,115 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
 			return
 		}
-		total, err := s.q.CountScheduledJobs(r.Context())
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
+
+	case "created_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByCreatedAsc(ctx, store.ListScheduledJobsByOwnerPageByCreatedAscParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
-		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
-		return
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
+
+	case "-name":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByNameDesc(ctx, store.ListScheduledJobsByOwnerPageByNameDescParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
+
+	case "name":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByNameAsc(ctx, store.ListScheduledJobsByOwnerPageByNameAscParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
+
+	case "-next_run_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByNextRunDesc(ctx, store.ListScheduledJobsByOwnerPageByNextRunDescParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
+
+	case "next_run_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByNextRunAsc(ctx, store.ListScheduledJobsByOwnerPageByNextRunAscParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
+
+	case "-updated_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByUpdatedDesc(ctx, store.ListScheduledJobsByOwnerPageByUpdatedDescParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
+
+	case "updated_at":
+		rows, err = s.q.ListScheduledJobsByOwnerPageByUpdatedAsc(ctx, store.ListScheduledJobsByOwnerPageByUpdatedAscParams{
+			OwnerID:   u.ID,
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
+
+	default:
+		panic("handleListScheduledJobs owner: missing dispatch arm for sort key " + pp.Sort)
 	}
 
-	rows, err := s.q.ListScheduledJobsByOwnerPage(r.Context(), store.ListScheduledJobsByOwnerPageParams{
-		OwnerID:   u.ID,
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
-		return
-	}
-	total, err := s.q.CountScheduledJobsByOwner(r.Context(), u.ID)
+	total, err := s.q.CountScheduledJobsByOwner(ctx, u.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 

@@ -109,6 +109,22 @@ func TestListJobs_JSONFlag(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result))
 }
 
+func TestListJobs_SortFlag(t *testing.T) {
+	var capturedRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[jobResp]{Items: []jobResp{}, Total: 0})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doListJobs(context.Background(), cfg, []string{"--sort", "-priority"}, &out)
+	require.NoError(t, err)
+	require.Contains(t, capturedRawQuery, "sort=-priority")
+}
+
 // Verify flag parsing helper compiles (used in jobs.go).
 var _ = flag.NewFlagSet
 

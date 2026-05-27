@@ -375,6 +375,494 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 	return items, nil
 }
 
+const listWorkersPageByCreatedAsc = `-- name: ListWorkersPageByCreatedAsc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListWorkersPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+// ListWorkersPageByCreatedAsc
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorkersPageByCreatedAscParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByLastSeenAsc = `-- name: ListWorkersPageByLastSeenAsc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            (last_seen_at IS NULL AND id > $3::uuid)
+         OR last_seen_at IS NOT NULL
+       ELSE
+            last_seen_at IS NOT NULL AND
+            (last_seen_at, id) > ($4::timestamptz, $3::uuid)
+       END
+   )
+ORDER BY last_seen_at ASC NULLS FIRST, id ASC
+LIMIT $5+ 1
+`
+
+type ListWorkersPageByLastSeenAscParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// ASC NULLS FIRST. Mirror image:
+//
+//   - cursor null: we're in the NULL head; qualify any null row with
+//     id > cursor_id, OR any non-null row.
+//
+//   - cursor non-null: we're in the non-null tail; qualify non-null rows
+//     with (last_seen_at, id) > (cursor_ts, cursor_id).
+//
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//     WHERE NOT $1::bool
+//     OR (
+//     CASE WHEN $2::bool THEN
+//     (last_seen_at IS NULL AND id > $3::uuid)
+//     OR last_seen_at IS NOT NULL
+//     ELSE
+//     last_seen_at IS NOT NULL AND
+//     (last_seen_at, id) > ($4::timestamptz, $3::uuid)
+//     END
+//     )
+//     ORDER BY last_seen_at ASC NULLS FIRST, id ASC
+//     LIMIT $5+ 1
+func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWorkersPageByLastSeenAscParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByLastSeenAsc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByLastSeenDesc = `-- name: ListWorkersPageByLastSeenDesc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool
+   OR (
+       CASE WHEN $2::bool THEN
+            last_seen_at IS NULL AND id < $3::uuid
+       ELSE
+            (last_seen_at IS NOT NULL AND
+             (last_seen_at, id) < ($4::timestamptz, $3::uuid))
+         OR last_seen_at IS NULL
+       END
+   )
+ORDER BY last_seen_at DESC NULLS LAST, id DESC
+LIMIT $5+ 1
+`
+
+type ListWorkersPageByLastSeenDescParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// DESC NULLS LAST. Cursor predicate splits on whether the cursor's
+// last_seen value is null (@cursor_is_null::bool):
+//
+//   - cursor null: we're in the NULL tail; only rows that are also NULL
+//     with id < cursor_id qualify.
+//
+//   - cursor non-null: we're in the non-null head; qualify any non-null
+//     row with (last_seen_at, id) < (cursor_ts, cursor_id), OR any null
+//     row (nulls come after in DESC NULLS LAST).
+//
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//     WHERE NOT $1::bool
+//     OR (
+//     CASE WHEN $2::bool THEN
+//     last_seen_at IS NULL AND id < $3::uuid
+//     ELSE
+//     (last_seen_at IS NOT NULL AND
+//     (last_seen_at, id) < ($4::timestamptz, $3::uuid))
+//     OR last_seen_at IS NULL
+//     END
+//     )
+//     ORDER BY last_seen_at DESC NULLS LAST, id DESC
+//     LIMIT $5+ 1
+func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWorkersPageByLastSeenDescParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByLastSeenDesc,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByNameAsc = `-- name: ListWorkersPageByNameAsc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+ORDER BY name ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListWorkersPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListWorkersPageByNameAsc
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+//	ORDER BY name ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersPageByNameAscParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByNameDesc = `-- name: ListWorkersPageByNameDesc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+ORDER BY name DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListWorkersPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListWorkersPageByNameDesc
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+//	ORDER BY name DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkersPageByNameDescParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByStatusAsc = `-- name: ListWorkersPageByStatusAsc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool OR (status, id) > ($2::text, $3::uuid)
+ORDER BY status ASC, id ASC
+LIMIT $4+ 1
+`
+
+type ListWorkersPageByStatusAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListWorkersPageByStatusAsc
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	WHERE NOT $1::bool OR (status, id) > ($2::text, $3::uuid)
+//	ORDER BY status ASC, id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorkersPageByStatusAscParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByStatusAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersPageByStatusDesc = `-- name: ListWorkersPageByStatusDesc :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+WHERE NOT $1::bool OR (status, id) < ($2::text, $3::uuid)
+ORDER BY status DESC, id DESC
+LIMIT $4+ 1
+`
+
+type ListWorkersPageByStatusDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+// ListWorkersPageByStatusDesc
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	WHERE NOT $1::bool OR (status, id) < ($2::text, $3::uuid)
+//	ORDER BY status DESC, id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListWorkersPageByStatusDesc(ctx context.Context, arg ListWorkersPageByStatusDescParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listWorkersPageByStatusDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setWorkerAgentToken = `-- name: SetWorkerAgentToken :exec
 UPDATE workers SET agent_token_hash = $2 WHERE id = $1
 `
