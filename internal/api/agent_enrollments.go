@@ -73,6 +73,14 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+var agentEnrollmentsSortSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at": sortKeyTimestamp,
+		"expires_at": sortKeyTimestamp,
+	},
+}
+
 func enrollmentRowToMap(row store.ListActiveAgentEnrollmentsPageRow) map[string]any {
 	entry := map[string]any{
 		"id":         uuidStr(row.ID),
@@ -90,35 +98,130 @@ func enrollmentRowKey(row store.ListActiveAgentEnrollmentsPageRow) (anySortVal, 
 	return row.CreatedAt.Time, row.ID
 }
 
+func enrollmentByCreatedAscRowToMap(row store.ListActiveAgentEnrollmentsPageByCreatedAscRow) map[string]any {
+	entry := map[string]any{
+		"id":         uuidStr(row.ID),
+		"created_at": row.CreatedAt.Time,
+		"expires_at": row.ExpiresAt.Time,
+		"created_by": uuidStr(row.CreatedBy),
+	}
+	if row.HostnameHint != nil {
+		entry["hostname_hint"] = *row.HostnameHint
+	}
+	return entry
+}
+
+func enrollmentByCreatedAscRowKey(row store.ListActiveAgentEnrollmentsPageByCreatedAscRow) (anySortVal, pgtype.UUID) {
+	return row.CreatedAt.Time, row.ID
+}
+
+func enrollmentByExpiresDescRowToMap(row store.ListActiveAgentEnrollmentsPageByExpiresDescRow) map[string]any {
+	entry := map[string]any{
+		"id":         uuidStr(row.ID),
+		"created_at": row.CreatedAt.Time,
+		"expires_at": row.ExpiresAt.Time,
+		"created_by": uuidStr(row.CreatedBy),
+	}
+	if row.HostnameHint != nil {
+		entry["hostname_hint"] = *row.HostnameHint
+	}
+	return entry
+}
+
+func enrollmentByExpiresDescRowKey(row store.ListActiveAgentEnrollmentsPageByExpiresDescRow) (anySortVal, pgtype.UUID) {
+	return row.ExpiresAt.Time, row.ID
+}
+
+func enrollmentByExpiresAscRowToMap(row store.ListActiveAgentEnrollmentsPageByExpiresAscRow) map[string]any {
+	entry := map[string]any{
+		"id":         uuidStr(row.ID),
+		"created_at": row.CreatedAt.Time,
+		"expires_at": row.ExpiresAt.Time,
+		"created_by": uuidStr(row.CreatedBy),
+	}
+	if row.HostnameHint != nil {
+		entry["hostname_hint"] = *row.HostnameHint
+	}
+	return entry
+}
+
+func enrollmentByExpiresAscRowKey(row store.ListActiveAgentEnrollmentsPageByExpiresAscRow) (anySortVal, pgtype.UUID) {
+	return row.ExpiresAt.Time, row.ID
+}
+
 func (s *Server) handleListAgentEnrollments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Temporary default spec; per-endpoint specs land in later tasks.
-	defaultSortSpec := sortSpec{
-		Default: "-created_at",
-		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
-	}
-	pp, ok := parsePage(w, r, defaultSortSpec)
+	pp, ok := parsePage(w, r, agentEnrollmentsSortSpec)
 	if !ok {
 		return
 	}
 
-	rows, err := s.q.ListActiveAgentEnrollmentsPage(ctx, store.ListActiveAgentEnrollmentsPageParams{
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list enrollments")
-		return
+	var items []map[string]any
+	var next string
+
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListActiveAgentEnrollmentsPage(ctx, store.ListActiveAgentEnrollmentsPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list enrollments")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, enrollmentRowToMap, enrollmentRowKey)
+
+	case "created_at":
+		rows, err := s.q.ListActiveAgentEnrollmentsPageByCreatedAsc(ctx, store.ListActiveAgentEnrollmentsPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list enrollments")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, enrollmentByCreatedAscRowToMap, enrollmentByCreatedAscRowKey)
+
+	case "-expires_at":
+		rows, err := s.q.ListActiveAgentEnrollmentsPageByExpiresDesc(ctx, store.ListActiveAgentEnrollmentsPageByExpiresDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list enrollments")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, enrollmentByExpiresDescRowToMap, enrollmentByExpiresDescRowKey)
+
+	case "expires_at":
+		rows, err := s.q.ListActiveAgentEnrollmentsPageByExpiresAsc(ctx, store.ListActiveAgentEnrollmentsPageByExpiresAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list enrollments")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, enrollmentByExpiresAscRowToMap, enrollmentByExpiresAscRowKey)
+
+	default:
+		panic("handleListAgentEnrollments: missing dispatch arm for sort key " + pp.Sort)
 	}
+
 	total, err := s.q.CountActiveAgentEnrollments(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count enrollments")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, pp.Sort, enrollmentRowToMap, enrollmentRowKey)
 	writeJSON(w, http.StatusOK, page[map[string]any]{Items: items, NextCursor: next, Total: total})
 }
 
