@@ -76,3 +76,75 @@ UPDATE workers SET disabled_at = NOW() WHERE id = $1 AND disabled_at IS NULL;
 -- name: EnableWorker :execrows
 -- Clears the disabled flag. Idempotent: affects zero rows if already enabled.
 UPDATE workers SET disabled_at = NULL WHERE id = $1 AND disabled_at IS NOT NULL;
+
+-- name: ListWorkersPageByCreatedAsc :many
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY created_at ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByNameDesc :many
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY name DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByNameAsc :many
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY name ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByStatusDesc :many
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool OR (status, id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY status DESC, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByStatusAsc :many
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool OR (status, id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY status ASC, id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByLastSeenDesc :many
+-- DESC NULLS LAST. Cursor predicate splits on whether the cursor's
+-- last_seen value is null (@cursor_is_null::bool):
+--   - cursor null: we're in the NULL tail; only rows that are also NULL
+--     with id < cursor_id qualify.
+--   - cursor non-null: we're in the non-null head; qualify any non-null
+--     row with (last_seen_at, id) < (cursor_ts, cursor_id), OR any null
+--     row (nulls come after in DESC NULLS LAST).
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool
+   OR (
+       CASE WHEN @cursor_is_null::bool THEN
+            last_seen_at IS NULL AND id < @cursor_id::uuid
+       ELSE
+            (last_seen_at IS NOT NULL AND
+             (last_seen_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+         OR last_seen_at IS NULL
+       END
+   )
+ORDER BY last_seen_at DESC NULLS LAST, id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListWorkersPageByLastSeenAsc :many
+-- ASC NULLS FIRST. Mirror image:
+--   - cursor null: we're in the NULL head; qualify any null row with
+--     id > cursor_id, OR any non-null row.
+--   - cursor non-null: we're in the non-null tail; qualify non-null rows
+--     with (last_seen_at, id) > (cursor_ts, cursor_id).
+SELECT * FROM workers
+WHERE NOT @cursor_set::bool
+   OR (
+       CASE WHEN @cursor_is_null::bool THEN
+            (last_seen_at IS NULL AND id > @cursor_id::uuid)
+         OR last_seen_at IS NOT NULL
+       ELSE
+            last_seen_at IS NOT NULL AND
+            (last_seen_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+       END
+   )
+ORDER BY last_seen_at ASC NULLS FIRST, id ASC
+LIMIT @page_limit + 1;

@@ -72,39 +72,164 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	}
 }
 
+var workersSortSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at":   sortKeyTimestamp,
+		"name":         sortKeyText,
+		"status":       sortKeyText,
+		"last_seen_at": sortKeyTimestamp,
+	},
+}
+
 func workersRowKey(w store.Worker) (anySortVal, pgtype.UUID) {
 	return w.CreatedAt.Time, w.ID
+}
+
+func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
+	if !w.LastSeenAt.Valid {
+		return (*time.Time)(nil), w.ID
+	}
+	t := w.LastSeenAt.Time
+	return &t, w.ID
 }
 
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Temporary default spec; per-endpoint specs land in later tasks.
-	defaultSortSpec := sortSpec{
-		Default: "-created_at",
-		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
-	}
-	pp, ok := parsePage(w, r, defaultSortSpec)
+	pp, ok := parsePage(w, r, workersSortSpec)
 	if !ok {
 		return
 	}
 
-	rows, err := s.q.ListWorkersPage(ctx, store.ListWorkersPageParams{
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list workers failed")
-		return
-	}
 	total, err := s.q.CountWorkers(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count workers failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKey)
+
+	var items []workerResponse
+	var next string
+
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListWorkersPage(ctx, store.ListWorkersPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKey)
+
+	case "created_at":
+		rows, err := s.q.ListWorkersPageByCreatedAsc(ctx, store.ListWorkersPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKey)
+
+	case "-name":
+		rows, err := s.q.ListWorkersPageByNameDesc(ctx, store.ListWorkersPageByNameDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, func(w store.Worker) (anySortVal, pgtype.UUID) {
+			return w.Name, w.ID
+		})
+
+	case "name":
+		rows, err := s.q.ListWorkersPageByNameAsc(ctx, store.ListWorkersPageByNameAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, func(w store.Worker) (anySortVal, pgtype.UUID) {
+			return w.Name, w.ID
+		})
+
+	case "-status":
+		rows, err := s.q.ListWorkersPageByStatusDesc(ctx, store.ListWorkersPageByStatusDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, func(w store.Worker) (anySortVal, pgtype.UUID) {
+			return w.Status, w.ID
+		})
+
+	case "status":
+		rows, err := s.q.ListWorkersPageByStatusAsc(ctx, store.ListWorkersPageByStatusAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, func(w store.Worker) (anySortVal, pgtype.UUID) {
+			return w.Status, w.ID
+		})
+
+	case "-last_seen_at":
+		rows, err := s.q.ListWorkersPageByLastSeenDesc(ctx, store.ListWorkersPageByLastSeenDescParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKeyByLastSeen)
+
+	case "last_seen_at":
+		rows, err := s.q.ListWorkersPageByLastSeenAsc(ctx, store.ListWorkersPageByLastSeenAscParams{
+			CursorSet:    pp.Cursor.Set,
+			CursorIsNull: pp.Cursor.IsNull,
+			CursorTs:     pp.CursorTs(),
+			CursorID:     pp.Cursor.ID,
+			PageLimit:    pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "list workers failed")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKeyByLastSeen)
+
+	default:
+		panic("handleListWorkers: missing dispatch arm for sort key " + pp.Sort)
+	}
+
 	if s.Metrics != nil {
 		for i := range items {
 			if at, ok := s.Metrics.LastSampleAt(items[i].ID); ok {

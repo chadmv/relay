@@ -259,6 +259,44 @@ func TestCursor_RejectsNeitherTNorV(t *testing.T) {
 	assert.ErrorIs(t, err, errBadCursor)
 }
 
+func TestCursor_EncodesNullTimestamp(t *testing.T) {
+	id := pgtype.UUID{Valid: true}
+	var nilT *time.Time
+	enc := encodeCursorV2("-last_seen_at", anySortVal(nilT), id)
+	got, err := decodeCursor(enc)
+	require.NoError(t, err)
+	require.True(t, got.Set)
+	assert.Equal(t, "-last_seen_at", got.Sort)
+	assert.True(t, got.IsNull, "decoded cursor must report IsNull for nil *time.Time")
+	assert.True(t, got.T.IsZero(), "T must be zero when IsNull is set")
+}
+
+func TestCursor_EncodesPtrTimestamp_NonNil(t *testing.T) {
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 30, 45, 0, time.UTC)
+	enc := encodeCursorV2("-last_seen_at", anySortVal(&tt), id)
+	got, err := decodeCursor(enc)
+	require.NoError(t, err)
+	require.True(t, got.Set)
+	assert.False(t, got.IsNull)
+	assert.True(t, got.T.Equal(tt))
+}
+
+func TestCursor_RejectsMultipleValueIndicators(t *testing.T) {
+	// T and N both set is malformed.
+	id := pgtype.UUID{Valid: true}
+	w := cursorWire{
+		T: "2026-04-16T10:00:00Z",
+		I: uuidStr(id),
+		S: "-last_seen_at",
+		N: true,
+	}
+	b, _ := json.Marshal(w)
+	enc := base64.RawURLEncoding.EncodeToString(b)
+	_, err := decodeCursor(enc)
+	assert.ErrorIs(t, err, errBadCursor)
+}
+
 func TestParseSort_DefaultWhenAbsent(t *testing.T) {
 	spec := sortSpec{
 		Default: "-created_at",

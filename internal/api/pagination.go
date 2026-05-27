@@ -22,6 +22,7 @@ type cursor struct {
 	Sort   string      // canonical sort string the cursor was issued for; "" for legacy cursors
 	T      time.Time   // populated when the sort key's value type is timestamp
 	StrVal string      // populated when the sort key's value type is text
+	IsNull bool        // true when the cursor's sort column value is NULL
 	ID     pgtype.UUID // last-seen row id (tiebreaker)
 }
 
@@ -31,6 +32,7 @@ type cursorWire struct {
 	I string `json:"i"`           // row id
 	S string `json:"s,omitempty"` // sort string; omitted for legacy default-sort cursors
 	V string `json:"v,omitempty"` // text value (populated when sort key is text)
+	N bool   `json:"n,omitempty"` // sort value is NULL
 }
 
 // anySortVal is a tiny helper that lets buildPage's row-key callback return
@@ -39,13 +41,16 @@ type cursorWire struct {
 type anySortVal any
 
 // encodeCursorV2 serializes (sort, val, id) as base64url(JSON). val must be
-// time.Time (for timestamp sort keys) or string (for text sort keys); any
-// other type causes a panic — that's a programmer error in the per-endpoint
-// sortSpec, not user input.
+// time.Time or *time.Time (for timestamp sort keys) or string (for text sort
+// keys); any other type causes a panic — that's a programmer error in the
+// per-endpoint sortSpec, not user input.
 //
 // Timestamps are truncated to microsecond precision: Postgres timestamptz
 // is µs-precise, and a nanosecond-precise cursor would skip the boundary
 // row when the query does (col, id) < (cursor_val, cursor_id).
+//
+// A nil *time.Time encodes the N=true wire field, representing a NULL sort
+// value (e.g. last_seen_at IS NULL).
 func encodeCursorV2(sort string, val anySortVal, id pgtype.UUID) string {
 	w := cursorWire{
 		I: uuidStr(id),
@@ -54,6 +59,12 @@ func encodeCursorV2(sort string, val anySortVal, id pgtype.UUID) string {
 	switch v := val.(type) {
 	case time.Time:
 		w.T = v.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	case *time.Time:
+		if v == nil {
+			w.N = true
+		} else {
+			w.T = v.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+		}
 	case string:
 		w.V = v
 	default:
@@ -95,17 +106,27 @@ func decodeCursor(s string) (cursor, error) {
 	if err := json.Unmarshal(b, &w); err != nil {
 		return cursor{}, errBadCursor
 	}
-	// A well-formed cursor must have exactly one of T or V populated.
-	// Both set is ambiguous (would silently pick one); neither set means
-	// there is no sort value to compare against.
-	if (w.T != "") == (w.V != "") {
+	// A well-formed cursor must have exactly one of T, V, or N set.
+	// Multiple set is ambiguous; none set means there is no sort value to
+	// compare against. N (null) is the third possibility for nullable columns.
+	setCount := 0
+	if w.T != "" {
+		setCount++
+	}
+	if w.V != "" {
+		setCount++
+	}
+	if w.N {
+		setCount++
+	}
+	if setCount != 1 {
 		return cursor{}, errBadCursor
 	}
 	id, err := parseUUID(w.I)
 	if err != nil {
 		return cursor{}, errBadCursor
 	}
-	c := cursor{Set: true, Sort: w.S, StrVal: w.V, ID: id}
+	c := cursor{Set: true, Sort: w.S, StrVal: w.V, IsNull: w.N, ID: id}
 	if w.T != "" {
 		t, err := time.Parse(time.RFC3339Nano, w.T)
 		if err != nil {
