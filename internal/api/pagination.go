@@ -154,6 +154,20 @@ type SortSpec struct {
 	Keys    map[string]SortKeyKind
 }
 
+// unsupportedSortKeyError is returned by parseSort when the requested sort
+// key isn't in the spec's allowlist. parsePage reformats it with the
+// request path; other callers (and parseSort's own unit tests) read the
+// path-free Error() form.
+type unsupportedSortKeyError struct {
+	Key     string
+	Allowed []string // sorted; same order as the wire message
+}
+
+func (e *unsupportedSortKeyError) Error() string {
+	return fmt.Sprintf("unsupported sort key '%s'; supported: %s",
+		e.Key, strings.Join(e.Allowed, ", "))
+}
+
 // parseSort validates and canonicalizes the raw ?sort= value against the
 // allowlist. Returns the canonical sort string ("name" / "-name") and the
 // value kind. Empty raw input resolves to spec.Default.
@@ -183,7 +197,7 @@ func parseSort(raw string, spec SortSpec) (canonical string, kind SortKeyKind, e
 			allowed = append(allowed, k)
 		}
 		sort.Strings(allowed)
-		return "", 0, fmt.Errorf("unsupported sort key '%s'; supported: %s", key, strings.Join(allowed, ", "))
+		return "", 0, &unsupportedSortKeyError{Key: key, Allowed: allowed}
 	}
 	return raw, k, nil
 }
@@ -237,7 +251,14 @@ func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParam
 	sortRaw := r.URL.Query().Get("sort")
 	canon, kind, err := parseSort(sortRaw, spec)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		var uke *unsupportedSortKeyError
+		if errors.As(err, &uke) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"unsupported sort key '%s' for %s; supported: %s",
+				uke.Key, r.URL.Path, strings.Join(uke.Allowed, ", ")))
+		} else {
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return pageParams{}, false
 	}
 	pp.Sort = canon

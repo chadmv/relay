@@ -365,7 +365,11 @@ func TestParsePage_UnknownSortKey_400(t *testing.T) {
 	_, ok := parsePage(w, r, testDefaultSpec)
 	assert.False(t, ok)
 	assert.Equal(t, 400, w.Code)
-	assert.Contains(t, w.Body.String(), "unsupported sort key 'labels'")
+	body := w.Body.String()
+	assert.Contains(t, body, "unsupported sort key 'labels'")
+	assert.Contains(t, body, "for /v1/jobs")
+	assert.Contains(t, body, "created_at")
+	assert.Contains(t, body, "name")
 }
 
 func TestParsePage_CursorSortMismatch_400(t *testing.T) {
