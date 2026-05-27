@@ -1,0 +1,171 @@
+// Command explain_sort_indexes verifies that every configurable ?sort=
+// path on the paginated list endpoints uses a composite index rather
+// than a Seq Scan + Sort node.
+//
+// It spins up a Postgres 16 testcontainer, applies all migrations, seeds
+// each table with realistic data, runs EXPLAIN ANALYZE over every
+// (table, sort_key, direction) tuple, and asserts each plan's top-level
+// access node is an Index Scan on the expected index.
+//
+// Run:
+//
+//	go run ./scripts/explain_sort_indexes -out docs/retros/2026-05-27-explain-sort-indexes.md
+//
+// Exits 0 if every plan passes, 1 if any plan failed or errored,
+// 2 if container start / migration / seed failed.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"relay/internal/store"
+)
+
+const (
+	exitOK        = 0
+	exitCheckFail = 1
+	exitInfraFail = 2
+)
+
+func main() {
+	out := flag.String("out", "", "output markdown path; empty means stdout")
+	flag.Parse()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	pool, terminate, err := startPostgres(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: bring up Postgres: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	defer terminate()
+	defer pool.Close()
+
+	if err := seed(ctx, pool); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: seed: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	counts := map[string]int{}
+	for _, table := range []string{"users", "jobs", "workers",
+		"scheduled_jobs", "reservations", "agent_enrollments"} {
+		var n int
+		if err := pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&n); err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: count %s: %v\n", table, err)
+			os.Exit(exitInfraFail)
+		}
+		counts[table] = n
+	}
+	fmt.Fprintf(os.Stderr,
+		"explain_sort_indexes: seeded users=%d jobs=%d workers=%d sched=%d resv=%d enroll=%d\n",
+		counts["users"], counts["jobs"], counts["workers"],
+		counts["scheduled_jobs"], counts["reservations"], counts["agent_enrollments"])
+
+	for _, table := range []string{"users", "jobs", "workers",
+		"scheduled_jobs", "reservations", "agent_enrollments"} {
+		if _, err := pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", table)); err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: analyze %s: %v\n", table, err)
+			os.Exit(exitInfraFail)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "explain_sort_indexes: ANALYZE complete")
+
+	var cases []explainCase
+	cases, err = buildCases(ctx, pool)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: build cases: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: built %d cases\n", len(cases))
+
+	if err := attachSQL(ctx, pool, cases); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: attach SQL: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	results := make([]caseResult, 0, len(cases))
+	failCount := 0
+	for _, c := range cases {
+		r := explainCaseRun(ctx, pool, c)
+		results = append(results, r)
+		if r.Status != "PASS" {
+			failCount++
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: %s | %s | %s -> %s: %s\n",
+				c.Table, c.SortKey, c.Direction, r.Status, r.Reason)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: %d/%d PASS\n",
+		len(results)-failCount, len(results))
+
+	// Query the running Postgres version for the doc header.
+	var pgVersion string
+	if err := pool.QueryRow(ctx, "SHOW server_version").Scan(&pgVersion); err != nil {
+		pgVersion = "unknown"
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: create %s: %v\n", *out, err)
+			os.Exit(exitInfraFail)
+		}
+		defer f.Close()
+		w = f
+	}
+	if err := renderMarkdown(w, results, pgVersion); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: render: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+
+	if failCount > 0 {
+		os.Exit(exitCheckFail)
+	}
+}
+
+// startPostgres launches a Postgres 16 container, runs every embedded
+// migration, and returns a pool plus a terminate func.
+func startPostgres(ctx context.Context) (*pgxpool.Pool, func(), error) {
+	pg, err := tcpostgres.Run(ctx,
+		"postgres:16",
+		tcpostgres.WithDatabase("relay_explain"),
+		tcpostgres.WithUsername("relay"),
+		tcpostgres.WithPassword("relay"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+		),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("run container: %w", err)
+	}
+	terminate := func() { _ = pg.Terminate(context.Background()) }
+
+	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		terminate()
+		return nil, nil, fmt.Errorf("connection string: %w", err)
+	}
+
+	migrateDSN := "pgx5" + dsn[len("postgres"):]
+	if err := store.Migrate(migrateDSN); err != nil {
+		terminate()
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		terminate()
+		return nil, nil, fmt.Errorf("open pool: %w", err)
+	}
+	return pool, terminate, nil
+}
