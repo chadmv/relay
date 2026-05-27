@@ -16,6 +16,22 @@ import (
 	"relay/internal/relayclient"
 )
 
+func TestReservationsList_SortFlag(t *testing.T) {
+	var capturedRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(relayclient.PageEnvelope[reservationResp]{Items: []reservationResp{}, Total: 0})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out strings.Builder
+	err := doReservations(context.Background(), cfg, []string{"list", "--sort", "-priority"}, &out)
+	require.NoError(t, err)
+	require.Contains(t, capturedRawQuery, "sort=-priority")
+}
+
 func TestReservations_ListCreateDelete(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 

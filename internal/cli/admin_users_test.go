@@ -459,6 +459,22 @@ func TestAdminUsersArchive_MissingArg(t *testing.T) {
 	assert.Contains(t, err.Error(), "usage:")
 }
 
+func TestAdminUsersList_SortFlag(t *testing.T) {
+	var capturedRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":"","total":0}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admintoken"}
+	out := &bytes.Buffer{}
+	err := doAdminUsers(context.Background(), cfg, []string{"list", "--sort", "-priority"}, out)
+	require.NoError(t, err)
+	require.Contains(t, capturedRawQuery, "sort=-priority")
+}
+
 func TestAdminUsersList_IncludeArchived(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

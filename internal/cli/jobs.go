@@ -81,6 +81,7 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	status := fs.String("status", "", "filter by status")
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
+	sortFlag := fs.String("sort", "", "sort order; e.g. -priority or name (server-validated)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
@@ -92,6 +93,9 @@ func doListJobs(ctx context.Context, cfg *Config, args []string, w io.Writer) er
 	params := url.Values{}
 	if *status != "" {
 		params.Set("status", *status)
+	}
+	if *sortFlag != "" {
+		params.Set("sort", *sortFlag)
 	}
 	jobs, total, err := relayclient.FetchAllPages[jobResp](ctx, c, "/v1/jobs", params, *limitFlag)
 	if err != nil {
