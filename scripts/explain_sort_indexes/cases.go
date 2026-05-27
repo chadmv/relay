@@ -19,8 +19,13 @@ type explainCase struct {
 	SortKey       string
 	Direction     string // "asc" | "desc"
 	ExpectedIndex string
-	InitialSQL    string
-	CursorSQL     string
+	// ValidIndexes, when non-empty, is the full set of acceptable index
+	// names. Used for nullable columns that have both an ASC and a DESC
+	// direction index: the planner may scan either in either direction, so
+	// both are valid. When empty, ExpectedIndex is the sole valid index.
+	ValidIndexes []string
+	InitialSQL   string
+	CursorSQL    string
 }
 
 // expectedIndexes is the hand-written truth table mapping each
@@ -81,6 +86,17 @@ var expectedIndexes = map[string]string{
 	"agent_enrollments|expires_at|asc":  "idx_agent_enr_expires_id",
 }
 
+// validIndexPairs lists (table, sort_key) pairs where two direction-specific
+// indexes exist (one ASC NULLS FIRST, one DESC NULLS LAST) for a nullable
+// column. Postgres can scan either index in either direction, so both are
+// valid. The planner's choice is nondeterministic, so we accept both.
+// Key format: "table|sort_key".
+var validIndexPairs = map[string][2]string{
+	"workers|last_seen_at":     {"idx_workers_last_seen_desc", "idx_workers_last_seen_asc"},
+	"reservations|starts_at":   {"idx_reservations_starts_desc", "idx_reservations_starts_asc"},
+	"reservations|ends_at":     {"idx_reservations_ends_desc", "idx_reservations_ends_asc"},
+}
+
 // tableSpec pairs each table name with its SortSpec from internal/api.
 // Listing them explicitly here (rather than reflection over package
 // vars) keeps the script straightforward.
@@ -122,13 +138,19 @@ func buildCases(ctx context.Context, pool *pgxpool.Pool) ([]explainCase, error) 
 						"no expected index registered for %s (update expectedIndexes in cases.go)",
 						mapKey)
 				}
-				cases = append(cases, explainCase{
+				ec := explainCase{
 					Table:         ts.Table,
 					SortKey:       key,
 					Direction:     dir,
 					ExpectedIndex: idx,
 					// SQL filled in by attachSQL in a later task.
-				})
+				}
+				// For nullable columns that have both an ASC and a DESC index,
+				// accept either; the planner may scan both in either direction.
+				if pair, ok := validIndexPairs[ts.Table+"|"+key]; ok {
+					ec.ValidIndexes = []string{pair[0], pair[1]}
+				}
+				cases = append(cases, ec)
 			}
 		}
 	}

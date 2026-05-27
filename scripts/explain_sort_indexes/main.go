@@ -93,8 +93,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "explain_sort_indexes: attach SQL: %v\n", err)
 		os.Exit(exitInfraFail)
 	}
-	// Spot-check one case so a regression in SQL generation is visible.
-	fmt.Fprintf(os.Stderr, "explain_sort_indexes: cases[0] InitialSQL = %s\n", cases[0].InitialSQL)
+	results := make([]caseResult, 0, len(cases))
+	failCount := 0
+	for _, c := range cases {
+		r := explainCaseRun(ctx, pool, c)
+		results = append(results, r)
+		if r.Status != "PASS" {
+			failCount++
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: %s | %s | %s -> %s: %s\n",
+				c.Table, c.SortKey, c.Direction, r.Status, r.Reason)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: %d/%d PASS\n",
+		len(results)-failCount, len(results))
+	if failCount > 0 {
+		os.Exit(exitCheckFail)
+	}
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
