@@ -144,7 +144,7 @@ func parseSort(raw string, spec sortSpec) (canonical string, kind sortKeyKind, e
 	if len(raw) > 0 && raw[0] == '-' {
 		key = raw[1:]
 	}
-	if key == "" || key == "-" {
+	if key == "" {
 		return "", 0, fmt.Errorf("invalid sort %q", raw)
 	}
 	// Reject any character that wouldn't appear in a column name.
@@ -170,6 +170,16 @@ func parseSort(raw string, spec sortSpec) (canonical string, kind sortKeyKind, e
 const (
 	defaultLimit int32 = 50
 	maxLimit     int32 = 200
+
+	// historicalDefaultSort is the sort string that every pre-feature
+	// cursor implicitly encoded. Before the ?sort= feature, all paginated
+	// endpoints ordered by created_at DESC, id DESC, and cursors only ever
+	// carried a created_at timestamp. When a cursor lacks an explicit Sort
+	// field, we treat it as if issued under this sort - NOT the calling
+	// endpoint's spec.Default (which may differ in some hypothetical future
+	// endpoint). Using spec.Default here would silently accept legacy
+	// cursors paired with arbitrary ?sort= values, producing wrong rows.
+	historicalDefaultSort = "-created_at"
 )
 
 // pageParams captures validated pagination input from the URL query string.
@@ -222,7 +232,7 @@ func parsePage(w http.ResponseWriter, r *http.Request, spec sortSpec) (pageParam
 		// equals the historical default that legacy cursors implied.
 		effective := c.Sort
 		if effective == "" {
-			effective = "-created_at"
+			effective = historicalDefaultSort
 		}
 		if effective != canon {
 			writeError(w, http.StatusBadRequest, "cursor sort key does not match requested sort; drop the cursor or change the sort")

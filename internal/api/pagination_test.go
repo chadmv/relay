@@ -58,6 +58,14 @@ func TestCursor_InvalidJSON(t *testing.T) {
 	assert.ErrorIs(t, err, errBadCursor)
 }
 
+var testDefaultSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at": sortKeyTimestamp,
+		"name":       sortKeyText,
+	},
+}
+
 func TestParsePage_Defaults(t *testing.T) {
 	r := httptest.NewRequest("GET", "/v1/jobs", nil)
 	w := httptest.NewRecorder()
@@ -279,14 +287,6 @@ func TestParseSort_RejectsEmptyAndWrongSyntax(t *testing.T) {
 	}
 }
 
-var testDefaultSpec = sortSpec{
-	Default: "-created_at",
-	Keys: map[string]sortKeyKind{
-		"created_at": sortKeyTimestamp,
-		"name":       sortKeyText,
-	},
-}
-
 func TestParsePage_SortKeyAccepted(t *testing.T) {
 	r := httptest.NewRequest("GET", "/v1/jobs?sort=name", nil)
 	w := httptest.NewRecorder()
@@ -331,4 +331,31 @@ func TestParsePage_LegacyCursorMatchesDefault(t *testing.T) {
 	pp, ok := parsePage(w, r, testDefaultSpec)
 	require.True(t, ok)
 	assert.Equal(t, "-created_at", pp.Sort)
+}
+
+func TestParsePage_NewStyleCursorMatchesExplicitDefault(t *testing.T) {
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	cur := encodeCursorV2("-created_at", anySortVal(tt), id)
+	r := httptest.NewRequest("GET", "/v1/jobs?sort=-created_at&cursor="+cur, nil)
+	w := httptest.NewRecorder()
+	pp, ok := parsePage(w, r, testDefaultSpec)
+	require.True(t, ok)
+	assert.Equal(t, "-created_at", pp.Sort)
+}
+
+func TestParsePage_LegacyCursorRejectsExplicitNonDefaultSort(t *testing.T) {
+	// A legacy cursor was issued under the historical -created_at sort,
+	// even though its wire format has no S field. Pairing it with a
+	// different ?sort= must be rejected - the cursor's T value cannot
+	// be reinterpreted as a name comparator without producing wrong rows.
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	legacy := encodeCursor(tt, id) // no S field
+	r := httptest.NewRequest("GET", "/v1/jobs?sort=name&cursor="+legacy, nil)
+	w := httptest.NewRecorder()
+	_, ok := parsePage(w, r, testDefaultSpec)
+	assert.False(t, ok)
+	assert.Equal(t, 400, w.Code)
+	assert.Contains(t, w.Body.String(), "cursor sort key does not match")
 }
