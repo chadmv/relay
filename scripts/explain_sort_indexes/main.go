@@ -52,7 +52,17 @@ func main() {
 	defer terminate()
 	defer pool.Close()
 
-	fmt.Fprintln(os.Stderr, "explain_sort_indexes: container up, migrations applied")
+	if err := seed(ctx, pool); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: seed: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: count users: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: seeded %d users, %d for FK\n",
+		count, len(firstUsersForFK))
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
