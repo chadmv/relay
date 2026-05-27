@@ -224,3 +224,56 @@ func TestCursor_RejectsNeitherTNorV(t *testing.T) {
 	_, err := decodeCursor(enc)
 	assert.ErrorIs(t, err, errBadCursor)
 }
+
+func TestParseSort_DefaultWhenAbsent(t *testing.T) {
+	spec := sortSpec{
+		Default: "-created_at",
+		Keys: map[string]sortKeyKind{
+			"created_at": sortKeyTimestamp,
+			"name":       sortKeyText,
+		},
+	}
+	got, kind, err := parseSort("", spec)
+	require.NoError(t, err)
+	assert.Equal(t, "-created_at", got)
+	assert.Equal(t, sortKeyTimestamp, kind)
+}
+
+func TestParseSort_AscAndDesc(t *testing.T) {
+	spec := sortSpec{
+		Default: "-created_at",
+		Keys: map[string]sortKeyKind{
+			"created_at": sortKeyTimestamp,
+			"name":       sortKeyText,
+		},
+	}
+	asc, kind, err := parseSort("name", spec)
+	require.NoError(t, err)
+	assert.Equal(t, "name", asc)
+	assert.Equal(t, sortKeyText, kind)
+
+	desc, kind, err := parseSort("-name", spec)
+	require.NoError(t, err)
+	assert.Equal(t, "-name", desc)
+	assert.Equal(t, sortKeyText, kind)
+}
+
+func TestParseSort_UnknownKey(t *testing.T) {
+	spec := sortSpec{
+		Default: "-created_at",
+		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp, "name": sortKeyText},
+	}
+	_, _, err := parseSort("labels", spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported sort key 'labels'")
+	assert.Contains(t, err.Error(), "created_at")
+	assert.Contains(t, err.Error(), "name")
+}
+
+func TestParseSort_RejectsEmptyAndWrongSyntax(t *testing.T) {
+	spec := sortSpec{Default: "-created_at", Keys: map[string]sortKeyKind{"name": sortKeyText}}
+	for _, bad := range []string{"-", "--name", "name asc", "name:desc"} {
+		_, _, err := parseSort(bad, spec)
+		assert.Error(t, err, "expected error for sort=%q", bad)
+	}
+}

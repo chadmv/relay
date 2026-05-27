@@ -4,8 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -111,6 +114,57 @@ func decodeCursor(s string) (cursor, error) {
 		c.T = t
 	}
 	return c, nil
+}
+
+// sortKeyKind tells parsePage how to populate the cursor from the value
+// returned by buildPage's row-key callback for this column.
+type sortKeyKind int
+
+const (
+	sortKeyTimestamp sortKeyKind = iota // populates cursor.T
+	sortKeyText                         // populates cursor.StrVal
+)
+
+// sortSpec is the per-endpoint allowlist. Default is the canonical sort
+// string used when the client sends no ?sort= param; Keys maps each
+// allowed key name (without leading dash) to its value kind.
+type sortSpec struct {
+	Default string
+	Keys    map[string]sortKeyKind
+}
+
+// parseSort validates and canonicalizes the raw ?sort= value against the
+// allowlist. Returns the canonical sort string ("name" / "-name") and the
+// value kind. Empty raw input resolves to spec.Default.
+func parseSort(raw string, spec sortSpec) (canonical string, kind sortKeyKind, err error) {
+	if raw == "" {
+		raw = spec.Default
+	}
+	key := raw
+	if len(raw) > 0 && raw[0] == '-' {
+		key = raw[1:]
+	}
+	if key == "" || key == "-" {
+		return "", 0, fmt.Errorf("invalid sort %q", raw)
+	}
+	// Reject any character that wouldn't appear in a column name.
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		isOK := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+		if !isOK {
+			return "", 0, fmt.Errorf("invalid sort %q", raw)
+		}
+	}
+	k, ok := spec.Keys[key]
+	if !ok {
+		allowed := make([]string, 0, len(spec.Keys))
+		for k := range spec.Keys {
+			allowed = append(allowed, k)
+		}
+		sort.Strings(allowed)
+		return "", 0, fmt.Errorf("unsupported sort key '%s'; supported: %s", key, strings.Join(allowed, ", "))
+	}
+	return raw, k, nil
 }
 
 const (
