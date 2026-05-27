@@ -92,6 +92,12 @@ func decodeCursor(s string) (cursor, error) {
 	if err := json.Unmarshal(b, &w); err != nil {
 		return cursor{}, errBadCursor
 	}
+	// A well-formed cursor must have exactly one of T or V populated.
+	// Both set is ambiguous (would silently pick one); neither set means
+	// there is no sort value to compare against.
+	if (w.T != "") == (w.V != "") {
+		return cursor{}, errBadCursor
+	}
 	id, err := parseUUID(w.I)
 	if err != nil {
 		return cursor{}, errBadCursor

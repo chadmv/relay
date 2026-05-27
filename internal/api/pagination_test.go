@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -192,4 +194,33 @@ func TestCursor_LegacyDecodeWithoutSortField(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", got.Sort, "legacy cursor must yield empty Sort so caller can default it")
 	assert.True(t, got.T.Equal(tt))
+}
+
+func TestCursor_RejectsBothTAndV(t *testing.T) {
+	// A malicious or buggy client crafts a cursor with both T and V set.
+	// decodeCursor must reject it rather than silently picking one.
+	id := pgtype.UUID{Valid: true}
+	w := cursorWire{
+		T: "2026-04-16T10:00:00Z",
+		I: uuidStr(id),
+		S: "name",
+		V: "alpha",
+	}
+	b, _ := json.Marshal(w)
+	enc := base64.RawURLEncoding.EncodeToString(b)
+
+	_, err := decodeCursor(enc)
+	assert.ErrorIs(t, err, errBadCursor)
+}
+
+func TestCursor_RejectsNeitherTNorV(t *testing.T) {
+	// A cursor with neither T nor V (just id, maybe sort) has no sort value
+	// to compare against — malformed.
+	id := pgtype.UUID{Valid: true}
+	w := cursorWire{I: uuidStr(id), S: "name"}
+	b, _ := json.Marshal(w)
+	enc := base64.RawURLEncoding.EncodeToString(b)
+
+	_, err := decodeCursor(enc)
+	assert.ErrorIs(t, err, errBadCursor)
 }
