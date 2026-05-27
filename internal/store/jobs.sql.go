@@ -467,6 +467,663 @@ func (q *Queries) ListJobsWithEmailPage(ctx context.Context, arg ListJobsWithEma
 	return items, nil
 }
 
+const listJobsWithEmailPageByCreatedAsc = `-- name: ListJobsWithEmailPageByCreatedAsc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
+ORDER BY j.created_at ASC, j.id ASC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByCreatedAscRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByCreatedAsc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY j.created_at ASC, j.id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByCreatedAsc(ctx context.Context, arg ListJobsWithEmailPageByCreatedAscParams) ([]ListJobsWithEmailPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByCreatedAscRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByCreatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByNameAsc = `-- name: ListJobsWithEmailPageByNameAsc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
+ORDER BY j.name ASC, j.id ASC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByNameAscRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByNameAsc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
+//	ORDER BY j.name ASC, j.id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByNameAsc(ctx context.Context, arg ListJobsWithEmailPageByNameAscParams) ([]ListJobsWithEmailPageByNameAscRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByNameAscRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByNameAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByNameDesc = `-- name: ListJobsWithEmailPageByNameDesc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
+ORDER BY j.name DESC, j.id DESC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByNameDescRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByNameDesc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
+//	ORDER BY j.name DESC, j.id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByNameDesc(ctx context.Context, arg ListJobsWithEmailPageByNameDescParams) ([]ListJobsWithEmailPageByNameDescRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByNameDescRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByNameDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByPriorityAsc = `-- name: ListJobsWithEmailPageByPriorityAsc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
+ORDER BY j.priority ASC, j.id ASC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByPriorityAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByPriorityAscRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByPriorityAsc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
+//	ORDER BY j.priority ASC, j.id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByPriorityAsc(ctx context.Context, arg ListJobsWithEmailPageByPriorityAscParams) ([]ListJobsWithEmailPageByPriorityAscRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByPriorityAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByPriorityAscRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByPriorityAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByPriorityDesc = `-- name: ListJobsWithEmailPageByPriorityDesc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
+ORDER BY j.priority DESC, j.id DESC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByPriorityDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByPriorityDescRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByPriorityDesc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
+//	ORDER BY j.priority DESC, j.id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByPriorityDesc(ctx context.Context, arg ListJobsWithEmailPageByPriorityDescParams) ([]ListJobsWithEmailPageByPriorityDescRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByPriorityDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByPriorityDescRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByPriorityDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByStatusAsc = `-- name: ListJobsWithEmailPageByStatusAsc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
+ORDER BY j.status ASC, j.id ASC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByStatusAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByStatusAscRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByStatusAsc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
+//	ORDER BY j.status ASC, j.id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByStatusAsc(ctx context.Context, arg ListJobsWithEmailPageByStatusAscParams) ([]ListJobsWithEmailPageByStatusAscRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByStatusAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByStatusAscRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByStatusAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByStatusDesc = `-- name: ListJobsWithEmailPageByStatusDesc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
+ORDER BY j.status DESC, j.id DESC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByStatusDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByStatusDescRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByStatusDesc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
+//	ORDER BY j.status DESC, j.id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByStatusDesc(ctx context.Context, arg ListJobsWithEmailPageByStatusDescParams) ([]ListJobsWithEmailPageByStatusDescRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByStatusDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByStatusDescRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByStatusDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByUpdatedAsc = `-- name: ListJobsWithEmailPageByUpdatedAsc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
+ORDER BY j.updated_at ASC, j.id ASC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByUpdatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByUpdatedAscRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByUpdatedAsc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
+//	ORDER BY j.updated_at ASC, j.id ASC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByUpdatedAsc(ctx context.Context, arg ListJobsWithEmailPageByUpdatedAscParams) ([]ListJobsWithEmailPageByUpdatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByUpdatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByUpdatedAscRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByUpdatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobsWithEmailPageByUpdatedDesc = `-- name: ListJobsWithEmailPageByUpdatedDesc :many
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
+ORDER BY j.updated_at DESC, j.id DESC
+LIMIT $4+ 1
+`
+
+type ListJobsWithEmailPageByUpdatedDescParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"+page_limit"`
+}
+
+type ListJobsWithEmailPageByUpdatedDescRow struct {
+	ID               pgtype.UUID        `json:"id"`
+	Name             string             `json:"name"`
+	Priority         string             `json:"priority"`
+	Status           string             `json:"status"`
+	SubmittedBy      pgtype.UUID        `json:"submitted_by"`
+	Labels           []byte             `json:"labels"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
+	SubmittedByEmail string             `json:"submitted_by_email"`
+}
+
+// ListJobsWithEmailPageByUpdatedDesc
+//
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
+//	ORDER BY j.updated_at DESC, j.id DESC
+//	LIMIT $4+ 1
+func (q *Queries) ListJobsWithEmailPageByUpdatedDesc(ctx context.Context, arg ListJobsWithEmailPageByUpdatedDescParams) ([]ListJobsWithEmailPageByUpdatedDescRow, error) {
+	rows, err := q.db.Query(ctx, listJobsWithEmailPageByUpdatedDesc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListJobsWithEmailPageByUpdatedDescRow
+	for rows.Next() {
+		var i ListJobsWithEmailPageByUpdatedDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Priority,
+			&i.Status,
+			&i.SubmittedBy,
+			&i.Labels,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ScheduledJobID,
+			&i.SubmittedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateJobStatus = `-- name: UpdateJobStatus :one
 UPDATE jobs
 SET status = $2, updated_at = NOW()

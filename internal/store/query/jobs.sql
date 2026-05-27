@@ -66,3 +66,75 @@ FROM jobs j
 JOIN users u ON u.id = j.submitted_by
 WHERE j.scheduled_job_id = $1
 ORDER BY j.created_at DESC;
+
+-- name: ListJobsWithEmailPageByCreatedAsc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.created_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY j.created_at ASC, j.id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByNameDesc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.name, j.id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.name DESC, j.id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByNameAsc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.name, j.id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.name ASC, j.id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByPriorityDesc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.priority, j.id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.priority DESC, j.id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByPriorityAsc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.priority, j.id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.priority ASC, j.id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByStatusDesc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.status, j.id) < (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.status DESC, j.id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByStatusAsc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.status, j.id) > (@cursor_v::text, @cursor_id::uuid)
+ORDER BY j.status ASC, j.id ASC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByUpdatedDesc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.updated_at, j.id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY j.updated_at DESC, j.id DESC
+LIMIT @page_limit + 1;
+
+-- name: ListJobsWithEmailPageByUpdatedAsc :many
+SELECT j.*, u.email AS submitted_by_email
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE NOT @cursor_set::bool OR (j.updated_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+ORDER BY j.updated_at ASC, j.id ASC
+LIMIT @page_limit + 1;

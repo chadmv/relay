@@ -171,6 +171,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
+// jobsSortSpec is the allowlist for ?sort= on the unfiltered /v1/jobs endpoint.
+var jobsSortSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at": sortKeyTimestamp,
+		"name":       sortKeyText,
+		"priority":   sortKeyText,
+		"status":     sortKeyText,
+		"updated_at": sortKeyTimestamp,
+	},
+}
+
 func jobsRowKeyDefault(r store.ListJobsWithEmailPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
@@ -206,16 +218,128 @@ func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow)
 	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
 }
 
+// ─── Sort-dispatch helpers for the unfiltered /v1/jobs list ──────────────────
+
+func jobsRowKeyByCreatedAsc(r store.ListJobsWithEmailPageByCreatedAscRow) (anySortVal, pgtype.UUID) {
+	return r.CreatedAt.Time, r.ID
+}
+func jobRowToResponseByCreatedAsc(r store.ListJobsWithEmailPageByCreatedAscRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByNameDesc(r store.ListJobsWithEmailPageByNameDescRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func jobRowToResponseByNameDesc(r store.ListJobsWithEmailPageByNameDescRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByNameAsc(r store.ListJobsWithEmailPageByNameAscRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func jobRowToResponseByNameAsc(r store.ListJobsWithEmailPageByNameAscRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByPriorityDesc(r store.ListJobsWithEmailPageByPriorityDescRow) (anySortVal, pgtype.UUID) {
+	return r.Priority, r.ID
+}
+func jobRowToResponseByPriorityDesc(r store.ListJobsWithEmailPageByPriorityDescRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByPriorityAsc(r store.ListJobsWithEmailPageByPriorityAscRow) (anySortVal, pgtype.UUID) {
+	return r.Priority, r.ID
+}
+func jobRowToResponseByPriorityAsc(r store.ListJobsWithEmailPageByPriorityAscRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByStatusDesc(r store.ListJobsWithEmailPageByStatusDescRow) (anySortVal, pgtype.UUID) {
+	return r.Status, r.ID
+}
+func jobRowToResponseByStatusDesc(r store.ListJobsWithEmailPageByStatusDescRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByStatusAsc(r store.ListJobsWithEmailPageByStatusAscRow) (anySortVal, pgtype.UUID) {
+	return r.Status, r.ID
+}
+func jobRowToResponseByStatusAsc(r store.ListJobsWithEmailPageByStatusAscRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByUpdatedDesc(r store.ListJobsWithEmailPageByUpdatedDescRow) (anySortVal, pgtype.UUID) {
+	return r.UpdatedAt.Time, r.ID
+}
+func jobRowToResponseByUpdatedDesc(r store.ListJobsWithEmailPageByUpdatedDescRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
+func jobsRowKeyByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) (anySortVal, pgtype.UUID) {
+	return r.UpdatedAt.Time, r.ID
+}
+func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) jobResponse {
+	job := store.Job{
+		ID: r.ID, Name: r.Name, Priority: r.Priority, Status: r.Status,
+		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+	}
+	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Temporary default spec; per-endpoint specs land in later tasks.
-	defaultSortSpec := sortSpec{
-		Default: "-created_at",
-		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
-	}
-	pp, ok := parsePage(w, r, defaultSortSpec)
+	pp, ok := parsePage(w, r, jobsSortSpec)
 	if !ok {
+		return
+	}
+
+	hasSort := r.URL.Query().Get("sort") != ""
+	hasFilter := r.URL.Query().Get("status") != "" || r.URL.Query().Get("scheduled_job_id") != ""
+	if hasSort && hasFilter {
+		writeError(w, http.StatusBadRequest, "sort not supported on filtered list variant; remove the filter or remove the sort")
 		return
 	}
 
@@ -274,24 +398,159 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default branch: no filter
-	rows, err := s.q.ListJobsWithEmailPage(ctx, store.ListJobsWithEmailPageParams{
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
+	// Default branch: no filter — dispatch on pp.Sort.
+	items, next, total, err := s.listJobsBySort(ctx, pp)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list jobs failed")
 		return
 	}
+	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
+}
+
+// listJobsBySort dispatches to the correct sqlc query based on pp.Sort and
+// returns (items, nextCursor, total, error). All 10 sort arms are covered.
+func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobResponse, string, int64, error) {
 	total, err := s.q.CountJobs(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "count jobs failed")
-		return
+		return nil, "", 0, err
 	}
-	items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseDefault, jobsRowKeyDefault)
-	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
+
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListJobsWithEmailPage(ctx, store.ListJobsWithEmailPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseDefault, jobsRowKeyDefault)
+		return items, next, total, nil
+
+	case "created_at":
+		rows, err := s.q.ListJobsWithEmailPageByCreatedAsc(ctx, store.ListJobsWithEmailPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByCreatedAsc, jobsRowKeyByCreatedAsc)
+		return items, next, total, nil
+
+	case "-name":
+		rows, err := s.q.ListJobsWithEmailPageByNameDesc(ctx, store.ListJobsWithEmailPageByNameDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByNameDesc, jobsRowKeyByNameDesc)
+		return items, next, total, nil
+
+	case "name":
+		rows, err := s.q.ListJobsWithEmailPageByNameAsc(ctx, store.ListJobsWithEmailPageByNameAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByNameAsc, jobsRowKeyByNameAsc)
+		return items, next, total, nil
+
+	case "-priority":
+		rows, err := s.q.ListJobsWithEmailPageByPriorityDesc(ctx, store.ListJobsWithEmailPageByPriorityDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByPriorityDesc, jobsRowKeyByPriorityDesc)
+		return items, next, total, nil
+
+	case "priority":
+		rows, err := s.q.ListJobsWithEmailPageByPriorityAsc(ctx, store.ListJobsWithEmailPageByPriorityAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByPriorityAsc, jobsRowKeyByPriorityAsc)
+		return items, next, total, nil
+
+	case "-status":
+		rows, err := s.q.ListJobsWithEmailPageByStatusDesc(ctx, store.ListJobsWithEmailPageByStatusDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByStatusDesc, jobsRowKeyByStatusDesc)
+		return items, next, total, nil
+
+	case "status":
+		rows, err := s.q.ListJobsWithEmailPageByStatusAsc(ctx, store.ListJobsWithEmailPageByStatusAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByStatusAsc, jobsRowKeyByStatusAsc)
+		return items, next, total, nil
+
+	case "-updated_at":
+		rows, err := s.q.ListJobsWithEmailPageByUpdatedDesc(ctx, store.ListJobsWithEmailPageByUpdatedDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByUpdatedDesc, jobsRowKeyByUpdatedDesc)
+		return items, next, total, nil
+
+	case "updated_at":
+		rows, err := s.q.ListJobsWithEmailPageByUpdatedAsc(ctx, store.ListJobsWithEmailPageByUpdatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			return nil, "", 0, err
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByUpdatedAsc, jobsRowKeyByUpdatedAsc)
+		return items, next, total, nil
+
+	default:
+		// parsePage already validated pp.Sort against jobsSortSpec, so this
+		// branch is unreachable in production. Return empty to avoid a silent bug.
+		return []jobResponse{}, "", total, nil
+	}
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
