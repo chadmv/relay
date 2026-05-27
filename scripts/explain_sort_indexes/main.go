@@ -71,6 +71,15 @@ func main() {
 		"explain_sort_indexes: seeded users=%d jobs=%d workers=%d sched=%d resv=%d enroll=%d\n",
 		counts["users"], counts["jobs"], counts["workers"],
 		counts["scheduled_jobs"], counts["reservations"], counts["agent_enrollments"])
+
+	for _, table := range []string{"users", "jobs", "workers",
+		"scheduled_jobs", "reservations", "agent_enrollments"} {
+		if _, err := pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", table)); err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: analyze %s: %v\n", table, err)
+			os.Exit(exitInfraFail)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "explain_sort_indexes: ANALYZE complete")
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
