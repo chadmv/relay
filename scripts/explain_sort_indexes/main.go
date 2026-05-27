@@ -80,6 +80,15 @@ func main() {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "explain_sort_indexes: ANALYZE complete")
+
+	var cases []explainCase
+	cases, err = buildCases(ctx, pool)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: build cases: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: built %d cases\n", len(cases))
+	_ = cases
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
