@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/mail"
@@ -66,6 +67,15 @@ func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, boo
 	return name, true
 }
 
+var usersSortSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at": sortKeyTimestamp,
+		"name":       sortKeyText,
+		"email":      sortKeyText,
+	},
+}
+
 func usersListRowKey(r store.ListUsersPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
@@ -73,10 +83,68 @@ func usersListIncArchivedRowKey(r store.ListUsersIncludingArchivedPageRow) (anyS
 	return r.CreatedAt.Time, r.ID
 }
 
+func usersListRowKeyByName(r store.ListUsersPageByNameDescRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func usersListRowKeyByNameAsc(r store.ListUsersPageByNameAscRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func usersListRowKeyByEmail(r store.ListUsersPageByEmailDescRow) (anySortVal, pgtype.UUID) {
+	return r.Email, r.ID
+}
+func usersListRowKeyByEmailAsc(r store.ListUsersPageByEmailAscRow) (anySortVal, pgtype.UUID) {
+	return r.Email, r.ID
+}
+
+func usersListIncArchivedRowKeyByName(r store.ListUsersIncludingArchivedPageByNameDescRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func usersListIncArchivedRowKeyByNameAsc(r store.ListUsersIncludingArchivedPageByNameAscRow) (anySortVal, pgtype.UUID) {
+	return r.Name, r.ID
+}
+func usersListIncArchivedRowKeyByEmail(r store.ListUsersIncludingArchivedPageByEmailDescRow) (anySortVal, pgtype.UUID) {
+	return r.Email, r.ID
+}
+func usersListIncArchivedRowKeyByEmailAsc(r store.ListUsersIncludingArchivedPageByEmailAscRow) (anySortVal, pgtype.UUID) {
+	return r.Email, r.ID
+}
+
 func usersListRowToResponse(r store.ListUsersPageRow) userResponse {
 	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
 }
 func usersListIncArchivedRowToResponse(r store.ListUsersIncludingArchivedPageRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+
+func usersListRowByCreatedAscToResponse(r store.ListUsersPageByCreatedAscRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+func usersListRowByNameDescToResponse(r store.ListUsersPageByNameDescRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+func usersListRowByNameAscToResponse(r store.ListUsersPageByNameAscRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+func usersListRowByEmailDescToResponse(r store.ListUsersPageByEmailDescRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+func usersListRowByEmailAscToResponse(r store.ListUsersPageByEmailAscRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, pgtype.Timestamptz{})
+}
+
+func usersListIncArchivedRowByCreatedAscToResponse(r store.ListUsersIncludingArchivedPageByCreatedAscRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+func usersListIncArchivedRowByNameDescToResponse(r store.ListUsersIncludingArchivedPageByNameDescRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+func usersListIncArchivedRowByNameAscToResponse(r store.ListUsersIncludingArchivedPageByNameAscRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+func usersListIncArchivedRowByEmailDescToResponse(r store.ListUsersIncludingArchivedPageByEmailDescRow) userResponse {
+	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
+}
+func usersListIncArchivedRowByEmailAscToResponse(r store.ListUsersIncludingArchivedPageByEmailAscRow) userResponse {
 	return toUserResponse(r.ID, r.Email, r.Name, r.IsAdmin, r.CreatedAt, r.ArchivedAt)
 }
 
@@ -107,18 +175,47 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Temporary default spec; per-endpoint specs land in later tasks.
-	defaultSortSpec := sortSpec{
-		Default: "-created_at",
-		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
-	}
-	pp, ok := parsePage(w, r, defaultSortSpec)
+	pp, ok := parsePage(w, r, usersSortSpec)
 	if !ok {
 		return
 	}
 
+	ctx := r.Context()
+
 	if includeArchived {
-		rows, err := s.q.ListUsersIncludingArchivedPage(r.Context(), store.ListUsersIncludingArchivedPageParams{
+		total, err := s.q.CountUsersIncludingArchived(ctx)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to count users")
+			return
+		}
+		items, next := s.listUsersIncludingArchivedBySort(w, ctx, pp)
+		if items == nil {
+			return
+		}
+		writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
+		return
+	}
+
+	total, err := s.q.CountUsers(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count users")
+		return
+	}
+	items, next := s.listUsersBySort(w, ctx, pp)
+	if items == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
+}
+
+// listUsersBySort dispatches to the correct active-only query for pp.Sort.
+// Returns (nil, "") and writes a 500 on DB error. Panics for unknown sort keys
+// (indicates a mismatch between usersSortSpec and this switch, which is a
+// programmer error).
+func (s *Server) listUsersBySort(w http.ResponseWriter, ctx context.Context, pp pageParams) ([]userResponse, string) { //nolint:contextcheck
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListUsersPage(ctx, store.ListUsersPageParams{
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
@@ -126,35 +223,182 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to list users")
-			return
+			return nil, ""
 		}
-		total, err := s.q.CountUsersIncludingArchived(r.Context())
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowToResponse, usersListRowKey)
+		return items, next
+
+	case "created_at":
+		rows, err := s.q.ListUsersPageByCreatedAsc(ctx, store.ListUsersPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to count users")
-			return
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowByCreatedAscToResponse, func(r store.ListUsersPageByCreatedAscRow) (anySortVal, pgtype.UUID) {
+			return r.CreatedAt.Time, r.ID
+		})
+		return items, next
+
+	case "-name":
+		rows, err := s.q.ListUsersPageByNameDesc(ctx, store.ListUsersPageByNameDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowByNameDescToResponse, usersListRowKeyByName)
+		return items, next
+
+	case "name":
+		rows, err := s.q.ListUsersPageByNameAsc(ctx, store.ListUsersPageByNameAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowByNameAscToResponse, usersListRowKeyByNameAsc)
+		return items, next
+
+	case "-email":
+		rows, err := s.q.ListUsersPageByEmailDesc(ctx, store.ListUsersPageByEmailDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowByEmailDescToResponse, usersListRowKeyByEmail)
+		return items, next
+
+	case "email":
+		rows, err := s.q.ListUsersPageByEmailAsc(ctx, store.ListUsersPageByEmailAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowByEmailAscToResponse, usersListRowKeyByEmailAsc)
+		return items, next
+
+	default:
+		panic("listUsersBySort: missing dispatch arm for sort key " + pp.Sort)
+	}
+}
+
+// listUsersIncludingArchivedBySort dispatches to the correct including-archived
+// query for pp.Sort. Returns (nil, "") and writes a 500 on DB error. Panics for
+// unknown sort keys.
+func (s *Server) listUsersIncludingArchivedBySort(w http.ResponseWriter, ctx context.Context, pp pageParams) ([]userResponse, string) { //nolint:contextcheck
+	switch pp.Sort {
+	case "-created_at":
+		rows, err := s.q.ListUsersIncludingArchivedPage(ctx, store.ListUsersIncludingArchivedPageParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
 		}
 		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowToResponse, usersListIncArchivedRowKey)
-		writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
-		return
-	}
+		return items, next
 
-	rows, err := s.q.ListUsersPage(r.Context(), store.ListUsersPageParams{
-		CursorSet: pp.Cursor.Set,
-		CursorTs:  pp.CursorTs(),
-		CursorID:  pp.Cursor.ID,
-		PageLimit: pp.Limit,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list users")
-		return
+	case "created_at":
+		rows, err := s.q.ListUsersIncludingArchivedPageByCreatedAsc(ctx, store.ListUsersIncludingArchivedPageByCreatedAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowByCreatedAscToResponse, func(r store.ListUsersIncludingArchivedPageByCreatedAscRow) (anySortVal, pgtype.UUID) {
+			return r.CreatedAt.Time, r.ID
+		})
+		return items, next
+
+	case "-name":
+		rows, err := s.q.ListUsersIncludingArchivedPageByNameDesc(ctx, store.ListUsersIncludingArchivedPageByNameDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowByNameDescToResponse, usersListIncArchivedRowKeyByName)
+		return items, next
+
+	case "name":
+		rows, err := s.q.ListUsersIncludingArchivedPageByNameAsc(ctx, store.ListUsersIncludingArchivedPageByNameAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowByNameAscToResponse, usersListIncArchivedRowKeyByNameAsc)
+		return items, next
+
+	case "-email":
+		rows, err := s.q.ListUsersIncludingArchivedPageByEmailDesc(ctx, store.ListUsersIncludingArchivedPageByEmailDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowByEmailDescToResponse, usersListIncArchivedRowKeyByEmail)
+		return items, next
+
+	case "email":
+		rows, err := s.q.ListUsersIncludingArchivedPageByEmailAsc(ctx, store.ListUsersIncludingArchivedPageByEmailAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorV:   pp.Cursor.StrVal,
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list users")
+			return nil, ""
+		}
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowByEmailAscToResponse, usersListIncArchivedRowKeyByEmailAsc)
+		return items, next
+
+	default:
+		panic("listUsersIncludingArchivedBySort: missing dispatch arm for sort key " + pp.Sort)
 	}
-	total, err := s.q.CountUsers(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to count users")
-		return
-	}
-	items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowToResponse, usersListRowKey)
-	writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 }
 
 func (s *Server) handleGetMe(w http.ResponseWriter, r *http.Request) {

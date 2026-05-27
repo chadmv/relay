@@ -301,6 +301,331 @@ func (q *Queries) ListUsersIncludingArchivedPage(ctx context.Context, arg ListUs
 	return items, nil
 }
 
+const listUsersIncludingArchivedPageByCreatedAsc = `-- name: ListUsersIncludingArchivedPageByCreatedAsc :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+WHERE ($1::bool = FALSE
+       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersIncludingArchivedPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListUsersIncludingArchivedPageByCreatedAscRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPageByCreatedAsc
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	WHERE ($1::bool = FALSE
+//	       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPageByCreatedAsc(ctx context.Context, arg ListUsersIncludingArchivedPageByCreatedAscParams) ([]ListUsersIncludingArchivedPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedPageByCreatedAscRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedPageByCreatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersIncludingArchivedPageByEmailAsc = `-- name: ListUsersIncludingArchivedPageByEmailAsc :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+WHERE ($1::bool = FALSE
+       OR (email, id) > ($2::text, $3::uuid))
+ORDER BY email ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersIncludingArchivedPageByEmailAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersIncludingArchivedPageByEmailAscRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPageByEmailAsc
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	WHERE ($1::bool = FALSE
+//	       OR (email, id) > ($2::text, $3::uuid))
+//	ORDER BY email ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPageByEmailAsc(ctx context.Context, arg ListUsersIncludingArchivedPageByEmailAscParams) ([]ListUsersIncludingArchivedPageByEmailAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPageByEmailAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedPageByEmailAscRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedPageByEmailAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersIncludingArchivedPageByEmailDesc = `-- name: ListUsersIncludingArchivedPageByEmailDesc :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+WHERE ($1::bool = FALSE
+       OR (email, id) < ($2::text, $3::uuid))
+ORDER BY email DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListUsersIncludingArchivedPageByEmailDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersIncludingArchivedPageByEmailDescRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPageByEmailDesc
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	WHERE ($1::bool = FALSE
+//	       OR (email, id) < ($2::text, $3::uuid))
+//	ORDER BY email DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPageByEmailDesc(ctx context.Context, arg ListUsersIncludingArchivedPageByEmailDescParams) ([]ListUsersIncludingArchivedPageByEmailDescRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPageByEmailDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedPageByEmailDescRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedPageByEmailDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersIncludingArchivedPageByNameAsc = `-- name: ListUsersIncludingArchivedPageByNameAsc :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+WHERE ($1::bool = FALSE
+       OR (name, id) > ($2::text, $3::uuid))
+ORDER BY name ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersIncludingArchivedPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersIncludingArchivedPageByNameAscRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPageByNameAsc
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	WHERE ($1::bool = FALSE
+//	       OR (name, id) > ($2::text, $3::uuid))
+//	ORDER BY name ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPageByNameAsc(ctx context.Context, arg ListUsersIncludingArchivedPageByNameAscParams) ([]ListUsersIncludingArchivedPageByNameAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedPageByNameAscRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedPageByNameAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersIncludingArchivedPageByNameDesc = `-- name: ListUsersIncludingArchivedPageByNameDesc :many
+SELECT id, email, name, is_admin, created_at, archived_at
+FROM users
+WHERE ($1::bool = FALSE
+       OR (name, id) < ($2::text, $3::uuid))
+ORDER BY name DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListUsersIncludingArchivedPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersIncludingArchivedPageByNameDescRow struct {
+	ID         pgtype.UUID        `json:"id"`
+	Email      string             `json:"email"`
+	Name       string             `json:"name"`
+	IsAdmin    bool               `json:"is_admin"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+}
+
+// ListUsersIncludingArchivedPageByNameDesc
+//
+//	SELECT id, email, name, is_admin, created_at, archived_at
+//	FROM users
+//	WHERE ($1::bool = FALSE
+//	       OR (name, id) < ($2::text, $3::uuid))
+//	ORDER BY name DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersIncludingArchivedPageByNameDesc(ctx context.Context, arg ListUsersIncludingArchivedPageByNameDescParams) ([]ListUsersIncludingArchivedPageByNameDescRow, error) {
+	rows, err := q.db.Query(ctx, listUsersIncludingArchivedPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersIncludingArchivedPageByNameDescRow
+	for rows.Next() {
+		var i ListUsersIncludingArchivedPageByNameDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+			&i.ArchivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsersPage = `-- name: ListUsersPage :many
 SELECT id, email, name, is_admin, created_at
 FROM users
@@ -349,6 +674,331 @@ func (q *Queries) ListUsersPage(ctx context.Context, arg ListUsersPageParams) ([
 	var items []ListUsersPageRow
 	for rows.Next() {
 		var i ListUsersPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPageByCreatedAsc = `-- name: ListUsersPageByCreatedAsc :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListUsersPageByCreatedAscRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPageByCreatedAsc
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (created_at, id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPageByCreatedAsc(ctx context.Context, arg ListUsersPageByCreatedAscParams) ([]ListUsersPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersPageByCreatedAscRow
+	for rows.Next() {
+		var i ListUsersPageByCreatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPageByEmailAsc = `-- name: ListUsersPageByEmailAsc :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (email, id) > ($2::text, $3::uuid))
+ORDER BY email ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersPageByEmailAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersPageByEmailAscRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPageByEmailAsc
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (email, id) > ($2::text, $3::uuid))
+//	ORDER BY email ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPageByEmailAsc(ctx context.Context, arg ListUsersPageByEmailAscParams) ([]ListUsersPageByEmailAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPageByEmailAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersPageByEmailAscRow
+	for rows.Next() {
+		var i ListUsersPageByEmailAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPageByEmailDesc = `-- name: ListUsersPageByEmailDesc :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (email, id) < ($2::text, $3::uuid))
+ORDER BY email DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListUsersPageByEmailDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersPageByEmailDescRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPageByEmailDesc
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (email, id) < ($2::text, $3::uuid))
+//	ORDER BY email DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPageByEmailDesc(ctx context.Context, arg ListUsersPageByEmailDescParams) ([]ListUsersPageByEmailDescRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPageByEmailDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersPageByEmailDescRow
+	for rows.Next() {
+		var i ListUsersPageByEmailDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPageByNameAsc = `-- name: ListUsersPageByNameAsc :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (name, id) > ($2::text, $3::uuid))
+ORDER BY name ASC, id ASC
+LIMIT $4::int + 1
+`
+
+type ListUsersPageByNameAscParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersPageByNameAscRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPageByNameAsc
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (name, id) > ($2::text, $3::uuid))
+//	ORDER BY name ASC, id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPageByNameAsc(ctx context.Context, arg ListUsersPageByNameAscParams) ([]ListUsersPageByNameAscRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPageByNameAsc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersPageByNameAscRow
+	for rows.Next() {
+		var i ListUsersPageByNameAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.Name,
+			&i.IsAdmin,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersPageByNameDesc = `-- name: ListUsersPageByNameDesc :many
+SELECT id, email, name, is_admin, created_at
+FROM users
+WHERE archived_at IS NULL
+  AND ($1::bool = FALSE
+       OR (name, id) < ($2::text, $3::uuid))
+ORDER BY name DESC, id DESC
+LIMIT $4::int + 1
+`
+
+type ListUsersPageByNameDescParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorV   string      `json:"cursor_v"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+type ListUsersPageByNameDescRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	Name      string             `json:"name"`
+	IsAdmin   bool               `json:"is_admin"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ListUsersPageByNameDesc
+//
+//	SELECT id, email, name, is_admin, created_at
+//	FROM users
+//	WHERE archived_at IS NULL
+//	  AND ($1::bool = FALSE
+//	       OR (name, id) < ($2::text, $3::uuid))
+//	ORDER BY name DESC, id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListUsersPageByNameDesc(ctx context.Context, arg ListUsersPageByNameDescParams) ([]ListUsersPageByNameDescRow, error) {
+	rows, err := q.db.Query(ctx, listUsersPageByNameDesc,
+		arg.CursorSet,
+		arg.CursorV,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersPageByNameDescRow
+	for rows.Next() {
+		var i ListUsersPageByNameDescRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Email,
