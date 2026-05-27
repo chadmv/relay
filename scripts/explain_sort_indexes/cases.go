@@ -194,6 +194,16 @@ func columns() map[string]colMeta {
 	}
 }
 
+// idExpr returns the id reference to use in ORDER BY and cursor predicates.
+// When the column expression has an alias prefix (e.g. "j.created_at"),
+// id must be qualified ("j.id") to avoid ambiguity in JOIN queries.
+func idExpr(col colMeta) string {
+	if i := strings.Index(col.SQLExpr, "."); i >= 0 {
+		return col.SQLExpr[:i] + ".id"
+	}
+	return "id"
+}
+
 // orderClause builds the ORDER BY tail for a column + direction.
 // Non-null columns: <col> <dir>, id <dir>.
 // Nullable columns: <col> <dir> NULLS LAST|FIRST, id <dir>.
@@ -207,9 +217,9 @@ func orderClause(col colMeta, dir string) string {
 		if dir == "asc" {
 			nullPos = "NULLS FIRST"
 		}
-		return fmt.Sprintf("%s %s %s, id %s", col.SQLExpr, upper, nullPos, upper)
+		return fmt.Sprintf("%s %s %s, %s %s", col.SQLExpr, upper, nullPos, idExpr(col), upper)
 	}
-	return fmt.Sprintf("%s %s, id %s", col.SQLExpr, upper, upper)
+	return fmt.Sprintf("%s %s, %s %s", col.SQLExpr, upper, idExpr(col), upper)
 }
 
 // whereClause merges col.Filter with an optional cursor predicate.
@@ -277,8 +287,8 @@ func attachSQL(ctx context.Context, pool *pgxpool.Pool, cases []explainCase) err
 		if c.Direction == "asc" {
 			op = ">"
 		}
-		cursorPred := fmt.Sprintf("(%s, id) %s (%s, '%s'::uuid)",
-			col.SQLExpr, op, literal, cursorID)
+		cursorPred := fmt.Sprintf("(%s, %s) %s (%s, '%s'::uuid)",
+			col.SQLExpr, idExpr(col), op, literal, cursorID)
 		cursorWhere := whereClause(col, cursorPred)
 		c.CursorSQL = fmt.Sprintf(
 			"EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) SELECT * FROM %s %s ORDER BY %s LIMIT 50",
@@ -320,16 +330,8 @@ func pickMidpoint(ctx context.Context, pool *pgxpool.Pool, col colMeta, dir stri
 		return nil, "", fmt.Errorf("table too sparse (%d rows)", n)
 	}
 	offset := n / 2
-	// Qualify id when the FROM contains a JOIN to avoid ambiguity.
-	idExpr := "id"
-	if strings.Contains(col.From, " JOIN ") {
-		// col.SQLExpr is "alias.column"; extract the alias.
-		if dot := strings.Index(col.SQLExpr, "."); dot >= 0 {
-			idExpr = col.SQLExpr[:dot] + ".id"
-		}
-	}
 	query := fmt.Sprintf("SELECT %s, %s::text FROM %s %s ORDER BY %s OFFSET %d LIMIT 1",
-		col.SQLExpr, idExpr, col.From, where, order, offset)
+		col.SQLExpr, idExpr(col), col.From, where, order, offset)
 	row := pool.QueryRow(ctx, query)
 	var id string
 	if col.IsTimestamp {
