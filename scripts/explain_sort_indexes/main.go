@@ -19,6 +19,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -39,7 +40,6 @@ const (
 func main() {
 	out := flag.String("out", "", "output markdown path; empty means stdout")
 	flag.Parse()
-	_ = out
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -106,6 +106,28 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "explain_sort_indexes: %d/%d PASS\n",
 		len(results)-failCount, len(results))
+
+	// Query the running Postgres version for the doc header.
+	var pgVersion string
+	if err := pool.QueryRow(ctx, "SHOW server_version").Scan(&pgVersion); err != nil {
+		pgVersion = "unknown"
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: create %s: %v\n", *out, err)
+			os.Exit(exitInfraFail)
+		}
+		defer f.Close()
+		w = f
+	}
+	if err := renderMarkdown(w, results, pgVersion); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: render: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+
 	if failCount > 0 {
 		os.Exit(exitCheckFail)
 	}

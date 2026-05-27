@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -108,4 +110,67 @@ func explainCaseRun(ctx context.Context, pool *pgxpool.Pool, c explainCase) case
 	}
 	r.Status = "PASS"
 	return r
+}
+
+// renderMarkdown writes the full output document: header, summary
+// table, then a section per case with the two plans inside <details>
+// tags so the document is skim-friendly.
+func renderMarkdown(w io.Writer, results []caseResult, pgVersion string) error {
+	fmt.Fprintln(w, "# EXPLAIN ANALYZE sort index verification")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Generated: %s\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintf(w, "Postgres: %s\n", pgVersion)
+
+	pass := 0
+	for _, r := range results {
+		if r.Status == "PASS" {
+			pass++
+		}
+	}
+	fmt.Fprintf(w, "Result: %d/%d PASS\n\n", pass, len(results))
+
+	fmt.Fprintln(w, "## Summary")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "| Table | Sort key | Dir | Index | Status | Notes |")
+	fmt.Fprintln(w, "| --- | --- | --- | --- | --- | --- |")
+	for _, r := range results {
+		c := r.Case
+		notes := ""
+		if r.Status != "PASS" {
+			notes = r.Reason
+		}
+		fmt.Fprintf(w, "| %s | %s | %s | `%s` | %s | %s |\n",
+			c.Table, c.SortKey, c.Direction, c.ExpectedIndex, r.Status, notes)
+	}
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "## Plans")
+	fmt.Fprintln(w)
+	for _, r := range results {
+		c := r.Case
+		fmt.Fprintf(w, "### %s · %s · %s\n\n", c.Table, c.SortKey, c.Direction)
+		fmt.Fprintf(w, "Index: `%s` - %s", c.ExpectedIndex, r.Status)
+		if r.Reason != "" {
+			fmt.Fprintf(w, " (%s)", r.Reason)
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<details><summary>Initial page plan</summary>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "```")
+		fmt.Fprint(w, r.InitialPlan)
+		fmt.Fprintln(w, "```")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "</details>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "<details><summary>Cursor-resume plan</summary>")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "```")
+		fmt.Fprint(w, r.CursorPlan)
+		fmt.Fprintln(w, "```")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "</details>")
+		fmt.Fprintln(w)
+	}
+	return nil
 }
