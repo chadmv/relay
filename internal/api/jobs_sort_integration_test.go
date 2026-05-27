@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -155,15 +154,6 @@ func assertSorted(t *testing.T, items []map[string]any, sortKey string) {
 		v, _ := it[key].(string)
 		values[i] = v
 	}
-	// Verify monotonicity.
-	sorted := make([]string, len(values))
-	copy(sorted, values)
-	if desc {
-		sort.Sort(sort.Reverse(sort.StringSlice(sorted)))
-	} else {
-		sort.Strings(sorted)
-	}
-	// Equal-key ties may reorder; use a stable check that ignores tied keys.
 	for i := 1; i < len(values); i++ {
 		if desc {
 			assert.GreaterOrEqual(t, values[i-1], values[i], "sort=%s not monotonic at i=%d (%v vs %v)", sortKey, i, values[i-1], values[i])

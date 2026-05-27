@@ -547,9 +547,7 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 		return items, next, total, nil
 
 	default:
-		// parsePage already validated pp.Sort against jobsSortSpec, so this
-		// branch is unreachable in production. Return empty to avoid a silent bug.
-		return []jobResponse{}, "", total, nil
+		panic("listJobsBySort: missing dispatch arm for sort key " + pp.Sort)
 	}
 }
 
