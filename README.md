@@ -598,7 +598,7 @@ relay list                     # all jobs, table format
 relay list --status running    # filter by status
 relay list --limit 10          # first 10 jobs
 relay list --json              # JSON output
-relay list --sort -priority    # high-priority jobs first
+relay list --sort -priority    # group by priority label (desc; text sort)
 relay list --sort name         # alphabetical
 ```
 
@@ -1076,7 +1076,7 @@ Each key supports both directions, e.g. `?sort=name` (ascending) and `?sort=-nam
 **Examples:**
 
 ```
-GET /v1/jobs?sort=-priority           # high-priority jobs first
+GET /v1/jobs?sort=-priority           # group by priority label (desc; text sort)
 GET /v1/workers?sort=name             # alphabetical
 GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 ```
