@@ -88,7 +88,13 @@ func main() {
 		os.Exit(exitInfraFail)
 	}
 	fmt.Fprintf(os.Stderr, "explain_sort_indexes: built %d cases\n", len(cases))
-	_ = cases
+
+	if err := attachSQL(ctx, pool, cases); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: attach SQL: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	// Spot-check one case so a regression in SQL generation is visible.
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: cases[0] InitialSQL = %s\n", cases[0].InitialSQL)
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
