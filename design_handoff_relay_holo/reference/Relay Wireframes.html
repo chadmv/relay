@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Relay — dashboard wireframes</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="styles.css?v=2"/>
+</head>
+<body data-density="comfortable" data-nav="sidebar" data-dag="on">
+
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        relay<span style="color:var(--accent)">.</span> wireframes
+        <small>low-fi exploration · sketchy · April 2026</small>
+      </div>
+      <div class="header-meta">
+        <b>scope:</b> sign-in · invites · jobs list · job detail · workers · admin overview<br/>
+        <b>audience:</b> devs + admins · medium scale (hundreds of jobs) · DAG toggleable<br/>
+        <b>tip:</b> toggle the <b>Tweaks</b> button in the toolbar to flip nav / density / DAG
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs"></nav>
+
+    <main id="content"></main>
+
+    <div class="footer-note">
+      <b>Next:</b> pick a direction per screen + decide on an accent color you love, then I'll build a hi-fi mock of the chosen path. Comment on any of the variants and I'll iterate.
+    </div>
+  </div>
+
+  <!-- Tweaks panel -->
+  <aside class="tweaks-panel" id="tweaks">
+    <h3>Tweaks</h3>
+    <div class="tweak-row">
+      <label>Navigation</label>
+      <div class="tweak-group" data-tweak="nav">
+        <button data-val="sidebar" class="on">sidebar</button>
+        <button data-val="topbar">topbar</button>
+      </div>
+    </div>
+    <div class="tweak-row">
+      <label>Density</label>
+      <div class="tweak-group" data-tweak="density">
+        <button data-val="comfortable" class="on">comfortable</button>
+        <button data-val="compact">compact</button>
+      </div>
+    </div>
+    <div class="tweak-row">
+      <label>DAG visualization</label>
+      <div class="tweak-group" data-tweak="dag">
+        <button data-val="on" class="on">on</button>
+        <button data-val="off">off (list only)</button>
+      </div>
+    </div>
+    <div style="margin-top:10px; padding-top:8px; border-top:1.5px dashed var(--mute-2); font-family:var(--hand); font-size:11px; color:var(--mute); line-height:1.4;">
+      changes apply to every screen on this page.
+    </div>
+  </aside>
+
+  <script src="shell.js?v=2"></script>
+  <script src="screens/auth.js?v=2"></script>
+  <script src="screens/jobs-list.js?v=2"></script>
+  <script src="screens/job-detail.js?v=2"></script>
+  <script src="screens/workers.js?v=2"></script>
+  <script src="screens/admin.js?v=2"></script>
+
+  <script>
+    /* ---------- EditMode defaults (persisted by host) ---------- */
+    const TWEAKS = /*EDITMODE-BEGIN*/{
+      "nav": "topbar",
+      "density": "comfortable",
+      "dag": "off",
+      "startTab": "jobs-list"
+    }/*EDITMODE-END*/;
+
+    const TABS = [
+      ['auth',       'Sign in & invite',    Auth.render],
+      ['jobs-list',  'Jobs list',           JobsList.render],
+      ['job-detail', 'Job detail',          JobDetail.render],
+      ['workers',    'Workers',             Workers.render],
+      ['admin',      'Admin & invites',     Admin.render],
+    ];
+
+    const tabsEl = document.getElementById('tabs');
+    const contentEl = document.getElementById('content');
+
+    function renderTabs(activeKey) {
+      tabsEl.innerHTML = TABS.map(([k,label])=>`
+        <button class="tab ${k===activeKey?'active':''}" data-key="${k}">${label}</button>
+      `).join('');
+      tabsEl.querySelectorAll('.tab').forEach(btn=>{
+        btn.addEventListener('click', ()=> selectTab(btn.dataset.key));
+      });
+    }
+
+    function selectTab(key) {
+      const entry = TABS.find(t=>t[0]===key) || TABS[0];
+      renderTabs(entry[0]);
+      contentEl.innerHTML = '';
+      entry[2](contentEl);
+      try { localStorage.setItem('relay-wf-tab', entry[0]); } catch(e){}
+    }
+
+    function applyTweaks() {
+      document.body.dataset.nav = TWEAKS.nav;
+      document.body.dataset.density = TWEAKS.density;
+      document.body.dataset.dag = TWEAKS.dag;
+      document.querySelectorAll('#tweaks .tweak-group').forEach(group=>{
+        const key = group.dataset.tweak;
+        group.querySelectorAll('button').forEach(b=>{
+          b.classList.toggle('on', b.dataset.val === TWEAKS[key]);
+        });
+      });
+    }
+
+    document.querySelectorAll('#tweaks .tweak-group button').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const key = btn.parentElement.dataset.tweak;
+        TWEAKS[key] = btn.dataset.val;
+        applyTweaks();
+        try {
+          window.parent.postMessage({type:'__edit_mode_set_keys', edits:{[key]: btn.dataset.val}}, '*');
+        } catch(e){}
+      });
+    });
+
+    /* ---------- EditMode protocol ---------- */
+    window.addEventListener('message', (e)=>{
+      const d = e.data || {};
+      if (d.type === '__activate_edit_mode') document.getElementById('tweaks').classList.add('visible');
+      if (d.type === '__deactivate_edit_mode') document.getElementById('tweaks').classList.remove('visible');
+    });
+    try { window.parent.postMessage({type:'__edit_mode_available'}, '*'); } catch(e){}
+
+    /* ---------- boot ---------- */
+    applyTweaks();
+    const savedTab = (()=>{ try { return localStorage.getItem('relay-wf-tab'); } catch(e){ return null; }})();
+    selectTab(savedTab || TWEAKS.startTab);
+  </script>
+</body>
+</html>

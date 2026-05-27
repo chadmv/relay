@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Relay — Holo · full app</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    background: #050410;
+    color: #EDE9FE;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  #root { height: 100vh; width: 100vw; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(167,139,250,0.18); border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script src="hifi2-data.js"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="hifi2-shared.jsx"></script>
+<script type="text/babel" src="hifi2-holo.jsx"></script>
+<script type="text/babel" src="hifi3-holo-pages.jsx"></script>
+
+<script type="text/babel">
+  const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "hue": 198,
+    "sat": 80,
+    "val": 97,
+    "cpuOffset": 180,
+    "memOffset": -50,
+    "gpuMemOffset": 85,
+    "dag": false,
+    "startRoute": "schedules",
+    "density": "compact",
+    "allowSelfRegister": false
+  }/*EDITMODE-END*/;
+
+  // HSV (0-360, 0-100, 0-100) → "#rrggbb"
+  function hsvToHex(h, s, v) {
+    s /= 100; v /= 100;
+    const c = v * s;
+    const hh = (h % 360) / 60;
+    const x = c * (1 - Math.abs(hh % 2 - 1));
+    let r = 0, g = 0, b = 0;
+    if (hh < 1)      { r = c; g = x; b = 0; }
+    else if (hh < 2) { r = x; g = c; b = 0; }
+    else if (hh < 3) { r = 0; g = c; b = x; }
+    else if (hh < 4) { r = 0; g = x; b = c; }
+    else if (hh < 5) { r = x; g = 0; b = c; }
+    else             { r = c; g = 0; b = x; }
+    const m = v - c;
+    const toHex = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+    return '#' + toHex(r) + toHex(g) + toHex(b);
+  }
+  function hsvToRgba(h, s, v, a) {
+    const hex = hsvToHex(h, s, v);
+    const r = parseInt(hex.slice(1,3), 16);
+    const g = parseInt(hex.slice(3,5), 16);
+    const b = parseInt(hex.slice(5,7), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  function App() {
+    const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+    const hex = hsvToHex(t.hue, t.sat, t.val);
+    const palette = [hex, hex, hsvToRgba(t.hue, t.sat, t.val, 0.24), hsvToRgba(t.hue, t.sat, t.val, 0.18)];
+    const hueOffsets = { cpu: t.cpuOffset, mem: t.memOffset, gpuMem: t.gpuMemOffset };
+
+    // Preview a hue-shifted swatch using HSL
+    const previewHex = (offset) => {
+      const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+      const max = Math.max(r,g,b), min = Math.min(r,g,b);
+      const l = (max+min)/2;
+      const s = max===min ? 0 : (l>0.5 ? (max-min)/(2-max-min) : (max-min)/(max+min));
+      let h = 0;
+      if (max!==min) {
+        if (max===r) h = (g-b)/(max-min) + (g<b?6:0);
+        else if (max===g) h = (b-r)/(max-min) + 2;
+        else h = (r-g)/(max-min) + 4;
+        h *= 60;
+      }
+      const h2 = (h + offset + 360) % 360;
+      const c = (1-Math.abs(2*l-1))*s;
+      const x = c*(1-Math.abs(((h2/60)%2)-1));
+      const m = l-c/2;
+      let rr=0,gg=0,bb=0;
+      if (h2<60){ rr=c;gg=x; } else if (h2<120){ rr=x;gg=c; } else if (h2<180){ gg=c;bb=x; }
+      else if (h2<240){ gg=x;bb=c; } else if (h2<300){ rr=x;bb=c; } else { rr=c;bb=x; }
+      const f=(n)=>Math.round((n+m)*255).toString(16).padStart(2,'0');
+      return '#'+f(rr)+f(gg)+f(bb);
+    };
+
+    return (
+      <>
+        <DesignCanvas
+          title="Relay — Holo · propagated"
+          subtitle="Full app in the chosen direction · topbar nav · click a job row to drill into detail · use Tweaks to change palette + toggle DAG"
+        >
+          <DCSection id="holo-app" title="Holo · clickable prototype" subtitle="">
+            <DCArtboard id="app" label={`Relay · Holo · ${hex}`} width={1320} height={840}>
+              <HoloApp palette={palette} dag={!!t.dag} startRoute={t.startRoute} density={t.density} hueOffsets={hueOffsets} allowSelfRegister={!!t.allowSelfRegister}/>
+            </DCArtboard>
+          </DCSection>
+        </DesignCanvas>
+
+        <TweaksPanel title="Tweaks">
+          <TweakSelect
+            label="Start route"
+            value={t.startRoute}
+            options={['auth','jobs','job-detail','workers','worker-detail','schedules','schedule-detail','admin','profile']}
+            onChange={v => setTweak('startRoute', v)}
+          />
+          <TweakRadio
+            label="Density"
+            value={t.density}
+            options={['comfortable','compact']}
+            onChange={v => setTweak('density', v)}
+          />
+          <TweakToggle
+            label="DAG visualization"
+            value={t.dag}
+            onChange={v => setTweak('dag', v)}
+          />
+          <TweakToggle
+            label="Open registration (RELAY_ALLOW_SELF_REGISTER)"
+            value={t.allowSelfRegister}
+            onChange={v => setTweak('allowSelfRegister', v)}
+          />
+          <TweakSection label={`Accent color · ${hex}`}>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginTop:4,marginBottom:8}}>
+              <div style={{width:28,height:28,borderRadius:6,background:hex,
+                border:'1px solid rgba(255,255,255,0.15)',flex:'none'}}/>
+              <div style={{fontFamily:"'JetBrains Mono', monospace",fontSize:10.5,opacity:0.6,letterSpacing:'0.04em'}}>
+                HSV {Math.round(t.hue)}° · {Math.round(t.sat)}% · {Math.round(t.val)}%
+              </div>
+            </div>
+            <TweakSlider label="Hue"        value={t.hue} min={0} max={360} step={1} unit="°" onChange={v => setTweak('hue', v)}/>
+            <TweakSlider label="Saturation" value={t.sat} min={0} max={100} step={1} unit="%" onChange={v => setTweak('sat', v)}/>
+            <TweakSlider label="Value"      value={t.val} min={0} max={100} step={1} unit="%" onChange={v => setTweak('val', v)}/>
+          </TweakSection>
+          <TweakSection label="Metric hue offsets">
+            <div style={{display:'flex',alignItems:'center',gap:12,marginTop:4,marginBottom:8,fontFamily:"'JetBrains Mono', monospace",fontSize:10}}>
+              {[
+                ['GPU',     hex],
+                ['CPU',     previewHex(t.cpuOffset)],
+                ['MEM',     previewHex(t.memOffset)],
+                ['GPU MEM', previewHex(t.gpuMemOffset)],
+              ].map(([n,c])=>(
+                <div key={n} style={{display:'flex',alignItems:'center',gap:5}}>
+                  <span style={{width:12,height:12,borderRadius:3,background:c,border:'1px solid rgba(255,255,255,0.15)'}}/>
+                  <span style={{opacity:0.7,letterSpacing:'0.06em'}}>{n}</span>
+                </div>
+              ))}
+            </div>
+            <TweakSlider label="CPU Δ"     value={t.cpuOffset}    min={-180} max={180} step={5} unit="°" onChange={v => setTweak('cpuOffset', v)}/>
+            <TweakSlider label="MEM Δ"     value={t.memOffset}    min={-180} max={180} step={5} unit="°" onChange={v => setTweak('memOffset', v)}/>
+            <TweakSlider label="GPU MEM Δ" value={t.gpuMemOffset} min={-180} max={180} step={5} unit="°" onChange={v => setTweak('gpuMemOffset', v)}/>
+          </TweakSection>
+          <div style={{fontFamily:"'JetBrains Mono', monospace", fontSize:10, lineHeight:1.6, opacity:0.65, marginTop:4}}>
+            Holo direction propagated across Jobs, Job detail, Workers, Admin, and Auth. Click a job row in the list to drill into detail — back arrow returns. Topbar only.
+          </div>
+        </TweaksPanel>
+      </>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
