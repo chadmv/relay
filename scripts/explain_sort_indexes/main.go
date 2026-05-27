@@ -56,17 +56,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "explain_sort_indexes: seed: %v\n", err)
 		os.Exit(exitInfraFail)
 	}
-	var users, jobs int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
-		fmt.Fprintf(os.Stderr, "explain_sort_indexes: count users: %v\n", err)
-		os.Exit(exitInfraFail)
+	counts := map[string]int{}
+	for _, table := range []string{"users", "jobs", "workers",
+		"scheduled_jobs", "reservations", "agent_enrollments"} {
+		var n int
+		if err := pool.QueryRow(ctx,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&n); err != nil {
+			fmt.Fprintf(os.Stderr, "explain_sort_indexes: count %s: %v\n", table, err)
+			os.Exit(exitInfraFail)
+		}
+		counts[table] = n
 	}
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&jobs); err != nil {
-		fmt.Fprintf(os.Stderr, "explain_sort_indexes: count jobs: %v\n", err)
-		os.Exit(exitInfraFail)
-	}
-	fmt.Fprintf(os.Stderr, "explain_sort_indexes: seeded %d users, %d jobs\n",
-		users, jobs)
+	fmt.Fprintf(os.Stderr,
+		"explain_sort_indexes: seeded users=%d jobs=%d workers=%d sched=%d resv=%d enroll=%d\n",
+		counts["users"], counts["jobs"], counts["workers"],
+		counts["scheduled_jobs"], counts["reservations"], counts["agent_enrollments"])
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded

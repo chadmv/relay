@@ -37,6 +37,18 @@ func seed(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := seedJobs(ctx, pool); err != nil {
 		return fmt.Errorf("seed jobs: %w", err)
 	}
+	if err := seedWorkers(ctx, pool); err != nil {
+		return fmt.Errorf("seed workers: %w", err)
+	}
+	if err := seedScheduledJobs(ctx, pool); err != nil {
+		return fmt.Errorf("seed scheduled_jobs: %w", err)
+	}
+	if err := seedReservations(ctx, pool); err != nil {
+		return fmt.Errorf("seed reservations: %w", err)
+	}
+	if err := seedAgentEnrollments(ctx, pool); err != nil {
+		return fmt.Errorf("seed agent_enrollments: %w", err)
+	}
 	return nil
 }
 
@@ -184,6 +196,168 @@ func seedJobs(ctx context.Context, pool *pgxpool.Pool) error {
 	)
 	if err != nil {
 		return fmt.Errorf("copy jobs: %w", err)
+	}
+	return nil
+}
+
+var workerStatuses = []string{"online", "offline", "offline", "busy"}
+
+func seedWorkers(ctx context.Context, pool *pgxpool.Pool) error {
+	names := nameVocabulary()
+	rows := make([][]any, 0, workersN)
+	now := time.Now().UTC()
+	for i := 0; i < workersN; i++ {
+		name := names[rand.IntN(len(names))]
+		hostname := fmt.Sprintf("worker-%s-%d", randHex(4), i)
+		status := workerStatuses[rand.IntN(len(workerStatuses))]
+		// 30% NULL to exercise both NULLS LAST and NULLS FIRST indexes.
+		var lastSeen any
+		if rand.IntN(10) >= 3 {
+			lastSeen = now.Add(-time.Duration(rand.Int64N(int64(30 * 24 * time.Hour))))
+		}
+		createdAt := now.Add(-time.Duration(rand.Int64N(int64(180 * 24 * time.Hour))))
+		rows = append(rows, []any{
+			name, hostname, 8 /*cpu_cores*/, 32 /*ram_gb*/, 0 /*gpu_count*/,
+			"" /*gpu_model*/, "linux", 4 /*max_slots*/,
+			[]byte("{}"), // labels JSONB
+			status, lastSeen, createdAt,
+		})
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	_, err = conn.Conn().CopyFrom(ctx,
+		pgx.Identifier{"workers"},
+		[]string{"name", "hostname", "cpu_cores", "ram_gb", "gpu_count",
+			"gpu_model", "os", "max_slots", "labels",
+			"status", "last_seen_at", "created_at"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("copy workers: %w", err)
+	}
+	return nil
+}
+
+func seedScheduledJobs(ctx context.Context, pool *pgxpool.Pool) error {
+	if len(firstUsersForFK) == 0 {
+		return fmt.Errorf("firstUsersForFK empty")
+	}
+	names := jobNameVocabulary()
+	rows := make([][]any, 0, schedJobsN)
+	now := time.Now().UTC()
+	jobSpec := []byte(`{"tasks":[]}`)
+	for i := 0; i < schedJobsN; i++ {
+		name := names[rand.IntN(len(names))] + "-sched"
+		owner := firstUsersForFK[i%len(firstUsersForFK)]
+		nextRun := now.Add(time.Duration(rand.Int64N(int64(30 * 24 * time.Hour))))
+		updated := now.Add(-time.Duration(rand.Int64N(int64(30 * 24 * time.Hour))))
+		created := updated.Add(-time.Hour)
+		rows = append(rows, []any{
+			name, owner, "@hourly", "UTC", jobSpec,
+			"skip", true, nextRun, created, updated,
+		})
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	_, err = conn.Conn().CopyFrom(ctx,
+		pgx.Identifier{"scheduled_jobs"},
+		[]string{"name", "owner_id", "cron_expr", "timezone", "job_spec",
+			"overlap_policy", "enabled", "next_run_at", "created_at", "updated_at"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("copy scheduled_jobs: %w", err)
+	}
+	return nil
+}
+
+func seedReservations(ctx context.Context, pool *pgxpool.Pool) error {
+	if len(firstUsersForFK) == 0 {
+		return fmt.Errorf("firstUsersForFK empty")
+	}
+	names := nameVocabulary()
+	rows := make([][]any, 0, reservationsN)
+	now := time.Now().UTC()
+	for i := 0; i < reservationsN; i++ {
+		name := names[rand.IntN(len(names))] + "-resv"
+		owner := firstUsersForFK[i%len(firstUsersForFK)]
+		var starts, ends any
+		if rand.IntN(10) >= 3 {
+			starts = now.Add(-time.Duration(rand.Int64N(int64(60 * 24 * time.Hour))))
+		}
+		if rand.IntN(10) >= 3 {
+			ends = now.Add(time.Duration(rand.Int64N(int64(60 * 24 * time.Hour))))
+		}
+		created := now.Add(-time.Duration(rand.Int64N(int64(90 * 24 * time.Hour))))
+		// worker_ids is UUID[] NOT NULL DEFAULT '{}'. pgx's CopyFrom
+		// needs a typed empty array; []string{} can mis-encode. If a
+		// "cannot encode" error appears here, swap to pgtype.Array[uuid.UUID]
+		// or replace this seeder with a parameterized INSERT loop.
+		rows = append(rows, []any{
+			name,
+			[]byte("{}"), // selector JSONB
+			[]string{},   // worker_ids UUID[]
+			owner, "", starts, ends, created,
+		})
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	_, err = conn.Conn().CopyFrom(ctx,
+		pgx.Identifier{"reservations"},
+		[]string{"name", "selector", "worker_ids", "user_id",
+			"project", "starts_at", "ends_at", "created_at"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("copy reservations: %w", err)
+	}
+	return nil
+}
+
+func seedAgentEnrollments(ctx context.Context, pool *pgxpool.Pool) error {
+	if len(firstUsersForFK) == 0 {
+		return fmt.Errorf("firstUsersForFK empty")
+	}
+	rows := make([][]any, 0, agentEnrollN)
+	now := time.Now().UTC()
+	for i := 0; i < agentEnrollN; i++ {
+		owner := firstUsersForFK[i%len(firstUsersForFK)]
+		// 20% consumed; the active listing filters consumed_at IS NULL.
+		var consumedAt any
+		if rand.IntN(10) < 2 {
+			consumedAt = now.Add(-time.Duration(rand.Int64N(int64(24 * time.Hour))))
+		}
+		// expires_at spread across +/-7 days. The listing additionally
+		// filters expires_at > NOW(); both branches need representation.
+		expiresOffset := time.Duration(rand.Int64N(int64(14*24*time.Hour))) - 7*24*time.Hour
+		expiresAt := now.Add(expiresOffset)
+		createdAt := now.Add(-time.Duration(rand.Int64N(int64(7 * 24 * time.Hour))))
+		rows = append(rows, []any{
+			randHex(32), nil, owner, createdAt, expiresAt, consumedAt, nil,
+		})
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	_, err = conn.Conn().CopyFrom(ctx,
+		pgx.Identifier{"agent_enrollments"},
+		[]string{"token_hash", "hostname_hint", "created_by", "created_at",
+			"expires_at", "consumed_at", "consumed_by"},
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("copy agent_enrollments: %w", err)
 	}
 	return nil
 }
