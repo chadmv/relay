@@ -56,13 +56,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "explain_sort_indexes: seed: %v\n", err)
 		os.Exit(exitInfraFail)
 	}
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+	var users, jobs int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
 		fmt.Fprintf(os.Stderr, "explain_sort_indexes: count users: %v\n", err)
 		os.Exit(exitInfraFail)
 	}
-	fmt.Fprintf(os.Stderr, "explain_sort_indexes: seeded %d users, %d for FK\n",
-		count, len(firstUsersForFK))
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&jobs); err != nil {
+		fmt.Fprintf(os.Stderr, "explain_sort_indexes: count jobs: %v\n", err)
+		os.Exit(exitInfraFail)
+	}
+	fmt.Fprintf(os.Stderr, "explain_sort_indexes: seeded %d users, %d jobs\n",
+		users, jobs)
 }
 
 // startPostgres launches a Postgres 16 container, runs every embedded
