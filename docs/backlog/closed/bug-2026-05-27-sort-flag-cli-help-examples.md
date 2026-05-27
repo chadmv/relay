@@ -1,8 +1,9 @@
 ---
 title: Add --sort example usage to non-jobs list CLI help
 type: bug
-status: open
+status: closed
 created: 2026-05-27
+closed: 2026-05-27
 priority: low
 source: list-endpoint-sort retro (docs/retros/2026-05-27-list-endpoint-sort.md)
 ---
@@ -32,3 +33,7 @@ Pick endpoint-appropriate example keys per the per-endpoint allowlist (already d
 
 - `README.md` — section under `#### Configurable sort order` already has the allowlist; examples are the gap
 - `internal/cli/{workers,schedules,reservations,admin_users}.go` — the commands themselves are already updated
+
+## Resolution
+
+README.md now has two `--sort` example lines in each of the four affected CLI sections (`relay workers list`, `relay reservations list`, `relay schedules list`, `relay admin users list`). Sort keys chosen per the per-endpoint allowlist: workers `name`/`-last_seen_at`, reservations `name`/`starts_at`, schedules `name`/`next_run_at`, admin users `email`/`name`. See [docs/superpowers/specs/2026-05-27-sort-examples-cli-help-design.md](../superpowers/specs/2026-05-27-sort-examples-cli-help-design.md).

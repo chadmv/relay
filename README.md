@@ -658,6 +658,8 @@ Output format:
 relay workers list
 relay workers list --limit 10
 relay workers list --json
+relay workers list --sort name             # alphabetical
+relay workers list --sort -last_seen_at    # most-recently-seen first
 ```
 
 Shows worker ID, name, status, CPU cores, RAM, GPU count, and GPU model.
@@ -741,6 +743,8 @@ Workspaces actively held by a running task cannot be evicted; the agent rejects 
 
 ```sh
 relay reservations list
+relay reservations list --sort name         # alphabetical
+relay reservations list --sort starts_at    # chronological by start
 ```
 
 ---
@@ -792,6 +796,8 @@ List all scheduled jobs owned by the current user (admins see all).
 
 ```sh
 relay schedules list
+relay schedules list --sort name           # alphabetical
+relay schedules list --sort next_run_at    # next-to-fire first
 ```
 
 Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time).
@@ -889,6 +895,8 @@ List every user in the system.
 relay admin users list
 relay admin users list --include-archived
 relay admin users list --limit 25
+relay admin users list --sort email    # alphabetical by email
+relay admin users list --sort name     # alphabetical by name
 ```
 
 Output columns: `ID`, `EMAIL`, `NAME`, `ADMIN`, `CREATED`. Pass `--include-archived` to include archived users in the output. Pass `--limit N` to control page size (default 50, max 200).
