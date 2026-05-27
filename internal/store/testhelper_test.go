@@ -15,9 +15,9 @@ import (
 	"relay/internal/store"
 )
 
-// newTestQueries spins up a fresh Postgres container, runs migrations,
-// and returns a *store.Queries ready for use. The container is terminated when t ends.
-func newTestQueries(t *testing.T) *store.Queries {
+// newTestPool spins up a fresh Postgres container, runs migrations, and returns
+// a *pgxpool.Pool ready for use. The container and pool are cleaned up when t ends.
+func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 
@@ -43,7 +43,14 @@ func newTestQueries(t *testing.T) *store.Queries {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	return store.New(pool)
+	return pool
+}
+
+// newTestQueries spins up a fresh Postgres container, runs migrations,
+// and returns a *store.Queries ready for use. The container is terminated when t ends.
+func newTestQueries(t *testing.T) *store.Queries {
+	t.Helper()
+	return store.New(newTestPool(t))
 }
 
 func newTestUser(t *testing.T, q *store.Queries, isAdmin bool) store.User {
