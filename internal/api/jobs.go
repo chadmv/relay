@@ -171,13 +171,13 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobResponse(job, u.Email, tasks, taskDeps))
 }
 
-func jobsRowKeyDefault(r store.ListJobsWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyDefault(r store.ListJobsWithEmailPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
-func jobsRowKeyByStatus(r store.ListJobsByStatusWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyByStatus(r store.ListJobsByStatusWithEmailPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
-func jobsRowKeyByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) (time.Time, pgtype.UUID) {
+func jobsRowKeyByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
 
@@ -246,7 +246,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, jobRowToResponseByScheduled, jobsRowKeyByScheduled)
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByScheduled, jobsRowKeyByScheduled)
 		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -269,7 +269,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, jobRowToResponseByStatus, jobsRowKeyByStatus)
+		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByStatus, jobsRowKeyByStatus)
 		writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -290,7 +290,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "count jobs failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, jobRowToResponseDefault, jobsRowKeyDefault)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseDefault, jobsRowKeyDefault)
 	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})
 }
 

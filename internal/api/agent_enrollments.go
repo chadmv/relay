@@ -86,7 +86,7 @@ func enrollmentRowToMap(row store.ListActiveAgentEnrollmentsPageRow) map[string]
 	return entry
 }
 
-func enrollmentRowKey(row store.ListActiveAgentEnrollmentsPageRow) (time.Time, pgtype.UUID) {
+func enrollmentRowKey(row store.ListActiveAgentEnrollmentsPageRow) (anySortVal, pgtype.UUID) {
 	return row.CreatedAt.Time, row.ID
 }
 
@@ -118,7 +118,7 @@ func (s *Server) handleListAgentEnrollments(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to count enrollments")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, enrollmentRowToMap, enrollmentRowKey)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, enrollmentRowToMap, enrollmentRowKey)
 	writeJSON(w, http.StatusOK, page[map[string]any]{Items: items, NextCursor: next, Total: total})
 }
 

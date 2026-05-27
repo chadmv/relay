@@ -72,7 +72,7 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	}
 }
 
-func workersRowKey(w store.Worker) (time.Time, pgtype.UUID) {
+func workersRowKey(w store.Worker) (anySortVal, pgtype.UUID) {
 	return w.CreatedAt.Time, w.ID
 }
 
@@ -104,7 +104,7 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "count workers failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, toWorkerResponse, workersRowKey)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKey)
 	if s.Metrics != nil {
 		for i := range items {
 			if at, ok := s.Metrics.LastSampleAt(items[i].ID); ok {

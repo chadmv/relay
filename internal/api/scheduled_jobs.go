@@ -167,7 +167,7 @@ func (s *Server) ownedScheduledJob(w http.ResponseWriter, r *http.Request, id pg
 	return row, true
 }
 
-func scheduledJobsRowKey(s store.ScheduledJob) (time.Time, pgtype.UUID) {
+func scheduledJobsRowKey(s store.ScheduledJob) (anySortVal, pgtype.UUID) {
 	return s.CreatedAt.Time, s.ID
 }
 
@@ -204,7 +204,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
+		items, next := buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
 		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -225,7 +225,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, toScheduledJobResponse, scheduledJobsRowKey)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 

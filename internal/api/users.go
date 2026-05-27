@@ -66,10 +66,10 @@ func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, boo
 	return name, true
 }
 
-func usersListRowKey(r store.ListUsersPageRow) (time.Time, pgtype.UUID) {
+func usersListRowKey(r store.ListUsersPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
-func usersListIncArchivedRowKey(r store.ListUsersIncludingArchivedPageRow) (time.Time, pgtype.UUID) {
+func usersListIncArchivedRowKey(r store.ListUsersIncludingArchivedPageRow) (anySortVal, pgtype.UUID) {
 	return r.CreatedAt.Time, r.ID
 }
 
@@ -133,7 +133,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to count users")
 			return
 		}
-		items, next := buildPage(rows, pp.Limit, usersListIncArchivedRowToResponse, usersListIncArchivedRowKey)
+		items, next := buildPage(rows, pp.Limit, pp.Sort, usersListIncArchivedRowToResponse, usersListIncArchivedRowKey)
 		writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -153,7 +153,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to count users")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, usersListRowToResponse, usersListRowKey)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, usersListRowToResponse, usersListRowKey)
 	writeJSON(w, http.StatusOK, page[userResponse]{Items: items, NextCursor: next, Total: total})
 }
 

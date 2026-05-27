@@ -122,13 +122,13 @@ func TestBuildPage_NoMore(t *testing.T) {
 		{time.Now(), id},
 	}
 	conv := func(r row) string { return "x" }
-	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
-	items, next := buildPage(rows, 50, conv, key)
+	key := func(r row) (anySortVal, pgtype.UUID) { return r.t, r.id }
+	items, next := buildPage(rows, 50, "-created_at", conv, key)
 	assert.Len(t, items, 2)
 	assert.Empty(t, next, "next_cursor must be empty when fewer rows than limit")
 }
 
-func TestBuildPage_HasMore(t *testing.T) {
+func TestBuildPage_HasMore_TimestampSort(t *testing.T) {
 	type row struct {
 		t  time.Time
 		id pgtype.UUID
@@ -141,15 +141,40 @@ func TestBuildPage_HasMore(t *testing.T) {
 		{t0.Add(1 * time.Second), id},
 	}
 	conv := func(r row) string { return "x" }
-	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
-	items, next := buildPage(rows, 2, conv, key) // limit=2, got 3 ⇒ trim, emit cursor
+	key := func(r row) (anySortVal, pgtype.UUID) { return r.t, r.id }
+
+	items, next := buildPage(rows, 2, "-created_at", conv, key)
 	assert.Len(t, items, 2)
 	require.NotEmpty(t, next, "must emit cursor when limit+1 rows fetched")
 
-	// Cursor must encode the LAST kept row's (t, id), not the trimmed extra.
 	c, err := decodeCursor(next)
 	require.NoError(t, err)
+	assert.Equal(t, "-created_at", c.Sort)
 	assert.True(t, c.T.Equal(rows[1].t.Truncate(time.Microsecond)))
+}
+
+func TestBuildPage_HasMore_TextSort(t *testing.T) {
+	type row struct {
+		name string
+		id   pgtype.UUID
+	}
+	id := pgtype.UUID{Valid: true}
+	rows := []row{
+		{"alpha", id},
+		{"beta", id},
+		{"gamma", id},
+	}
+	conv := func(r row) string { return r.name }
+	key := func(r row) (anySortVal, pgtype.UUID) { return r.name, r.id }
+
+	items, next := buildPage(rows, 2, "name", conv, key)
+	assert.Len(t, items, 2)
+	require.NotEmpty(t, next)
+
+	c, err := decodeCursor(next)
+	require.NoError(t, err)
+	assert.Equal(t, "name", c.Sort)
+	assert.Equal(t, "beta", c.StrVal)
 }
 
 func TestBuildPage_EmptyResult(t *testing.T) {
@@ -158,8 +183,8 @@ func TestBuildPage_EmptyResult(t *testing.T) {
 		id pgtype.UUID
 	}
 	conv := func(r row) string { return "x" }
-	key := func(r row) (time.Time, pgtype.UUID) { return r.t, r.id }
-	items, next := buildPage([]row{}, 50, conv, key)
+	key := func(r row) (anySortVal, pgtype.UUID) { return r.t, r.id }
+	items, next := buildPage([]row{}, 50, "-created_at", conv, key)
 	assert.Empty(t, items)
 	assert.Empty(t, next, "empty result must yield empty cursor, not echo input")
 }

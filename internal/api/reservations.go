@@ -52,7 +52,7 @@ func toReservationResponse(res store.Reservation) reservationResponse {
 	}
 }
 
-func reservationsRowKey(res store.Reservation) (time.Time, pgtype.UUID) {
+func reservationsRowKey(res store.Reservation) (anySortVal, pgtype.UUID) {
 	return res.CreatedAt.Time, res.ID
 }
 
@@ -84,7 +84,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "count reservations failed")
 		return
 	}
-	items, next := buildPage(rows, pp.Limit, toReservationResponse, reservationsRowKey)
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toReservationResponse, reservationsRowKey)
 	writeJSON(w, http.StatusOK, page[reservationResponse]{Items: items, NextCursor: next, Total: total})
 }
 

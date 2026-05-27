@@ -253,14 +253,19 @@ type page[T any] struct {
 // buildPage trims a (limit+1)-row fetch result to limit rows and emits the
 // cursor pointing at the LAST KEPT row's key — never the trimmed extra row.
 //
-// - Fewer than limit+1 rows fetched → no cursor (last page).
-// - Empty input → empty items, empty cursor (do not echo input cursor).
-// - Otherwise → trim to limit, encode cursor from items[limit-1].
+//   - Fewer than limit+1 rows fetched → no cursor (last page).
+//   - Empty input → empty items, empty cursor (do not echo input cursor).
+//   - Otherwise → trim to limit, encode cursor from items[limit-1] using
+//     the sort string the request resolved to.
+//
+// The key callback returns (sortVal, id) where sortVal is either time.Time
+// or string; encodeCursorV2 dispatches on the runtime type.
 func buildPage[Row, Out any](
 	rows []Row,
 	limit int32,
+	sort string,
 	conv func(Row) Out,
-	key func(Row) (time.Time, pgtype.UUID),
+	key func(Row) (anySortVal, pgtype.UUID),
 ) ([]Out, string) {
 	if len(rows) == 0 {
 		return []Out{}, ""
@@ -277,6 +282,6 @@ func buildPage[Row, Out any](
 		return items, ""
 	}
 	last := rows[len(rows)-1]
-	t, id := key(last)
-	return items, encodeCursor(t, id)
+	val, id := key(last)
+	return items, encodeCursorV2(sort, val, id)
 }
