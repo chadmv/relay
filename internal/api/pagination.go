@@ -15,21 +15,54 @@ var errBadCursor = errors.New("invalid cursor")
 
 // cursor is the decoded form of an opaque pagination cursor.
 type cursor struct {
-	Set bool        // false → first page (no cursor sent)
-	T   time.Time   // last-seen created_at, microsecond precision
-	ID  pgtype.UUID // last-seen row id (tiebreaker)
+	Set    bool        // false → first page (no cursor sent)
+	Sort   string      // canonical sort string the cursor was issued for; "" for legacy cursors
+	T      time.Time   // populated when the sort key's value type is timestamp
+	StrVal string      // populated when the sort key's value type is text
+	ID     pgtype.UUID // last-seen row id (tiebreaker)
 }
 
 // cursorWire is the JSON shape encoded inside the base64 envelope.
 type cursorWire struct {
-	T string `json:"t"`
-	I string `json:"i"`
+	T string `json:"t,omitempty"` // timestamp value
+	I string `json:"i"`           // row id
+	S string `json:"s,omitempty"` // sort string; omitted for legacy default-sort cursors
+	V string `json:"v,omitempty"` // text value (populated when sort key is text)
 }
 
-// encodeCursor serializes (t, id) as base64url(JSON). The timestamp is
-// truncated to microsecond precision: Postgres timestamptz is µs-precise,
-// and a nanosecond-precise cursor would skip the boundary row when the
-// query does (created_at, id) < (cursor_ts, cursor_id).
+// anySortVal is a tiny helper that lets buildPage's row-key callback return
+// either a time.Time or a string without exploding the buildPage generic
+// signature. encodeCursorV2 dispatches on the concrete runtime type.
+type anySortVal any
+
+// encodeCursorV2 serializes (sort, val, id) as base64url(JSON). val must be
+// time.Time (for timestamp sort keys) or string (for text sort keys); any
+// other type causes a panic — that's a programmer error in the per-endpoint
+// sortSpec, not user input.
+//
+// Timestamps are truncated to microsecond precision: Postgres timestamptz
+// is µs-precise, and a nanosecond-precise cursor would skip the boundary
+// row when the query does (col, id) < (cursor_val, cursor_id).
+func encodeCursorV2(sort string, val anySortVal, id pgtype.UUID) string {
+	w := cursorWire{
+		I: uuidStr(id),
+		S: sort,
+	}
+	switch v := val.(type) {
+	case time.Time:
+		w.T = v.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	case string:
+		w.V = v
+	default:
+		panic("encodeCursorV2: unsupported sort value type")
+	}
+	b, _ := json.Marshal(w)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// encodeCursor is the legacy entrypoint that emits cursors with no S field,
+// preserving wire compatibility while callers are migrated to encodeCursorV2.
+// Remove once every caller passes through buildPage's new sort-aware path.
 func encodeCursor(t time.Time, id pgtype.UUID) string {
 	tUTC := t.UTC().Truncate(time.Microsecond)
 	w := cursorWire{
@@ -40,10 +73,13 @@ func encodeCursor(t time.Time, id pgtype.UUID) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// decodeCursor reverses encodeCursor. Empty input yields a zero cursor with
-// Set=false (used for first-page requests). Malformed input returns
-// errBadCursor; the caller MUST translate this to a 400 response and MUST
-// NOT echo decoded bytes to the client.
+// decodeCursor reverses encodeCursor/encodeCursorV2. Empty input yields a
+// zero cursor with Set=false (used for first-page requests). Malformed input
+// returns errBadCursor; the caller MUST translate this to a 400 response and
+// MUST NOT echo decoded bytes to the client.
+//
+// Legacy cursors (no S field) decode to Sort="" so the caller can substitute
+// the spec default at parsePage time.
 func decodeCursor(s string) (cursor, error) {
 	if s == "" {
 		return cursor{}, nil
@@ -56,15 +92,19 @@ func decodeCursor(s string) (cursor, error) {
 	if err := json.Unmarshal(b, &w); err != nil {
 		return cursor{}, errBadCursor
 	}
-	t, err := time.Parse(time.RFC3339Nano, w.T)
-	if err != nil {
-		return cursor{}, errBadCursor
-	}
 	id, err := parseUUID(w.I)
 	if err != nil {
 		return cursor{}, errBadCursor
 	}
-	return cursor{Set: true, T: t, ID: id}, nil
+	c := cursor{Set: true, Sort: w.S, StrVal: w.V, ID: id}
+	if w.T != "" {
+		t, err := time.Parse(time.RFC3339Nano, w.T)
+		if err != nil {
+			return cursor{}, errBadCursor
+		}
+		c.T = t
+	}
+	return c, nil
 }
 
 const (

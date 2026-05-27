@@ -152,3 +152,44 @@ func TestBuildPage_EmptyResult(t *testing.T) {
 	assert.Empty(t, items)
 	assert.Empty(t, next, "empty result must yield empty cursor, not echo input")
 }
+
+func TestCursor_EncodesSortAndStringValue(t *testing.T) {
+	id := pgtype.UUID{Valid: true}
+	copy(id.Bytes[:], []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00})
+
+	enc := encodeCursorV2("name", anySortVal("alpha"), id)
+	require.NotEmpty(t, enc)
+
+	got, err := decodeCursor(enc)
+	require.NoError(t, err)
+	require.True(t, got.Set)
+	assert.Equal(t, "name", got.Sort)
+	assert.Equal(t, "alpha", got.StrVal)
+	assert.Equal(t, id, got.ID)
+}
+
+func TestCursor_EncodesTimestampVariant(t *testing.T) {
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 30, 45, 123456000, time.UTC)
+
+	enc := encodeCursorV2("-created_at", anySortVal(tt), id)
+	got, err := decodeCursor(enc)
+	require.NoError(t, err)
+	require.True(t, got.Set)
+	assert.Equal(t, "-created_at", got.Sort)
+	assert.True(t, got.T.Equal(tt), "decoded time %v != original %v", got.T, tt)
+}
+
+func TestCursor_LegacyDecodeWithoutSortField(t *testing.T) {
+	// A cursor written by pre-feature code: {"t":"...","i":"..."} only. Must
+	// decode to cursor.Sort == "" so the caller can substitute the spec
+	// default at parsePage time.
+	tt := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	id := pgtype.UUID{Valid: true}
+	legacy := encodeCursor(tt, id) // existing function, no S field
+
+	got, err := decodeCursor(legacy)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Sort, "legacy cursor must yield empty Sort so caller can default it")
+	assert.True(t, got.T.Equal(tt))
+}
