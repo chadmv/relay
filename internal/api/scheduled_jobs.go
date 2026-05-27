@@ -178,7 +178,12 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pp, ok := parsePage(w, r)
+	// Temporary default spec; per-endpoint specs land in later tasks.
+	defaultSortSpec := sortSpec{
+		Default: "-created_at",
+		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
+	}
+	pp, ok := parsePage(w, r, defaultSortSpec)
 	if !ok {
 		return
 	}

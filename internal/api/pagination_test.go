@@ -61,10 +61,11 @@ func TestCursor_InvalidJSON(t *testing.T) {
 func TestParsePage_Defaults(t *testing.T) {
 	r := httptest.NewRequest("GET", "/v1/jobs", nil)
 	w := httptest.NewRecorder()
-	pp, ok := parsePage(w, r)
+	pp, ok := parsePage(w, r, testDefaultSpec)
 	require.True(t, ok)
 	assert.Equal(t, defaultLimit, pp.Limit)
 	assert.False(t, pp.Cursor.Set)
+	assert.Equal(t, "-created_at", pp.Sort)
 }
 
 func TestParsePage_LimitClamping(t *testing.T) {
@@ -85,7 +86,7 @@ func TestParsePage_LimitClamping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "/v1/jobs"+tc.query, nil)
 			w := httptest.NewRecorder()
-			pp, ok := parsePage(w, r)
+			pp, ok := parsePage(w, r, testDefaultSpec)
 			assert.Equal(t, tc.wantOK, ok)
 			if tc.wantOK {
 				assert.Equal(t, tc.wantLim, pp.Limit)
@@ -97,7 +98,7 @@ func TestParsePage_LimitClamping(t *testing.T) {
 func TestParsePage_BadCursor(t *testing.T) {
 	r := httptest.NewRequest("GET", "/v1/jobs?cursor=garbage!!!", nil)
 	w := httptest.NewRecorder()
-	_, ok := parsePage(w, r)
+	_, ok := parsePage(w, r, testDefaultSpec)
 	assert.False(t, ok)
 	assert.Equal(t, 400, w.Code)
 }
@@ -276,4 +277,58 @@ func TestParseSort_RejectsEmptyAndWrongSyntax(t *testing.T) {
 		_, _, err := parseSort(bad, spec)
 		assert.Error(t, err, "expected error for sort=%q", bad)
 	}
+}
+
+var testDefaultSpec = sortSpec{
+	Default: "-created_at",
+	Keys: map[string]sortKeyKind{
+		"created_at": sortKeyTimestamp,
+		"name":       sortKeyText,
+	},
+}
+
+func TestParsePage_SortKeyAccepted(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v1/jobs?sort=name", nil)
+	w := httptest.NewRecorder()
+	pp, ok := parsePage(w, r, testDefaultSpec)
+	require.True(t, ok)
+	assert.Equal(t, "name", pp.Sort)
+	assert.Equal(t, sortKeyText, pp.SortKind)
+}
+
+func TestParsePage_UnknownSortKey_400(t *testing.T) {
+	r := httptest.NewRequest("GET", "/v1/jobs?sort=labels", nil)
+	w := httptest.NewRecorder()
+	_, ok := parsePage(w, r, testDefaultSpec)
+	assert.False(t, ok)
+	assert.Equal(t, 400, w.Code)
+	assert.Contains(t, w.Body.String(), "unsupported sort key 'labels'")
+}
+
+func TestParsePage_CursorSortMismatch_400(t *testing.T) {
+	// Encode a cursor under sort="-created_at", then request with ?sort=name.
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	cur := encodeCursorV2("-created_at", anySortVal(tt), id)
+
+	r := httptest.NewRequest("GET", "/v1/jobs?sort=name&cursor="+cur, nil)
+	w := httptest.NewRecorder()
+	_, ok := parsePage(w, r, testDefaultSpec)
+	assert.False(t, ok)
+	assert.Equal(t, 400, w.Code)
+	assert.Contains(t, w.Body.String(), "cursor sort key does not match")
+}
+
+func TestParsePage_LegacyCursorMatchesDefault(t *testing.T) {
+	// Legacy cursor (no S field) must be accepted when the request omits
+	// ?sort=, since the spec's Default is the historical "-created_at".
+	id := pgtype.UUID{Valid: true}
+	tt := time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC)
+	cur := encodeCursor(tt, id)
+
+	r := httptest.NewRequest("GET", "/v1/jobs?cursor="+cur, nil)
+	w := httptest.NewRecorder()
+	pp, ok := parsePage(w, r, testDefaultSpec)
+	require.True(t, ok)
+	assert.Equal(t, "-created_at", pp.Sort)
 }

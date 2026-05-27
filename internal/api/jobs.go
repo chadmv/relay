@@ -209,7 +209,12 @@ func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow)
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pp, ok := parsePage(w, r)
+	// Temporary default spec; per-endpoint specs land in later tasks.
+	defaultSortSpec := sortSpec{
+		Default: "-created_at",
+		Keys:    map[string]sortKeyKind{"created_at": sortKeyTimestamp},
+	}
+	pp, ok := parsePage(w, r, defaultSortSpec)
 	if !ok {
 		return
 	}

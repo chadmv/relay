@@ -174,8 +174,10 @@ const (
 
 // pageParams captures validated pagination input from the URL query string.
 type pageParams struct {
-	Limit  int32
-	Cursor cursor
+	Limit    int32
+	Cursor   cursor
+	Sort     string      // canonical sort string ("name" / "-name" / "-created_at")
+	SortKind sortKeyKind // value type for the active sort key
 }
 
 // CursorTs returns the cursor timestamp as a pgtype.Timestamptz. The Valid
@@ -185,10 +187,11 @@ func (p pageParams) CursorTs() pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: p.Cursor.T, Valid: p.Cursor.Set}
 }
 
-// parsePage extracts ?limit= and ?cursor= from the request. On invalid
-// input it writes the 400 response itself and returns ok=false. Defaults:
-// limit=50. Range: [1, 200]. Bad cursor → 400 with body "invalid cursor".
-func parsePage(w http.ResponseWriter, r *http.Request) (pageParams, bool) {
+// parsePage extracts ?limit=, ?cursor=, and ?sort= from the request. On
+// invalid input it writes the 400 response itself and returns ok=false.
+// Defaults: limit=50, sort=spec.Default. Range: limit [1, 200]. Bad cursor
+// or sort -> 400.
+func parsePage(w http.ResponseWriter, r *http.Request, spec sortSpec) (pageParams, bool) {
 	pp := pageParams{Limit: defaultLimit}
 
 	if s := r.URL.Query().Get("limit"); s != "" {
@@ -200,10 +203,31 @@ func parsePage(w http.ResponseWriter, r *http.Request) (pageParams, bool) {
 		pp.Limit = int32(n)
 	}
 
+	sortRaw := r.URL.Query().Get("sort")
+	canon, kind, err := parseSort(sortRaw, spec)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return pageParams{}, false
+	}
+	pp.Sort = canon
+	pp.SortKind = kind
+
 	c, err := decodeCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid cursor")
 		return pageParams{}, false
+	}
+	if c.Set {
+		// Legacy cursor (Sort=="") is acceptable iff the resolved sort
+		// equals the historical default that legacy cursors implied.
+		effective := c.Sort
+		if effective == "" {
+			effective = "-created_at"
+		}
+		if effective != canon {
+			writeError(w, http.StatusBadRequest, "cursor sort key does not match requested sort; drop the cursor or change the sort")
+			return pageParams{}, false
+		}
 	}
 	pp.Cursor = c
 	return pp, true
