@@ -3,9 +3,10 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypeVar, Union, cast
 
 import httpx
+from pydantic import BaseModel
 
 from .config import Config, resolve_config
 from .errors import (
@@ -23,6 +24,7 @@ from .models import (
     JobStatus,
     LogRecord,
     OverlapPolicy,
+    Page,
     ScheduledJob,
     Task,
 )
@@ -30,6 +32,8 @@ from .models import (
 _TERMINAL_JOB_STATUSES = frozenset(
     {JobStatus.DONE.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
 )
+
+M = TypeVar("M", bound=BaseModel)
 
 
 class Client:
@@ -41,6 +45,10 @@ class Client:
     Windows). If no token is found, methods that require authentication
     raise :class:`AuthError` with a hint pointing at ``relay login``.
     """
+
+    # Per-request page size used when auto-paginating. Matches the server's
+    # max limit and relayclient.PageRequestLimit so we minimize round-trips.
+    _PAGE_REQUEST_LIMIT = 200
 
     def __init__(
         self,
@@ -93,6 +101,70 @@ class Client:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    # ─── Pagination helpers ───────────────────────────────────────────────
+
+    def _get_page(
+        self,
+        path: str,
+        model: type[M],
+        *,
+        params: Optional[dict[str, str]] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[M]:
+        """Fetch a single page envelope and validate each item into ``model``."""
+        self._require_token()
+        p: dict[str, str] = dict(params or {})
+        if sort is not None:
+            p["sort"] = sort
+        if limit is not None:
+            p["limit"] = str(limit)
+        if cursor is not None:
+            p["cursor"] = cursor
+        response = self._http.get(path, params=p)
+        raise_for_response(response)
+        body = response.json()
+        items = [model.model_validate(item) for item in body["items"]]
+        return cast(
+            "Page[M]",
+            Page(items=items, next_cursor=body.get("next_cursor", ""), total=body.get("total", 0)),
+        )
+
+    def _fetch_all(
+        self,
+        path: str,
+        model: type[M],
+        *,
+        params: Optional[dict[str, str]] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[M]:
+        """Walk ?cursor= until next_cursor is empty, or ``limit`` rows collected.
+
+        ``limit`` caps the TOTAL rows returned across pages (None = all). Each
+        request fetches ``_PAGE_REQUEST_LIMIT`` rows.
+        """
+        self._require_token()
+        p: dict[str, str] = dict(params or {})
+        if sort is not None:
+            p["sort"] = sort
+        p["limit"] = str(self._PAGE_REQUEST_LIMIT)
+        out: list[M] = []
+        cursor: Optional[str] = None
+        while True:
+            if cursor:
+                p["cursor"] = cursor
+            response = self._http.get(path, params=p)
+            raise_for_response(response)
+            body = response.json()
+            out.extend(model.model_validate(item) for item in body["items"])
+            if limit is not None and len(out) >= limit:
+                return out[:limit]
+            cursor = body.get("next_cursor", "")
+            if not cursor:
+                return out
+
     # ─── Jobs ─────────────────────────────────────────────────────────────
 
     def submit(self, job: Job) -> Job:
@@ -116,16 +188,51 @@ class Client:
         *,
         status: Optional[Union[str, JobStatus]] = None,
         scheduled_job_id: Optional[str] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> list[Job]:
-        self._require_token()
+        """List jobs, auto-paginating across all pages.
+
+        ``limit`` caps the TOTAL number of jobs returned (None = all).
+        ``sort`` is forwarded to ?sort= and validated server-side; an
+        unknown key raises :class:`ValidationError`.
+        """
+        return self._fetch_all(
+            "/v1/jobs", Job,
+            params=self._job_filters(status, scheduled_job_id), sort=sort, limit=limit,
+        )
+
+    def list_jobs_page(
+        self,
+        *,
+        status: Optional[Union[str, JobStatus]] = None,
+        scheduled_job_id: Optional[str] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Job]:
+        """Fetch a single page of jobs.
+
+        ``limit`` is the PAGE SIZE (1-200). Use the returned ``next_cursor``
+        as ``cursor=`` to page forward.
+        """
+        return self._get_page(
+            "/v1/jobs", Job,
+            params=self._job_filters(status, scheduled_job_id),
+            sort=sort, limit=limit, cursor=cursor,
+        )
+
+    @staticmethod
+    def _job_filters(
+        status: Optional[Union[str, JobStatus]],
+        scheduled_job_id: Optional[str],
+    ) -> dict[str, str]:
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = status.value if isinstance(status, JobStatus) else status
         if scheduled_job_id is not None:
             params["scheduled_job_id"] = scheduled_job_id
-        response = self._http.get("/v1/jobs", params=params)
-        raise_for_response(response)
-        return [Job.model_validate(item) for item in response.json()]
+        return params
 
     def cancel_job(self, job_id: str, *, force: bool = False) -> Job:
         self._require_token()

@@ -47,6 +47,14 @@ def _job_response(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+def _page_response(items: list[Any], *, next_cursor: str = "", total: Optional[int] = None) -> dict[str, Any]:
+    return {
+        "items": items,
+        "next_cursor": next_cursor,
+        "total": len(items) if total is None else total,
+    }
+
+
 # ─── Auth & wiring ────────────────────────────────────────────────────────────
 
 
@@ -62,7 +70,7 @@ def test_authorization_header_sent(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["auth"] = request.headers.get("authorization", "")
-        return httpx.Response(200, json=[])
+        return httpx.Response(200, json=_page_response([]))
 
     client = _make_client(handler, token="secret-token")
     client.list_jobs()
@@ -139,11 +147,11 @@ def test_list_jobs_passes_status_filter() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["query"] = dict(request.url.params)
-        return httpx.Response(200, json=[])
+        return httpx.Response(200, json=_page_response([]))
 
     client = _make_client(handler)
     client.list_jobs(status=JobStatus.RUNNING)
-    assert captured["query"] == {"status": "running"}
+    assert captured["query"]["status"] == "running"
 
 
 def test_cancel_job_force_query_param() -> None:
@@ -260,3 +268,86 @@ def test_run_schedule_now_admin_403_raises_auth_error() -> None:
     client = _make_client(handler)
     with pytest.raises(AuthError):
         client.run_schedule_now("abc")
+
+
+# ─── pagination ──────────────────────────────────────────────────────────────
+
+
+def test_list_jobs_parses_envelope_items() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([_job_response(id="j1")], total=1))
+
+    client = _make_client(handler)
+    jobs = client.list_jobs()
+    assert [j.id for j in jobs] == ["j1"]
+
+
+def test_list_jobs_walks_all_pages() -> None:
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if "cursor" not in request.url.params:
+            return httpx.Response(200, json=_page_response([_job_response(id="j1")], next_cursor="c1", total=2))
+        return httpx.Response(200, json=_page_response([_job_response(id="j2")], total=2))
+
+    client = _make_client(handler)
+    jobs = client.list_jobs()
+    assert [j.id for j in jobs] == ["j1", "j2"]
+    assert "cursor" not in calls[0]
+    assert calls[0]["limit"] == "200"
+    assert calls[1]["cursor"] == "c1"
+
+
+def test_list_jobs_limit_caps_total() -> None:
+    page1 = [_job_response(id=f"a{i}") for i in range(200)]
+    page2 = [_job_response(id=f"b{i}") for i in range(200)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "cursor" not in request.url.params:
+            return httpx.Response(200, json=_page_response(page1, next_cursor="c1", total=400))
+        return httpx.Response(200, json=_page_response(page2, total=400))
+
+    client = _make_client(handler)
+    jobs = client.list_jobs(limit=250)
+    assert len(jobs) == 250
+
+
+def test_list_jobs_page_returns_envelope() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["query"] = dict(request.url.params)
+        return httpx.Response(200, json=_page_response([_job_response(id="j1")], next_cursor="nextc", total=7))
+
+    client = _make_client(handler)
+    page = client.list_jobs_page(limit=50, cursor="start")
+    assert [j.id for j in page.items] == ["j1"]
+    assert page.next_cursor == "nextc"
+    assert page.total == 7
+    assert captured["query"]["limit"] == "50"
+    assert captured["query"]["cursor"] == "start"
+
+
+def test_list_jobs_sort_passed_through() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["query"] = dict(request.url.params)
+        return httpx.Response(200, json=_page_response([]))
+
+    client = _make_client(handler)
+    client.list_jobs(sort="-name")
+    assert captured["query"]["sort"] == "-name"
+
+
+def test_list_jobs_bad_sort_raises_validation_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": "unsupported sort key 'bogus' for /v1/jobs; supported: created_at, name"},
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ValidationError, match="unsupported sort key"):
+        client.list_jobs(sort="bogus")
