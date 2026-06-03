@@ -1,4 +1,4 @@
-// Jobs list (home) wireframes — updated to match chadmv/relay@master
+// Jobs list (home) wireframes — updated to match chadmv/relay@main
 //   - Status set: pending · queued · dispatched · running · done · failed · timed_out · cancelled
 //   - Job rows carry submitted_by_email (user-friendly owner column)
 //   - Priority: high | normal | low

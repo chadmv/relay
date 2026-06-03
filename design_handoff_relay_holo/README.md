@@ -172,7 +172,7 @@ The fundamental container is a "glass panel" — `glassPanel(C)` returns:
 
 ## Backend contract
 
-The wireframe annotations (`reference/screens/*.js`) document the API model from `chadmv/relay@master`. Key endpoints the UI talks to:
+The wireframe annotations (`reference/screens/*.js`) document the API model from `chadmv/relay@main`. Key endpoints the UI talks to:
 
 ### Auth
 

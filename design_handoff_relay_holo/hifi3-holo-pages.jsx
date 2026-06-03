@@ -1889,7 +1889,7 @@ function explainCron(expr) {
 }
 
 // ── ADMIN ───────────────────────────────────────────────────────────────────
-// Mirrors every admin surface in chadmv/relay@master:
+// Mirrors every admin surface in chadmv/relay@main:
 //   • Users           — GET/POST /v1/users · PATCH · POST archive/unarchive · POST password-reset
 //   • Invites         — POST /v1/invites (email optional, 72h default, max 720h)
 //   • Agent enrolls   — POST /v1/agent-enrollments (hostname_hint, ttl; default 24h, max 7d)

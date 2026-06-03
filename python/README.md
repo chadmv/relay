@@ -103,7 +103,7 @@ for debugging.
 ## Compatibility
 
 - **Python**: 3.9, 3.10, 3.11, 3.12, 3.13.
-- **Server**: tested against relay-server `master`. The SDK only consumes
+- **Server**: tested against relay-server `main`. The SDK only consumes
   the existing v1 REST + SSE surface — no server-side changes needed.
 
 ## Development

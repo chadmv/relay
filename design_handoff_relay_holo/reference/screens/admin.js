@@ -1,5 +1,5 @@
 // Admin overview + invites + agent enrollments + scheduled jobs + users
-// Updated to chadmv/relay@master:
+// Updated to chadmv/relay@main:
 //   - Invites: POST /v1/invites  (email optional, expires_in default 72h, max 720h)
 //   - Agent enrollments (NEW SURFACE): POST /v1/agent-enrollments  (hostname_hint, ttl_seconds; default 24h, max 7d)
 //     Listed via GET /v1/agent-enrollments (active = unconsumed + unexpired) — PAGINATED

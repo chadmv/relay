@@ -2,7 +2,7 @@ name: python-sdk
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "python/**"
       - ".github/workflows/python.yml"

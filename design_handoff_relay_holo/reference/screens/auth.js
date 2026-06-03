@@ -1,5 +1,5 @@
 // Sign-in and invite-onboarding wireframes
-// Updated to match the current auth model in chadmv/relay@master:
+// Updated to match the current auth model in chadmv/relay@main:
 //   - POST /v1/auth/login   : email + password (existing accounts only)
 //   - POST /v1/auth/register: email + password + name + invite_token
 //                             (invite optional iff RELAY_ALLOW_SELF_REGISTER=true)
@@ -201,7 +201,7 @@ window.Auth = (function(){
     host.innerHTML = `
       <div class="section-intro">
         <h2>Sign in, register & password</h2>
-        <p>The auth model is now <b>email + password</b>. Login and register are separate endpoints; new accounts need an <span style="color:var(--accent)">invite token</span> unless the server has <span class="mono">RELAY_ALLOW_SELF_REGISTER=true</span>. Tokens last 30 days. <span class="scribble">Updated to match master.</span></p>
+        <p>The auth model is now <b>email + password</b>. Login and register are separate endpoints; new accounts need an <span style="color:var(--accent)">invite token</span> unless the server has <span class="mono">RELAY_ALLOW_SELF_REGISTER=true</span>. Tokens last 30 days. <span class="scribble">Updated to match main.</span></p>
       </div>
 
       <div class="variations cols-3">

@@ -1,4 +1,4 @@
-// Workers list + detail wireframes — updated to chadmv/relay@master
+// Workers list + detail wireframes — updated to chadmv/relay@main
 //   - response shape: id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os,
 //                     max_slots, labels, status, last_seen_at
 //   - admin actions: PATCH name/labels/max_slots · DELETE token (revoke)

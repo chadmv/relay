@@ -1,4 +1,4 @@
-// Job detail — updated to match chadmv/relay@master
+// Job detail — updated to match chadmv/relay@main
 //   - tasks now have `commands` (array of command arrays), retry_count/retries, worker_id, source spec
 //   - statuses: pending | queued | dispatched | running | done | failed | timed_out | cancelled
 //   - cancel: DELETE /v1/jobs/{id}?force=true (force skips pipe-drain + workspace cleanup)
