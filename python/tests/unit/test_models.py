@@ -4,13 +4,18 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from relay import (
+    AgentEnrollment,
     Job,
     JobStatus,
+    Page,
     Priority,
+    Reservation,
     Source,
     Sync,
     TaskStatus,
+    User,
     ValidationError,
+    Worker,
 )
 
 # ─── Sync / Source ────────────────────────────────────────────────────────────
@@ -249,10 +254,6 @@ def test_full_response_round_trip() -> None:
     assert job.tasks[0].name == "t"
     assert job.tasks[0].worker_id == "44444444-4444-4444-4444-444444444444"
     assert job.status == JobStatus.RUNNING
-
-
-from relay import AgentEnrollment, Page, Reservation, User, Worker
-from relay.models import Job
 
 
 def test_page_validates_items_as_job_model() -> None:
