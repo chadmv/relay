@@ -19,14 +19,18 @@ from .errors import (
 )
 from .events import parse_sse_stream
 from .models import (
+    AgentEnrollment,
     Event,
     Job,
     JobStatus,
     LogRecord,
     OverlapPolicy,
     Page,
+    Reservation,
     ScheduledJob,
     Task,
+    User,
+    Worker,
 )
 
 _TERMINAL_JOB_STATUSES = frozenset(
@@ -429,3 +433,67 @@ class Client:
         response = self._http.post(f"/v1/scheduled-jobs/{schedule_id}/run-now")
         raise_for_response(response)
         return Job.model_validate(response.json())
+
+    # ─── Workers ──────────────────────────────────────────────────────────
+
+    def list_workers(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[Worker]:
+        """List workers, auto-paginating across all pages. ``limit`` caps total rows."""
+        return self._fetch_all("/v1/workers", Worker, sort=sort, limit=limit)
+
+    def list_workers_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Worker]:
+        """Fetch a single page of workers. ``limit`` is the page size (1-200)."""
+        return self._get_page("/v1/workers", Worker, sort=sort, limit=limit, cursor=cursor)
+
+    # ─── Users (admin-only) ───────────────────────────────────────────────
+
+    def list_users(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[User]:
+        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError."""
+        return self._fetch_all("/v1/users", User, sort=sort, limit=limit)
+
+    def list_users_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[User]:
+        """Fetch a single page of users (admin-only). ``limit`` is the page size (1-200)."""
+        return self._get_page("/v1/users", User, sort=sort, limit=limit, cursor=cursor)
+
+    # ─── Reservations (admin-only) ────────────────────────────────────────
+
+    def list_reservations(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[Reservation]:
+        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError."""
+        return self._fetch_all("/v1/reservations", Reservation, sort=sort, limit=limit)
+
+    def list_reservations_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Reservation]:
+        """Fetch a single page of reservations (admin-only). ``limit`` is the page size."""
+        return self._get_page(
+            "/v1/reservations", Reservation, sort=sort, limit=limit, cursor=cursor
+        )
+
+    # ─── Agent enrollments (admin-only) ───────────────────────────────────
+
+    def list_agent_enrollments(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[AgentEnrollment]:
+        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError."""
+        return self._fetch_all("/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit)
+
+    def list_agent_enrollments_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[AgentEnrollment]:
+        """Fetch a single page of agent enrollments (admin-only). ``limit`` is the page size."""
+        return self._get_page(
+            "/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit, cursor=cursor
+        )

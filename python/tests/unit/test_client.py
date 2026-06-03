@@ -389,3 +389,93 @@ def test_list_schedules_page_returns_envelope() -> None:
     assert [s.id for s in page.items] == ["s1"]
     assert page.next_cursor == "c2"
     assert page.total == 3
+
+
+# ─── new resource list methods ───────────────────────────────────────────────
+
+
+def test_list_workers_parses_model_and_paginates() -> None:
+    calls: list[dict[str, str]] = []
+    worker = {
+        "id": "w1", "name": "worker-a", "hostname": "host-a", "cpu_cores": 8,
+        "ram_gb": 32, "gpu_count": 1, "gpu_model": "RTX", "os": "linux",
+        "max_slots": 4, "labels": {"zone": "us"}, "status": "online",
+        "last_seen_at": "2026-06-03T12:00:00Z",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=_page_response([worker], total=1))
+
+    client = _make_client(handler)
+    workers = client.list_workers()
+    assert workers[0].name == "worker-a"
+    assert workers[0].cpu_cores == 8
+    assert workers[0].labels == {"zone": "us"}
+    assert calls[0]["limit"] == "200"
+
+
+def test_list_workers_page_returns_envelope() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([], next_cursor="wc", total=9))
+
+    client = _make_client(handler)
+    page = client.list_workers_page(limit=10)
+    assert page.items == []
+    assert page.next_cursor == "wc"
+    assert page.total == 9
+
+
+def test_list_users_parses_model() -> None:
+    user = {
+        "id": "u1", "email": "a@example.com", "name": "Alice",
+        "is_admin": True, "created_at": "2026-06-03T12:00:00Z", "archived_at": None,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([user], total=1))
+
+    client = _make_client(handler)
+    users = client.list_users()
+    assert users[0].email == "a@example.com"
+    assert users[0].is_admin is True
+
+
+def test_list_reservations_parses_model() -> None:
+    reservation = {
+        "id": "r1", "name": "res-a", "selector": {"gpu": "true"},
+        "worker_ids": ["w1", "w2"], "user_id": "u1", "project": "proj",
+        "ends_at": "2026-06-04T00:00:00Z", "created_at": "2026-06-03T12:00:00Z",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([reservation], total=1))
+
+    client = _make_client(handler)
+    reservations = client.list_reservations()
+    assert reservations[0].worker_ids == ["w1", "w2"]
+    assert reservations[0].starts_at is None
+
+
+def test_list_agent_enrollments_parses_model() -> None:
+    enrollment = {
+        "id": "e1", "created_at": "2026-06-03T12:00:00Z",
+        "expires_at": "2026-06-04T12:00:00Z", "created_by": "u1", "hostname_hint": "host-x",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([enrollment], total=1))
+
+    client = _make_client(handler)
+    enrollments = client.list_agent_enrollments()
+    assert enrollments[0].created_by == "u1"
+    assert enrollments[0].hostname_hint == "host-x"
+
+
+def test_list_users_admin_403_raises_auth_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "admin only"})
+
+    client = _make_client(handler)
+    with pytest.raises(AuthError):
+        client.list_users()
