@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any, Generic, Optional, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -380,3 +380,77 @@ class ScheduledJob(BaseModel):
     last_job_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+# ─── Pagination & resource models ──────────────────────────────────────────────
+
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    """One page of a paginated list response.
+
+    ``next_cursor`` is the empty string on the last page; pass it back as
+    ``cursor=`` to fetch the next page. ``total`` is the server's count of
+    all matching rows, not just this page.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[T]
+    next_cursor: str = ""
+    total: int = 0
+
+
+class Worker(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str
+    hostname: str
+    cpu_cores: int
+    ram_gb: int
+    gpu_count: int
+    gpu_model: str
+    os: str
+    max_slots: int
+    labels: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    last_seen_at: Optional[datetime] = None
+    last_sample_at: Optional[datetime] = None
+    disabled_at: Optional[datetime] = None
+
+
+class Reservation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str
+    selector: dict[str, Any] = Field(default_factory=dict)
+    worker_ids: list[str] = Field(default_factory=list)
+    user_id: str
+    project: Optional[str] = None
+    starts_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AgentEnrollment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    created_at: datetime
+    expires_at: datetime
+    created_by: str
+    hostname_hint: Optional[str] = None
+
+
+class User(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    email: str
+    name: str
+    is_admin: bool
+    created_at: datetime
+    archived_at: Optional[datetime] = None
