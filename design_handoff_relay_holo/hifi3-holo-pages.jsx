@@ -75,6 +75,132 @@ function glassPanel(C){
   };
 }
 
+// ── SORT CONTROL ────────────────────────────────────────────────────────────
+// Surfaces the server-side ?sort= allowlist that the paginated list endpoints
+// gained (jobs / scheduled-jobs / agent-enrollments / reservations). Every menu
+// row is exactly ONE allowed (key, direction) pair — the mono token on the
+// right is the literal value the client sends as ?sort=. Selecting a sort drops
+// any in-flight cursor, because cursors are issued for a specific sort and the
+// server 400s a sort/cursor mismatch.
+function SortControl({ C, options, value, onChange, disabled, disabledHint, width }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  const active = options.find(o => o.value === value) || options[0];
+  const arrow = active.value[0] === '-' ? '↓' : '↑';
+  return (
+    <div ref={ref} style={{position:'relative', flex:'none'}}>
+      <button
+        onClick={() => { if (!disabled) setOpen(v => !v); }}
+        title={disabled ? disabledHint : 'Sort — maps to ?sort= on the list endpoint'}
+        style={{
+          display:'flex', alignItems:'center', gap:8, padding:'6px 12px',
+          borderRadius:999, cursor: disabled ? 'not-allowed' : 'pointer',
+          background: open ? hexToRgba(C.accent,0.14) : 'rgba(0,0,0,0.25)',
+          border:`1px solid ${open ? hexToRgba(C.accent,0.5) : C.border}`,
+          color: disabled ? C.fgDim : C.fg, opacity: disabled ? 0.5 : 1,
+          backdropFilter:'blur(8px)',
+        }}>
+        <span style={{fontFamily:C.mono, fontSize:9.5, letterSpacing:'0.18em', color:C.fgMute}}>SORT</span>
+        <span style={{fontFamily:C.sans, fontSize:12, whiteSpace:'nowrap'}}>{active.label}</span>
+        <span style={{fontFamily:C.mono, fontSize:12, color: disabled ? C.fgDim : C.accent}}>{disabled ? '⊘' : arrow}</span>
+      </button>
+      {open && !disabled && (
+        <div style={{
+          position:'absolute', top:'calc(100% + 6px)', right:0, zIndex:40,
+          minWidth: width || 252, padding:6, borderRadius:12,
+          background:'rgba(12,10,24,0.97)', border:`1px solid ${C.border}`,
+          boxShadow:'0 18px 50px rgba(0,0,0,0.55)', backdropFilter:'blur(16px)',
+        }}>
+          <div style={{fontFamily:C.mono, fontSize:9, letterSpacing:'0.18em', color:C.fgDim, padding:'6px 10px 8px'}}>
+            ORDER BY · ?sort=
+          </div>
+          {options.map(o => {
+            const on = o.value === value;
+            return (
+              <button key={o.value} onClick={() => { onChange(o.value); setOpen(false); }}
+                onMouseEnter={e => { if (!on) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
+                onMouseLeave={e => { if (!on) e.currentTarget.style.background = 'transparent'; }}
+                style={{
+                  display:'flex', alignItems:'center', gap:10, width:'100%',
+                  padding:'8px 10px', borderRadius:8, border:'none', cursor:'pointer', textAlign:'left',
+                  background: on ? hexToRgba(C.accent,0.16) : 'transparent',
+                  color: on ? C.fg : C.fgMute,
+                }}>
+                <span style={{width:12, flex:'none', color: on ? C.accent : 'transparent', fontFamily:C.mono, fontSize:12}}>✓</span>
+                <span style={{flex:1, fontFamily:C.sans, fontSize:12.5}}>{o.label}</span>
+                <span style={{fontFamily:C.mono, fontSize:10, letterSpacing:'0.03em', color: on ? C.accentB : C.fgDim}}>{o.value}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Priority rank — higher = more urgent, so "priority ↓" puts critical first.
+const PRIORITY_RANK = { critical: 3, high: 2, normal: 1, low: 0 };
+
+// "HH:MM" wall-clock → minutes since midnight (jobs sample's created/updated proxy).
+function clockToMin(s) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(s || ''));
+  return m ? (+m[1]) * 60 + (+m[2]) : null;
+}
+
+// Relative span ("in 7m", "2h 14m", "8m ago", "1d") → signed minutes (future +, past −).
+function relMin(s) {
+  s = String(s || '').trim();
+  if (!s || s === '—') return null;
+  const past = /ago/.test(s);
+  let total = 0, found = false, mm;
+  const re = /(\d+)\s*([dhm])/g;
+  while ((mm = re.exec(s))) { found = true; const n = +mm[1]; total += mm[2] === 'd' ? n * 1440 : mm[2] === 'h' ? n * 60 : n; }
+  if (!found) return null;
+  return past ? -total : total;
+}
+
+// "May 01 09:00" → comparable number. "—"/blank → null.
+const MONTHS = { Jan:1, Feb:2, Mar:3, Apr:4, May:5, Jun:6, Jul:7, Aug:8, Sep:9, Oct:10, Nov:11, Dec:12 };
+function dateToNum(s) {
+  const m = /([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}):(\d{2})/.exec(String(s || '').trim());
+  if (!m) return null;
+  return (MONTHS[m[1]] || 0) * 1e6 + (+m[2]) * 1e4 + (+m[3]) * 100 + (+m[4]);
+}
+
+// Stable sort honoring the server's NULL placement: DESC NULLS LAST / ASC NULLS
+// FIRST. getVal(row, index) returns number | string | null.
+function sortRows(rows, getVal, desc) {
+  const dec = rows.map((row, i) => ({ row, i, v: getVal(row, i) }));
+  dec.sort((a, b) => {
+    const an = a.v === null || a.v === undefined, bn = b.v === null || b.v === undefined;
+    if (an && bn) return a.i - b.i;
+    if (an) return desc ? 1 : -1;
+    if (bn) return desc ? -1 : 1;
+    let c;
+    if (typeof a.v === 'number' && typeof b.v === 'number') c = a.v - b.v;
+    else c = String(a.v).localeCompare(String(b.v));
+    if (c === 0) return a.i - b.i; // id tiebreaker
+    return desc ? -c : c;
+  });
+  return dec.map(d => d.row);
+}
+
+// applySort(rows, "-name", { name:(r)=>... }) → sorted copy (or rows if no arm).
+function applySort(rows, token, keyMap) {
+  const desc = token[0] === '-';
+  const key = desc ? token.slice(1) : token;
+  const getVal = keyMap[key];
+  return getVal ? sortRows(rows, getVal, desc) : rows;
+}
+
 function UserMenu({ C, email, onLogout, onNavigate }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -346,10 +472,39 @@ function HoloJobsList({ C, D, onOpen }) {
   const [view, setView] = useState('table');
   const [tWindow, setTWindow] = useState('24h');
   const [mineOnly, setMineOnly] = useState(false);
+  const [sort, setSort] = useState('-created_at');
   const ME = 'mira@studio.dev';
   let filtered = filter==='all' ? JOBS_SAMPLE : JOBS_SAMPLE.filter(j => j[2]===filter || (filter==='active' && (j[2]==='running'||j[2]==='queued')));
   if (mineOnly) filtered = filtered.filter(j => j[7] === ME);
   const VIEWS = [['table','☰','Table'],['lanes','⊞','Lanes'],['timeline','⌚','Timeline']];
+
+  // ?sort= on /v1/jobs is allowed ONLY on the unfiltered list — the server 400s
+  // sort+status together. So sorting is locked to the default while a status
+  // chip is active, and picking a status chip snaps sort back to default.
+  // (row: [id,name,st,pct,start,dur,tasks,owner,prio,sched])
+  const JOBS_SORT = [
+    { value:'-created_at', label:'Newest' },
+    { value:'created_at',  label:'Oldest' },
+    { value:'name',        label:'Name A→Z' },
+    { value:'-name',       label:'Name Z→A' },
+    { value:'-priority',   label:'Priority high→low' },
+    { value:'priority',    label:'Priority low→high' },
+    { value:'status',      label:'Status A→Z' },
+    { value:'-status',     label:'Status Z→A' },
+    { value:'-updated_at', label:'Recently updated' },
+    { value:'updated_at',  label:'Least recently updated' },
+  ];
+  const jobsKeyMap = {
+    created_at: (j) => clockToMin(j[4]),
+    updated_at: (j) => clockToMin(j[4]),
+    name:       (j) => j[1].toLowerCase(),
+    priority:   (j) => PRIORITY_RANK[j[8]] ?? -1,
+    status:     (j) => j[2],
+  };
+  const statusFiltered = filter !== 'all';
+  const effSort = statusFiltered ? '-created_at' : sort;
+  const sorted = applySort(filtered, effSort, jobsKeyMap);
+  const pickFilter = (k) => { setFilter(k); if (k !== 'all') setSort('-created_at'); };
   return (
     <div style={{flex:1, padding:D.pad, display:'flex',flexDirection:'column',gap:D.gap, minHeight:0}}>
       <div style={{display:'flex',alignItems:'flex-end',gap:24,flexWrap:'wrap'}}>
@@ -388,7 +543,7 @@ function HoloJobsList({ C, D, onOpen }) {
       {/* View-specific toolbar */}
       <div style={{display:'flex',gap:8,marginTop:4,alignItems:'center',flexWrap:'wrap'}}>
         {view === 'table' && [['all','All'],['running','Running'],['queued','Queued'],['done','Done'],['failed','Failed']].map(([k,n])=>(
-          <button key={k} onClick={()=>setFilter(k)} style={{
+          <button key={k} onClick={()=>pickFilter(k)} style={{
             padding:'6px 14px', borderRadius:999, fontFamily:C.sans, fontSize:12, cursor:'pointer',
             background: filter===k?`linear-gradient(90deg, ${hexToRgba(C.accent,0.25)}, ${hexToRgba(C.accentB,0.18)})`:'rgba(255,255,255,0.04)',
             border:`1px solid ${filter===k?C.accent+'66':C.border}`,
@@ -434,6 +589,11 @@ function HoloJobsList({ C, D, onOpen }) {
         }}>
           <span style={{fontSize:13}}>◔</span> My jobs
         </button>
+        {view === 'table' && (
+          <SortControl C={C} options={JOBS_SORT} value={effSort} onChange={setSort}
+            disabled={statusFiltered}
+            disabledHint="Sorting is unavailable while a status filter is active — the server rejects sort + status together. Switch to All to sort."/>
+        )}
       </div>
 
       {view === 'lanes' && <HoloLanes C={C} D={D} onOpen={onOpen}/>}
@@ -446,7 +606,7 @@ function HoloJobsList({ C, D, onOpen }) {
           <span>ID</span><span>NAME</span><span>STATUS</span><span>PROGRESS</span><span>STARTED</span><span>DUR</span><span>OWNER</span><span/>
         </div>
         <div style={{flex:1,minHeight:0,overflow:'auto'}}>
-          {filtered.map((j,i)=>{
+          {sorted.map((j,i)=>{
             const [id,name,st,pct,start,dur,tasks,owner,prio,sched] = j;
             const sc = st==='done'?C.ok: st==='running'?C.accent : st==='failed'?C.err: st==='queued'?C.warn: C.fgMute;
             const fillBg = st==='done'?C.ok : st==='failed'?C.err : st==='cancelled'?C.fgDim
@@ -498,7 +658,7 @@ function HoloJobsList({ C, D, onOpen }) {
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',
           padding:'10px 18px',borderTop:`1px solid ${C.border}`,
           fontFamily:C.mono,fontSize:10.5,letterSpacing:'0.08em',color:C.fgMute}}>
-          <span>SHOWING <span style={{color:C.fg}}>1–{filtered.length}</span> OF <span style={{color:C.fg}}>2,341</span> · CURSOR PAGINATED</span>
+          <span>SHOWING <span style={{color:C.fg}}>1–{sorted.length}</span> OF <span style={{color:C.fg}}>2,341</span> · SORT <span style={{color:C.accentB}}>{effSort}</span> · CURSOR PAGINATED</span>
           <div style={{display:'flex',gap:6}}>
             <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11,opacity:0.5}}>← prev</button>
             <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11}}>next 50 →</button>
@@ -1350,7 +1510,26 @@ const SCHEDULES = [
 function HoloSchedules({ C, D, onOpenJob, onEdit }) {
   D = D || {pad:'22px 26px',gap:16,rowPad:'10px 18px'};
   const [filter, setFilter] = React.useState('all');
+  const [sort, setSort] = React.useState('-created_at');
   const rows = SCHEDULES.filter(s => filter==='all' ? true : filter==='enabled' ? s[4] : !s[4]);
+  // row: [name,cron,tz,overlap,enabled,next,last,jobId,jobStatus,owner]
+  const SCHED_SORT = [
+    { value:'-created_at',  label:'Newest' },
+    { value:'created_at',   label:'Oldest' },
+    { value:'name',         label:'Name A→Z' },
+    { value:'-name',        label:'Name Z→A' },
+    { value:'next_run_at',  label:'Next run soonest' },
+    { value:'-next_run_at', label:'Next run latest' },
+    { value:'-updated_at',  label:'Recently run' },
+    { value:'updated_at',   label:'Least recently run' },
+  ];
+  const schedKeyMap = {
+    created_at:  (s,i) => -i,            // sample order ≈ creation order
+    name:        (s) => s[0].toLowerCase(),
+    next_run_at: (s) => relMin(s[5]),    // 'in 7m' → +7 ; paused '—' → null
+    updated_at:  (s) => relMin(s[6]),    // last run '8m ago' → −8
+  };
+  const sorted = applySort(rows, sort, schedKeyMap);
   const counts = {
     all: SCHEDULES.length,
     enabled: SCHEDULES.filter(s=>s[4]).length,
@@ -1383,8 +1562,8 @@ function HoloSchedules({ C, D, onOpenJob, onEdit }) {
         <input placeholder="Filter by name, owner, cron..." style={{
           marginLeft:'auto', minWidth:240, padding:'7px 14px',borderRadius:999,
           background:'rgba(0,0,0,0.25)',border:`1px solid ${C.border}`,
-          color:C.fg,fontFamily:C.sans,fontSize:12,outline:'none',
         }}/>
+        <SortControl C={C} options={SCHED_SORT} value={sort} onChange={setSort}/>
       </div>
 
       <div style={{...glassPanel(C), flex:1, minHeight:0, display:'flex',flexDirection:'column', overflow:'hidden'}}>
@@ -1394,7 +1573,7 @@ function HoloSchedules({ C, D, onOpenJob, onEdit }) {
           <span>NAME</span><span>CRON</span><span>TZ</span><span>OVERLAP</span><span>NEXT RUN</span><span>LAST RUN</span><span>LAST JOB</span><span>OWNER</span><span style={{textAlign:'right'}}>ACTIONS</span>
         </div>
         <div style={{flex:1,minHeight:0,overflow:'auto'}}>
-          {rows.map((s,i)=>{
+          {sorted.map((s,i)=>{
             const [name,cron,tz,overlap,enabled,next,last,jobId,jobStatus,owner] = s;
             const jc = jobStatus==='done'?C.ok: jobStatus==='running'?C.accent: jobStatus==='failed'?C.err: C.fgMute;
             return (
@@ -1443,7 +1622,7 @@ function HoloSchedules({ C, D, onOpenJob, onEdit }) {
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',
           padding:'10px 18px',borderTop:`1px solid ${C.border}`,
           fontFamily:C.mono,fontSize:10.5,letterSpacing:'0.08em',color:C.fgMute}}>
-          <span>SHOWING <span style={{color:C.fg}}>1–{rows.length}</span> OF <span style={{color:C.fg}}>{counts.all}</span> · OWNED + ADMINISTRATIVE</span>
+          <span>SHOWING <span style={{color:C.fg}}>1–{sorted.length}</span> OF <span style={{color:C.fg}}>{counts.all}</span> · SORT <span style={{color:C.accentB}}>{sort}</span> · OWNED + ADMINISTRATIVE</span>
           <div style={{display:'flex',gap:6}}>
             <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11,opacity:0.5}}>← prev</button>
             <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11}}>next 50 →</button>
@@ -1956,11 +2135,25 @@ function AdminInvites({ C, D, onNew }) {
 }
 
 function AdminEnrollments({ C, D, onNew }) {
+  const [sort, setSort] = useState('-created_at');
+  // row: [token,hint,exp,by,status]
+  const ENROLL_SORT = [
+    { value:'-created_at', label:'Newest' },
+    { value:'created_at',  label:'Oldest' },
+    { value:'expires_at',  label:'Expires soonest' },
+    { value:'-expires_at', label:'Expires last' },
+  ];
+  const enrollKeyMap = {
+    created_at: (e,i) => -i,
+    expires_at: (e) => relMin(e[2]),   // '21h 42m' → +1302
+  };
+  const sorted = applySort(ENROLLMENTS, sort, enrollKeyMap);
   return (
     <>
       <div style={{display:'flex',gap:10,alignItems:'center'}}>
         <span style={{fontSize:13,color:C.fgMute,fontFamily:C.mono,letterSpacing:'0.06em'}}>POST /v1/agent-enrollments · default 24h · max 7d</span>
         <span style={{marginLeft:'auto'}}/>
+        <SortControl C={C} options={ENROLL_SORT} value={sort} onChange={setSort}/>
         <button onClick={onNew} style={pillBtn(C,'primary')}>+ Enroll agent</button>
       </div>
 
@@ -1971,7 +2164,7 @@ function AdminEnrollments({ C, D, onNew }) {
           <span>TOKEN PREFIX</span><span>HOSTNAME HINT</span><span>EXPIRES</span><span>CREATED BY</span><span>STATUS</span><span style={{textAlign:'right'}}>ACTIONS</span>
         </div>
         <div style={{flex:1,minHeight:0,overflow:'auto'}}>
-          {ENROLLMENTS.map((en,i)=>{
+          {sorted.map((en,i)=>{
             const [token,hint,exp,by,status] = en;
             const sc = status==='active'?C.ok: status==='expiring'?C.warn: C.fgMute;
             return (
@@ -1997,7 +2190,7 @@ function AdminEnrollments({ C, D, onNew }) {
             );
           })}
         </div>
-        <PageFooter C={C} count={ENROLLMENTS.length} total={ENROLLMENTS.length} endpoint="/v1/agent-enrollments (active only)"/>
+        <PageFooter C={C} count={ENROLLMENTS.length} total={ENROLLMENTS.length} endpoint="/v1/agent-enrollments (active only)" sort={sort}/>
       </div>
 
       <div style={{fontFamily:C.mono,fontSize:10,color:C.fgDim,letterSpacing:'0.04em',lineHeight:1.7}}>
@@ -2010,11 +2203,31 @@ function AdminEnrollments({ C, D, onNew }) {
 }
 
 function AdminReservations({ C, D }) {
+  const [sort, setSort] = useState('-created_at');
+  // row: [name,proj,wids,sel,starts,ends] — starts/ends nullable ('—')
+  const RES_SORT = [
+    { value:'-created_at', label:'Newest' },
+    { value:'created_at',  label:'Oldest' },
+    { value:'name',        label:'Name A→Z' },
+    { value:'-name',       label:'Name Z→A' },
+    { value:'starts_at',   label:'Starts soonest' },
+    { value:'-starts_at',  label:'Starts latest' },
+    { value:'ends_at',     label:'Ends soonest' },
+    { value:'-ends_at',    label:'Ends latest' },
+  ];
+  const resKeyMap = {
+    created_at: (r,i) => -i,
+    name:       (r) => r[0].toLowerCase(),
+    starts_at:  (r) => dateToNum(r[4]),   // '—' → null (NULLS LAST/FIRST)
+    ends_at:    (r) => dateToNum(r[5]),
+  };
+  const sorted = applySort(RESERVATIONS, sort, resKeyMap);
   return (
     <>
       <div style={{display:'flex',gap:10,alignItems:'center'}}>
         <span style={{fontSize:13,color:C.fgMute,fontFamily:C.mono,letterSpacing:'0.06em'}}>GET /v1/reservations · admin-only</span>
         <span style={{marginLeft:'auto'}}/>
+        <SortControl C={C} options={RES_SORT} value={sort} onChange={setSort}/>
         <button style={pillBtn(C,'primary')}>+ Reserve workers</button>
       </div>
 
@@ -2025,7 +2238,7 @@ function AdminReservations({ C, D }) {
           <span>NAME</span><span>PROJECT</span><span>WORKER IDS</span><span>SELECTOR</span><span>STARTS</span><span>ENDS</span><span style={{textAlign:'right'}}>ACT.</span>
         </div>
         <div style={{flex:1,minHeight:0,overflow:'auto'}}>
-          {RESERVATIONS.map((r,i)=>{
+          {sorted.map((r,i)=>{
             const [name,proj,wids,sel,starts,ends] = r;
             return (
               <div key={name} style={{
@@ -2054,7 +2267,7 @@ function AdminReservations({ C, D }) {
             );
           })}
         </div>
-        <PageFooter C={C} count={RESERVATIONS.length} total={RESERVATIONS.length} endpoint="/v1/reservations"/>
+        <PageFooter C={C} count={RESERVATIONS.length} total={RESERVATIONS.length} endpoint="/v1/reservations" sort={sort}/>
       </div>
 
       <div style={{fontFamily:C.mono,fontSize:10,color:C.fgDim,letterSpacing:'0.04em',lineHeight:1.7}}>
@@ -2186,12 +2399,12 @@ function AdminTokenModal({ C, kind, onClose }) {
   );
 }
 
-function PageFooter({ C, count, total, endpoint }) {
+function PageFooter({ C, count, total, endpoint, sort }) {
   return (
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',
       padding:'10px 18px',borderTop:`1px solid ${C.border}`,
       fontFamily:C.mono,fontSize:10.5,letterSpacing:'0.08em',color:C.fgMute}}>
-      <span>SHOWING <span style={{color:C.fg}}>1–{count}</span> OF <span style={{color:C.fg}}>{total}</span> · <span style={{color:C.fgMute}}>{endpoint}</span> · CURSOR PAGINATED</span>
+      <span>SHOWING <span style={{color:C.fg}}>1–{count}</span> OF <span style={{color:C.fg}}>{total}</span> · <span style={{color:C.fgMute}}>{endpoint}</span>{sort && <> · SORT <span style={{color:C.accentB}}>{sort}</span></>} · CURSOR PAGINATED</span>
       <div style={{display:'flex',gap:6}}>
         <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11,opacity:0.5}}>← prev</button>
         <button style={{...pillBtn(C,'ghost'),padding:'4px 12px',fontSize:11}}>size: 50</button>
