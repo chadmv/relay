@@ -3,9 +3,10 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypeVar, Union, cast
 
 import httpx
+from pydantic import BaseModel
 
 from .config import Config, resolve_config
 from .errors import (
@@ -18,18 +19,25 @@ from .errors import (
 )
 from .events import parse_sse_stream
 from .models import (
+    AgentEnrollment,
     Event,
     Job,
     JobStatus,
     LogRecord,
     OverlapPolicy,
+    Page,
+    Reservation,
     ScheduledJob,
     Task,
+    User,
+    Worker,
 )
 
 _TERMINAL_JOB_STATUSES = frozenset(
     {JobStatus.DONE.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
 )
+
+M = TypeVar("M", bound=BaseModel)
 
 
 class Client:
@@ -41,6 +49,10 @@ class Client:
     Windows). If no token is found, methods that require authentication
     raise :class:`AuthError` with a hint pointing at ``relay login``.
     """
+
+    # Per-request page size used when auto-paginating. Matches the server's
+    # max limit and relayclient.PageRequestLimit so we minimize round-trips.
+    _PAGE_REQUEST_LIMIT = 200
 
     def __init__(
         self,
@@ -93,6 +105,70 @@ class Client:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    # ─── Pagination helpers ───────────────────────────────────────────────
+
+    def _get_page(
+        self,
+        path: str,
+        model: type[M],
+        *,
+        params: Optional[dict[str, str]] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[M]:
+        """Fetch a single page envelope and validate each item into ``model``."""
+        self._require_token()
+        p: dict[str, str] = dict(params or {})
+        if sort is not None:
+            p["sort"] = sort
+        if limit is not None:
+            p["limit"] = str(limit)
+        if cursor is not None:
+            p["cursor"] = cursor
+        response = self._http.get(path, params=p)
+        raise_for_response(response)
+        body = response.json()
+        items = [model.model_validate(item) for item in body["items"]]
+        return cast(
+            "Page[M]",
+            Page(items=items, next_cursor=body.get("next_cursor", ""), total=body.get("total", 0)),
+        )
+
+    def _fetch_all(
+        self,
+        path: str,
+        model: type[M],
+        *,
+        params: Optional[dict[str, str]] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[M]:
+        """Walk ?cursor= until next_cursor is empty, or ``limit`` rows collected.
+
+        ``limit`` caps the TOTAL rows returned across pages (None = all). Each
+        request fetches ``_PAGE_REQUEST_LIMIT`` rows.
+        """
+        self._require_token()
+        p: dict[str, str] = dict(params or {})
+        if sort is not None:
+            p["sort"] = sort
+        p["limit"] = str(self._PAGE_REQUEST_LIMIT)
+        out: list[M] = []
+        cursor: Optional[str] = None
+        while True:
+            if cursor:
+                p["cursor"] = cursor
+            response = self._http.get(path, params=p)
+            raise_for_response(response)
+            body = response.json()
+            out.extend(model.model_validate(item) for item in body["items"])
+            if limit is not None and len(out) >= limit:
+                return out[:limit]
+            cursor = body.get("next_cursor", "")
+            if not cursor:
+                return out
+
     # ─── Jobs ─────────────────────────────────────────────────────────────
 
     def submit(self, job: Job) -> Job:
@@ -116,16 +192,51 @@ class Client:
         *,
         status: Optional[Union[str, JobStatus]] = None,
         scheduled_job_id: Optional[str] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> list[Job]:
-        self._require_token()
+        """List jobs, auto-paginating across all pages.
+
+        ``limit`` caps the TOTAL number of jobs returned (None = all).
+        ``sort`` is forwarded to ?sort= and validated server-side; an
+        unknown key raises :class:`ValidationError`.
+        """
+        return self._fetch_all(
+            "/v1/jobs", Job,
+            params=self._job_filters(status, scheduled_job_id), sort=sort, limit=limit,
+        )
+
+    def list_jobs_page(
+        self,
+        *,
+        status: Optional[Union[str, JobStatus]] = None,
+        scheduled_job_id: Optional[str] = None,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Job]:
+        """Fetch a single page of jobs.
+
+        ``limit`` is the PAGE SIZE (1-200). Use the returned ``next_cursor``
+        as ``cursor=`` to page forward.
+        """
+        return self._get_page(
+            "/v1/jobs", Job,
+            params=self._job_filters(status, scheduled_job_id),
+            sort=sort, limit=limit, cursor=cursor,
+        )
+
+    @staticmethod
+    def _job_filters(
+        status: Optional[Union[str, JobStatus]],
+        scheduled_job_id: Optional[str],
+    ) -> dict[str, str]:
         params: dict[str, str] = {}
         if status is not None:
             params["status"] = status.value if isinstance(status, JobStatus) else status
         if scheduled_job_id is not None:
             params["scheduled_job_id"] = scheduled_job_id
-        response = self._http.get("/v1/jobs", params=params)
-        raise_for_response(response)
-        return [Job.model_validate(item) for item in response.json()]
+        return params
 
     def cancel_job(self, job_id: str, *, force: bool = False) -> Job:
         self._require_token()
@@ -241,11 +352,30 @@ class Client:
         raise_for_response(response)
         return ScheduledJob.model_validate(response.json())
 
-    def list_schedules(self) -> list[ScheduledJob]:
-        self._require_token()
-        response = self._http.get("/v1/scheduled-jobs")
-        raise_for_response(response)
-        return [ScheduledJob.model_validate(item) for item in response.json()]
+    def list_schedules(
+        self,
+        *,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[ScheduledJob]:
+        """List scheduled jobs, auto-paginating across all pages.
+
+        ``limit`` caps the TOTAL rows returned (None = all). ``sort`` is
+        validated server-side; an unknown key raises :class:`ValidationError`.
+        """
+        return self._fetch_all("/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit)
+
+    def list_schedules_page(
+        self,
+        *,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[ScheduledJob]:
+        """Fetch a single page of scheduled jobs. ``limit`` is the page size (1-200)."""
+        return self._get_page(
+            "/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit, cursor=cursor
+        )
 
     def get_schedule(self, schedule_id: str) -> ScheduledJob:
         self._require_token()
@@ -303,3 +433,67 @@ class Client:
         response = self._http.post(f"/v1/scheduled-jobs/{schedule_id}/run-now")
         raise_for_response(response)
         return Job.model_validate(response.json())
+
+    # ─── Workers ──────────────────────────────────────────────────────────
+
+    def list_workers(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[Worker]:
+        """List workers, auto-paginating across all pages. ``limit`` caps total rows."""
+        return self._fetch_all("/v1/workers", Worker, sort=sort, limit=limit)
+
+    def list_workers_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Worker]:
+        """Fetch a single page of workers. ``limit`` is the page size (1-200)."""
+        return self._get_page("/v1/workers", Worker, sort=sort, limit=limit, cursor=cursor)
+
+    # ─── Users (admin-only) ───────────────────────────────────────────────
+
+    def list_users(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[User]:
+        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError."""
+        return self._fetch_all("/v1/users", User, sort=sort, limit=limit)
+
+    def list_users_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[User]:
+        """Fetch a single page of users (admin-only). ``limit`` is the page size (1-200)."""
+        return self._get_page("/v1/users", User, sort=sort, limit=limit, cursor=cursor)
+
+    # ─── Reservations (admin-only) ────────────────────────────────────────
+
+    def list_reservations(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[Reservation]:
+        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError."""
+        return self._fetch_all("/v1/reservations", Reservation, sort=sort, limit=limit)
+
+    def list_reservations_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[Reservation]:
+        """Fetch a single page of reservations (admin-only). ``limit`` is the page size (1-200)."""
+        return self._get_page(
+            "/v1/reservations", Reservation, sort=sort, limit=limit, cursor=cursor
+        )
+
+    # ─── Agent enrollments (admin-only) ───────────────────────────────────
+
+    def list_agent_enrollments(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None
+    ) -> list[AgentEnrollment]:
+        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError."""
+        return self._fetch_all("/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit)
+
+    def list_agent_enrollments_page(
+        self, *, sort: Optional[str] = None, limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[AgentEnrollment]:
+        """Fetch a single page of agent enrollments (admin-only). ``limit`` is the page size (1-200)."""
+        return self._get_page(
+            "/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit, cursor=cursor
+        )
