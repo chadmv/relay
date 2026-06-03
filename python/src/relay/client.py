@@ -476,7 +476,7 @@ class Client:
         self, *, sort: Optional[str] = None, limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> Page[Reservation]:
-        """Fetch a single page of reservations (admin-only). ``limit`` is the page size."""
+        """Fetch a single page of reservations (admin-only). ``limit`` is the page size (1-200)."""
         return self._get_page(
             "/v1/reservations", Reservation, sort=sort, limit=limit, cursor=cursor
         )
@@ -493,7 +493,7 @@ class Client:
         self, *, sort: Optional[str] = None, limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> Page[AgentEnrollment]:
-        """Fetch a single page of agent enrollments (admin-only). ``limit`` is the page size."""
+        """Fetch a single page of agent enrollments (admin-only). ``limit`` is the page size (1-200)."""
         return self._get_page(
             "/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit, cursor=cursor
         )
