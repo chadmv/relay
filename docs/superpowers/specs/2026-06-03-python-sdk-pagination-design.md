@@ -238,6 +238,8 @@ class User(BaseModel):
 - `python/src/relay/__init__.py` — export new symbols.
 - `python/tests/unit/test_client.py` — fix the three tests that mock bare `json=[]`; add pagination tests (below).
 - `python/tests/unit/test_models.py` — add validation tests for `Page[T]` and the four new models.
+- `python/pyproject.toml` — bump `version` `0.1.1` → `0.1.2`.
+- `python/src/relay/_version.py` — bump `__version__` `0.1.0` → `0.1.2`. (These two are currently out of sync — `pyproject.toml` is at `0.1.1`, `_version.py` at `0.1.0`; this re-aligns both to `0.1.2`.)
 - `docs/backlog/bug-2026-05-26-python-sdk-list-pagination-envelope.md` — `git mv` to `docs/backlog/closed/`.
 
 ## Test plan
@@ -266,6 +268,7 @@ class User(BaseModel):
 - Every list method accepts `sort`, passed through and validated server-side (`ValidationError` on bad key).
 - `Worker`, `User`, `Reservation`, `AgentEnrollment`, `Page` are importable from `relay`.
 - `make test` (unit) green; new unit tests cover envelope parsing, multi-page walk, `limit`, `sort`, and each new model.
+- `python/pyproject.toml` and `python/src/relay/_version.py` both read `0.1.2` (re-aligned from `0.1.1`/`0.1.0`).
 - Backlog item moved to `docs/backlog/closed/` on the same branch.
 
 ## Rollout
