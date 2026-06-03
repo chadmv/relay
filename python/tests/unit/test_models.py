@@ -249,3 +249,97 @@ def test_full_response_round_trip() -> None:
     assert job.tasks[0].name == "t"
     assert job.tasks[0].worker_id == "44444444-4444-4444-4444-444444444444"
     assert job.status == JobStatus.RUNNING
+
+
+from relay import AgentEnrollment, Page, Reservation, User, Worker
+from relay.models import Job
+
+
+def test_page_validates_items_as_job_model() -> None:
+    page = Page[Job].model_validate(
+        {
+            "items": [{"name": "j", "id": "j1", "status": "pending"}],
+            "next_cursor": "c1",
+            "total": 5,
+        }
+    )
+    assert isinstance(page.items[0], Job)
+    assert page.items[0].id == "j1"
+    assert page.next_cursor == "c1"
+    assert page.total == 5
+
+
+def test_page_defaults_empty_cursor_and_zero_total() -> None:
+    page = Page[Job].model_validate({"items": []})
+    assert page.items == []
+    assert page.next_cursor == ""
+    assert page.total == 0
+
+
+def test_worker_parses_and_ignores_unknown_field() -> None:
+    w = Worker.model_validate(
+        {
+            "id": "w1",
+            "name": "worker-a",
+            "hostname": "host-a",
+            "cpu_cores": 8,
+            "ram_gb": 32,
+            "gpu_count": 1,
+            "gpu_model": "RTX",
+            "os": "linux",
+            "max_slots": 4,
+            "labels": {"zone": "us"},
+            "status": "online",
+            "last_seen_at": "2026-06-03T12:00:00Z",
+            "future_field": "ignored",
+        }
+    )
+    assert w.name == "worker-a"
+    assert w.cpu_cores == 8
+    assert w.labels == {"zone": "us"}
+    assert w.disabled_at is None
+
+
+def test_reservation_parses_worker_ids_and_optional_times() -> None:
+    r = Reservation.model_validate(
+        {
+            "id": "r1",
+            "name": "res-a",
+            "selector": {"gpu": "true"},
+            "worker_ids": ["w1", "w2"],
+            "user_id": "u1",
+            "project": "proj",
+            "ends_at": "2026-06-04T00:00:00Z",
+            "created_at": "2026-06-03T12:00:00Z",
+        }
+    )
+    assert r.worker_ids == ["w1", "w2"]
+    assert r.starts_at is None
+    assert r.ends_at is not None
+
+
+def test_user_and_agent_enrollment_parse() -> None:
+    u = User.model_validate(
+        {
+            "id": "u1",
+            "email": "a@example.com",
+            "name": "Alice",
+            "is_admin": True,
+            "created_at": "2026-06-03T12:00:00Z",
+            "archived_at": None,
+        }
+    )
+    assert u.is_admin is True
+    assert u.archived_at is None
+
+    e = AgentEnrollment.model_validate(
+        {
+            "id": "e1",
+            "created_at": "2026-06-03T12:00:00Z",
+            "expires_at": "2026-06-04T12:00:00Z",
+            "created_by": "u1",
+            "hostname_hint": "host-x",
+        }
+    )
+    assert e.created_by == "u1"
+    assert e.hostname_hint == "host-x"
