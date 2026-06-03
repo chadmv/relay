@@ -348,11 +348,30 @@ class Client:
         raise_for_response(response)
         return ScheduledJob.model_validate(response.json())
 
-    def list_schedules(self) -> list[ScheduledJob]:
-        self._require_token()
-        response = self._http.get("/v1/scheduled-jobs")
-        raise_for_response(response)
-        return [ScheduledJob.model_validate(item) for item in response.json()]
+    def list_schedules(
+        self,
+        *,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> list[ScheduledJob]:
+        """List scheduled jobs, auto-paginating across all pages.
+
+        ``limit`` caps the TOTAL rows returned (None = all). ``sort`` is
+        validated server-side; an unknown key raises :class:`ValidationError`.
+        """
+        return self._fetch_all("/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit)
+
+    def list_schedules_page(
+        self,
+        *,
+        sort: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> Page[ScheduledJob]:
+        """Fetch a single page of scheduled jobs. ``limit`` is the page size (1-200)."""
+        return self._get_page(
+            "/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit, cursor=cursor
+        )
 
     def get_schedule(self, schedule_id: str) -> ScheduledJob:
         self._require_token()

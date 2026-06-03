@@ -351,3 +351,41 @@ def test_list_jobs_bad_sort_raises_validation_error() -> None:
     client = _make_client(handler)
     with pytest.raises(ValidationError, match="unsupported sort key"):
         client.list_jobs(sort="bogus")
+
+
+def _schedule_response(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": "55555555-5555-5555-5555-555555555555",
+        "name": "hourly",
+        "owner_id": "22222222-2222-2222-2222-222222222222",
+        "cron_expr": "@hourly",
+        "timezone": "UTC",
+        "job_spec": {"name": "j", "tasks": []},
+        "overlap_policy": "skip",
+        "enabled": True,
+        "next_run_at": "2026-06-03T13:00:00Z",
+        "created_at": "2026-06-03T12:00:00Z",
+        "updated_at": "2026-06-03T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_list_schedules_parses_envelope_items() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([_schedule_response(id="s1")], total=1))
+
+    client = _make_client(handler)
+    scheds = client.list_schedules()
+    assert [s.id for s in scheds] == ["s1"]
+
+
+def test_list_schedules_page_returns_envelope() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page_response([_schedule_response(id="s1")], next_cursor="c2", total=3))
+
+    client = _make_client(handler)
+    page = client.list_schedules_page(sort="name")
+    assert [s.id for s in page.items] == ["s1"]
+    assert page.next_cursor == "c2"
+    assert page.total == 3
