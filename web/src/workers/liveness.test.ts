@@ -53,10 +53,10 @@ function worker(over: Partial<Worker>): Worker {
 }
 
 describe('specLine', () => {
-  test('shows the GPU model when the worker has a GPU', () => {
-    expect(specLine(worker({ gpu_count: 1, gpu_model: 'RTX 4090' }))).toBe('RTX 4090')
+  test('appends the GPU model after cpu/ram when the worker has a GPU', () => {
+    expect(specLine(worker({ gpu_count: 1, gpu_model: 'RTX 4090', cpu_cores: 16, ram_gb: 128 }))).toBe('16c · 128GB · RTX 4090')
   })
-  test('falls back to cpu/ram when there is no GPU', () => {
+  test('shows cpu/ram only when there is no GPU', () => {
     expect(specLine(worker({ gpu_count: 0, cpu_cores: 16, ram_gb: 128 }))).toBe('16c · 128GB')
   })
 })

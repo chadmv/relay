@@ -16,7 +16,7 @@ test('renders a card with name, status, spec, slots, and label chip', () => {
   render(<WorkersGrid workers={[worker({})]} />)
   expect(screen.getByText('render-01')).toBeInTheDocument()
   expect(screen.getByText('ONLINE')).toBeInTheDocument()
-  expect(screen.getByText('RTX 4090')).toBeInTheDocument()
+  expect(screen.getByText('16c · 128GB · RTX 4090')).toBeInTheDocument()
   expect(screen.getByText('4 slots')).toBeInTheDocument()
   expect(screen.getByText('pool=render')).toBeInTheDocument()
 })

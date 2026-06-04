@@ -210,7 +210,7 @@ token-store choke-point pattern, so the choice survives reloads.
 ### Grid view (`WorkersGrid`)
 
 One glass-panel card per worker: name + status dot/label, hardware spec line
-(`gpu_model`, else cpu/ram), `max_slots` as capacity, label chips, and a "last
+(cpu/ram, with `gpu_model` appended when present), `max_slots` as capacity, label chips, and a "last
 seen Xs ago" footer. Disabled/offline cards are dimmed per the liveness map. No
 sparklines, no used/running cells. Non-interactive.
 

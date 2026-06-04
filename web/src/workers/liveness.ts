@@ -33,7 +33,8 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
 }
 
 export function specLine(w: Worker): string {
-  return w.gpu_count > 0 && w.gpu_model ? w.gpu_model : `${w.cpu_cores}c · ${w.ram_gb}GB`
+  const base = `${w.cpu_cores}c · ${w.ram_gb}GB`
+  return w.gpu_count > 0 && w.gpu_model ? `${base} · ${w.gpu_model}` : base
 }
 
 export function labelChips(labels: Record<string, string> | null): string[] {
