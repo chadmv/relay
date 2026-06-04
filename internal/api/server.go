@@ -35,6 +35,10 @@ type Server struct {
 	// Metrics, when non-nil, supplies worker utilization history. Set by
 	// cmd/relay-server after construction.
 	Metrics *metrics.Store
+
+	// StaticHandler, when non-nil, serves the embedded web UI for any path not
+	// matched by a /v1 API route. Set by cmd/relay-server from package webui.
+	StaticHandler http.Handler
 }
 
 // New creates a Server.
@@ -149,6 +153,10 @@ func (s *Server) Handler() http.Handler {
 
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
+
+	if s.StaticHandler != nil {
+		mux.Handle("/", s.StaticHandler)
+	}
 
 	return CORS(s.CORSOrigins)(mux)
 }
