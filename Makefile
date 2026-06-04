@@ -1,7 +1,19 @@
-.PHONY: build test test-integration generate clean python-test python-test-integration python-lint
+.PHONY: build test test-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev
 
-# Build all binaries into bin/
-build:
+# Install web dependencies
+web-install:
+	cd web && npm ci
+
+# Build the web UI into web/dist (embedded by relay-server)
+web-build:
+	cd web && npm run build
+
+# Run the Vite dev server (proxies /v1 to :8080)
+web-dev:
+	cd web && npm run dev
+
+# Build all binaries into bin/ (web UI is embedded into relay-server)
+build: web-build
 	go build -o bin/relay-server ./cmd/relay-server
 	go build -o bin/relay-agent  ./cmd/relay-agent
 	go build -o bin/relay        ./cmd/relay
