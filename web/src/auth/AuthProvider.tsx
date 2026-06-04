@@ -45,7 +45,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function applyAuth(res: LoginResponse) {
     setToken(res.token)
-    setUser(res.user)
+    const me = await apiFetch<User>('/users/me')
+    setUser(me)
     setStatus('authenticated')
   }
 

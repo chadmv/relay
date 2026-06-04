@@ -32,7 +32,7 @@ test('redirects anonymous users to /auth', async () => {
 test('renders the protected route when authenticated', async () => {
   server.use(
     http.get('/v1/users/me', () =>
-      HttpResponse.json({ id: '1', email: 'a@b.co', name: 'A', role: 'user' }),
+      HttpResponse.json({ id: '1', email: 'a@b.co', name: 'A', is_admin: false }),
     ),
   )
   setToken('tok')

@@ -2,13 +2,12 @@ export interface User {
   id: string
   email: string
   name: string
-  role: string
+  is_admin: boolean
 }
 
 export interface LoginResponse {
   token: string
-  expires: string
-  user: User
+  expires_at: string
 }
 
 export interface ConfigResponse {

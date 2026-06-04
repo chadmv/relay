@@ -8,7 +8,7 @@ import { AuthProvider, useAuth } from './AuthProvider'
 
 afterEach(() => clearToken())
 
-const ME = { id: '1', email: 'ada@studio.dev', name: 'Ada', role: 'user' }
+const ME = { id: '1', email: 'ada@studio.dev', name: 'Ada', is_admin: false }
 
 function Probe() {
   const { status, user, login, logout } = useAuth()
@@ -47,8 +47,9 @@ test('hydrates the user from an existing token', async () => {
 test('login stores the token and sets the user', async () => {
   server.use(
     http.post('/v1/auth/login', () =>
-      HttpResponse.json({ token: 'tok_new', expires: '', user: ME }),
+      HttpResponse.json({ token: 'tok_new', expires_at: '' }),
     ),
+    http.get('/v1/users/me', () => HttpResponse.json(ME)),
   )
   renderProbe()
   await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
