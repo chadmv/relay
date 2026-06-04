@@ -24,7 +24,7 @@ slice](2026-06-03-web-frontend-foundation-auth-design.md) and reuses its
 | Slice scope | Workers **list page only**; worker detail page deferred to its own slice |
 | Telemetry depth | **List-endpoint data only** - no per-worker `/metrics` fanout, no sparklines |
 | Layouts | **Both** grid and table, with a segmented toggle |
-| Pagination | **First page only**, polled every ~3s; no prev/next UI |
+| Pagination | **First page only** (50 workers), polled every ~3s; no prev/next UI |
 | Sorting | **Server-side**, driven by clickable table column headers |
 | Data layer shape | **Feature module** (`web/src/workers/`) - the template later pages copy |
 | Query library | `@tanstack/react-query` v5 |
@@ -43,6 +43,8 @@ Grounded against `internal/api/workers.go` and `internal/metrics/sweep.go`
   `last_sample_at`, `disabled_at`.
 - **Sort** is server-side via `?sort=`, supporting `created_at` (default
   `-created_at`), `name`, `status`, `last_seen_at` (each asc/desc).
+- **Page size** defaults to 50 (`?limit=`, range [1, 200]) per
+  `internal/api/pagination.go`.
 - **Status taxonomy is `online` / `stale` / `offline`**, with **`disabled`**
   overlaid by the API whenever `disabled_at` is set. There is **no `busy`/`idle`**
   - the prototype's six-state model assumed running-task counts the list
@@ -142,14 +144,16 @@ export type WorkerSort =
   | 'last_seen_at' | '-last_seen_at'
 
 export function listWorkers(sort: WorkerSort): Promise<WorkersPage> {
-  const q = new URLSearchParams({ sort })
+  const q = new URLSearchParams({ sort, limit: '50' })
   return apiFetch<WorkersPage>(`/workers?${q}`)
 }
 ```
 
 Types are hand-written to match `workerResponse` exactly (no codegen; verified
-against `internal/api/workers.go`). First page only - no `cursor` param and the
-endpoint's default limit.
+against `internal/api/workers.go`). First page only - no `cursor` param. The
+page size is passed **explicitly** as `limit=50` (the server default) rather
+than relying on the server default, so the client's page size is
+self-documenting and decoupled from any future server-side change.
 
 ### `useWorkers.ts`
 
