@@ -72,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Public endpoints
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
+	mux.HandleFunc("GET /v1/config", s.handleConfig)
 
 	registerH := http.HandlerFunc(s.handleRegister)
 	if s.RegisterLimitN > 0 && s.RegisterLimitWin > 0 {
