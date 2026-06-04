@@ -29,7 +29,7 @@ export function WorkersGrid({ workers }: { workers: Worker[] }) {
           )}
           <div className="mt-2 flex justify-between border-t border-border pt-2 font-mono text-[10px] text-fg-mute">
             <span>{specLine(w)}</span>
-            <span>{w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '—'}</span>
+            <span>{w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}</span>
           </div>
         </div>
       ))}
