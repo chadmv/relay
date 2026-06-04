@@ -105,10 +105,7 @@ export function RegisterScreen() {
 
         {emailExists && (
           <div className="mb-3 text-[12px] text-err">
-            That email is already registered.{' '}
-            <Link to="/auth" className="text-accent">
-              Sign in
-            </Link>
+            That email is already registered.
           </div>
         )}
 
@@ -119,7 +116,7 @@ export function RegisterScreen() {
         <div className="mt-4 text-center text-[11px] text-fg-mute">
           Already have an account?{' '}
           <Link to="/auth" className="text-accent">
-            Log in
+            Sign in
           </Link>
         </div>
       </form>
