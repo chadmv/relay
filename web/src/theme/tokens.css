@@ -1,0 +1,30 @@
+@import "tailwindcss";
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+@theme {
+  --color-bg: #050410;
+  --color-fg: #ede9fe;
+  --color-fg-mute: rgba(237, 233, 254, 0.55);
+  --color-fg-dim: rgba(237, 233, 254, 0.35);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-err: #fb7185;
+  --color-accent: #3dd0f7;
+  --color-accent-b: #6fe0fa;
+
+  --font-sans: "Space Grotesk Variable", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  --radius-card: 14px;
+  --radius-input: 8px;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}

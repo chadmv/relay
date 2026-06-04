@@ -21,6 +21,7 @@ import (
 	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/worker"
+	webui "relay/web"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -153,6 +154,7 @@ func main() {
 
 	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
 	httpServer.Metrics = metricsStore
+	httpServer.StaticHandler = webui.Handler()
 
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
