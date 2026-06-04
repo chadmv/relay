@@ -1,0 +1,86 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { apiFetch } from '../lib/api'
+import { clearToken, getToken, setToken } from '../lib/token'
+import type { LoginResponse, User } from '../lib/types'
+
+type Status = 'loading' | 'authenticated' | 'anonymous'
+
+interface RegisterInput {
+  email: string
+  name: string
+  password: string
+  invite_token?: string
+}
+
+interface AuthContextValue {
+  status: Status
+  user: User | null
+  login: (email: string, password: string) => Promise<void>
+  register: (input: RegisterInput) => Promise<void>
+  logout: () => Promise<void>
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null)
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [status, setStatus] = useState<Status>('loading')
+  const [user, setUser] = useState<User | null>(null)
+
+  useEffect(() => {
+    if (!getToken()) {
+      setStatus('anonymous')
+      return
+    }
+    apiFetch<User>('/users/me')
+      .then((u) => {
+        setUser(u)
+        setStatus('authenticated')
+      })
+      .catch(() => {
+        clearToken()
+        setUser(null)
+        setStatus('anonymous')
+      })
+  }, [])
+
+  async function applyAuth(res: LoginResponse) {
+    setToken(res.token)
+    setUser(res.user)
+    setStatus('authenticated')
+  }
+
+  async function login(email: string, password: string) {
+    const res = await apiFetch<LoginResponse>('/auth/login', {
+      method: 'POST',
+      json: { email, password },
+    })
+    await applyAuth(res)
+  }
+
+  async function register(input: RegisterInput) {
+    const res = await apiFetch<LoginResponse>('/auth/register', {
+      method: 'POST',
+      json: input,
+    })
+    await applyAuth(res)
+  }
+
+  async function logout() {
+    await apiFetch('/auth/token', { method: 'DELETE' }).catch(() => {})
+    clearToken()
+    setUser(null)
+    setStatus('anonymous')
+  }
+
+  return (
+    <AuthContext.Provider value={{ status, user, login, register, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext)
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider')
+  return ctx
+}
