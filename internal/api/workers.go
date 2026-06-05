@@ -84,17 +84,17 @@ type workerStatsResponse struct {
 }
 
 func (s *Server) handleWorkerStats(w http.ResponseWriter, r *http.Request) {
-	c, err := s.q.WorkerStatusCounts(r.Context())
+	counts, err := s.q.WorkerStatusCounts(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "worker stats failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, workerStatsResponse{
-		Online:   c.Online,
-		Stale:    c.Stale,
-		Offline:  c.Offline,
-		Disabled: c.Disabled,
-		Total:    c.Online + c.Stale + c.Offline + c.Disabled,
+		Online:   counts.Online,
+		Stale:    counts.Stale,
+		Offline:  counts.Offline,
+		Disabled: counts.Disabled,
+		Total:    counts.Online + counts.Stale + counts.Offline + counts.Disabled,
 	})
 }
 
