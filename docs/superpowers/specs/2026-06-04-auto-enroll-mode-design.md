@@ -151,6 +151,22 @@ The server logs each auto-enroll event: worker id, hostname, and the connection
 `RemoteAddr`. Cheap, and valuable because - unlike token enrollment - there is
 no per-agent enrollment record for these joins.
 
+## Documentation (`README.md`)
+
+The README must be updated **after** the code changes, in the same change set:
+
+- **Server env vars** (the server configuration list, ~line 264): document
+  `RELAY_ALLOW_AUTO_ENROLL` - default `false`, what it does, and a note that it
+  is intended only for trusted private networks.
+- **Agent env vars table** (~line 352): note that when auto-enroll is enabled
+  server-side, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN`
+  will join token-lessly rather than exiting with an error.
+- **Quickstart "Enroll and start one or more agents"** (~line 189): add a short
+  note that on a trusted network with `RELAY_ALLOW_AUTO_ENROLL=true` the agent
+  can be started with no token at all, skipping the `relay agent enroll` step.
+- **Revocation behavior** (~line 342-349): note that a `revoked` worker is *not*
+  revived by auto-enroll; it stays revoked until an admin clears it.
+
 ## Testing (integration, `internal/worker/handler_auth_test.go`)
 
 - Auto-enroll **disabled** + unset credential -> rejected with the specific
