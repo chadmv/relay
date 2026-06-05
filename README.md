@@ -197,6 +197,8 @@ Before a new agent can connect, an admin must issue it a one-time enrollment tok
 
 Set that token as an environment variable before starting the agent for the first time. After enrollment the agent persists a long-lived token in `--state-dir` and the env var is no longer needed.
 
+On a trusted private network you can instead run the server with `RELAY_ALLOW_AUTO_ENROLL=true` and start the agent with no token at all - skip the `relay agent enroll` step entirely. The agent receives and persists a long-lived token on its first connection, exactly as with token enrollment.
+
 **Linux / macOS**
 
 ```sh
@@ -278,6 +280,7 @@ All configuration is via environment variables:
 | `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
 | `RELAY_ALLOW_SELF_REGISTER` | _(unset)_ | When `true`, `POST /v1/auth/register` accepts requests without an `invite_token` and creates a non-admin user directly. Default off; requires server restart to change. |
+| `RELAY_ALLOW_AUTO_ENROLL` | `false` | When `true`, agents may register with no enrollment token (token-less auto-enrollment). Intended only for trusted private networks where any host able to reach gRPC is trusted. A long-lived agent token is still issued on join and used for all later reconnects. Revoked workers are not revived. |
 
 **Linux / macOS**
 
@@ -341,6 +344,8 @@ The agent writes two files to `--state-dir`:
 
 On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error.
 
+When the server runs with `RELAY_ALLOW_AUTO_ENROLL=true`, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN` attempts token-less auto-enrollment instead of exiting. If the server does not allow it, the agent exits with an authentication error.
+
 **Disable vs revoke.** *Disabling* a worker (`relay workers disable`) takes it
 out of the scheduler's rotation while keeping its token and connection, so it
 can be re-enabled instantly with `relay workers enable`. *Revoking* a worker
@@ -348,6 +353,12 @@ can be re-enabled instantly with `relay workers enable`. *Revoking* a worker
 before it can rejoin. The two are independent: a worker can be both disabled and
 revoked, and re-enrollment clears the revoked state but leaves a disabled worker
 disabled.
+
+Token-less auto-enrollment is the exception to that rule: whereas a deliberate
+token re-enrollment (with a fresh admin-issued enrollment token) clears the
+revoked state, auto-enrollment under `RELAY_ALLOW_AUTO_ENROLL` does not revive a
+revoked worker - it stays revoked until an admin clears or deletes it. (Because
+identity is keyed by hostname, a renamed host can still rejoin as a new worker.)
 
 ### Environment variables
 

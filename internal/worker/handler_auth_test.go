@@ -361,6 +361,154 @@ func TestConnect_ExpiredEnrollmentRejected(t *testing.T) {
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
 }
 
+func TestConnect_AutoEnrollIssuesAgentToken(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "auto-enroll-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+				// No credential field — token-less.
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	msg := stream.RecvFromServer(t, 5*time.Second)
+	resp := msg.GetRegisterResponse()
+	require.NotNil(t, resp)
+	assert.NotEmpty(t, resp.WorkerId)
+	assert.NotEmpty(t, resp.AgentToken)
+
+	stream.CloseSend()
+	<-done
+}
+
+func TestConnect_AutoEnrollDisabledRejectsNoCredential(t *testing.T) {
+	fx := newWorkerTestFixture(t) // AllowAutoEnroll defaults to false
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "disabled-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	err := <-done
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
+
+func TestConnect_AutoEnrollRefusesRevokedWorker(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+
+	// First: auto-enroll a worker.
+	stream1 := newMockConnectStream(t)
+	stream1.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "revoked-auto-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+			},
+		},
+	})
+	done1 := make(chan error, 1)
+	go func() { done1 <- fx.Handler.Connect(stream1) }()
+	resp1 := stream1.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp1)
+	workerIDStr := resp1.WorkerId
+	stream1.CloseSend()
+	<-done1
+
+	// Revoke it.
+	var wID pgtype.UUID
+	require.NoError(t, wID.Scan(workerIDStr))
+	_, err := fx.Q.ClearWorkerAgentToken(ctx, wID)
+	require.NoError(t, err)
+
+	// Second: token-less auto-enroll of the same hostname must be rejected.
+	stream2 := newMockConnectStream(t)
+	stream2.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "revoked-auto-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+			},
+		},
+	})
+	done2 := make(chan error, 1)
+	go func() { done2 <- fx.Handler.Connect(stream2) }()
+
+	err2 := <-done2
+	require.Error(t, err2)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err2))
+
+	// Worker remains revoked.
+	w, err := fx.Q.GetWorkerByHostname(ctx, "revoked-auto-host")
+	require.NoError(t, err)
+	assert.Equal(t, "revoked", w.Status)
+}
+
+func TestConnect_AutoEnrollRotatesTokenForExistingHost(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+
+	enroll := func() string {
+		stream := newMockConnectStream(t)
+		stream.SendToServer(&relayv1.AgentMessage{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: "rotate-host",
+					CpuCores: 4, RamGb: 8, Os: "linux",
+				},
+			},
+		})
+		done := make(chan error, 1)
+		go func() { done <- fx.Handler.Connect(stream) }()
+		resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+		require.NotNil(t, resp)
+		stream.CloseSend()
+		<-done
+		return resp.AgentToken
+	}
+
+	first := enroll()
+	second := enroll()
+	require.NotEmpty(t, first)
+	require.NotEmpty(t, second)
+	assert.NotEqual(t, first, second, "re-enrollment should rotate the agent token")
+
+	// Reconnect with the rotated (second) token must succeed.
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "rotate-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: second},
+			},
+		},
+	})
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+	require.NotNil(t, stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse())
+	stream.CloseSend()
+	<-done
+}
+
 func TestConnect_NoCredentialRejected(t *testing.T) {
 	fx := newWorkerTestFixture(t)
 

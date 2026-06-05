@@ -138,6 +138,14 @@ func main() {
 	agentHandler := worker.NewHandlerWithGrace(q, pool, registry, broker, dispatcher.Trigger, grace)
 	agentHandler.Metrics = metricsStore
 
+	if v := os.Getenv("RELAY_ALLOW_AUTO_ENROLL"); v != "" {
+		allow, err := strconv.ParseBool(v)
+		if err != nil {
+			log.Fatalf("parse RELAY_ALLOW_AUTO_ENROLL: %v", err)
+		}
+		agentHandler.AllowAutoEnroll = allow
+	}
+
 	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 	if err != nil {
 		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)

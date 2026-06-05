@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -38,6 +39,18 @@ var agentTokenGenerator = func() (string, string) {
 // ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
 var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 
+// errWorkerRevoked is returned inside the auto-enroll transaction when the
+// existing worker row for this hostname has status 'revoked'.
+var errWorkerRevoked = errors.New("worker revoked")
+
+// remoteAddr returns the gRPC peer address for logging, or "unknown".
+func remoteAddr(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		return p.Addr.String()
+	}
+	return "unknown"
+}
+
 // Handler implements relayv1.AgentServiceServer.
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
@@ -51,6 +64,10 @@ type Handler struct {
 	// Metrics, when non-nil, receives worker utilization samples and tracks
 	// per-worker liveness. Set by cmd/relay-server after construction.
 	Metrics *metrics.Store
+
+	// AllowAutoEnroll, when true, permits agents to register with no credential
+	// (token-less auto-enrollment). Set by cmd/relay-server after construction.
+	AllowAutoEnroll bool
 }
 
 // NewHandler returns a Handler wired to the given dependencies.
@@ -127,7 +144,10 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 	case *relayv1.RegisterRequest_AgentToken:
 		return h.reconnectAndRegister(ctx, stream, reg, cred.AgentToken)
 	default:
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		if h.AllowAutoEnroll {
+			return h.autoEnrollAndRegister(ctx, stream, reg)
+		}
+		return "", nil, status.Errorf(codes.Unauthenticated, "auto-enroll disabled")
 	}
 }
 
@@ -220,6 +240,59 @@ func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.Agent
 	}
 
 	return h.finishRegister(ctx, stream, reg, w.ID, "")
+}
+
+// autoEnrollAndRegister handles token-less enrollment when AllowAutoEnroll is
+// set. It upserts the worker by hostname and issues a fresh agent token without
+// consuming any enrollment record.
+func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
+	rawAgent, agentHash := agentTokenGenerator()
+	if rawAgent == "" || agentHash == "" {
+		return "", nil, status.Errorf(codes.Internal, "token gen failed")
+	}
+
+	var workerID pgtype.UUID
+	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		txq := h.q.WithTx(tx)
+
+		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup worker: %w", err)
+		}
+		if err == nil && existing.Status == "revoked" {
+			return errWorkerRevoked
+		}
+
+		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+			Name:     reg.Hostname,
+			Hostname: reg.Hostname,
+			CpuCores: reg.CpuCores,
+			RamGb:    reg.RamGb,
+			GpuCount: reg.GpuCount,
+			GpuModel: reg.GpuModel,
+			Os:       reg.Os,
+		})
+		if err != nil {
+			return fmt.Errorf("upsert worker: %w", err)
+		}
+		workerID = w.ID
+
+		if err := txq.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+			ID: w.ID, AgentTokenHash: &agentHash,
+		}); err != nil {
+			return fmt.Errorf("set agent token: %w", err)
+		}
+		return nil
+	})
+	if txErr != nil {
+		if errors.Is(txErr, errWorkerRevoked) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "worker revoked")
+		}
+		return "", nil, txErr
+	}
+
+	log.Printf("worker: auto-enrolled worker %s (hostname=%s) from %s", uuidStr(workerID), reg.Hostname, remoteAddr(ctx))
+	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
 
 // finishRegister updates worker status, reconciles running tasks, sends RegisterResponse,
