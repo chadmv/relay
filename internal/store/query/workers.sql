@@ -148,3 +148,15 @@ WHERE NOT @cursor_set::bool
    )
 ORDER BY last_seen_at ASC NULLS FIRST, id ASC
 LIMIT @page_limit + 1;
+
+-- name: WorkerStatusCounts :one
+-- Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
+-- overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
+-- toWorkerResponse. Revoked workers (not disabled) fall into no bucket and are
+-- excluded from the total computed by the caller.
+SELECT
+    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL)                    AS disabled,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')  AS online,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')   AS stale,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline') AS offline
+FROM workers;

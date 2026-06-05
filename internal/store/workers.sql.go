@@ -1076,3 +1076,42 @@ func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerBy
 	)
 	return i, err
 }
+
+const workerStatusCounts = `-- name: WorkerStatusCounts :one
+SELECT
+    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL)                    AS disabled,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')  AS online,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')   AS stale,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline') AS offline
+FROM workers
+`
+
+type WorkerStatusCountsRow struct {
+	Disabled int64 `json:"disabled"`
+	Online   int64 `json:"online"`
+	Stale    int64 `json:"stale"`
+	Offline  int64 `json:"offline"`
+}
+
+// Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
+// overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
+// toWorkerResponse. Revoked workers (not disabled) fall into no bucket and are
+// excluded from the total computed by the caller.
+//
+//	SELECT
+//	    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL)                    AS disabled,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')  AS online,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')   AS stale,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline') AS offline
+//	FROM workers
+func (q *Queries) WorkerStatusCounts(ctx context.Context) (WorkerStatusCountsRow, error) {
+	row := q.db.QueryRow(ctx, workerStatusCounts)
+	var i WorkerStatusCountsRow
+	err := row.Scan(
+		&i.Disabled,
+		&i.Online,
+		&i.Stale,
+		&i.Offline,
+	)
+	return i, err
+}
