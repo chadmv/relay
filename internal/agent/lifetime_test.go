@@ -105,3 +105,14 @@ func TestAgent_BuildRegisterRequest_IncludesInventory(t *testing.T) {
 	require.Equal(t, "abcdef", req.Inventory[0].ShortId)
 	require.Equal(t, "deadbeef", req.Inventory[0].BaselineHash)
 }
+
+func TestAgent_BuildRegisterRequest_NoCredentialsLeavesCredentialUnset(t *testing.T) {
+	creds, _ := LoadCredentials(t.TempDir()) // no token file, no enrollment token
+	a := NewAgent("nowhere:0", Capabilities{
+		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
+	}, "worker-xyz", creds, func(string) error { return nil }, nil)
+
+	req, err := a.buildRegisterRequest()
+	require.NoError(t, err)
+	assert.Nil(t, req.Credential, "credential must be unset for token-less auto-enroll")
+}

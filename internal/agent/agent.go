@@ -262,7 +262,10 @@ func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 	case a.creds.EnrollmentToken() != "":
 		req.Credential = &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: a.creds.EnrollmentToken()}
 	default:
-		return nil, fmt.Errorf("no credentials: set RELAY_AGENT_ENROLLMENT_TOKEN or provision the agent token file")
+		// No credential: token-less auto-enroll. Leave Credential unset; the
+		// server accepts this only when RELAY_ALLOW_AUTO_ENROLL is enabled and
+		// otherwise rejects with Unauthenticated (which the reconnect loop
+		// treats as terminal).
 	}
 
 	// Attach workspace inventory if the provider supports it.
