@@ -15,8 +15,8 @@ The `workers.status` column only ever holds `online`, `stale`, `offline`, or `re
 
 ## Decisions
 
-- **Revoked workers: excluded entirely.** Stats counts only online/stale/offline/disabled. `total` = sum of those four buckets. Consequence: the strip's "N workers" count (now `stats.total`) excludes revoked workers, whereas the list endpoint's `total` includes them. This is intended.
-- **Disabled-and-revoked worker counts as `disabled`.** The disabled overlay wins over the revoked status, matching the per-row API precedence rather than the "exclude revoked" rule. This is the only place the two rules overlap; consistency with the per-row rendering is the tiebreaker.
+- **Revoked workers: excluded entirely, everywhere.** Stats counts only online/stale/offline/disabled. `total` = sum of those four buckets. For consistency, revoked workers are also excluded from the `GET /v1/workers` list endpoint and its `CountWorkers` total (see "List endpoint" below), so the stats `total` and the list `total` agree. The frontend's `WorkerStatus` type (4 values, no `revoked`) is thereby guaranteed by the backend.
+- **Disabled-and-revoked worker: excluded.** Revoked exclusion wins over the disabled overlay, so a worker that is both disabled and revoked counts in no bucket - the same as the list endpoint, which excludes it as revoked. (Note: an earlier draft of this spec had the disabled overlay win for this edge case; that was reversed once revoked workers were excluded from the list endpoint, to keep stats and list consistent.)
 - **Auth: any authenticated user** (the same `auth` middleware as `GET /v1/workers`), not admin-only.
 - **Scope: backend + frontend.** Add the endpoint and rewire the summary strip to consume it.
 
@@ -30,13 +30,13 @@ Add to `internal/store/query/workers.sql`, then `make generate`:
 -- name: WorkerStatusCounts :one
 -- Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
 -- overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
--- toWorkerResponse. Revoked workers (not disabled) fall into no bucket and are
--- excluded from the total.
+-- toWorkerResponse. Revoked workers are excluded from every bucket and from the
+-- total, including a worker that is both disabled and revoked.
 SELECT
-  COUNT(*) FILTER (WHERE disabled_at IS NOT NULL)                    AS disabled,
-  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')  AS online,
-  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')   AS stale,
-  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline') AS offline
+  COUNT(*) FILTER (WHERE disabled_at IS NOT NULL AND status != 'revoked') AS disabled,
+  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')       AS online,
+  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')        AS stale,
+  COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline')      AS offline
 FROM workers;
 ```
 
@@ -117,8 +117,19 @@ A hook mirroring `useWorkers`: react-query, 3000 ms `refetchInterval`, `placehol
 `internal/api/workers_stats_integration_test.go` (build tag `integration`, following `workers_sort_integration_test.go`):
 
 - Seed workers spanning every relevant state: online, stale, offline, disabled (with an internal online status), revoked, and one worker that is both disabled and revoked.
-- Assert the four buckets have the exact expected counts, that the disabled-and-revoked worker lands in `disabled`, that revoked-only workers appear in no bucket, and that `total` equals the sum of the four (excluding revoked).
+- Assert the four buckets have the exact expected counts, that the disabled-and-revoked worker appears in no bucket (revoked exclusion wins), that revoked-only workers appear in no bucket, and that `total` equals the sum of the four (excluding all revoked workers).
 - Assert a non-admin authenticated user receives 200 (endpoint is not admin-only).
+
+A separate test (`internal/api/workers_list_revoked_integration_test.go`) asserts that revoked workers are excluded from `GET /v1/workers` (both the returned rows and the `total`).
+
+## List endpoint (revoked exclusion)
+
+To keep the system consistent - revoked workers are ignored everywhere in the operational view - the `GET /v1/workers` list path also excludes them:
+
+- Add `status != 'revoked'` to all eight paginated `ListWorkersPage*` queries (wrapping each existing cursor disjunction in parentheses so the `AND` binds across the whole row predicate) and to `CountWorkers`.
+- Leave the non-paginated `ListWorkers` (used by the scheduler dispatch loop) and `ListWorkersByLiveness` unchanged.
+
+This makes the list `total` and the stats `total` agree, and guarantees the frontend never receives a worker whose status is outside its 4-value `WorkerStatus` union.
 
 ## Docs
 
@@ -131,5 +142,5 @@ Add `GET /v1/workers/stats` to the workers section of `README.md` (endpoint tabl
 ## Out of scope
 
 - No new `revoked` count surfaced anywhere.
-- No change to `GET /v1/workers` or its `total` semantics.
+- No change to how the scheduler enumerates workers (`ListWorkers` is left untouched).
 - No caching of the count; it is a cheap single-row aggregate polled on the existing 3 s cadence.
