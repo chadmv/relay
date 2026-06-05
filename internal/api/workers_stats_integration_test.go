@@ -68,6 +68,8 @@ func TestWorkerStats_EmptyFleet(t *testing.T) {
 	code, body := getWorkerStats(t, srv, token)
 	require.Equal(t, http.StatusOK, code)
 	require.EqualValues(t, 0, body["online"])
+	require.EqualValues(t, 0, body["stale"])
+	require.EqualValues(t, 0, body["offline"])
 	require.EqualValues(t, 0, body["disabled"])
 	require.EqualValues(t, 0, body["total"])
 }
