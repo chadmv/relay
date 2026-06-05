@@ -1095,8 +1095,9 @@ type WorkerStatusCountsRow struct {
 
 // Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
 // overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
-// toWorkerResponse. Revoked workers (not disabled) fall into no bucket and are
-// excluded from the total computed by the caller.
+// toWorkerResponse. Revoked workers with disabled_at IS NULL fall into no bucket
+// and are excluded from the total computed by the caller; a revoked worker that
+// is also disabled counts as disabled (disabled_at wins).
 //
 //	SELECT
 //	    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL)                    AS disabled,
