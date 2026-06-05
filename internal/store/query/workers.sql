@@ -9,6 +9,9 @@ SELECT * FROM workers WHERE id = $1;
 -- name: GetWorkerByHostname :one
 SELECT * FROM workers WHERE hostname = $1;
 
+-- name: GetWorkerByHostnameForUpdate :one
+SELECT * FROM workers WHERE hostname = $1 FOR UPDATE;
+
 -- name: ListWorkers :many
 SELECT * FROM workers ORDER BY name;
 

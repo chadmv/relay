@@ -223,6 +223,37 @@ func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Wor
 	return i, err
 }
 
+const getWorkerByHostnameForUpdate = `-- name: GetWorkerByHostnameForUpdate :one
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1 FOR UPDATE
+`
+
+// GetWorkerByHostnameForUpdate
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1 FOR UPDATE
+func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname string) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorkerByHostnameForUpdate, hostname)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Hostname,
+		&i.CpuCores,
+		&i.RamGb,
+		&i.GpuCount,
+		&i.GpuModel,
+		&i.Os,
+		&i.MaxSlots,
+		&i.Labels,
+		&i.Status,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.AgentTokenHash,
+		&i.DisconnectedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
 const listWorkers = `-- name: ListWorkers :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers ORDER BY name
 `
