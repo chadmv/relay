@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { ApiError } from '../lib/api'
-import { listWorkers, type WorkersPage } from './api'
+import { listWorkers, getWorkerStats, type WorkersPage } from './api'
 
 const emptyPage: WorkersPage = { items: [], next_cursor: '', total: 0 }
 
@@ -42,4 +42,25 @@ test('throws ApiError on the error envelope', async () => {
     ),
   )
   await expect(listWorkers('-created_at')).rejects.toBeInstanceOf(ApiError)
+})
+
+test('getWorkerStats fetches /workers/stats', async () => {
+  let captured: string | undefined
+  server.use(
+    http.get('/v1/workers/stats', ({ request }) => {
+      captured = new URL(request.url).pathname
+      return HttpResponse.json({ online: 3, stale: 1, offline: 2, disabled: 1, total: 7 })
+    }),
+  )
+  const stats = await getWorkerStats()
+  expect(captured).toBe('/v1/workers/stats')
+  expect(stats.total).toBe(7)
+  expect(stats.online).toBe(3)
+})
+
+test('getWorkerStats throws ApiError on the error envelope', async () => {
+  server.use(
+    http.get('/v1/workers/stats', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+  )
+  await expect(getWorkerStats()).rejects.toBeInstanceOf(ApiError)
 })
