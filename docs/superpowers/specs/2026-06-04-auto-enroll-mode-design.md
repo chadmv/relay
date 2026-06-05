@@ -99,9 +99,18 @@ Mirrors `enrollAndRegister` but omits the enrollment-token lookup/consume. Steps
    a. **Revoked guard (before upsert):** read the existing worker by hostname
       with a row lock. If it exists and `status = 'revoked'`, abort the
       transaction (via a sentinel error) and reject the connection with
-      `status.Errorf(codes.PermissionDenied, "worker revoked")`. The guard must
+      `status.Errorf(codes.Unauthenticated, "worker revoked")`. The guard must
       precede the upsert so the upsert cannot silently reset a revoked worker to
       online.
+
+      `codes.Unauthenticated` (not `PermissionDenied`) is deliberate: the agent
+      reconnect loop treats `Unauthenticated` as terminal and exits, while other
+      codes trigger infinite backoff-retry. A revoked host will never be allowed
+      back without admin action, so terminal-exit is the correct behavior, and
+      it matches the existing token-revocation path. Both rejection cases
+      (auto-enroll disabled and worker revoked) therefore use `Unauthenticated`,
+      distinguished only by message text for log clarity. No change to the agent
+      reconnect loop is needed.
    b. `UpsertWorkerByHostname` - creates a new worker row or rebinds the
       existing one (admin-managed fields preserved on conflict, as today).
    c. `SetWorkerAgentToken` with the new hash.
@@ -125,16 +134,28 @@ SELECT * FROM workers WHERE hostname = $1 FOR UPDATE;
 Run `make generate` after editing. (`pgx.ErrNoRows` from this query means "no
 existing worker" -> proceed to upsert as a brand-new host.)
 
-### Agent (`internal/agent/`)
+### Agent (two gates to relax)
 
-- `buildRegisterRequest` currently returns an error when neither an agent token
-  nor an enrollment token is present. Remove that error: when no credential is
-  available, leave `Credential` unset and connect anyway. The agent-token and
-  enrollment-token paths are unchanged and still take priority when present.
-- On a rejected handshake, surface the server's message clearly so that an agent
-  pointed at a non-auto-enroll server fails loud with something actionable
-  (distinguishing "auto-enroll disabled" from a genuine bad-token rejection)
-  rather than a generic auth error.
+The agent currently refuses to start token-less in two places; both must allow
+proceeding:
+
+1. **`cmd/relay-agent/main.go`** - when no `token` file exists and
+   `RELAY_AGENT_ENROLLMENT_TOKEN` is unset, it prints an error and calls
+   `os.Exit(1)` *before* attempting any connection. Change this to log an
+   informational notice ("no credentials; attempting token-less auto-enroll")
+   and continue, rather than exiting.
+2. **`internal/agent/agent.go` `buildRegisterRequest`** - currently returns an
+   error when neither an agent token nor an enrollment token is present. Remove
+   that error: when no credential is available, leave `Credential` unset and
+   connect anyway. The agent-token and enrollment-token paths are unchanged and
+   still take priority when present.
+
+Fail-loud on rejection needs **no new code**: the existing reconnect loop
+(`agent.go`, the `status.Code(err) == codes.Unauthenticated` branch) already
+logs and exits when the server rejects with `Unauthenticated`. Since both
+server-side rejections (auto-enroll disabled, worker revoked) use that code, a
+token-less agent pointed at a server that won't have it exits cleanly instead of
+spinning.
 
 ## Behavioral Edges (documented, not expanded scope)
 
