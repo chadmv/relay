@@ -1,7 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, beforeEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { WorkersPage } from './WorkersPage'
@@ -17,7 +17,13 @@ const page = {
   total: 2,
 }
 
-test('renders workers and the page-scoped summary', async () => {
+const stats = { online: 1, stale: 0, offline: 1, disabled: 0, total: 2 }
+
+beforeEach(() => {
+  server.use(http.get('/v1/workers/stats', () => HttpResponse.json(stats)))
+})
+
+test('renders workers and the fleet-wide summary', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
   renderWithQuery(<WorkersPage />)
   expect(await screen.findByText('render-01')).toBeInTheDocument()
@@ -63,4 +69,16 @@ test('shows the empty state when there are no workers', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })))
   renderWithQuery(<WorkersPage />)
   expect(await screen.findByText(/no workers enrolled yet/i)).toBeInTheDocument()
+})
+
+test('summary strip shows fleet-wide totals from the stats endpoint', async () => {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page))) // page total = 2
+  server.use(
+    http.get('/v1/workers/stats', () =>
+      HttpResponse.json({ online: 4, stale: 0, offline: 1, disabled: 0, total: 5 }),
+    ),
+  )
+  renderWithQuery(<WorkersPage />)
+  // page.total is 2, but the strip must show the fleet-wide total of 5.
+  expect(await screen.findByText('5 workers')).toBeInTheDocument()
 })

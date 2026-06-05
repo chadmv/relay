@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { Button } from '../components/Button'
 import { useWorkers } from './useWorkers'
+import { useWorkerStats } from './useWorkerStats'
 import { WorkersGrid } from './WorkersGrid'
 import { WorkersTable, type SortField } from './WorkersTable'
-import type { Worker, WorkerSort, WorkerStatus } from './api'
+import type { Worker, WorkerSort, WorkerStats, WorkerStatus } from './api'
 
 type View = 'grid' | 'table'
 
@@ -30,6 +31,7 @@ export function WorkersPage() {
   const [sort, setSort] = useState<WorkerSort>('-created_at')
   const [view, setView] = useState<View>(loadView)
   const { data, error, isLoading, isFetching, refetch } = useWorkers(sort)
+  const { data: stats } = useWorkerStats()
 
   function chooseView(v: View) {
     setView(v)
@@ -66,7 +68,16 @@ export function WorkersPage() {
     )
   }
 
-  const counts = countByStatus(workers)
+  // Prefer fleet-wide counts from the stats endpoint. Until the first stats
+  // response arrives, fall back to page-scoped counts so the strip is never empty.
+  const fallback = countByStatus(workers)
+  const counts: WorkerStats = stats ?? {
+    online: fallback.online,
+    stale: fallback.stale,
+    offline: fallback.offline,
+    disabled: fallback.disabled,
+    total: data?.total ?? workers.length,
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -75,15 +86,12 @@ export function WorkersPage() {
           <div className="font-mono text-[11px] tracking-widest text-fg-mute">FLEET</div>
           <h1 className="text-[32px] font-normal tracking-tight">Workers</h1>
         </div>
-        <div
-          className="flex gap-4 font-mono text-[11px] text-fg-mute"
-          title="Counts for the loaded page"
-        >
+        <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
           <span><b className="text-ok">{counts.online}</b> ONLINE</span>
           <span><b className="text-warn">{counts.stale}</b> STALE</span>
           <span><b className="text-fg-mute">{counts.disabled}</b> DISABLED</span>
           <span><b className="text-err">{counts.offline}</b> OFFLINE</span>
-          <span className="text-fg-dim">· <span>{`${data?.total ?? workers.length} workers`}</span></span>
+          <span className="text-fg-dim">· <span>{`${counts.total} workers`}</span></span>
         </div>
         <div className="ml-auto flex items-center gap-3">
           <span className="font-mono text-[10px] text-fg-mute">
