@@ -39,6 +39,10 @@ var agentTokenGenerator = func() (string, string) {
 // ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
 var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 
+// errWorkerRevoked is returned inside the auto-enroll transaction when the
+// existing worker row for this hostname has status 'revoked'.
+var errWorkerRevoked = errors.New("worker revoked")
+
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
@@ -251,6 +255,14 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
 
+		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup worker: %w", err)
+		}
+		if err == nil && existing.Status == "revoked" {
+			return errWorkerRevoked
+		}
+
 		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 			Name:     reg.Hostname,
 			Hostname: reg.Hostname,
@@ -273,6 +285,9 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 		return nil
 	})
 	if txErr != nil {
+		if errors.Is(txErr, errWorkerRevoked) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "worker revoked")
+		}
 		return "", nil, txErr
 	}
 
