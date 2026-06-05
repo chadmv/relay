@@ -44,7 +44,7 @@ func main() {
 			creds.SetEnrollmentToken(t)
 			os.Unsetenv("RELAY_AGENT_ENROLLMENT_TOKEN") //nolint:errcheck // best-effort; token now in memory
 		} else {
-			log.Printf("relay-agent: no credentials available — attempting token-less auto-enroll (requires RELAY_ALLOW_AUTO_ENROLL on the server)")
+			log.Printf("relay-agent: no credentials available - attempting token-less auto-enroll (requires RELAY_ALLOW_AUTO_ENROLL on the server)")
 		}
 	}
 
