@@ -361,6 +361,55 @@ func TestConnect_ExpiredEnrollmentRejected(t *testing.T) {
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
 }
 
+func TestConnect_AutoEnrollIssuesAgentToken(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "auto-enroll-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+				// No credential field — token-less.
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	msg := stream.RecvFromServer(t, 5*time.Second)
+	resp := msg.GetRegisterResponse()
+	require.NotNil(t, resp)
+	assert.NotEmpty(t, resp.WorkerId)
+	assert.NotEmpty(t, resp.AgentToken)
+
+	stream.CloseSend()
+	<-done
+}
+
+func TestConnect_AutoEnrollDisabledRejectsNoCredential(t *testing.T) {
+	fx := newWorkerTestFixture(t) // AllowAutoEnroll defaults to false
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "disabled-host",
+				CpuCores: 4, RamGb: 8, Os: "linux",
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	err := <-done
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
+
 func TestConnect_NoCredentialRejected(t *testing.T) {
 	fx := newWorkerTestFixture(t)
 
