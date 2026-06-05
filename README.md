@@ -354,8 +354,10 @@ before it can rejoin. The two are independent: a worker can be both disabled and
 revoked, and re-enrollment clears the revoked state but leaves a disabled worker
 disabled.
 
-Under `RELAY_ALLOW_AUTO_ENROLL`, a revoked worker is not revived by
-auto-enrollment; it stays revoked until an admin clears or deletes it. (Because
+Token-less auto-enrollment is the exception to that rule: whereas a deliberate
+token re-enrollment (with a fresh admin-issued enrollment token) clears the
+revoked state, auto-enrollment under `RELAY_ALLOW_AUTO_ENROLL` does not revive a
+revoked worker - it stays revoked until an admin clears or deletes it. (Because
 identity is keyed by hostname, a renamed host can still rejoin as a new worker.)
 
 ### Environment variables
