@@ -1183,7 +1183,8 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/workers` | List workers. Paginated. Order: created_at DESC (changed from name ASC). |
+| `GET` | `/v1/workers` | List workers. Paginated. Order: created_at DESC (changed from name ASC). Excludes revoked workers. |
+| `GET` | `/v1/workers/stats` | Fleet-wide worker counts: `online`, `stale`, `offline`, `disabled`, and `total`. `total` is the sum of those buckets; revoked workers are excluded. Same bearer-auth as `GET /v1/workers`. |
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |

@@ -54,13 +54,16 @@ WHERE agent_token_hash = $1 AND status != 'revoked';
 
 -- name: ListWorkersPage :many
 SELECT * FROM workers
-WHERE (sqlc.arg(cursor_set)::bool = FALSE
+WHERE status != 'revoked'
+  AND (sqlc.arg(cursor_set)::bool = FALSE
        OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountWorkers :one
-SELECT COUNT(*) FROM workers;
+-- Total workers for the list endpoint. Excludes revoked workers so the count
+-- matches the rows returned by the paginated list queries.
+SELECT COUNT(*) FROM workers WHERE status != 'revoked';
 
 -- name: ListWorkersByLiveness :many
 -- Workers eligible for staleness sweeping: those currently connected.
@@ -82,31 +85,36 @@ UPDATE workers SET disabled_at = NULL WHERE id = $1 AND disabled_at IS NOT NULL;
 
 -- name: ListWorkersPageByCreatedAsc :many
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+WHERE status != 'revoked'
+  AND (NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
 ORDER BY created_at ASC, id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListWorkersPageByNameDesc :many
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid)
+WHERE status != 'revoked'
+  AND (NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid))
 ORDER BY name DESC, id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListWorkersPageByNameAsc :many
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid)
+WHERE status != 'revoked'
+  AND (NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid))
 ORDER BY name ASC, id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListWorkersPageByStatusDesc :many
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool OR (status, id) < (@cursor_v::text, @cursor_id::uuid)
+WHERE status != 'revoked'
+  AND (NOT @cursor_set::bool OR (status, id) < (@cursor_v::text, @cursor_id::uuid))
 ORDER BY status DESC, id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListWorkersPageByStatusAsc :many
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool OR (status, id) > (@cursor_v::text, @cursor_id::uuid)
+WHERE status != 'revoked'
+  AND (NOT @cursor_set::bool OR (status, id) > (@cursor_v::text, @cursor_id::uuid))
 ORDER BY status ASC, id ASC
 LIMIT @page_limit + 1;
 
@@ -119,8 +127,10 @@ LIMIT @page_limit + 1;
 --     row with (last_seen_at, id) < (cursor_ts, cursor_id), OR any null
 --     row (nulls come after in DESC NULLS LAST).
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool
-   OR (
+WHERE status != 'revoked'
+  AND (
+       NOT @cursor_set::bool
+    OR (
        CASE WHEN @cursor_is_null::bool THEN
             last_seen_at IS NULL AND id < @cursor_id::uuid
        ELSE
@@ -128,7 +138,7 @@ WHERE NOT @cursor_set::bool
              (last_seen_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
          OR last_seen_at IS NULL
        END
-   )
+   ))
 ORDER BY last_seen_at DESC NULLS LAST, id DESC
 LIMIT @page_limit + 1;
 
@@ -139,8 +149,10 @@ LIMIT @page_limit + 1;
 --   - cursor non-null: we're in the non-null tail; qualify non-null rows
 --     with (last_seen_at, id) > (cursor_ts, cursor_id).
 SELECT * FROM workers
-WHERE NOT @cursor_set::bool
-   OR (
+WHERE status != 'revoked'
+  AND (
+       NOT @cursor_set::bool
+    OR (
        CASE WHEN @cursor_is_null::bool THEN
             (last_seen_at IS NULL AND id > @cursor_id::uuid)
          OR last_seen_at IS NOT NULL
@@ -148,6 +160,19 @@ WHERE NOT @cursor_set::bool
             last_seen_at IS NOT NULL AND
             (last_seen_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
        END
-   )
+   ))
 ORDER BY last_seen_at ASC NULLS FIRST, id ASC
 LIMIT @page_limit + 1;
+
+-- name: WorkerStatusCounts :one
+-- Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
+-- overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
+-- toWorkerResponse. Revoked workers are excluded from every bucket and from the
+-- total computed by the caller, matching the GET /v1/workers list endpoint -
+-- including a worker that is both disabled and revoked (it counts in no bucket).
+SELECT
+    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL AND status != 'revoked') AS disabled,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')       AS online,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')        AS stale,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline')      AS offline
+FROM workers;

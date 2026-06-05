@@ -31,12 +31,13 @@ func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) (in
 }
 
 const countWorkers = `-- name: CountWorkers :one
-SELECT COUNT(*) FROM workers
+SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 `
 
-// CountWorkers
+// Total workers for the list endpoint. Excludes revoked workers so the count
+// matches the rows returned by the paginated list queries.
 //
-//	SELECT COUNT(*) FROM workers
+//	SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
 	row := q.db.QueryRow(ctx, countWorkers)
 	var count int64
@@ -344,7 +345,8 @@ func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 
 const listWorkersPage = `-- name: ListWorkersPage :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE ($1::bool = FALSE
+WHERE status != 'revoked'
+  AND ($1::bool = FALSE
        OR (created_at, id) < ($2::timestamptz, $3::uuid))
 ORDER BY created_at DESC, id DESC
 LIMIT $4::int + 1
@@ -360,7 +362,8 @@ type ListWorkersPageParams struct {
 // ListWorkersPage
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE ($1::bool = FALSE
+//	WHERE status != 'revoked'
+//	  AND ($1::bool = FALSE
 //	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
 //	ORDER BY created_at DESC, id DESC
 //	LIMIT $4::int + 1
@@ -408,7 +411,8 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 
 const listWorkersPageByCreatedAsc = `-- name: ListWorkersPageByCreatedAsc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+WHERE status != 'revoked'
+  AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 ORDER BY created_at ASC, id ASC
 LIMIT $4+ 1
 `
@@ -423,7 +427,8 @@ type ListWorkersPageByCreatedAscParams struct {
 // ListWorkersPageByCreatedAsc
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
+//	WHERE status != 'revoked'
+//	  AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 //	ORDER BY created_at ASC, id ASC
 //	LIMIT $4+ 1
 func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorkersPageByCreatedAscParams) ([]Worker, error) {
@@ -470,8 +475,10 @@ func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorke
 
 const listWorkersPageByLastSeenAsc = `-- name: ListWorkersPageByLastSeenAsc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool
-   OR (
+WHERE status != 'revoked'
+  AND (
+       NOT $1::bool
+    OR (
        CASE WHEN $2::bool THEN
             (last_seen_at IS NULL AND id > $3::uuid)
          OR last_seen_at IS NOT NULL
@@ -479,7 +486,7 @@ WHERE NOT $1::bool
             last_seen_at IS NOT NULL AND
             (last_seen_at, id) > ($4::timestamptz, $3::uuid)
        END
-   )
+   ))
 ORDER BY last_seen_at ASC NULLS FIRST, id ASC
 LIMIT $5+ 1
 `
@@ -501,7 +508,9 @@ type ListWorkersPageByLastSeenAscParams struct {
 //     with (last_seen_at, id) > (cursor_ts, cursor_id).
 //
 //     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//     WHERE NOT $1::bool
+//     WHERE status != 'revoked'
+//     AND (
+//     NOT $1::bool
 //     OR (
 //     CASE WHEN $2::bool THEN
 //     (last_seen_at IS NULL AND id > $3::uuid)
@@ -510,7 +519,7 @@ type ListWorkersPageByLastSeenAscParams struct {
 //     last_seen_at IS NOT NULL AND
 //     (last_seen_at, id) > ($4::timestamptz, $3::uuid)
 //     END
-//     )
+//     ))
 //     ORDER BY last_seen_at ASC NULLS FIRST, id ASC
 //     LIMIT $5+ 1
 func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWorkersPageByLastSeenAscParams) ([]Worker, error) {
@@ -558,8 +567,10 @@ func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWork
 
 const listWorkersPageByLastSeenDesc = `-- name: ListWorkersPageByLastSeenDesc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool
-   OR (
+WHERE status != 'revoked'
+  AND (
+       NOT $1::bool
+    OR (
        CASE WHEN $2::bool THEN
             last_seen_at IS NULL AND id < $3::uuid
        ELSE
@@ -567,7 +578,7 @@ WHERE NOT $1::bool
              (last_seen_at, id) < ($4::timestamptz, $3::uuid))
          OR last_seen_at IS NULL
        END
-   )
+   ))
 ORDER BY last_seen_at DESC NULLS LAST, id DESC
 LIMIT $5+ 1
 `
@@ -591,7 +602,9 @@ type ListWorkersPageByLastSeenDescParams struct {
 //     row (nulls come after in DESC NULLS LAST).
 //
 //     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//     WHERE NOT $1::bool
+//     WHERE status != 'revoked'
+//     AND (
+//     NOT $1::bool
 //     OR (
 //     CASE WHEN $2::bool THEN
 //     last_seen_at IS NULL AND id < $3::uuid
@@ -600,7 +613,7 @@ type ListWorkersPageByLastSeenDescParams struct {
 //     (last_seen_at, id) < ($4::timestamptz, $3::uuid))
 //     OR last_seen_at IS NULL
 //     END
-//     )
+//     ))
 //     ORDER BY last_seen_at DESC NULLS LAST, id DESC
 //     LIMIT $5+ 1
 func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWorkersPageByLastSeenDescParams) ([]Worker, error) {
@@ -648,7 +661,8 @@ func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWor
 
 const listWorkersPageByNameAsc = `-- name: ListWorkersPageByNameAsc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+WHERE status != 'revoked'
+  AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 ORDER BY name ASC, id ASC
 LIMIT $4+ 1
 `
@@ -663,7 +677,8 @@ type ListWorkersPageByNameAscParams struct {
 // ListWorkersPageByNameAsc
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
+//	WHERE status != 'revoked'
+//	  AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 //	ORDER BY name ASC, id ASC
 //	LIMIT $4+ 1
 func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersPageByNameAscParams) ([]Worker, error) {
@@ -710,7 +725,8 @@ func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersP
 
 const listWorkersPageByNameDesc = `-- name: ListWorkersPageByNameDesc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+WHERE status != 'revoked'
+  AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 ORDER BY name DESC, id DESC
 LIMIT $4+ 1
 `
@@ -725,7 +741,8 @@ type ListWorkersPageByNameDescParams struct {
 // ListWorkersPageByNameDesc
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
+//	WHERE status != 'revoked'
+//	  AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 //	ORDER BY name DESC, id DESC
 //	LIMIT $4+ 1
 func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkersPageByNameDescParams) ([]Worker, error) {
@@ -772,7 +789,8 @@ func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkers
 
 const listWorkersPageByStatusAsc = `-- name: ListWorkersPageByStatusAsc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool OR (status, id) > ($2::text, $3::uuid)
+WHERE status != 'revoked'
+  AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 ORDER BY status ASC, id ASC
 LIMIT $4+ 1
 `
@@ -787,7 +805,8 @@ type ListWorkersPageByStatusAscParams struct {
 // ListWorkersPageByStatusAsc
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE NOT $1::bool OR (status, id) > ($2::text, $3::uuid)
+//	WHERE status != 'revoked'
+//	  AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 //	ORDER BY status ASC, id ASC
 //	LIMIT $4+ 1
 func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorkersPageByStatusAscParams) ([]Worker, error) {
@@ -834,7 +853,8 @@ func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorker
 
 const listWorkersPageByStatusDesc = `-- name: ListWorkersPageByStatusDesc :many
 SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-WHERE NOT $1::bool OR (status, id) < ($2::text, $3::uuid)
+WHERE status != 'revoked'
+  AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 ORDER BY status DESC, id DESC
 LIMIT $4+ 1
 `
@@ -849,7 +869,8 @@ type ListWorkersPageByStatusDescParams struct {
 // ListWorkersPageByStatusDesc
 //
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
-//	WHERE NOT $1::bool OR (status, id) < ($2::text, $3::uuid)
+//	WHERE status != 'revoked'
+//	  AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 //	ORDER BY status DESC, id DESC
 //	LIMIT $4+ 1
 func (q *Queries) ListWorkersPageByStatusDesc(ctx context.Context, arg ListWorkersPageByStatusDescParams) ([]Worker, error) {
@@ -1104,6 +1125,46 @@ func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerBy
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const workerStatusCounts = `-- name: WorkerStatusCounts :one
+SELECT
+    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL AND status != 'revoked') AS disabled,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')       AS online,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')        AS stale,
+    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline')      AS offline
+FROM workers
+`
+
+type WorkerStatusCountsRow struct {
+	Disabled int64 `json:"disabled"`
+	Online   int64 `json:"online"`
+	Stale    int64 `json:"stale"`
+	Offline  int64 `json:"offline"`
+}
+
+// Fleet-wide worker counts for the dashboard summary strip. "disabled" is an
+// overlay (disabled_at IS NOT NULL) that wins over the internal status, mirroring
+// toWorkerResponse. Revoked workers are excluded from every bucket and from the
+// total computed by the caller, matching the GET /v1/workers list endpoint -
+// including a worker that is both disabled and revoked (it counts in no bucket).
+//
+//	SELECT
+//	    COUNT(*) FILTER (WHERE disabled_at IS NOT NULL AND status != 'revoked') AS disabled,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'online')       AS online,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')        AS stale,
+//	    COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline')      AS offline
+//	FROM workers
+func (q *Queries) WorkerStatusCounts(ctx context.Context) (WorkerStatusCountsRow, error) {
+	row := q.db.QueryRow(ctx, workerStatusCounts)
+	var i WorkerStatusCountsRow
+	err := row.Scan(
+		&i.Disabled,
+		&i.Online,
+		&i.Stale,
+		&i.Offline,
 	)
 	return i, err
 }

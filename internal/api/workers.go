@@ -72,6 +72,32 @@ func toWorkerResponse(w store.Worker) workerResponse {
 	}
 }
 
+// workerStatsResponse is the fleet-wide summary returned by GET /v1/workers/stats.
+// total is the sum of the four buckets; revoked workers are in no bucket and are
+// therefore excluded from total.
+type workerStatsResponse struct {
+	Online   int64 `json:"online"`
+	Stale    int64 `json:"stale"`
+	Offline  int64 `json:"offline"`
+	Disabled int64 `json:"disabled"`
+	Total    int64 `json:"total"`
+}
+
+func (s *Server) handleWorkerStats(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.q.WorkerStatusCounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "worker stats failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, workerStatsResponse{
+		Online:   counts.Online,
+		Stale:    counts.Stale,
+		Offline:  counts.Offline,
+		Disabled: counts.Disabled,
+		Total:    counts.Online + counts.Stale + counts.Offline + counts.Disabled,
+	})
+}
+
 var WorkersSortSpec = SortSpec{
 	Default: "-created_at",
 	Keys: map[string]SortKeyKind{

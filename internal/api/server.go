@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Workers (PATCH is admin-only)
 	mux.Handle("GET /v1/workers", auth(http.HandlerFunc(s.handleListWorkers)))
+	mux.Handle("GET /v1/workers/stats", auth(http.HandlerFunc(s.handleWorkerStats)))
 	mux.Handle("GET /v1/workers/{id}", auth(http.HandlerFunc(s.handleGetWorker)))
 	mux.Handle("GET /v1/workers/{id}/metrics", auth(http.HandlerFunc(s.handleGetWorkerMetrics)))
 	mux.Handle("PATCH /v1/workers/{id}", auth(admin(http.HandlerFunc(s.handleUpdateWorker))))

@@ -2,6 +2,14 @@ import { apiFetch } from '../lib/api'
 
 export type WorkerStatus = 'online' | 'stale' | 'offline' | 'disabled'
 
+export interface WorkerStats {
+  online: number
+  stale: number
+  offline: number
+  disabled: number
+  total: number
+}
+
 export interface Worker {
   id: string
   name: string
@@ -40,4 +48,10 @@ export type WorkerSort =
 export function listWorkers(sort: WorkerSort): Promise<WorkersPage> {
   const q = new URLSearchParams({ sort, limit: '50' })
   return apiFetch<WorkersPage>(`/workers?${q}`)
+}
+
+// Fleet-wide worker counts for the summary strip. Buckets sum to total; revoked
+// workers are excluded server-side.
+export function getWorkerStats(): Promise<WorkerStats> {
+  return apiFetch<WorkerStats>('/workers/stats')
 }
