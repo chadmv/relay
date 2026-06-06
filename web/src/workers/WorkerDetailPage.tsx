@@ -58,6 +58,7 @@ export function WorkerDetailPage() {
   const latest = last(samples)
   const memTotal = latest?.mem_total ?? 0
   const gpuMemTotal = latest?.gpu_mem_total ?? 0
+  const chips = labelChips(worker.labels)
 
   return (
     <div className={`flex flex-col gap-5 ${livenessView(worker.status).dimClass}`}>
@@ -70,7 +71,7 @@ export function WorkerDetailPage() {
           <StatusDot status={worker.status} />
         </div>
         <div className="font-mono text-[11px] text-fg-mute">
-          id {worker.id.slice(0, 8)} &middot; {worker.hostname} &middot; {worker.os} &middot;{' '}
+          id {worker.id.slice(0, 8)} · {worker.hostname} · {worker.os} ·{' '}
           {worker.last_seen_at ? `last seen ${formatRelativeTime(worker.last_seen_at)}` : 'never seen'}
           {worker.last_sample_at ? ` · sampled ${formatRelativeTime(worker.last_sample_at)}` : ''}
         </div>
@@ -142,11 +143,11 @@ export function WorkerDetailPage() {
         )}
       </div>
 
-      {labelChips(worker.labels).length > 0 && (
+      {chips.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="font-mono text-[11px] tracking-widest text-fg-mute">LABELS</div>
           <div className="flex flex-wrap gap-1">
-            {labelChips(worker.labels).map((c) => (
+            {chips.map((c) => (
               <span
                 key={c}
                 className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-[10px] text-accent"

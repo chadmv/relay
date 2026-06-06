@@ -134,3 +134,10 @@ test('non-admins never see or fetch workspaces', async () => {
   expect(wsCount).toBe(0)
   expect(screen.queryByText('SOURCE WORKSPACES')).not.toBeInTheDocument()
 })
+
+test('shows a generic error with a Retry button for a non-404 failure', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))))
+  renderDetail(false)
+  expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
+})
