@@ -30,6 +30,8 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
         className="rounded-full border border-border bg-white/5 px-3 py-1 text-[12px] text-fg"
       >
         {email}
