@@ -64,7 +64,7 @@ New unexported helper in the same file:
 ```go
 // authFailureMessage returns the exit log for an Unauthenticated registration
 // failure, tailored to which credential was in use.
-func authFailureMessage(hasAgentToken bool, tokenPath string, hasEnrollmentToken bool) string
+func authFailureMessage(hasAgentToken, hasEnrollmentToken bool, tokenPath string) string
 ```
 
 Three branches, all hyphens (the em dash is removed):
@@ -88,8 +88,8 @@ Call site at `internal/agent/agent.go:73-77` replaces the em-dash line entirely:
 if status.Code(err) == codes.Unauthenticated {
     log.Print(authFailureMessage(
         a.creds.HasAgentToken(),
-        a.creds.TokenFilePath(),
         a.creds.EnrollmentToken() != "",
+        a.creds.TokenFilePath(),
     ))
     a.runnerWG.Wait()
     return
