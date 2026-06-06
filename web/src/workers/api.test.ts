@@ -129,3 +129,18 @@ test('listWorkerWorkspaces fetches /workers/{id}/workspaces', async () => {
   expect(ws).toHaveLength(1)
   expect(ws[0].short_id).toBe('ws-1')
 })
+
+test('getWorker throws ApiError on the error envelope', async () => {
+  server.use(http.get('/v1/workers/w1', () => HttpResponse.json({ error: 'worker not found' }, { status: 404 })))
+  await expect(getWorker('w1')).rejects.toBeInstanceOf(ApiError)
+})
+
+test('getWorkerMetrics throws ApiError on the error envelope', async () => {
+  server.use(http.get('/v1/workers/w1/metrics', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
+  await expect(getWorkerMetrics('w1')).rejects.toBeInstanceOf(ApiError)
+})
+
+test('listWorkerWorkspaces throws ApiError on the error envelope', async () => {
+  server.use(http.get('/v1/workers/w1/workspaces', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
+  await expect(listWorkerWorkspaces('w1')).rejects.toBeInstanceOf(ApiError)
+})

@@ -81,6 +81,7 @@ export interface Workspace {
   last_used_at: string
 }
 
+// Fetches a single worker. Throws ApiError(404) if the worker does not exist.
 export function getWorker(id: string): Promise<Worker> {
   return apiFetch<Worker>(`/workers/${id}`)
 }
