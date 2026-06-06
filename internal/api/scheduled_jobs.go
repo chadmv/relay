@@ -19,6 +19,7 @@ type scheduledJobResponse struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
 	OwnerID       string          `json:"owner_id"`
+	OwnerEmail    string          `json:"owner_email"`
 	CronExpr      string          `json:"cron_expr"`
 	Timezone      string          `json:"timezone"`
 	JobSpec       json.RawMessage `json:"job_spec"`
@@ -193,6 +194,43 @@ func scheduledJobsRowKeyByUpdated(s store.ScheduledJob) (anySortVal, pgtype.UUID
 	return s.UpdatedAt.Time, s.ID
 }
 
+// fillOwnerEmails resolves owner_email for a page of items. For the owner-scoped
+// path every item belongs to the caller, so pass selfEmail to skip the lookup.
+// For the admin path pass selfEmail == "" to batch-resolve from the store.
+func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, selfEmail string) {
+	if selfEmail != "" {
+		for i := range items {
+			items[i].OwnerEmail = selfEmail
+		}
+		return
+	}
+	ids := make([]pgtype.UUID, 0, len(items))
+	seen := map[string]bool{}
+	for _, it := range items {
+		if !seen[it.OwnerID] {
+			seen[it.OwnerID] = true
+			id, err := parseUUID(it.OwnerID)
+			if err == nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	rows, err := s.q.GetUserEmailsByIDs(r.Context(), ids)
+	if err != nil {
+		return // best-effort: leave owner_email empty on lookup failure
+	}
+	emailByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		emailByID[uuidStr(row.ID)] = row.Email
+	}
+	for i := range items {
+		items[i].OwnerEmail = emailByID[items[i].OwnerID]
+	}
+}
+
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
 	u, ok := UserFromCtx(r.Context())
 	if !ok {
@@ -327,6 +365,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 			return
 		}
+		s.fillOwnerEmails(r, items, "")
 		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -459,6 +498,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 		return
 	}
+	s.fillOwnerEmails(r, items, u.Email)
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
