@@ -13,7 +13,7 @@ func EnrollmentIgnoredWarning(hasAgentToken, enrollmentTokenSet bool, tokenPath 
 
 // authFailureMessage returns the exit log for an Unauthenticated registration
 // failure, tailored to which credential was in use.
-func authFailureMessage(hasAgentToken bool, tokenPath string, hasEnrollmentToken bool) string {
+func authFailureMessage(hasAgentToken, hasEnrollmentToken bool, tokenPath string) string {
 	switch {
 	case hasAgentToken:
 		return fmt.Sprintf("agent: authentication failed - stored agent token at %s was rejected; if this agent was re-provisioned, delete that file and set RELAY_AGENT_ENROLLMENT_TOKEN to re-enroll; exiting", tokenPath)

@@ -58,7 +58,7 @@ func TestAuthFailureMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := authFailureMessage(tt.hasAgentToken, path, tt.hasEnrollment)
+			got := authFailureMessage(tt.hasAgentToken, tt.hasEnrollment, path)
 			for _, sub := range tt.wantSubstrings {
 				if !strings.Contains(got, sub) {
 					t.Errorf("message %q missing substring %q", got, sub)
