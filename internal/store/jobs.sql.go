@@ -175,6 +175,45 @@ func (q *Queries) GetJobWithEmail(ctx context.Context, id pgtype.UUID) (GetJobWi
 	return i, err
 }
 
+const jobStatusCounts = `-- name: JobStatusCounts :one
+SELECT
+  COUNT(*) FILTER (WHERE status IN ('running','dispatched'))                                              AS running,
+  COUNT(*) FILTER (WHERE status IN ('queued','pending'))                                                  AS queued,
+  COUNT(*) FILTER (WHERE status = 'done'                  AND updated_at >= NOW() - INTERVAL '24 hours')  AS done_24h,
+  COUNT(*) FILTER (WHERE status IN ('failed','timed_out') AND updated_at >= NOW() - INTERVAL '24 hours')  AS failed_24h
+FROM jobs
+`
+
+type JobStatusCountsRow struct {
+	Running   int64 `json:"running"`
+	Queued    int64 `json:"queued"`
+	Done24h   int64 `json:"done_24h"`
+	Failed24h int64 `json:"failed_24h"`
+}
+
+// Fleet-wide job counts for the dashboard KPI strip. running/queued are current
+// totals; done_24h/failed_24h are windowed on updated_at, which is a faithful
+// finish-time proxy because the only writer of updated_at is UpdateJobStatus and
+// a terminal state is the last transition a job makes (see the design spec).
+//
+//	SELECT
+//	  COUNT(*) FILTER (WHERE status IN ('running','dispatched'))                                              AS running,
+//	  COUNT(*) FILTER (WHERE status IN ('queued','pending'))                                                  AS queued,
+//	  COUNT(*) FILTER (WHERE status = 'done'                  AND updated_at >= NOW() - INTERVAL '24 hours')  AS done_24h,
+//	  COUNT(*) FILTER (WHERE status IN ('failed','timed_out') AND updated_at >= NOW() - INTERVAL '24 hours')  AS failed_24h
+//	FROM jobs
+func (q *Queries) JobStatusCounts(ctx context.Context) (JobStatusCountsRow, error) {
+	row := q.db.QueryRow(ctx, jobStatusCounts)
+	var i JobStatusCountsRow
+	err := row.Scan(
+		&i.Running,
+		&i.Queued,
+		&i.Done24h,
+		&i.Failed24h,
+	)
+	return i, err
+}
+
 const listJobsByScheduledJob = `-- name: ListJobsByScheduledJob :many
 SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
 FROM jobs j
@@ -235,9 +274,19 @@ func (q *Queries) ListJobsByScheduledJob(ctx context.Context, scheduledJobID pgt
 }
 
 const listJobsByScheduledJobWithEmailPage = `-- name: ListJobsByScheduledJobWithEmailPage :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.scheduled_job_id = $1::uuid
   AND ($2::bool = FALSE
        OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
@@ -264,13 +313,28 @@ type ListJobsByScheduledJobWithEmailPageRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsByScheduledJobWithEmailPage
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE j.scheduled_job_id = $1::uuid
 //	  AND ($2::bool = FALSE
 //	       OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
@@ -302,6 +366,11 @@ func (q *Queries) ListJobsByScheduledJobWithEmailPage(ctx context.Context, arg L
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -314,9 +383,19 @@ func (q *Queries) ListJobsByScheduledJobWithEmailPage(ctx context.Context, arg L
 }
 
 const listJobsByStatusWithEmailPage = `-- name: ListJobsByStatusWithEmailPage :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.status = $1::text
   AND ($2::bool = FALSE
        OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
@@ -343,13 +422,28 @@ type ListJobsByStatusWithEmailPageRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsByStatusWithEmailPage
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE j.status = $1::text
 //	  AND ($2::bool = FALSE
 //	       OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
@@ -381,6 +475,11 @@ func (q *Queries) ListJobsByStatusWithEmailPage(ctx context.Context, arg ListJob
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -393,9 +492,19 @@ func (q *Queries) ListJobsByStatusWithEmailPage(ctx context.Context, arg ListJob
 }
 
 const listJobsWithEmailPage = `-- name: ListJobsWithEmailPage :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE ($1::bool = FALSE
        OR (j.created_at, j.id) < ($2::timestamptz, $3::uuid))
 ORDER BY j.created_at DESC, j.id DESC
@@ -420,13 +529,28 @@ type ListJobsWithEmailPageRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPage
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE ($1::bool = FALSE
 //	       OR (j.created_at, j.id) < ($2::timestamptz, $3::uuid))
 //	ORDER BY j.created_at DESC, j.id DESC
@@ -456,6 +580,11 @@ func (q *Queries) ListJobsWithEmailPage(ctx context.Context, arg ListJobsWithEma
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -468,9 +597,19 @@ func (q *Queries) ListJobsWithEmailPage(ctx context.Context, arg ListJobsWithEma
 }
 
 const listJobsWithEmailPageByCreatedAsc = `-- name: ListJobsWithEmailPageByCreatedAsc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
 ORDER BY j.created_at ASC, j.id ASC
 LIMIT $4+ 1
@@ -494,13 +633,28 @@ type ListJobsWithEmailPageByCreatedAscRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByCreatedAsc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
 //	ORDER BY j.created_at ASC, j.id ASC
 //	LIMIT $4+ 1
@@ -529,6 +683,11 @@ func (q *Queries) ListJobsWithEmailPageByCreatedAsc(ctx context.Context, arg Lis
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -541,9 +700,19 @@ func (q *Queries) ListJobsWithEmailPageByCreatedAsc(ctx context.Context, arg Lis
 }
 
 const listJobsWithEmailPageByNameAsc = `-- name: ListJobsWithEmailPageByNameAsc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
 ORDER BY j.name ASC, j.id ASC
 LIMIT $4+ 1
@@ -567,13 +736,28 @@ type ListJobsWithEmailPageByNameAscRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByNameAsc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
 //	ORDER BY j.name ASC, j.id ASC
 //	LIMIT $4+ 1
@@ -602,6 +786,11 @@ func (q *Queries) ListJobsWithEmailPageByNameAsc(ctx context.Context, arg ListJo
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -614,9 +803,19 @@ func (q *Queries) ListJobsWithEmailPageByNameAsc(ctx context.Context, arg ListJo
 }
 
 const listJobsWithEmailPageByNameDesc = `-- name: ListJobsWithEmailPageByNameDesc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
 ORDER BY j.name DESC, j.id DESC
 LIMIT $4+ 1
@@ -640,13 +839,28 @@ type ListJobsWithEmailPageByNameDescRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByNameDesc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
 //	ORDER BY j.name DESC, j.id DESC
 //	LIMIT $4+ 1
@@ -675,6 +889,11 @@ func (q *Queries) ListJobsWithEmailPageByNameDesc(ctx context.Context, arg ListJ
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -687,9 +906,19 @@ func (q *Queries) ListJobsWithEmailPageByNameDesc(ctx context.Context, arg ListJ
 }
 
 const listJobsWithEmailPageByPriorityAsc = `-- name: ListJobsWithEmailPageByPriorityAsc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
 ORDER BY j.priority ASC, j.id ASC
 LIMIT $4+ 1
@@ -713,13 +942,28 @@ type ListJobsWithEmailPageByPriorityAscRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByPriorityAsc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
 //	ORDER BY j.priority ASC, j.id ASC
 //	LIMIT $4+ 1
@@ -748,6 +992,11 @@ func (q *Queries) ListJobsWithEmailPageByPriorityAsc(ctx context.Context, arg Li
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -760,9 +1009,19 @@ func (q *Queries) ListJobsWithEmailPageByPriorityAsc(ctx context.Context, arg Li
 }
 
 const listJobsWithEmailPageByPriorityDesc = `-- name: ListJobsWithEmailPageByPriorityDesc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
 ORDER BY j.priority DESC, j.id DESC
 LIMIT $4+ 1
@@ -786,13 +1045,28 @@ type ListJobsWithEmailPageByPriorityDescRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByPriorityDesc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
 //	ORDER BY j.priority DESC, j.id DESC
 //	LIMIT $4+ 1
@@ -821,6 +1095,11 @@ func (q *Queries) ListJobsWithEmailPageByPriorityDesc(ctx context.Context, arg L
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -833,9 +1112,19 @@ func (q *Queries) ListJobsWithEmailPageByPriorityDesc(ctx context.Context, arg L
 }
 
 const listJobsWithEmailPageByStatusAsc = `-- name: ListJobsWithEmailPageByStatusAsc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
 ORDER BY j.status ASC, j.id ASC
 LIMIT $4+ 1
@@ -859,13 +1148,28 @@ type ListJobsWithEmailPageByStatusAscRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByStatusAsc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
 //	ORDER BY j.status ASC, j.id ASC
 //	LIMIT $4+ 1
@@ -894,6 +1198,11 @@ func (q *Queries) ListJobsWithEmailPageByStatusAsc(ctx context.Context, arg List
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -906,9 +1215,19 @@ func (q *Queries) ListJobsWithEmailPageByStatusAsc(ctx context.Context, arg List
 }
 
 const listJobsWithEmailPageByStatusDesc = `-- name: ListJobsWithEmailPageByStatusDesc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
 ORDER BY j.status DESC, j.id DESC
 LIMIT $4+ 1
@@ -932,13 +1251,28 @@ type ListJobsWithEmailPageByStatusDescRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByStatusDesc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
 //	ORDER BY j.status DESC, j.id DESC
 //	LIMIT $4+ 1
@@ -967,6 +1301,11 @@ func (q *Queries) ListJobsWithEmailPageByStatusDesc(ctx context.Context, arg Lis
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -979,9 +1318,19 @@ func (q *Queries) ListJobsWithEmailPageByStatusDesc(ctx context.Context, arg Lis
 }
 
 const listJobsWithEmailPageByUpdatedAsc = `-- name: ListJobsWithEmailPageByUpdatedAsc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
 ORDER BY j.updated_at ASC, j.id ASC
 LIMIT $4+ 1
@@ -1005,13 +1354,28 @@ type ListJobsWithEmailPageByUpdatedAscRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByUpdatedAsc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
 //	ORDER BY j.updated_at ASC, j.id ASC
 //	LIMIT $4+ 1
@@ -1040,6 +1404,11 @@ func (q *Queries) ListJobsWithEmailPageByUpdatedAsc(ctx context.Context, arg Lis
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}
@@ -1052,9 +1421,19 @@ func (q *Queries) ListJobsWithEmailPageByUpdatedAsc(ctx context.Context, arg Lis
 }
 
 const listJobsWithEmailPageByUpdatedDesc = `-- name: ListJobsWithEmailPageByUpdatedDesc :many
-SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+       sj.name AS scheduled_job_name
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)                                  AS total_tasks,
+         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
+  FROM tasks t WHERE t.job_id = j.id
+) ts ON TRUE
+LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
 ORDER BY j.updated_at DESC, j.id DESC
 LIMIT $4+ 1
@@ -1078,13 +1457,28 @@ type ListJobsWithEmailPageByUpdatedDescRow struct {
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 	ScheduledJobID   pgtype.UUID        `json:"scheduled_job_id"`
 	SubmittedByEmail string             `json:"submitted_by_email"`
+	TotalTasks       int64              `json:"total_tasks"`
+	DoneTasks        int64              `json:"done_tasks"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	FinishedAt       pgtype.Timestamptz `json:"finished_at"`
+	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
 // ListJobsWithEmailPageByUpdatedDesc
 //
-//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
+//	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
+//	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
+//	       sj.name AS scheduled_job_name
 //	FROM jobs j
 //	JOIN users u ON u.id = j.submitted_by
+//	LEFT JOIN LATERAL (
+//	  SELECT COUNT(*)                                  AS total_tasks,
+//	         COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
+//	         MIN(t.started_at)::timestamptz            AS started_at,
+//	         MAX(t.finished_at)::timestamptz           AS finished_at
+//	  FROM tasks t WHERE t.job_id = j.id
+//	) ts ON TRUE
+//	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
 //	ORDER BY j.updated_at DESC, j.id DESC
 //	LIMIT $4+ 1
@@ -1113,6 +1507,11 @@ func (q *Queries) ListJobsWithEmailPageByUpdatedDesc(ctx context.Context, arg Li
 			&i.UpdatedAt,
 			&i.ScheduledJobID,
 			&i.SubmittedByEmail,
+			&i.TotalTasks,
+			&i.DoneTasks,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ScheduledJobName,
 		); err != nil {
 			return nil, err
 		}

@@ -2,8 +2,10 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { LoginScreen } from '../auth/LoginScreen'
 import { RegisterScreen } from '../auth/RegisterScreen'
 import { JobsPlaceholder } from './JobsPlaceholder'
+import { JobsPage } from '../jobs/JobsPage'
 import { WorkersPage } from '../workers/WorkersPage'
 import { WorkerDetailPage } from '../workers/WorkerDetailPage'
+import { SchedulesPage } from '../schedules/SchedulesPage'
 import { ProtectedRoute } from './ProtectedRoute'
 import { PublicOnlyRoute } from './PublicOnlyRoute'
 
@@ -15,10 +17,10 @@ export function AppRoutes() {
         <Route path="/register" element={<RegisterScreen />} />
       </Route>
       <Route element={<ProtectedRoute />}>
-        <Route path="/jobs" element={<JobsPlaceholder />} />
+        <Route path="/jobs" element={<JobsPage />} />
         <Route path="/workers" element={<WorkersPage />} />
         <Route path="/workers/:id" element={<WorkerDetailPage />} />
-        <Route path="/schedules" element={<JobsPlaceholder />} />
+        <Route path="/schedules" element={<SchedulesPage />} />
         <Route path="/admin" element={<JobsPlaceholder />} />
         <Route path="/profile/*" element={<JobsPlaceholder />} />
       </Route>

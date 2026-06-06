@@ -62,6 +62,15 @@ type jobResponse struct {
 	Tasks            []taskResponse  `json:"tasks,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
+
+	// Enrichment populated only on list rows (GET /v1/jobs). Derived from the
+	// job's tasks and its scheduled-job source.
+	TotalTasks       int32      `json:"total_tasks"`
+	DoneTasks        int32      `json:"done_tasks"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ScheduledJobID   string     `json:"scheduled_job_id,omitempty"`
+	ScheduledJobName string     `json:"scheduled_job_name,omitempty"`
 }
 
 // ─── Converters ───────────────────────────────────────────────────────────────
@@ -102,6 +111,53 @@ func toJobResponse(j store.Job, email string, tasks []store.Task, taskDeps map[p
 		CreatedAt:        j.CreatedAt.Time,
 		UpdatedAt:        j.UpdatedAt.Time,
 	}
+}
+
+// applyJobEnrichment sets the list-only fields (task progress, timing, schedule
+// source) on a jobResponse. totalTasks/doneTasks come from the LATERAL aggregate;
+// startedAt/finishedAt/scheduledJobName are nullable; scheduledJobID comes from
+// the job row directly.
+func applyJobEnrichment(resp *jobResponse, totalTasks, doneTasks int64, startedAt, finishedAt pgtype.Timestamptz, scheduledJobID pgtype.UUID, scheduledJobName *string) {
+	// COUNT(*) is int64; a job's task count fits int32 in any realistic case.
+	resp.TotalTasks = int32(totalTasks)
+	resp.DoneTasks = int32(doneTasks)
+	if startedAt.Valid {
+		t := startedAt.Time
+		resp.StartedAt = &t
+	}
+	if finishedAt.Valid {
+		t := finishedAt.Time
+		resp.FinishedAt = &t
+	}
+	if scheduledJobID.Valid {
+		resp.ScheduledJobID = uuidStr(scheduledJobID)
+	}
+	if scheduledJobName != nil {
+		resp.ScheduledJobName = *scheduledJobName
+	}
+}
+
+// jobStatsResponse is the fleet-wide KPI summary returned by GET /v1/jobs/stats.
+// done_24h and failed_24h are windowed on updated_at (see JobStatusCounts).
+type jobStatsResponse struct {
+	Running   int64 `json:"running"`
+	Queued    int64 `json:"queued"`
+	Done24h   int64 `json:"done_24h"`
+	Failed24h int64 `json:"failed_24h"`
+}
+
+func (s *Server) handleJobStats(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.q.JobStatusCounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "job stats failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, jobStatsResponse{
+		Running:   counts.Running,
+		Queued:    counts.Queued,
+		Done24h:   counts.Done24h,
+		Failed24h: counts.Failed24h,
+	})
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -199,7 +255,9 @@ func jobRowToResponseDefault(r store.ListJobsWithEmailPageRow) jobResponse {
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 func jobRowToResponseByStatus(r store.ListJobsByStatusWithEmailPageRow) jobResponse {
 	job := store.Job{
@@ -207,7 +265,9 @@ func jobRowToResponseByStatus(r store.ListJobsByStatusWithEmailPageRow) jobRespo
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow) jobResponse {
 	job := store.Job{
@@ -215,7 +275,9 @@ func jobRowToResponseByScheduled(r store.ListJobsByScheduledJobWithEmailPageRow)
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 // ─── Sort-dispatch helpers for the unfiltered /v1/jobs list ──────────────────
@@ -229,7 +291,9 @@ func jobRowToResponseByCreatedAsc(r store.ListJobsWithEmailPageByCreatedAscRow) 
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByNameDesc(r store.ListJobsWithEmailPageByNameDescRow) (anySortVal, pgtype.UUID) {
@@ -241,7 +305,9 @@ func jobRowToResponseByNameDesc(r store.ListJobsWithEmailPageByNameDescRow) jobR
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByNameAsc(r store.ListJobsWithEmailPageByNameAscRow) (anySortVal, pgtype.UUID) {
@@ -253,7 +319,9 @@ func jobRowToResponseByNameAsc(r store.ListJobsWithEmailPageByNameAscRow) jobRes
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByPriorityDesc(r store.ListJobsWithEmailPageByPriorityDescRow) (anySortVal, pgtype.UUID) {
@@ -265,7 +333,9 @@ func jobRowToResponseByPriorityDesc(r store.ListJobsWithEmailPageByPriorityDescR
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByPriorityAsc(r store.ListJobsWithEmailPageByPriorityAscRow) (anySortVal, pgtype.UUID) {
@@ -277,7 +347,9 @@ func jobRowToResponseByPriorityAsc(r store.ListJobsWithEmailPageByPriorityAscRow
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByStatusDesc(r store.ListJobsWithEmailPageByStatusDescRow) (anySortVal, pgtype.UUID) {
@@ -289,7 +361,9 @@ func jobRowToResponseByStatusDesc(r store.ListJobsWithEmailPageByStatusDescRow) 
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByStatusAsc(r store.ListJobsWithEmailPageByStatusAscRow) (anySortVal, pgtype.UUID) {
@@ -301,7 +375,9 @@ func jobRowToResponseByStatusAsc(r store.ListJobsWithEmailPageByStatusAscRow) jo
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByUpdatedDesc(r store.ListJobsWithEmailPageByUpdatedDescRow) (anySortVal, pgtype.UUID) {
@@ -313,7 +389,9 @@ func jobRowToResponseByUpdatedDesc(r store.ListJobsWithEmailPageByUpdatedDescRow
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func jobsRowKeyByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) (anySortVal, pgtype.UUID) {
@@ -325,7 +403,9 @@ func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) 
 		SubmittedBy: r.SubmittedBy, Labels: r.Labels,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
-	return toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	resp := toJobResponse(job, r.SubmittedByEmail, nil, nil)
+	applyJobEnrichment(&resp, r.TotalTasks, r.DoneTasks, r.StartedAt, r.FinishedAt, r.ScheduledJobID, r.ScheduledJobName)
+	return resp
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
