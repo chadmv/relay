@@ -102,6 +102,7 @@ export function WorkersPage() {
               <button
                 key={v}
                 type="button"
+                aria-pressed={view === v}
                 onClick={() => chooseView(v)}
                 className={`rounded-full px-3 py-1 text-[12px] ${view === v ? 'bg-accent text-bg' : 'text-fg-mute'}`}
               >
