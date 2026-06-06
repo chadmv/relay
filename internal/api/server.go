@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	// Jobs
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs", auth(http.HandlerFunc(s.handleListJobs)))
+	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
 

@@ -137,6 +137,29 @@ func applyJobEnrichment(resp *jobResponse, totalTasks, doneTasks int64, startedA
 	}
 }
 
+// jobStatsResponse is the fleet-wide KPI summary returned by GET /v1/jobs/stats.
+// done_24h and failed_24h are windowed on updated_at (see JobStatusCounts).
+type jobStatsResponse struct {
+	Running   int64 `json:"running"`
+	Queued    int64 `json:"queued"`
+	Done24h   int64 `json:"done_24h"`
+	Failed24h int64 `json:"failed_24h"`
+}
+
+func (s *Server) handleJobStats(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.q.JobStatusCounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "job stats failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, jobStatsResponse{
+		Running:   counts.Running,
+		Queued:    counts.Queued,
+		Done24h:   counts.Done24h,
+		Failed24h: counts.Failed24h,
+	})
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
