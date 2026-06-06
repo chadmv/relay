@@ -57,6 +57,47 @@ export function getWorkerStats(): Promise<WorkerStats> {
   return apiFetch<WorkerStats>('/workers/stats')
 }
 
+export interface MetricSample {
+  t: string
+  cpu_pct: number
+  mem_used: number
+  mem_total: number
+  gpu: boolean
+  gpu_util_pct: number
+  gpu_mem_used: number
+  gpu_mem_total: number
+}
+
+export interface WorkerMetrics {
+  worker_id: string
+  sample_interval_seconds: number
+  samples: MetricSample[]
+}
+
+export interface Workspace {
+  source_type: string
+  source_key: string
+  short_id: string
+  baseline_hash: string
+  last_used_at: string
+}
+
+// Fetches a single worker. Throws ApiError(404) if the worker does not exist.
+export function getWorker(id: string): Promise<Worker> {
+  return apiFetch<Worker>(`/workers/${id}`)
+}
+
+// Short-term utilization history. samples is always present (empty for an
+// offline / never-sampled worker).
+export function getWorkerMetrics(id: string): Promise<WorkerMetrics> {
+  return apiFetch<WorkerMetrics>(`/workers/${id}/metrics`)
+}
+
+// Admin-only. Source workspaces resident on the worker.
+export function listWorkerWorkspaces(id: string): Promise<Workspace[]> {
+  return apiFetch<Workspace[]>(`/workers/${id}/workspaces`)
+}
+
 // Admin-only. Lists revoked (decommissioned) workers, newest revocation first.
 // First page only; limit=50 matches listWorkers.
 export function listRevokedWorkers(): Promise<WorkersPage> {

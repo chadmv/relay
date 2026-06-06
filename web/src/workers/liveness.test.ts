@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { livenessView, formatRelativeTime, specLine, labelChips } from './liveness'
+import { livenessView, formatRelativeTime, specLine, labelChips, formatGB } from './liveness'
 import type { Worker } from './api'
 
 describe('livenessView', () => {
@@ -67,5 +67,14 @@ describe('labelChips', () => {
   })
   test('key=value pairs, bare key when value empty', () => {
     expect(labelChips({ pool: 'render', gpu: '' })).toEqual(['pool=render', 'gpu'])
+  })
+})
+
+describe('formatGB', () => {
+  test('formats bytes as GB with one decimal', () => {
+    expect(formatGB(2 * 1024 ** 3)).toBe('2.0 GB')
+  })
+  test('zero is 0.0 GB', () => {
+    expect(formatGB(0)).toBe('0.0 GB')
   })
 })

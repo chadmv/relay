@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { StatusDot } from './StatusDot'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
@@ -53,7 +54,11 @@ export function WorkersTable({
           role="row"
           className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
         >
-          <span role="cell" className="text-fg">{w.name}</span>
+          <span role="cell">
+            <Link to={`/workers/${w.id}`} className="text-fg hover:text-accent">
+              {w.name}
+            </Link>
+          </span>
           <span role="cell"><StatusDot status={w.status} /></span>
           <span role="cell" className="text-fg-mute">{w.max_slots}</span>
           <span role="cell" className="text-[10.5px] text-fg-mute">{specLine(w)}</span>

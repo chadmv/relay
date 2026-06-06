@@ -4,6 +4,7 @@ import { RegisterScreen } from '../auth/RegisterScreen'
 import { JobsPlaceholder } from './JobsPlaceholder'
 import { JobsPage } from '../jobs/JobsPage'
 import { WorkersPage } from '../workers/WorkersPage'
+import { WorkerDetailPage } from '../workers/WorkerDetailPage'
 import { SchedulesPage } from '../schedules/SchedulesPage'
 import { ProtectedRoute } from './ProtectedRoute'
 import { PublicOnlyRoute } from './PublicOnlyRoute'
@@ -18,6 +19,7 @@ export function AppRoutes() {
       <Route element={<ProtectedRoute />}>
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/workers" element={<WorkersPage />} />
+        <Route path="/workers/:id" element={<WorkerDetailPage />} />
         <Route path="/schedules" element={<SchedulesPage />} />
         <Route path="/admin" element={<JobsPlaceholder />} />
         <Route path="/profile/*" element={<JobsPlaceholder />} />
