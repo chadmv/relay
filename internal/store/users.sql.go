@@ -236,6 +236,38 @@ func (q *Queries) GetUserByEmailPublic(ctx context.Context, email string) (GetUs
 	return i, err
 }
 
+const getUserEmailsByIDs = `-- name: GetUserEmailsByIDs :many
+SELECT id, email FROM users WHERE id = ANY($1::uuid[])
+`
+
+type GetUserEmailsByIDsRow struct {
+	ID    pgtype.UUID `json:"id"`
+	Email string      `json:"email"`
+}
+
+// GetUserEmailsByIDs
+//
+//	SELECT id, email FROM users WHERE id = ANY($1::uuid[])
+func (q *Queries) GetUserEmailsByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]GetUserEmailsByIDsRow, error) {
+	rows, err := q.db.Query(ctx, getUserEmailsByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetUserEmailsByIDsRow
+	for rows.Next() {
+		var i GetUserEmailsByIDsRow
+		if err := rows.Scan(&i.ID, &i.Email); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsersIncludingArchivedPage = `-- name: ListUsersIncludingArchivedPage :many
 SELECT id, email, name, is_admin, created_at, archived_at
 FROM users
