@@ -1,7 +1,7 @@
 ---
 title: Agent logs misleading "token may have been revoked" when a stale token file shadows the enrollment token
 type: bug
-status: open
+status: closed
 created: 2026-06-03
 priority: medium
 source: surfaced while manually testing the web Workers page; enroll appeared to fail but root cause was a leftover state-dir token file
