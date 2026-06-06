@@ -11,6 +11,11 @@ function caret(field: SortField, sort: WorkerSort): string {
   return sort.startsWith('-') ? ' ▼' : ' ▲'
 }
 
+function ariaSort(field: SortField, sort: WorkerSort): 'ascending' | 'descending' | 'none' {
+  if (sort.replace('-', '') !== field) return 'none'
+  return sort.startsWith('-') ? 'descending' : 'ascending'
+}
+
 export function WorkersTable({
   workers,
   sort,
@@ -23,16 +28,16 @@ export function WorkersTable({
   return (
     <div className="rounded-card border border-border bg-white/5 backdrop-blur">
       <div className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
-        <button type="button" className="text-left" onClick={() => onSort('name')}>
+        <button type="button" aria-sort={ariaSort('name', sort)} className="text-left" onClick={() => onSort('name')}>
           NAME{caret('name', sort)}
         </button>
-        <button type="button" className="text-left" onClick={() => onSort('status')}>
+        <button type="button" aria-sort={ariaSort('status', sort)} className="text-left" onClick={() => onSort('status')}>
           STATUS{caret('status', sort)}
         </button>
         <span>SLOTS</span>
         <span>SPEC</span>
         <span>LABELS</span>
-        <button type="button" className="text-left" onClick={() => onSort('last_seen_at')}>
+        <button type="button" aria-sort={ariaSort('last_seen_at', sort)} className="text-left" onClick={() => onSort('last_seen_at')}>
           LAST SEEN{caret('last_seen_at', sort)}
         </button>
       </div>

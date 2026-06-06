@@ -40,6 +40,17 @@ test('view toggle switches to the table and persists to localStorage', async () 
   expect(localStorage.getItem('relay.workers.view')).toBe('table')
 })
 
+test('view toggle reports aria-pressed on the active button', async () => {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderWithQuery(<WorkersPage />)
+  await screen.findByText('render-01')
+  expect(screen.getByRole('button', { name: 'Grid' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'false')
+  await userEvent.click(screen.getByRole('button', { name: 'Table' }))
+  expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('button', { name: 'Grid' })).toHaveAttribute('aria-pressed', 'false')
+})
+
 test('clicking a sort header re-requests with the new sort', async () => {
   const sorts: (string | null)[] = []
   server.use(

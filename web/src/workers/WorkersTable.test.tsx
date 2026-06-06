@@ -24,3 +24,15 @@ test('shows a descending caret on the active sort column', () => {
   render(<WorkersTable workers={[worker({})]} sort="-name" onSort={() => {}} />)
   expect(screen.getByRole('button', { name: /name ▼/i })).toBeInTheDocument()
 })
+
+test('exposes aria-sort on the active sortable header and "none" on the rest', () => {
+  render(<WorkersTable workers={[worker({})]} sort="-last_seen_at" onSort={() => {}} />)
+  expect(screen.getByRole('button', { name: /last seen/i })).toHaveAttribute('aria-sort', 'descending')
+  expect(screen.getByRole('button', { name: /name/i })).toHaveAttribute('aria-sort', 'none')
+  expect(screen.getByRole('button', { name: /status/i })).toHaveAttribute('aria-sort', 'none')
+})
+
+test('reports ascending aria-sort when the active sort is ascending', () => {
+  render(<WorkersTable workers={[worker({})]} sort="name" onSort={() => {}} />)
+  expect(screen.getByRole('button', { name: /name/i })).toHaveAttribute('aria-sort', 'ascending')
+})
