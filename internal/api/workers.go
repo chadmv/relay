@@ -115,6 +115,9 @@ var WorkersSortSpec = SortSpec{
 	},
 }
 
+// RevokedWorkersSortSpec drives GET /v1/workers/revoked. The endpoint is
+// DESC-only; the revoked_at key exists solely so the "-revoked_at" default
+// resolves in parseSort. handleListRevokedWorkers rejects an ascending request.
 var RevokedWorkersSortSpec = SortSpec{
 	Default: "-revoked_at",
 	Keys: map[string]SortKeyKind{
@@ -296,6 +299,15 @@ func (s *Server) handleListRevokedWorkers(w http.ResponseWriter, r *http.Request
 
 	pp, ok := parsePage(w, r, RevokedWorkersSortSpec)
 	if !ok {
+		return
+	}
+
+	// This endpoint is DESC-only (the SQL ordering is fixed). The sort spec
+	// must list the revoked_at key so the "-revoked_at" default resolves, but
+	// an explicit ascending request can't be honored by the fixed query, so
+	// reject it rather than silently returning descending rows.
+	if pp.Sort != "-revoked_at" {
+		writeError(w, http.StatusBadRequest, "revoked workers can only be sorted by -revoked_at")
 		return
 	}
 
