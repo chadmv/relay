@@ -1,7 +1,8 @@
 ---
 title: Workers table uses div/button markup so aria-sort may not be announced
 type: idea
-status: open
+status: closed
+closed: 2026-06-05
 created: 2026-06-05
 priority: low
 source: follow-up from bug-2026-06-03-workers-view-controls-aria (aria-sort added, but on plain buttons)
