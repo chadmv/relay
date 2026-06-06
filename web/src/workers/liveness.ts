@@ -17,6 +17,8 @@ export function livenessView(status: WorkerStatus): LivenessView {
       return { label: 'STALE', dotClass: 'bg-warn', textClass: 'text-warn', dimClass: '' }
     case 'disabled':
       return { label: 'DISABLED', dotClass: 'bg-fg-mute', textClass: 'text-fg-mute', dimClass: 'opacity-70' }
+    case 'revoked':
+      return { label: 'REVOKED', dotClass: 'bg-fg-mute', textClass: 'text-fg-mute', dimClass: 'opacity-70' }
     case 'offline':
       return { label: 'OFFLINE', dotClass: 'bg-err', textClass: 'text-err', dimClass: 'opacity-[0.55]' }
   }

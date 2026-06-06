@@ -1,7 +1,7 @@
 ---
 title: Surface revoked workers for admin audit or re-enrollment
 type: idea
-status: open
+status: closed
 created: 2026-06-04
 priority: low
 source: noticed while excluding revoked workers from the workers-stats endpoint (PR #12)

@@ -27,32 +27,42 @@ export function WorkersTable({
   onSort: (field: SortField) => void
 }) {
   return (
-    <div className="rounded-card border border-border bg-white/5 backdrop-blur">
-      <div className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
-        <button type="button" aria-sort={ariaSort('name', sort)} className="text-left" onClick={() => onSort('name')}>
-          NAME{caret('name', sort)}
-        </button>
-        <button type="button" aria-sort={ariaSort('status', sort)} className="text-left" onClick={() => onSort('status')}>
-          STATUS{caret('status', sort)}
-        </button>
-        <span>SLOTS</span>
-        <span>SPEC</span>
-        <span>LABELS</span>
-        <button type="button" aria-sort={ariaSort('last_seen_at', sort)} className="text-left" onClick={() => onSort('last_seen_at')}>
-          LAST SEEN{caret('last_seen_at', sort)}
-        </button>
+    <div role="table" aria-label="Workers" className="rounded-card border border-border bg-white/5 backdrop-blur">
+      <div role="row" className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
+        <div role="columnheader" aria-sort={ariaSort('name', sort)}>
+          <button type="button" className="text-left" onClick={() => onSort('name')}>
+            NAME{caret('name', sort)}
+          </button>
+        </div>
+        <div role="columnheader" aria-sort={ariaSort('status', sort)}>
+          <button type="button" className="text-left" onClick={() => onSort('status')}>
+            STATUS{caret('status', sort)}
+          </button>
+        </div>
+        <span role="columnheader">SLOTS</span>
+        <span role="columnheader">SPEC</span>
+        <span role="columnheader">LABELS</span>
+        <div role="columnheader" aria-sort={ariaSort('last_seen_at', sort)}>
+          <button type="button" className="text-left" onClick={() => onSort('last_seen_at')}>
+            LAST SEEN{caret('last_seen_at', sort)}
+          </button>
+        </div>
       </div>
       {workers.map((w) => (
-        <Link
+        <div
           key={w.id}
-          to={`/workers/${w.id}`}
-          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] transition hover:bg-white/5 ${livenessView(w.status).dimClass}`}
+          role="row"
+          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
         >
-          <span className="text-fg">{w.name}</span>
-          <span><StatusDot status={w.status} /></span>
-          <span className="text-fg-mute">{w.max_slots}</span>
-          <span className="text-[10.5px] text-fg-mute">{specLine(w)}</span>
-          <span className="flex flex-wrap gap-1">
+          <span role="cell">
+            <Link to={`/workers/${w.id}`} className="text-fg hover:text-accent">
+              {w.name}
+            </Link>
+          </span>
+          <span role="cell"><StatusDot status={w.status} /></span>
+          <span role="cell" className="text-fg-mute">{w.max_slots}</span>
+          <span role="cell" className="text-[10.5px] text-fg-mute">{specLine(w)}</span>
+          <span role="cell" className="flex flex-wrap gap-1">
             {labelChips(w.labels).map((c) => (
               <span
                 key={c}
@@ -62,10 +72,10 @@ export function WorkersTable({
               </span>
             ))}
           </span>
-          <span className="text-fg-mute">
+          <span role="cell" className="text-fg-mute">
             {w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}
           </span>
-        </Link>
+        </div>
       ))}
     </div>
   )

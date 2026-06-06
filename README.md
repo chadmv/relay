@@ -671,6 +671,7 @@ relay workers list --limit 10
 relay workers list --json
 relay workers list --sort name             # alphabetical
 relay workers list --sort -last_seen_at    # most-recently-seen first
+relay workers list --revoked               # revoked (decommissioned) workers (admin only)
 ```
 
 Shows worker ID, name, status, CPU cores, RAM, GPU count, and GPU model.
@@ -1185,6 +1186,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 |--------|------|-------------|
 | `GET` | `/v1/workers` | List workers. Paginated. Order: created_at DESC (changed from name ASC). Excludes revoked workers. |
 | `GET` | `/v1/workers/stats` | Fleet-wide worker counts: `online`, `stale`, `offline`, `disabled`, and `total`. `total` is the sum of those buckets; revoked workers are excluded. Same bearer-auth as `GET /v1/workers`. |
+| `GET` | `/v1/workers/revoked` | List revoked (decommissioned) workers for audit, newest revocation first (admin only). Paginated, same `page` envelope as `GET /v1/workers`; each item includes `revoked_at`. Sortable only by `-revoked_at` (the default). |
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |

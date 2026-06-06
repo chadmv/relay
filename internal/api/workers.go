@@ -29,6 +29,7 @@ type workerResponse struct {
 	LastSeenAt   *time.Time      `json:"last_seen_at,omitempty"`
 	LastSampleAt *time.Time      `json:"last_sample_at,omitempty"`
 	DisabledAt   *time.Time      `json:"disabled_at,omitempty"`
+	RevokedAt    *time.Time      `json:"revoked_at,omitempty"`
 }
 
 // disableWorkerResponse is the body returned by the disable endpoint. It embeds
@@ -55,6 +56,11 @@ func toWorkerResponse(w store.Worker) workerResponse {
 		disabledAt = &t
 		status = "disabled"
 	}
+	var revokedAt *time.Time
+	if w.RevokedAt.Valid {
+		t := w.RevokedAt.Time
+		revokedAt = &t
+	}
 	return workerResponse{
 		ID:         uuidStr(w.ID),
 		Name:       w.Name,
@@ -69,6 +75,7 @@ func toWorkerResponse(w store.Worker) workerResponse {
 		Status:     status,
 		LastSeenAt: lastSeen,
 		DisabledAt: disabledAt,
+		RevokedAt:  revokedAt,
 	}
 }
 
@@ -108,8 +115,26 @@ var WorkersSortSpec = SortSpec{
 	},
 }
 
+// RevokedWorkersSortSpec drives GET /v1/workers/revoked. The endpoint is
+// DESC-only; the revoked_at key exists solely so the "-revoked_at" default
+// resolves in parseSort. handleListRevokedWorkers rejects an ascending request.
+var RevokedWorkersSortSpec = SortSpec{
+	Default: "-revoked_at",
+	Keys: map[string]SortKeyKind{
+		"revoked_at": SortKeyTimestamp,
+	},
+}
+
 func workersRowKey(w store.Worker) (anySortVal, pgtype.UUID) {
 	return w.CreatedAt.Time, w.ID
+}
+
+func workersRowKeyByRevoked(w store.Worker) (anySortVal, pgtype.UUID) {
+	if !w.RevokedAt.Valid {
+		return (*time.Time)(nil), w.ID
+	}
+	t := w.RevokedAt.Time
+	return &t, w.ID
 }
 
 func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
@@ -263,6 +288,47 @@ func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	writeJSON(w, http.StatusOK, page[workerResponse]{Items: items, NextCursor: next, Total: total})
+}
+
+// handleListRevokedWorkers lists workers with status 'revoked' for admin audit.
+// Admin-only. Ordered revoked_at DESC NULLS LAST, id DESC. Revoked workers are
+// excluded from every other list/stats endpoint; this is the only surface for them.
+func (s *Server) handleListRevokedWorkers(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	pp, ok := parsePage(w, r, RevokedWorkersSortSpec)
+	if !ok {
+		return
+	}
+
+	// This endpoint is DESC-only (the SQL ordering is fixed). The sort spec
+	// must list the revoked_at key so the "-revoked_at" default resolves, but
+	// an explicit ascending request can't be honored by the fixed query, so
+	// reject it rather than silently returning descending rows.
+	if pp.Sort != "-revoked_at" {
+		writeError(w, http.StatusBadRequest, "revoked workers can only be sorted by -revoked_at")
+		return
+	}
+
+	total, err := s.q.CountRevokedWorkers(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count revoked workers failed")
+		return
+	}
+
+	rows, err := s.q.ListRevokedWorkersPage(ctx, store.ListRevokedWorkersPageParams{
+		CursorSet:    pp.Cursor.Set,
+		CursorIsNull: pp.Cursor.IsNull,
+		CursorTs:     pp.CursorTs(),
+		CursorID:     pp.Cursor.ID,
+		PageLimit:    pp.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list revoked workers failed")
+		return
+	}
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerResponse, workersRowKeyByRevoked)
 	writeJSON(w, http.StatusOK, page[workerResponse]{Items: items, NextCursor: next, Total: total})
 }
 

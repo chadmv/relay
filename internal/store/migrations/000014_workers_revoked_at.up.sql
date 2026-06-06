@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN revoked_at TIMESTAMPTZ NULL;

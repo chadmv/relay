@@ -8,6 +8,7 @@ import {
   getWorker,
   getWorkerMetrics,
   listWorkerWorkspaces,
+  listRevokedWorkers,
   type WorkersPage,
 } from './api'
 
@@ -143,4 +144,21 @@ test('getWorkerMetrics throws ApiError on the error envelope', async () => {
 test('listWorkerWorkspaces throws ApiError on the error envelope', async () => {
   server.use(http.get('/v1/workers/w1/workspaces', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
   await expect(listWorkerWorkspaces('w1')).rejects.toBeInstanceOf(ApiError)
+})
+
+test('listRevokedWorkers fetches /workers/revoked with limit=50', async () => {
+  let captured: string | undefined
+  server.use(
+    http.get('/v1/workers/revoked', ({ request }) => {
+      captured = new URL(request.url).pathname
+      return HttpResponse.json({
+        items: [{ id: 'w1', name: 'gone-1', status: 'revoked', revoked_at: '2026-01-02T03:04:05Z' }],
+        next_cursor: '',
+        total: 1,
+      })
+    }),
+  )
+  const page = await listRevokedWorkers()
+  expect(captured).toBe('/v1/workers/revoked')
+  expect(page.items[0].revoked_at).toBe('2026-01-02T03:04:05Z')
 })
