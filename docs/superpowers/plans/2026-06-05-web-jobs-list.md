@@ -1224,20 +1224,22 @@ export function JobsPage() {
     setStack([])
   }
 
+  // next/prev use plain setters (not functional updaters): cursor and stack are
+  // both read from the current render and React batches the two updates in one
+  // event. Side effects inside a functional updater would double-fire under
+  // StrictMode.
   function next() {
     if (!data?.next_cursor) return
-    setStack((s) => [...s, cursor])
+    setStack([...stack, cursor])
     setCursor(data.next_cursor)
   }
 
   function prev() {
-    setStack((s) => {
-      if (s.length === 0) return s
-      const copy = [...s]
-      const back = copy.pop() ?? ''
-      setCursor(back)
-      return copy
-    })
+    if (stack.length === 0) return
+    const copy = [...stack]
+    const back = copy.pop() ?? ''
+    setStack(copy)
+    setCursor(back)
   }
 
   if (isLoading && !data) {
@@ -1311,7 +1313,7 @@ export function JobsPage() {
 
       <div className="flex items-center justify-between px-1 font-mono text-[10.5px] tracking-wider text-fg-mute">
         <span>
-          SHOWING <span className="text-fg">1–{jobs.length}</span> OF <span className="text-fg">{data?.total ?? 0}</span>
+          SHOWING <span className="text-fg">{jobs.length}</span> OF <span className="text-fg">{data?.total ?? 0}</span>
           {' · '}SORT <span className="text-accent-b">{statusFiltered ? `status=${status}` : sort}</span> · CURSOR PAGINATED
         </span>
         <div className="flex gap-2">
