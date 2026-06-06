@@ -41,3 +41,9 @@ export function labelChips(labels: Record<string, string> | null): string[] {
   if (!labels) return []
   return Object.entries(labels).map(([k, v]) => (v ? `${k}=${v}` : k))
 }
+
+// Formats a byte count as gibibytes with one decimal, labeled "GB" to match the
+// rest of the UI (e.g. worker.ram_gb). Used by the telemetry memory charts.
+export function formatGB(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+}
