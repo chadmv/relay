@@ -47,6 +47,13 @@ func main() {
 			log.Printf("relay-agent: no credentials available - attempting token-less auto-enroll (requires RELAY_ALLOW_AUTO_ENROLL on the server)")
 		}
 	}
+	if w := agent.EnrollmentIgnoredWarning(
+		creds.HasAgentToken(),
+		os.Getenv("RELAY_AGENT_ENROLLMENT_TOKEN") != "",
+		creds.TokenFilePath(),
+	); w != "" {
+		log.Print(w)
+	}
 
 	// Detect hardware capabilities.
 	caps := agent.Detect()
