@@ -30,7 +30,9 @@ func TestListScheduledJobs_OwnerEmail_AdminMultiOwner(t *testing.T) {
 
 	byName := map[string]string{}
 	for _, it := range p.Items {
-		byName[it["name"].(string)] = it["owner_email"].(string)
+		name, _ := it["name"].(string)
+		ownerEmail, _ := it["owner_email"].(string)
+		byName[name] = ownerEmail
 	}
 	require.Equal(t, "sjmail-owner1@test.com", byName["mail-sched-a"])
 	require.Equal(t, "sjmail-owner2@test.com", byName["mail-sched-b"])
@@ -48,5 +50,6 @@ func TestListScheduledJobs_OwnerEmail_OwnerScoped(t *testing.T) {
 	code, p := getScheduledJobsPage(t, srv, aliceToken, "sort=name&limit=50")
 	require.Equal(t, http.StatusOK, code)
 	require.Len(t, p.Items, 1)
-	require.Equal(t, "sjmail-alice@test.com", p.Items[0]["owner_email"].(string))
+	ownerEmail, _ := p.Items[0]["owner_email"].(string)
+	require.Equal(t, "sjmail-alice@test.com", ownerEmail)
 }

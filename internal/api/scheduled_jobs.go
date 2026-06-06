@@ -205,10 +205,10 @@ func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, 
 		return
 	}
 	ids := make([]pgtype.UUID, 0, len(items))
-	seen := map[string]bool{}
+	seen := map[string]struct{}{}
 	for _, it := range items {
-		if !seen[it.OwnerID] {
-			seen[it.OwnerID] = true
+		if _, ok := seen[it.OwnerID]; !ok {
+			seen[it.OwnerID] = struct{}{}
 			id, err := parseUUID(it.OwnerID)
 			if err == nil {
 				ids = append(ids, id)
