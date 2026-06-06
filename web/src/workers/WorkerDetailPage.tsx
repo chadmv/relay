@@ -54,6 +54,9 @@ export function WorkerDetailPage() {
   if (!worker) return null
 
   const samples: MetricSample[] = metrics?.samples ?? []
+  // Gate GPU charts on the hardware-stable gpu_count, not the per-sample `gpu`
+  // flag (a transient nvidia-smi success), so the charts do not flicker away on
+  // a single failed reading.
   const hasGpu = worker.gpu_count > 0
   const latest = last(samples)
   const memTotal = latest?.mem_total ?? 0

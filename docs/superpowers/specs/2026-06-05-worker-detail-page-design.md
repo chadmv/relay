@@ -129,7 +129,9 @@ supports. Uses the existing Holo design tokens and components (`StatusDot`,
    - CPU % (`max: 100`).
    - Memory used / total (`max: mem_total`), with current GB.
    - GPU util % and GPU mem used / total - rendered **only when the worker has a
-     GPU** (`gpu_count > 0` and samples report `gpu: true`).
+     GPU** (`gpu_count > 0`). Gating on the hardware-stable `gpu_count` rather
+     than the per-sample `gpu` flag avoids charts flickering away on a transient
+     `nvidia-smi` miss.
    - Each chart shows title, current value, and a caption (`last 30 min · 10s
      samples`). Empty state ("No telemetry yet") when `samples` is empty.
 4. **Labels** - read-only chips (reuse `labelChips`).
