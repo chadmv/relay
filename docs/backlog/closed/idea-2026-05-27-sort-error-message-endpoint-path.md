@@ -1,8 +1,10 @@
 ---
 title: Include endpoint path in SortSpec "unsupported sort key" error
 type: idea
-status: open
+status: closed
 created: 2026-05-27
+closed: 2026-06-05
+resolution: fixed
 priority: low
 source: list-endpoint-sort retro (docs/retros/2026-05-27-list-endpoint-sort.md)
 ---
@@ -34,3 +36,7 @@ Pick option 2; format the error in `parsePage`.
 - `internal/api/pagination.go` — `parseSort` and `parsePage`
 - `internal/api/pagination_test.go` — `TestParsePage_UnknownSortKey_400`
 - Per-endpoint sort integration tests in `internal/api/*_sort_integration_test.go`
+
+## Resolution
+
+Implemented as proposed (option 2). `parsePage` in `internal/api/pagination.go:254-258` reformats the `unsupportedSortKeyError` with `r.URL.Path`: `"unsupported sort key '%s' for %s; supported: %s"`. `SortSpec` stays purely declarative — no `EndpointPath` field. Both acceptance criteria are covered by `TestParsePage_UnknownSortKey_400` (`internal/api/pagination_test.go:362`), which asserts the body contains both `for /v1/jobs` and `unsupported sort key 'labels'`. This item was already filed under closed/ but its frontmatter status was never flipped; corrected here.
