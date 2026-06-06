@@ -1,7 +1,7 @@
 ---
 title: Gitignore bin/ and root *.exe build artifacts
 type: idea
-status: open
+status: closed
 created: 2026-06-04
 source: noticed during auto-enroll verification (retro 2026-06-04-auto-enroll-mode)
 ---

@@ -1,6 +1,8 @@
 .superpowers/
 .claude/settings.local.json
 .worktrees/
+bin/
+/*.exe
 web/node_modules/
 web/dist/
 !web/dist/index.html
