@@ -55,8 +55,8 @@ JOIN users u ON u.id = j.submitted_by
 LEFT JOIN LATERAL (
   SELECT COUNT(*)                                  AS total_tasks,
          COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
-         MIN(t.started_at)                         AS started_at,
-         MAX(t.finished_at)                        AS finished_at
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
@@ -74,8 +74,8 @@ For each query below, insert these two lines immediately after its `JOIN users u
 LEFT JOIN LATERAL (
   SELECT COUNT(*)                                  AS total_tasks,
          COUNT(*) FILTER (WHERE t.status = 'done') AS done_tasks,
-         MIN(t.started_at)                         AS started_at,
-         MAX(t.finished_at)                        AS finished_at
+         MIN(t.started_at)::timestamptz            AS started_at,
+         MAX(t.finished_at)::timestamptz           AS finished_at
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
@@ -114,7 +114,7 @@ FROM jobs;
 - [ ] **Step 4: Regenerate the store layer**
 
 Run: `make generate`
-Expected: `internal/store/jobs.sql.go` (and possibly `models.go`) regenerate with no errors. The generated `ListJobsWithEmailPageRow` and siblings now carry `TotalTasks int64`, `DoneTasks int64`, `StartedAt pgtype.Timestamptz`, `FinishedAt pgtype.Timestamptz`, `ScheduledJobName pgtype.Text`. A new `JobStatusCountsRow` has `Running`, `Queued`, `Done24h`, `Failed24h` (all `int64`).
+Expected: `internal/store/jobs.sql.go` (and possibly `models.go`) regenerate with no errors. The generated `ListJobsWithEmailPageRow` and siblings now carry `TotalTasks int64`, `DoneTasks int64`, `StartedAt pgtype.Timestamptz`, `FinishedAt pgtype.Timestamptz`, `ScheduledJobName *string` (sqlc emits `*string` for the nullable `sj.name`). The `::timestamptz` casts are required so sqlc infers `pgtype.Timestamptz` for the MIN/MAX rather than `interface{}`. A new `JobStatusCountsRow` has `Running`, `Queued`, `Done24h`, `Failed24h` (all `int64`).
 
 Note (Windows): `sqlc generate` may rewrite `internal/store/*.sql.go` with line-ending-only changes. Restrict the commit to the intended files: `git add internal/store/query/jobs.sql internal/store/jobs.sql.go internal/store/models.go` and run `git checkout -- internal/store/` for any other `*.sql.go` showing an empty diff.
 
@@ -174,7 +174,7 @@ Immediately after the `toJobResponse` function (after line ~105 in `internal/api
 // source) on a jobResponse. totalTasks/doneTasks come from the LATERAL aggregate;
 // startedAt/finishedAt/scheduledJobName are nullable; scheduledJobID comes from
 // the job row directly.
-func applyJobEnrichment(resp *jobResponse, totalTasks, doneTasks int64, startedAt, finishedAt pgtype.Timestamptz, scheduledJobID pgtype.UUID, scheduledJobName pgtype.Text) {
+func applyJobEnrichment(resp *jobResponse, totalTasks, doneTasks int64, startedAt, finishedAt pgtype.Timestamptz, scheduledJobID pgtype.UUID, scheduledJobName *string) {
 	resp.TotalTasks = int32(totalTasks)
 	resp.DoneTasks = int32(doneTasks)
 	if startedAt.Valid {
@@ -188,8 +188,8 @@ func applyJobEnrichment(resp *jobResponse, totalTasks, doneTasks int64, startedA
 	if scheduledJobID.Valid {
 		resp.ScheduledJobID = uuidStr(scheduledJobID)
 	}
-	if scheduledJobName.Valid {
-		resp.ScheduledJobName = scheduledJobName.String
+	if scheduledJobName != nil {
+		resp.ScheduledJobName = *scheduledJobName
 	}
 }
 ```
