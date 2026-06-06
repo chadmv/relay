@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
 import { WorkersGrid } from './WorkersGrid'
 import type { Worker } from './api'
@@ -12,8 +13,16 @@ function worker(over: Partial<Worker>): Worker {
   }
 }
 
+function renderGrid(workers: Worker[]) {
+  return render(
+    <MemoryRouter>
+      <WorkersGrid workers={workers} />
+    </MemoryRouter>,
+  )
+}
+
 test('renders a card with name, status, spec, slots, and label chip', () => {
-  render(<WorkersGrid workers={[worker({})]} />)
+  renderGrid([worker({})])
   expect(screen.getByText('render-01')).toBeInTheDocument()
   expect(screen.getByText('ONLINE')).toBeInTheDocument()
   expect(screen.getByText('16c · 128GB · RTX 4090')).toBeInTheDocument()
@@ -22,6 +31,11 @@ test('renders a card with name, status, spec, slots, and label chip', () => {
 })
 
 test('dims offline workers', () => {
-  const { container } = render(<WorkersGrid workers={[worker({ id: 'o', name: 'off-01', status: 'offline' })]} />)
+  const { container } = renderGrid([worker({ id: 'o', name: 'off-01', status: 'offline' })])
   expect(container.querySelector('.opacity-\\[0\\.55\\]')).not.toBeNull()
+})
+
+test('each card links to the worker detail page', () => {
+  renderGrid([worker({ id: 'w9', name: 'render-09' })])
+  expect(screen.getByRole('link', { name: /render-09/ })).toHaveAttribute('href', '/workers/w9')
 })

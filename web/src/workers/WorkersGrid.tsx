@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { StatusDot } from './StatusDot'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker } from './api'
@@ -6,9 +7,10 @@ export function WorkersGrid({ workers }: { workers: Worker[] }) {
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
       {workers.map((w) => (
-        <div
+        <Link
           key={w.id}
-          className={`rounded-card border border-border bg-white/5 p-4 backdrop-blur ${livenessView(w.status).dimClass}`}
+          to={`/workers/${w.id}`}
+          className={`block rounded-card border border-border bg-white/5 p-4 backdrop-blur transition hover:border-accent/50 ${livenessView(w.status).dimClass}`}
         >
           <div className="mb-2 flex items-baseline justify-between">
             <span className="font-mono text-[13px] text-fg">{w.name}</span>
@@ -31,7 +33,7 @@ export function WorkersGrid({ workers }: { workers: Worker[] }) {
             <span>{specLine(w)}</span>
             <span>{w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}</span>
           </div>
-        </div>
+        </Link>
       ))}
     </div>
   )

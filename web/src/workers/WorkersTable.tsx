@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { StatusDot } from './StatusDot'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
@@ -42,9 +43,10 @@ export function WorkersTable({
         </button>
       </div>
       {workers.map((w) => (
-        <div
+        <Link
           key={w.id}
-          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
+          to={`/workers/${w.id}`}
+          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] transition hover:bg-white/5 ${livenessView(w.status).dimClass}`}
         >
           <span className="text-fg">{w.name}</span>
           <span><StatusDot status={w.status} /></span>
@@ -63,7 +65,7 @@ export function WorkersTable({
           <span className="text-fg-mute">
             {w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}
           </span>
-        </div>
+        </Link>
       ))}
     </div>
   )
