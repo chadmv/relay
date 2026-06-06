@@ -1,6 +1,6 @@
 import { apiFetch } from '../lib/api'
 
-export type WorkerStatus = 'online' | 'stale' | 'offline' | 'disabled'
+export type WorkerStatus = 'online' | 'stale' | 'offline' | 'disabled' | 'revoked'
 
 export interface WorkerStats {
   online: number
@@ -25,6 +25,7 @@ export interface Worker {
   last_seen_at?: string
   last_sample_at?: string
   disabled_at?: string
+  revoked_at?: string
 }
 
 export interface WorkersPage {
@@ -54,4 +55,11 @@ export function listWorkers(sort: WorkerSort): Promise<WorkersPage> {
 // workers are excluded server-side.
 export function getWorkerStats(): Promise<WorkerStats> {
   return apiFetch<WorkerStats>('/workers/stats')
+}
+
+// Admin-only. Lists revoked (decommissioned) workers, newest revocation first.
+// First page only; limit=50 matches listWorkers.
+export function listRevokedWorkers(): Promise<WorkersPage> {
+  const q = new URLSearchParams({ limit: '50' })
+  return apiFetch<WorkersPage>(`/workers/revoked?${q}`)
 }

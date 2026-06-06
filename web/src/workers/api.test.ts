@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { ApiError } from '../lib/api'
-import { listWorkers, getWorkerStats, type WorkersPage } from './api'
+import { listWorkers, getWorkerStats, listRevokedWorkers, type WorkersPage } from './api'
 
 const emptyPage: WorkersPage = { items: [], next_cursor: '', total: 0 }
 
@@ -63,4 +63,21 @@ test('getWorkerStats throws ApiError on the error envelope', async () => {
     http.get('/v1/workers/stats', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
   )
   await expect(getWorkerStats()).rejects.toBeInstanceOf(ApiError)
+})
+
+test('listRevokedWorkers fetches /workers/revoked with limit=50', async () => {
+  let captured: string | undefined
+  server.use(
+    http.get('/v1/workers/revoked', ({ request }) => {
+      captured = new URL(request.url).pathname
+      return HttpResponse.json({
+        items: [{ id: 'w1', name: 'gone-1', status: 'revoked', revoked_at: '2026-01-02T03:04:05Z' }],
+        next_cursor: '',
+        total: 1,
+      })
+    }),
+  )
+  const page = await listRevokedWorkers()
+  expect(captured).toBe('/v1/workers/revoked')
+  expect(page.items[0].revoked_at).toBe('2026-01-02T03:04:05Z')
 })
