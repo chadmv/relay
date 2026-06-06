@@ -28,6 +28,15 @@ test('closes on Escape', async () => {
   expect(screen.queryByText('Log out')).not.toBeInTheDocument()
 })
 
+test('exposes menu semantics and reflects open state via aria attributes', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  expect(toggle).toHaveAttribute('aria-haspopup', 'menu')
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+})
+
 test('calls onLogout when Log out is clicked', async () => {
   const onLogout = renderMenu()
   await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
