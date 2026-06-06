@@ -155,9 +155,10 @@ type jobResponse struct {
 	UpdatedAt        time.Time       `json:"updated_at"`
 
 	// Enrichment populated only on list rows (GET /v1/jobs). Derived from the
-	// job's tasks and its scheduled-job source.
-	TotalTasks       int32           `json:"total_tasks,omitempty"`
-	DoneTasks        int32           `json:"done_tasks,omitempty"`
+	// job's tasks and its scheduled-job source. The counts are always emitted
+	// (no omitempty) so a zero count is explicit rather than absent.
+	TotalTasks       int32           `json:"total_tasks"`
+	DoneTasks        int32           `json:"done_tasks"`
 	StartedAt        *time.Time      `json:"started_at,omitempty"`
 	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
 	ScheduledJobID   string          `json:"scheduled_job_id,omitempty"`
