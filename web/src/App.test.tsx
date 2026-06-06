@@ -23,6 +23,8 @@ test('a successful login lands the user on the jobs page', async () => {
     http.get('/v1/users/me', () =>
       HttpResponse.json({ id: '1', email: 'admin@example.com', name: 'Admin', is_admin: true }),
     ),
+    http.get('/v1/jobs', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })),
+    http.get('/v1/jobs/stats', () => HttpResponse.json({ running: 0, queued: 0, done_24h: 0, failed_24h: 0 })),
   )
   render(<App />)
   await waitFor(() =>
@@ -31,5 +33,5 @@ test('a successful login lands the user on the jobs page', async () => {
   await userEvent.type(screen.getByLabelText('Email'), 'admin@example.com')
   await userEvent.type(screen.getByLabelText('Password'), 'changeme123')
   await userEvent.click(screen.getByRole('button', { name: /sign in/i }))
-  expect(await screen.findByText(/coming soon/i)).toBeInTheDocument()
+  expect(await screen.findByText('OVERVIEW')).toBeInTheDocument()
 })
