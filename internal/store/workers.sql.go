@@ -13,14 +13,14 @@ import (
 
 const clearWorkerAgentToken = `-- name: ClearWorkerAgentToken :execrows
 UPDATE workers
-SET agent_token_hash = NULL, status = 'revoked'
+SET agent_token_hash = NULL, status = 'revoked', revoked_at = NOW()
 WHERE id = $1
 `
 
 // ClearWorkerAgentToken
 //
 //	UPDATE workers
-//	SET agent_token_hash = NULL, status = 'revoked'
+//	SET agent_token_hash = NULL, status = 'revoked', revoked_at = NOW()
 //	WHERE id = $1
 func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, clearWorkerAgentToken, id)
@@ -28,6 +28,20 @@ func (q *Queries) ClearWorkerAgentToken(ctx context.Context, id pgtype.UUID) (in
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const countRevokedWorkers = `-- name: CountRevokedWorkers :one
+SELECT COUNT(*) FROM workers WHERE status = 'revoked'
+`
+
+// CountRevokedWorkers
+//
+//	SELECT COUNT(*) FROM workers WHERE status = 'revoked'
+func (q *Queries) CountRevokedWorkers(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countRevokedWorkers)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const countWorkers = `-- name: CountWorkers :one
@@ -48,7 +62,7 @@ func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
 const createWorker = `-- name: CreateWorker :one
 INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 `
 
 type CreateWorkerParams struct {
@@ -65,7 +79,7 @@ type CreateWorkerParams struct {
 //
 //	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, createWorker,
 		arg.Name,
@@ -94,6 +108,7 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -130,12 +145,12 @@ func (q *Queries) EnableWorker(ctx context.Context, id pgtype.UUID) (int64, erro
 }
 
 const getWorker = `-- name: GetWorker :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE id = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE id = $1
 `
 
 // GetWorker
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE id = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE id = $1
 func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorker, id)
 	var i Worker
@@ -156,18 +171,19 @@ func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error)
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const getWorkerByAgentTokenHash = `-- name: GetWorkerByAgentTokenHash :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE agent_token_hash = $1 AND status != 'revoked'
 `
 
 // GetWorkerByAgentTokenHash
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE agent_token_hash = $1 AND status != 'revoked'
 func (q *Queries) GetWorkerByAgentTokenHash(ctx context.Context, agentTokenHash *string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByAgentTokenHash, agentTokenHash)
@@ -189,17 +205,18 @@ func (q *Queries) GetWorkerByAgentTokenHash(ctx context.Context, agentTokenHash 
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const getWorkerByHostname = `-- name: GetWorkerByHostname :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE hostname = $1
 `
 
 // GetWorkerByHostname
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE hostname = $1
 func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostname, hostname)
 	var i Worker
@@ -220,17 +237,18 @@ func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Wor
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const getWorkerByHostnameForUpdate = `-- name: GetWorkerByHostnameForUpdate :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1 FOR UPDATE
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE hostname = $1 FOR UPDATE
 `
 
 // GetWorkerByHostnameForUpdate
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE hostname = $1 FOR UPDATE
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE hostname = $1 FOR UPDATE
 func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostnameForUpdate, hostname)
 	var i Worker
@@ -251,17 +269,107 @@ func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname str
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
+const listRevokedWorkersPage = `-- name: ListRevokedWorkersPage :many
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
+WHERE status = 'revoked'
+  AND (
+       NOT $1::bool
+    OR (
+       CASE WHEN $2::bool THEN
+            revoked_at IS NULL AND id < $3::uuid
+       ELSE
+            (revoked_at IS NOT NULL AND
+             (revoked_at, id) < ($4::timestamptz, $3::uuid))
+         OR revoked_at IS NULL
+       END
+   ))
+ORDER BY revoked_at DESC NULLS LAST, id DESC
+LIMIT $5+ 1
+`
+
+type ListRevokedWorkersPageParams struct {
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"+page_limit"`
+}
+
+// Revoked workers for the admin audit endpoint, newest revocation first.
+// revoked_at is nullable (rows revoked before the column existed), so the
+// cursor predicate mirrors ListWorkersPageByLastSeenDesc's NULLS LAST handling.
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
+//	WHERE status = 'revoked'
+//	  AND (
+//	       NOT $1::bool
+//	    OR (
+//	       CASE WHEN $2::bool THEN
+//	            revoked_at IS NULL AND id < $3::uuid
+//	       ELSE
+//	            (revoked_at IS NOT NULL AND
+//	             (revoked_at, id) < ($4::timestamptz, $3::uuid))
+//	         OR revoked_at IS NULL
+//	       END
+//	   ))
+//	ORDER BY revoked_at DESC NULLS LAST, id DESC
+//	LIMIT $5+ 1
+func (q *Queries) ListRevokedWorkersPage(ctx context.Context, arg ListRevokedWorkersPageParams) ([]Worker, error) {
+	rows, err := q.db.Query(ctx, listRevokedWorkersPage,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Worker
+	for rows.Next() {
+		var i Worker
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Hostname,
+			&i.CpuCores,
+			&i.RamGb,
+			&i.GpuCount,
+			&i.GpuModel,
+			&i.Os,
+			&i.MaxSlots,
+			&i.Labels,
+			&i.Status,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.AgentTokenHash,
+			&i.DisconnectedAt,
+			&i.DisabledAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkers = `-- name: ListWorkers :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers ORDER BY name
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers ORDER BY name
 `
 
 // ListWorkers
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers ORDER BY name
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers ORDER BY name
 func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkers)
 	if err != nil {
@@ -288,6 +396,7 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -300,12 +409,12 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 }
 
 const listWorkersByLiveness = `-- name: ListWorkersByLiveness :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE status IN ('online', 'stale')
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE status IN ('online', 'stale')
 `
 
 // Workers eligible for staleness sweeping: those currently connected.
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers WHERE status IN ('online', 'stale')
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers WHERE status IN ('online', 'stale')
 func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkersByLiveness)
 	if err != nil {
@@ -332,6 +441,7 @@ func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -344,7 +454,7 @@ func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 }
 
 const listWorkersPage = `-- name: ListWorkersPage :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND ($1::bool = FALSE
        OR (created_at, id) < ($2::timestamptz, $3::uuid))
@@ -361,7 +471,7 @@ type ListWorkersPageParams struct {
 
 // ListWorkersPage
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND ($1::bool = FALSE
 //	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
@@ -398,6 +508,7 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -410,7 +521,7 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 }
 
 const listWorkersPageByCreatedAsc = `-- name: ListWorkersPageByCreatedAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 ORDER BY created_at ASC, id ASC
@@ -426,7 +537,7 @@ type ListWorkersPageByCreatedAscParams struct {
 
 // ListWorkersPageByCreatedAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 //	ORDER BY created_at ASC, id ASC
@@ -462,6 +573,7 @@ func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorke
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -474,7 +586,7 @@ func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorke
 }
 
 const listWorkersPageByLastSeenAsc = `-- name: ListWorkersPageByLastSeenAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (
        NOT $1::bool
@@ -507,7 +619,7 @@ type ListWorkersPageByLastSeenAscParams struct {
 //   - cursor non-null: we're in the non-null tail; qualify non-null rows
 //     with (last_seen_at, id) > (cursor_ts, cursor_id).
 //
-//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //     WHERE status != 'revoked'
 //     AND (
 //     NOT $1::bool
@@ -554,6 +666,7 @@ func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWork
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -566,7 +679,7 @@ func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWork
 }
 
 const listWorkersPageByLastSeenDesc = `-- name: ListWorkersPageByLastSeenDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (
        NOT $1::bool
@@ -601,7 +714,7 @@ type ListWorkersPageByLastSeenDescParams struct {
 //     row with (last_seen_at, id) < (cursor_ts, cursor_id), OR any null
 //     row (nulls come after in DESC NULLS LAST).
 //
-//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //     WHERE status != 'revoked'
 //     AND (
 //     NOT $1::bool
@@ -648,6 +761,7 @@ func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWor
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -660,7 +774,7 @@ func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWor
 }
 
 const listWorkersPageByNameAsc = `-- name: ListWorkersPageByNameAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 ORDER BY name ASC, id ASC
@@ -676,7 +790,7 @@ type ListWorkersPageByNameAscParams struct {
 
 // ListWorkersPageByNameAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 //	ORDER BY name ASC, id ASC
@@ -712,6 +826,7 @@ func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersP
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -724,7 +839,7 @@ func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersP
 }
 
 const listWorkersPageByNameDesc = `-- name: ListWorkersPageByNameDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 ORDER BY name DESC, id DESC
@@ -740,7 +855,7 @@ type ListWorkersPageByNameDescParams struct {
 
 // ListWorkersPageByNameDesc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 //	ORDER BY name DESC, id DESC
@@ -776,6 +891,7 @@ func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkers
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -788,7 +904,7 @@ func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkers
 }
 
 const listWorkersPageByStatusAsc = `-- name: ListWorkersPageByStatusAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 ORDER BY status ASC, id ASC
@@ -804,7 +920,7 @@ type ListWorkersPageByStatusAscParams struct {
 
 // ListWorkersPageByStatusAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 //	ORDER BY status ASC, id ASC
@@ -840,6 +956,7 @@ func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorker
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -852,7 +969,7 @@ func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorker
 }
 
 const listWorkersPageByStatusDesc = `-- name: ListWorkersPageByStatusDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 ORDER BY status DESC, id DESC
@@ -868,7 +985,7 @@ type ListWorkersPageByStatusDescParams struct {
 
 // ListWorkersPageByStatusDesc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 //	ORDER BY status DESC, id DESC
@@ -904,6 +1021,7 @@ func (q *Queries) ListWorkersPageByStatusDesc(ctx context.Context, arg ListWorke
 			&i.AgentTokenHash,
 			&i.DisconnectedAt,
 			&i.DisabledAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -916,7 +1034,7 @@ func (q *Queries) ListWorkersPageByStatusDesc(ctx context.Context, arg ListWorke
 }
 
 const setWorkerAgentToken = `-- name: SetWorkerAgentToken :exec
-UPDATE workers SET agent_token_hash = $2 WHERE id = $1
+UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1
 `
 
 type SetWorkerAgentTokenParams struct {
@@ -924,9 +1042,12 @@ type SetWorkerAgentTokenParams struct {
 	AgentTokenHash *string     `json:"agent_token_hash"`
 }
 
-// SetWorkerAgentToken
+// Sets the long-lived agent token on (re)enrollment. Clears revoked_at because
+// regaining a valid token means the worker is no longer revoked; this is the
+// one place a revoked worker is revived (revocation nulls the token, so the
+// reconnect-by-token path can no longer find it).
 //
-//	UPDATE workers SET agent_token_hash = $2 WHERE id = $1
+//	UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1
 func (q *Queries) SetWorkerAgentToken(ctx context.Context, arg SetWorkerAgentTokenParams) error {
 	_, err := q.db.Exec(ctx, setWorkerAgentToken, arg.ID, arg.AgentTokenHash)
 	return err
@@ -954,7 +1075,7 @@ const updateWorker = `-- name: UpdateWorker :one
 UPDATE workers
 SET name = $2, labels = $3, max_slots = $4
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 `
 
 type UpdateWorkerParams struct {
@@ -969,7 +1090,7 @@ type UpdateWorkerParams struct {
 //	UPDATE workers
 //	SET name = $2, labels = $3, max_slots = $4
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorker,
 		arg.ID,
@@ -995,6 +1116,7 @@ func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Wor
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -1003,7 +1125,7 @@ const updateWorkerStatus = `-- name: UpdateWorkerStatus :one
 UPDATE workers
 SET status = $2, last_seen_at = $3, disconnected_at = $4
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 `
 
 type UpdateWorkerStatusParams struct {
@@ -1018,7 +1140,7 @@ type UpdateWorkerStatusParams struct {
 //	UPDATE workers
 //	SET status = $2, last_seen_at = $3, disconnected_at = $4
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at
 func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatusParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorkerStatus,
 		arg.ID,
@@ -1044,6 +1166,7 @@ func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatus
 		&i.AgentTokenHash,
 		&i.DisconnectedAt,
 		&i.DisabledAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
