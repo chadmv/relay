@@ -71,7 +71,11 @@ func (a *Agent) Run(ctx context.Context) {
 				return
 			}
 			if status.Code(err) == codes.Unauthenticated {
-				log.Printf("agent: authentication failed — token may have been revoked; exiting")
+				log.Print(authFailureMessage(
+					a.creds.HasAgentToken(),
+					a.creds.EnrollmentToken() != "",
+					a.creds.TokenFilePath(),
+				))
 				a.runnerWG.Wait()
 				return
 			}
