@@ -137,6 +137,7 @@ type Worker struct {
 	AgentTokenHash *string            `json:"agent_token_hash"`
 	DisconnectedAt pgtype.Timestamptz `json:"disconnected_at"`
 	DisabledAt     pgtype.Timestamptz `json:"disabled_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type WorkerWorkspace struct {
