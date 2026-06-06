@@ -11,8 +11,8 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Server holds shared dependencies for all HTTP handlers.
