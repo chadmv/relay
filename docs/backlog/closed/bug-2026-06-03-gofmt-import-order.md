@@ -1,8 +1,9 @@
 ---
 title: Pre-existing gofmt import-order issues in server.go and main.go
 type: bug
-status: open
+status: closed
 created: 2026-06-03
+closed: 2026-06-05
 priority: low
 source: web front end auth slice final review
 ---
@@ -17,6 +18,9 @@ source: web front end auth slice final review
 
 ## Acceptance / Done When
 - `gofmt -l` (or `gofmt -w`) reports no issues for both files.
+
+## Resolution (2026-06-05)
+Reordered imports to satisfy gofmt: `pgtype` before `pgxpool` in `server.go`, and `relayv1` moved into path-sorted position in `main.go`. Fixes were applied as surgical edits rather than `gofmt -w` because the working tree checks out with CRLF line endings under `core.autocrlf=true`; `gofmt -w` would have rewritten every line to LF. The committed (LF) blob is now gofmt-clean, so CI on Linux passes. On a Windows checkout `gofmt -l` will still list both files solely due to CRLF terminators, which is a platform artifact, not a formatting defect.
 
 ## Related
 - `internal/api/server.go`

@@ -13,10 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/metrics"
+	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/schedrunner"
 	"relay/internal/scheduler"
 	"relay/internal/store"
