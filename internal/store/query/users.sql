@@ -152,3 +152,6 @@ WHERE (sqlc.arg(cursor_set)::bool = FALSE
        OR (email, id) > (sqlc.arg(cursor_v)::text, sqlc.arg(cursor_id)::uuid))
 ORDER BY email ASC, id ASC
 LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: GetUserEmailsByIDs :many
+SELECT id, email FROM users WHERE id = ANY($1::uuid[]);

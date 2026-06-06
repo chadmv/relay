@@ -15,16 +15,17 @@ import (
 )
 
 type workerResp struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Hostname string `json:"hostname"`
-	CpuCores int32  `json:"cpu_cores"`
-	RamGb    int32  `json:"ram_gb"`
-	GpuCount int32  `json:"gpu_count"`
-	GpuModel string `json:"gpu_model"`
-	Os       string `json:"os"`
-	MaxSlots int32  `json:"max_slots"`
-	Status   string `json:"status"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Hostname  string `json:"hostname"`
+	CpuCores  int32  `json:"cpu_cores"`
+	RamGb     int32  `json:"ram_gb"`
+	GpuCount  int32  `json:"gpu_count"`
+	GpuModel  string `json:"gpu_model"`
+	Os        string `json:"os"`
+	MaxSlots  int32  `json:"max_slots"`
+	Status    string `json:"status"`
+	RevokedAt string `json:"revoked_at"`
 }
 
 // WorkersCommand returns the relay workers Command.
@@ -73,15 +74,22 @@ func doWorkersList(ctx context.Context, c *relayclient.Client, args []string, w 
 	asJSON := fs.Bool("json", false, "output raw JSON")
 	limitFlag := fs.Int("limit", 0, "cap output at N rows (0 = all)")
 	sortFlag := fs.String("sort", "", "sort order; e.g. -name or status (server-validated)")
+	revoked := fs.Bool("revoked", false, "list revoked (decommissioned) workers instead (admin only)")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
+
+	path := "/v1/workers"
+	if *revoked {
+		path = "/v1/workers/revoked"
+	}
+
 	var params url.Values
 	if *sortFlag != "" {
 		params = url.Values{}
 		params.Set("sort", *sortFlag)
 	}
-	workers, total, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", params, *limitFlag)
+	workers, total, err := relayclient.FetchAllPages[workerResp](ctx, c, path, params, *limitFlag)
 	if err != nil {
 		return err
 	}
@@ -90,6 +98,13 @@ func doWorkersList(ctx context.Context, c *relayclient.Client, args []string, w 
 	}
 	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if *revoked {
+		fmt.Fprintln(tw, "ID\tNAME\tHOSTNAME\tREVOKED AT")
+		for _, wk := range workers {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", wk.ID, wk.Name, wk.Hostname, wk.RevokedAt)
+		}
+		return tw.Flush()
+	}
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tCPU\tRAM GB\tGPUS\tGPU MODEL")
 	for _, wk := range workers {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",

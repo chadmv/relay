@@ -2,9 +2,18 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, expect, test } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { WorkersPage } from './WorkersPage'
+
+function renderPage() {
+  return renderWithQuery(
+    <MemoryRouter>
+      <WorkersPage />
+    </MemoryRouter>,
+  )
+}
 
 afterEach(() => localStorage.clear())
 
@@ -25,7 +34,7 @@ beforeEach(() => {
 
 test('renders workers and the fleet-wide summary', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   expect(await screen.findByText('render-01')).toBeInTheDocument()
   expect(screen.getByText('render-02')).toBeInTheDocument()
   expect(screen.getByText('2 workers')).toBeInTheDocument()
@@ -33,7 +42,7 @@ test('renders workers and the fleet-wide summary', async () => {
 
 test('view toggle switches to the table and persists to localStorage', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   await screen.findByText('render-01')
   await userEvent.click(screen.getByRole('button', { name: 'Table' }))
   expect(screen.getByRole('button', { name: /name/i })).toBeInTheDocument()
@@ -42,7 +51,7 @@ test('view toggle switches to the table and persists to localStorage', async () 
 
 test('view toggle reports aria-pressed on the active button', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   await screen.findByText('render-01')
   expect(screen.getByRole('button', { name: 'Grid' })).toHaveAttribute('aria-pressed', 'true')
   expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'false')
@@ -59,7 +68,7 @@ test('clicking a sort header re-requests with the new sort', async () => {
       return HttpResponse.json(page)
     }),
   )
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   await screen.findByText('render-01')
   await userEvent.click(screen.getByRole('button', { name: 'Table' }))
   await userEvent.click(screen.getByRole('button', { name: /name/i }))
@@ -68,7 +77,7 @@ test('clicking a sort header re-requests with the new sort', async () => {
 
 test('shows an error banner with retry, then recovers', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
 
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
@@ -78,7 +87,7 @@ test('shows an error banner with retry, then recovers', async () => {
 
 test('shows the empty state when there are no workers', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })))
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   expect(await screen.findByText(/no workers enrolled yet/i)).toBeInTheDocument()
 })
 
@@ -89,7 +98,7 @@ test('summary strip shows fleet-wide totals from the stats endpoint', async () =
       HttpResponse.json({ online: 4, stale: 0, offline: 1, disabled: 0, total: 5 }),
     ),
   )
-  renderWithQuery(<WorkersPage />)
+  renderPage()
   // page.total is 2, but the strip must show the fleet-wide total of 5.
   expect(await screen.findByText('5 workers')).toBeInTheDocument()
 })

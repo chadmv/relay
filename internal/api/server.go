@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	// Jobs
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs", auth(http.HandlerFunc(s.handleListJobs)))
+	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
 
@@ -128,6 +129,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleCreateAgentEnrollment))))
 	mux.Handle("GET /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleListAgentEnrollments))))
 	mux.Handle("DELETE /v1/workers/{id}/token", auth(admin(http.HandlerFunc(s.handleDeleteWorkerToken))))
+	mux.Handle("GET /v1/workers/revoked", auth(admin(http.HandlerFunc(s.handleListRevokedWorkers))))
 	mux.Handle("POST /v1/workers/{id}/disable", auth(admin(http.HandlerFunc(s.handleDisableWorker))))
 	mux.Handle("POST /v1/workers/{id}/enable", auth(admin(http.HandlerFunc(s.handleEnableWorker))))
 

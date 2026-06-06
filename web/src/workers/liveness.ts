@@ -17,6 +17,8 @@ export function livenessView(status: WorkerStatus): LivenessView {
       return { label: 'STALE', dotClass: 'bg-warn', textClass: 'text-warn', dimClass: '' }
     case 'disabled':
       return { label: 'DISABLED', dotClass: 'bg-fg-mute', textClass: 'text-fg-mute', dimClass: 'opacity-70' }
+    case 'revoked':
+      return { label: 'REVOKED', dotClass: 'bg-fg-mute', textClass: 'text-fg-mute', dimClass: 'opacity-70' }
     case 'offline':
       return { label: 'OFFLINE', dotClass: 'bg-err', textClass: 'text-err', dimClass: 'opacity-[0.55]' }
   }
@@ -40,4 +42,10 @@ export function specLine(w: Worker): string {
 export function labelChips(labels: Record<string, string> | null): string[] {
   if (!labels) return []
   return Object.entries(labels).map(([k, v]) => (v ? `${k}=${v}` : k))
+}
+
+// Formats a byte count as gibibytes with one decimal, labeled "GB" to match the
+// rest of the UI (e.g. worker.ram_gb). Used by the telemetry memory charts.
+export function formatGB(bytes: number): string {
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
 }

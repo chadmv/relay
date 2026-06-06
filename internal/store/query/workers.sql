@@ -41,11 +41,15 @@ ON CONFLICT (hostname) DO UPDATE
 RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at;
 
 -- name: SetWorkerAgentToken :exec
-UPDATE workers SET agent_token_hash = $2 WHERE id = $1;
+-- Sets the long-lived agent token on (re)enrollment. Clears revoked_at because
+-- regaining a valid token means the worker is no longer revoked; this is the
+-- one place a revoked worker is revived (revocation nulls the token, so the
+-- reconnect-by-token path can no longer find it).
+UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1;
 
 -- name: ClearWorkerAgentToken :execrows
 UPDATE workers
-SET agent_token_hash = NULL, status = 'revoked'
+SET agent_token_hash = NULL, status = 'revoked', revoked_at = NOW()
 WHERE id = $1;
 
 -- name: GetWorkerByAgentTokenHash :one
@@ -176,3 +180,26 @@ SELECT
     COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'stale')        AS stale,
     COUNT(*) FILTER (WHERE disabled_at IS NULL AND status = 'offline')      AS offline
 FROM workers;
+
+-- name: CountRevokedWorkers :one
+SELECT COUNT(*) FROM workers WHERE status = 'revoked';
+
+-- name: ListRevokedWorkersPage :many
+-- Revoked workers for the admin audit endpoint, newest revocation first.
+-- revoked_at is nullable (rows revoked before the column existed), so the
+-- cursor predicate mirrors ListWorkersPageByLastSeenDesc's NULLS LAST handling.
+SELECT * FROM workers
+WHERE status = 'revoked'
+  AND (
+       NOT @cursor_set::bool
+    OR (
+       CASE WHEN @cursor_is_null::bool THEN
+            revoked_at IS NULL AND id < @cursor_id::uuid
+       ELSE
+            (revoked_at IS NOT NULL AND
+             (revoked_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+         OR revoked_at IS NULL
+       END
+   ))
+ORDER BY revoked_at DESC NULLS LAST, id DESC
+LIMIT @page_limit + 1;
