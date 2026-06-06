@@ -1,8 +1,9 @@
 ---
 title: Workers view toggle lacks aria-pressed; sort headers lack aria-sort
 type: bug
-status: open
+status: closed
 created: 2026-06-03
+closed: 2026-06-05
 priority: low
 source: web workers slice retro (final code review flagged it as a minor a11y gap)
 ---
