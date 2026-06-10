@@ -60,6 +60,17 @@ Code map:
 
 **Source providers.** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent. Provision tickets out-of-band (`p4 login`); relay does not manage P4 credentials. The Perforce integration test spins up a `p4d` container via testcontainers-go.
 
+## Invariants
+
+Cross-cutting rules that new code must not bypass. Every high-severity finding in the 2026-06-10 codebase review was a path that sidestepped an invariant already enforced elsewhere - check changes against these:
+
+- **Epoch fence.** Every write to `tasks.status` or `task_logs` must either fence on `assignment_epoch` (match the caller's epoch) or end the assignment (bump it, as `ClaimTaskForWorker` and `RequeueWorkerTasksWithEpoch` do). Never call an epoch-fenced query with a zero-value epoch, and never return a task to `pending` without bumping the epoch.
+- **Single job-spec pipeline.** All job-spec ingestion (REST API, CLI, MCP, schedrunner) goes through `jobspec.Validate` and `CreateJobFromSpec`. Never define parallel spec structs or task-creation paths; if a field is added to `jobspec.TaskSpec`, every consumer gets it for free only if they share the types.
+- **One bounded sender per gRPC stream.** All writes to a stream go through its single send goroutine (agent: `sendCh`; server: `workerSender`). Sends from other goroutines must be bounded - a peer that stops reading must never block a dispatcher or HTTP handler indefinitely.
+- **Identity-checked teardown.** Connection cleanup must only tear down state it owns: verify the registered sender or handle is yours before unregistering a worker, marking it offline, or arming a grace timer. A stale connection's defers must not clobber a fresh registration.
+- **No interior pointers across locks.** Shared registries return value copies from getters; mutation happens through methods that hold the lock, never on pointers that escaped it.
+- **Single JSON entry point.** HTTP request bodies are read only via `readJSON` in `internal/api/server.go`; request-size limits and decode policy live there, not at call sites.
+
 ## Behavior
 
 Behavioral guidelines to reduce common LLM coding mistakes.
