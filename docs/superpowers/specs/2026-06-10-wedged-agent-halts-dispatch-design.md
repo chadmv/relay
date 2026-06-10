@@ -151,9 +151,12 @@ if err := d.registry.Send(uuidStr(w.ID), msg); err != nil {
 
 **HTTP handlers** (`jobs.go:755`, `workers.go:502`, `workspaces.go:79`). No
 change. They already discard the send error (`_ = s.registry.Send(...)`); the
-fix is that they now return in ~5s worst case instead of hanging forever.
-Cancel/disable/evict are best-effort signals and the worker's eventual
-disconnect handles cleanup.
+fix is that each `Send` now returns within `sendTimeout` (~5s) instead of
+hanging forever. Note the cancel/disable handlers loop over a job's running
+tasks synchronously, so a job whose tasks all sit on one wedged worker can take
+up to N x ~5s in the request path (bounded, was previously unbounded). This runs
+after the DB commit, so state is already durable. Cancel/disable/evict are
+best-effort signals and the worker's eventual disconnect handles cleanup.
 
 ## Out of scope (deliberate boundaries)
 
