@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 func main() {
@@ -173,7 +174,12 @@ func main() {
 	}
 
 	// Start gRPC.
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second, // ping after 30s of transport inactivity
+			Timeout: 10 * time.Second, // close the transport if no ack within 10s
+		}),
+	)
 	relayv1.RegisterAgentServiceServer(grpcSrv, agentHandler)
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
