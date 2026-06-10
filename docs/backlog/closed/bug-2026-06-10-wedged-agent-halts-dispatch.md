@@ -1,8 +1,10 @@
 ---
 title: One wedged agent can halt task dispatch for the entire farm
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-10
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -21,3 +23,6 @@ source: full-codebase review (2026-06-10)
 - `internal/scheduler/dispatch.go:262` (`sendTask`)
 - `internal/api/jobs.go:755`, `internal/api/workers.go:502`, `internal/api/workspaces.go:79`
 - Same keepalive fix as bug-2026-06-10-stale-stream-teardown-clobbers-registration
+
+## Resolution
+Fixed via PR #24 (https://github.com/chadmv/relay/pull/24): bounded `workerSender.Send` with a 5s timeout (`ErrSendTimeout`) and added server-side gRPC keepalive (30s/10s). Commits a845c6b..6ac89df. Follow-up on the synchronous N x 5s cancel/disable loop tracked in bug-2026-06-10-cancel-disable-handlers-send-synchronously.
