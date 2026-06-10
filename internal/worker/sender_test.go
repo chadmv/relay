@@ -1,6 +1,7 @@
 package worker_test
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -77,4 +78,80 @@ func TestWorkerSender_SendAfterClose(t *testing.T) {
 
 	err := ws.Send(&relayv1.CoordinatorMessage{})
 	assert.Error(t, err)
+}
+
+// wedgedStream simulates an agent whose stream blocks: the send goroutine parks
+// inside Send until release is closed, then Send returns an error (mimicking the
+// transport dying). entered is closed the first time Send is reached.
+type wedgedStream struct {
+	entered   chan struct{}
+	release   chan struct{}
+	onceEnter sync.Once
+}
+
+func (s *wedgedStream) Send(*relayv1.CoordinatorMessage) error {
+	s.onceEnter.Do(func() { close(s.entered) })
+	<-s.release
+	return errors.New("stream closed")
+}
+
+func newWedgedStream() *wedgedStream {
+	return &wedgedStream{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+// fillBuffer parks the send goroutine inside Send and fills the 64-slot buffer,
+// so the next Send call has nowhere to go.
+func fillBuffer(t *testing.T, ws worker.Sender, stream *wedgedStream) {
+	t.Helper()
+	require.NoError(t, ws.Send(&relayv1.CoordinatorMessage{})) // pulled by loop, parks in Send
+	<-stream.entered                                           // loop goroutine now blocked inside Send
+	for i := 0; i < 64; i++ {
+		require.NoError(t, ws.Send(&relayv1.CoordinatorMessage{})) // fills the buffer
+	}
+}
+
+func TestWorkerSender_TimesOutWhenBufferFull(t *testing.T) {
+	worker.SetSendTimeoutForTest(t, 50*time.Millisecond)
+	stream := newWedgedStream()
+	ws := worker.NewWorkerSender(stream)
+	t.Cleanup(func() { close(stream.release); ws.Close() })
+
+	fillBuffer(t, ws, stream)
+
+	// Run the blocking send in a goroutine so the test fails fast (rather than
+	// hanging) against the unfixed code.
+	errc := make(chan error, 1)
+	go func() { errc <- ws.Send(&relayv1.CoordinatorMessage{}) }()
+	select {
+	case err := <-errc:
+		require.ErrorIs(t, err, worker.ErrSendTimeout)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return; it blocked forever on a full buffer")
+	}
+}
+
+func TestWorkerSender_ReturnsDisconnectedWhenStreamDiesMidWait(t *testing.T) {
+	worker.SetSendTimeoutForTest(t, 5*time.Second) // long; the stream dies first
+	stream := newWedgedStream()
+	ws := worker.NewWorkerSender(stream)
+	t.Cleanup(func() { ws.Close() })
+
+	fillBuffer(t, ws, stream)
+
+	// A send blocked on the full buffer...
+	errc := make(chan error, 1)
+	go func() { errc <- ws.Send(&relayv1.CoordinatorMessage{}) }()
+
+	// ...then the stream dies: the parked Send returns an error, the loop exits
+	// and closes the sender. With no consumer draining the full buffer, the
+	// blocked Send must observe the closed sender, not free space.
+	time.Sleep(50 * time.Millisecond)
+	close(stream.release)
+
+	select {
+	case err := <-errc:
+		require.ErrorIs(t, err, worker.ErrWorkerDisconnected)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send did not return after the stream died")
+	}
 }

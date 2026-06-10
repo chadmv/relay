@@ -260,8 +260,9 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	}
 
 	if err := d.registry.Send(uuidStr(w.ID), msg); err != nil {
-		// Worker disappeared between claim and send; revert so another pass
-		// (or another worker) can pick the task up.
+		// Worker disappeared or is wedged between claim and send; revert so
+		// another pass (or another worker) can pick the task up.
+		log.Printf("dispatch: send to worker %s failed: %v; requeueing task %s", uuidStr(w.ID), err, claimed.ID)
 		_ = d.q.RequeueTask(ctx, claimed.ID)
 		return false
 	}
