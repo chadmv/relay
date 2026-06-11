@@ -131,3 +131,16 @@ func TestValidate_LinearChainAccepted(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestValidate_DuplicateDependsOnAccepted(t *testing.T) {
+	// A repeated dependency name must not be misread as a cycle: detectCycle
+	// inflates indegree and the dependents list symmetrically, so they cancel.
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"a", "a"}},
+		},
+	})
+	require.NoError(t, err)
+}
