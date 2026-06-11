@@ -403,3 +403,68 @@ func TestWorkerWorkspacesAndSourceColumn(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, "abcdef", rows[0].ShortID)
 }
+
+func TestSelfDependencyConstraintRejected(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Cyl", "cyl@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "self-dep", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "a", Commands: []byte(`[["echo","a"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// A task depending on itself must violate the no_self_dep CHECK constraint.
+	err = q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: task.ID, DependsOnTaskID: task.ID,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no_self_dep")
+}
+
+func TestFailDependentTasksTerminatesOnChain(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Chain", "chain@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "chain", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	mk := func(name string) store.Task {
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: job.ID, Name: name, Commands: []byte(`[["echo"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		return task
+	}
+	a, b, c := mk("a"), mk("b"), mk("c")
+
+	// b depends on a, c depends on b.
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: b.ID, DependsOnTaskID: a.ID,
+	}))
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: c.ID, DependsOnTaskID: b.ID,
+	}))
+
+	// Failing a must transitively fail b and c, and must terminate.
+	require.NoError(t, q.FailDependentTasks(ctx, a.ID))
+
+	gb, err := q.GetTask(ctx, b.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", gb.Status)
+	gc, err := q.GetTask(ctx, c.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", gc.Status)
+}
