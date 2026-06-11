@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,5 +105,46 @@ func TestServer_RateLimitsRegister(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 on third register, got %d", rec.Code)
+	}
+}
+
+func TestReadJSON_ValidBody_ReturnsTrue(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"alice"}`))
+	w := httptest.NewRecorder()
+	var v struct {
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &v) {
+		t.Fatalf("readJSON returned false for valid body; response: %d %s", w.Code, w.Body.String())
+	}
+	if v.Name != "alice" {
+		t.Fatalf("expected name %q, got %q", "alice", v.Name)
+	}
+}
+
+func TestReadJSON_MalformedBody_Returns400(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{not json`))
+	w := httptest.NewRecorder()
+	var v map[string]any
+	if readJSON(w, r, &v) {
+		t.Fatal("expected readJSON to return false for malformed body")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestReadJSON_OversizeBody_Returns413(t *testing.T) {
+	// Body larger than maxBodyBytes (1 MiB).
+	big := bytes.Repeat([]byte("a"), (1<<20)+1024)
+	body := `{"name":"` + string(big) + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	var v map[string]any
+	if readJSON(w, r, &v) {
+		t.Fatal("expected readJSON to return false for oversize body")
+	}
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", w.Code)
 	}
 }
