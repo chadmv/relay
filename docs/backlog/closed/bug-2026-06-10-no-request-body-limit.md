@@ -1,7 +1,7 @@
 ---
 title: No request body size limit on any endpoint, including unauthenticated ones
 type: bug
-status: open
+status: closed
 created: 2026-06-10
 priority: high
 source: full-codebase review (2026-06-10)
