@@ -1,7 +1,7 @@
 ---
 title: Dependency cycles pass validation and drive FailDependentTasks into infinite recursion
 type: bug
-status: open
+status: closed
 created: 2026-06-10
 priority: high
 source: full-codebase review (2026-06-10)
