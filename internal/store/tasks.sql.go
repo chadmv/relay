@@ -281,7 +281,7 @@ func (q *Queries) CreateTaskWithSource(ctx context.Context, arg CreateTaskWithSo
 const failDependentTasks = `-- name: FailDependentTasks :exec
 WITH RECURSIVE blocked AS (
     SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1::uuid
-    UNION ALL
+    UNION
     SELECT td.task_id FROM task_dependencies td
     JOIN blocked b ON td.depends_on_task_id = b.task_id
 )
@@ -297,7 +297,7 @@ WHERE status = 'pending'
 //
 //	WITH RECURSIVE blocked AS (
 //	    SELECT task_id FROM task_dependencies WHERE depends_on_task_id = $1::uuid
-//	    UNION ALL
+//	    UNION
 //	    SELECT td.task_id FROM task_dependencies td
 //	    JOIN blocked b ON td.depends_on_task_id = b.task_id
 //	)
