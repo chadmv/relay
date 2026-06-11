@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -95,6 +96,9 @@ func Validate(spec *JobSpec) error {
 			}
 		}
 	}
+	if cyc := detectCycle(spec.Tasks); len(cyc) > 0 {
+		return fmt.Errorf("dependency cycle detected involving tasks: %s", strings.Join(cyc, ", "))
+	}
 	for _, ts := range spec.Tasks {
 		if err := validateSourceSpec(ts.Source); err != nil {
 			return fmt.Errorf("task %s: %w", ts.Name, err)
@@ -122,6 +126,52 @@ func normalizeTaskCommands(ts *TaskSpec) error {
 		}
 	}
 	return nil
+}
+
+// detectCycle returns the sorted names of tasks that participate in or are
+// blocked by a dependency cycle, or nil if the DependsOn graph is acyclic.
+// Uses Kahn's algorithm: repeatedly remove tasks whose dependencies are all
+// satisfied; any tasks left over are part of a cycle. Assumes every DependsOn
+// name refers to an existing task (the caller checks this first).
+func detectCycle(tasks []TaskSpec) []string {
+	indegree := make(map[string]int, len(tasks))
+	// dependents[x] = tasks that depend on x.
+	dependents := make(map[string][]string, len(tasks))
+	for _, ts := range tasks {
+		indegree[ts.Name] = len(ts.DependsOn)
+		for _, dep := range ts.DependsOn {
+			dependents[dep] = append(dependents[dep], ts.Name)
+		}
+	}
+	queue := make([]string, 0, len(tasks))
+	for name, deg := range indegree {
+		if deg == 0 {
+			queue = append(queue, name)
+		}
+	}
+	resolved := 0
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		resolved++
+		for _, d := range dependents[name] {
+			indegree[d]--
+			if indegree[d] == 0 {
+				queue = append(queue, d)
+			}
+		}
+	}
+	if resolved == len(tasks) {
+		return nil
+	}
+	var stuck []string
+	for name, deg := range indegree {
+		if deg > 0 {
+			stuck = append(stuck, name)
+		}
+	}
+	sort.Strings(stuck)
+	return stuck
 }
 
 func validateSourceSpec(s *SourceSpec) error {
