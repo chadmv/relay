@@ -713,24 +713,21 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	// Collect running/dispatched tasks for agent cancel signals before the
+	// bulk update clears their worker_id.
 	var runningTasks []store.Task
 	for _, t := range tasks {
-		switch t.Status {
-		case "pending", "queued", "running", "dispatched":
-			if _, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
-				ID:         t.ID,
-				Status:     "failed",
-				WorkerID:   pgtype.UUID{},
-				StartedAt:  pgtype.Timestamptz{},
-				FinishedAt: pgtype.Timestamptz{Valid: true, Time: time.Now()},
-			}); err != nil {
-				writeError(w, http.StatusInternalServerError, "db error")
-				return
-			}
-			if (t.Status == "running" || t.Status == "dispatched") && t.WorkerID.Valid {
-				runningTasks = append(runningTasks, t)
-			}
+		if (t.Status == "running" || t.Status == "dispatched") && t.WorkerID.Valid {
+			runningTasks = append(runningTasks, t)
 		}
+	}
+
+	// Fail every non-terminal task in one statement. This bumps assignment_epoch
+	// so late updates from the assigned agent are fenced out; a per-task,
+	// epoch-fenced update would reject any task that had ever been dispatched.
+	if err := q.CancelJobTasks(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
 	}
 
 	job, err = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{
