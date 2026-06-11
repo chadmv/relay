@@ -236,8 +236,7 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 		EndsAt    *time.Time        `json:"ends_at"`
 		WorkerIDs []string          `json:"worker_ids"`
 	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !readJSON(w, r, &body) {
 		return
 	}
 

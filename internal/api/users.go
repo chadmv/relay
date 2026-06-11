@@ -55,8 +55,7 @@ type updateUserRequest struct {
 // returns the trimmed name.
 func parseUpdateUserRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req updateUserRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return "", false
 	}
 	name := strings.TrimSpace(req.Name)
@@ -572,8 +571,7 @@ type createUserRequest struct {
 
 func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 	if req.Email == "" {

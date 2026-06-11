@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -176,8 +177,25 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func readJSON(r *http.Request, v any) error {
-	return json.NewDecoder(r.Body).Decode(v)
+// maxBodyBytes caps the size of any JSON request body. It bounds server memory
+// against arbitrarily large bodies, including on unauthenticated endpoints.
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// readJSON decodes the request body into v, enforcing maxBodyBytes. On failure
+// it writes an error response (413 for an oversize body, 400 for malformed
+// JSON) and returns false; callers should simply return.
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+		}
+		return false
+	}
+	return true
 }
 
 // ─── UUID helpers ─────────────────────────────────────────────────────────────

@@ -24,8 +24,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		Email     string `json:"email"`
 		ExpiresIn string `json:"expires_in"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 

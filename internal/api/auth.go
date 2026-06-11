@@ -59,8 +59,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		InviteToken string `json:"invite_token"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 	if req.Email == "" {
@@ -234,8 +233,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -280,8 +278,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 	if len(req.NewPassword) < 8 {
@@ -364,8 +361,7 @@ func (s *Server) handleAdminPasswordReset(w http.ResponseWriter, r *http.Request
 		Email       string `json:"email"`
 		NewPassword string `json:"new_password"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 	if req.Email == "" {
