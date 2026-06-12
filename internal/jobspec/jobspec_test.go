@@ -67,3 +67,80 @@ func TestValidate_BothCommandAndCommandsRejected(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "either command or commands")
 }
+
+func TestValidate_SelfDependencyRejected(t *testing.T) {
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}, DependsOn: []string{"a"}},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dependency cycle")
+}
+
+func TestValidate_TwoCycleRejected(t *testing.T) {
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}, DependsOn: []string{"b"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"a"}},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dependency cycle")
+	require.Contains(t, err.Error(), "a")
+	require.Contains(t, err.Error(), "b")
+}
+
+func TestValidate_ThreeCycleRejected(t *testing.T) {
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}, DependsOn: []string{"b"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"c"}},
+			{Name: "c", Command: []string{"echo"}, DependsOn: []string{"a"}},
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dependency cycle")
+}
+
+func TestValidate_DiamondDAGAccepted(t *testing.T) {
+	// a -> {b, c} -> d. Legitimate DAG, must pass.
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"a"}},
+			{Name: "c", Command: []string{"echo"}, DependsOn: []string{"a"}},
+			{Name: "d", Command: []string{"echo"}, DependsOn: []string{"b", "c"}},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestValidate_LinearChainAccepted(t *testing.T) {
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"a"}},
+			{Name: "c", Command: []string{"echo"}, DependsOn: []string{"b"}},
+		},
+	})
+	require.NoError(t, err)
+}
+
+func TestValidate_DuplicateDependsOnAccepted(t *testing.T) {
+	// A repeated dependency name must not be misread as a cycle: detectCycle
+	// inflates indegree and the dependents list symmetrically, so they cancel.
+	err := Validate(&JobSpec{
+		Name: "x",
+		Tasks: []TaskSpec{
+			{Name: "a", Command: []string{"echo"}},
+			{Name: "b", Command: []string{"echo"}, DependsOn: []string{"a", "a"}},
+		},
+	})
+	require.NoError(t, err)
+}

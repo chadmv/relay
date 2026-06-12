@@ -63,7 +63,7 @@ SELECT * FROM task_logs WHERE task_id = $1 ORDER BY id;
 -- Call this after marking a task as failed.
 WITH RECURSIVE blocked AS (
     SELECT task_id FROM task_dependencies WHERE depends_on_task_id = sqlc.arg(failed_task_id)::uuid
-    UNION ALL
+    UNION
     SELECT td.task_id FROM task_dependencies td
     JOIN blocked b ON td.depends_on_task_id = b.task_id
 )
