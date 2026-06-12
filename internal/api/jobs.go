@@ -170,8 +170,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createJobRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !readJSON(w, r, &req) {
 		return
 	}
 

@@ -24,8 +24,7 @@ func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Requ
 		HostnameHint string `json:"hostname_hint"`
 		TTLSeconds   int64  `json:"ttl_seconds"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if !readJSON(w, r, &req) {
 		return
 	}
 

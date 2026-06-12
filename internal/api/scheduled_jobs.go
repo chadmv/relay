@@ -73,8 +73,7 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 	}
 
 	var req createScheduledJobRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !readJSON(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -536,8 +535,7 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req patchScheduledJobRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !readJSON(w, r, &req) {
 		return
 	}
 

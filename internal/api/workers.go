@@ -384,8 +384,7 @@ func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {
 		Labels   map[string]string `json:"labels"`
 		MaxSlots *int32            `json:"max_slots"`
 	}
-	if err := readJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !readJSON(w, r, &body) {
 		return
 	}
 
