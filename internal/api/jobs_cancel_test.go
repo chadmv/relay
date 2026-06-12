@@ -90,10 +90,10 @@ func newCancelTestServer(t *testing.T) *cancelTestEnv {
 	}
 }
 
-// seedRunningTask creates a job and a task in "running" status owned by
-// env.workerID. The task is created with the default assignment_epoch=0 and
-// then set to running via a direct UPDATE (without bumping epoch), so the
-// cancel handler's epoch=0 check matches.
+// seedRunningTask creates a job and a task dispatched to env.workerID via
+// ClaimTaskForWorker, which is how tasks reach a worker in production. The
+// claim bumps assignment_epoch to 1, matching the state of any task that has
+// ever been dispatched - the case the cancel handler must support.
 // Returns the job ID string for use in URL paths.
 func seedRunningTask(t *testing.T, env *cancelTestEnv, userID pgtype.UUID) string {
 	t.Helper()
@@ -117,13 +117,14 @@ func seedRunningTask(t *testing.T, env *cancelTestEnv, userID pgtype.UUID) strin
 	})
 	require.NoError(t, err)
 
-	// Set status='running' and worker_id without touching assignment_epoch (stays 0),
-	// so the cancel handler's WHERE assignment_epoch = 0 matches.
-	_, err = env.pool.Exec(ctx,
-		`UPDATE tasks SET status = 'running', worker_id = $1, started_at = NOW() WHERE id = $2`,
-		env.workerID, task.ID,
-	)
+	// Dispatch the task the way the scheduler does. This bumps assignment_epoch
+	// to 1, so the cancel handler can no longer assume epoch 0.
+	claimed, err := env.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID:       task.ID,
+		WorkerID: env.workerID,
+	})
 	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
 	return uuidString(job.ID)
 }

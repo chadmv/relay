@@ -45,6 +45,32 @@ func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) er
 	return err
 }
 
+const cancelJobTasks = `-- name: CancelJobTasks :exec
+UPDATE tasks
+SET status = 'failed',
+    worker_id = NULL,
+    finished_at = NOW(),
+    assignment_epoch = assignment_epoch + 1
+WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
+`
+
+// Mark every non-terminal task of a job as failed when the job is cancelled.
+// Bumps assignment_epoch so any in-flight status update or log chunk from the
+// assigned agent is rejected by the epoch fence. Unlike UpdateTaskStatus this
+// does not fence on the caller's epoch: the cancel handler does not track each
+// task's current generation, and cancellation ends the assignment regardless.
+//
+//	UPDATE tasks
+//	SET status = 'failed',
+//	    worker_id = NULL,
+//	    finished_at = NOW(),
+//	    assignment_epoch = assignment_epoch + 1
+//	WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
+func (q *Queries) CancelJobTasks(ctx context.Context, jobID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, cancelJobTasks, jobID)
+	return err
+}
+
 const claimTaskForWorker = `-- name: ClaimTaskForWorker :one
 UPDATE tasks
 SET status = 'dispatched',

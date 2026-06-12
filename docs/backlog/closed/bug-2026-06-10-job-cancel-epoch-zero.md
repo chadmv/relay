@@ -1,8 +1,9 @@
 ---
 title: Job cancellation 500s for any job whose tasks were ever claimed (epoch 0 mismatch)
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-11
 priority: high
 source: full-codebase review (2026-06-10)
 ---
