@@ -63,6 +63,11 @@ discard the result. Therefore:
 - **Update the disable-worker caller** `internal/api/workers.go:484` for the new
   name (it already uses the epoch-bumping query and consumes the returned IDs to
   send agent cancel signals - behavior unchanged).
+- **Update the CLAUDE.md Epoch-fence invariant.** Its bullet cites
+  `RequeueWorkerTasksWithEpoch` as an exemplar that ends an assignment by
+  bumping the epoch; that symbol no longer exists by that name. Change the
+  reference to `RequeueWorkerTasks`, leaving a dangling symbol name out of the
+  canonical invariants doc.
 
 ### 3. Delete `RequeueAllActiveTasks`
 
@@ -88,13 +93,27 @@ For each of the three fixed queries (`IncrementTaskRetryCount`, `RequeueTask`,
 4. Assert a stale `UpdateTaskStatusEpoch` at the old epoch (1) is rejected with
    `pgx.ErrNoRows` and does not mutate the task.
 
-Also:
+For `IncrementTaskRetryCount` specifically, also assert the "burn an extra
+retry" failure mode is closed: after the epoch bump, the stale
+`UpdateTaskStatusEpoch` at the old epoch returns `pgx.ErrNoRows` **and**
+`retry_count` is unchanged (the stale generation cannot drive a second retry).
 
-- Update the existing tests that reference the renamed/removed queries:
-  `internal/scheduler/dispatch_test.go:274`, `internal/store/store_test.go:182`,
-  `internal/store/store_test.go:346-347`, and the worker-requeue test for the
-  rename.
-- Verify with `make test` and `make test-integration`.
+Update the existing tests:
+
+- `internal/store/store_test.go:182-189` - this is a **modified-query** change,
+  not a rename. `RequeueTask` now bumps the epoch between the two claims, so the
+  second-claim assertion at line 189 changes from `int32(2)` to `int32(3)`, and
+  the comment at line 184 ("epoch goes 1 -> 2") must be corrected accordingly.
+- `internal/scheduler/dispatch_test.go:273-279` and
+  `internal/store/store_test.go:346-357` - status/worker_id assertions only;
+  no epoch value change. Confirm they still compile and pass after the rename.
+- `internal/store/workers_disabled_test.go:48,81` - rename the calls for the
+  renamed query, and rename the test function itself from
+  `TestRequeueWorkerTasksWithEpoch_BumpsEpochAndFencesStaleUpdates` to drop the
+  now-meaningless `WithEpoch` (e.g. `TestRequeueWorkerTasks_...`) so the test
+  name does not drift from the symbol.
+
+Verify with `make test` and `make test-integration`.
 
 ## Out of scope
 
