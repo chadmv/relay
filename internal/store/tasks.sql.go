@@ -722,22 +722,6 @@ func (q *Queries) NotifyTaskSubmitted(ctx context.Context) error {
 	return err
 }
 
-const requeueAllActiveTasks = `-- name: RequeueAllActiveTasks :exec
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE status IN ('dispatched', 'running')
-`
-
-// Called on coordinator startup to recover from an unclean shutdown.
-//
-//	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
-//	WHERE status IN ('dispatched', 'running')
-func (q *Queries) RequeueAllActiveTasks(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, requeueAllActiveTasks)
-	return err
-}
-
 const requeueTask = `-- name: RequeueTask :exec
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, started_at = NULL,

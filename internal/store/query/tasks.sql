@@ -73,12 +73,6 @@ SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
   AND id IN (SELECT task_id FROM blocked);
 
--- name: RequeueAllActiveTasks :exec
--- Called on coordinator startup to recover from an unclean shutdown.
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE status IN ('dispatched', 'running');
-
 -- name: ClaimTaskForWorker :one
 -- Atomically transition a pending task to 'dispatched' on the given worker.
 -- Increments assignment_epoch so subsequent status updates from prior
