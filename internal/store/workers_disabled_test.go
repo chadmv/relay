@@ -45,7 +45,7 @@ func TestWorkerDisableEnable_RoundTrip(t *testing.T) {
 	require.Equal(t, int64(0), n, "second enable must affect zero rows")
 }
 
-func TestRequeueWorkerTasksWithEpoch_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
+func TestRequeueWorkerTasks_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueries(t)
 
@@ -78,7 +78,7 @@ func TestRequeueWorkerTasksWithEpoch_BumpsEpochAndFencesStaleUpdates(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	ids, err := q.RequeueWorkerTasksWithEpoch(ctx, w.ID)
+	ids, err := q.RequeueWorkerTasks(ctx, w.ID)
 	require.NoError(t, err)
 	require.Len(t, ids, 1, "the one active task must be requeued")
 	require.Equal(t, task.ID, ids[0])

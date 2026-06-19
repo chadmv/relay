@@ -20,7 +20,8 @@ RETURNING *;
 
 -- name: IncrementTaskRetryCount :one
 UPDATE tasks
-SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1
 RETURNING *;
 
@@ -72,18 +73,6 @@ SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
   AND id IN (SELECT task_id FROM blocked);
 
--- name: RequeueWorkerTasks :exec
--- Re-queue dispatched/running tasks for a worker that has disconnected.
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE worker_id = $1 AND status IN ('dispatched', 'running');
-
--- name: RequeueAllActiveTasks :exec
--- Called on coordinator startup to recover from an unclean shutdown.
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE status IN ('dispatched', 'running');
-
 -- name: ClaimTaskForWorker :one
 -- Atomically transition a pending task to 'dispatched' on the given worker.
 -- Increments assignment_epoch so subsequent status updates from prior
@@ -99,8 +88,10 @@ RETURNING *;
 -- name: RequeueTask :exec
 -- Revert a single task from 'dispatched' back to 'pending'.
 -- Used when the registry send fails after the task has been claimed.
+-- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
+SET status = 'pending', worker_id = NULL, started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'dispatched';
 
 -- name: GetActiveTasksForWorker :many
@@ -125,11 +116,13 @@ WHERE t.status IN ('dispatched', 'running');
 -- Revert a single task back to 'pending' regardless of current status.
 -- Used by the reconcile path when the coordinator has a task assigned
 -- that the agent didn't report as running.
+-- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
     started_at = NULL,
-    finished_at = NULL
+    finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status IN ('dispatched', 'running');
 
 -- name: NotifyTaskSubmitted :exec
@@ -187,11 +180,12 @@ SET status = 'failed',
     assignment_epoch = assignment_epoch + 1
 WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched');
 
--- name: RequeueWorkerTasksWithEpoch :many
--- Re-queue dispatched/running tasks for a worker that is being disabled.
--- Unlike RequeueWorkerTasks, this bumps assignment_epoch so a stale status
--- update from the still-connected agent (whose subprocess we are about to
--- cancel) is rejected by the epoch fence. Returns the affected task ids.
+-- name: RequeueWorkerTasks :many
+-- Re-queue dispatched/running tasks for a worker that has disconnected or is
+-- being disabled. Bumps assignment_epoch so a stale status update or log chunk
+-- from the (possibly still-connected) agent is rejected by the epoch fence.
+-- Returns the affected task ids; the disable path uses them to send cancels,
+-- the disconnect/grace paths discard them.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,

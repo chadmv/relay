@@ -1,8 +1,9 @@
 ---
 title: Requeue/retry paths return tasks to pending without bumping assignment_epoch
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-19
 priority: medium
 source: full-codebase review (2026-06-10)
 ---

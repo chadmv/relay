@@ -576,7 +576,8 @@ func (q *Queries) GetTaskLogsPage(ctx context.Context, arg GetTaskLogsPageParams
 
 const incrementTaskRetryCount = `-- name: IncrementTaskRetryCount :one
 UPDATE tasks
-SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 `
@@ -584,7 +585,8 @@ RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count
 // IncrementTaskRetryCount
 //
 //	UPDATE tasks
-//	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+//	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (Task, error) {
@@ -720,33 +722,20 @@ func (q *Queries) NotifyTaskSubmitted(ctx context.Context) error {
 	return err
 }
 
-const requeueAllActiveTasks = `-- name: RequeueAllActiveTasks :exec
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE status IN ('dispatched', 'running')
-`
-
-// Called on coordinator startup to recover from an unclean shutdown.
-//
-//	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
-//	WHERE status IN ('dispatched', 'running')
-func (q *Queries) RequeueAllActiveTasks(ctx context.Context) error {
-	_, err := q.db.Exec(ctx, requeueAllActiveTasks)
-	return err
-}
-
 const requeueTask = `-- name: RequeueTask :exec
 UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
+SET status = 'pending', worker_id = NULL, started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'dispatched'
 `
 
 // Revert a single task from 'dispatched' back to 'pending'.
 // Used when the registry send fails after the task has been claimed.
+// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 //
 //	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
+//	SET status = 'pending', worker_id = NULL, started_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status = 'dispatched'
 func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, requeueTask, id)
@@ -758,42 +747,29 @@ UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
     started_at = NULL,
-    finished_at = NULL
+    finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status IN ('dispatched', 'running')
 `
 
 // Revert a single task back to 'pending' regardless of current status.
 // Used by the reconcile path when the coordinator has a task assigned
 // that the agent didn't report as running.
+// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 //
 //	UPDATE tasks
 //	SET status = 'pending',
 //	    worker_id = NULL,
 //	    started_at = NULL,
-//	    finished_at = NULL
+//	    finished_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status IN ('dispatched', 'running')
 func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, requeueTaskByID, id)
 	return err
 }
 
-const requeueWorkerTasks = `-- name: RequeueWorkerTasks :exec
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-`
-
-// Re-queue dispatched/running tasks for a worker that has disconnected.
-//
-//	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, requeueWorkerTasks, workerID)
-	return err
-}
-
-const requeueWorkerTasksWithEpoch = `-- name: RequeueWorkerTasksWithEpoch :many
+const requeueWorkerTasks = `-- name: RequeueWorkerTasks :many
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -803,10 +779,11 @@ WHERE worker_id = $1 AND status IN ('dispatched', 'running')
 RETURNING id
 `
 
-// Re-queue dispatched/running tasks for a worker that is being disabled.
-// Unlike RequeueWorkerTasks, this bumps assignment_epoch so a stale status
-// update from the still-connected agent (whose subprocess we are about to
-// cancel) is rejected by the epoch fence. Returns the affected task ids.
+// Re-queue dispatched/running tasks for a worker that has disconnected or is
+// being disabled. Bumps assignment_epoch so a stale status update or log chunk
+// from the (possibly still-connected) agent is rejected by the epoch fence.
+// Returns the affected task ids; the disable path uses them to send cancels,
+// the disconnect/grace paths discard them.
 //
 //	UPDATE tasks
 //	SET status = 'pending',
@@ -815,8 +792,8 @@ RETURNING id
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
 //	RETURNING id
-func (q *Queries) RequeueWorkerTasksWithEpoch(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, requeueWorkerTasksWithEpoch, workerID)
+func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, requeueWorkerTasks, workerID)
 	if err != nil {
 		return nil, err
 	}

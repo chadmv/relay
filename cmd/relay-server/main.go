@@ -125,7 +125,7 @@ func main() {
 		if err := id.Scan(workerID); err != nil {
 			return
 		}
-		_ = q.RequeueWorkerTasks(context.Background(), id)
+		_, _ = q.RequeueWorkerTasks(context.Background(), id)
 		dispatcher.Trigger()
 	})
 	defer grace.Stop()

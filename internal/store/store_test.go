@@ -181,12 +181,12 @@ func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
 	// Requeue so we can claim again.
 	require.NoError(t, q.RequeueTask(ctx, task.ID))
 
-	// Second claim: epoch goes 1 -> 2. Epoch never decreases.
+	// RequeueTask bumped 1 -> 2; second claim: epoch goes 2 -> 3. Epoch never decreases.
 	claimed2, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), claimed2.AssignmentEpoch)
+	assert.Equal(t, int32(3), claimed2.AssignmentEpoch)
 }
 
 func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
@@ -467,4 +467,136 @@ func TestFailDependentTasksTerminatesOnChain(t *testing.T) {
 	gc, err := q.GetTask(ctx, c.ID)
 	require.NoError(t, err)
 	require.Equal(t, "failed", gc.Status)
+}
+
+func TestRequeueTask_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+
+	user := newTestUser(t, q, false)
+	w := newTestWorker(t, q)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "rq-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"),
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "rq-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte("{}"), Requires: []byte("{}"), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	// Claim: status -> 'dispatched', epoch 0 -> 1.
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Requeue: status -> 'pending', epoch 1 -> 2.
+	require.NoError(t, q.RequeueTask(ctx, task.ID))
+
+	got, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got.Status, "task must be back to pending")
+	require.False(t, got.WorkerID.Valid, "worker_id must be cleared")
+	require.Equal(t, int32(2), got.AssignmentEpoch, "epoch must be bumped to 2")
+
+	// A stale status update at the old epoch (1) must be rejected.
+	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		ID: task.ID, Status: "done", Epoch: 1,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "stale update at epoch 1 must be rejected after requeue")
+
+	got2, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got2.Status, "stale update must not have changed task status")
+}
+
+func TestRequeueTaskByID_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+
+	user := newTestUser(t, q, false)
+	w := newTestWorker(t, q)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "rqid-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"),
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "rqid-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte("{}"), Requires: []byte("{}"), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	require.NoError(t, q.RequeueTaskByID(ctx, task.ID))
+
+	got, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got.Status, "task must be back to pending")
+	require.False(t, got.WorkerID.Valid, "worker_id must be cleared")
+	require.Equal(t, int32(2), got.AssignmentEpoch, "epoch must be bumped to 2")
+
+	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		ID: task.ID, Status: "done", Epoch: 1,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "stale update at epoch 1 must be rejected after requeue")
+
+	got2, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got2.Status, "stale update must not have changed task status")
+}
+
+func TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+
+	user := newTestUser(t, q, false)
+	w := newTestWorker(t, q)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "retry-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"),
+	})
+	require.NoError(t, err)
+
+	// Allow one retry so IncrementTaskRetryCount is a valid transition.
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "retry-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte("{}"), Requires: []byte("{}"), Retries: 1,
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Retry: status -> 'pending', retry_count 0 -> 1, epoch 1 -> 2.
+	retried, err := q.IncrementTaskRetryCount(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", retried.Status, "task must be back to pending")
+	require.Equal(t, int32(1), retried.RetryCount, "retry_count must be incremented to 1")
+	require.Equal(t, int32(2), retried.AssignmentEpoch, "epoch must be bumped to 2")
+
+	// A stale terminal update at the old epoch (1) must be rejected AND must not
+	// be able to drive a second retry (the "burn an extra retry" failure mode).
+	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		ID: task.ID, Status: "failed", Epoch: 1,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "stale terminal update at epoch 1 must be rejected after retry")
+
+	got, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", got.Status, "stale update must not have changed task status")
+	require.Equal(t, int32(1), got.RetryCount, "stale generation must not drive a second retry")
 }
