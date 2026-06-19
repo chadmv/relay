@@ -20,7 +20,8 @@ RETURNING *;
 
 -- name: IncrementTaskRetryCount :one
 UPDATE tasks
-SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1
 RETURNING *;
 
@@ -99,8 +100,10 @@ RETURNING *;
 -- name: RequeueTask :exec
 -- Revert a single task from 'dispatched' back to 'pending'.
 -- Used when the registry send fails after the task has been claimed.
+-- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
+SET status = 'pending', worker_id = NULL, started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'dispatched';
 
 -- name: GetActiveTasksForWorker :many
@@ -125,11 +128,13 @@ WHERE t.status IN ('dispatched', 'running');
 -- Revert a single task back to 'pending' regardless of current status.
 -- Used by the reconcile path when the coordinator has a task assigned
 -- that the agent didn't report as running.
+-- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
     started_at = NULL,
-    finished_at = NULL
+    finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status IN ('dispatched', 'running');
 
 -- name: NotifyTaskSubmitted :exec

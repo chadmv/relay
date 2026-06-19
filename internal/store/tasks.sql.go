@@ -576,7 +576,8 @@ func (q *Queries) GetTaskLogsPage(ctx context.Context, arg GetTaskLogsPageParams
 
 const incrementTaskRetryCount = `-- name: IncrementTaskRetryCount :one
 UPDATE tasks
-SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 `
@@ -584,7 +585,8 @@ RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count
 // IncrementTaskRetryCount
 //
 //	UPDATE tasks
-//	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL
+//	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (Task, error) {
@@ -738,15 +740,18 @@ func (q *Queries) RequeueAllActiveTasks(ctx context.Context) error {
 
 const requeueTask = `-- name: RequeueTask :exec
 UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
+SET status = 'pending', worker_id = NULL, started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'dispatched'
 `
 
 // Revert a single task from 'dispatched' back to 'pending'.
 // Used when the registry send fails after the task has been claimed.
+// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 //
 //	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
+//	SET status = 'pending', worker_id = NULL, started_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status = 'dispatched'
 func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, requeueTask, id)
@@ -758,19 +763,22 @@ UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
     started_at = NULL,
-    finished_at = NULL
+    finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status IN ('dispatched', 'running')
 `
 
 // Revert a single task back to 'pending' regardless of current status.
 // Used by the reconcile path when the coordinator has a task assigned
 // that the agent didn't report as running.
+// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 //
 //	UPDATE tasks
 //	SET status = 'pending',
 //	    worker_id = NULL,
 //	    started_at = NULL,
-//	    finished_at = NULL
+//	    finished_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status IN ('dispatched', 'running')
 func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, requeueTaskByID, id)
