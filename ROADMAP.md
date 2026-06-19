@@ -40,13 +40,9 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## What moved
 
-- First run.
-
-## Suggested backlog actions
-
-- File a new high-severity security item: `POST /v1/scheduled-jobs/{id}/run-now` is registered `auth(...)` only and `handleRunScheduledJobNow` uses `ownedScheduledJob` (owner-or-admin) with no `IsAdmin` check, so any schedule owner (or, via MCP, any non-admin) can fire run-now - contradicting the README's documented admin-only contract and the fallback the open MCP role-filtering item relies on. Evidence: `internal/api/server.go:156`, `internal/api/scheduled_jobs.go:638` (`ownedScheduledJob`), `internal/mcp/run_now.go`. Distinct from the existing job-cancel-authz item. Run `/backlog` to capture it.
-- File a new medium item (Invariant: one bounded sender per gRPC stream): on the agent, `connect()` returns as soon as the recv loop breaks without awaiting its send goroutine, so a reconnect can leave two goroutines reading the same `sendCh` and silently drop a message already taken off the channel (most often a task-log chunk, which is not replayed on reconnect). Evidence: `internal/agent/agent.go:63-95` (Run loop), `:100-208` (connect; no WaitGroup join before the next connect). Run `/backlog` to capture it.
-- Close as duplicate: [relay_wait_for_job shorter poll interval for fast jobs](docs/backlog/idea-2026-05-09-relay-wait-job-shorter-poll.md) is a strict subset of [relay_wait_for_job poll interval too coarse for sub-2s jobs](docs/backlog/bug-2026-05-09-wait-for-job-poll-interval.md) (same `waitPoll` constant; the idea itself cross-references the bug as the deeper fix). Run `/backlog close idea-2026-05-09-relay-wait-job-shorter-poll` after folding any extra detail into the bug.
+- New: filed [run-now is owner-or-admin but documented admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) (placed in api-auth) and [agent send goroutine not awaited across reconnect](docs/backlog/bug-2026-06-18-agent-reconnect-send-goroutine-not-awaited.md) (placed in dispatch-races), both from the 2026-06-18 deep-review findings. Both are medium, so they slot into their theme sections without displacing the high-severity Now/Next/Later tier.
+- Closed: [relay_wait_for_job shorter poll interval](docs/backlog/closed/idea-2026-05-09-relay-wait-job-shorter-poll.md) as a duplicate of [wait-for-job-poll-interval](docs/backlog/bug-2026-05-09-wait-for-job-poll-interval.md); its unique detail was folded into that bug, which leaves the mcp theme at six items.
+- All three of the previous run's Suggested backlog actions are now done, so that section is dropped. Ordering is otherwise unchanged (sticky).
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -56,8 +52,9 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 3. [Job status recompute race can leave a job stuck in running forever](docs/backlog/bug-2026-06-10-job-status-recompute-race.md) (bug, medium) - concurrent last-task completions interleave so a stale `running` write lands last; the terminal SSE event never fires and skip-schedules wedge.
 4. [Dispatch failure paths are inconsistent and silent](docs/backlog/bug-2026-06-10-dispatch-failure-paths-silent.md) (bug, medium) - partially mitigated (bad-commands JSON and send failures now log and requeue), but the bad-source-JSON path still strands a claimed task and the top-level dispatch loop still swallows DB errors with no log.
 5. [Reconnect backoff never resets in agent and NotifyListener](docs/backlog/bug-2026-06-10-reconnect-backoff-never-resets.md) (bug, medium) - the backoff reset is unreachable on the drop path, so reconnect delay degrades monotonically toward the 60s cap and dispatch latency falls back to the 30s safety poll.
-6. [Cancel/disable handlers send synchronously to workers](docs/backlog/bug-2026-06-10-cancel-disable-handlers-send-synchronously.md) (bug, low) - bounded after the wedged-agent fix, but a multi-task job on one wedged worker can still take up to N x ~5s in the request path.
-7. [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) (bug, low) - between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
+6. [Agent send goroutine not awaited across reconnect](docs/backlog/bug-2026-06-18-agent-reconnect-send-goroutine-not-awaited.md) (bug, medium) - `connect()` returns without joining its send goroutine, so a reconnect can leave two goroutines draining one `sendCh` and silently drop a queued message (typically a task-log chunk). Violates the one-bounded-sender invariant.
+7. [Cancel/disable handlers send synchronously to workers](docs/backlog/bug-2026-06-10-cancel-disable-handlers-send-synchronously.md) (bug, low) - bounded after the wedged-agent fix, but a multi-task job on one wedged worker can still take up to N x ~5s in the request path.
+8. [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) (bug, low) - between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
 
 ## Agent runtime & Perforce workspaces (agent-perforce)
 
@@ -82,11 +79,12 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## API authorization, auth & account lifecycle (api-auth)
 
-1. [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) (bug, medium) - `handleCancelJob` never reads the auth user; contrast the strictly owner/admin-scoped scheduled-jobs handlers. (See also the suggested run-now authz item above - same class.)
+1. [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) (bug, medium) - `handleCancelJob` never reads the auth user; contrast the strictly owner/admin-scoped scheduled-jobs handlers.
 2. [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) (bug, medium) - no `archived_at` predicate in `GetTokenWithUser`/`BearerAuth`, and the archive handler never disables the user's schedules.
-3. [owner_email lookup errors are swallowed silently](docs/backlog/bug-2026-06-05-owner-email-lookup-errors.md) (bug, low) - a `GetUserEmailsByIDs` failure leaves `owner_email` empty with no log line, invisible to operators.
-4. [Through-the-stack re-enrollment integration test](docs/backlog/idea-2026-06-05-reenrollment-integration-test.md) (idea) - drives the worker Connect enrollment-token revive path end to end and asserts `revoked_at` clears; currently only covered at the store layer.
-5. [Audit log for archive/unarchive actions](docs/backlog/idea-2026-05-06-audit-log-archive-unarchive.md) (idea) - archive/unarchive are recorded nowhere; wire them into an audit table if one is added.
+3. [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) (bug, medium) - the run-now route is `auth(...)` only and the handler uses `ownedScheduledJob`, so an owner can fire run-now despite the documented admin-only contract. Bounded to own schedules (`ownedScheduledJob` still gates by owner), so primarily a contract mismatch across REST/MCP/README.
+4. [owner_email lookup errors are swallowed silently](docs/backlog/bug-2026-06-05-owner-email-lookup-errors.md) (bug, low) - a `GetUserEmailsByIDs` failure leaves `owner_email` empty with no log line, invisible to operators.
+5. [Through-the-stack re-enrollment integration test](docs/backlog/idea-2026-06-05-reenrollment-integration-test.md) (idea) - drives the worker Connect enrollment-token revive path end to end and asserts `revoked_at` clears; currently only covered at the store layer.
+6. [Audit log for archive/unarchive actions](docs/backlog/idea-2026-05-06-audit-log-archive-unarchive.md) (idea) - archive/unarchive are recorded nowhere; wire them into an audit table if one is added.
 
 ## Store schema integrity & query performance (store-schema)
 
@@ -99,12 +97,11 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 ## MCP server fidelity (mcp)
 
 1. [MCP structured errors (code/hint) never reach clients](docs/backlog/bug-2026-06-10-mcp-structured-errors-lost.md) (bug, medium) - the SDK flattens a returned error to plain `code: message` text, so every carefully written `Hint` is dead weight no client ever sees.
-2. [MCP admin-only tools have no discovery-time role filtering](docs/backlog/bug-2026-05-09-mcp-admin-tools-role-filtering.md) (bug) - admin tools are registered for everyone; non-admins only learn they lack access after a `forbidden` call. (Related to the suggested run-now authz item - that server check is the fallback this assumes.)
+2. [MCP admin-only tools have no discovery-time role filtering](docs/backlog/bug-2026-05-09-mcp-admin-tools-role-filtering.md) (bug) - admin tools are registered for everyone; non-admins only learn they lack access after a `forbidden` call. (Its assumed server-side `forbidden` fallback for run-now is itself filed as [run-now-not-admin-gated](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md).)
 3. [MCP token read once at startup - mid-session expiry requires client restart](docs/backlog/bug-2026-05-09-mcp-token-mid-session-expiry.md) (bug) - rare with 30-day tokens, but the recovery path forces a full client restart.
-4. [relay_wait_for_job poll interval too coarse for sub-2s jobs](docs/backlog/bug-2026-05-09-wait-for-job-poll-interval.md) (bug) - the 2s poll always costs a full interval for short tasks; LISTEN/NOTIFY is the deeper fix.
-5. [relay_wait_for_job shorter poll interval for fast jobs](docs/backlog/idea-2026-05-09-relay-wait-job-shorter-poll.md) (idea) - duplicate of the item above; close into it (see Suggested backlog actions).
-6. [MCP resources have no caching and no resource templates](docs/backlog/bug-2026-05-09-mcp-resources-caching-templates.md) (bug) - no `relay://jobs/{id}` templates and every read refetches.
-7. [MCP live task-log streaming via resources or streaming tool calls](docs/backlog/idea-2026-05-09-mcp-live-task-log-streaming.md) (idea) - open question on whether stdio transport can surface live logs without polling.
+4. [relay_wait_for_job poll interval too coarse for sub-2s jobs](docs/backlog/bug-2026-05-09-wait-for-job-poll-interval.md) (bug) - the 2s poll always costs a full interval for short tasks; LISTEN/NOTIFY is the deeper fix. Absorbed the closed shorter-poll idea.
+5. [MCP resources have no caching and no resource templates](docs/backlog/bug-2026-05-09-mcp-resources-caching-templates.md) (bug) - no `relay://jobs/{id}` templates and every read refetches.
+6. [MCP live task-log streaming via resources or streaming tool calls](docs/backlog/idea-2026-05-09-mcp-live-task-log-streaming.md) (idea) - open question on whether stdio transport can surface live logs without polling.
 
 ## Web SPA correctness & feature build-out (web-frontend)
 
@@ -150,6 +147,10 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
    quick win - pass the stdout writer for data subcommands.
 4. [Bump GitHub Actions off deprecated Node 20](docs/backlog/idea-2026-06-03-bump-github-actions-deprecated-node.md) (idea, low) - `checkout@v4`/`setup-python@v5` run on Node 20 (forced off ~June 2026, removed ~Sept 2026); bump to the Node 24 majors before the cutoff.
    quick win - still open (workflows confirmed on v4/v5).
+
+## Recently shipped
+
+- [relay_wait_for_job shorter poll interval for fast jobs](docs/backlog/closed/idea-2026-05-09-relay-wait-job-shorter-poll.md) - closed 2026-06-18 as a duplicate of the wait-for-job-poll-interval bug; its unique detail (the poll const is test-injectable; the 500ms-vs-API-load tradeoff) was folded into that bug.
 
 ## Deferred
 
