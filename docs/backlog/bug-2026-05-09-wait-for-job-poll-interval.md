@@ -21,3 +21,11 @@ Drop the default poll interval to 500 ms, or wire the wait loop to Postgres LIST
 ## Related
 - `internal/mcp/wait.go` — `waitPoll` constant (currently 2 s)
 - `internal/store/query/tasks.sql` — `NotifyTaskCompleted` query
+
+## Notes
+- The `waitPoll` constant in `internal/mcp/wait.go` is already injectable in tests
+  (overridable package var), so lowering the default is a one-line change. The open
+  question is whether 500 ms improves typical workloads without creating excess API
+  load; if LISTEN/NOTIFY is wired, the poll interval matters less and becomes a fallback.
+- Merged [[idea-2026-05-09-relay-wait-job-shorter-poll]] here (closed as duplicate
+  2026-06-18); that item asked the same "shorter default poll for fast jobs" question.
