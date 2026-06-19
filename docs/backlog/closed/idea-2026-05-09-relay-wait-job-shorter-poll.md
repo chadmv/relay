@@ -1,9 +1,11 @@
 ---
 title: relay_wait_for_job shorter poll interval for fast jobs
 type: idea
-status: open
+status: closed
 created: 2026-05-09
 source: MCP server session retro
+closed: 2026-06-18
+resolution: duplicate
 ---
 
 # relay_wait_for_job shorter poll interval for fast jobs
@@ -17,3 +19,10 @@ The `waitPoll` constant in `internal/mcp/wait.go` is already injectable in tests
 ## Related
 - `internal/mcp/wait.go` — `waitPoll` constant
 - `bug-2026-05-09-wait-for-job-poll-interval` — related bug about coarse polling; LISTEN/NOTIFY is the deeper fix
+
+## Resolution
+Duplicate of [[bug-2026-05-09-wait-for-job-poll-interval]]. Both ask for a shorter default
+poll for sub-2 s jobs, with LISTEN/NOTIFY as the deeper fix; this idea is a strict subset.
+The unique detail (waitPoll is already test-injectable, so the default is a one-line change;
+the 500 ms-vs-excess-API-load tradeoff) was folded into that bug's Notes before closing.
+Merged during the 2026-06-18 /roadmap deep review.
