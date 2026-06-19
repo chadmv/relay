@@ -481,7 +481,7 @@ func (s *Server) handleDisableWorker(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		requeuedIDs, err = q.RequeueWorkerTasksWithEpoch(ctx, id)
+		requeuedIDs, err = q.RequeueWorkerTasks(ctx, id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "requeue tasks failed")
 			return

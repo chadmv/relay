@@ -785,23 +785,7 @@ func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
-const requeueWorkerTasks = `-- name: RequeueWorkerTasks :exec
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-`
-
-// Re-queue dispatched/running tasks for a worker that has disconnected.
-//
-//	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
-func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, requeueWorkerTasks, workerID)
-	return err
-}
-
-const requeueWorkerTasksWithEpoch = `-- name: RequeueWorkerTasksWithEpoch :many
+const requeueWorkerTasks = `-- name: RequeueWorkerTasks :many
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -811,10 +795,11 @@ WHERE worker_id = $1 AND status IN ('dispatched', 'running')
 RETURNING id
 `
 
-// Re-queue dispatched/running tasks for a worker that is being disabled.
-// Unlike RequeueWorkerTasks, this bumps assignment_epoch so a stale status
-// update from the still-connected agent (whose subprocess we are about to
-// cancel) is rejected by the epoch fence. Returns the affected task ids.
+// Re-queue dispatched/running tasks for a worker that has disconnected or is
+// being disabled. Bumps assignment_epoch so a stale status update or log chunk
+// from the (possibly still-connected) agent is rejected by the epoch fence.
+// Returns the affected task ids; the disable path uses them to send cancels,
+// the disconnect/grace paths discard them.
 //
 //	UPDATE tasks
 //	SET status = 'pending',
@@ -823,8 +808,8 @@ RETURNING id
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
 //	RETURNING id
-func (q *Queries) RequeueWorkerTasksWithEpoch(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, requeueWorkerTasksWithEpoch, workerID)
+func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, requeueWorkerTasks, workerID)
 	if err != nil {
 		return nil, err
 	}

@@ -564,7 +564,7 @@ func (h *Handler) requeueWorkerTasks(workerID string) {
 		return
 	}
 	ctx := context.Background()
-	_ = h.q.RequeueWorkerTasks(ctx, id)
+	_, _ = h.q.RequeueWorkerTasks(ctx, id)
 	go h.triggerDispatch()
 }
 

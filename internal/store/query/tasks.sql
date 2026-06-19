@@ -73,12 +73,6 @@ SET status = 'failed', finished_at = NOW()
 WHERE status = 'pending'
   AND id IN (SELECT task_id FROM blocked);
 
--- name: RequeueWorkerTasks :exec
--- Re-queue dispatched/running tasks for a worker that has disconnected.
-UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL
-WHERE worker_id = $1 AND status IN ('dispatched', 'running');
-
 -- name: RequeueAllActiveTasks :exec
 -- Called on coordinator startup to recover from an unclean shutdown.
 UPDATE tasks
@@ -192,11 +186,12 @@ SET status = 'failed',
     assignment_epoch = assignment_epoch + 1
 WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched');
 
--- name: RequeueWorkerTasksWithEpoch :many
--- Re-queue dispatched/running tasks for a worker that is being disabled.
--- Unlike RequeueWorkerTasks, this bumps assignment_epoch so a stale status
--- update from the still-connected agent (whose subprocess we are about to
--- cancel) is rejected by the epoch fence. Returns the affected task ids.
+-- name: RequeueWorkerTasks :many
+-- Re-queue dispatched/running tasks for a worker that has disconnected or is
+-- being disabled. Bumps assignment_epoch so a stale status update or log chunk
+-- from the (possibly still-connected) agent is rejected by the epoch fence.
+-- Returns the affected task ids; the disable path uses them to send cancels,
+-- the disconnect/grace paths discard them.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
