@@ -273,6 +273,58 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 	assert.Equal(t, "running", afterValid.Status, "valid epoch update must be applied")
 }
 
+func TestHandleTaskStatus_PrepareFailedIsTerminal(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "test-user", Email: "test@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "prepfail-job", Priority: "normal", SubmittedBy: user.ID,
+		Labels: []byte("{}"), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "prepfail-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte("{}"), Requires: []byte("[]"), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	wk, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "test-worker", Hostname: "prepfail-worker-01", CpuCores: 4, RamGb: 8,
+		GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: wk.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	idb := claimed.ID.Bytes
+	taskUUID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		idb[0:4], idb[4:6], idb[6:8], idb[8:10], idb[10:16])
+
+	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+		TaskId: taskUUID,
+		Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		Epoch:  1,
+	})
+
+	after, err := q.GetTask(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", after.Status, "PREPARE_FAILED must be a terminal failure")
+	assert.True(t, after.FinishedAt.Valid, "finished_at must be set on terminal failure")
+}
+
 func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	ctx := context.Background()
 	q, pool := newTestStore(t)
