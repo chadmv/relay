@@ -75,8 +75,8 @@ func main() {
 		})
 		if err := pp.Preflight(ctx); err != nil {
 			// Non-fatal: log loudly and run without the workspace provider.
-			// Source-bearing tasks will fail at dispatch with the existing
-			// "no source provider" path; non-source tasks still run.
+			// Source-bearing tasks are rejected by the runner at run time with
+			// TASK_STATUS_PREPARE_FAILED (see Runner.Run); non-source tasks still run.
 			log.Printf("relay-agent: workspace provider disabled: %v", err)
 		} else {
 			provider = pp
