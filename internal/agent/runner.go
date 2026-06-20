@@ -110,6 +110,22 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	// 1) Prepare phase — acquire and sync workspace if a source spec is present.
 	var workDir string
 	var extraEnv map[string]string
+	// A source-bearing task requires a workspace provider. If the agent has
+	// none (p4 preflight failed, or RELAY_WORKSPACE_ROOT is unset), reject the
+	// task loudly instead of silently running its commands without a synced
+	// workspace. Dispatch does not filter on provider capability, so this is the
+	// agent's last line of defense.
+	if task.Source != nil && r.provider == nil {
+		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId:       r.taskID,
+				Status:       relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+				ErrorMessage: "task has a source spec but this worker has no workspace provider (check p4 preflight / RELAY_WORKSPACE_ROOT)",
+				Epoch:        r.epoch,
+			},
+		}})
+		return
+	}
 	if task.Source != nil && r.provider != nil {
 		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 			TaskStatus: &relayv1.TaskStatusUpdate{
