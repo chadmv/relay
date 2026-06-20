@@ -150,9 +150,11 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 	}
 }
 
-// taskIsSourceBearing reports whether a task carries a parseable, non-empty
-// source spec - the same condition selectWorker uses to require a workspace
-// provider. Kept in sync with the taskSrc parse in selectWorker.
+// taskIsSourceBearing reports whether a task carries a parseable source spec
+// with a non-empty Type - i.e. one that names a workspace provider. This is the
+// single predicate selectWorker uses to require a provider-capable worker and
+// the held-pending count uses to decide a task is stuck for lack of one, so the
+// two never disagree. A parseable but typeless spec ({}) is not source-bearing.
 func taskIsSourceBearing(task store.Task) bool {
 	if len(task.Source) == 0 {
 		return false
@@ -179,7 +181,9 @@ func (d *Dispatcher) selectWorker(
 		}
 	}
 
-	// Parse task source (for warm scoring).
+	// Parse task source (for warm scoring). Whether the task actually requires a
+	// workspace provider is decided by taskIsSourceBearing below, not by this
+	// parse succeeding - a parseable but typeless spec ({}) is not source-bearing.
 	var taskSrc *api.SourceSpec
 	if len(task.Source) > 0 {
 		var s api.SourceSpec
@@ -187,6 +191,7 @@ func (d *Dispatcher) selectWorker(
 			taskSrc = &s
 		}
 	}
+	sourceBearing := taskIsSourceBearing(task)
 
 	var best *store.Worker
 	var bestScore int64 = -1
@@ -217,10 +222,11 @@ func (d *Dispatcher) selectWorker(
 		}
 		// Source-bearing tasks require a worker with a workspace provider.
 		// Skipping providerless workers here (rather than scoring them lower) is
-		// the hard requirement: a task whose Source is set must never be
-		// dispatched to a worker that will only PREPARE_FAILED it. For a
-		// non-source task taskSrc == nil and this is a no-op.
-		if taskSrc != nil && !w.SupportsWorkspaces {
+		// the hard requirement: a source-bearing task must never be dispatched to
+		// a worker that will only PREPARE_FAILED it. The source-bearing decision
+		// goes through taskIsSourceBearing so this filter and the held-pending
+		// count always agree. For a non-source task it is a no-op.
+		if sourceBearing && !w.SupportsWorkspaces {
 			continue
 		}
 		score := free

@@ -124,6 +124,27 @@ func TestSelectWorker_NonSourceTaskIgnoresProviderlessFlag(t *testing.T) {
 	assert.Equal(t, w.ID, got.ID)
 }
 
+func TestSelectWorker_TypelessSourceAgreesWithSourceBearing(t *testing.T) {
+	// A task with a parseable but typeless Source ({}) is not source-bearing:
+	// it carries no provider requirement. The selectWorker capability filter and
+	// taskIsSourceBearing must agree, so such a task schedules on a providerless
+	// worker (matching the held-pending count, which keys off taskIsSourceBearing).
+	d := newDispatcherForTest()
+	task := baseTask()
+	task.Source = []byte(`{}`)
+	w := baseWorker(75, "online") // SupportsWorkspaces false
+	workers := []store.Worker{w}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	require.False(t, taskIsSourceBearing(task), "typeless source must not be source-bearing")
+	require.NotNil(t, got, "a typeless-source task must still schedule on a providerless worker")
+	assert.Equal(t, w.ID, got.ID)
+}
+
 func TestSelectWorker_StaleWorkerIsEligible(t *testing.T) {
 	d := newDispatcherForTest()
 	task := baseTask()
