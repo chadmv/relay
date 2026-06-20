@@ -23,15 +23,15 @@ store/schema work fill in behind those two.
 ## Now / Next / Later
 
 ### Now
-- [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/bug-2026-06-10-schedrunner-poisoned-tick.md) - a single failing schedule rolls back the shared tx and starves all other due schedules every 10s; the scheduler-correctness workstream's last open high-leverage item.
 - [Drain-mode disable test asserts 'running' but seed yields 'dispatched'](docs/backlog/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - quick win; a test that has never passed in this configuration, masking real drain-mode confidence. Cheap to fix.
 - [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/bug-2026-06-19-forced-cancel-send-backpressure.md) - forced cancel falls back to the 5s WaitDelay exactly when an operator needs it (a wedged coordinator connection), defeating the point of the force-cancel feature.
-- [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) - high; pulled up from Next - the path every web session hits at 30-day token expiry, leaving a frozen page only a hard reload escapes.
+- [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) - high; the path every web session hits at 30-day token expiry, leaving a frozen page only a hard reload escapes.
+- [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - pulled up from Next; the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
 
 ### Next
-- [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
 - [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; destructive cancel with no owner-or-admin check.
 - [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; offboarded users keep a valid session and their schedules keep creating jobs.
+- [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) - the last open api-auth contract bug; run-now is `auth(...)`-only despite the documented admin-only contract.
 
 ### Later
 - [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
@@ -41,10 +41,9 @@ store/schema work fill in behind those two.
 
 ## What moved
 
-- Shipped since this roadmap's prior 2026-06-20 pass: [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (was Now #1), via PR #38 - the worker connection-epoch fence that closes the residual stale-teardown race.
-- New: [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) - filed while closing the finishRegister-gap fix, whose Phase 4 caught a compile break in an `//go:build integration` file that unit `make test` never compiles; proposes running `go vet -tags integration ./...` in CI.
-- Reordered: with finishregister-gap shipped, `schedrunner-poisoned-tick` takes Now #1 and `spa-401-redirect-loop` (high) is pulled up from Next into Now.
-- Earlier this cycle (since the 2026-06-18 roadmap), 8 items shipped: the entire prior **Now** tier - [requeue-paths-skip-epoch-bump](docs/backlog/closed/bug-2026-06-10-requeue-paths-skip-epoch-bump.md), [stale-stream-teardown-clobbers-registration](docs/backlog/closed/bug-2026-06-10-stale-stream-teardown-clobbers-registration.md), [source-tasks-run-without-workspace](docs/backlog/closed/bug-2026-06-10-source-tasks-run-without-workspace.md), [cron-jobs-drop-source](docs/backlog/closed/bug-2026-06-10-cron-jobs-drop-source.md) - plus [perforce-registry-races](docs/backlog/closed/bug-2026-06-10-perforce-registry-races.md), [agent-pipe-drain-hang](docs/backlog/closed/bug-2026-06-10-agent-pipe-drain-hang.md), [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36), and finishregister-gap (PR #38).
+- Shipped since this roadmap's prior 2026-06-20 pass: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (was Now #1), via PR #40 - per-fire savepoints so one poisoned schedule can't abort the whole tick, plus a reconcile path that no longer falsifies `last_run_at`. This empties the **scheduler-cron** theme (all its items are now shipped); the section is dropped until a new scheduler item is filed.
+- Reordered: with schedrunner-poisoned-tick shipped, the Now tier shifts up - `drain-mode-disable-test-asserts-running` (quick win) takes Now #1, and `dispatch-provider-capability-filter` is pulled up from Next into Now.
+- Earlier this cycle: [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38) and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch (requeue epoch bump, stale-teardown, nil-provider source guard, cron source persistence, perforce-registry-races, pipe-drain hang). [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains the one open item filed this cycle (CI should `go vet -tags integration ./...`).
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -69,10 +68,6 @@ store/schema work fill in behind those two.
 8. [Remove synthetic step marker text line once consumers use step_index/step_total](docs/backlog/idea-2026-04-26-remove-synthetic-step-marker.md) (idea) - the structured fields already carry the same info.
    quick win - one-line deletion in `sendStepMarker`.
 9. [Pin SHA-256 of p4d/p4 binaries downloaded by test container](docs/backlog/idea-2026-05-01-p4d-binary-checksum-verification.md) (idea) - the test image curls p4d/p4 with no checksum verification; bounded (test-only) supply-chain risk.
-
-## Scheduler & cron-engine correctness (scheduler-cron)
-
-1. [One poisoned schedule aborts the whole schedrunner tick and hot-loops; reconcile falsifies last_run_at](docs/backlog/bug-2026-06-10-schedrunner-poisoned-tick.md) (bug, medium) - an errored statement aborts the shared Postgres tx (so nothing in the batch commits) and `AdvanceScheduledJob` records runs that never happened on restart.
 
 ## API authorization, auth & account lifecycle (api-auth)
 
@@ -148,6 +143,7 @@ store/schema work fill in behind those two.
 
 ## Recently shipped
 
+- [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
 - [Job status recompute race can leave a job stuck in running forever](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) - closed 2026-06-20 (PR #36); replaced the read-modify-write job-status update with an atomic `RecomputeJobStatus` statement.
 - [Agent runner pipe-drain hang - wg.Wait() before cmd.Wait() defeats WaitDelay](docs/backlog/closed/bug-2026-06-10-agent-pipe-drain-hang.md) - closed 2026-06-19; drain via chunkWriter so WaitDelay bounds the hang.

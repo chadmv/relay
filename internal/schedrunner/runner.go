@@ -3,6 +3,7 @@ package schedrunner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -49,10 +50,11 @@ func (r *Runner) Run(ctx context.Context) {
 
 // TickOnce performs one poll-and-fire cycle. Exposed for testing.
 //
-// All rows in a tick share one transaction. This means a failed fire (e.g.
-// DB error inside CreateJobFromSpec) still advances next_run_at via the same tx,
-// preventing indefinite hot-loop retries on a broken schedule. last_job_id
-// is left unchanged on failure via COALESCE in AdvanceScheduledJob.
+// All eligible rows in a tick share one outer transaction, but each row's fire
+// runs inside its own savepoint (pgx nested tx). A failed fire rolls back only
+// its savepoint, so a single poisoned schedule cannot abort the healthy rows'
+// commits. The failed schedule's next_run_at is still advanced on the outer tx
+// (without setting last_run_at) so it does not hot-loop every tick.
 func (r *Runner) TickOnce(ctx context.Context) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -66,46 +68,64 @@ func (r *Runner) TickOnce(ctx context.Context) error {
 		return err
 	}
 	for _, row := range rows {
-		r.fireOne(ctx, q, row)
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			log.Printf("schedrunner: begin savepoint for %s: %v", row.Name, err)
+			continue
+		}
+		next, fireErr := r.fireOne(ctx, r.q.WithTx(sp), row)
+		if fireErr != nil {
+			// Roll back ONLY this schedule's writes; the outer tx stays usable.
+			if rbErr := sp.Rollback(ctx); rbErr != nil {
+				log.Printf("schedrunner: rollback savepoint for %s: %v", row.Name, rbErr)
+			}
+			log.Printf("schedrunner: fire schedule %s: %v", row.Name, fireErr)
+			// Advance next_run_at on the OUTER tx (no last_run_at) so the
+			// poisoned schedule stops hot-looping every tick.
+			r.advanceNextRun(ctx, q, row, next)
+			continue
+		}
+		if err := sp.Commit(ctx); err != nil {
+			log.Printf("schedrunner: release savepoint for %s: %v", row.Name, err)
+		}
 	}
 	return tx.Commit(ctx)
 }
 
-func (r *Runner) fireOne(ctx context.Context, q *store.Queries, row store.ScheduledJob) {
+// fireOne attempts to fire one schedule using q. On success it creates the job
+// AND advances the schedule (last_run_at + last_job_id) on q, then returns a nil
+// error. On failure it returns the next_run_at the caller should advance to
+// (without setting last_run_at) and a non-nil error. The caller is responsible
+// for the savepoint and the failure-path advance on the outer tx.
+func (r *Runner) fireOne(ctx context.Context, q *store.Queries, row store.ScheduledJob) (time.Time, error) {
 	var spec jobspec.JobSpec
 	if err := json.Unmarshal(row.JobSpec, &spec); err != nil {
-		log.Printf("schedrunner: schedule %s has invalid job_spec: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, time.Now().Add(time.Minute))
-		return
+		return time.Now().Add(time.Minute), fmt.Errorf("invalid job_spec: %w", err)
 	}
 	sched, err := ParseSchedule(row.CronExpr, row.Timezone)
 	if err != nil {
-		log.Printf("schedrunner: schedule %s failed to parse cron: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, time.Now().Add(time.Minute))
-		return
+		return time.Now().Add(time.Minute), fmt.Errorf("parse cron: %w", err)
 	}
 	nextFire := sched.Next(time.Now())
 
 	if row.OverlapPolicy == "skip" {
 		active, err := q.CountActiveJobsForSchedule(ctx, row.ID)
 		if err != nil {
-			log.Printf("schedrunner: CountActiveJobsForSchedule for %s: %v", row.Name, err)
-			return
+			return nextFire, fmt.Errorf("count active jobs: %w", err)
 		}
 		if active > 0 {
 			log.Printf("schedrunner: skipping schedule %s (previous run still active)", row.Name)
 			r.advance(ctx, q, row, pgtype.UUID{}, nextFire)
-			return
+			return nextFire, nil
 		}
 	}
 
 	job, _, err := jobcreate.CreateJobFromSpec(ctx, q, spec, row.OwnerID, row.ID)
 	if err != nil {
-		log.Printf("schedrunner: create job failed for %s: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, nextFire)
-		return
+		return nextFire, fmt.Errorf("create job: %w", err)
 	}
 	r.advance(ctx, q, row, job.ID, nextFire)
+	return nextFire, nil
 }
 
 func (r *Runner) advance(ctx context.Context, q *store.Queries, row store.ScheduledJob, newJobID pgtype.UUID, next time.Time) {
@@ -115,6 +135,15 @@ func (r *Runner) advance(ctx context.Context, q *store.Queries, row store.Schedu
 		LastJobID: newJobID, // COALESCE in SQL preserves old value when this is invalid
 	}); err != nil {
 		log.Printf("schedrunner: AdvanceScheduledJob for %s: %v", row.Name, err)
+	}
+}
+
+func (r *Runner) advanceNextRun(ctx context.Context, q *store.Queries, row store.ScheduledJob, next time.Time) {
+	if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
+		ID:        row.ID,
+		NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
+	}); err != nil {
+		log.Printf("schedrunner: AdvanceScheduledJobNextRun for %s: %v", row.Name, err)
 	}
 }
 
@@ -134,10 +163,9 @@ func ReconcileOnStartup(ctx context.Context, q *store.Queries) error {
 			continue
 		}
 		next := sched.Next(now)
-		if err := q.AdvanceScheduledJob(ctx, store.AdvanceScheduledJobParams{
+		if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
 			ID:        row.ID,
 			NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
-			LastJobID: pgtype.UUID{}, // unchanged via COALESCE
 		}); err != nil {
 			log.Printf("schedrunner: reconcile advance for %s: %v", row.Name, err)
 		}

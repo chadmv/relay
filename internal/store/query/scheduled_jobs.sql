@@ -66,6 +66,12 @@ SET next_run_at = $2,
     updated_at  = NOW()
 WHERE id = $1;
 
+-- name: AdvanceScheduledJobNextRun :exec
+UPDATE scheduled_jobs
+SET next_run_at = $2,
+    updated_at  = NOW()
+WHERE id = $1;
+
 -- name: CountActiveJobsForSchedule :one
 SELECT COUNT(*) FROM jobs
  WHERE scheduled_job_id = $1
