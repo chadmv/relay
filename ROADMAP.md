@@ -23,13 +23,12 @@ store/schema work fill in behind those two.
 ## Now / Next / Later
 
 ### Now
-- [Drain-mode disable test asserts 'running' but seed yields 'dispatched'](docs/backlog/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - quick win; a test that has never passed in this configuration, masking real drain-mode confidence. Cheap to fix.
 - [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/bug-2026-06-19-forced-cancel-send-backpressure.md) - forced cancel falls back to the 5s WaitDelay exactly when an operator needs it (a wedged coordinator connection), defeating the point of the force-cancel feature.
 - [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) - high; the path every web session hits at 30-day token expiry, leaving a frozen page only a hard reload escapes.
-- [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - pulled up from Next; the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
+- [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
+- [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; pulled up from Next - destructive cancel with no owner-or-admin check.
 
 ### Next
-- [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; destructive cancel with no owner-or-admin check.
 - [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; offboarded users keep a valid session and their schedules keep creating jobs.
 - [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) - the last open api-auth contract bug; run-now is `auth(...)`-only despite the documented admin-only contract.
 
@@ -41,19 +40,17 @@ store/schema work fill in behind those two.
 
 ## What moved
 
-- Shipped since this roadmap's prior 2026-06-20 pass: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (was Now #1), via PR #40 - per-fire savepoints so one poisoned schedule can't abort the whole tick, plus a reconcile path that no longer falsifies `last_run_at`. This empties the **scheduler-cron** theme (all its items are now shipped); the section is dropped until a new scheduler item is filed.
-- Reordered: with schedrunner-poisoned-tick shipped, the Now tier shifts up - `drain-mode-disable-test-asserts-running` (quick win) takes Now #1, and `dispatch-provider-capability-filter` is pulled up from Next into Now.
-- Earlier this cycle: [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38) and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch (requeue epoch bump, stale-teardown, nil-provider source guard, cron source persistence, perforce-registry-races, pipe-drain hang). [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains the one open item filed this cycle (CI should `go vet -tags integration ./...`).
+- Shipped since this roadmap's prior 2026-06-20 pass: [drain-mode-disable-test-asserts-running](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (was Now #1), via PR #43 - a quick-win test fix so `seedRunningTask` advances the task to `running` and the drain-mode test exercises a genuinely running task.
+- Reordered: with drain-mode shipped, the Now tier shifts up - `forced-cancel-send-backpressure` takes Now #1 and `job-cancel-missing-authz` (security) is pulled up from Next into Now.
+- Earlier this cycle: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40, emptied the scheduler-cron theme), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch. [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains the one open item filed this cycle (CI should `go vet -tags integration ./...`).
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
 1. [Dispatch failure paths are inconsistent and silent](docs/backlog/bug-2026-06-10-dispatch-failure-paths-silent.md) (bug, medium) - partially mitigated, but the bad-source-JSON path still strands a claimed task and the top-level dispatch loop still swallows DB errors with no log.
 2. [Agent send goroutine not awaited across reconnect](docs/backlog/bug-2026-06-18-agent-reconnect-send-goroutine-not-awaited.md) (bug, medium) - `connect()` returns without joining its send goroutine, so a reconnect can leave two goroutines draining one `sendCh` and silently drop a queued message. Violates the one-bounded-sender invariant.
 3. [Reconnect backoff never resets in agent and NotifyListener](docs/backlog/bug-2026-06-10-reconnect-backoff-never-resets.md) (bug, medium) - the backoff reset is unreachable on the drop path, so reconnect delay degrades monotonically toward the 60s cap and dispatch latency falls back to the 30s safety poll.
-4. [Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'](docs/backlog/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (bug, medium) - the test has never passed in this configuration; `seedRunningTask` claims via `ClaimTaskForWorker` (leaving `dispatched`) but the test asserts `running`.
-   quick win - test-only fix.
-5. [Cancel/disable handlers send synchronously to workers](docs/backlog/bug-2026-06-10-cancel-disable-handlers-send-synchronously.md) (bug, low) - bounded after the wedged-agent fix, but a multi-task job on one wedged worker can still take up to N x ~5s in the request path.
-6. [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) (bug, low) - between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
+4. [Cancel/disable handlers send synchronously to workers](docs/backlog/bug-2026-06-10-cancel-disable-handlers-send-synchronously.md) (bug, low) - bounded after the wedged-agent fix, but a multi-task job on one wedged worker can still take up to N x ~5s in the request path.
+5. [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) (bug, low) - between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
 
 ## Agent runtime & Perforce workspaces (agent-perforce)
 
@@ -143,6 +140,7 @@ store/schema work fill in behind those two.
 
 ## Recently shipped
 
+- [Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - closed 2026-06-20 (PR #43); `seedRunningTask` now advances the claimed task to `running` at the claimed epoch so the drain-mode test exercises a running task.
 - [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
 - [Job status recompute race can leave a job stuck in running forever](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) - closed 2026-06-20 (PR #36); replaced the read-modify-write job-status update with an atomic `RecomputeJobStatus` statement.

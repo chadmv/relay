@@ -1,11 +1,21 @@
 ---
 title: Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'
 type: bug
-status: open
+status: closed
 created: 2026-06-19
+closed: 2026-06-20
 priority: medium
 source: discovered by relay-verify while fixing bug-2026-06-10-requeue-paths-skip-epoch-bump
 ---
+
+## Resolution
+Fixed in PR #43, 2026-06-20 (Option 1). `seedRunningTask`
+(`internal/api/jobs_cancel_test.go`) now advances the claimed task from
+`dispatched` to `running` via `UpdateTaskStatusEpoch` at the claimed
+`assignment_epoch` (1, from `ClaimTaskForWorker`), honoring the epoch-fence
+invariant and mirroring how a real agent's status report transitions the task.
+`TestDisableWorker_DrainModeLeavesRunningTaskAlone` now genuinely exercises a
+running task; all five `seedRunningTask` callers verified compatible.
 
 # Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'
 
