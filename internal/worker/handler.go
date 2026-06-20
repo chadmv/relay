@@ -102,14 +102,7 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	var workerUUID pgtype.UUID
 	_ = workerUUID.Scan(workerID)
 
-	if h.grace != nil {
-		defer h.grace.Start(workerID) // runs 4th: grace timer will requeue after window
-	} else {
-		defer h.requeueWorkerTasks(workerID) // runs 4th: requeue immediately
-	}
-	defer h.markWorkerOffline(workerID)    // runs 3rd
-	defer sender.Close()                   // runs 2nd
-	defer h.registry.Unregister(workerID) // runs 1st
+	defer h.teardownConnection(workerID, sender)
 
 	// Message loop.
 	for {
@@ -532,6 +525,25 @@ func (h *Handler) handleTelemetry(workerID string, t *relayv1.WorkerTelemetry) {
 		GPUMemUsed:     t.GpuMemUsedBytes,
 		GPUMemTotal:    t.GpuMemTotalBytes,
 	})
+}
+
+// teardownConnection runs when a Connect stream ends. It always stops this
+// connection's own send goroutine, but only tears down shared worker state
+// (DB offline flag, grace timer / requeue) when this connection still owns the
+// worker's registry slot. A newer connection for the same worker must not be
+// clobbered (Identity-checked teardown invariant).
+func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
+	owned := h.registry.UnregisterIf(workerID, sender)
+	sender.Close() // always stop our own send goroutine
+	if !owned {
+		return // a newer connection owns this worker; leave shared state alone
+	}
+	h.markWorkerOffline(workerID)
+	if h.grace != nil {
+		h.grace.Start(workerID)
+	} else {
+		h.requeueWorkerTasks(workerID)
+	}
 }
 
 // markWorkerOffline is called in a defer after the stream ends.
