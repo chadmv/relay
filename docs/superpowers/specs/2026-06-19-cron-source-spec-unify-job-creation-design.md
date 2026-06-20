@@ -130,5 +130,3 @@ Net effect: cron fires now go through `jobspec.Validate` (previously skipped) an
   call `jobcreate.CreateJobFromSpec`.
 - `internal/schedrunner/runner_test.go` - new source-persistence integration test.
 - `docs/backlog/closed/bug-2026-06-10-cron-jobs-drop-source.md` - moved on close.
-</content>
-</invoke>
