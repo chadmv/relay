@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -599,4 +600,84 @@ func TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "pending", got.Status, "stale update must not have changed task status")
 	require.Equal(t, int32(1), got.RetryCount, "stale generation must not drive a second retry")
+}
+
+func TestRecomputeJobStatus(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+	user := makeTestUser(t, q, ctx, "Rita", "rita@example.com")
+
+	mkJob := func(name string) store.Job {
+		job, err := q.CreateJob(ctx, store.CreateJobParams{
+			Name: name, Priority: "normal", SubmittedBy: user.ID,
+			Labels: []byte(`{}`), ScheduledJobID: pgtype.UUID{},
+		})
+		require.NoError(t, err)
+		return job
+	}
+	mkTask := func(job store.Job, status string) {
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		if status != "pending" {
+			_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task.ID, Status: status, Epoch: 0,
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	// All tasks done -> job done.
+	allDone := mkJob("all-done")
+	mkTask(allDone, "done")
+	mkTask(allDone, "done")
+	got, err := q.RecomputeJobStatus(ctx, allDone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", got)
+
+	// One still active -> job running.
+	oneActive := mkJob("one-active")
+	mkTask(oneActive, "done")
+	mkTask(oneActive, "running")
+	got, err = q.RecomputeJobStatus(ctx, oneActive.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got)
+
+	// All terminal but one failed -> job failed (timed_out also terminal-failure).
+	mixedFail := mkJob("mixed-fail")
+	mkTask(mixedFail, "done")
+	mkTask(mixedFail, "failed")
+	mkTask(mixedFail, "timed_out")
+	got, err = q.RecomputeJobStatus(ctx, mixedFail.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got)
+
+	// No tasks -> pgx.ErrNoRows, mirroring the old "" return.
+	empty := mkJob("empty")
+	_, err = q.RecomputeJobStatus(ctx, empty.ID)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// Concurrent completion: two tasks marked done, two goroutines recompute
+	// at once. The final committed job status must be terminal, never 'running'.
+	for i := 0; i < 20; i++ {
+		race := mkJob("race")
+		mkTask(race, "done")
+		mkTask(race, "done")
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		for g := 0; g < 2; g++ {
+			go func() {
+				defer wg.Done()
+				_, _ = q.RecomputeJobStatus(ctx, race.ID)
+			}()
+		}
+		wg.Wait()
+
+		final, err := q.GetJob(ctx, race.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "done", final.Status, "iteration %d stranded job", i)
+	}
 }
