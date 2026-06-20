@@ -1,7 +1,7 @@
 ---
 title: Stale stream teardown clobbers a fresh registration for the same worker
 type: bug
-status: open
+status: closed
 created: 2026-06-10
 priority: high
 source: full-codebase review (2026-06-10)
