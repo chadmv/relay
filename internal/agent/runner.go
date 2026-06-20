@@ -241,6 +241,9 @@ type chunkWriter struct {
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil // match the old pipeLog n>0 guard: never emit an empty chunk
+	}
 	chunk := make([]byte, len(p))
 	copy(chunk, p)
 	w.r.send(&relayv1.AgentMessage{
