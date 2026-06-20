@@ -291,13 +291,12 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 // finishRegister updates worker status, reconciles running tasks, sends RegisterResponse,
 // registers the sender, and triggers dispatch.
 func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, id pgtype.UUID, rawAgentToken string) (string, *workerSender, error) {
-	updated, err := h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+	updated, err := h.q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
 		ID:         id,
-		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("update worker status: %w", err)
+		return "", nil, fmt.Errorf("register worker connection: %w", err)
 	}
 
 	workerID := uuidStr(updated.ID)
@@ -334,6 +333,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 
 	// From here on, all sends go through the serializing wrapper.
 	sender := NewWorkerSender(stream)
+	sender.connEpoch = updated.ConnectionEpoch
 	h.registry.Register(workerID, sender)
 
 	if h.Metrics != nil {
