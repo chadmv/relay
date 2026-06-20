@@ -746,7 +746,7 @@ func TestRegisterAndDispatch_SourceTaskHeldOnProviderlessWorker(t *testing.T) {
 		Name:     "src-task",
 		Commands: []byte(`[["echo","hi"]]`),
 		Env:      []byte("{}"),
-		Requires: []byte("[]"),
+		Requires: []byte("{}"),
 		Retries:  0,
 		Source:   []byte(`{"type":"perforce","stream":"//depot/main"}`),
 	})
@@ -762,6 +762,113 @@ func TestRegisterAndDispatch_SourceTaskHeldOnProviderlessWorker(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pending", after.Status, "source-bearing task must stay pending on a providerless fleet")
 	assert.Equal(t, int32(0), after.AssignmentEpoch, "task must never be claimed (no epoch bump)")
+
+	close(hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return")
+	}
+}
+
+// TestRegisterAndDispatch_CapableWorkerReDispatchesHeldSourceTask verifies that
+// a source-bearing task held pending (no capable worker present) is dispatched
+// once a provider-capable worker later connects and triggers a dispatch cycle.
+// This end-to-end proof covers the "re-dispatch on capable worker connect" path
+// that the spec relies on via triggerDispatch.
+func TestRegisterAndDispatch_CapableWorkerReDispatchesHeldSourceTask(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+
+	// The dispatcher will be wired as the triggerDispatch callback so Connect
+	// exercises the real dispatch-on-register path.
+	var disp *scheduler.Dispatcher
+	dispatchCh := make(chan struct{}, 1)
+	h := worker.NewHandler(q, pool, registry, broker, func() {
+		select {
+		case dispatchCh <- struct{}{}:
+		default:
+		}
+	})
+
+	// Seed a user, job, and source-bearing task. No capable worker is online yet.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u2", Email: "u2@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "src-job2", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID:    job.ID,
+		Name:     "src-task2",
+		Commands: []byte(`[["echo","hello"]]`),
+		Env:      []byte("{}"),
+		Requires: []byte("{}"),
+		Retries:  0,
+		Source:   []byte(`{"type":"perforce","stream":"//depot/main"}`),
+	})
+	require.NoError(t, err)
+
+	// Confirm the task starts pending with epoch 0 (never claimed).
+	initial, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", initial.Status)
+	require.Equal(t, int32(0), initial.AssignmentEpoch)
+
+	// Wire the dispatcher now (after task creation so RunOnce sees it).
+	disp = scheduler.NewDispatcher(q, registry, broker)
+
+	// Seed a capable worker with an agent token.
+	capableID, capableToken := seedWorkerWithAgentToken(t, ctx, q, "capable-01")
+	_ = capableID
+
+	// Connect the capable worker. Its registration sends SupportsWorkspaces=true,
+	// so finishRegister persists the capability and calls triggerDispatch.
+	hold := make(chan struct{})
+	capableStream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname:           "capable-01",
+					CpuCores:           4,
+					RamGb:              8,
+					Os:                 "linux",
+					Credential:         &relayv1.RegisterRequest_AgentToken{AgentToken: capableToken},
+					SupportsWorkspaces: proto.Bool(true),
+				},
+			}},
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(capableStream) }()
+
+	// Wait for RegisterResponse (worker is now online with SupportsWorkspaces=true).
+	select {
+	case <-capableStream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse from capable worker")
+	}
+
+	// Wait for the triggerDispatch signal, then run one dispatch cycle.
+	select {
+	case <-dispatchCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for triggerDispatch from capable worker connect")
+	}
+	disp.RunOnce(ctx)
+
+	// The source-bearing task must now be dispatched (claimed) to the capable worker.
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", after.Status, "source task must be dispatched once a capable worker connects")
+	assert.Equal(t, int32(1), after.AssignmentEpoch, "task must be claimed (epoch bumped to 1)")
 
 	close(hold)
 	select {
