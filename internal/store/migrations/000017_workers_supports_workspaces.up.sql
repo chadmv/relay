@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN supports_workspaces BOOLEAN NOT NULL DEFAULT TRUE;
