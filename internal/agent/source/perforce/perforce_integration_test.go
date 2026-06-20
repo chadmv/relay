@@ -83,8 +83,8 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	// Registry should show no open task changelists after Finalize.
 	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
 	require.NoError(t, err)
-	e := reg.Get(inv.ShortID)
-	require.NotNil(t, e, "workspace entry should remain in registry after finalize")
+	e, ok := reg.Get(inv.ShortID)
+	require.True(t, ok, "workspace entry should remain in registry after finalize")
 	require.Empty(t, e.OpenTaskChangelists, "Finalize should clear pending changelists")
 
 	// --- Second prepare: same spec → should not re-sync (baseline matches) ---
