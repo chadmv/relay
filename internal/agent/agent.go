@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // Agent manages the gRPC connection to the coordinator, dispatches tasks to
@@ -258,6 +259,9 @@ func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 		GpuModel:     a.caps.GPUModel,
 		Os:           a.caps.OS,
 		RunningTasks: running,
+		// proto.Bool gives explicit presence so the server can distinguish a new
+		// agent reporting false from an old agent omitting the field entirely.
+		SupportsWorkspaces: proto.Bool(a.provider != nil),
 	}
 
 	switch {

@@ -48,6 +48,103 @@ func newDispatcherForTest() *Dispatcher {
 	return &Dispatcher{}
 }
 
+// sourceTask returns a pending task whose Source is a parseable Perforce spec,
+// making it "source-bearing" (taskSrc != nil in selectWorker).
+func sourceTask() store.Task {
+	t := baseTask()
+	t.Source = []byte(`{"type":"perforce","stream":"//depot/main"}`)
+	return t
+}
+
+func TestSelectWorker_SourceTaskSkipsProviderlessWorker(t *testing.T) {
+	d := newDispatcherForTest()
+	task := sourceTask()
+	w := baseWorker(70, "online") // SupportsWorkspaces defaults false
+	workers := []store.Worker{w}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	assert.Nil(t, got, "a source-bearing task must NOT be dispatched to a providerless worker")
+}
+
+func TestSelectWorker_SourceTaskSelectsCapableWorker(t *testing.T) {
+	d := newDispatcherForTest()
+	task := sourceTask()
+	w := baseWorker(71, "online")
+	w.SupportsWorkspaces = true
+	workers := []store.Worker{w}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	require.NotNil(t, got, "a source-bearing task must be dispatched to a provider-capable worker")
+	assert.Equal(t, w.ID, got.ID)
+}
+
+func TestSelectWorker_SourceTaskPrefersCapableOverFreerProviderless(t *testing.T) {
+	// The providerless worker has more free slots (higher base score) but must
+	// still be skipped; the capable worker wins despite fewer free slots.
+	d := newDispatcherForTest()
+	task := sourceTask()
+	providerless := baseWorker(72, "online")
+	providerless.MaxSlots = 16 // more free slots
+	capable := baseWorker(73, "online")
+	capable.MaxSlots = 1
+	capable.SupportsWorkspaces = true
+	workers := []store.Worker{providerless, capable}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	require.NotNil(t, got)
+	assert.Equal(t, capable.ID, got.ID, "capability is a hard filter that outranks free-slot scoring")
+}
+
+func TestSelectWorker_NonSourceTaskIgnoresProviderlessFlag(t *testing.T) {
+	// Regression guard: a non-source task (empty Source) schedules on a
+	// providerless worker; the guard is a no-op for taskSrc == nil.
+	d := newDispatcherForTest()
+	task := baseTask() // no Source
+	w := baseWorker(74, "online") // SupportsWorkspaces false
+	workers := []store.Worker{w}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	require.NotNil(t, got, "a non-source task must still schedule on a providerless worker")
+	assert.Equal(t, w.ID, got.ID)
+}
+
+func TestSelectWorker_TypelessSourceAgreesWithSourceBearing(t *testing.T) {
+	// A task with a parseable but typeless Source ({}) is not source-bearing:
+	// it carries no provider requirement. The selectWorker capability filter and
+	// taskIsSourceBearing must agree, so such a task schedules on a providerless
+	// worker (matching the held-pending count, which keys off taskIsSourceBearing).
+	d := newDispatcherForTest()
+	task := baseTask()
+	task.Source = []byte(`{}`)
+	w := baseWorker(75, "online") // SupportsWorkspaces false
+	workers := []store.Worker{w}
+
+	got := d.selectWorker(task, workers, nil,
+		map[pgtype.UUID]int64{},
+		map[pgtype.UUID][]store.WorkerWorkspace{},
+	)
+
+	require.False(t, taskIsSourceBearing(task), "typeless source must not be source-bearing")
+	require.NotNil(t, got, "a typeless-source task must still schedule on a providerless worker")
+	assert.Equal(t, w.ID, got.ID)
+}
+
 func TestSelectWorker_StaleWorkerIsEligible(t *testing.T) {
 	d := newDispatcherForTest()
 	task := baseTask()

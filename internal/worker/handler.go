@@ -175,13 +175,14 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		txq := h.q.WithTx(tx)
 
 		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
-			Name:     reg.Hostname,
-			Hostname: reg.Hostname,
-			CpuCores: reg.CpuCores,
-			RamGb:    reg.RamGb,
-			GpuCount: reg.GpuCount,
-			GpuModel: reg.GpuModel,
-			Os:       reg.Os,
+			Name:               reg.Hostname,
+			Hostname:           reg.Hostname,
+			CpuCores:           reg.CpuCores,
+			RamGb:              reg.RamGb,
+			GpuCount:           reg.GpuCount,
+			GpuModel:           reg.GpuModel,
+			Os:                 reg.Os,
+			SupportsWorkspaces: reg.SupportsWorkspaces,
 		})
 		if err != nil {
 			return fmt.Errorf("upsert worker: %w", err)
@@ -257,13 +258,14 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 		}
 
 		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
-			Name:     reg.Hostname,
-			Hostname: reg.Hostname,
-			CpuCores: reg.CpuCores,
-			RamGb:    reg.RamGb,
-			GpuCount: reg.GpuCount,
-			GpuModel: reg.GpuModel,
-			Os:       reg.Os,
+			Name:               reg.Hostname,
+			Hostname:           reg.Hostname,
+			CpuCores:           reg.CpuCores,
+			RamGb:              reg.RamGb,
+			GpuCount:           reg.GpuCount,
+			GpuModel:           reg.GpuModel,
+			Os:                 reg.Os,
+			SupportsWorkspaces: reg.SupportsWorkspaces,
 		})
 		if err != nil {
 			return fmt.Errorf("upsert worker: %w", err)
@@ -292,8 +294,9 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 // registers the sender, and triggers dispatch.
 func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, id pgtype.UUID, rawAgentToken string) (string, *workerSender, error) {
 	updated, err := h.q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
-		ID:         id,
-		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		ID:                 id,
+		LastSeenAt:         pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		SupportsWorkspaces: reg.SupportsWorkspaces,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("register worker connection: %w", err)

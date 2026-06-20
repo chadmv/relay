@@ -32,11 +32,14 @@ RETURNING *;
 -- this connection. The returned connection_epoch is the value this connection
 -- owns; all later teardown writes for this connection fence on it. Clears
 -- disconnected_at because a reconnected worker has no live disconnect timestamp.
+-- supports_workspaces is the authoritative per-connect capability write: a NULL
+-- param (old agent that omits proto field 12) leaves the existing value.
 UPDATE workers
 SET status = 'online',
     last_seen_at = $2,
     disconnected_at = NULL,
-    connection_epoch = connection_epoch + 1
+    connection_epoch = connection_epoch + 1,
+    supports_workspaces = COALESCE(sqlc.narg(supports_workspaces)::bool, supports_workspaces)
 WHERE id = $1
 RETURNING *;
 
@@ -53,15 +56,16 @@ WHERE id = $1 AND connection_epoch = $4;
 -- name: UpsertWorkerByHostname :one
 -- Insert a new worker or update hardware specs on reconnect.
 -- Admin-managed fields (name, labels, max_slots) are preserved on conflict.
-INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE(sqlc.narg(supports_workspaces)::bool, TRUE))
 ON CONFLICT (hostname) DO UPDATE
     SET cpu_cores = EXCLUDED.cpu_cores,
         ram_gb    = EXCLUDED.ram_gb,
         gpu_count = EXCLUDED.gpu_count,
         gpu_model = EXCLUDED.gpu_model,
-        os        = EXCLUDED.os
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at;
+        os        = EXCLUDED.os,
+        supports_workspaces = COALESCE(sqlc.narg(supports_workspaces)::bool, workers.supports_workspaces)
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at, supports_workspaces;
 
 -- name: SetWorkerAgentToken :exec
 -- Sets the long-lived agent token on (re)enrollment. Clears revoked_at because

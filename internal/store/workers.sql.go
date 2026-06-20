@@ -62,7 +62,7 @@ func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
 const createWorker = `-- name: CreateWorker :one
 INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 `
 
 type CreateWorkerParams struct {
@@ -79,7 +79,7 @@ type CreateWorkerParams struct {
 //
 //	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, createWorker,
 		arg.Name,
@@ -110,6 +110,7 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
@@ -146,12 +147,12 @@ func (q *Queries) EnableWorker(ctx context.Context, id pgtype.UUID) (int64, erro
 }
 
 const getWorker = `-- name: GetWorker :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE id = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1
 `
 
 // GetWorker
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE id = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1
 func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorker, id)
 	var i Worker
@@ -174,18 +175,19 @@ func (q *Queries) GetWorker(ctx context.Context, id pgtype.UUID) (Worker, error)
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
 
 const getWorkerByAgentTokenHash = `-- name: GetWorkerByAgentTokenHash :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE agent_token_hash = $1 AND status != 'revoked'
 `
 
 // GetWorkerByAgentTokenHash
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE agent_token_hash = $1 AND status != 'revoked'
 func (q *Queries) GetWorkerByAgentTokenHash(ctx context.Context, agentTokenHash *string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByAgentTokenHash, agentTokenHash)
@@ -209,17 +211,18 @@ func (q *Queries) GetWorkerByAgentTokenHash(ctx context.Context, agentTokenHash 
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
 
 const getWorkerByHostname = `-- name: GetWorkerByHostname :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE hostname = $1
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1
 `
 
 // GetWorkerByHostname
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE hostname = $1
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1
 func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostname, hostname)
 	var i Worker
@@ -242,17 +245,18 @@ func (q *Queries) GetWorkerByHostname(ctx context.Context, hostname string) (Wor
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
 
 const getWorkerByHostnameForUpdate = `-- name: GetWorkerByHostnameForUpdate :one
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE hostname = $1 FOR UPDATE
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1 FOR UPDATE
 `
 
 // GetWorkerByHostnameForUpdate
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE hostname = $1 FOR UPDATE
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1 FOR UPDATE
 func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostnameForUpdate, hostname)
 	var i Worker
@@ -275,12 +279,13 @@ func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname str
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
 
 const listRevokedWorkersPage = `-- name: ListRevokedWorkersPage :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status = 'revoked'
   AND (
        NOT $1::bool
@@ -309,7 +314,7 @@ type ListRevokedWorkersPageParams struct {
 // revoked_at is nullable (rows revoked before the column existed), so the
 // cursor predicate mirrors ListWorkersPageByLastSeenDesc's NULLS LAST handling.
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status = 'revoked'
 //	  AND (
 //	       NOT $1::bool
@@ -358,6 +363,7 @@ func (q *Queries) ListRevokedWorkersPage(ctx context.Context, arg ListRevokedWor
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -370,12 +376,12 @@ func (q *Queries) ListRevokedWorkersPage(ctx context.Context, arg ListRevokedWor
 }
 
 const listWorkers = `-- name: ListWorkers :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers ORDER BY name
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers ORDER BY name
 `
 
 // ListWorkers
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers ORDER BY name
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers ORDER BY name
 func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkers)
 	if err != nil {
@@ -404,6 +410,7 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -416,12 +423,12 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]Worker, error) {
 }
 
 const listWorkersByLiveness = `-- name: ListWorkersByLiveness :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE status IN ('online', 'stale')
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE status IN ('online', 'stale')
 `
 
 // Workers eligible for staleness sweeping: those currently connected.
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers WHERE status IN ('online', 'stale')
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE status IN ('online', 'stale')
 func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 	rows, err := q.db.Query(ctx, listWorkersByLiveness)
 	if err != nil {
@@ -450,6 +457,7 @@ func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -462,7 +470,7 @@ func (q *Queries) ListWorkersByLiveness(ctx context.Context) ([]Worker, error) {
 }
 
 const listWorkersPage = `-- name: ListWorkersPage :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND ($1::bool = FALSE
        OR (created_at, id) < ($2::timestamptz, $3::uuid))
@@ -479,7 +487,7 @@ type ListWorkersPageParams struct {
 
 // ListWorkersPage
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND ($1::bool = FALSE
 //	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
@@ -518,6 +526,7 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -530,7 +539,7 @@ func (q *Queries) ListWorkersPage(ctx context.Context, arg ListWorkersPageParams
 }
 
 const listWorkersPageByCreatedAsc = `-- name: ListWorkersPageByCreatedAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 ORDER BY created_at ASC, id ASC
@@ -546,7 +555,7 @@ type ListWorkersPageByCreatedAscParams struct {
 
 // ListWorkersPageByCreatedAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid))
 //	ORDER BY created_at ASC, id ASC
@@ -584,6 +593,7 @@ func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorke
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -596,7 +606,7 @@ func (q *Queries) ListWorkersPageByCreatedAsc(ctx context.Context, arg ListWorke
 }
 
 const listWorkersPageByLastSeenAsc = `-- name: ListWorkersPageByLastSeenAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (
        NOT $1::bool
@@ -629,7 +639,7 @@ type ListWorkersPageByLastSeenAscParams struct {
 //   - cursor non-null: we're in the non-null tail; qualify non-null rows
 //     with (last_seen_at, id) > (cursor_ts, cursor_id).
 //
-//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //     WHERE status != 'revoked'
 //     AND (
 //     NOT $1::bool
@@ -678,6 +688,7 @@ func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWork
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -690,7 +701,7 @@ func (q *Queries) ListWorkersPageByLastSeenAsc(ctx context.Context, arg ListWork
 }
 
 const listWorkersPageByLastSeenDesc = `-- name: ListWorkersPageByLastSeenDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (
        NOT $1::bool
@@ -725,7 +736,7 @@ type ListWorkersPageByLastSeenDescParams struct {
 //     row with (last_seen_at, id) < (cursor_ts, cursor_id), OR any null
 //     row (nulls come after in DESC NULLS LAST).
 //
-//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//     SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //     WHERE status != 'revoked'
 //     AND (
 //     NOT $1::bool
@@ -774,6 +785,7 @@ func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWor
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -786,7 +798,7 @@ func (q *Queries) ListWorkersPageByLastSeenDesc(ctx context.Context, arg ListWor
 }
 
 const listWorkersPageByNameAsc = `-- name: ListWorkersPageByNameAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 ORDER BY name ASC, id ASC
@@ -802,7 +814,7 @@ type ListWorkersPageByNameAscParams struct {
 
 // ListWorkersPageByNameAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (name, id) > ($2::text, $3::uuid))
 //	ORDER BY name ASC, id ASC
@@ -840,6 +852,7 @@ func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersP
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -852,7 +865,7 @@ func (q *Queries) ListWorkersPageByNameAsc(ctx context.Context, arg ListWorkersP
 }
 
 const listWorkersPageByNameDesc = `-- name: ListWorkersPageByNameDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 ORDER BY name DESC, id DESC
@@ -868,7 +881,7 @@ type ListWorkersPageByNameDescParams struct {
 
 // ListWorkersPageByNameDesc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (name, id) < ($2::text, $3::uuid))
 //	ORDER BY name DESC, id DESC
@@ -906,6 +919,7 @@ func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkers
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -918,7 +932,7 @@ func (q *Queries) ListWorkersPageByNameDesc(ctx context.Context, arg ListWorkers
 }
 
 const listWorkersPageByStatusAsc = `-- name: ListWorkersPageByStatusAsc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 ORDER BY status ASC, id ASC
@@ -934,7 +948,7 @@ type ListWorkersPageByStatusAscParams struct {
 
 // ListWorkersPageByStatusAsc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (status, id) > ($2::text, $3::uuid))
 //	ORDER BY status ASC, id ASC
@@ -972,6 +986,7 @@ func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorker
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -984,7 +999,7 @@ func (q *Queries) ListWorkersPageByStatusAsc(ctx context.Context, arg ListWorker
 }
 
 const listWorkersPageByStatusDesc = `-- name: ListWorkersPageByStatusDesc :many
-SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 WHERE status != 'revoked'
   AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 ORDER BY status DESC, id DESC
@@ -1000,7 +1015,7 @@ type ListWorkersPageByStatusDescParams struct {
 
 // ListWorkersPageByStatusDesc
 //
-//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch FROM workers
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers
 //	WHERE status != 'revoked'
 //	  AND (NOT $1::bool OR (status, id) < ($2::text, $3::uuid))
 //	ORDER BY status DESC, id DESC
@@ -1038,6 +1053,7 @@ func (q *Queries) ListWorkersPageByStatusDesc(ctx context.Context, arg ListWorke
 			&i.DisabledAt,
 			&i.RevokedAt,
 			&i.ConnectionEpoch,
+			&i.SupportsWorkspaces,
 		); err != nil {
 			return nil, err
 		}
@@ -1091,30 +1107,35 @@ UPDATE workers
 SET status = 'online',
     last_seen_at = $2,
     disconnected_at = NULL,
-    connection_epoch = connection_epoch + 1
+    connection_epoch = connection_epoch + 1,
+    supports_workspaces = COALESCE($3::bool, supports_workspaces)
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 `
 
 type RegisterWorkerConnectionParams struct {
-	ID         pgtype.UUID        `json:"id"`
-	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
+	ID                 pgtype.UUID        `json:"id"`
+	LastSeenAt         pgtype.Timestamptz `json:"last_seen_at"`
+	SupportsWorkspaces *bool              `json:"supports_workspaces"`
 }
 
 // Marks the worker online and atomically allocates a fresh connection_epoch for
 // this connection. The returned connection_epoch is the value this connection
 // owns; all later teardown writes for this connection fence on it. Clears
 // disconnected_at because a reconnected worker has no live disconnect timestamp.
+// supports_workspaces is the authoritative per-connect capability write: a NULL
+// param (old agent that omits proto field 12) leaves the existing value.
 //
 //	UPDATE workers
 //	SET status = 'online',
 //	    last_seen_at = $2,
 //	    disconnected_at = NULL,
-//	    connection_epoch = connection_epoch + 1
+//	    connection_epoch = connection_epoch + 1,
+//	    supports_workspaces = COALESCE($3::bool, supports_workspaces)
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 func (q *Queries) RegisterWorkerConnection(ctx context.Context, arg RegisterWorkerConnectionParams) (Worker, error) {
-	row := q.db.QueryRow(ctx, registerWorkerConnection, arg.ID, arg.LastSeenAt)
+	row := q.db.QueryRow(ctx, registerWorkerConnection, arg.ID, arg.LastSeenAt, arg.SupportsWorkspaces)
 	var i Worker
 	err := row.Scan(
 		&i.ID,
@@ -1135,6 +1156,7 @@ func (q *Queries) RegisterWorkerConnection(ctx context.Context, arg RegisterWork
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
@@ -1181,7 +1203,7 @@ const updateWorker = `-- name: UpdateWorker :one
 UPDATE workers
 SET name = $2, labels = $3, max_slots = $4
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 `
 
 type UpdateWorkerParams struct {
@@ -1196,7 +1218,7 @@ type UpdateWorkerParams struct {
 //	UPDATE workers
 //	SET name = $2, labels = $3, max_slots = $4
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorker,
 		arg.ID,
@@ -1224,6 +1246,7 @@ func (q *Queries) UpdateWorker(ctx context.Context, arg UpdateWorkerParams) (Wor
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
@@ -1232,7 +1255,7 @@ const updateWorkerStatus = `-- name: UpdateWorkerStatus :one
 UPDATE workers
 SET status = $2, last_seen_at = $3, disconnected_at = $4
 WHERE id = $1
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 `
 
 type UpdateWorkerStatusParams struct {
@@ -1247,7 +1270,7 @@ type UpdateWorkerStatusParams struct {
 //	UPDATE workers
 //	SET status = $2, last_seen_at = $3, disconnected_at = $4
 //	WHERE id = $1
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces
 func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatusParams) (Worker, error) {
 	row := q.db.QueryRow(ctx, updateWorkerStatus,
 		arg.ID,
@@ -1275,61 +1298,66 @@ func (q *Queries) UpdateWorkerStatus(ctx context.Context, arg UpdateWorkerStatus
 		&i.DisabledAt,
 		&i.RevokedAt,
 		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }
 
 const upsertWorkerByHostname = `-- name: UpsertWorkerByHostname :one
-INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::bool, TRUE))
 ON CONFLICT (hostname) DO UPDATE
     SET cpu_cores = EXCLUDED.cpu_cores,
         ram_gb    = EXCLUDED.ram_gb,
         gpu_count = EXCLUDED.gpu_count,
         gpu_model = EXCLUDED.gpu_model,
-        os        = EXCLUDED.os
-RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at
+        os        = EXCLUDED.os,
+        supports_workspaces = COALESCE($8::bool, workers.supports_workspaces)
+RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at, supports_workspaces
 `
 
 type UpsertWorkerByHostnameParams struct {
-	Name     string `json:"name"`
-	Hostname string `json:"hostname"`
-	CpuCores int32  `json:"cpu_cores"`
-	RamGb    int32  `json:"ram_gb"`
-	GpuCount int32  `json:"gpu_count"`
-	GpuModel string `json:"gpu_model"`
-	Os       string `json:"os"`
+	Name               string `json:"name"`
+	Hostname           string `json:"hostname"`
+	CpuCores           int32  `json:"cpu_cores"`
+	RamGb              int32  `json:"ram_gb"`
+	GpuCount           int32  `json:"gpu_count"`
+	GpuModel           string `json:"gpu_model"`
+	Os                 string `json:"os"`
+	SupportsWorkspaces *bool  `json:"supports_workspaces"`
 }
 
 type UpsertWorkerByHostnameRow struct {
-	ID         pgtype.UUID        `json:"id"`
-	Name       string             `json:"name"`
-	Hostname   string             `json:"hostname"`
-	CpuCores   int32              `json:"cpu_cores"`
-	RamGb      int32              `json:"ram_gb"`
-	GpuCount   int32              `json:"gpu_count"`
-	GpuModel   string             `json:"gpu_model"`
-	Os         string             `json:"os"`
-	MaxSlots   int32              `json:"max_slots"`
-	Labels     []byte             `json:"labels"`
-	Status     string             `json:"status"`
-	LastSeenAt pgtype.Timestamptz `json:"last_seen_at"`
-	CreatedAt  pgtype.Timestamptz `json:"created_at"`
-	DisabledAt pgtype.Timestamptz `json:"disabled_at"`
+	ID                 pgtype.UUID        `json:"id"`
+	Name               string             `json:"name"`
+	Hostname           string             `json:"hostname"`
+	CpuCores           int32              `json:"cpu_cores"`
+	RamGb              int32              `json:"ram_gb"`
+	GpuCount           int32              `json:"gpu_count"`
+	GpuModel           string             `json:"gpu_model"`
+	Os                 string             `json:"os"`
+	MaxSlots           int32              `json:"max_slots"`
+	Labels             []byte             `json:"labels"`
+	Status             string             `json:"status"`
+	LastSeenAt         pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	DisabledAt         pgtype.Timestamptz `json:"disabled_at"`
+	SupportsWorkspaces bool               `json:"supports_workspaces"`
 }
 
 // Insert a new worker or update hardware specs on reconnect.
 // Admin-managed fields (name, labels, max_slots) are preserved on conflict.
 //
-//	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os)
-//	VALUES ($1, $2, $3, $4, $5, $6, $7)
+//	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
+//	VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::bool, TRUE))
 //	ON CONFLICT (hostname) DO UPDATE
 //	    SET cpu_cores = EXCLUDED.cpu_cores,
 //	        ram_gb    = EXCLUDED.ram_gb,
 //	        gpu_count = EXCLUDED.gpu_count,
 //	        gpu_model = EXCLUDED.gpu_model,
-//	        os        = EXCLUDED.os
-//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at
+//	        os        = EXCLUDED.os,
+//	        supports_workspaces = COALESCE($8::bool, workers.supports_workspaces)
+//	RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at, supports_workspaces
 func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerByHostnameParams) (UpsertWorkerByHostnameRow, error) {
 	row := q.db.QueryRow(ctx, upsertWorkerByHostname,
 		arg.Name,
@@ -1339,6 +1367,7 @@ func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerBy
 		arg.GpuCount,
 		arg.GpuModel,
 		arg.Os,
+		arg.SupportsWorkspaces,
 	)
 	var i UpsertWorkerByHostnameRow
 	err := row.Scan(
@@ -1356,6 +1385,7 @@ func (q *Queries) UpsertWorkerByHostname(ctx context.Context, arg UpsertWorkerBy
 		&i.LastSeenAt,
 		&i.CreatedAt,
 		&i.DisabledAt,
+		&i.SupportsWorkspaces,
 	)
 	return i, err
 }

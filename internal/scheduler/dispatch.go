@@ -76,6 +76,18 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		return
 	}
 
+	// Whether any connected worker advertises a workspace provider. Used only to
+	// distinguish "source-bearing task held because no capable worker exists"
+	// (observable) from "all capable workers busy" (normal backpressure, silent).
+	anyProviderWorker := false
+	for i := range workers {
+		w := &workers[i]
+		if (w.Status == "online" || w.Status == "stale") && !w.DisabledAt.Valid && w.SupportsWorkspaces {
+			anyProviderWorker = true
+			break
+		}
+	}
+
 	reservations, err := d.q.ListActiveReservations(ctx)
 	if err != nil {
 		return
@@ -117,14 +129,41 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		}
 	}
 
+	heldSourceTasks := 0
 	for _, task := range tasks {
 		w := d.selectWorker(task, workers, reservations, activeByWorker, warmByWorker)
 		if w != nil {
 			if d.sendTask(ctx, task, *w) {
 				activeByWorker[w.ID]++ // track in-cycle dispatches
 			}
+			continue
+		}
+		// No worker selected. If this is a source-bearing task and no connected
+		// worker advertises a workspace provider, it is held for lack of a
+		// capable worker (distinct from normal "all busy" backpressure).
+		if !anyProviderWorker && taskIsSourceBearing(task) {
+			heldSourceTasks++
 		}
 	}
+	if heldSourceTasks > 0 {
+		log.Printf("dispatch: %d source-bearing task(s) held pending; no connected worker has a workspace provider", heldSourceTasks)
+	}
+}
+
+// taskIsSourceBearing reports whether a task carries a parseable source spec
+// with a non-empty Type - i.e. one that names a workspace provider. This is the
+// single predicate selectWorker uses to require a provider-capable worker and
+// the held-pending count uses to decide a task is stuck for lack of one, so the
+// two never disagree. A parseable but typeless spec ({}) is not source-bearing.
+func taskIsSourceBearing(task store.Task) bool {
+	if len(task.Source) == 0 {
+		return false
+	}
+	var s api.SourceSpec
+	if err := json.Unmarshal(task.Source, &s); err != nil {
+		return false
+	}
+	return s.Type != ""
 }
 
 func (d *Dispatcher) selectWorker(
@@ -142,7 +181,9 @@ func (d *Dispatcher) selectWorker(
 		}
 	}
 
-	// Parse task source (for warm scoring).
+	// Parse task source (for warm scoring). Whether the task actually requires a
+	// workspace provider is decided by taskIsSourceBearing below, not by this
+	// parse succeeding - a parseable but typeless spec ({}) is not source-bearing.
 	var taskSrc *api.SourceSpec
 	if len(task.Source) > 0 {
 		var s api.SourceSpec
@@ -150,6 +191,7 @@ func (d *Dispatcher) selectWorker(
 			taskSrc = &s
 		}
 	}
+	sourceBearing := taskIsSourceBearing(task)
 
 	var best *store.Worker
 	var bestScore int64 = -1
@@ -176,6 +218,15 @@ func (d *Dispatcher) selectWorker(
 		}
 		free := int64(w.MaxSlots) - activeByWorker[w.ID]
 		if free <= 0 {
+			continue
+		}
+		// Source-bearing tasks require a worker with a workspace provider.
+		// Skipping providerless workers here (rather than scoring them lower) is
+		// the hard requirement: a source-bearing task must never be dispatched to
+		// a worker that will only PREPARE_FAILED it. The source-bearing decision
+		// goes through taskIsSourceBearing so this filter and the held-pending
+		// count always agree. For a non-source task it is a no-op.
+		if sourceBearing && !w.SupportsWorkspaces {
 			continue
 		}
 		score := free

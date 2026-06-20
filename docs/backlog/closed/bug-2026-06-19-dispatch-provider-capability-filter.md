@@ -1,11 +1,20 @@
 ---
 title: Dispatch has no provider-capability filter; selectWorker can route source-bearing tasks to providerless workers
 type: bug
-status: open
+status: closed
 created: 2026-06-19
 priority: medium
 source: follow-up to closed bug-2026-06-10-source-tasks-run-without-workspace
 ---
+
+> Closed 2026-06-20: implemented per the design spec
+> `docs/superpowers/specs/2026-06-19-dispatch-provider-capability-filter-design.md`
+> and plan `docs/superpowers/plans/2026-06-19-dispatch-provider-capability-filter.md`.
+> Workers now report `supports_workspaces` at registration (proto field 12),
+> persisted to `workers.supports_workspaces` (migration 000017, COALESCE keeps the
+> value for old agents), and `selectWorker` hard-skips providerless workers for
+> source-bearing tasks - holding them pending with one throttled log line per
+> dispatch cycle.
 
 # Dispatch has no provider-capability filter; selectWorker can route source-bearing tasks to providerless workers
 

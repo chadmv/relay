@@ -13,6 +13,7 @@ import (
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
+	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/tokenhash"
 	"relay/internal/worker"
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -681,4 +683,247 @@ func TestHandler_DisconnectAndRegisterTrackDisconnectedAt(t *testing.T) {
 	fetched, err = q.GetWorker(ctx, w.ID)
 	require.NoError(t, err)
 	require.False(t, fetched.DisconnectedAt.Valid, "disconnected_at must be NULL after register")
+}
+
+func TestRegisterAndDispatch_SourceTaskHeldOnProviderlessWorker(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	// Seed a worker with a known agent token so it reconnects (finishRegister
+	// -> RegisterWorkerConnection runs and persists the capability).
+	workerID, rawToken := seedWorkerWithAgentToken(t, ctx, q, "providerless-01")
+
+	// Register reporting supports_workspaces = false (a new agent with no
+	// provider). Hold the stream open so Connect stays in its message loop.
+	hold := make(chan struct{})
+	stream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname:           "providerless-01",
+					CpuCores:           4,
+					RamGb:              8,
+					Os:                 "linux",
+					Credential:         &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
+					SupportsWorkspaces: proto.Bool(false),
+				},
+			}},
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+	select {
+	case <-stream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse")
+	}
+
+	// Capability persisted as false.
+	wk, err := q.GetWorker(ctx, workerID)
+	require.NoError(t, err)
+	assert.False(t, wk.SupportsWorkspaces, "providerless agent must persist supports_workspaces=false")
+	assert.Equal(t, "online", wk.Status)
+
+	// Submit a source-bearing job/task. The source is set via CreateTaskWithSource
+	// (the same store query the job-spec pipeline uses) so the task is
+	// source-bearing for selectWorker.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "u@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "src-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID:    job.ID,
+		Name:     "src-task",
+		Commands: []byte(`[["echo","hi"]]`),
+		Env:      []byte("{}"),
+		Requires: []byte("{}"),
+		Retries:  0,
+		Source:   []byte(`{"type":"perforce","stream":"//depot/main"}`),
+	})
+	require.NoError(t, err)
+
+	// Run one dispatch cycle.
+	disp := scheduler.NewDispatcher(q, registry, broker)
+	disp.RunOnce(ctx)
+
+	// The source-bearing task on a providerless worker must stay pending, not
+	// failed, and must never have been claimed.
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", after.Status, "source-bearing task must stay pending on a providerless fleet")
+	assert.Equal(t, int32(0), after.AssignmentEpoch, "task must never be claimed (no epoch bump)")
+
+	close(hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return")
+	}
+}
+
+// TestRegisterAndDispatch_CapableWorkerReDispatchesHeldSourceTask verifies that
+// a source-bearing task held pending (no capable worker present) is dispatched
+// once a provider-capable worker later connects and triggers a dispatch cycle.
+// This end-to-end proof covers the "re-dispatch on capable worker connect" path
+// that the spec relies on via triggerDispatch.
+func TestRegisterAndDispatch_CapableWorkerReDispatchesHeldSourceTask(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+
+	// The dispatcher will be wired as the triggerDispatch callback so Connect
+	// exercises the real dispatch-on-register path.
+	var disp *scheduler.Dispatcher
+	dispatchCh := make(chan struct{}, 1)
+	h := worker.NewHandler(q, pool, registry, broker, func() {
+		select {
+		case dispatchCh <- struct{}{}:
+		default:
+		}
+	})
+
+	// Seed a user, job, and source-bearing task. No capable worker is online yet.
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u2", Email: "u2@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "src-job2", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID:    job.ID,
+		Name:     "src-task2",
+		Commands: []byte(`[["echo","hello"]]`),
+		Env:      []byte("{}"),
+		Requires: []byte("{}"),
+		Retries:  0,
+		Source:   []byte(`{"type":"perforce","stream":"//depot/main"}`),
+	})
+	require.NoError(t, err)
+
+	// Confirm the task starts pending with epoch 0 (never claimed).
+	initial, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", initial.Status)
+	require.Equal(t, int32(0), initial.AssignmentEpoch)
+
+	// Wire the dispatcher now (after task creation so RunOnce sees it).
+	disp = scheduler.NewDispatcher(q, registry, broker)
+
+	// Seed a capable worker with an agent token.
+	capableID, capableToken := seedWorkerWithAgentToken(t, ctx, q, "capable-01")
+	_ = capableID
+
+	// Connect the capable worker. Its registration sends SupportsWorkspaces=true,
+	// so finishRegister persists the capability and calls triggerDispatch.
+	hold := make(chan struct{})
+	capableStream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname:           "capable-01",
+					CpuCores:           4,
+					RamGb:              8,
+					Os:                 "linux",
+					Credential:         &relayv1.RegisterRequest_AgentToken{AgentToken: capableToken},
+					SupportsWorkspaces: proto.Bool(true),
+				},
+			}},
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(capableStream) }()
+
+	// Wait for RegisterResponse (worker is now online with SupportsWorkspaces=true).
+	select {
+	case <-capableStream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse from capable worker")
+	}
+
+	// Wait for the triggerDispatch signal, then run one dispatch cycle.
+	select {
+	case <-dispatchCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for triggerDispatch from capable worker connect")
+	}
+	disp.RunOnce(ctx)
+
+	// The source-bearing task must now be dispatched (claimed) to the capable worker.
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", after.Status, "source task must be dispatched once a capable worker connects")
+	assert.Equal(t, int32(1), after.AssignmentEpoch, "task must be claimed (epoch bumped to 1)")
+
+	close(hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return")
+	}
+}
+
+func TestRegister_OldAgentOmittingFieldKeepsDefaultTrue(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	workerID, rawToken := seedWorkerWithAgentToken(t, ctx, q, "oldagent-01")
+
+	// New worker rows default supports_workspaces = TRUE (column DEFAULT).
+	before, err := q.GetWorker(ctx, workerID)
+	require.NoError(t, err)
+	require.True(t, before.SupportsWorkspaces, "column default must be TRUE")
+
+	hold := make(chan struct{})
+	stream := &fakeStream{
+		ctx:    ctx,
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname:   "oldagent-01",
+					Os:         "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
+					// SupportsWorkspaces deliberately left nil (old agent).
+				},
+			}},
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+	select {
+	case <-stream.sentCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse")
+	}
+
+	after, err := q.GetWorker(ctx, workerID)
+	require.NoError(t, err)
+	assert.True(t, after.SupportsWorkspaces, "old agent (nil field) must NOT overwrite to false via COALESCE")
+
+	close(hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return")
+	}
 }
