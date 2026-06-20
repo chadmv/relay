@@ -722,3 +722,154 @@ func TestRecomputeJobStatus(t *testing.T) {
 		assert.Equal(t, "done", final.Status, "iteration %d stranded job", i)
 	}
 }
+
+func TestMarkWorkerOfflineIfEpoch_StaleEpochIsNoOp(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-off", Hostname: "w-off-host", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Connection S registers: connection_epoch 0 -> 1, status online.
+	s, err := q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID:         w.ID,
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), s.ConnectionEpoch)
+
+	// Connection F reconnects: connection_epoch 1 -> 2, status stays online.
+	f, err := q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID:         w.ID,
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), f.ConnectionEpoch)
+
+	// S's stale teardown tries to mark offline at epoch 1: fence holds, 0 rows.
+	now := time.Now()
+	rows, err := q.MarkWorkerOfflineIfEpoch(ctx, store.MarkWorkerOfflineIfEpochParams{
+		ID:              w.ID,
+		LastSeenAt:      pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		ConnectionEpoch: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), rows, "stale-epoch offline must affect zero rows")
+
+	after, err := q.GetWorker(ctx, w.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "online", after.Status, "live worker must stay online")
+
+	// Current-epoch offline (epoch 2) applies: positive control.
+	rows, err = q.MarkWorkerOfflineIfEpoch(ctx, store.MarkWorkerOfflineIfEpochParams{
+		ID:              w.ID,
+		LastSeenAt:      pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		ConnectionEpoch: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows, "current-epoch offline must apply")
+	after, err = q.GetWorker(ctx, w.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "offline", after.Status)
+}
+
+func TestRequeueWorkerTasksIfEpoch_StaleEpochIsNoOp(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Req-Stale", "req-stale@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-req-stale", Hostname: "w-req-stale-host", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Worker comes online at epoch 1, task claimed (assignment_epoch 0 -> 1, dispatched).
+	_, err = q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID: w.ID, LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "dispatched", claimed.Status)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Reconnect bumps connection_epoch 1 -> 2 (grace timer was armed at epoch 1).
+	_, err = q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID: w.ID, LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Stale grace fire at epoch 1: EXISTS guard fails, zero tasks move.
+	ids, err := q.RequeueWorkerTasksIfEpoch(ctx, store.RequeueWorkerTasksIfEpochParams{
+		WorkerID: w.ID, ConnectionEpoch: 1,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, ids, "stale-epoch requeue must move zero tasks")
+
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", after.Status, "task must stay dispatched")
+	assert.Equal(t, int32(1), after.AssignmentEpoch, "assignment_epoch must not be bumped")
+	assert.Equal(t, w.ID, after.WorkerID, "task must remain assigned")
+}
+
+func TestRequeueWorkerTasksIfEpoch_CurrentEpochRequeues(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Req-Cur", "req-cur@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-req-cur", Hostname: "w-req-cur-host", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Worker online at epoch 1, task claimed (assignment_epoch -> 1).
+	_, err = q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID: w.ID, LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// No reconnect: requeue at the current epoch 1 moves the task.
+	ids, err := q.RequeueWorkerTasksIfEpoch(ctx, store.RequeueWorkerTasksIfEpochParams{
+		WorkerID: w.ID, ConnectionEpoch: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", after.Status, "task must be requeued to pending")
+	assert.Equal(t, int32(2), after.AssignmentEpoch, "assignment_epoch must be bumped 1 -> 2")
+	assert.False(t, after.WorkerID.Valid, "worker_id must be cleared")
+}
