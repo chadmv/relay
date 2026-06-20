@@ -25,6 +25,7 @@ type Runner struct {
 	cancelled atomic.Bool
 	forced    atomic.Bool
 	abandoned atomic.Bool
+	forcedCh  chan struct{} // closed exactly once by Cancel(force=true); signals in-flight log writes to abandon
 	provider  source.Provider
 }
 
@@ -39,15 +40,21 @@ func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, pa
 	} else {
 		runCtx, cancel = context.WithCancel(parent)
 	}
-	return &Runner{taskID: taskID, epoch: epoch, sendCh: sendCh, ctx: parent, cancel: cancel}, runCtx
+	return &Runner{taskID: taskID, epoch: epoch, sendCh: sendCh, ctx: parent, cancel: cancel, forcedCh: make(chan struct{})}, runCtx
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
-// If force is true, the runner skips workspace finalize and bypasses pipe drain
-// when killing the subprocess.
+// If force is true, the runner skips workspace finalize, bypasses pipe drain
+// when killing the subprocess, and closes forcedCh so in-flight log writes
+// abandon instead of parking on a full sendCh.
 func (r *Runner) Cancel(force bool) {
 	if force {
-		r.forced.Store(true)
+		// CompareAndSwap guarantees exactly one forced caller closes forcedCh,
+		// even under concurrent or repeated Cancel(true) / mixed forced and
+		// non-forced cancels. Closing a channel twice panics; this gate prevents it.
+		if r.forced.CompareAndSwap(false, true) {
+			close(r.forcedCh)
+		}
 	}
 	r.cancelled.Store(true)
 	r.cancel()
