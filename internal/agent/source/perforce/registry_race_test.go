@@ -24,6 +24,12 @@ func TestRegistry_ConcurrentSweepAndMutate(t *testing.T) {
 
 	// Sweeper with stubbed I/O: never actually evicts (MaxAge huge), just scans.
 	// Match the Client/stub construction used in sweeper_test.go.
+	// MaxAge: time.Hour against the fresh LastUsedAt seeded above keeps the age
+	// pass from ever entering evict, and MinFreeGB is left zero so the pressure
+	// pass is skipped. This is load-bearing: it keeps the fake P4 client (whose
+	// call log is not concurrency-safe) off the concurrent path so the only
+	// shared state under test is the Registry itself. Do not lower MaxAge or set
+	// MinFreeGB here without also synchronizing the fake client.
 	sw := &Sweeper{
 		Root:       root,
 		MaxAge:     time.Hour,
