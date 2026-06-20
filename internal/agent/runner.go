@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -27,15 +26,6 @@ type Runner struct {
 	forced    atomic.Bool
 	abandoned atomic.Bool
 	provider  source.Provider
-
-	// stepPipes guards the live stdout/stderr pipe handles for the currently
-	// executing step. Set in Run after cmd.Start; cleared on step completion.
-	// Accessed by the cmd.Cancel callback to force-close pipes when forced.
-	stepPipes struct {
-		mu     sync.Mutex
-		stdout io.Closer
-		stderr io.Closer
-	}
 }
 
 // newRunner creates a Runner and its execution context.
@@ -69,38 +59,6 @@ func (r *Runner) Cancel(force bool) {
 func (r *Runner) Abandon() {
 	r.abandoned.Store(true)
 	r.cancel()
-}
-
-// setStepPipes records the pipe handles for the currently executing step so
-// the cmd.Cancel callback can force-close them on a forced cancel.
-func (r *Runner) setStepPipes(stdout, stderr io.Closer) {
-	r.stepPipes.mu.Lock()
-	r.stepPipes.stdout = stdout
-	r.stepPipes.stderr = stderr
-	r.stepPipes.mu.Unlock()
-}
-
-// clearStepPipes drops the references after a step completes. Safe to call
-// even if setStepPipes wasn't called (no-op).
-func (r *Runner) clearStepPipes() {
-	r.stepPipes.mu.Lock()
-	r.stepPipes.stdout = nil
-	r.stepPipes.stderr = nil
-	r.stepPipes.mu.Unlock()
-}
-
-// closeStepPipesForForce closes the live pipe handles, unblocking pipeLog
-// readers immediately. Called from the cmd.Cancel callback only when forced.
-func (r *Runner) closeStepPipesForForce() {
-	r.stepPipes.mu.Lock()
-	stdout, stderr := r.stepPipes.stdout, r.stepPipes.stderr
-	r.stepPipes.mu.Unlock()
-	if stdout != nil {
-		_ = stdout.Close()
-	}
-	if stderr != nil {
-		_ = stderr.Close()
-	}
 }
 
 // Run executes the task and sends status/log messages to sendCh. Blocks until done.
@@ -204,40 +162,28 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		r.sendStepMarker(step, stepTotal, argv)
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
-		cleanupProcTree := setupProcTree(cmd, r)
+		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process exit/kill
+		cleanupProcTree := setupProcTree(cmd)
 		cmd.Env = env
 		if workDir != "" {
 			cmd.Dir = workDir
 		}
 
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
-			break
-		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
-			break
-		}
+		// Hand exec custom writers instead of taking the pipes ourselves. This
+		// makes exec own the OS pipes AND the copy goroutines, so cmd.Wait()
+		// enforces WaitDelay: if a leaked child still holds the write end after
+		// the process exits, Wait force-closes the descriptors within 5s instead
+		// of blocking forever (go.dev/issue/23019).
+		cmd.Stdout = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
+		cmd.Stderr = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
 
 		if err := cmd.Start(); err != nil {
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
 			break
 		}
 
-		r.setStepPipes(stdout, stderr)
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT, step, stepTotal) }()
-		go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR, step, stepTotal) }()
-		wg.Wait()
-
 		waitErr := cmd.Wait()
 		cleanupProcTree()
-		r.clearStepPipes()
 
 		lastExitCode = nil
 		if cmd.ProcessState != nil {
@@ -282,30 +228,37 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 	}})
 }
 
-func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream, stepIndex, stepTotal int32) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := pipe.Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			r.send(&relayv1.AgentMessage{
-				Payload: &relayv1.AgentMessage_TaskLog{
-					TaskLog: &relayv1.TaskLogChunk{
-						TaskId:    r.taskID,
-						Stream:    stream,
-						Content:   chunk,
-						Epoch:     r.epoch,
-						StepIndex: stepIndex,
-						StepTotal: stepTotal,
-					},
-				},
-			})
-		}
-		if err != nil {
-			return
-		}
+// chunkWriter is the io.Writer exec copies subprocess stdout/stderr into. Each
+// Write copies its slice (exec reuses the buffer between calls), wraps it in a
+// TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
+// through r.send (bounded on r.ctx.Done()). Write always returns (len(p), nil)
+// so exec never treats the sink as broken and keeps copying until EOF.
+type chunkWriter struct {
+	r         *Runner
+	stream    relayv1.LogStream
+	stepIndex int32
+	stepTotal int32
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil // match the old pipeLog n>0 guard: never emit an empty chunk
 	}
+	chunk := make([]byte, len(p))
+	copy(chunk, p)
+	w.r.send(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId:    w.r.taskID,
+				Stream:    w.stream,
+				Content:   chunk,
+				Epoch:     w.r.epoch,
+				StepIndex: w.stepIndex,
+				StepTotal: w.stepTotal,
+			},
+		},
+	})
+	return len(p), nil
 }
 
 func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {

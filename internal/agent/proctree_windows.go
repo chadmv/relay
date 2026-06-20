@@ -19,13 +19,10 @@ import (
 //     spawns is also tied to the job and dies with it.
 //   - cmd.Cancel calls TerminateJobObject, which kills every process in the
 //     job atomically — direct child and any descendants.
-//   - if r.forced is set at cancel time, stdout/stderr pipe handles are
-//     closed immediately, bypassing the pipe-buffer drain bounded by
-//     cmd.WaitDelay.
 //
 // Returns a cleanup function that must be called after cmd.Wait returns to
 // close the Job Object handle when the process completes without cancellation.
-func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
+func setupProcTree(cmd *exec.Cmd) func() {
 	var (
 		jobMu sync.Mutex
 		job   windows.Handle
@@ -85,9 +82,6 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
 			_ = windows.CloseHandle(h)
 		} else if cmd.Process != nil {
 			_ = cmd.Process.Kill()
-		}
-		if r.forced.Load() {
-			r.closeStepPipesForForce()
 		}
 		return nil
 	}
