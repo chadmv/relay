@@ -659,21 +659,62 @@ func TestRecomputeJobStatus(t *testing.T) {
 	_, err = q.RecomputeJobStatus(ctx, empty.ID)
 	require.ErrorIs(t, err, pgx.ErrNoRows)
 
-	// Concurrent completion: two tasks marked done, two goroutines recompute
-	// at once. The final committed job status must be terminal, never 'running'.
+	// Concurrent completion: two goroutines each finish one task then recompute.
+	// This reproduces the original read-modify-write race: if goroutine A reads
+	// the task list before goroutine B has marked its task done, the old code
+	// would see one active task, compute "running", and overwrite a "done" that
+	// B had already committed - stranding the job. The atomic SQL prevents this
+	// because the UPDATE re-reads task state at write time inside Postgres.
+	//
+	// Both goroutines use q (backed by a pgxpool.Pool); each query call acquires
+	// its own connection from the pool, so they genuinely execute concurrently.
+	w := newTestWorker(t, q)
 	for i := 0; i < 20; i++ {
 		race := mkJob("race")
-		mkTask(race, "done")
-		mkTask(race, "done")
 
+		// Create two tasks and claim them so they are 'dispatched' (epoch=1).
+		// 'dispatched' is active in the CASE expression (not in done/failed/timed_out),
+		// so a goroutine that reads before the other has marked done will see an
+		// active task and would compute "running" under the old implementation.
+		task1, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: race.ID, Name: "t1", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		task2, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: race.ID, Name: "t2", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+
+		_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: task1.ID, WorkerID: w.ID})
+		require.NoError(t, err)
+		_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: task2.ID, WorkerID: w.ID})
+		require.NoError(t, err)
+
+		// ready signals that both goroutines have started and are about to race.
+		ready := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(2)
-		for g := 0; g < 2; g++ {
-			go func() {
-				defer wg.Done()
-				_, _ = q.RecomputeJobStatus(ctx, race.ID)
-			}()
-		}
+
+		go func() {
+			defer wg.Done()
+			<-ready
+			_, _ = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task1.ID, Status: "done", Epoch: 1,
+			})
+			_, _ = q.RecomputeJobStatus(ctx, race.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-ready
+			_, _ = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task2.ID, Status: "done", Epoch: 1,
+			})
+			_, _ = q.RecomputeJobStatus(ctx, race.ID)
+		}()
+
+		close(ready) // release both goroutines simultaneously
 		wg.Wait()
 
 		final, err := q.GetJob(ctx, race.ID)
