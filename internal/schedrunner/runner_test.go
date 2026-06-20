@@ -191,6 +191,37 @@ func TestRunner_ReconcileOnStartup_AdvancesPastMissedTriggers(t *testing.T) {
 	require.True(t, row.NextRunAt.Time.After(time.Now()), "next_run_at should be in the future")
 }
 
+func TestRunner_ReconcileOnStartup_DoesNotSetLastRunAt(t *testing.T) {
+	h := newRunnerHarness(t)
+	ctx := context.Background()
+	userID := h.createUser(t, "alice-reconcile-lastrun@example.com")
+
+	oldNext := time.Now().Add(-25 * time.Hour)
+	sj, err := h.q.CreateScheduledJob(ctx, store.CreateScheduledJobParams{
+		Name:          "nightly",
+		OwnerID:       userID,
+		CronExpr:      "0 2 * * *",
+		Timezone:      "UTC",
+		JobSpec:       makeSpecJSON(t),
+		OverlapPolicy: "skip",
+		Enabled:       true,
+		NextRunAt:     pgtype.Timestamptz{Time: oldNext, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Sanity: freshly created schedule has no last_run_at.
+	before, err := h.q.GetScheduledJob(ctx, sj.ID)
+	require.NoError(t, err)
+	require.False(t, before.LastRunAt.Valid, "precondition: last_run_at unset on create")
+
+	require.NoError(t, schedrunner.ReconcileOnStartup(ctx, h.q))
+
+	row, err := h.q.GetScheduledJob(ctx, sj.ID)
+	require.NoError(t, err)
+	require.True(t, row.NextRunAt.Time.After(time.Now()), "next_run_at should advance")
+	require.False(t, row.LastRunAt.Valid, "reconcile must NOT set last_run_at for a run that never happened")
+}
+
 func TestRunner_FiresScheduleWithSource_PersistsSource(t *testing.T) {
 	h := newRunnerHarness(t)
 	ctx := context.Background()

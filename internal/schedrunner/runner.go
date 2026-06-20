@@ -134,10 +134,9 @@ func ReconcileOnStartup(ctx context.Context, q *store.Queries) error {
 			continue
 		}
 		next := sched.Next(now)
-		if err := q.AdvanceScheduledJob(ctx, store.AdvanceScheduledJobParams{
+		if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
 			ID:        row.ID,
 			NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
-			LastJobID: pgtype.UUID{}, // unchanged via COALESCE
 		}); err != nil {
 			log.Printf("schedrunner: reconcile advance for %s: %v", row.Name, err)
 		}
