@@ -586,35 +586,16 @@ func (h *Handler) requeueWorkerTasks(workerID string) {
 	go h.triggerDispatch()
 }
 
-// updateJobStatusFromTasks recomputes and persists a job's status from its tasks.
-// Returns the new status string, or "" if the status could not be determined.
+// updateJobStatusFromTasks atomically recomputes and persists a job's status
+// from its tasks in a single SQL statement, so concurrent last-task completions
+// can never strand the job in 'running'. Returns the new status string, or ""
+// if it could not be determined (e.g. the job has no tasks).
 func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtype.UUID) string {
-	tasks, err := q.ListTasksByJob(ctx, jobID)
-	if err != nil || len(tasks) == 0 {
+	status, err := q.RecomputeJobStatus(ctx, jobID)
+	if err != nil {
 		return ""
 	}
-	var done, failed, active int
-	for _, t := range tasks {
-		switch t.Status {
-		case "done":
-			done++
-		case "failed", "timed_out":
-			failed++
-		default:
-			active++
-		}
-	}
-	var newStatus string
-	switch {
-	case active > 0:
-		newStatus = "running"
-	case done == len(tasks):
-		newStatus = "done"
-	default:
-		newStatus = "failed"
-	}
-	_, _ = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{ID: jobID, Status: newStatus})
-	return newStatus
+	return status
 }
 
 // applyInventory does a transactional full-replace of workspace inventory for

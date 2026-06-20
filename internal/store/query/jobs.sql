@@ -86,6 +86,26 @@ SET status = $2, updated_at = NOW()
 WHERE id = $1
 RETURNING *;
 
+-- name: RecomputeJobStatus :one
+-- Atomically recomputes a job's status from its tasks in a single statement,
+-- so concurrent last-task completions can never strand the job in 'running'.
+-- Returns the new status. Returns pgx.ErrNoRows if the job has no tasks
+-- (the subquery's aggregate is empty), matching the old helper's "" behavior.
+UPDATE jobs j
+SET status = sub.next, updated_at = NOW()
+FROM (
+    SELECT CASE
+        WHEN COUNT(*) FILTER (WHERE status NOT IN ('done','failed','timed_out')) > 0 THEN 'running'
+        WHEN COUNT(*) FILTER (WHERE status = 'done') = COUNT(*) THEN 'done'
+        ELSE 'failed'
+    END AS next
+    FROM tasks
+    WHERE job_id = $1
+    HAVING COUNT(*) > 0
+) sub
+WHERE j.id = $1
+RETURNING j.status;
+
 -- name: DeleteJob :exec
 DELETE FROM jobs WHERE id = $1;
 

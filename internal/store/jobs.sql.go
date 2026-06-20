@@ -1523,6 +1523,49 @@ func (q *Queries) ListJobsWithEmailPageByUpdatedDesc(ctx context.Context, arg Li
 	return items, nil
 }
 
+const recomputeJobStatus = `-- name: RecomputeJobStatus :one
+UPDATE jobs j
+SET status = sub.next, updated_at = NOW()
+FROM (
+    SELECT CASE
+        WHEN COUNT(*) FILTER (WHERE status NOT IN ('done','failed','timed_out')) > 0 THEN 'running'
+        WHEN COUNT(*) FILTER (WHERE status = 'done') = COUNT(*) THEN 'done'
+        ELSE 'failed'
+    END AS next
+    FROM tasks
+    WHERE job_id = $1
+    HAVING COUNT(*) > 0
+) sub
+WHERE j.id = $1
+RETURNING j.status
+`
+
+// Atomically recomputes a job's status from its tasks in a single statement,
+// so concurrent last-task completions can never strand the job in 'running'.
+// Returns the new status. Returns pgx.ErrNoRows if the job has no tasks
+// (the subquery's aggregate is empty), matching the old helper's "" behavior.
+//
+//	UPDATE jobs j
+//	SET status = sub.next, updated_at = NOW()
+//	FROM (
+//	    SELECT CASE
+//	        WHEN COUNT(*) FILTER (WHERE status NOT IN ('done','failed','timed_out')) > 0 THEN 'running'
+//	        WHEN COUNT(*) FILTER (WHERE status = 'done') = COUNT(*) THEN 'done'
+//	        ELSE 'failed'
+//	    END AS next
+//	    FROM tasks
+//	    WHERE job_id = $1
+//	    HAVING COUNT(*) > 0
+//	) sub
+//	WHERE j.id = $1
+//	RETURNING j.status
+func (q *Queries) RecomputeJobStatus(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, recomputeJobStatus, id)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
 const updateJobStatus = `-- name: UpdateJobStatus :one
 UPDATE jobs
 SET status = $2, updated_at = NOW()

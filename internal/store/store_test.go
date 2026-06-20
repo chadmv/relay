@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -599,4 +600,125 @@ func TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "pending", got.Status, "stale update must not have changed task status")
 	require.Equal(t, int32(1), got.RetryCount, "stale generation must not drive a second retry")
+}
+
+func TestRecomputeJobStatus(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+	user := makeTestUser(t, q, ctx, "Rita", "rita@example.com")
+
+	mkJob := func(name string) store.Job {
+		job, err := q.CreateJob(ctx, store.CreateJobParams{
+			Name: name, Priority: "normal", SubmittedBy: user.ID,
+			Labels: []byte(`{}`), ScheduledJobID: pgtype.UUID{},
+		})
+		require.NoError(t, err)
+		return job
+	}
+	mkTask := func(job store.Job, status string) {
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		if status != "pending" {
+			_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task.ID, Status: status, Epoch: 0,
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	// All tasks done -> job done.
+	allDone := mkJob("all-done")
+	mkTask(allDone, "done")
+	mkTask(allDone, "done")
+	got, err := q.RecomputeJobStatus(ctx, allDone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", got)
+
+	// One still active -> job running.
+	oneActive := mkJob("one-active")
+	mkTask(oneActive, "done")
+	mkTask(oneActive, "running")
+	got, err = q.RecomputeJobStatus(ctx, oneActive.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got)
+
+	// All terminal but one failed -> job failed (timed_out also terminal-failure).
+	mixedFail := mkJob("mixed-fail")
+	mkTask(mixedFail, "done")
+	mkTask(mixedFail, "failed")
+	mkTask(mixedFail, "timed_out")
+	got, err = q.RecomputeJobStatus(ctx, mixedFail.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", got)
+
+	// No tasks -> pgx.ErrNoRows, mirroring the old "" return.
+	empty := mkJob("empty")
+	_, err = q.RecomputeJobStatus(ctx, empty.ID)
+	require.ErrorIs(t, err, pgx.ErrNoRows)
+
+	// Concurrent completion: two goroutines each finish one task then recompute.
+	// This reproduces the original read-modify-write race: if goroutine A reads
+	// the task list before goroutine B has marked its task done, the old code
+	// would see one active task, compute "running", and overwrite a "done" that
+	// B had already committed - stranding the job. The atomic SQL prevents this
+	// because the UPDATE re-reads task state at write time inside Postgres.
+	//
+	// Both goroutines use q (backed by a pgxpool.Pool); each query call acquires
+	// its own connection from the pool, so they genuinely execute concurrently.
+	w := newTestWorker(t, q)
+	for i := 0; i < 20; i++ {
+		race := mkJob("race")
+
+		// Create two tasks and claim them so they are 'dispatched' (epoch=1).
+		// 'dispatched' is active in the CASE expression (not in done/failed/timed_out),
+		// so a goroutine that reads before the other has marked done will see an
+		// active task and would compute "running" under the old implementation.
+		task1, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: race.ID, Name: "t1", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+		task2, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: race.ID, Name: "t2", Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`),
+		})
+		require.NoError(t, err)
+
+		_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: task1.ID, WorkerID: w.ID})
+		require.NoError(t, err)
+		_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: task2.ID, WorkerID: w.ID})
+		require.NoError(t, err)
+
+		// ready signals that both goroutines have started and are about to race.
+		ready := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			<-ready
+			_, _ = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task1.ID, Status: "done", Epoch: 1,
+			})
+			_, _ = q.RecomputeJobStatus(ctx, race.ID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-ready
+			_, _ = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+				ID: task2.ID, Status: "done", Epoch: 1,
+			})
+			_, _ = q.RecomputeJobStatus(ctx, race.ID)
+		}()
+
+		close(ready) // release both goroutines simultaneously
+		wg.Wait()
+
+		final, err := q.GetJob(ctx, race.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "done", final.Status, "iteration %d stranded job", i)
+	}
 }
