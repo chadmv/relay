@@ -204,40 +204,28 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		r.sendStepMarker(step, stepTotal, argv)
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process kill
-		cleanupProcTree := setupProcTree(cmd, r)
+		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process exit/kill
+		cleanupProcTree := setupProcTree(cmd)
 		cmd.Env = env
 		if workDir != "" {
 			cmd.Dir = workDir
 		}
 
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
-			break
-		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
-			break
-		}
+		// Hand exec custom writers instead of taking the pipes ourselves. This
+		// makes exec own the OS pipes AND the copy goroutines, so cmd.Wait()
+		// enforces WaitDelay: if a leaked child still holds the write end after
+		// the process exits, Wait force-closes the descriptors within 5s instead
+		// of blocking forever (go.dev/issue/23019).
+		cmd.Stdout = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
+		cmd.Stderr = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
 
 		if err := cmd.Start(); err != nil {
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
 			break
 		}
 
-		r.setStepPipes(stdout, stderr)
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); r.pipeLog(stdout, relayv1.LogStream_LOG_STREAM_STDOUT, step, stepTotal) }()
-		go func() { defer wg.Done(); r.pipeLog(stderr, relayv1.LogStream_LOG_STREAM_STDERR, step, stepTotal) }()
-		wg.Wait()
-
 		waitErr := cmd.Wait()
 		cleanupProcTree()
-		r.clearStepPipes()
 
 		lastExitCode = nil
 		if cmd.ProcessState != nil {

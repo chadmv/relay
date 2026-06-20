@@ -13,10 +13,7 @@ import (
 //   - cmd.Cancel (invoked when the context tied to exec.CommandContext is
 //     cancelled) sends SIGKILL to the entire process group, killing every
 //     descendant in one shot.
-//   - if r.forced is set at cancel time, the runner's stdout/stderr pipe
-//     handles are closed immediately, unblocking pipeLog readers without
-//     waiting on the kernel pipe-buffer drain bounded by cmd.WaitDelay.
-func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
+func setupProcTree(cmd *exec.Cmd) func() {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -31,9 +28,6 @@ func setupProcTree(cmd *exec.Cmd, r *Runner) func() {
 		// We set Setpgid above so PGID == child PID.
 		if pid > 0 {
 			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
-		if r.forced.Load() {
-			r.closeStepPipesForForce()
 		}
 		return nil
 	}
