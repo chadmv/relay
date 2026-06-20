@@ -53,6 +53,12 @@ message RegisterRequest {
     string agent_token      = 10;
   }
   repeated WorkspaceInventoryUpdate inventory = 11;
+  // supports_workspaces reports whether this agent has a workspace provider
+  // configured (provider != nil). optional gives explicit presence: a new agent
+  // always sets it (true/false); an old agent omits it, and the server then
+  // leaves the column's DEFAULT TRUE / prior value untouched (rolling-upgrade
+  // safety). See migration 000017 and RegisterWorkerConnection.
+  optional bool supports_workspaces = 12;
 }
 
 // A task the agent believes it is currently running, with the epoch assigned

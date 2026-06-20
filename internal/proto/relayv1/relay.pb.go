@@ -381,10 +381,16 @@ type RegisterRequest struct {
 	//
 	//	*RegisterRequest_EnrollmentToken
 	//	*RegisterRequest_AgentToken
-	Credential    isRegisterRequest_Credential `protobuf_oneof:"credential"`
-	Inventory     []*WorkspaceInventoryUpdate  `protobuf:"bytes,11,rep,name=inventory,proto3" json:"inventory,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Credential isRegisterRequest_Credential `protobuf_oneof:"credential"`
+	Inventory  []*WorkspaceInventoryUpdate  `protobuf:"bytes,11,rep,name=inventory,proto3" json:"inventory,omitempty"`
+	// supports_workspaces reports whether this agent has a workspace provider
+	// configured (provider != nil). optional gives explicit presence: a new agent
+	// always sets it (true/false); an old agent omits it, and the server then
+	// leaves the column's DEFAULT TRUE / prior value untouched (rolling-upgrade
+	// safety). See migration 000017 and RegisterWorkerConnection.
+	SupportsWorkspaces *bool `protobuf:"varint,12,opt,name=supports_workspaces,json=supportsWorkspaces,proto3,oneof" json:"supports_workspaces,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RegisterRequest) Reset() {
@@ -503,6 +509,13 @@ func (x *RegisterRequest) GetInventory() []*WorkspaceInventoryUpdate {
 		return x.Inventory
 	}
 	return nil
+}
+
+func (x *RegisterRequest) GetSupportsWorkspaces() bool {
+	if x != nil && x.SupportsWorkspaces != nil {
+		return *x.SupportsWorkspaces
+	}
+	return false
 }
 
 type isRegisterRequest_Credential interface {
@@ -1456,7 +1469,7 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\ahas_gpu\x18\x04 \x01(\bR\x06hasGpu\x12(\n" +
 	"\x10gpu_util_percent\x18\x05 \x01(\x01R\x0egpuUtilPercent\x12+\n" +
 	"\x12gpu_mem_used_bytes\x18\x06 \x01(\x04R\x0fgpuMemUsedBytes\x12-\n" +
-	"\x13gpu_mem_total_bytes\x18\a \x01(\x04R\x10gpuMemTotalBytes\"\xa4\x03\n" +
+	"\x13gpu_mem_total_bytes\x18\a \x01(\x04R\x10gpuMemTotalBytes\"\xf2\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1a\n" +
 	"\bhostname\x18\x02 \x01(\tR\bhostname\x12\x1b\n" +
@@ -1470,9 +1483,11 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\vagent_token\x18\n" +
 	" \x01(\tH\x00R\n" +
 	"agentToken\x12@\n" +
-	"\tinventory\x18\v \x03(\v2\".relay.v1.WorkspaceInventoryUpdateR\tinventoryB\f\n" +
+	"\tinventory\x18\v \x03(\v2\".relay.v1.WorkspaceInventoryUpdateR\tinventory\x124\n" +
+	"\x13supports_workspaces\x18\f \x01(\bH\x01R\x12supportsWorkspaces\x88\x01\x01B\f\n" +
 	"\n" +
-	"credential\"<\n" +
+	"credentialB\x16\n" +
+	"\x14_supports_workspaces\"<\n" +
 	"\vRunningTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\"\xc4\x01\n" +
