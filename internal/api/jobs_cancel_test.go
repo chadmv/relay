@@ -126,6 +126,18 @@ func seedRunningTask(t *testing.T, env *cancelTestEnv, userID pgtype.UUID) strin
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
+	// Advance dispatched -> running, the way an agent's status report does, so
+	// callers (e.g. the drain-mode test) exercise a genuinely running task. The
+	// status write must fence on the claim's assignment_epoch, not a hardcoded
+	// value, to honor the epoch fence.
+	running, err := env.q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
+		Status: "running",
+		ID:     claimed.ID,
+		Epoch:  claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", running.Status)
+
 	return uuidString(job.ID)
 }
 
