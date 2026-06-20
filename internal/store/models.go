@@ -121,23 +121,24 @@ type User struct {
 }
 
 type Worker struct {
-	ID             pgtype.UUID        `json:"id"`
-	Name           string             `json:"name"`
-	Hostname       string             `json:"hostname"`
-	CpuCores       int32              `json:"cpu_cores"`
-	RamGb          int32              `json:"ram_gb"`
-	GpuCount       int32              `json:"gpu_count"`
-	GpuModel       string             `json:"gpu_model"`
-	Os             string             `json:"os"`
-	MaxSlots       int32              `json:"max_slots"`
-	Labels         []byte             `json:"labels"`
-	Status         string             `json:"status"`
-	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	AgentTokenHash *string            `json:"agent_token_hash"`
-	DisconnectedAt pgtype.Timestamptz `json:"disconnected_at"`
-	DisabledAt     pgtype.Timestamptz `json:"disabled_at"`
-	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Name            string             `json:"name"`
+	Hostname        string             `json:"hostname"`
+	CpuCores        int32              `json:"cpu_cores"`
+	RamGb           int32              `json:"ram_gb"`
+	GpuCount        int32              `json:"gpu_count"`
+	GpuModel        string             `json:"gpu_model"`
+	Os              string             `json:"os"`
+	MaxSlots        int32              `json:"max_slots"`
+	Labels          []byte             `json:"labels"`
+	Status          string             `json:"status"`
+	LastSeenAt      pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	AgentTokenHash  *string            `json:"agent_token_hash"`
+	DisconnectedAt  pgtype.Timestamptz `json:"disconnected_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	ConnectionEpoch int32              `json:"connection_epoch"`
 }
 
 type WorkerWorkspace struct {

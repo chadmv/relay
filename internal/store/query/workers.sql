@@ -27,6 +27,29 @@ SET status = $2, last_seen_at = $3, disconnected_at = $4
 WHERE id = $1
 RETURNING *;
 
+-- name: RegisterWorkerConnection :one
+-- Marks the worker online and atomically allocates a fresh connection_epoch for
+-- this connection. The returned connection_epoch is the value this connection
+-- owns; all later teardown writes for this connection fence on it. Clears
+-- disconnected_at because a reconnected worker has no live disconnect timestamp.
+UPDATE workers
+SET status = 'online',
+    last_seen_at = $2,
+    disconnected_at = NULL,
+    connection_epoch = connection_epoch + 1
+WHERE id = $1
+RETURNING *;
+
+-- name: MarkWorkerOfflineIfEpoch :execrows
+-- Flip the worker offline only if connection_epoch still matches the epoch the
+-- caller's connection owned. A stale teardown whose epoch has been superseded by
+-- a fresh registration affects zero rows and leaves the live worker online.
+UPDATE workers
+SET status = 'offline',
+    last_seen_at = $2,
+    disconnected_at = $3
+WHERE id = $1 AND connection_epoch = $4;
+
 -- name: UpsertWorkerByHostname :one
 -- Insert a new worker or update hardware specs on reconnect.
 -- Admin-managed fields (name, labels, max_slots) are preserved on conflict.
