@@ -28,6 +28,11 @@ type workerSender struct {
 	stopReq chan struct{}
 	closed  chan struct{}
 	once    sync.Once
+
+	// connEpoch is the workers.connection_epoch this connection owns, set once
+	// in finishRegister and never mutated. Teardown fences shared-state writes
+	// on it so a stale connection's writes no-op once a fresher one registers.
+	connEpoch int32
 }
 
 // NewWorkerSender wraps a raw stream in a send goroutine and returns a Sender

@@ -1,0 +1,1 @@
+ALTER TABLE workers ADD COLUMN connection_epoch INT NOT NULL DEFAULT 0;

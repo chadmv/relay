@@ -330,7 +330,7 @@ func TestRegisterWorker_ReconcilesRunningTasks(t *testing.T) {
 	q, pool := newTestStore(t)
 	broker := events.NewBroker()
 	registry := worker.NewRegistry()
-	grace := worker.NewGraceRegistry(1*time.Minute, func(string) {})
+	grace := worker.NewGraceRegistry(1*time.Minute, func(string, int32) {})
 	h := worker.NewHandlerWithGrace(q, pool, registry, broker, func() {}, grace)
 
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
@@ -452,7 +452,7 @@ func TestConnect_DisconnectStartsGraceTimer(t *testing.T) {
 	registry := worker.NewRegistry()
 
 	var fired atomic.Int32
-	grace := worker.NewGraceRegistry(50*time.Millisecond, func(workerID string) {
+	grace := worker.NewGraceRegistry(50*time.Millisecond, func(workerID string, epoch int32) {
 		fired.Add(1)
 	})
 	defer grace.Stop()

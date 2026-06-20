@@ -291,13 +291,12 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 // finishRegister updates worker status, reconciles running tasks, sends RegisterResponse,
 // registers the sender, and triggers dispatch.
 func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, id pgtype.UUID, rawAgentToken string) (string, *workerSender, error) {
-	updated, err := h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+	updated, err := h.q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
 		ID:         id,
-		Status:     "online",
 		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("update worker status: %w", err)
+		return "", nil, fmt.Errorf("register worker connection: %w", err)
 	}
 
 	workerID := uuidStr(updated.ID)
@@ -334,6 +333,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 
 	// From here on, all sends go through the serializing wrapper.
 	sender := NewWorkerSender(stream)
+	sender.connEpoch = updated.ConnectionEpoch
 	h.registry.Register(workerID, sender)
 
 	if h.Metrics != nil {
@@ -544,28 +544,37 @@ func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
 	if !owned {
 		return // a newer connection owns this worker; leave shared state alone
 	}
-	h.markWorkerOffline(workerID)
+	epoch := sender.connEpoch
+	if h.markWorkerOffline(workerID, epoch) == 0 {
+		return // a fresher connection holds the epoch; leave grace/requeue alone
+	}
 	if h.grace != nil {
-		h.grace.Start(workerID)
+		h.grace.Start(workerID, epoch)
 	} else {
-		h.requeueWorkerTasks(workerID)
+		h.requeueWorkerTasks(workerID, epoch)
 	}
 }
 
-// markWorkerOffline is called in a defer after the stream ends.
-func (h *Handler) markWorkerOffline(workerID string) {
+// markWorkerOffline is called in a defer after the stream ends. It is fenced on
+// connection_epoch: if a fresher connection has bumped the epoch, the write
+// affects zero rows and the offline broker event / metrics-clear are skipped.
+// Returns the number of rows updated (0 = fence superseded, 1 = applied).
+func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
-		return
+		return 0
 	}
 	ctx := context.Background()
 	now := time.Now()
-	_, _ = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:             id,
-		Status:         "offline",
-		LastSeenAt:     pgtype.Timestamptz{Time: now, Valid: true},
-		DisconnectedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	rows, err := h.q.MarkWorkerOfflineIfEpoch(ctx, store.MarkWorkerOfflineIfEpochParams{
+		ID:              id,
+		LastSeenAt:      pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		ConnectionEpoch: epoch,
 	})
+	if err != nil || rows == 0 {
+		return 0
+	}
 	h.broker.Publish(events.Event{
 		Type: "worker",
 		Data: []byte(fmt.Sprintf(`{"id":%q,"status":"offline"}`, workerID)),
@@ -573,16 +582,23 @@ func (h *Handler) markWorkerOffline(workerID string) {
 	if h.Metrics != nil {
 		h.Metrics.Clear(workerID)
 	}
+	return rows
 }
 
-// requeueWorkerTasks requeues dispatched/running tasks for a disconnected worker.
-func (h *Handler) requeueWorkerTasks(workerID string) {
+// requeueWorkerTasks requeues dispatched/running tasks for a disconnected
+// worker, fenced on connection_epoch: if a fresher connection has bumped the
+// epoch, the EXISTS guard fails and zero tasks move. Bumps assignment_epoch on
+// each requeued task (task-level fence preserved).
+func (h *Handler) requeueWorkerTasks(workerID string, epoch int32) {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
 		return
 	}
 	ctx := context.Background()
-	_, _ = h.q.RequeueWorkerTasks(ctx, id)
+	_, _ = h.q.RequeueWorkerTasksIfEpoch(ctx, store.RequeueWorkerTasksIfEpochParams{
+		WorkerID:        id,
+		ConnectionEpoch: epoch,
+	})
 	go h.triggerDispatch()
 }
 

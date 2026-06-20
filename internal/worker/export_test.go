@@ -5,8 +5,10 @@ package worker
 import (
 	"context"
 	"testing"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -34,6 +36,30 @@ func (h *Handler) RegisteredSenderForTest(workerID string, stream Sender) *Sende
 	s := NewWorkerSender(stream)
 	h.registry.Register(workerID, s)
 	return &SenderHandle{s: s}
+}
+
+// RegisteredSenderWithEpochForTest wraps stream in a real *workerSender, stamps
+// the given connEpoch (as finishRegister does), registers it for workerID, and
+// returns an opaque handle. Lets worker_test drive teardown with a known,
+// possibly-stale, owned epoch.
+func (h *Handler) RegisteredSenderWithEpochForTest(workerID string, stream Sender, epoch int32) *SenderHandle {
+	s := NewWorkerSender(stream)
+	s.connEpoch = epoch
+	h.registry.Register(workerID, s)
+	return &SenderHandle{s: s}
+}
+
+// RegisterWorkerConnectionForTest invokes the store's RegisterWorkerConnection
+// so worker_test can advance a worker's connection_epoch and read the new value.
+func (h *Handler) RegisterWorkerConnectionForTest(ctx context.Context, id pgtype.UUID) (int32, error) {
+	w, err := h.q.RegisterWorkerConnection(ctx, store.RegisterWorkerConnectionParams{
+		ID:         id,
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return w.ConnectionEpoch, nil
 }
 
 // SenderHandle is an opaque wrapper around an unexported *workerSender so that

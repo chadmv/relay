@@ -614,22 +614,23 @@ func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (
 }
 
 const listGraceCandidates = `-- name: ListGraceCandidates :many
-SELECT DISTINCT w.id, w.disconnected_at
+SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 FROM workers w
 JOIN tasks t ON t.worker_id = w.id
 WHERE t.status IN ('dispatched', 'running')
 `
 
 type ListGraceCandidatesRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	DisconnectedAt pgtype.Timestamptz `json:"disconnected_at"`
+	ID              pgtype.UUID        `json:"id"`
+	DisconnectedAt  pgtype.Timestamptz `json:"disconnected_at"`
+	ConnectionEpoch int32              `json:"connection_epoch"`
 }
 
 // Returns id and disconnected_at for each worker that has at least one
 // non-terminal task assigned. Used at server startup to seed grace timers
 // with the correct remaining duration based on persisted disconnect time.
 //
-//	SELECT DISTINCT w.id, w.disconnected_at
+//	SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 //	FROM workers w
 //	JOIN tasks t ON t.worker_id = w.id
 //	WHERE t.status IN ('dispatched', 'running')
@@ -642,7 +643,7 @@ func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidate
 	var items []ListGraceCandidatesRow
 	for rows.Next() {
 		var i ListGraceCandidatesRow
-		if err := rows.Scan(&i.ID, &i.DisconnectedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.DisconnectedAt, &i.ConnectionEpoch); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -794,6 +795,55 @@ RETURNING id
 //	RETURNING id
 func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
 	rows, err := q.db.Query(ctx, requeueWorkerTasks, workerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const requeueWorkerTasksIfEpoch = `-- name: RequeueWorkerTasksIfEpoch :many
+UPDATE tasks
+SET status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    assignment_epoch = assignment_epoch + 1
+WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+  AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
+RETURNING id
+`
+
+type RequeueWorkerTasksIfEpochParams struct {
+	WorkerID        pgtype.UUID `json:"worker_id"`
+	ConnectionEpoch int32       `json:"connection_epoch"`
+}
+
+// Re-queue dispatched/running tasks for a disconnected worker, but only if the
+// worker's connection_epoch still matches the epoch the caller owned. If a fresh
+// connection has superseded it, the EXISTS guard fails and zero tasks move.
+// Bumps assignment_epoch on each requeued task (task-level fence preserved).
+//
+//	UPDATE tasks
+//	SET status = 'pending',
+//	    worker_id = NULL,
+//	    started_at = NULL,
+//	    assignment_epoch = assignment_epoch + 1
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+//	  AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
+//	RETURNING id
+func (q *Queries) RequeueWorkerTasksIfEpoch(ctx context.Context, arg RequeueWorkerTasksIfEpochParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, requeueWorkerTasksIfEpoch, arg.WorkerID, arg.ConnectionEpoch)
 	if err != nil {
 		return nil, err
 	}
