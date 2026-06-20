@@ -50,10 +50,11 @@ func (r *Runner) Run(ctx context.Context) {
 
 // TickOnce performs one poll-and-fire cycle. Exposed for testing.
 //
-// All rows in a tick share one transaction. This means a failed fire (e.g.
-// DB error inside CreateJobFromSpec) still advances next_run_at via the same tx,
-// preventing indefinite hot-loop retries on a broken schedule. last_job_id
-// is left unchanged on failure via COALESCE in AdvanceScheduledJob.
+// All eligible rows in a tick share one outer transaction, but each row's fire
+// runs inside its own savepoint (pgx nested tx). A failed fire rolls back only
+// its savepoint, so a single poisoned schedule cannot abort the healthy rows'
+// commits. The failed schedule's next_run_at is still advanced on the outer tx
+// (without setting last_run_at) so it does not hot-loop every tick.
 func (r *Runner) TickOnce(ctx context.Context) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -67,10 +68,25 @@ func (r *Runner) TickOnce(ctx context.Context) error {
 		return err
 	}
 	for _, row := range rows {
-		next, err := r.fireOne(ctx, q, row)
+		sp, err := tx.Begin(ctx)
 		if err != nil {
-			log.Printf("schedrunner: fire schedule %s: %v", row.Name, err)
+			log.Printf("schedrunner: begin savepoint for %s: %v", row.Name, err)
+			continue
+		}
+		next, fireErr := r.fireOne(ctx, r.q.WithTx(sp), row)
+		if fireErr != nil {
+			// Roll back ONLY this schedule's writes; the outer tx stays usable.
+			if rbErr := sp.Rollback(ctx); rbErr != nil {
+				log.Printf("schedrunner: rollback savepoint for %s: %v", row.Name, rbErr)
+			}
+			log.Printf("schedrunner: fire schedule %s: %v", row.Name, fireErr)
+			// Advance next_run_at on the OUTER tx (no last_run_at) so the
+			// poisoned schedule stops hot-looping every tick.
 			r.advanceNextRun(ctx, q, row, next)
+			continue
+		}
+		if err := sp.Commit(ctx); err != nil {
+			log.Printf("schedrunner: release savepoint for %s: %v", row.Name, err)
 		}
 	}
 	return tx.Commit(ctx)
