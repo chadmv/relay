@@ -79,7 +79,7 @@ func TestStartupReconcile_NullDisconnectedAtUsesFullWindow(t *testing.T) {
 	var fired []string
 	var mu sync.Mutex
 	window := 50 * time.Millisecond
-	grace := worker.NewGraceRegistry(window, func(workerID string) {
+	grace := worker.NewGraceRegistry(window, func(workerID string, _ int32) {
 		mu.Lock()
 		fired = append(fired, workerID)
 		mu.Unlock()
@@ -116,7 +116,7 @@ func TestStartupReconcile_PartialRemainingHonored(t *testing.T) {
 
 	var fired atomic.Int32
 	window := 50 * time.Millisecond
-	grace := worker.NewGraceRegistry(window, func(string) { fired.Add(1) })
+	grace := worker.NewGraceRegistry(window, func(string, int32) { fired.Add(1) })
 	require.NoError(t, seedGraceTimersFromActiveTasks(ctx, q, grace, window))
 
 	require.Eventually(t, func() bool {
@@ -141,7 +141,7 @@ func TestStartupReconcile_ExpiredRemainingFiresImmediately(t *testing.T) {
 
 	var fired atomic.Int32
 	window := 50 * time.Millisecond
-	grace := worker.NewGraceRegistry(window, func(string) { fired.Add(1) })
+	grace := worker.NewGraceRegistry(window, func(string, int32) { fired.Add(1) })
 	require.NoError(t, seedGraceTimersFromActiveTasks(ctx, q, grace, window))
 
 	// ExpireNow path is synchronous; fired must be 1 immediately.
