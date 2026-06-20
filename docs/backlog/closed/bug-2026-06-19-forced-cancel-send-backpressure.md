@@ -1,11 +1,35 @@
 ---
 title: Forced cancel cannot preempt a log write blocked on a full sendCh
 type: bug
-status: open
+status: closed
 created: 2026-06-19
+closed: 2026-06-20
 priority: medium
 source: verification of bug-2026-06-10-agent-pipe-drain-hang
 ---
+
+## Resolution
+Fixed 2026-06-20 (forced-cancel-send-backpressure, Option 1). Added a per-runner
+`forcedCh` closed exactly once (via `forced.CompareAndSwap`) by `Cancel(force=true)`.
+The log-streaming write path (`chunkWriter.Write` -> new `sendOrAbort` helper) now
+selects on `forcedCh` and returns the package sentinel `errForcedAbort` so exec's
+`io.Copy` stops and `cmd.Wait()` returns promptly instead of waiting out the 5s
+`WaitDelay`. The forced-path terminal `FAILED` send in `sendFinalStatus` is bounded
+with a non-blocking try-send (`select { case r.sendCh <- msg: default: }`) so `Run`
+returns promptly even when `sendCh` is wedged full, while still delivering the
+terminal status whenever the channel has headroom; the drop on a genuinely full
+channel is safe because `handleCancelJob` runs `CancelJobTasks` (sets `failed` +
+bumps `assignment_epoch`) before the gRPC cancel, so any stale agent terminal
+message is epoch-fenced out server-side. The non-forced/normal terminal path is
+unchanged (still the blocking `r.send`), so it can never drop terminal status. The
+one-bounded-sender invariant is preserved (no new or out-of-band stream writer; the
+change only reduces how long a runner blocks on a non-reading peer).
+
+Verified red->green on Linux/Docker: `TestRunner_ForceCancel_ReturnsQuickly`
+(`//go:build !windows`, silently skipped by Windows `make test`) went from a 3.30s
+failure to a 0.30s pass, with a new `TestRunner_ForceCancel_StillSendsTerminalFailed`
+guard, stable across `-count=10` and `-race`. Confined to `internal/agent/runner.go`
+and `internal/agent/runner_cancel_test.go`.
 
 # Forced cancel cannot preempt a log write blocked on a full sendCh
 

@@ -133,6 +133,51 @@ func TestRunner_ForceCancel_ReturnsQuickly(t *testing.T) {
 		"forced cancel should return well under WaitDelay (5s); took %s", elapsed)
 }
 
+// TestRunner_ForceCancel_StillSendsTerminalFailed guards spec Fact 1: the forced
+// abort path must not be routed through the terminal-status send. With a sendCh
+// that has room, a forced cancel must still report a terminal FAILED, proving the
+// common force-cancel case (healthy connection, just one slow/wedged consumer or
+// buffer headroom) still surfaces the terminal status to the server.
+func TestRunner_ForceCancel_StillSendsTerminalFailed(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4096)
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-term",
+		JobId:    "j-term",
+		Commands: singleCmd([]string{"sleep", "30"}),
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	time.Sleep(200 * time.Millisecond) // let the subprocess start
+	r.Cancel(true)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runner did not return within 3s after force cancel")
+	}
+
+	// Drain sendCh and assert a terminal FAILED was reported.
+	var sawFailed bool
+	for {
+		select {
+		case msg := <-sendCh:
+			if ts := msg.GetTaskStatus(); ts != nil &&
+				ts.Status == relayv1.TaskStatus_TASK_STATUS_FAILED {
+				sawFailed = true
+			}
+		default:
+			require.True(t, sawFailed,
+				"forced cancel with room on sendCh must still report terminal FAILED")
+			return
+		}
+	}
+}
+
 // TestRunner_NormalExit_LeakedChildHoldingStdout_DoesNotHang reproduces the
 // go.dev/issue/23019 pattern: the foreground command exits 0 while a background
 // grandchild keeps the inherited stdout pipe open. With the old
