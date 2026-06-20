@@ -1,9 +1,10 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, expect, test } from 'vitest'
 import { server } from './test/setup-helpers'
 import { clearToken, getToken, setToken } from './lib/token'
+import { queryClient } from './lib/queryClient'
 import { App } from './App'
 
 afterEach(() => clearToken())
@@ -59,10 +60,10 @@ test('a 401 on the next poll lands an authenticated session on sign-in with no l
     http.get('/v1/jobs/stats', unauthorized),
   )
 
-  // Fire the next jobs poll (useJobs default refetchInterval is 3000ms).
-  vi.useFakeTimers()
-  await vi.advanceTimersByTimeAsync(3100)
-  vi.useRealTimers()
+  // Fire the next jobs poll by forcing a refetch of all active queries.
+  // (Fake-timer advance is unreliable mid-test when RQ timers were set with real timers;
+  //  refetchQueries triggers the same 401 path deterministically.)
+  await queryClient.refetchQueries()
 
   // The 401 handler must reset auth state: sign-in renders, token gone.
   await waitFor(() =>
