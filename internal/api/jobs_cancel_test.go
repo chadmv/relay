@@ -232,3 +232,87 @@ func TestCancelJob_Force_QueryParamParsing(t *testing.T) {
 		})
 	}
 }
+
+// parseJobUUID converts a job ID string (as returned by seedRunningTask) back
+// into a pgtype.UUID for direct store reads in no-side-effect assertions.
+func parseJobUUID(t *testing.T, s string) pgtype.UUID {
+	t.Helper()
+	var id pgtype.UUID
+	require.NoError(t, id.Scan(s))
+	return id
+}
+
+func TestCancelJob_Owner_Succeeds(t *testing.T) {
+	env := newCancelTestServer(t)
+
+	owner := createTestUser(t, env.q, "Owner", "cancel-owner@example.com", false)
+	token := createTestToken(t, env.q, owner.ID)
+	jobID := seedRunningTask(t, env, owner.ID)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	job, err := env.q.GetJob(t.Context(), parseJobUUID(t, jobID))
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", job.Status)
+}
+
+func TestCancelJob_Admin_CancelsAnyJob(t *testing.T) {
+	env := newCancelTestServer(t)
+
+	owner := createTestUser(t, env.q, "Owner", "cancel-admin-owner@example.com", false)
+	admin := createTestUser(t, env.q, "Admin", "cancel-admin@example.com", true)
+	adminToken := createTestToken(t, env.q, admin.ID)
+	jobID := seedRunningTask(t, env, owner.ID)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	job, err := env.q.GetJob(t.Context(), parseJobUUID(t, jobID))
+	require.NoError(t, err)
+	assert.Equal(t, "cancelled", job.Status)
+}
+
+func TestCancelJob_NonOwner_404_NoSideEffects(t *testing.T) {
+	env := newCancelTestServer(t)
+
+	owner := createTestUser(t, env.q, "Owner", "cancel-victim@example.com", false)
+	attacker := createTestUser(t, env.q, "Attacker", "cancel-attacker@example.com", false)
+	attackerToken := createTestToken(t, env.q, attacker.ID)
+	jobID := seedRunningTask(t, env, owner.ID)
+	jobUUID := parseJobUUID(t, jobID)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID, nil)
+	req.Header.Set("Authorization", "Bearer "+attackerToken)
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, req)
+
+	// 404, body "job not found".
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, "job not found", body["error"])
+
+	// Security-critical: zero side effects.
+	// 1. Job status unchanged (task was advanced to running, job is not cancelled).
+	job, err := env.q.GetJob(t.Context(), jobUUID)
+	require.NoError(t, err)
+	assert.NotEqual(t, "cancelled", job.Status)
+
+	// 2. Underlying task NOT cancelled (still running).
+	tasks, err := env.q.ListTasksByJob(t.Context(), jobUUID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "running", tasks[0].Status)
+
+	// 3. No agent CancelTask signal was sent.
+	assert.Empty(t, env.cs.snapshot())
+}
