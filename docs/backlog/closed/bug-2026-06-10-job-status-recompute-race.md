@@ -1,8 +1,9 @@
 ---
 title: Job status recompute race can leave a job stuck in running forever
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-20
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -34,3 +35,6 @@ Note: an orphaned copy of `updateJobStatusFromTasks` also exists unused in `inte
 - `internal/worker/handler.go:573-600`
 - `internal/store/query/scheduled_jobs.sql:69-72` (`CountActiveJobsForSchedule`)
 - `internal/api/jobs.go:776-804` (dead copy)
+
+## Resolution
+Fixed in PR #36 (merge commit cda9a3a), 2026-06-20. Added an atomic `RecomputeJobStatus :one` query in `internal/store/query/jobs.sql` (single `UPDATE jobs ... FROM (SELECT aggregate over tasks)`), rewrote `updateJobStatusFromTasks` as a thin wrapper preserving its signature and `""`-on-error contract so the terminal SSE event still fires, and deleted the dead zero-caller copy from `internal/api/jobs.go`. Covered by the store-layer integration test `TestRecomputeJobStatus`, whose concurrent-completion sub-test claims both tasks then races two goroutines (mark-done + recompute) so it genuinely reproduces the interleaving and fails against the pre-fix read-modify-write code.
