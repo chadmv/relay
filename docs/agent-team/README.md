@@ -48,14 +48,16 @@ plan").
 
 - **Phase 0** is opt-in: skip for small changes; run when scoping something
   unfamiliar.
-- **Phase 1** commits the spec doc on its own (`docs: add <slug> spec`) when the
-  gate passes, before planning begins.
-- **Phase 2** commits the plan doc on its own (`docs: add <slug> plan`) when the
-  gate passes, before implementation begins. The spec and plan must be in history
-  before Phase 3 writes any code - so the record reflects the order work was done,
-  and a halt mid-implementation still leaves the design captured. The commit
-  happens at the phase boundary in both gate modes (autonomous auto-passes the
-  gate, then commits; gated commits after sign-off).
+- **Phase 1** - the conductor commits the spec doc that relay-tpm produced, on its
+  own (`docs: add <slug> spec`), when the gate passes, before planning begins.
+- **Phase 2** - the conductor commits the plan doc that relay-planner produced, on
+  its own (`docs: add <slug> plan`), when the gate passes, before implementation
+  begins. The spec and plan must be in history before Phase 3 writes any code - so
+  the record reflects the order work was done, and a halt mid-implementation still
+  leaves the design captured. The commit happens at the phase boundary in both gate
+  modes (autonomous auto-passes the gate, then commits; gated commits after
+  sign-off). relay-tpm and relay-planner only write the docs - they hold no git
+  access, so committing is always the conductor's step.
 - **Phase 3 parallelism** depends on the planner's independence declaration.
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
