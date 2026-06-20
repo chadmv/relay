@@ -585,14 +585,20 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 	return rows
 }
 
-// requeueWorkerTasks requeues dispatched/running tasks for a disconnected worker.
-func (h *Handler) requeueWorkerTasks(workerID string) {
+// requeueWorkerTasks requeues dispatched/running tasks for a disconnected
+// worker, fenced on connection_epoch: if a fresher connection has bumped the
+// epoch, the EXISTS guard fails and zero tasks move. Bumps assignment_epoch on
+// each requeued task (task-level fence preserved).
+func (h *Handler) requeueWorkerTasks(workerID string, epoch int32) {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
 		return
 	}
 	ctx := context.Background()
-	_, _ = h.q.RequeueWorkerTasks(ctx, id)
+	_, _ = h.q.RequeueWorkerTasksIfEpoch(ctx, store.RequeueWorkerTasksIfEpochParams{
+		WorkerID:        id,
+		ConnectionEpoch: epoch,
+	})
 	go h.triggerDispatch()
 }
 
