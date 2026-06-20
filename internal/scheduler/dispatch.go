@@ -178,6 +178,14 @@ func (d *Dispatcher) selectWorker(
 		if free <= 0 {
 			continue
 		}
+		// Source-bearing tasks require a worker with a workspace provider.
+		// Skipping providerless workers here (rather than scoring them lower) is
+		// the hard requirement: a task whose Source is set must never be
+		// dispatched to a worker that will only PREPARE_FAILED it. For a
+		// non-source task taskSrc == nil and this is a no-op.
+		if taskSrc != nil && !w.SupportsWorkspaces {
+			continue
+		}
 		score := free
 		if taskSrc != nil {
 			for _, ws := range warmByWorker[w.ID] {
