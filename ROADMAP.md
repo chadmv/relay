@@ -13,36 +13,36 @@ bounded sender per gRPC stream, identity-checked teardown, the single job-spec p
 no interior pointers across locks, and the single JSON entry point. The team is closing
 those findings one at a time; the last several sessions shipped the requeue/retry epoch
 bump, the stale-stream-teardown fix, the nil-provider source guard, cron source-spec
-persistence, the Perforce registry race fix, the runner pipe-drain hang fix, and the job
-status recompute race fix, with priority on correctness of the thing being operated - task
-dispatch, scheduling, and source workspaces - before broadening features. A secondary
-workstream builds out the embedded web SPA (auth, Workers, Jobs, and Schedules lists
-shipped; detail pages, list filters, and Admin/Profile still pending). MCP, CLI, and
-store/schema work fill in behind those two.
+persistence, the Perforce registry race fix, the runner pipe-drain hang fix, the job
+status recompute race fix, and the forced-cancel send-backpressure fix, with priority on
+correctness of the thing being operated - task dispatch, scheduling, and source
+workspaces - before broadening features. A secondary workstream builds out the embedded
+web SPA (auth, Workers, Jobs, and Schedules lists shipped; detail pages, list filters, and
+Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind those two.
 
 ## Now / Next / Later
 
 ### Now
-- [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/bug-2026-06-19-forced-cancel-send-backpressure.md) - forced cancel falls back to the 5s WaitDelay exactly when an operator needs it (a wedged coordinator connection), defeating the point of the force-cancel feature.
 - [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) - high; the path every web session hits at 30-day token expiry, leaving a frozen page only a hard reload escapes.
 - [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
-- [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; pulled up from Next - destructive cancel with no owner-or-admin check.
+- [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; destructive cancel with no owner-or-admin check.
+- [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; pulled up from Next - offboarded users keep a valid session and their schedules keep creating jobs.
 
 ### Next
-- [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; offboarded users keep a valid session and their schedules keep creating jobs.
 - [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) - the last open api-auth contract bug; run-now is `auth(...)`-only despite the documented admin-only contract.
+- [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
 
 ### Later
-- [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
 - [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
 - [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) - medium; the new registry race test only catches a regression when invoked with `-race`, which neither `make test` nor CI runs.
 - [Trailing slash in the server URL breaks every POST/PATCH/DELETE](docs/backlog/bug-2026-06-10-trailing-slash-breaks-posts.md) - quick win; a trailing slash in `RELAY_URL` makes `relay login` fail with an opaque 405.
 
 ## What moved
 
-- Shipped since this roadmap's prior 2026-06-20 pass: [drain-mode-disable-test-asserts-running](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (was Now #1), via PR #43 - a quick-win test fix so `seedRunningTask` advances the task to `running` and the drain-mode test exercises a genuinely running task.
-- Reordered: with drain-mode shipped, the Now tier shifts up - `forced-cancel-send-backpressure` takes Now #1 and `job-cancel-missing-authz` (security) is pulled up from Next into Now.
-- Earlier this cycle: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40, emptied the scheduler-cron theme), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch. [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains the one open item filed this cycle (CI should `go vet -tags integration ./...`).
+- Shipped since the prior 2026-06-20 pass: [forced-cancel-send-backpressure](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) (was Now #1), closed 2026-06-20 - a per-runner `forcedCh` lets a forced cancel preempt a log write parked on a full `sendCh` (returning in ~0.3s instead of the 5s `WaitDelay`), with the forced-path terminal `FAILED` send bounded by a non-blocking try-send and the non-forced path left blocking.
+- New: [default-cancel-abandon-backpressure-bound-test](docs/backlog/idea-2026-06-20-default-cancel-abandon-backpressure-bound-test.md) (idea, low) filed in agent-perforce - the forced path got a fix and a test, but nothing asserts the default-cancel / `Abandon()` paths stay `WaitDelay`-bounded (not unbounded) under a wedged `sendCh`.
+- Reordered: with forced-cancel shipped, the Now tier shifts up one - `spa-401-redirect-loop` takes Now #1 and `archived-users-tokens-schedules` (security) is pulled up from Next into Now; `hot-path-indexes` is pulled from Later into Next to keep that tier populated.
+- Earlier this cycle: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40), [drain-mode-disable-test-asserts-running](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (PR #43), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch. [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains open (CI should `go vet -tags integration ./...`).
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -55,10 +55,10 @@ store/schema work fill in behind those two.
 ## Agent runtime & Perforce workspaces (agent-perforce)
 
 1. [Dispatch has no provider-capability filter; selectWorker can route source-bearing tasks to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) (bug, medium) - the failure is now loud (`PREPARE_FAILED` -> terminal `failed`), but dispatch still does not avoid providerless workers; warm-workspace affinity is only a score bonus, not a hard requirement.
-2. [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/bug-2026-06-19-forced-cancel-send-backpressure.md) (bug, medium) - `Runner.send` selects on the long-lived agent ctx, not the per-task ctx, so a forced cancel cannot unblock a send parked on a full `sendCh` and falls back to the 5s `WaitDelay`. Pre-existing; reproduces on main.
-3. [A dirty delete permanently wedges the workspace sweeper](docs/backlog/bug-2026-06-10-sweeper-wedges-dirty-delete.md) (bug, medium) - a failed `RemoveAll` leaves an entry whose next sweep fails on the already-deleted client, aborting every subsequent pass so disk pressure is never relieved.
-4. [Agent token file is world-readable on Windows](docs/backlog/bug-2026-06-10-agent-token-windows-acl.md) (bug, medium) - 0600 carries no ACL meaning on Windows; the token inherits ProgramData's all-users-read ACL, so any local user can steal the agent bearer token.
-5. [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) (idea, medium) - `make test` and CI run no `-race`, so the new registry race test only catches a reintroduced data race when invoked explicitly; add a dedicated `-race` target.
+2. [A dirty delete permanently wedges the workspace sweeper](docs/backlog/bug-2026-06-10-sweeper-wedges-dirty-delete.md) (bug, medium) - a failed `RemoveAll` leaves an entry whose next sweep fails on the already-deleted client, aborting every subsequent pass so disk pressure is never relieved.
+3. [Agent token file is world-readable on Windows](docs/backlog/bug-2026-06-10-agent-token-windows-acl.md) (bug, medium) - 0600 carries no ACL meaning on Windows; the token inherits ProgramData's all-users-read ACL, so any local user can steal the agent bearer token.
+4. [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) (idea, medium) - `make test` and CI run no `-race`, so the new registry race test only catches a reintroduced data race when invoked explicitly; add a dedicated `-race` target.
+5. [No regression test bounds default cancel / Abandon() under a wedged sendCh](docs/backlog/idea-2026-06-20-default-cancel-abandon-backpressure-bound-test.md) (idea, low) - the forced path got a fix plus `TestRunner_ForceCancel_ReturnsQuickly`, but nothing asserts the default-cancel / `Abandon()` paths stay `WaitDelay`-bounded rather than unbounded under a full `sendCh`; test-only, no runtime behavior change.
 6. [Per-eviction timeout for EvictWorkspace?](docs/backlog/idea-2026-04-25-eviction-timeout.md) (idea) - `EvictWorkspace` blocks on `p4 client -d` and `rm -rf` with no per-eviction deadline.
 7. [Add cwd assertions to the three perforce unit tests](docs/backlog/idea-2026-05-01-add-cwd-assertions-perforce.md) (idea) - locks in the cwd half of the client-selection contract that is currently only tested implicitly.
    quick win - test-only, `fakeRunner` already records cwd.
@@ -140,16 +140,13 @@ store/schema work fill in behind those two.
 
 ## Recently shipped
 
+- [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) - closed 2026-06-20; a per-runner `forcedCh` (closed once via `CompareAndSwap`) lets `chunkWriter.Write` abort an in-flight log send via the `errForcedAbort` sentinel so a forced cancel returns in ~0.3s instead of the 5s `WaitDelay`; the forced-path terminal `FAILED` send is bounded by a non-blocking try-send while the non-forced path stays blocking.
 - [Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - closed 2026-06-20 (PR #43); `seedRunningTask` now advances the claimed task to `running` at the claimed epoch so the drain-mode test exercises a running task.
 - [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
 - [Job status recompute race can leave a job stuck in running forever](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) - closed 2026-06-20 (PR #36); replaced the read-modify-write job-status update with an atomic `RecomputeJobStatus` statement.
 - [Agent runner pipe-drain hang - wg.Wait() before cmd.Wait() defeats WaitDelay](docs/backlog/closed/bug-2026-06-10-agent-pipe-drain-hang.md) - closed 2026-06-19; drain via chunkWriter so WaitDelay bounds the hang.
 - [Perforce workspace registry races](docs/backlog/closed/bug-2026-06-10-perforce-registry-races.md) - closed 2026-06-19; all registry access routed through the locked API, getters return copies.
-- [Cron-fired scheduled jobs silently drop task source specs](docs/backlog/closed/bug-2026-06-10-cron-jobs-drop-source.md) - closed 2026-06-19; cron fires routed through `jobcreate.CreateJobFromSpec`.
-- [Source-bearing tasks silently run without a workspace when the provider is nil](docs/backlog/closed/bug-2026-06-10-source-tasks-run-without-workspace.md) - closed 2026-06-19; nil-provider source guard.
-- [Stale stream teardown clobbers a fresh registration](docs/backlog/closed/bug-2026-06-10-stale-stream-teardown-clobbers-registration.md) - closed; identity-checked teardown (`UnregisterIf` + `teardownConnection`). Residual gap now tracked as `finishregister-gap-connection-epoch-race`.
-- [Requeue/retry paths return tasks to pending without bumping assignment_epoch](docs/backlog/closed/bug-2026-06-10-requeue-paths-skip-epoch-bump.md) - closed; epoch bump on the requeue/retry paths.
 
 ## Deferred
 
