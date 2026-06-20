@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -27,15 +26,6 @@ type Runner struct {
 	forced    atomic.Bool
 	abandoned atomic.Bool
 	provider  source.Provider
-
-	// stepPipes guards the live stdout/stderr pipe handles for the currently
-	// executing step. Set in Run after cmd.Start; cleared on step completion.
-	// Accessed by the cmd.Cancel callback to force-close pipes when forced.
-	stepPipes struct {
-		mu     sync.Mutex
-		stdout io.Closer
-		stderr io.Closer
-	}
 }
 
 // newRunner creates a Runner and its execution context.
@@ -69,38 +59,6 @@ func (r *Runner) Cancel(force bool) {
 func (r *Runner) Abandon() {
 	r.abandoned.Store(true)
 	r.cancel()
-}
-
-// setStepPipes records the pipe handles for the currently executing step so
-// the cmd.Cancel callback can force-close them on a forced cancel.
-func (r *Runner) setStepPipes(stdout, stderr io.Closer) {
-	r.stepPipes.mu.Lock()
-	r.stepPipes.stdout = stdout
-	r.stepPipes.stderr = stderr
-	r.stepPipes.mu.Unlock()
-}
-
-// clearStepPipes drops the references after a step completes. Safe to call
-// even if setStepPipes wasn't called (no-op).
-func (r *Runner) clearStepPipes() {
-	r.stepPipes.mu.Lock()
-	r.stepPipes.stdout = nil
-	r.stepPipes.stderr = nil
-	r.stepPipes.mu.Unlock()
-}
-
-// closeStepPipesForForce closes the live pipe handles, unblocking pipeLog
-// readers immediately. Called from the cmd.Cancel callback only when forced.
-func (r *Runner) closeStepPipesForForce() {
-	r.stepPipes.mu.Lock()
-	stdout, stderr := r.stepPipes.stdout, r.stepPipes.stderr
-	r.stepPipes.mu.Unlock()
-	if stdout != nil {
-		_ = stdout.Close()
-	}
-	if stderr != nil {
-		_ = stderr.Close()
-	}
 }
 
 // Run executes the task and sends status/log messages to sendCh. Blocks until done.
@@ -298,32 +256,6 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 		},
 	})
 	return len(p), nil
-}
-
-func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream, stepIndex, stepTotal int32) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := pipe.Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			r.send(&relayv1.AgentMessage{
-				Payload: &relayv1.AgentMessage_TaskLog{
-					TaskLog: &relayv1.TaskLogChunk{
-						TaskId:    r.taskID,
-						Stream:    stream,
-						Content:   chunk,
-						Epoch:     r.epoch,
-						StepIndex: stepIndex,
-						StepTotal: stepTotal,
-					},
-				},
-			})
-		}
-		if err != nil {
-			return
-		}
-	}
 }
 
 func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
