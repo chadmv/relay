@@ -74,10 +74,9 @@ func (p *Provider) ListInventory() ([]source.InventoryEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	reg.mu.Lock()
-	defer reg.mu.Unlock()
-	out := make([]source.InventoryEntry, 0, len(reg.Workspaces))
-	for _, w := range reg.Workspaces {
+	ws := reg.Snapshot()
+	out := make([]source.InventoryEntry, 0, len(ws))
+	for _, w := range ws {
 		out = append(out, source.InventoryEntry{
 			SourceType:   "perforce",
 			SourceKey:    w.SourceKey,
@@ -146,9 +145,9 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	baseline := BaselineHash(pf, resolved)
 
 	// Find or allocate a workspace short_id for this stream.
-	existing := reg.GetBySourceKey(pf.Stream)
+	existing, found := reg.GetBySourceKey(pf.Stream)
 	var shortID string
-	if existing != nil {
+	if found {
 		shortID = existing.ShortID
 	} else {
 		shortID = allocateShortID(pf.Stream, reg)
@@ -177,7 +176,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	// First time: create on-disk dir and p4 client spec.
-	if existing == nil {
+	if !found {
 		if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 			handle.Release()
 			return nil, err
@@ -205,8 +204,8 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// happens on first use after a fresh process start, before syncedPaths
 	// is populated). Both cases are functionally equivalent to gaining
 	// exclusive workspace ownership for the sync operation.
-	cur := reg.Get(shortID)
-	needsSync := handle.Mode() == ModeExclusive || (cur != nil && cur.BaselineHash != baseline)
+	cur, curOK := reg.Get(shortID)
+	needsSync := handle.Mode() == ModeExclusive || (curOK && cur.BaselineHash != baseline)
 
 	// Crash-recovery: clean up any relay-owned pending CLs left by a
 	// previous agent crash before we sync.
@@ -221,10 +220,11 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 			handle.Release()
 			return nil, classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 		}
-		if cur != nil {
-			cur.BaselineHash = baseline
-			cur.LastUsedAt = time.Now()
-			reg.Upsert(*cur)
+		if curOK {
+			_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
+				e.BaselineHash = baseline
+				e.LastUsedAt = time.Now()
+			})
 		}
 		_ = reg.Save()
 	}
@@ -274,12 +274,12 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	if err != nil {
 		return fmt.Errorf("load registry: %w", err)
 	}
-	e := reg.Get(shortID)
-	if e == nil {
+	e, ok := reg.Get(shortID)
+	if !ok {
 		return fmt.Errorf("workspace %s not found in registry", shortID)
 	}
 	sw := &Sweeper{Root: p.cfg.Root, Reg: reg, Client: p.cfg.Client, ListLocked: p.lockedShortIDs}
-	return sw.evict(ctx, reg, *e)
+	return sw.evict(ctx, reg, e)
 }
 
 // Client returns the underlying Perforce client. Used by the sweeper in relay-agent main.
@@ -386,20 +386,11 @@ func allocateShortID(stream string, reg *Registry) string {
 	enc = strings.TrimRight(enc, "=")
 	for n := 6; n <= len(enc); n += 2 {
 		candidate := enc[:n]
-		if !shortIDInUse(reg, candidate, stream) {
+		if !reg.ShortIDInUse(candidate, stream) {
 			return candidate
 		}
 	}
 	return enc
-}
-
-func shortIDInUse(reg *Registry, shortID, sourceKey string) bool {
-	for _, w := range reg.Workspaces {
-		if w.ShortID == shortID && w.SourceKey != sourceKey {
-			return true
-		}
-	}
-	return false
 }
 
 func sanitizeHostname(h string) string {

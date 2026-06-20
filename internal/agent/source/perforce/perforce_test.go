@@ -118,8 +118,8 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 
 	// Registry must be clean after Finalize.
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
-	e := reg.GetBySourceKey("//s/x")
-	require.NotNil(t, e)
+	e, ok := reg.GetBySourceKey("//s/x")
+	require.True(t, ok)
 	require.Empty(t, e.OpenTaskChangelists)
 }
 

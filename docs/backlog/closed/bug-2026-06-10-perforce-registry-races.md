@@ -23,3 +23,18 @@ Never let interior pointers escape:
 - `internal/agent/source/perforce/sweeper.go:62-67`
 - `internal/agent/source/perforce/registry.go:78, 106, 113-119`
 - `internal/agent/source/perforce/perforce.go:208-229, 396-403`
+
+## Closed 2026-06-19
+Fixed: `Get`/`GetBySourceKey` now return `WorkspaceEntry` value copies + bool;
+added `Mutate`/`Snapshot`/`ShortIDInUse` locked methods. All consumers (Prepare,
+EvictWorkspace, ListInventory, allocateShortID, sweeper) route through the locked
+API. The dangerous `cur := reg.Get(...)` read-modify-`Upsert(*cur)` block in
+Prepare became an in-place `Mutate`, which also can no longer clobber an
+`OpenTaskChangelist` appended concurrently during the unlocked sync. No unlocked
+`reg.Workspaces` iteration or escaping interior pointer remains outside
+`registry.go`. Verified clean under `go test -race ./internal/agent/source/perforce/...`
+via a new Docker-free concurrency test (`registry_race_test.go`) - confirmed
+load-bearing (the pre-fix pattern trips `-race`).
+
+Spec: `docs/superpowers/specs/2026-06-19-perforce-registry-races-design.md`.
+Plan: `docs/superpowers/plans/2026-06-19-perforce-registry-races.md`.

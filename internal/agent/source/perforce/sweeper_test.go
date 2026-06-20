@@ -90,7 +90,8 @@ func TestSweeper_UsesInjectedRegistry(t *testing.T) {
 	require.Equal(t, []string{"old"}, evicted)
 
 	// The eviction must be visible directly on the injected registry pointer.
-	require.Nil(t, reg.Get("old"))
+	_, ok := reg.Get("old")
+	require.False(t, ok)
 }
 
 func TestSweeper_SkipsLockedWorkspaces(t *testing.T) {

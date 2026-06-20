@@ -59,8 +59,9 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 	}
 
 	// Build candidate list: unlocked workspaces, sorted oldest-first.
-	candidates := make([]WorkspaceEntry, 0, len(reg.Workspaces))
-	for _, w := range reg.Workspaces {
+	snap := reg.Snapshot()
+	candidates := make([]WorkspaceEntry, 0, len(snap))
+	for _, w := range snap {
 		if !locked[w.ShortID] {
 			candidates = append(candidates, w)
 		}
@@ -88,7 +89,7 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 	if s.MinFreeGB > 0 && s.FreeDiskGB != nil {
 		for _, w := range candidates {
 			// Skip if already evicted above.
-			if reg.Get(w.ShortID) == nil {
+			if _, ok := reg.Get(w.ShortID); !ok {
 				continue
 			}
 			free, err := s.FreeDiskGB(s.Root)
