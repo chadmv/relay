@@ -1,8 +1,9 @@
 ---
 title: Stale teardown can still clobber during the finishRegister gap (needs worker connection-epoch fence)
 type: bug
-status: open
+status: closed
 created: 2026-06-19
+closed: 2026-06-20
 priority: medium
 source: relay-verify review of bug-2026-06-10-stale-stream-teardown fix
 ---
@@ -55,3 +56,18 @@ teardown path - its own spec/plan/verify cycle.
 - `internal/worker/registry.go` `UnregisterIf`.
 - CLAUDE.md invariants: "Identity-checked teardown", "Epoch fence".
 - Closed predecessor: `docs/backlog/closed/bug-2026-06-10-stale-stream-teardown-clobbers-registration.md`.
+
+## Resolution
+Fixed in PR #38 (merge commit 8001278), 2026-06-20. Added a DB-enforced
+`connection_epoch` column on `workers` (migration 000016), mirroring the task
+`assignment_epoch` invariant. `RegisterWorkerConnection` bumps the epoch and sets
+`status=online` atomically in one statement, `RETURNING` the new epoch, which is
+stamped immutably on the per-connection `workerSender`. `MarkWorkerOfflineIfEpoch`
+and `RequeueWorkerTasksIfEpoch` fence the stale teardown's writes via conditional
+`UPDATE ... WHERE connection_epoch = $N`, so they no-op once a fresher connection
+has bumped the epoch; the grace requeue is fenced at FIRE time against the epoch
+it was armed under. Atomicity comes from the DB conditional-UPDATE rowcount, not
+Go statement ordering. Covered by two integration tests that fail against pre-fix
+code: a gap-path SQL fence test and a grace fire-time fence test. Spec at
+`docs/superpowers/specs/2026-06-20-finishregister-gap-connection-epoch-design.md`,
+plan at `docs/superpowers/plans/2026-06-20-finishregister-gap-connection-epoch.md`.
