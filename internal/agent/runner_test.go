@@ -133,6 +133,44 @@ done2:
 	}, phases)
 }
 
+func TestRunner_SourceTaskWithNilProviderFailsPrepare(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t1",
+		JobId:    "j1",
+		Commands: singleCmd(echoTaskCmd()),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	// Note: no SetProviderForTest call — r.provider is nil.
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.Run(runCtx, task)
+
+	var phases []relayv1.TaskStatus
+	var sawCmdOutput bool
+	for {
+		select {
+		case m := <-sendCh:
+			if ts := m.GetTaskStatus(); ts != nil {
+				phases = append(phases, ts.Status)
+			}
+			if log := m.GetTaskLog(); log != nil && strings.Contains(string(log.Content), "hello") {
+				sawCmdOutput = true
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	require.Equal(t, []relayv1.TaskStatus{
+		relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+	}, phases)
+	require.False(t, sawCmdOutput, "command must not run when the provider is nil")
+}
+
 // singleCmd wraps a single argv into the multi-command DispatchTask form.
 func singleCmd(argv []string) []*relayv1.CommandLine {
 	return []*relayv1.CommandLine{{Argv: argv}}

@@ -426,6 +426,12 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 		statusStr = "failed"
 	case relayv1.TaskStatus_TASK_STATUS_TIMED_OUT:
 		statusStr = "timed_out"
+	case relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED:
+		// A prepare failure (sync failed, or the worker has no workspace
+		// provider for a source-bearing task) is a terminal failure: route it
+		// through the existing "failed" path so retry, dependent-cascade, and
+		// slot release all apply.
+		statusStr = "failed"
 	default:
 		return
 	}
