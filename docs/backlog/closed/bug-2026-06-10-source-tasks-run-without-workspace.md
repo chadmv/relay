@@ -1,7 +1,7 @@
 ---
 title: Source-bearing tasks silently run without a workspace when the provider is nil
 type: bug
-status: open
+status: closed
 created: 2026-06-10
 priority: high
 source: full-codebase review (2026-06-10)
@@ -29,3 +29,6 @@ Longer term, consider a provider-capability requirement in dispatch so such task
 - `internal/agent/runner.go:113`
 - `cmd/relay-agent/main.go:77-80` (stale comment)
 - `internal/scheduler/dispatch.go:157-199` (`selectWorker`)
+
+## Closing note
+Closed 2026-06-19: `Runner.Run` now guards source-bearing tasks against a nil provider and emits `TASK_STATUS_PREPARE_FAILED` instead of running commands without a synced workspace, and the stale `cmd/relay-agent/main.go` comment is corrected. The dispatch-side provider-capability filter (so such tasks are never sent to providerless workers) remains the documented follow-up.
