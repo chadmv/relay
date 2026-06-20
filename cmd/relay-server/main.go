@@ -120,12 +120,15 @@ func main() {
 			graceWindow = d
 		}
 	}
-	grace := worker.NewGraceRegistry(graceWindow, func(workerID string) {
+	grace := worker.NewGraceRegistry(graceWindow, func(workerID string, epoch int32) {
 		var id pgtype.UUID
 		if err := id.Scan(workerID); err != nil {
 			return
 		}
-		_, _ = q.RequeueWorkerTasks(context.Background(), id)
+		_, _ = q.RequeueWorkerTasksIfEpoch(context.Background(), store.RequeueWorkerTasksIfEpochParams{
+			WorkerID:        id,
+			ConnectionEpoch: epoch,
+		})
 		dispatcher.Trigger()
 	})
 	defer grace.Stop()
@@ -269,14 +272,14 @@ func seedGraceTimersFromActiveTasks(ctx context.Context, q *store.Queries, grace
 	for _, c := range candidates {
 		id := uuidStrMain(c.ID)
 		if !c.DisconnectedAt.Valid {
-			grace.Start(id)
+			grace.Start(id, c.ConnectionEpoch)
 			continue
 		}
 		remaining := c.DisconnectedAt.Time.Add(window).Sub(now)
 		if remaining > 0 {
-			grace.StartWithDuration(id, remaining)
+			grace.StartWithDuration(id, c.ConnectionEpoch, remaining)
 		} else {
-			grace.ExpireNow(id)
+			grace.ExpireNow(id, c.ConnectionEpoch)
 		}
 	}
 	return nil
