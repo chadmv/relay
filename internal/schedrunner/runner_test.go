@@ -235,6 +235,13 @@ func (h *runnerHarness) insertScheduledJobBogusOwner(t *testing.T, name string, 
 
 	_, err := h.pool.Exec(ctx, `ALTER TABLE scheduled_jobs DROP CONSTRAINT scheduled_jobs_owner_id_fkey`)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Restore the constraint regardless of how the test exits (including t.Fatal
+		// mid-insert). NOT VALID avoids a full table scan and matches the original.
+		_, _ = h.pool.Exec(context.Background(),
+			`ALTER TABLE scheduled_jobs ADD CONSTRAINT scheduled_jobs_owner_id_fkey
+			   FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID`)
+	})
 
 	var id pgtype.UUID
 	err = h.pool.QueryRow(ctx,
@@ -243,10 +250,6 @@ func (h *runnerHarness) insertScheduledJobBogusOwner(t *testing.T, name string, 
 		name, bogusOwner, spec, next).Scan(&id)
 	require.NoError(t, err)
 
-	_, err = h.pool.Exec(ctx,
-		`ALTER TABLE scheduled_jobs ADD CONSTRAINT scheduled_jobs_owner_id_fkey
-		   FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID`)
-	require.NoError(t, err)
 	return id
 }
 
