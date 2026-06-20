@@ -39,6 +39,29 @@ func (q *Queries) AdvanceScheduledJob(ctx context.Context, arg AdvanceScheduledJ
 	return err
 }
 
+const advanceScheduledJobNextRun = `-- name: AdvanceScheduledJobNextRun :exec
+UPDATE scheduled_jobs
+SET next_run_at = $2,
+    updated_at  = NOW()
+WHERE id = $1
+`
+
+type AdvanceScheduledJobNextRunParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	NextRunAt pgtype.Timestamptz `json:"next_run_at"`
+}
+
+// AdvanceScheduledJobNextRun
+//
+//	UPDATE scheduled_jobs
+//	SET next_run_at = $2,
+//	    updated_at  = NOW()
+//	WHERE id = $1
+func (q *Queries) AdvanceScheduledJobNextRun(ctx context.Context, arg AdvanceScheduledJobNextRunParams) error {
+	_, err := q.db.Exec(ctx, advanceScheduledJobNextRun, arg.ID, arg.NextRunAt)
+	return err
+}
+
 const countActiveJobsForSchedule = `-- name: CountActiveJobsForSchedule :one
 SELECT COUNT(*) FROM jobs
  WHERE scheduled_job_id = $1
