@@ -30,11 +30,19 @@ func (r *Registry) Register(workerID string, s Sender) {
 	r.mu.Unlock()
 }
 
-// Unregister removes a worker stream.
-func (r *Registry) Unregister(workerID string) {
+// UnregisterIf removes the worker's stream only if the currently registered
+// sender is s. Returns true if it removed it (this caller still owned the
+// slot); false if a newer connection has since replaced it. Pointer identity
+// works because the registry stores *workerSender values behind the Sender
+// interface; interface comparison falls through to pointer equality.
+func (r *Registry) UnregisterIf(workerID string, s Sender) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.streams[workerID] != s {
+		return false
+	}
 	delete(r.streams, workerID)
-	r.mu.Unlock()
+	return true
 }
 
 // Send delivers msg to the named worker. Returns an error if the worker is
