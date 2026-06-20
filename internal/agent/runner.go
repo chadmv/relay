@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/exec"
@@ -235,11 +236,22 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 	}})
 }
 
+// errForcedAbort is returned by chunkWriter.Write when a forced cancel closes
+// r.forcedCh while a log send is in flight. A non-nil Write error makes exec's
+// io.Copy stop copying so cmd.Wait() returns promptly instead of waiting out
+// WaitDelay. It is consumed only by exec's copy loop; the runner's terminal
+// status is decided independently in Run (the cancelled branch yields FAILED),
+// so this sentinel never leaks as an extra task failure.
+var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log write")
+
 // chunkWriter is the io.Writer exec copies subprocess stdout/stderr into. Each
 // Write copies its slice (exec reuses the buffer between calls), wraps it in a
 // TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
-// through r.send (bounded on r.ctx.Done()). Write always returns (len(p), nil)
-// so exec never treats the sink as broken and keeps copying until EOF.
+// through r.sendOrAbort. On a successful enqueue Write returns (len(p), nil) so
+// exec keeps copying until EOF (unchanged slow-consumer behavior). If a forced
+// cancel has closed r.forcedCh (or the agent context is done), the enqueue is
+// abandoned and Write returns errForcedAbort so exec's io.Copy stops and
+// cmd.Wait() returns promptly instead of waiting out WaitDelay.
 type chunkWriter struct {
 	r         *Runner
 	stream    relayv1.LogStream
@@ -253,7 +265,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	}
 	chunk := make([]byte, len(p))
 	copy(chunk, p)
-	w.r.send(&relayv1.AgentMessage{
+	if !w.r.sendOrAbort(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_TaskLog{
 			TaskLog: &relayv1.TaskLogChunk{
 				TaskId:    w.r.taskID,
@@ -264,7 +276,12 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 				StepTotal: w.stepTotal,
 			},
 		},
-	})
+	}) {
+		// Abandoned. On a forced cancel this stops io.Copy so cmd.Wait returns.
+		// On agent shutdown (ctx.Done) returning the sentinel is equally fine:
+		// the runner is tearing down regardless.
+		return 0, errForcedAbort
+	}
 	return len(p), nil
 }
 
@@ -288,6 +305,24 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 	case r.sendCh <- msg:
 	case <-r.ctx.Done():
 		// Connection lost; will be redelivered when agent reconnects.
+	}
+}
+
+// sendOrAbort enqueues a log chunk like send, but additionally abandons the
+// enqueue if a forced cancel has closed r.forcedCh. It returns true on a
+// successful enqueue and false if it abandoned (agent shutdown or forced abort).
+// Only chunkWriter.Write uses this; all other callers use send so their
+// blocking discipline is unchanged.
+func (r *Runner) sendOrAbort(msg *relayv1.AgentMessage) bool {
+	select {
+	case r.sendCh <- msg:
+		return true
+	case <-r.ctx.Done():
+		// Agent shutdown; will be redelivered when the agent reconnects.
+		return false
+	case <-r.forcedCh:
+		// Forced cancel in progress; abandon this chunk so cmd.Wait can return.
+		return false
 	}
 }
 
