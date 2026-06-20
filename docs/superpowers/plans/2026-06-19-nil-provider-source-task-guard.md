@@ -168,6 +168,143 @@ git commit -m "backlog: close source-tasks-run-without-workspace (agent guard sh
 
 ---
 
+### Task 4: Handle `PREPARE_FAILED` server-side so the task goes terminal
+
+**Background (added after review):** the agent's `PREPARE_FAILED` status is dropped
+by `handleTaskStatus` in `internal/worker/handler.go` - its switch has no case for
+`TASK_STATUS_PREPARE_FAILED`, so it hits `default: return`. Without this task, the
+guard from Task 1 leaves the task non-terminal (no retry, no dependent cascade,
+slot freed only on disconnect). Map `PREPARE_FAILED` to the existing `"failed"`
+terminal status (no new DB status value, no migration) so retry, `FailDependentTasks`
+cascade, job-status rollup, events, and slot release all work via the existing
+terminal path. This also fixes the identical latent gap for the existing
+provider-error `PREPARE_FAILED` emission.
+
+**Files:**
+- Modify: `internal/worker/handler.go` (the status switch at lines 420-431)
+- Test: `internal/worker/handler_test.go` (integration, `//go:build integration`)
+
+- [ ] **Step 1: Write the failing integration test**
+
+Add to `internal/worker/handler_test.go`, mirroring `TestHandleTaskStatus_EpochGate`
+(line 189). It seeds a user/job/task, claims it (epoch -> 1), sends a
+`PREPARE_FAILED` update at the matching epoch, and asserts the task becomes
+`"failed"` with `finished_at` set.
+
+```go
+func TestHandleTaskStatus_PrepareFailedIsTerminal(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "test-user", Email: "test@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "prepfail-job", Priority: "normal", SubmittedBy: user.ID,
+		Labels: []byte("{}"), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "prepfail-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte("{}"), Requires: []byte("[]"), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	wk, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "test-worker", Hostname: "prepfail-worker-01", CpuCores: 4, RamGb: 8,
+		GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: wk.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	idb := claimed.ID.Bytes
+	taskUUID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		idb[0:4], idb[4:6], idb[6:8], idb[8:10], idb[10:16])
+
+	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+		TaskId: taskUUID,
+		Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		Epoch:  1,
+	})
+
+	after, err := q.GetTask(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", after.Status, "PREPARE_FAILED must be a terminal failure")
+	assert.True(t, after.FinishedAt.Valid, "finished_at must be set on terminal failure")
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test -tags integration -p 1 ./internal/worker/... -run TestHandleTaskStatus_PrepareFailedIsTerminal -v -timeout 180s`
+Expected: FAIL - the task stays `"dispatched"` (the update hits `default: return`), so the `"failed"` assertion fails.
+
+- [ ] **Step 3: Add the switch case**
+
+In `internal/worker/handler.go`, add a case to the status switch (after the
+`TASK_STATUS_TIMED_OUT` case, before `default`):
+
+```go
+	case relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED:
+		// A prepare failure (sync failed, or the worker has no workspace
+		// provider for a source-bearing task) is a terminal failure: route it
+		// through the existing "failed" path so retry, dependent-cascade, and
+		// slot release all apply.
+		statusStr = "failed"
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `go test -tags integration -p 1 ./internal/worker/... -run TestHandleTaskStatus_PrepareFailedIsTerminal -v -timeout 180s`
+Expected: PASS
+
+- [ ] **Step 5: Run the worker integration suite to confirm no regression**
+
+Run: `go test -tags integration -p 1 ./internal/worker/... -timeout 300s`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/worker/handler.go internal/worker/handler_test.go
+git commit -m "fix(worker): treat PREPARE_FAILED as a terminal task failure"
+```
+
+---
+
+### Task 5: Correct the backlog closing note
+
+**Files:**
+- Modify: `docs/backlog/closed/bug-2026-06-10-source-tasks-run-without-workspace.md`
+
+The closing note written in Task 3 says server-side `PREPARE_FAILED` handling is a
+follow-up. That is now done in Task 4. Update the note so the only remaining
+documented follow-up is the longer-term **dispatch-side provider-capability
+filter** in `selectWorker`. Remove any wording implying server-side
+`PREPARE_FAILED` handling is still outstanding.
+
+- [ ] **Step 1: Edit the note** (no code; just correct the prose as above).
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add docs/backlog/closed/bug-2026-06-10-source-tasks-run-without-workspace.md
+git commit -m "backlog: correct closing note (server-side PREPARE_FAILED now handled)"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:**
@@ -175,7 +312,8 @@ git commit -m "backlog: close source-tasks-run-without-workspace (agent guard sh
 - `PREPARE_FAILED` with the specified message + epoch fence -> Task 1, Step 3 (carries `r.epoch`, matching the existing prepare-error path). ✓
 - Stale-comment fix in `main.go` -> Task 2. ✓
 - Unit test asserting only `PREPARE_FAILED` and no command output -> Task 1, Steps 1-2. ✓
-- Backlog closure with dispatch-filter follow-up retained -> Task 3. ✓
+- Server-side `PREPARE_FAILED` -> terminal `"failed"` + integration test -> Task 4. ✓
+- Backlog closure with dispatch-filter follow-up retained -> Task 3 (note corrected in Task 5). ✓
 
 **Placeholder scan:** No TBD/TODO; all code steps show complete code and exact commands. ✓
 

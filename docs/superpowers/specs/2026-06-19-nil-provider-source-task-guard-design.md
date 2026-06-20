@@ -51,9 +51,17 @@ if task.Source != nil && r.provider == nil {
 ```
 
 This converts a silent wrong-success into a loud, correct `PREPARE_FAILED` - the
-same terminal status the existing prepare-error path already emits
-(`runner.go:124-134`), so the server, retry logic, and UI handle it with no other
-changes. The guard returns before any command runs.
+same status the existing prepare-error path already emits (`runner.go:124-134`).
+The guard returns before any command runs.
+
+**Correction (post-review):** an earlier draft of this spec claimed the server
+already handles `PREPARE_FAILED` "with no other changes." That was wrong.
+`handleTaskStatus` in `internal/worker/handler.go` maps only RUNNING/DONE/FAILED/
+TIMED_OUT and drops everything else via `default: return`, so a `PREPARE_FAILED`
+update leaves the task non-terminal (no retry, no dependent cascade, slot freed
+only on disconnect). The fix therefore also includes a server-side change (item 3
+below). This gap is pre-existing - the provider-error `PREPARE_FAILED` path has
+always hit it - so the server-side fix corrects both paths.
 
 The existing prepare block keeps its `r.provider != nil` half of the condition
 unchanged; the new guard sits ahead of it and handles the nil-provider case
@@ -66,6 +74,15 @@ Replace the comment at `main.go:77-80` so it accurately describes the runtime
 behavior: when the provider is disabled, source-bearing tasks are rejected by the
 agent at run time with `PREPARE_FAILED` (not "at dispatch"); non-source tasks
 still run. Keep it terse and matched to the surrounding comment style.
+
+### 3. Handle `PREPARE_FAILED` server-side (post-review addition)
+
+In `internal/worker/handler.go`, add a `case TASK_STATUS_PREPARE_FAILED:` to the
+`handleTaskStatus` status switch mapping it to the existing `"failed"` string -
+no new DB status value, no migration. This routes prepare failures through the
+established terminal path (retry if configured, `FailDependentTasks` cascade,
+job-status rollup, SSE events, slot release). Verified by an integration test
+asserting the task transitions to `"failed"` with `finished_at` set.
 
 ## Testing
 
@@ -97,5 +114,7 @@ item retains this as the documented follow-up direction.
 - `internal/agent/runner.go` - add the nil-provider guard.
 - `cmd/relay-agent/main.go` - correct the stale comment.
 - `internal/agent/runner_test.go` - add the guard unit test.
+- `internal/worker/handler.go` - map `PREPARE_FAILED` to terminal `"failed"`.
+- `internal/worker/handler_test.go` - integration test for terminal PREPARE_FAILED.
 - `docs/backlog/bug-2026-06-10-source-tasks-run-without-workspace.md` ->
   `docs/backlog/closed/` on completion.
