@@ -17,8 +17,7 @@ import (
 // child to start a new process group via Setpgid.
 func TestSetupProcTree_Unix_SetsPgid(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "sleep", "30")
-	r := &Runner{}
-	setupProcTree(cmd, r)
+	setupProcTree(cmd)
 	require.NotNil(t, cmd.SysProcAttr, "SysProcAttr should be set")
 	require.True(t, cmd.SysProcAttr.Setpgid, "Setpgid should be true")
 	require.NotNil(t, cmd.Cancel, "cmd.Cancel should be set")
@@ -106,11 +105,9 @@ func TestRunner_DefaultCancel_RunsWorkspaceFinalize(t *testing.T) {
 func TestRunner_ForceCancel_ReturnsQuickly(t *testing.T) {
 	sendCh := make(chan *relayv1.AgentMessage, 4096)
 
-	// Spawn something that produces a steady stream of stdout, so the kernel
-	// pipe buffer always has bytes the agent's pipeLog goroutine could be
-	// reading. On a non-forced cancel, draining this would burn the
-	// 5s WaitDelay; on a forced cancel, closeStepPipesForForce should
-	// short-circuit it.
+	// Spawn something that produces a steady stream of stdout. On a forced
+	// cancel the whole process group is SIGKILLed, so exec's copy goroutine
+	// reaches EOF promptly and cmd.Wait returns well under WaitDelay (5s).
 	task := &relayv1.DispatchTask{
 		TaskId:   "t-quick",
 		JobId:    "j-quick",
