@@ -701,6 +701,20 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// Owner-or-admin gate. A non-owner non-admin caller gets 404 (existence
+	// hidden), matching ownedScheduledJob. Returning here rolls back the open
+	// tx, so no task is cancelled and no agent signal is sent.
+	u, ok := UserFromCtx(ctx)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !u.IsAdmin && job.SubmittedBy != u.ID {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+
 	if job.Status == "cancelled" || job.Status == "done" {
 		writeError(w, http.StatusConflict, "job is already in a terminal state")
 		return
