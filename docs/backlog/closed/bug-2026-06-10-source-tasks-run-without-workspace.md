@@ -31,4 +31,4 @@ Longer term, consider a provider-capability requirement in dispatch so such task
 - `internal/scheduler/dispatch.go:157-199` (`selectWorker`)
 
 ## Closing note
-Closed 2026-06-19: `Runner.Run` now guards source-bearing tasks against a nil provider and emits `TASK_STATUS_PREPARE_FAILED` instead of running commands without a synced workspace, and the stale `cmd/relay-agent/main.go` comment is corrected. The dispatch-side provider-capability filter (so such tasks are never sent to providerless workers) remains the documented follow-up.
+Closed 2026-06-19: `Runner.Run` now guards source-bearing tasks against a nil provider and emits `TASK_STATUS_PREPARE_FAILED` instead of running commands without a synced workspace, and the stale `cmd/relay-agent/main.go` comment is corrected. `handleTaskStatus` in `internal/worker/handler.go` now maps `TASK_STATUS_PREPARE_FAILED` to the terminal `"failed"` path, so the guard's status drives retry, dependent-cascade, job rollup, and slot release. The only remaining documented follow-up is the dispatch-side provider-capability filter in `selectWorker` (so such tasks are never sent to providerless workers).
