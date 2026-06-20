@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
@@ -11,16 +12,18 @@ afterEach(() => clearToken())
 
 function renderAt(path: string) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AuthProvider>
-        <Routes>
-          <Route path="/auth" element={<div>login page</div>} />
-          <Route element={<ProtectedRoute />}>
-            <Route path="/jobs" element={<div>jobs page</div>} />
-          </Route>
-        </Routes>
-      </AuthProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter initialEntries={[path]}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/auth" element={<div>login page</div>} />
+            <Route element={<ProtectedRoute />}>
+              <Route path="/jobs" element={<div>jobs page</div>} />
+            </Route>
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
 }
 

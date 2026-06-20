@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
@@ -12,11 +13,13 @@ afterEach(() => clearToken())
 
 function renderRegister() {
   return render(
-    <MemoryRouter>
-      <AuthProvider>
-        <RegisterScreen />
-      </AuthProvider>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter>
+        <AuthProvider>
+          <RegisterScreen />
+        </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   )
 }
 

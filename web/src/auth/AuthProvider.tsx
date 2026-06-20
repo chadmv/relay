@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { apiFetch } from '../lib/api'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { apiFetch, onUnauthorized } from '../lib/api'
 import { clearToken, getToken, setToken } from '../lib/token'
 import type { LoginResponse, User } from '../lib/types'
 
@@ -25,6 +26,27 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>('loading')
   const [user, setUser] = useState<User | null>(null)
+  const queryClient = useQueryClient()
+
+  // Mirror status in a ref so the 401 subscription can read the latest value
+  // without re-subscribing. The effect below mounts once for the provider's life.
+  const statusRef = useRef(status)
+  statusRef.current = status
+
+  // Reset auth state on any 401 so the route guards send the user to sign-in.
+  // Guarded to no-op when already anonymous: a failed login still on the sign-in
+  // screen must not churn state or clear an empty cache on every request.
+  useEffect(
+    () =>
+      onUnauthorized(() => {
+        if (statusRef.current === 'anonymous') return
+        clearToken()
+        setUser(null)
+        setStatus('anonymous')
+        queryClient.clear()
+      }),
+    [queryClient],
+  )
 
   useEffect(() => {
     if (!getToken()) {
