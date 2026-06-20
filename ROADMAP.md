@@ -23,26 +23,25 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 ## Now / Next / Later
 
 ### Now
-- [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) - high; the path every web session hits at 30-day token expiry, leaving a frozen page only a hard reload escapes.
 - [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/bug-2026-06-19-dispatch-provider-capability-filter.md) - the failure is now loud (PREPARE_FAILED) rather than silent, but `selectWorker` still does not avoid providerless workers; warm-workspace affinity is only a score bonus.
 - [Any authenticated user can cancel any other user's job](docs/backlog/bug-2026-06-10-job-cancel-missing-authz.md) - security; destructive cancel with no owner-or-admin check.
-- [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; pulled up from Next - offboarded users keep a valid session and their schedules keep creating jobs.
+- [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; offboarded users keep a valid session and their schedules keep creating jobs.
+- [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) - pulled up from Next; the last open api-auth contract bug; run-now is `auth(...)`-only despite the documented admin-only contract.
 
 ### Next
-- [run-now is owner-or-admin, but README and the MCP tool treat it as admin-only](docs/backlog/bug-2026-06-18-run-now-not-admin-gated.md) - the last open api-auth contract bug; run-now is `auth(...)`-only despite the documented admin-only contract.
 - [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
+- [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
 
 ### Later
-- [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
 - [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) - medium; the new registry race test only catches a regression when invoked with `-race`, which neither `make test` nor CI runs.
 - [Trailing slash in the server URL breaks every POST/PATCH/DELETE](docs/backlog/bug-2026-06-10-trailing-slash-breaks-posts.md) - quick win; a trailing slash in `RELAY_URL` makes `relay login` fail with an opaque 405.
+- [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) - now a quick win; the spa-401 fix put `queryClient` in `AuthProvider` scope, so clearing on the manual `logout()` path is a one-liner.
 
 ## What moved
 
-- Shipped since the prior 2026-06-20 pass: [forced-cancel-send-backpressure](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) (was Now #1), closed 2026-06-20 - a per-runner `forcedCh` lets a forced cancel preempt a log write parked on a full `sendCh` (returning in ~0.3s instead of the 5s `WaitDelay`), with the forced-path terminal `FAILED` send bounded by a non-blocking try-send and the non-forced path left blocking.
-- New: [default-cancel-abandon-backpressure-bound-test](docs/backlog/idea-2026-06-20-default-cancel-abandon-backpressure-bound-test.md) (idea, low) filed in agent-perforce - the forced path got a fix and a test, but nothing asserts the default-cancel / `Abandon()` paths stay `WaitDelay`-bounded (not unbounded) under a wedged `sendCh`.
-- Reordered: with forced-cancel shipped, the Now tier shifts up one - `spa-401-redirect-loop` takes Now #1 and `archived-users-tokens-schedules` (security) is pulled up from Next into Now; `hot-path-indexes` is pulled from Later into Next to keep that tier populated.
-- Earlier this cycle: [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40), [drain-mode-disable-test-asserts-running](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (PR #43), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36); plus the 2026-06-18-era batch. [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remains open (CI should `go vet -tags integration ./...`).
+- Shipped since the prior 2026-06-20 pass: [spa-401-redirect-loop](docs/backlog/closed/bug-2026-06-10-spa-401-redirect-loop.md) (was Now #1, high), closed 2026-06-20 - the 401 handler now resets auth state in `AuthProvider` (clear token/user/status + `queryClient.clear()`, guarded so it no-ops when already anonymous) and the dead `UnauthorizedRedirect` is gone, so an expired session lands on sign-in instead of an infinite redirect loop.
+- Reordered: with spa-401 shipped, the Now tier shifts up - `dispatch-provider-capability-filter` takes Now #1 and `run-now-not-admin-gated` is pulled up from Next into Now (clearing the api-auth contract bugs); `status-vocabulary-drift` moves Later -> Next, and `spa-query-cache-logout` is surfaced into Later as a now-quick win (the spa-401 fix put `queryClient` in `AuthProvider` scope, making the manual-logout cache clear a one-liner).
+- Earlier this cycle: [forced-cancel-send-backpressure](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) (PR #44), [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40), [drain-mode-disable-test-asserts-running](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) (PR #43), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36). [default-cancel-abandon-backpressure-bound-test](docs/backlog/idea-2026-06-20-default-cancel-abandon-backpressure-bound-test.md) (filed last iteration) and [vet-integration-tagged-build](docs/backlog/idea-2026-06-20-vet-integration-tagged-build.md) remain open.
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -94,38 +93,37 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## Web SPA correctness & feature build-out (web-frontend)
 
-1. [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/bug-2026-06-10-spa-401-redirect-loop.md) (bug, high) - `onUnauthorized` navigates to `/auth` but never clears the token, so the app bounces back and re-401s every poll. Every session hits this at expiry.
-2. [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) (bug, medium) - logout never calls `queryClient.clear()`, so a second user sees the previous user's cached rows (including emails).
-3. [SPA pagination corrupts the cursor stack when next is clicked during a fetch](docs/backlog/bug-2026-06-10-spa-pagination-cursor-corruption.md) (bug, medium) - a stale cursor is pushed on double-next; affects Jobs and Schedules.
-4. [useJobs and useJobStats share query-key prefix](docs/backlog/bug-2026-06-05-usejobs-usejobstats-query-key-prefix.md) (bug, low) - a broad `['jobs']` invalidation would clobber the stats query; latent today.
+1. [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) (bug, medium) - logout never calls `queryClient.clear()`, so a second user sees the previous user's cached rows (including emails). Now a quick win - the spa-401 fix put `queryClient` in `AuthProvider` scope, so adding the clear to `logout()` is a one-liner.
+2. [SPA pagination corrupts the cursor stack when next is clicked during a fetch](docs/backlog/bug-2026-06-10-spa-pagination-cursor-corruption.md) (bug, medium) - a stale cursor is pushed on double-next; affects Jobs and Schedules.
+3. [useJobs and useJobStats share query-key prefix](docs/backlog/bug-2026-06-05-usejobs-usejobstats-query-key-prefix.md) (bug, low) - a broad `['jobs']` invalidation would clobber the stats query; latent today.
    quick win - re-key the stats query.
-5. [Jobs pagination footer lacks absolute X-Y range](docs/backlog/bug-2026-06-05-jobs-pagination-footer-absolute-range.md) (bug, low) - footer shows only the page count, not an absolute range.
-6. [Paginate revoked workers list (UI and client)](docs/backlog/bug-2026-06-05-paginate-revoked-workers-list.md) (bug, low) - the endpoint is paginated but the hook fetches only the first page.
-7. [formatRelativeTime duplicated across workers and schedules modules](docs/backlog/bug-2026-06-05-formatrelativetime-duplicated.md) (bug, low) - extract a shared helper now that a second page reuses it.
+4. [Jobs pagination footer lacks absolute X-Y range](docs/backlog/bug-2026-06-05-jobs-pagination-footer-absolute-range.md) (bug, low) - footer shows only the page count, not an absolute range.
+5. [Paginate revoked workers list (UI and client)](docs/backlog/bug-2026-06-05-paginate-revoked-workers-list.md) (bug, low) - the endpoint is paginated but the hook fetches only the first page.
+6. [formatRelativeTime duplicated across workers and schedules modules](docs/backlog/bug-2026-06-05-formatrelativetime-duplicated.md) (bug, low) - extract a shared helper now that a second page reuses it.
    quick win.
-8. [UserMenu dropdown panel lacks menu/menuitem roles and keyboard navigation](docs/backlog/feature-2026-06-05-usermenu-panel-menu-roles.md) (feature, low) - the toggle advertises `aria-haspopup=menu` but the panel has no menu semantics or arrow-key nav.
-9. [Adopt role-layering pattern or extract a shared accessible-table primitive](docs/backlog/idea-2026-06-05-shared-accessible-table-primitive.md) (idea, low) - decide once a second pseudo-table appears whether to share the WorkersTable ARIA pattern.
-10. [Upgrade vite 5 to 8 and vitest 2 to 4 to clear dev-tooling audit advisories](docs/backlog/feature-2026-06-05-upgrade-vite-vitest.md) (feature, low) - 5 npm audit advisories (1 critical) in build/test tooling; do it as a deliberate, separately-tested migration.
-11. [Add an end-to-end (Playwright) test harness for the web UI](docs/backlog/idea-2026-06-03-web-e2e-harness.md) (idea, medium) - the auth slice shipped two integration bugs past thorough unit tests; a browser-driven harness catches that class.
-12. [Return the user object from login/register to skip the /users/me round-trip](docs/backlog/idea-2026-06-03-login-return-user-object.md) (idea, low) - a small backend change that lets the web client populate the current user in one round-trip.
-13. [Job detail page and row-click navigation](docs/backlog/idea-2026-06-05-job-detail-page-row-click.md) (idea) - frontend-only; the backend `GET /v1/jobs/{id}` already returns the full job with DAG.
+7. [UserMenu dropdown panel lacks menu/menuitem roles and keyboard navigation](docs/backlog/feature-2026-06-05-usermenu-panel-menu-roles.md) (feature, low) - the toggle advertises `aria-haspopup=menu` but the panel has no menu semantics or arrow-key nav.
+8. [Adopt role-layering pattern or extract a shared accessible-table primitive](docs/backlog/idea-2026-06-05-shared-accessible-table-primitive.md) (idea, low) - decide once a second pseudo-table appears whether to share the WorkersTable ARIA pattern.
+9. [Upgrade vite 5 to 8 and vitest 2 to 4 to clear dev-tooling audit advisories](docs/backlog/feature-2026-06-05-upgrade-vite-vitest.md) (feature, low) - 5 npm audit advisories (1 critical) in build/test tooling; do it as a deliberate, separately-tested migration.
+10. [Add an end-to-end (Playwright) test harness for the web UI](docs/backlog/idea-2026-06-03-web-e2e-harness.md) (idea, medium) - the auth slice shipped two integration bugs past thorough unit tests; a browser-driven harness catches that class.
+11. [Return the user object from login/register to skip the /users/me round-trip](docs/backlog/idea-2026-06-03-login-return-user-object.md) (idea, low) - a small backend change that lets the web client populate the current user in one round-trip.
+12. [Job detail page and row-click navigation](docs/backlog/idea-2026-06-05-job-detail-page-row-click.md) (idea) - frontend-only; the backend `GET /v1/jobs/{id}` already returns the full job with DAG.
    blocks [last-job-link-status](docs/backlog/idea-2026-06-05-last-job-link-status.md)
-14. [Worker detail running-tasks and activity stats panel](docs/backlog/feature-2026-06-05-worker-detail-activity-panel.md) (feature, medium) - needs a new per-worker task endpoint before the UI can be built.
-15. [Worker detail page admin mutation actions](docs/backlog/feature-2026-06-05-worker-detail-admin-mutations.md) (feature, medium) - the first write operations in the web frontend.
-16. [Worker detail reservations panel](docs/backlog/feature-2026-06-05-worker-detail-reservations-panel.md) (feature, low) - needs a per-worker reservations lookup or a documented client-side filter.
-17. [Schedule detail page and Edit action](docs/backlog/idea-2026-06-05-schedule-detail-page.md) (idea) - editable cron/tz/overlap, read-only spec, next-fires preview, recent runs.
-18. [Fleet-wide schedules stats endpoint for the summary strip](docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md) (idea) - makes the ENABLED/PAUSED strip fleet-wide instead of page-scoped.
+13. [Worker detail running-tasks and activity stats panel](docs/backlog/feature-2026-06-05-worker-detail-activity-panel.md) (feature, medium) - needs a new per-worker task endpoint before the UI can be built.
+14. [Worker detail page admin mutation actions](docs/backlog/feature-2026-06-05-worker-detail-admin-mutations.md) (feature, medium) - the first write operations in the web frontend.
+15. [Worker detail reservations panel](docs/backlog/feature-2026-06-05-worker-detail-reservations-panel.md) (feature, low) - needs a per-worker reservations lookup or a documented client-side filter.
+16. [Schedule detail page and Edit action](docs/backlog/idea-2026-06-05-schedule-detail-page.md) (idea) - editable cron/tz/overlap, read-only spec, next-fires preview, recent runs.
+17. [Fleet-wide schedules stats endpoint for the summary strip](docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md) (idea) - makes the ENABLED/PAUSED strip fleet-wide instead of page-scoped.
    blocks [failed-24h-stat](docs/backlog/idea-2026-06-05-failed-24h-stat.md)
-19. [FAILED 24h summary stat for the Schedules page](docs/backlog/idea-2026-06-05-failed-24h-stat.md) (idea) - needs the failed-runs aggregate from the schedules stats endpoint.
+18. [FAILED 24h summary stat for the Schedules page](docs/backlog/idea-2026-06-05-failed-24h-stat.md) (idea) - needs the failed-runs aggregate from the schedules stats endpoint.
    depends on [schedules-stats-endpoint](docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md)
-20. [Server-side filter and search for the Schedules list](docs/backlog/idea-2026-06-05-schedules-filter-search.md) (idea) - enabled/disabled chips and name/owner/cron search need server-side query params.
-21. [Advanced filter params for list endpoints](docs/backlog/idea-2026-05-06-list-endpoint-filters.md) (idea, low) - the generic backend filtering capability behind the per-page search/filter features below.
-22. [Job search box (server ?q= filter)](docs/backlog/idea-2026-06-05-job-search-box-q-filter.md) (idea) - a real list-query filter (client-side search is misleading under pagination).
-23. [My jobs toggle (server ?mine= filter)](docs/backlog/idea-2026-06-05-my-jobs-toggle-mine-filter.md) (idea) - a server-side `?mine=true` WHERE clause across the jobs list queries.
-24. [LAST JOB column as a link with run-status dot](docs/backlog/idea-2026-06-05-last-job-link-status.md) (idea) - needs the job detail page plus a last-job-status field on the response.
+19. [Server-side filter and search for the Schedules list](docs/backlog/idea-2026-06-05-schedules-filter-search.md) (idea) - enabled/disabled chips and name/owner/cron search need server-side query params.
+20. [Advanced filter params for list endpoints](docs/backlog/idea-2026-05-06-list-endpoint-filters.md) (idea, low) - the generic backend filtering capability behind the per-page search/filter features below.
+21. [Job search box (server ?q= filter)](docs/backlog/idea-2026-06-05-job-search-box-q-filter.md) (idea) - a real list-query filter (client-side search is misleading under pagination).
+22. [My jobs toggle (server ?mine= filter)](docs/backlog/idea-2026-06-05-my-jobs-toggle-mine-filter.md) (idea) - a server-side `?mine=true` WHERE clause across the jobs list queries.
+23. [LAST JOB column as a link with run-status dot](docs/backlog/idea-2026-06-05-last-job-link-status.md) (idea) - needs the job detail page plus a last-job-status field on the response.
    depends on [job-detail-page-row-click](docs/backlog/idea-2026-06-05-job-detail-page-row-click.md)
-25. [Jobs Lanes (swimlanes-by-status) view](docs/backlog/idea-2026-06-05-jobs-lanes-swimlanes-view.md) (idea) - per-status capped list calls with a "+N more" overflow.
-26. [Jobs Timeline view (6h/24h/7d)](docs/backlog/idea-2026-06-05-jobs-timeline-view.md) (idea) - needs a backend time-window list query the API does not expose yet.
+24. [Jobs Lanes (swimlanes-by-status) view](docs/backlog/idea-2026-06-05-jobs-lanes-swimlanes-view.md) (idea) - per-status capped list calls with a "+N more" overflow.
+25. [Jobs Timeline view (6h/24h/7d)](docs/backlog/idea-2026-06-05-jobs-timeline-view.md) (idea) - needs a backend time-window list query the API does not expose yet.
 
 ## CLI & client tooling (cli-client)
 
@@ -140,7 +138,8 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## Recently shipped
 
-- [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) - closed 2026-06-20; a per-runner `forcedCh` (closed once via `CompareAndSwap`) lets `chunkWriter.Write` abort an in-flight log send via the `errForcedAbort` sentinel so a forced cancel returns in ~0.3s instead of the 5s `WaitDelay`; the forced-path terminal `FAILED` send is bounded by a non-blocking try-send while the non-forced path stays blocking.
+- [SPA gets stuck in an infinite redirect loop when the session expires](docs/backlog/closed/bug-2026-06-10-spa-401-redirect-loop.md) - closed 2026-06-20; the 401 handler now resets auth state in `AuthProvider` (clear token/user/status + `queryClient.clear()`, guarded to no-op when already anonymous) and the dead `UnauthorizedRedirect` is removed, so an expired session lands on the sign-in screen instead of an infinite redirect loop.
+- [Forced cancel cannot preempt a log write blocked on a full sendCh](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) - closed 2026-06-20 (PR #44); a per-runner `forcedCh` (closed once via `CompareAndSwap`) lets `chunkWriter.Write` abort an in-flight log send via the `errForcedAbort` sentinel so a forced cancel returns in ~0.3s instead of the 5s `WaitDelay`; the forced-path terminal `FAILED` send is bounded by a non-blocking try-send while the non-forced path stays blocking.
 - [Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - closed 2026-06-20 (PR #43); `seedRunningTask` now advances the claimed task to `running` at the claimed epoch so the drain-mode test exercises a running task.
 - [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
