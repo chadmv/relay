@@ -282,6 +282,36 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 	}})
 }
 
+// chunkWriter is the io.Writer exec copies subprocess stdout/stderr into. Each
+// Write copies its slice (exec reuses the buffer between calls), wraps it in a
+// TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
+// through r.send (bounded on r.ctx.Done()). Write always returns (len(p), nil)
+// so exec never treats the sink as broken and keeps copying until EOF.
+type chunkWriter struct {
+	r         *Runner
+	stream    relayv1.LogStream
+	stepIndex int32
+	stepTotal int32
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	chunk := make([]byte, len(p))
+	copy(chunk, p)
+	w.r.send(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId:    w.r.taskID,
+				Stream:    w.stream,
+				Content:   chunk,
+				Epoch:     w.r.epoch,
+				StepIndex: w.stepIndex,
+				StepTotal: w.stepTotal,
+			},
+		},
+	})
+	return len(p), nil
+}
+
 func (r *Runner) pipeLog(pipe io.Reader, stream relayv1.LogStream, stepIndex, stepTotal int32) {
 	buf := make([]byte, 4096)
 	for {
