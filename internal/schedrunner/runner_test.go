@@ -74,6 +74,26 @@ func makeSpecJSON(t *testing.T) []byte {
 	return spec
 }
 
+func makeSourceSpecJSON(t *testing.T) []byte {
+	t.Helper()
+	spec, err := json.Marshal(map[string]any{
+		"name": "src-job",
+		"tasks": []map[string]any{{
+			"name":    "t",
+			"command": []string{"true"},
+			"source": map[string]any{
+				"type":   "perforce",
+				"stream": "//streams/X/main",
+				"sync": []map[string]any{
+					{"path": "//streams/X/main/...", "rev": "#head"},
+				},
+			},
+		}},
+	})
+	require.NoError(t, err)
+	return spec
+}
+
 func TestRunner_FiresEligibleSchedule(t *testing.T) {
 	h := newRunnerHarness(t)
 	ctx := context.Background()
@@ -169,4 +189,35 @@ func TestRunner_ReconcileOnStartup_AdvancesPastMissedTriggers(t *testing.T) {
 	row, err := h.q.GetScheduledJob(ctx, sj.ID)
 	require.NoError(t, err)
 	require.True(t, row.NextRunAt.Time.After(time.Now()), "next_run_at should be in the future")
+}
+
+func TestRunner_FiresScheduleWithSource_PersistsSource(t *testing.T) {
+	h := newRunnerHarness(t)
+	ctx := context.Background()
+	userID := h.createUser(t, "alice-source@example.com")
+
+	sj, err := h.q.CreateScheduledJob(ctx, store.CreateScheduledJobParams{
+		Name:          "nightly-source",
+		OwnerID:       userID,
+		CronExpr:      "@hourly",
+		Timezone:      "UTC",
+		JobSpec:       makeSourceSpecJSON(t),
+		OverlapPolicy: "skip",
+		Enabled:       true,
+		NextRunAt:     pgtype.Timestamptz{Time: time.Now().Add(-1 * time.Second), Valid: true},
+	})
+	require.NoError(t, err)
+
+	runner := schedrunner.NewRunner(h.pool, h.q)
+	require.NoError(t, runner.TickOnce(ctx))
+
+	jobs, err := h.q.ListJobsByScheduledJob(ctx, sj.ID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+
+	tasks, err := h.q.ListTasksByJob(ctx, jobs[0].ID)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].Source, "cron-fired task must persist its source spec")
+	require.Contains(t, string(tasks[0].Source), `"//streams/X/main"`)
 }
