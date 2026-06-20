@@ -766,35 +766,3 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, toJobResponse(job, "", nil, nil))
 }
-
-// ─── Package-level helper ─────────────────────────────────────────────────────
-
-func updateJobStatusFromTasks(ctx context.Context, q *store.Queries, jobID pgtype.UUID) {
-	tasks, err := q.ListTasksByJob(ctx, jobID)
-	if err != nil || len(tasks) == 0 {
-		// If we can't list tasks we can't determine the correct status; skip update.
-		return
-	}
-	var done, failed, active int
-	for _, t := range tasks {
-		switch t.Status {
-		case "done":
-			done++
-		case "failed", "timed_out":
-			failed++
-		default:
-			active++
-		}
-	}
-	var newStatus string
-	switch {
-	case active > 0:
-		newStatus = "running"
-	case done == len(tasks):
-		newStatus = "done"
-	default:
-		newStatus = "failed"
-	}
-	// Best-effort update; caller has no error return so we can't propagate failures.
-	_, _ = q.UpdateJobStatus(ctx, store.UpdateJobStatusParams{ID: jobID, Status: newStatus})
-}
