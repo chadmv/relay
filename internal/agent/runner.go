@@ -289,15 +289,32 @@ func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
 	if r.abandoned.Load() {
 		return // coordinator reassigned this task; suppress final status
 	}
-	upd := &relayv1.TaskStatusUpdate{
-		TaskId:   r.taskID,
-		Status:   status,
-		ExitCode: exitCode,
-		Epoch:    r.epoch,
+	msg := &relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{TaskStatus: &relayv1.TaskStatusUpdate{
+			TaskId:   r.taskID,
+			Status:   status,
+			ExitCode: exitCode,
+			Epoch:    r.epoch,
+		}},
 	}
-	r.send(&relayv1.AgentMessage{
-		Payload: &relayv1.AgentMessage_TaskStatus{TaskStatus: upd},
-	})
+	if r.forced.Load() {
+		// Forced cancel: best-effort, bounded enqueue so Run returns even when
+		// sendCh is wedged full. Try the enqueue first; only abandon when sendCh
+		// is genuinely full. forcedCh is already closed (Cancel closed it), so a
+		// plain two-case select would race the always-ready closed channel
+		// against the send even when there is headroom; the non-blocking try-send
+		// prefers delivery and falls back to abandon only on a full channel.
+		// Dropping the message is safe: the server's CancelJobTasks already set
+		// the task failed and bumped assignment_epoch, so this terminal message
+		// (carrying the old r.epoch) is epoch-fenced out.
+		select {
+		case r.sendCh <- msg:
+		default:
+			// sendCh full and wedged; abandon best-effort. Server is authoritative.
+		}
+		return
+	}
+	r.send(msg)
 }
 
 func (r *Runner) send(msg *relayv1.AgentMessage) {
