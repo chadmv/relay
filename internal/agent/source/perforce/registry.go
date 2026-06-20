@@ -69,28 +69,70 @@ func (r *Registry) Save() error {
 	return os.Rename(tmp, r.path)
 }
 
-// Get returns a pointer to the entry with the given shortID, or nil.
-func (r *Registry) Get(shortID string) *WorkspaceEntry {
+// Get returns a copy of the entry with the given shortID and true, or a zero
+// value and false. Callers receive a copy so they cannot mutate registry memory
+// without going through Mutate.
+func (r *Registry) Get(shortID string) (WorkspaceEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.Workspaces {
 		if r.Workspaces[i].ShortID == shortID {
-			return &r.Workspaces[i]
+			return r.Workspaces[i], true
 		}
 	}
-	return nil
+	return WorkspaceEntry{}, false
 }
 
-// GetBySourceKey returns a pointer to the entry matching sourceKey, or nil.
-func (r *Registry) GetBySourceKey(sourceKey string) *WorkspaceEntry {
+// GetBySourceKey returns a copy of the entry matching sourceKey and true, or a
+// zero value and false.
+func (r *Registry) GetBySourceKey(sourceKey string) (WorkspaceEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.Workspaces {
 		if r.Workspaces[i].SourceKey == sourceKey {
-			return &r.Workspaces[i]
+			return r.Workspaces[i], true
 		}
 	}
-	return nil
+	return WorkspaceEntry{}, false
+}
+
+// Mutate applies fn to the live entry with the given shortID under the lock.
+// Returns an error if no entry matches. This is the only sanctioned way to edit
+// an existing entry in place; it cannot clobber a concurrently-appended
+// OpenTaskChangelist the way a read-copy-Upsert sequence could.
+func (r *Registry) Mutate(shortID string, fn func(*WorkspaceEntry)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.Workspaces {
+		if r.Workspaces[i].ShortID == shortID {
+			fn(&r.Workspaces[i])
+			return nil
+		}
+	}
+	return fmt.Errorf("workspace %s not found", shortID)
+}
+
+// Snapshot returns an independent copy of the workspace slice for read-only
+// iteration outside the lock.
+func (r *Registry) Snapshot() []WorkspaceEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]WorkspaceEntry, len(r.Workspaces))
+	copy(out, r.Workspaces)
+	return out
+}
+
+// ShortIDInUse reports whether shortID is already claimed by a workspace bound
+// to a different sourceKey.
+func (r *Registry) ShortIDInUse(shortID, sourceKey string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.Workspaces {
+		if r.Workspaces[i].ShortID == shortID && r.Workspaces[i].SourceKey != sourceKey {
+			return true
+		}
+	}
+	return false
 }
 
 // Upsert inserts or replaces the entry by ShortID.
