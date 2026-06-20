@@ -544,28 +544,37 @@ func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
 	if !owned {
 		return // a newer connection owns this worker; leave shared state alone
 	}
-	h.markWorkerOffline(workerID)
+	epoch := sender.connEpoch
+	if h.markWorkerOffline(workerID, epoch) == 0 {
+		return // a fresher connection holds the epoch; leave grace/requeue alone
+	}
 	if h.grace != nil {
-		h.grace.Start(workerID)
+		h.grace.Start(workerID, epoch)
 	} else {
-		h.requeueWorkerTasks(workerID)
+		h.requeueWorkerTasks(workerID, epoch)
 	}
 }
 
-// markWorkerOffline is called in a defer after the stream ends.
-func (h *Handler) markWorkerOffline(workerID string) {
+// markWorkerOffline is called in a defer after the stream ends. It is fenced on
+// connection_epoch: if a fresher connection has bumped the epoch, the write
+// affects zero rows and the offline broker event / metrics-clear are skipped.
+// Returns the number of rows updated (0 = fence superseded, 1 = applied).
+func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
-		return
+		return 0
 	}
 	ctx := context.Background()
 	now := time.Now()
-	_, _ = h.q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
-		ID:             id,
-		Status:         "offline",
-		LastSeenAt:     pgtype.Timestamptz{Time: now, Valid: true},
-		DisconnectedAt: pgtype.Timestamptz{Time: now, Valid: true},
+	rows, err := h.q.MarkWorkerOfflineIfEpoch(ctx, store.MarkWorkerOfflineIfEpochParams{
+		ID:              id,
+		LastSeenAt:      pgtype.Timestamptz{Time: now, Valid: true},
+		DisconnectedAt:  pgtype.Timestamptz{Time: now, Valid: true},
+		ConnectionEpoch: epoch,
 	})
+	if err != nil || rows == 0 {
+		return 0
+	}
 	h.broker.Publish(events.Event{
 		Type: "worker",
 		Data: []byte(fmt.Sprintf(`{"id":%q,"status":"offline"}`, workerID)),
@@ -573,6 +582,7 @@ func (h *Handler) markWorkerOffline(workerID string) {
 	if h.Metrics != nil {
 		h.Metrics.Clear(workerID)
 	}
+	return rows
 }
 
 // requeueWorkerTasks requeues dispatched/running tasks for a disconnected worker.
