@@ -76,6 +76,18 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		return
 	}
 
+	// Whether any connected worker advertises a workspace provider. Used only to
+	// distinguish "source-bearing task held because no capable worker exists"
+	// (observable) from "all capable workers busy" (normal backpressure, silent).
+	anyProviderWorker := false
+	for i := range workers {
+		w := &workers[i]
+		if (w.Status == "online" || w.Status == "stale") && !w.DisabledAt.Valid && w.SupportsWorkspaces {
+			anyProviderWorker = true
+			break
+		}
+	}
+
 	reservations, err := d.q.ListActiveReservations(ctx)
 	if err != nil {
 		return
@@ -117,14 +129,39 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 		}
 	}
 
+	heldSourceTasks := 0
 	for _, task := range tasks {
 		w := d.selectWorker(task, workers, reservations, activeByWorker, warmByWorker)
 		if w != nil {
 			if d.sendTask(ctx, task, *w) {
 				activeByWorker[w.ID]++ // track in-cycle dispatches
 			}
+			continue
+		}
+		// No worker selected. If this is a source-bearing task and no connected
+		// worker advertises a workspace provider, it is held for lack of a
+		// capable worker (distinct from normal "all busy" backpressure).
+		if !anyProviderWorker && taskIsSourceBearing(task) {
+			heldSourceTasks++
 		}
 	}
+	if heldSourceTasks > 0 {
+		log.Printf("dispatch: %d source-bearing task(s) held pending; no connected worker has a workspace provider", heldSourceTasks)
+	}
+}
+
+// taskIsSourceBearing reports whether a task carries a parseable, non-empty
+// source spec - the same condition selectWorker uses to require a workspace
+// provider. Kept in sync with the taskSrc parse in selectWorker.
+func taskIsSourceBearing(task store.Task) bool {
+	if len(task.Source) == 0 {
+		return false
+	}
+	var s api.SourceSpec
+	if err := json.Unmarshal(task.Source, &s); err != nil {
+		return false
+	}
+	return s.Type != ""
 }
 
 func (d *Dispatcher) selectWorker(
