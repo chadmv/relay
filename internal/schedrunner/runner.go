@@ -3,6 +3,7 @@ package schedrunner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -66,46 +67,49 @@ func (r *Runner) TickOnce(ctx context.Context) error {
 		return err
 	}
 	for _, row := range rows {
-		r.fireOne(ctx, q, row)
+		next, err := r.fireOne(ctx, q, row)
+		if err != nil {
+			log.Printf("schedrunner: fire schedule %s: %v", row.Name, err)
+			r.advanceNextRun(ctx, q, row, next)
+		}
 	}
 	return tx.Commit(ctx)
 }
 
-func (r *Runner) fireOne(ctx context.Context, q *store.Queries, row store.ScheduledJob) {
+// fireOne attempts to fire one schedule using q. On success it creates the job
+// AND advances the schedule (last_run_at + last_job_id) on q, then returns a nil
+// error. On failure it returns the next_run_at the caller should advance to
+// (without setting last_run_at) and a non-nil error. The caller is responsible
+// for the savepoint and the failure-path advance on the outer tx.
+func (r *Runner) fireOne(ctx context.Context, q *store.Queries, row store.ScheduledJob) (time.Time, error) {
 	var spec jobspec.JobSpec
 	if err := json.Unmarshal(row.JobSpec, &spec); err != nil {
-		log.Printf("schedrunner: schedule %s has invalid job_spec: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, time.Now().Add(time.Minute))
-		return
+		return time.Now().Add(time.Minute), fmt.Errorf("invalid job_spec: %w", err)
 	}
 	sched, err := ParseSchedule(row.CronExpr, row.Timezone)
 	if err != nil {
-		log.Printf("schedrunner: schedule %s failed to parse cron: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, time.Now().Add(time.Minute))
-		return
+		return time.Now().Add(time.Minute), fmt.Errorf("parse cron: %w", err)
 	}
 	nextFire := sched.Next(time.Now())
 
 	if row.OverlapPolicy == "skip" {
 		active, err := q.CountActiveJobsForSchedule(ctx, row.ID)
 		if err != nil {
-			log.Printf("schedrunner: CountActiveJobsForSchedule for %s: %v", row.Name, err)
-			return
+			return nextFire, fmt.Errorf("count active jobs: %w", err)
 		}
 		if active > 0 {
 			log.Printf("schedrunner: skipping schedule %s (previous run still active)", row.Name)
 			r.advance(ctx, q, row, pgtype.UUID{}, nextFire)
-			return
+			return nextFire, nil
 		}
 	}
 
 	job, _, err := jobcreate.CreateJobFromSpec(ctx, q, spec, row.OwnerID, row.ID)
 	if err != nil {
-		log.Printf("schedrunner: create job failed for %s: %v", row.Name, err)
-		r.advance(ctx, q, row, pgtype.UUID{}, nextFire)
-		return
+		return nextFire, fmt.Errorf("create job: %w", err)
 	}
 	r.advance(ctx, q, row, job.ID, nextFire)
+	return nextFire, nil
 }
 
 func (r *Runner) advance(ctx context.Context, q *store.Queries, row store.ScheduledJob, newJobID pgtype.UUID, next time.Time) {
@@ -115,6 +119,15 @@ func (r *Runner) advance(ctx context.Context, q *store.Queries, row store.Schedu
 		LastJobID: newJobID, // COALESCE in SQL preserves old value when this is invalid
 	}); err != nil {
 		log.Printf("schedrunner: AdvanceScheduledJob for %s: %v", row.Name, err)
+	}
+}
+
+func (r *Runner) advanceNextRun(ctx context.Context, q *store.Queries, row store.ScheduledJob, next time.Time) {
+	if err := q.AdvanceScheduledJobNextRun(ctx, store.AdvanceScheduledJobNextRunParams{
+		ID:        row.ID,
+		NextRunAt: pgtype.Timestamptz{Time: next, Valid: true},
+	}); err != nil {
+		log.Printf("schedrunner: AdvanceScheduledJobNextRun for %s: %v", row.Name, err)
 	}
 }
 
