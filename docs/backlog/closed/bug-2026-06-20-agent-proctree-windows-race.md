@@ -1,8 +1,10 @@
 ---
 title: Windows proctree setup races with cmd.Start() on the agent Runner
 type: bug
-status: open
+status: closed
 created: 2026-06-20
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: surfaced by the first `-race` run while closing race-test-target-perforce-package
 ---
@@ -56,3 +58,17 @@ run covers the agent package again.
 - `internal/agent/runner.go:174,188` (`(*Runner).Run`)
 - `Makefile` (`test-race` target, currently excludes `relay/internal/agent`)
 - [[idea-2026-06-19-race-test-target-perforce-package]] (the CI race target that surfaced this)
+
+## Resolution
+fixed - `setupProcTree` now returns `(assign, cleanup)` on both platforms; `(*Runner).Run`
+calls `assign()` synchronously immediately after a successful `cmd.Start()`, so the
+`cmd.Process` read happens-after the Start write on the same goroutine. The racing poll
+goroutine (and its `runtime`/`time` imports and leak-guard deadline) is deleted from
+`proctree_windows.go`; on Windows `assign` runs `ensureAssigned()` (Job Object assignment)
+synchronously, on unix it is a no-op (the process group is set via `SysProcAttr` before
+Start). `cmd.Cancel`, kill-on-job-close semantics, and `cleanup` are otherwise unchanged.
+With the race gone, `relay/internal/agent` was re-included in the `make test-race` target
+(Windows-gcc NOTE kept). Verified with load-bearing-red under `go test -race` on Windows
+(MSYS2 mingw64 gcc): the detector reported the race before the fix and is clean after;
+Linux `-race` stays green (unix path unchanged). Plan:
+`docs/superpowers/plans/2026-06-20-agent-proctree-windows-race.md`.
