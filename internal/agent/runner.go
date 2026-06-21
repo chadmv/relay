@@ -171,7 +171,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process exit/kill
-		cleanupProcTree := setupProcTree(cmd)
+		assignProcTree, cleanupProcTree := setupProcTree(cmd)
 		cmd.Env = env
 		if workDir != "" {
 			cmd.Dir = workDir
@@ -189,6 +189,11 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
 			break
 		}
+		// Assign the started process to the proctree (Windows Job Object) now
+		// that cmd.Start has populated cmd.Process. Calling this synchronously
+		// after Start - rather than from a goroutine that polls cmd.Process -
+		// avoids racing the Start write to cmd.Process. No-op on Unix.
+		assignProcTree()
 
 		waitErr := cmd.Wait()
 		cleanupProcTree()
