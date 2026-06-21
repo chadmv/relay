@@ -1,8 +1,10 @@
 ---
 title: Reconnect backoff never resets in agent and NotifyListener
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -28,3 +30,17 @@ For the agent, signal successful registration out of `connect` (e.g. a `register
 ## Related
 - `internal/agent/agent.go:94, 117-120, 178-185`
 - `internal/scheduler/notify.go:28-49`
+
+## Resolution
+fixed - `connect()` now returns a `registered` bool and `session()` a `listened` bool
+signalling an established session. Each Run loop resets `backoff` to 1s BEFORE sleeping
+when the prior session was healthy, so the first reconnect after a healthy drop is prompt
+regardless of accumulated backoff; repeated unhealthy failures still back off
+exponentially toward the 60s cap, and the first failure from a fresh start still waits
+~1s. The dead always-nil error return on `buildRegisterRequest` was removed (single-return
+signature). A pure `nextReconnectBackoff(current, healthy)` helper per site is unit-tested
+deterministically (no sleeps); a `reconnectSleep` test seam makes the reset-before-sleep
+ordering observable without real timing. The agent's `sendWG` join / one-bounded-sender
+ordering is preserved. A first implementation reset AFTER the sleep (only the second
+reconnect benefited) was caught in verification and corrected to reset-before-sleep. Plan:
+`docs/superpowers/plans/2026-06-20-reconnect-backoff-never-resets.md`.
