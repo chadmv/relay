@@ -37,7 +37,7 @@ vet-integration:
 # the perforce registry race guard.
 # SCOPE: excludes relay/internal/agent because its Windows-only proctree code
 # (internal/agent/proctree_windows.go) has a pre-existing data race surfaced when
-# this target was first run under -race; see the backlog item for that race. The
+# this target was first run under -race (docs/backlog/bug-2026-06-20-agent-proctree-windows-race.md). The
 # race is //go:build windows so Linux never compiles it (proctree_unix.go is the
 # clean Linux build), and the integration tester proved `go test -race ./...` is
 # fully green on Linux including internal/agent. CI runs on Linux and therefore

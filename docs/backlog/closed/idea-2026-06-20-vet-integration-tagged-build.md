@@ -1,11 +1,21 @@
 ---
 title: Verification flow does not compile integration-tagged files (vet/build -tags integration in CI)
 type: idea
-status: open
+status: closed
 created: 2026-06-20
+closed: 2026-06-20
 priority: medium
 source: noticed while closing bug-2026-06-19-finishregister-gap-connection-epoch-race (Phase 4 caught a HIGH compile break invisible to unit make test)
 ---
+
+## Resolution
+Resolved 2026-06-20, folded into `race-test-target-perforce-package` (same
+CI/Makefile surface). Added a `make vet-integration` target (`go vet -tags integration ./...`)
+that type-checks every `//go:build integration` file without Docker, and wired it
+as the first step of the new `.github/workflows/go-ci.yml` (runs before the race
+step so a fast compile failure surfaces first). A shared-signature change that
+breaks an integration-tagged callsite is now caught in CI on every push/PR.
+Spec: `docs/superpowers/specs/2026-06-20-race-test-target-perforce-design.md`.
 
 # Verification flow does not compile integration-tagged files
 
