@@ -705,12 +705,6 @@ func TestArchiveUser_SelfArchiveForbidden(t *testing.T) {
 	assert.Equal(t, "cannot archive yourself", body["error"])
 }
 
-// TestArchiveUser_LastAdminGuard exercises the last-admin guard by simulating
-// a race: admin A authenticates, then A's row is archived externally (e.g.,
-// by another admin in a parallel request) before A's archive call reaches the
-// guard. BearerAuth does not filter on archived_at (see middleware.go), so
-// A's still-valid token passes auth; the guard then catches the inconsistent
-// state when A tries to archive admin B (the only remaining active admin).
 // TestArchiveUser_ArchivedAdminTokenRejected supersedes the old
 // TestArchiveUser_LastAdminGuard. That test simulated the login-vs-archive race
 // by archiving admin A via direct SQL while keeping A's token, then relied on
