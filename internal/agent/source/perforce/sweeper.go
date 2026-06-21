@@ -3,6 +3,7 @@ package perforce
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,7 +79,8 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 		for _, w := range candidates {
 			if now.Sub(w.LastUsedAt) > s.MaxAge {
 				if err := s.evict(ctx, reg, w); err != nil {
-					return evicted, err
+					log.Printf("sweeper: evict %s: %v", w.ShortID, err)
+					continue
 				}
 				evicted = append(evicted, w.ShortID)
 			}
@@ -100,7 +102,8 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 				break
 			}
 			if err := s.evict(ctx, reg, w); err != nil {
-				return evicted, err
+				log.Printf("sweeper: evict %s: %v", w.ShortID, err)
+				continue
 			}
 			evicted = append(evicted, w.ShortID)
 		}
@@ -109,8 +112,13 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 }
 
 func (s *Sweeper) evict(ctx context.Context, reg *Registry, w WorkspaceEntry) error {
-	if err := s.Client.DeleteClient(ctx, w.ClientName); err != nil {
-		return err
+	// When w.DirtyDelete is set, a prior sweep already deleted the p4 client
+	// and only the on-disk directory remains. Calling DeleteClient again would
+	// fail ("client doesn't exist") and previously wedged the whole sweep.
+	if !w.DirtyDelete {
+		if err := s.Client.DeleteClient(ctx, w.ClientName); err != nil {
+			return err
+		}
 	}
 	if err := os.RemoveAll(filepath.Join(s.Root, w.ShortID)); err != nil {
 		_ = reg.MarkDirtyDelete(w.ShortID, true)
