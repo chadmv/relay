@@ -71,6 +71,38 @@ Cross-cutting rules that new code must not bypass. Every high-severity finding i
 - **No interior pointers across locks.** Shared registries return value copies from getters; mutation happens through methods that hold the lock, never on pointers that escaped it.
 - **Single JSON entry point.** HTTP request bodies are read only via `readJSON` in `internal/api/server.go`; request-size limits and decode policy live there, not at call sites.
 
+## Subagent team and routing
+
+Development is supported by a team of role-specialized subagents in `.claude/agents/`
+(`relay-tpm`, `relay-planner`, `relay-backend-engineer`, `relay-frontend-engineer`,
+`relay-integration-tester`, `relay-code-reviewer`, plus the built-in `Explore` for
+read-only discovery). The main interactive session is the conductor: it orchestrates them
+through a phased `spec -> plan -> implement -> verify -> integrate -> retro` lifecycle. See
+[docs/agent-team/README.md](docs/agent-team/README.md) for the roster, the phase pipeline,
+gate modes, and when to dispatch which agent. The design spec behind the team is
+`docs/superpowers/specs/2026-06-18-agent-team-design.md`.
+
+**Doc-only vs code agents.** `relay-tpm`, `relay-planner`, and `relay-code-reviewer` never
+touch source - they produce specs, plans, and review findings respectively. Committing the
+spec doc (Phase 1) and the plan doc (Phase 2) is always the conductor's step, since those
+agents hold no git access; both commits land at the phase boundary before any code is
+written. `relay-backend-engineer`, `relay-frontend-engineer`, and `relay-integration-tester`
+edit code (and tests) under TDD and the Invariants above.
+
+**Verification.** Phase 4 runs the `relay-verify` workflow (`.claude/workflows/relay-verify.js`),
+a parallel fan-out of the code reviewer across dimensions plus the integration tester. Running
+a Workflow requires explicit opt-in. Confirmed findings route back to the owning engineer, then
+re-verify until clean.
+
+**Closing backlog items.** Always close a backlog item with the `/backlog close <fragment>`
+command, never by hand-editing the item's `status` field in place. The command runs the full
+close sequence the skill enforces: it `git mv`s the file from `docs/backlog/` into
+`docs/backlog/closed/`, stamps `status: closed` plus `closed:`/`resolution:` frontmatter,
+appends a `## Resolution` note, and commits. The `git mv` to `docs/backlog/closed/` is required
+scope when a task closes a backlog item, not optional cleanup. Flipping `status` alone leaves
+the file in the open directory and skips these steps, which `/backlog list` then reports as a
+malformed open item.
+
 ## Behavior
 
 Behavioral guidelines to reduce common LLM coding mistakes.
