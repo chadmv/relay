@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 )
 
 // AdminCommand returns the relay admin Command (subcommand group).
@@ -13,7 +14,7 @@ func AdminCommand() Command {
 		Name:  "admin",
 		Usage: "admin <passwd|users> [args]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
-			return doAdmin(ctx, cfg, args, stderrWriter())
+			return doAdmin(ctx, cfg, args, os.Stdout)
 		},
 	}
 }
@@ -41,7 +42,7 @@ func doAdminPasswd(ctx context.Context, cfg *Config, args []string, out io.Write
 	}
 	email := args[0]
 
-	newPass, err := readPasswordFn(out, "New password for "+email+": ")
+	newPass, err := readPasswordFn(stderrWriter(), "New password for "+email+": ")
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}
@@ -49,7 +50,7 @@ func doAdminPasswd(ctx context.Context, cfg *Config, args []string, out io.Write
 		return fmt.Errorf("new password is required")
 	}
 
-	confirm, err := readPasswordFn(out, "Confirm new password: ")
+	confirm, err := readPasswordFn(stderrWriter(), "Confirm new password: ")
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}

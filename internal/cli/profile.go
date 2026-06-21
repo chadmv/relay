@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -15,7 +16,7 @@ func ProfileCommand() Command {
 		Name:  "profile",
 		Usage: "profile <update> [flags]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
-			return doProfile(ctx, cfg, args, stderrWriter())
+			return doProfile(ctx, cfg, args, os.Stdout)
 		},
 	}
 }
