@@ -798,7 +798,7 @@ Recurring jobs are defined as **schedules** — a cron expression plus a stored 
 
 The server reconciles `next_run_at` on startup: any firings that fell during downtime are skipped (no catch-up), and the schedule resumes on its next eligible fire. A polling loop ticks every 10 s.
 
-Schedules are owned by the user who created them; non-admins see only their own. Admins can list and operate on all of them, and only admins can use `run-now` to fire a schedule immediately.
+Schedules are owned by the user who created them; non-admins see only their own. Admins can list and operate on all of them. The schedule's owner (or an admin) can use `run-now` to fire a schedule immediately.
 
 ---
 
@@ -883,7 +883,7 @@ relay schedules delete <schedule-id>
 
 #### `relay schedules run-now`
 
-Fire the schedule immediately, outside of its normal cron cadence (admin only).
+Fire the schedule immediately, outside of its normal cron cadence (owner or admin).
 
 ```sh
 relay schedules run-now <schedule-id>
@@ -1031,7 +1031,7 @@ Write tools (any logged-in user):
 | `relay_cancel_job` | Cancel a job (no force in v1). |
 | `relay_wait_for_job` | Block until terminal or timeout (default 60s, max 300s). |
 | `relay_create_schedule` / `relay_update_schedule` / `relay_delete_schedule` | Schedule CRUD. |
-| `relay_run_schedule_now` | Fire a schedule immediately (admin-only). |
+| `relay_run_schedule_now` | Fire a schedule immediately (owner or admin). |
 
 Calls that map to admin-only endpoints return a `forbidden` error when invoked by a non-admin token.
 
@@ -1260,7 +1260,7 @@ Returns the raw token once:
 | `GET` | `/v1/scheduled-jobs/{id}` | Get a scheduled job |
 | `PATCH` | `/v1/scheduled-jobs/{id}` | Update a scheduled job |
 | `DELETE` | `/v1/scheduled-jobs/{id}` | Delete a scheduled job |
-| `POST` | `/v1/scheduled-jobs/{id}/run-now` | Fire the schedule immediately (admin only) |
+| `POST` | `/v1/scheduled-jobs/{id}/run-now` | Fire the schedule immediately (owner or admin) |
 
 **POST `/v1/scheduled-jobs`** body:
 

@@ -267,6 +267,39 @@ func TestRunScheduledJobNow_CreatesJob(t *testing.T) {
 	assert.Equal(t, "run-now-test-job", resp["name"])
 }
 
+// TestRunScheduledJobNow_Authz pins the run-now contract: owner-or-admin. A
+// non-admin owner may fire their own schedule (201); a non-admin who does not
+// own it gets 404 (enumeration-safe, via ownedScheduledJob); an admin may fire
+// any schedule (201).
+func TestRunScheduledJobNow_Authz(t *testing.T) {
+	srv, q := newTestServer(t)
+	owner := createTestUser(t, q, "Owner", "runnow-owner@example.com", false)
+	ownerToken := createTestToken(t, q, owner.ID)
+
+	schedID := createScheduleHelper(t, srv, ownerToken, "run-now-authz")
+
+	runNow := func(token string) int {
+		req := httptest.NewRequest("POST", "/v1/scheduled-jobs/"+schedID+"/run-now", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Non-admin owner can fire their own schedule.
+	assert.Equal(t, http.StatusCreated, runNow(ownerToken))
+
+	// Non-admin non-owner is rejected as not-found (no existence leak).
+	stranger := createTestUser(t, q, "Stranger", "runnow-stranger@example.com", false)
+	strangerToken := createTestToken(t, q, stranger.ID)
+	assert.Equal(t, http.StatusNotFound, runNow(strangerToken))
+
+	// Admin can fire any schedule, even one they do not own.
+	admin := createTestUser(t, q, "Admin", "runnow-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	assert.Equal(t, http.StatusCreated, runNow(adminToken))
+}
+
 func TestListJobs_FilterByScheduledJobID(t *testing.T) {
 	srv, q := newTestServer(t)
 	user := createTestUser(t, q, "Alice", "filterjobs-alice@example.com", false)
