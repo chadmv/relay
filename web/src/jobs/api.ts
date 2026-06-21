@@ -1,14 +1,6 @@
 import { apiFetch } from '../lib/api'
 
-export type JobStatus =
-  | 'pending'
-  | 'queued'
-  | 'dispatched'
-  | 'running'
-  | 'done'
-  | 'failed'
-  | 'timed_out'
-  | 'cancelled'
+export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 
 export interface Job {
   id: string

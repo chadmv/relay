@@ -5,21 +5,18 @@ interface StatusView {
   dot: string
 }
 
-// Color mapping follows the hi-fi HoloJobsList (the picked direction):
-// done=ok, running/dispatched=accent, queued/pending=warn, failed/timed_out=err,
+// Color mapping for the real jobs.status vocabulary:
+// done=ok, running=accent, pending=warn, failed=err,
 // everything else (cancelled, unknown) = fg-mute.
 export function statusColor(status: JobStatus): StatusView {
   switch (status) {
     case 'done':
       return { text: 'text-ok', dot: 'bg-ok' }
     case 'running':
-    case 'dispatched':
       return { text: 'text-accent', dot: 'bg-accent' }
-    case 'queued':
     case 'pending':
       return { text: 'text-warn', dot: 'bg-warn' }
     case 'failed':
-    case 'timed_out':
       return { text: 'text-err', dot: 'bg-err' }
     default:
       return { text: 'text-fg-mute', dot: 'bg-fg-mute' }

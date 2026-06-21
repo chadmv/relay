@@ -52,6 +52,20 @@ test('selecting a status chip re-requests with status and disables sort', async 
   expect(screen.getByLabelText('Sort jobs')).toBeDisabled()
 })
 
+test('selecting the Queued chip requests status=pending', async () => {
+  const requests: URLSearchParams[] = []
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      requests.push(new URL(request.url).searchParams)
+      return HttpResponse.json(page)
+    }),
+  )
+  renderWithQuery(<JobsPage />)
+  await screen.findByText('film-x render')
+  await userEvent.click(screen.getByRole('button', { name: 'Queued' }))
+  await waitFor(() => expect(requests.some((q) => q.get('status') === 'pending')).toBe(true))
+})
+
 test('shows the error banner with retry, then recovers', async () => {
   server.use(http.get('/v1/jobs', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
   renderWithQuery(<JobsPage />)

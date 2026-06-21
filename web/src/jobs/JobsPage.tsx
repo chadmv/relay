@@ -9,7 +9,7 @@ import type { JobSort } from './api'
 const FILTERS: { key: string; label: string; status: string }[] = [
   { key: 'all', label: 'All', status: '' },
   { key: 'running', label: 'Running', status: 'running' },
-  { key: 'queued', label: 'Queued', status: 'queued' },
+  { key: 'queued', label: 'Queued', status: 'pending' },
   { key: 'done', label: 'Done', status: 'done' },
   { key: 'failed', label: 'Failed', status: 'failed' },
 ]
