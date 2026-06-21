@@ -1,0 +1,34 @@
+name: go-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: race + integration-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Integration-tagged build check
+        run: make vet-integration
+      - name: Race unit tests
+        # CI runs on Linux, where the whole module is race-clean. The shared
+        # `make test-race` target excludes internal/agent for local Windows devs
+        # (a Windows-only race in proctree_windows.go, tracked separately); that
+        # file is never compiled on Linux, so CI runs the complete set for full
+        # coverage of the agent send goroutine and Runner.
+        run: go test -race ./... -timeout 180s
