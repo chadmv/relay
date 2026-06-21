@@ -38,9 +38,14 @@ vet-integration:
 # SCOPE: excludes relay/internal/agent because its Windows-only proctree code
 # (internal/agent/proctree_windows.go) has a pre-existing data race surfaced when
 # this target was first run under -race; see the backlog item for that race. The
-# race is //go:build windows so Linux/CI never compiles it, but the recipe stays
-# descoped so the same command is green on every platform. Re-include
-# relay/internal/agent here once that race is fixed.
+# race is //go:build windows so Linux never compiles it (proctree_unix.go is the
+# clean Linux build), and the integration tester proved `go test -race ./...` is
+# fully green on Linux including internal/agent. CI runs on Linux and therefore
+# invokes the full `go test -race ./...` set directly (see
+# .github/workflows/go-ci.yml) rather than this target, for complete coverage of
+# the agent send goroutine and Runner. This target stays descoped only so the
+# same command is green for local Windows devs until the proctree race is fixed;
+# re-include relay/internal/agent here once it is.
 # NOTE (Windows): -race needs cgo with a working gcc. The default Strawberry Perl
 # gcc fails (exit status 0xc0000139); use MSYS2 mingw64 via
 # CC=/c/msys64/mingw64/bin/gcc.exe (with its bin on PATH). Linux/CI is unaffected.
