@@ -29,6 +29,11 @@ were likewise already owner-or-admin. The misclassification lived only in docs:
   ([[bug-2026-05-09-mcp-admin-tools-role-filtering]]) updated to drop
   `relay_run_schedule_now` from its admin-only set; only `relay_list_reservations`
   remains in scope there.
+- **Python SDK** (`python/src/relay/client.py` `run_schedule_now` docstring,
+  `python/README.md` method table) corrected from "Admin-only on the server" to
+  owner-or-admin; the SDK's 403->`AuthError` mapping test was renamed
+  contract-neutral (`test_run_schedule_now_forbidden_raises_auth_error`). Caught
+  by code review after the initial pass missed it.
 - **Test** `TestRunScheduledJobNow_Authz`
   (`internal/api/scheduled_jobs_test.go`) pins the contract: non-admin owner 201,
   non-admin non-owner 404, admin non-owner 201.

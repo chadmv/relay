@@ -81,7 +81,7 @@ b = job.add_task("b", commands=[["echo", "2"]], depends_on=[a])  # or ["a"]
 | `wait(id, timeout=None, poll_interval=1.0)` | Block (polling) until the job is terminal. |
 | `create_schedule(...)` | POST `/v1/scheduled-jobs`. |
 | `list_schedules() / get_schedule(id) / update_schedule(id, ...) / delete_schedule(id)` | Standard CRUD. |
-| `run_schedule_now(id)` | POST `/v1/scheduled-jobs/{id}/run-now`. Admin-only on the server. |
+| `run_schedule_now(id)` | POST `/v1/scheduled-jobs/{id}/run-now`. Allowed for the schedule's owner or an admin. |
 
 ## Errors
 

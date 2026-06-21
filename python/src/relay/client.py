@@ -426,8 +426,8 @@ class Client:
         raise_for_response(response)
 
     def run_schedule_now(self, schedule_id: str) -> Job:
-        """Fire a schedule immediately. Admin-only on the server; non-admin
-        callers get :class:`AuthError`.
+        """Fire a schedule immediately. Allowed for the schedule's owner or an
+        admin; other callers get :class:`AuthError`.
         """
         self._require_token()
         response = self._http.post(f"/v1/scheduled-jobs/{schedule_id}/run-now")

@@ -261,9 +261,9 @@ def test_create_schedule_serializes_job_spec() -> None:
     assert sched.id == "55555555-5555-5555-5555-555555555555"
 
 
-def test_run_schedule_now_admin_403_raises_auth_error() -> None:
+def test_run_schedule_now_forbidden_raises_auth_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"error": "admin only"})
+        return httpx.Response(403, json={"error": "forbidden"})
 
     client = _make_client(handler)
     with pytest.raises(AuthError):
