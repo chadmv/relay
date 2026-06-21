@@ -62,3 +62,37 @@ func TestDelivery_ToolErrorReachesClient(t *testing.T) {
 	require.Equal(t, "auth_expired", got.Code)
 	require.Equal(t, "run `relay login` to refresh credentials", got.Hint)
 }
+
+// TestDelivery_ValidationErrorReachesClient drives relay_get_job with an empty job_id
+// (a client-side validation *ToolError that never reaches the backend) and asserts the
+// structured error is delivered as an IsError result.
+func TestDelivery_ValidationErrorReachesClient(t *testing.T) {
+	// Backend should never be hit; fail loudly if it is.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("backend should not be called for a validation error; got %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
+
+	cs := connectClient(t, s)
+
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "relay_get_job",
+		Arguments: map[string]any{"job_id": ""},
+	})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.NotEmpty(t, res.Content)
+
+	text, ok := res.Content[0].(*mcpsdk.TextContent)
+	require.True(t, ok)
+
+	var got ToolError
+	require.NoError(t, json.Unmarshal([]byte(text.Text), &got),
+		"delivered text must be the JSON-encoded ToolError, got %q", text.Text)
+	require.Equal(t, "validation", got.Code)
+	require.Contains(t, got.Message, "job_id is required")
+}
