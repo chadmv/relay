@@ -139,6 +139,10 @@ func (s *Sweeper) evict(ctx context.Context, reg *Registry, w WorkspaceEntry) er
 		if !ok {
 			return ErrEvictClaimLost
 		}
+		// release() must stay the outermost deferred cleanup so the reservation
+		// outlives OnEvictedCB (which clears p.workspaces). A Prepare arriving
+		// between OnEvictedCB and release() still sees p.evicting set and backs
+		// out; only after release() does it find no registry entry and rebuild.
 		defer release()
 	}
 	// When w.DirtyDelete is set, a prior sweep already deleted the p4 client

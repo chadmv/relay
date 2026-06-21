@@ -309,6 +309,12 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 // and backs out if it lost. Net guarantee: a workspace is never deleted while a
 // Prepare holds (or is about to hold) it, and exactly one of the two proceeds.
 func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
+	// This reservation block is the canonical twin of ReserveForEvict below;
+	// they intentionally share the holder-check + p.evicting discipline and the
+	// p.mu->ws.mu lock order. They are kept separate (not deduped) only so this
+	// path can return the two distinct descriptive errors ("currently in use" vs
+	// "already being evicted") that ReserveForEvict collapses to ok==false. If
+	// the reservation discipline changes, update both.
 	p.mu.Lock()
 	if ws, ok := p.workspaces[shortID]; ok {
 		ws.mu.Lock()
@@ -361,6 +367,9 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 // reservation and backs out if it loses the race. Lock order is p.mu then
 // ws.mu, matching EvictWorkspace and lockedShortIDs. Returns ok=false (and a
 // nil release) when the workspace is held or already reserved.
+//
+// The holder-check + reservation below is the canonical twin of the block in
+// EvictWorkspace; keep the two in sync if the reservation discipline changes.
 func (p *Provider) ReserveForEvict(shortID string) (func(), bool) {
 	p.mu.Lock()
 	if ws, ok := p.workspaces[shortID]; ok {
