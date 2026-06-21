@@ -57,6 +57,9 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io
 		var job jobResp
 		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
 			// Fall through to the stream; a transient snapshot error should not abort.
+			// taskNames stays empty here, so any subsequent stream task event prints
+			// with a blank name - acceptable on this degraded path (the stream event
+			// payload carries only id/status, never the name).
 			return true
 		}
 		for _, t := range job.Tasks {
