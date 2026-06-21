@@ -99,8 +99,9 @@ export function listWorkerWorkspaces(id: string): Promise<Workspace[]> {
 }
 
 // Admin-only. Lists revoked (decommissioned) workers, newest revocation first.
-// First page only; limit=50 matches listWorkers.
-export function listRevokedWorkers(): Promise<WorkersPage> {
+// limit=50 matches listWorkers. Pass cursor='' for the first page.
+export function listRevokedWorkers(cursor = ''): Promise<WorkersPage> {
   const q = new URLSearchParams({ limit: '50' })
+  if (cursor) q.set('cursor', cursor)
   return apiFetch<WorkersPage>(`/workers/revoked?${q}`)
 }

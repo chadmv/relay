@@ -102,3 +102,123 @@ test('summary strip shows fleet-wide totals from the stats endpoint', async () =
   // page.total is 2, but the strip must show the fleet-wide total of 5.
   expect(await screen.findByText('5 workers')).toBeInTheDocument()
 })
+
+// --- Decommissioned section pagination ---
+
+const revokedWorker = {
+  id: 'rw1', name: 'gone-1', hostname: 'gone-1-host',
+  cpu_cores: 4, ram_gb: 16, gpu_count: 0, gpu_model: '', os: 'linux',
+  max_slots: 1, labels: null, status: 'revoked',
+  revoked_at: '2026-01-02T03:04:05Z',
+}
+
+async function switchToDecommissioned() {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByText('render-01')
+  await userEvent.click(screen.getByRole('button', { name: 'Decommissioned' }))
+}
+
+test('decommissioned section shows revoked workers', async () => {
+  server.use(
+    http.get('/v1/workers/revoked', () =>
+      HttpResponse.json({ items: [revokedWorker], next_cursor: '', total: 1 }),
+    ),
+  )
+  await switchToDecommissioned()
+  expect(await screen.findByText('gone-1')).toBeInTheDocument()
+})
+
+test('decommissioned section shows pagination footer', async () => {
+  server.use(
+    http.get('/v1/workers/revoked', () =>
+      HttpResponse.json({ items: [revokedWorker], next_cursor: '', total: 1 }),
+    ),
+  )
+  await switchToDecommissioned()
+  expect(await screen.findByText(/1-1 of 1/i)).toBeInTheDocument()
+})
+
+test('decommissioned section shows 0 of 0 footer for empty results', async () => {
+  server.use(
+    http.get('/v1/workers/revoked', () =>
+      HttpResponse.json({ items: [], next_cursor: '', total: 0 }),
+    ),
+  )
+  await switchToDecommissioned()
+  expect(await screen.findByText(/0 of 0/i)).toBeInTheDocument()
+})
+
+test('decommissioned next and prev are disabled while a page fetch is in flight', async () => {
+  let resolvePage2!: () => void
+  const page2Ready = new Promise<void>((res) => { resolvePage2 = res })
+
+  const revokedB = { ...revokedWorker, id: 'rw2', name: 'gone-2', hostname: 'gone-2-host' }
+
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: [revokedWorker], next_cursor: 'CUR1', total: 2 },
+    CUR1: { items: [revokedB], next_cursor: '', total: 2 },
+  }
+  server.use(
+    http.get('/v1/workers/revoked', async ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      if (cur === 'CUR1') await page2Ready
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByText('render-01')
+  await userEvent.click(screen.getByRole('button', { name: 'Decommissioned' }))
+
+  // Page 1 loaded: prev disabled, next enabled.
+  expect(await screen.findByText('gone-1')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  expect(screen.getByRole('button', { name: /next/i })).toBeEnabled()
+
+  // Click next; fetch is in flight. Both buttons must be disabled.
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /next/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  })
+
+  // Resolve the fetch; page 2 lands.
+  resolvePage2()
+  expect(await screen.findByText('gone-2')).toBeInTheDocument()
+  // No next_cursor: next disabled; prev re-enabled.
+  await waitFor(() => expect(screen.getByRole('button', { name: /next/i })).toBeDisabled())
+  expect(screen.getByRole('button', { name: /prev/i })).toBeEnabled()
+
+  // Go back to page 1.
+  await userEvent.click(screen.getByRole('button', { name: /prev/i }))
+  expect(await screen.findByText('gone-1')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+})
+
+test('decommissioned pagination sends cursor on next page request', async () => {
+  const cursors: (string | null)[] = []
+  const revokedB = { ...revokedWorker, id: 'rw2', name: 'gone-2', hostname: 'gone-2-host' }
+
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: [revokedWorker], next_cursor: 'CUR1', total: 2 },
+    CUR1: { items: [revokedB], next_cursor: '', total: 2 },
+  }
+  server.use(
+    http.get('/v1/workers/revoked', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor')
+      cursors.push(cur)
+      return HttpResponse.json(pages[cur ?? ''])
+    }),
+  )
+
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByText('render-01')
+  await userEvent.click(screen.getByRole('button', { name: 'Decommissioned' }))
+
+  expect(await screen.findByText('gone-1')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await waitFor(() => expect(cursors).toContain('CUR1'))
+})
