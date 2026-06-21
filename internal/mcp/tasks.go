@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -17,33 +16,15 @@ type getTaskArgs struct {
 }
 
 func (s *Server) registerTasks() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_list_tasks",
 		Description: "List all tasks belonging to a relay job.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args listTasksArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callListTasks(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callListTasks)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_task",
 		Description: "Get details of a single relay task by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args getTaskArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callGetTask(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callGetTask)
 }
 
 func (s *Server) callListTasks(ctx context.Context, args listTasksArgs) (map[string]any, *ToolError) {

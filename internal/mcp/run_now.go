@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,19 +12,10 @@ type runScheduleNowArgs struct {
 }
 
 func (s *Server) registerRunNow() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_run_schedule_now",
 		Description: "Trigger a relay scheduled job to run immediately, outside its normal cron schedule.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args runScheduleNowArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callRunScheduleNow(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callRunScheduleNow)
 }
 
 func (s *Server) callRunScheduleNow(ctx context.Context, args runScheduleNowArgs) (map[string]any, *ToolError) {

@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 	"strconv"
 
@@ -17,19 +16,10 @@ type listReservationsArgs struct {
 }
 
 func (s *Server) registerReservations() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_list_reservations",
 		Description: "List relay reservations (admin-only). Returns a paginated list of worker reservations.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args listReservationsArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callListReservations(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callListReservations)
 }
 
 func (s *Server) callListReservations(ctx context.Context, args listReservationsArgs) (map[string]any, *ToolError) {

@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"relay/internal/jobspec"
@@ -13,19 +12,10 @@ type submitJobArgs struct {
 }
 
 func (s *Server) registerSubmit() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_submit_job",
 		Description: "Submit a new relay job from a job spec. Validates the spec client-side before sending.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args submitJobArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callSubmitJob(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callSubmitJob)
 }
 
 func (s *Server) callSubmitJob(ctx context.Context, args submitJobArgs) (map[string]any, *ToolError) {

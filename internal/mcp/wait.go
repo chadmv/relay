@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -27,19 +26,10 @@ type waitForJobArgs struct {
 }
 
 func (s *Server) registerWait() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_wait_for_job",
 		Description: "Poll a relay job until it reaches a terminal state (done, failed, cancelled) or the timeout elapses.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args waitForJobArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callWaitForJob(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callWaitForJob)
 }
 
 func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[string]any, *ToolError) {

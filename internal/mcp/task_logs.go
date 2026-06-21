@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -19,19 +18,10 @@ type getTaskLogsArgs struct {
 }
 
 func (s *Server) registerTaskLogs() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_task_logs",
 		Description: "Fetch stdout/stderr log lines for a relay task, with optional sequence-number pagination.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args getTaskLogsArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callGetTaskLogs(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callGetTaskLogs)
 }
 
 func (s *Server) callGetTaskLogs(ctx context.Context, args getTaskLogsArgs) (map[string]any, *ToolError) {
