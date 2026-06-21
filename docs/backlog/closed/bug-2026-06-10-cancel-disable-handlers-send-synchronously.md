@@ -1,8 +1,10 @@
 ---
 title: Cancel/disable handlers send synchronously to workers
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-21
+resolution: fixed
 priority: low
 source: surfaced by the 2026-06-10 wedged-agent-halts-dispatch fix
 ---
@@ -27,3 +29,13 @@ Dispatch the per-task sends concurrently, or fire-and-forget them, since they ar
 - `internal/worker/sender.go` (`sendTimeout`, `ErrSendTimeout`)
 - `docs/retros/2026-06-10-wedged-agent-dispatch-fix.md`
 - `docs/superpowers/specs/2026-06-10-wedged-agent-halts-dispatch-design.md`
+
+## Resolution
+Fixed 2026-06-21 (autopilot batch, item cancel-disable-handlers-send-synchronously). Extracted a
+shared `(*Server).sendCancelSignals` helper (`internal/api/cancel_signals.go`) that dispatches the
+best-effort `CancelTask` signals concurrently via a `sync.WaitGroup` and waits for all, bounding the
+cancel/disable handlers to ~one send timeout instead of N x it. Both call sites (`handleCancelJob`,
+`handleDisableWorker`) now build a `[]cancelSignal` and call the helper. Behavior otherwise unchanged
+(same messages, same Force values, return still ignored). New unit test
+`TestSendCancelSignals_FanOutIsConcurrent` proven RED against a sequential helper and GREEN after the
+fan-out; adversarial code review re-verified `registry.Send`/`workerSender.Send` concurrency safety.
