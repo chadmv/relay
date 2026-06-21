@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -74,6 +76,69 @@ func fakeCompletedJobServer(t *testing.T, jobID, taskID, jobStatus string) *http
 			})
 		}
 	}))
+}
+
+// fakeRaceJobServer models the terminal-before-subscribe race: the job reads
+// "running" until the SSE subscription is established, then "done" afterward.
+// The events endpoint sends NO event and holds the connection open, modeling
+// the missed terminal event that the broker (no replay) never delivers.
+func fakeRaceJobServer(t *testing.T, jobID, taskID string) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	subscribed := false
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			done := subscribed
+			mu.Unlock()
+			status, taskStatus := "running", "pending"
+			if done {
+				status, taskStatus = "done", "done"
+			}
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: status,
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: taskStatus}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			mu.Lock()
+			subscribed = true
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// Send no event; hold open until the request context is cancelled.
+			<-r.Context().Done()
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			json.NewEncoder(w).Encode([]struct {
+				Stream  string `json:"stream"`
+				Content string `json:"content"`
+			}{
+				{Stream: "stdout", Content: "frame rendered"},
+			})
+		}
+	}))
+}
+
+func TestWatchJobLogs_TerminalBeforeSubscribe_DoesNotHang(t *testing.T) {
+	jobID, taskID := "job-race", "task-race"
+	srv := fakeRaceJobServer(t, jobID, taskID)
+	defer srv.Close()
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var out strings.Builder
+	status, err := watchJobLogs(ctx, c, jobID, &out)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
 }
 
 func TestWatchJobLogs_DoneExits0(t *testing.T) {
