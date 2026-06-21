@@ -352,6 +352,41 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	return sw.evict(ctx, reg, e)
 }
 
+// ReserveForEvict atomically reserves shortID for an in-flight eviction, the
+// same way EvictWorkspace does, for the background Sweeper's Claim hook. Under
+// p.mu it verifies the workspace is neither held (inline holders re-check) nor
+// already being evicted, then sets p.evicting[shortID] and returns a release
+// closure that clears it under p.mu. The holder check and the reservation are
+// one p.mu critical section, so Prepare's post-Acquire re-check observes the
+// reservation and backs out if it loses the race. Lock order is p.mu then
+// ws.mu, matching EvictWorkspace and lockedShortIDs. Returns ok=false (and a
+// nil release) when the workspace is held or already reserved.
+func (p *Provider) ReserveForEvict(shortID string) (func(), bool) {
+	p.mu.Lock()
+	if ws, ok := p.workspaces[shortID]; ok {
+		ws.mu.Lock()
+		held := len(ws.holders) > 0
+		ws.mu.Unlock()
+		if held {
+			p.mu.Unlock()
+			return nil, false
+		}
+	}
+	if p.evicting[shortID] {
+		p.mu.Unlock()
+		return nil, false
+	}
+	p.evicting[shortID] = true
+	p.mu.Unlock()
+
+	release := func() {
+		p.mu.Lock()
+		delete(p.evicting, shortID)
+		p.mu.Unlock()
+	}
+	return release, true
+}
+
 // Client returns the underlying Perforce client. Used by the sweeper in relay-agent main.
 func (p *Provider) Client() *Client { return p.cfg.Client }
 
