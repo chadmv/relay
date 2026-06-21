@@ -1,8 +1,10 @@
 ---
 title: Query cache is not cleared on logout; previous user's data flashes for the next user
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -30,3 +32,10 @@ Also clear from the 401 handler (see the redirect-loop item).
 - `web/src/auth/AuthProvider.tsx:69-74`
 - `web/src/lib/queryClient.ts`
 - bug-2026-06-10-spa-401-redirect-loop
+
+## Resolution
+fixed - `logout()` in `web/src/auth/AuthProvider.tsx` now calls `queryClient.clear()`
+after resetting auth state, mirroring the already-fixed 401-handler path. The previous
+user's cached jobs/workers/schedules rows (including emails) no longer flash for the next
+user logging in on the same browser. Covered by a new AuthProvider test that seeds the
+cache, logs out, and asserts the query cache is empty.
