@@ -285,8 +285,8 @@ LIMIT @page_limit + 1;
 -- finish-time proxy because the only writer of updated_at is UpdateJobStatus and
 -- a terminal state is the last transition a job makes (see the design spec).
 SELECT
-  COUNT(*) FILTER (WHERE status IN ('running','dispatched'))                                              AS running,
-  COUNT(*) FILTER (WHERE status IN ('queued','pending'))                                                  AS queued,
+  COUNT(*) FILTER (WHERE status = 'running')                                                              AS running,
+  COUNT(*) FILTER (WHERE status = 'pending')                                                              AS queued,
   COUNT(*) FILTER (WHERE status = 'done'                  AND updated_at >= NOW() - INTERVAL '24 hours')  AS done_24h,
-  COUNT(*) FILTER (WHERE status IN ('failed','timed_out') AND updated_at >= NOW() - INTERVAL '24 hours')  AS failed_24h
+  COUNT(*) FILTER (WHERE status IN ('failed','cancelled') AND updated_at >= NOW() - INTERVAL '24 hours')  AS failed_24h
 FROM jobs;
