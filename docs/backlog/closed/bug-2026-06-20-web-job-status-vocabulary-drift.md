@@ -1,8 +1,10 @@
 ---
 title: SPA models job statuses the backend never emits (queued/dispatched/timed_out)
 type: bug
-status: open
+status: closed
 created: 2026-06-20
+closed: 2026-06-21
+resolution: fixed
 priority: medium
 source: status-vocabulary-drift retro (2026-06-20)
 ---
@@ -42,3 +44,18 @@ unaffected, since that field is a separate concern.
 - `web/src/jobs/status.ts:11-26`
 - `web/src/jobs/JobsPage.tsx:12`
 - `internal/store/migrations/000019_status_vocabulary_checks.up.sql` (`jobs_status_check`)
+
+## Resolution
+Fixed 2026-06-21 (web-job-status-vocabulary-drift). The SPA `JobStatus` union was narrowed to the
+real `jobs.status` vocabulary `pending|running|done|failed|cancelled` (migration 000019
+`jobs_status_check`), removing the dead `queued|dispatched|timed_out` values. The `statusColor`
+switch dropped those three dead cases (each was a fallthrough partner of a retained status, so no
+retained color changed: running=accent, pending=warn, failed=err, done=ok, cancelled=fg-mute via
+default) and its doc comment was corrected; `JobsTable` dropped its dead `j.status === 'timed_out'`
+comparison. The Jobs "Queued" filter chip now sends `status=pending` (label kept "Queued",
+consistent with the stats strip that already labels the pending count "QUEUED"), so it actually
+matches jobs instead of sending the never-matching `status=queued`. `JobStats`/`getJobStats`/the
+stats strip and their intentional public `queued` wire field were left untouched (out of scope).
+A behavioral RED test asserts the Queued chip requests `status=pending`; `tsc` passing is the
+completeness proof that no dead status reference remains anywhere in the SPA. Code review returned
+no findings.
