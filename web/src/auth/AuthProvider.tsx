@@ -93,6 +93,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearToken()
     setUser(null)
     setStatus('anonymous')
+    queryClient.clear()
   }
 
   return (

@@ -73,3 +73,25 @@ test('logout clears token and user', async () => {
   await waitFor(() => expect(getToken()).toBeNull())
   expect(screen.getByTestId('user')).toHaveTextContent('none')
 })
+
+test('logout clears the query cache', async () => {
+  server.use(
+    http.get('/v1/users/me', () => HttpResponse.json(ME)),
+    http.delete('/v1/auth/token', () => new HttpResponse(null, { status: 204 })),
+  )
+  setToken('tok_existing')
+  const qc = new QueryClient()
+  // Seed the cache with a query that represents another user's data
+  qc.setQueryData(['workers'], [{ id: 'w1', name: 'alice-worker' }])
+  render(
+    <QueryClientProvider client={qc}>
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>
+    </QueryClientProvider>,
+  )
+  await waitFor(() => expect(screen.getByTestId('user')).toHaveTextContent('ada@studio.dev'))
+  await userEvent.click(screen.getByText('logout'))
+  await waitFor(() => expect(getToken()).toBeNull())
+  expect(qc.getQueryCache().getAll()).toHaveLength(0)
+})
