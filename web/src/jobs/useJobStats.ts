@@ -3,7 +3,7 @@ import { getJobStats } from './api'
 
 export function useJobStats(intervalMs = 3000) {
   return useQuery({
-    queryKey: ['jobs', 'stats'],
+    queryKey: ['job-stats'],
     queryFn: getJobStats,
     refetchInterval: intervalMs,
   })
