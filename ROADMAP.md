@@ -14,34 +14,34 @@ no interior pointers across locks, and the single JSON entry point. The team is 
 those findings one at a time; the last several sessions shipped the requeue/retry epoch
 bump, the stale-stream-teardown fix, the nil-provider source guard, cron source-spec
 persistence, the Perforce registry race fix, the runner pipe-drain hang fix, the job
-status recompute race fix, and the forced-cancel send-backpressure fix, with priority on
-correctness of the thing being operated - task dispatch, scheduling, and source
-workspaces - before broadening features. A secondary workstream builds out the embedded
-web SPA (auth, Workers, Jobs, and Schedules lists shipped; detail pages, list filters, and
-Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind those two.
+status recompute race fix, the forced-cancel send-backpressure fix, and the archived-user
+offboarding fix (token rejection + schedule disable), with priority on correctness of the
+thing being operated - task dispatch, scheduling, and source workspaces - before
+broadening features. A secondary workstream builds out the embedded web SPA (auth,
+Workers, Jobs, and Schedules lists shipped; detail pages, list filters, and Admin/Profile
+still pending). MCP, CLI, and store/schema work fill in behind those two.
 
 ## Now / Next / Later
 
 ### Now
-- [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) - security; offboarded users keep a valid session and their schedules keep creating jobs.
 - [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
-- [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - pulled up from Next; medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
+- [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
+- [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) - medium; the new registry race test only catches a regression when invoked with `-race`, which neither `make test` nor CI runs.
 
 ### Next
-- [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) - medium; the new registry race test only catches a regression when invoked with `-race`, which neither `make test` nor CI runs.
 - [Trailing slash in the server URL breaks every POST/PATCH/DELETE](docs/backlog/bug-2026-06-10-trailing-slash-breaks-posts.md) - quick win; a trailing slash in `RELAY_URL` makes `relay login` fail with an opaque 405.
+- [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) - now a quick win; the spa-401 fix put `queryClient` in `AuthProvider` scope, so clearing on the manual `logout()` path is a one-liner.
 
 ### Later
-- [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) - now a quick win; the spa-401 fix put `queryClient` in `AuthProvider` scope, so clearing on the manual `logout()` path is a one-liner.
 - [Dispatch failure paths are inconsistent and silent](docs/backlog/bug-2026-06-10-dispatch-failure-paths-silent.md) - medium; the bad-source-JSON path still strands a claimed task and the top-level dispatch loop swallows DB errors with no log.
+- [Agent send goroutine not awaited across reconnect](docs/backlog/bug-2026-06-18-agent-reconnect-send-goroutine-not-awaited.md) - medium; `connect()` returns without joining its send goroutine, so a reconnect can leave two goroutines draining one `sendCh` (violates the one-bounded-sender invariant).
 - [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) - low; between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
 
 ## What moved
 
-- Closed since the prior 2026-06-20 pass: [job-task-read-routes-missing-authz](docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md) (was Later #3 / api-auth #2, bug low), resolved 2026-06-20 as working-as-intended (PR #48) - global READ across all jobs/tasks is a deliberate render-farm semantic, documented next to the route registrations in `internal/api/server.go` rather than gated; the cancel route's 404-on-deny stays as defense-in-depth for the destructive action. No code behavior change.
-- Reordered: with the read-routes question resolved, the Later tier backfills with `inconsistent-state-window-reenroll` (the next dispatch-races item); api-auth renumbers 1-4. Now/Next are unchanged - `archived-users-tokens-schedules`, `hot-path-indexes`, and `status-vocabulary-drift` still lead.
-- Also this cycle: [run-now-not-admin-gated](docs/backlog/closed/bug-2026-06-18-run-now-not-admin-gated.md) reconciliation landed (PR #49) - 4 README spots fixed and `relay_run_schedule_now` dropped from the MCP role-filtering item; the item was already closed in the prior pass, so no roadmap move.
-- Earlier this cycle (still in Recently shipped): [job-cancel-missing-authz](docs/backlog/closed/bug-2026-06-10-job-cancel-missing-authz.md), [dispatch-provider-capability-filter](docs/backlog/closed/bug-2026-06-19-dispatch-provider-capability-filter.md), [spa-401-redirect-loop](docs/backlog/closed/bug-2026-06-10-spa-401-redirect-loop.md), [forced-cancel-send-backpressure](docs/backlog/closed/bug-2026-06-19-forced-cancel-send-backpressure.md) (PR #44), [schedrunner-poisoned-tick](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) (PR #40), [finishregister-gap-connection-epoch-race](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) (PR #38), and [job-status-recompute-race](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) (PR #36).
+- Closed since the prior 2026-06-20 pass: [archived-users-tokens-schedules](docs/backlog/closed/bug-2026-06-10-archived-users-tokens-schedules.md) (was Now #1 / api-auth #1, bug medium), resolved 2026-06-20. Both offboarding gaps closed with two small atomic backend changes: `GetTokenWithUser` now carries `AND u.archived_at IS NULL` so an archived user's token resolves to 401 via the existing `BearerAuth` path, and `handleAdminArchiveUser` disables the owner's `scheduled_jobs` (`DisableScheduledJobsByOwner`) inside the same archive transaction. Unarchive deliberately does not re-enable schedules.
+- Reordered: with archived-users shipped, Now backfills from Next - `race-test-target-perforce-package` promotes into Now; `trailing-slash-breaks-posts` and `spa-query-cache-logout` fill Next; Later backfills with `agent-reconnect-send-goroutine-not-awaited` (the next invariant-violating dispatch-races bug, medium). The api-auth theme renumbers 1-3 with `owner-email-lookup-errors` now leading.
+- No new backlog items filed this cycle: the iteration's retro triage explicitly declined the operational-backfill candidate (covered by the deploy note in the closed item) and the archive-tx atomicity fault-injection test (low value, no precedent in the suite).
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -66,10 +66,9 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## API authorization, auth & account lifecycle (api-auth)
 
-1. [Archived users - token validation race and schedules that keep firing](docs/backlog/bug-2026-06-10-archived-users-tokens-schedules.md) (bug, medium) - no `archived_at` predicate in `GetTokenWithUser`/`BearerAuth`, and the archive handler never disables the user's schedules.
-2. [owner_email lookup errors are swallowed silently](docs/backlog/bug-2026-06-05-owner-email-lookup-errors.md) (bug, low) - a `GetUserEmailsByIDs` failure leaves `owner_email` empty with no log line, invisible to operators.
-3. [Through-the-stack re-enrollment integration test](docs/backlog/idea-2026-06-05-reenrollment-integration-test.md) (idea) - drives the worker Connect enrollment-token revive path end to end and asserts `revoked_at` clears; currently only covered at the store layer.
-4. [Audit log for archive/unarchive actions](docs/backlog/idea-2026-05-06-audit-log-archive-unarchive.md) (idea) - archive/unarchive are recorded nowhere; wire them into an audit table if one is added.
+1. [owner_email lookup errors are swallowed silently](docs/backlog/bug-2026-06-05-owner-email-lookup-errors.md) (bug, low) - a `GetUserEmailsByIDs` failure leaves `owner_email` empty with no log line, invisible to operators.
+2. [Through-the-stack re-enrollment integration test](docs/backlog/idea-2026-06-05-reenrollment-integration-test.md) (idea) - drives the worker Connect enrollment-token revive path end to end and asserts `revoked_at` clears; currently only covered at the store layer.
+3. [Audit log for archive/unarchive actions](docs/backlog/idea-2026-05-06-audit-log-archive-unarchive.md) (idea) - archive/unarchive are recorded nowhere; wire them into an audit table if one is added.
 
 ## Store schema integrity & query performance (store-schema)
 
@@ -135,6 +134,7 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 
 ## Recently shipped
 
+- [Archived users - token validation race and schedules that keep firing](docs/backlog/closed/bug-2026-06-10-archived-users-tokens-schedules.md) - closed 2026-06-20; `GetTokenWithUser` gained `AND u.archived_at IS NULL` (an archived user's token now resolves to `401 invalid token` via the existing `BearerAuth` path), and `handleAdminArchiveUser` calls the new `DisableScheduledJobsByOwner` inside the archive transaction so the owner's schedules stop firing atomically with the archive. Unarchive deliberately does not re-enable. Backend-only, no migration. A side effect of the auth predicate: an archived admin's own token is rejected at the boundary, making the handler-level last-admin guard structurally unreachable via the API (kept as store-tested defense-in-depth).
 - [Job and task READ routes have no owner check](docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md) - closed 2026-06-20 (PR #48); resolved working-as-intended - global READ across all jobs/tasks is deliberate render-farm semantics, documented next to the route registrations in `internal/api/server.go` rather than gated. The follow-up the code reviewer filed off the cancel fix is now answered, not scoped.
 - [Any authenticated user can cancel any other user's job](docs/backlog/closed/bug-2026-06-10-job-cancel-missing-authz.md) - closed 2026-06-20; `handleCancelJob` now gates on owner-or-admin (404 for non-owners, enumeration-safe) before any side effect, so a non-owner can no longer destructively cancel another user's job. Code review filed a follow-up for the read routes, since resolved as working-as-intended.
 - [Dispatch has no provider-capability filter; source tasks can route to providerless workers](docs/backlog/closed/bug-2026-06-19-dispatch-provider-capability-filter.md) - closed 2026-06-20; workers report `supports_workspaces` at registration (proto field 12, migration 000017 with a `COALESCE`/`DEFAULT TRUE` rolling-upgrade guard) and `selectWorker` hard-skips providerless workers for source-bearing tasks, holding them pending and re-dispatching on a capable-worker connect instead of routing them to a fast failure.
@@ -144,8 +144,6 @@ Admin/Profile still pending). MCP, CLI, and store/schema work fill in behind tho
 - [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
 - [Job status recompute race can leave a job stuck in running forever](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) - closed 2026-06-20 (PR #36); replaced the read-modify-write job-status update with an atomic `RecomputeJobStatus` statement.
-- [Agent runner pipe-drain hang - wg.Wait() before cmd.Wait() defeats WaitDelay](docs/backlog/closed/bug-2026-06-10-agent-pipe-drain-hang.md) - closed 2026-06-19; drain via chunkWriter so WaitDelay bounds the hang.
-- [Perforce workspace registry races](docs/backlog/closed/bug-2026-06-10-perforce-registry-races.md) - closed 2026-06-19; all registry access routed through the locked API, getters return copies.
 
 ## Deferred
 

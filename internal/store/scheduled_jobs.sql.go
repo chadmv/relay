@@ -179,6 +179,29 @@ func (q *Queries) DeleteScheduledJob(ctx context.Context, id pgtype.UUID) (int64
 	return result.RowsAffected(), nil
 }
 
+const disableScheduledJobsByOwner = `-- name: DisableScheduledJobsByOwner :execrows
+UPDATE scheduled_jobs
+SET enabled = FALSE,
+    updated_at = NOW()
+WHERE owner_id = $1
+  AND enabled = TRUE
+`
+
+// DisableScheduledJobsByOwner
+//
+//	UPDATE scheduled_jobs
+//	SET enabled = FALSE,
+//	    updated_at = NOW()
+//	WHERE owner_id = $1
+//	  AND enabled = TRUE
+func (q *Queries) DisableScheduledJobsByOwner(ctx context.Context, ownerID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, disableScheduledJobsByOwner, ownerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getScheduledJob = `-- name: GetScheduledJob :one
 SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs WHERE id = $1
 `

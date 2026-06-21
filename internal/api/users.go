@@ -516,6 +516,11 @@ func (s *Server) handleAdminArchiveUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if _, err := txq.DisableScheduledJobsByOwner(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to disable schedules")
+		return
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit archive")
 		return

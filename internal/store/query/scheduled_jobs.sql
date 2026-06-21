@@ -167,3 +167,10 @@ WHERE owner_id = @owner_id::uuid
   AND (NOT @cursor_set::bool OR (updated_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
 ORDER BY updated_at ASC, id ASC
 LIMIT @page_limit + 1;
+
+-- name: DisableScheduledJobsByOwner :execrows
+UPDATE scheduled_jobs
+SET enabled = FALSE,
+    updated_at = NOW()
+WHERE owner_id = $1
+  AND enabled = TRUE;
