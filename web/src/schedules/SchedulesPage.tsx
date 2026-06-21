@@ -29,7 +29,7 @@ export function SchedulesPage() {
   const cursor = cursorStack[cursorStack.length - 1]
   const [pendingId, setPendingId] = useState<string | null>(null)
 
-  const { data, error, isLoading, refetch } = useSchedules(sort, cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, cursor)
   const { runNow, setEnabled } = useScheduleActions()
 
   // Tick once a second so relative "next run"/"last run" strings stay fresh
@@ -147,7 +147,7 @@ export function SchedulesPage() {
         <div className="flex gap-1.5">
           <button
             type="button"
-            disabled={cursorStack.length === 0}
+            disabled={cursorStack.length === 0 || isPlaceholderData}
             onClick={() => setCursorStack((s) => s.slice(0, -1))}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
@@ -155,7 +155,7 @@ export function SchedulesPage() {
           </button>
           <button
             type="button"
-            disabled={!data?.next_cursor}
+            disabled={!data?.next_cursor || isPlaceholderData}
             onClick={() => data?.next_cursor && setCursorStack((s) => [...s, data.next_cursor])}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
