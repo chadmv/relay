@@ -404,11 +404,13 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
+		log.Printf("worker: handleTaskStatus bad task id %q: %v", upd.TaskId, err)
 		return
 	}
 
 	task, err := h.q.GetTask(ctx, taskID)
 	if err != nil {
+		log.Printf("worker: handleTaskStatus GetTask %s: %v", upd.TaskId, err)
 		return
 	}
 
@@ -443,7 +445,9 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 
 	// Retry if applicable. Epoch guard above ensures we don't double-retry.
 	if terminal && task.RetryCount < task.Retries {
-		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err == nil {
+		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err != nil {
+			log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+		} else {
 			updateJobStatusFromTasks(ctx, h.q, task.JobID)
 			_ = h.q.NotifyTaskSubmitted(ctx)
 		}
@@ -469,11 +473,14 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
+		log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
 		return
 	}
 
 	if terminal {
-		_ = h.q.FailDependentTasks(ctx, taskID)
+		if err := h.q.FailDependentTasks(ctx, taskID); err != nil {
+			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", upd.TaskId, err)
+		}
 	}
 
 	jobStatus := updateJobStatusFromTasks(ctx, h.q, updated.JobID)

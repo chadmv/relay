@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -67,12 +69,17 @@ func (d *Dispatcher) RunOnce(ctx context.Context) {
 
 func (d *Dispatcher) dispatch(ctx context.Context) {
 	tasks, err := d.q.GetEligibleTasks(ctx)
-	if err != nil || len(tasks) == 0 {
+	if err != nil {
+		log.Printf("dispatch: GetEligibleTasks: %v", err)
+		return
+	}
+	if len(tasks) == 0 {
 		return
 	}
 
 	workers, err := d.q.ListWorkers(ctx)
 	if err != nil {
+		log.Printf("dispatch: ListWorkers: %v", err)
 		return
 	}
 
@@ -90,11 +97,13 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 
 	reservations, err := d.q.ListActiveReservations(ctx)
 	if err != nil {
+		log.Printf("dispatch: ListActiveReservations: %v", err)
 		return
 	}
 
 	counts, err := d.q.CountActiveTasksByAllWorkers(ctx)
 	if err != nil {
+		log.Printf("dispatch: CountActiveTasksByAllWorkers: %v", err)
 		return
 	}
 	activeByWorker := make(map[pgtype.UUID]int64, len(counts))
@@ -273,14 +282,18 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		WorkerID: w.ID,
 	})
 	if err != nil {
+		// pgx.ErrNoRows is the benign claim race (another dispatcher won) and
+		// fires on the normal happy path; only log genuine errors.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("dispatch: ClaimTaskForWorker for task %s: %v", uuidStr(task.ID), err)
+		}
 		return false
 	}
 
 	var commandsArgv [][]string
 	if len(claimed.Commands) > 0 {
 		if err := json.Unmarshal(claimed.Commands, &commandsArgv); err != nil {
-			log.Printf("dispatch: bad commands JSON on task %s: %v", claimed.ID, err)
-			_ = d.q.RequeueTask(ctx, claimed.ID)
+			d.failClaimedTask(ctx, claimed, fmt.Sprintf("bad commands JSON: %v", err))
 			return false
 		}
 	}
@@ -299,7 +312,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	if len(claimed.Source) > 0 {
 		var ss api.SourceSpec
 		if err := json.Unmarshal(claimed.Source, &ss); err != nil {
-			log.Printf("dispatch: bad source JSON on task %s: %v", claimed.ID, err)
+			d.failClaimedTask(ctx, claimed, fmt.Sprintf("bad source JSON: %v", err))
 			return false
 		}
 		dt.Source = sourceSpecToProto(&ss)
@@ -324,6 +337,52 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"dispatched","worker_id":%q}`, uuidStr(claimed.ID), uuidStr(w.ID))),
 	})
 	return true
+}
+
+// failClaimedTask marks an already-claimed task terminally 'failed' and cascades
+// to its dependents. It is the single path the dispatcher uses when a claimed
+// task carries poison persistent data (unparseable commands or source JSON):
+// retrying can never succeed, so the task must not be requeued (which would churn
+// the claim/requeue loop) nor left 'dispatched' (which would leak a worker slot).
+//
+// Epoch fence: the write goes through UpdateTaskStatus fenced on the claim's own
+// assignment_epoch (a real, non-zero value from ClaimTaskForWorker). 'failed' is
+// terminal, so the assignment ends and the epoch is intentionally NOT bumped. If
+// another path ended the assignment between claim and here, UpdateTaskStatus
+// affects zero rows (pgx.ErrNoRows); we log and stop without retry or requeue.
+func (d *Dispatcher) failClaimedTask(ctx context.Context, claimed store.Task, reason string) {
+	log.Printf("dispatch: failing task %s terminally: %s", uuidStr(claimed.ID), reason)
+	updated, err := d.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID:              claimed.ID,
+		Status:          "failed",
+		WorkerID:        claimed.WorkerID,
+		StartedAt:       claimed.StartedAt,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	if err != nil {
+		log.Printf("dispatch: UpdateTaskStatus(failed) for task %s: %v", uuidStr(claimed.ID), err)
+		return
+	}
+	if err := d.q.FailDependentTasks(ctx, claimed.ID); err != nil {
+		log.Printf("dispatch: FailDependentTasks for task %s: %v", uuidStr(claimed.ID), err)
+	}
+	jobStatus, err := d.q.RecomputeJobStatus(ctx, updated.JobID)
+	if err != nil {
+		log.Printf("dispatch: RecomputeJobStatus for job %s: %v", uuidStr(updated.JobID), err)
+	}
+	d.broker.Publish(events.Event{
+		Type:  "task",
+		JobID: uuidStr(updated.JobID),
+		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"failed"}`, uuidStr(updated.ID))),
+	})
+	if jobStatus == "done" || jobStatus == "failed" {
+		d.broker.Publish(events.Event{
+			Type:  "job",
+			JobID: uuidStr(updated.JobID),
+			Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(updated.JobID), jobStatus)),
+		})
+	}
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.

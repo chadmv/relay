@@ -473,3 +473,173 @@ func TestDispatcher_PassesSourceToAgent(t *testing.T) {
 	assert.Equal(t, "//streams/X/main/...", pf.Sync[0].Path)
 	assert.Equal(t, "#head", pf.Sync[0].Rev)
 }
+
+func TestDispatcher_BadCommandsJSON_FailsTaskNoRequeue(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "badcmd@x.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	// Poison: commands is valid JSON but not a [][]string (an object, not an array
+	// of arrays). json.Unmarshal into [][]string fails - persistent, unretryable.
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "poison", Commands: []byte(`{"bad":"shape"}`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+
+	// Run two cycles. The bug requeued, so the second cycle would re-claim and the
+	// epoch would climb. The fix marks the task 'failed' on cycle one; cycle two is
+	// a no-op because the task is no longer 'pending'.
+	d.RunOnce(ctx)
+	afterFirst, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", afterFirst.Status, "poison commands must fail the task, not requeue it")
+	require.Empty(t, sender.sent, "poison task must never be sent to the worker")
+
+	epochAfterFirst := afterFirst.AssignmentEpoch
+	d.RunOnce(ctx)
+	afterSecond, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", afterSecond.Status, "task stays failed across cycles")
+	require.Equal(t, epochAfterFirst, afterSecond.AssignmentEpoch,
+		"no churn: a failed task is not re-claimed, so assignment_epoch must not climb")
+}
+
+func TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "failjobevent@x.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	// Poison commands: the only task in the job fails terminally, so RecomputeJobStatus
+	// flips the whole job to 'failed'. The dispatcher must mirror handleTaskStatus and
+	// publish a 'job' event in addition to the 'task' event.
+	_, err = q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "poison", Commands: []byte(`{"bad":"shape"}`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	broker := events.NewBroker()
+	ch, cancel := broker.Subscribe("")
+	defer cancel()
+
+	d := scheduler.NewDispatcher(q, registry, broker)
+	d.RunOnce(ctx)
+
+	jobIDStr := uuidStr(job.ID)
+	var sawTask, sawJob bool
+drain:
+	for {
+		select {
+		case e := <-ch:
+			switch e.Type {
+			case "task":
+				sawTask = true
+			case "job":
+				assert.Equal(t, jobIDStr, e.JobID, "job event must carry the job id")
+				assert.JSONEq(t, fmt.Sprintf(`{"id":%q,"status":"failed"}`, jobIDStr), string(e.Data),
+					"job event payload must mirror handleTaskStatus")
+				sawJob = true
+			}
+		case <-time.After(time.Second):
+			break drain
+		}
+	}
+
+	assert.True(t, sawTask, "dispatcher must publish a task event on terminal fail")
+	assert.True(t, sawJob, "dispatcher must publish a job event when the job flips terminal")
+}
+
+func TestDispatcher_BadSourceJSON_FailsTaskNoLeak(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "badsrc@x.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	// Poison: source is valid Postgres JSON (so the column accepts it) but cannot
+	// unmarshal into SourceSpec (an array, not an object). taskIsSourceBearing
+	// returns false for an unparseable spec, so selectWorker does NOT require a
+	// workspace provider - the task is selected, claimed, then the in-sendTask
+	// json.Unmarshal of claimed.Source fails.
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "w", Hostname: "w", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTaskWithSource(ctx, store.CreateTaskWithSourceParams{
+		JobID: job.ID, Name: "poison-src", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Source: []byte(`[1,2,3]`),
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d.RunOnce(ctx)
+
+	got, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", got.Status,
+		"poison source must fail the task, not leave it dispatched (slot leak)")
+	require.Empty(t, sender.sent, "poison task must never be sent to the worker")
+}

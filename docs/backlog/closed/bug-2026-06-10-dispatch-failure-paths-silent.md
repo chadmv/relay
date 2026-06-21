@@ -1,8 +1,10 @@
 ---
 title: Dispatch failure paths are inconsistent and silent
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -19,3 +21,16 @@ Three observability/correctness gaps in the dispatch loop and task-status handli
 ## Related
 - `internal/scheduler/dispatch.go:68-91, 228-253`
 - `internal/worker/handler.go:408-497` (`handleTaskStatus`)
+
+## Resolution
+fixed - a shared `failClaimedTask` helper in `internal/scheduler/dispatch.go` now
+terminally fails a claimed task for both bad-JSON cases (bad `source` and bad
+`commands`) via the epoch-fenced `UpdateTaskStatus` at the claim's own non-zero epoch
+(not bumped, since `failed` is terminal), then cascades `FailDependentTasks`, recomputes
+job status, and publishes `task` + `job` SSE events - mirroring `handleTaskStatus`. This
+ends the dispatched-slot leak (bad source) and the infinite claim/requeue churn with
+unbounded `assignment_epoch` growth (bad commands). Every DB error path in `dispatch`
+and `handleTaskStatus` now logs via `log.Printf`; the benign `ClaimTaskForWorker`
+`pgx.ErrNoRows` claim race stays silent to avoid noise. Covered by new scheduler tests
+(no-requeue, no-slot-leak, epoch stability across cycles, terminal job event). Plan:
+`docs/superpowers/plans/2026-06-20-dispatch-failure-paths-silent.md`.
