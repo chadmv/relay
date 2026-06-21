@@ -1,11 +1,23 @@
 ---
 title: Job and task READ routes have no owner check (any authenticated user can read any job's metadata, task list, and logs)
 type: bug
-status: open
+status: closed
 created: 2026-06-20
+closed: 2026-06-20
 priority: low
 source: discovered by relay-code-reviewer during job-cancel-missing-authz
 ---
+
+## Resolution
+Resolved 2026-06-20 as **working-as-intended**. Product decision: global READ
+across all jobs/tasks is deliberate render-farm semantics - a shared farm where
+any authenticated operator can inspect any job's metadata, task list, and logs.
+No code gate was added to the four read routes; instead the decision was
+documented next to the route registrations in `internal/api/server.go` (the
+Jobs/Tasks blocks), including the interaction with the cancel-deny path: the
+cancel route's 404-on-deny is defense-in-depth for the destructive action rather
+than a true existence secret, since these global reads already expose existence
+and metadata to any authenticated user. No test change (no behavior change).
 
 # Job and task READ routes have no owner check
 
