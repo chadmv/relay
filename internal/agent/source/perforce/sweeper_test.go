@@ -2,6 +2,7 @@ package perforce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,4 +112,78 @@ func TestSweeper_SkipsLockedWorkspaces(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, evicted)
 	require.Empty(t, fr.argHistory(), "must not call p4 on locked workspaces")
+}
+
+func TestSweeper_DirtyDeleteSkipsDeleteClient(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	// Deliberately register NO fixture for "client -d relay_h_dirty".
+	// If evict calls DeleteClient, fakeRunner.Run will t.Errorf and fail.
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{
+		ShortID:     "dirty",
+		SourceKey:   "//s/x",
+		ClientName:  "relay_h_dirty",
+		LastUsedAt:  time.Now().Add(-30 * 24 * time.Hour),
+		DirtyDelete: true, // client already deleted on a prior sweep
+	})
+	require.NoError(t, reg.Save())
+	// Directory now exists and is removable (the transient RemoveAll failure cleared).
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dirty"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+	evicted, err := s.SweepOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"dirty"}, evicted)
+
+	// Directory gone, entry gone, and p4 client -d was never called.
+	_, statErr := os.Stat(filepath.Join(root, "dirty"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, ok := reg.Get("dirty")
+	require.False(t, ok)
+	require.Empty(t, fr.argHistory(), "DeleteClient must be skipped for a DirtyDelete entry")
+}
+
+func TestSweeper_ContinuesPastEvictFailure(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	// Oldest entry: DeleteClient fails (simulates a still-present client that
+	// cannot be deleted). Newer entry: DeleteClient succeeds.
+	fr.setErr("client -d relay_h_bad", errors.New("p4 client -d relay_h_bad: boom"))
+	fr.set("client -d relay_h_good", "Client deleted.\n")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "bad", SourceKey: "//s/bad",
+		ClientName: "relay_h_bad", LastUsedAt: time.Now().Add(-40 * 24 * time.Hour)})
+	reg.Upsert(WorkspaceEntry{ShortID: "good", SourceKey: "//s/good",
+		ClientName: "relay_h_good", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "bad"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "good"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+	evicted, err := s.SweepOnce(context.Background())
+	require.NoError(t, err, "one bad entry must not abort the whole pass")
+	require.Equal(t, []string{"good"}, evicted)
+
+	// The good workspace is gone; the bad one remains for a future attempt.
+	_, statErr := os.Stat(filepath.Join(root, "good"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, ok := reg.Get("good")
+	require.False(t, ok)
+	_, ok = reg.Get("bad")
+	require.True(t, ok, "the failed entry stays in the registry")
 }
