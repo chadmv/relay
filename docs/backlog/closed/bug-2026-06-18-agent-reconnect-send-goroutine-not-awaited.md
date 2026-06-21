@@ -1,8 +1,10 @@
 ---
 title: Agent send goroutine not awaited across reconnect (transient dual-sender drops a queued message)
 type: bug
-status: open
+status: closed
 created: 2026-06-18
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: 2026-06-18 /roadmap deep Gaps review agent, confirmed by direct code read
 ---
@@ -46,3 +48,18 @@ message whose `Send` failed instead of dropping it silently.
 
 ## Notes
 Surfaced by the 2026-06-18 `/roadmap deep` Gaps review agent and confirmed by direct code read.
+
+## Resolution
+fixed - added a `sendWG sync.WaitGroup` to `Agent` (matching the existing `runnerWG`
+pattern). `connect()` now calls `a.sendWG.Wait()` before spawning the next sender, so the
+previous send goroutine is joined after `connCancel()` and at most one goroutine reads
+`sendCh` at any instant across a reconnect. The send loop was extracted into a named
+`runSender` method for testability. The single in-flight message whose `Send` fails on
+the already-dead connection is a documented bounded loss (at most one log chunk per stream
+drop) - deliberately not re-enqueued (a blocking re-enqueue on the full 64-cap `sendCh`
+would deadlock the join; non-blocking would reorder the best-effort log stream; task
+status is already reconciled on reconnect via `RunningTasks`). Covered by deterministic
+white-box tests (atomic concurrency counter + real join) asserting at-most-one-sender
+across a reconnect and in-order delivery of queued messages by the live sender; verified
+load-bearing-red. Plan:
+`docs/superpowers/plans/2026-06-20-agent-reconnect-send-goroutine-not-awaited.md`.

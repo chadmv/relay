@@ -29,6 +29,7 @@ type Agent struct {
 	mu       sync.Mutex
 	runners  map[string]*Runner
 	runnerWG sync.WaitGroup // tracks active runner goroutines; waited on agent shutdown
+	sendWG   sync.WaitGroup // tracks the per-connection send goroutine; joined before the next connect
 	saveID   func(string) error
 	creds    *Credentials
 	provider source.Provider // optional; nil = no workspace management
@@ -96,11 +97,50 @@ func (a *Agent) Run(ctx context.Context) {
 	}
 }
 
+// runSender is the single bounded sender for one gRPC stream. It owns all
+// writes to a.sendCh for the lifetime of one connection: it selects messages
+// off the shared a.sendCh and hands them to send (in production, stream.Send).
+// On a send error it cancels the connection (connCancel) and returns; on
+// connCtx cancellation (recv loop drop, or parent shutdown) it returns. There
+// is exactly one runSender per connection - see connect, which joins the
+// previous one via sendWG before spawning the next.
+//
+// Bounded-loss note: if send fails, the message already pulled off a.sendCh is
+// dropped. This is at most one in-flight message per stream drop, and the
+// connection it was destined for is dead. Task status is reconciled on
+// reconnect via buildRegisterRequest's RunningTasks; task-log chunks are not
+// replayed, so a forced reconnect may drop at most one in-flight log chunk.
+// We deliberately do NOT re-enqueue: a re-enqueue would either block this
+// goroutine (a full sendCh would prevent the join) or reorder the chunk behind
+// newer ones, corrupting the best-effort log stream.
+func (a *Agent) runSender(connCtx context.Context, connCancel context.CancelFunc, send func(*relayv1.AgentMessage) error) {
+	defer a.sendWG.Done()
+	for {
+		select {
+		case msg := <-a.sendCh:
+			if err := send(msg); err != nil {
+				connCancel()
+				return
+			}
+		case <-connCtx.Done():
+			return
+		}
+	}
+}
+
 // connect dials the coordinator, registers, and runs the recv loop until the
 // stream closes or ctx is cancelled.
 func (a *Agent) connect(ctx context.Context) error {
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
+
+	// Join the previous connection's send goroutine before this connection
+	// starts its own. This enforces the "one bounded sender per gRPC stream"
+	// invariant: without the join, the prior sender could still be draining
+	// a.sendCh while the new one starts, so two goroutines would race on the
+	// same channel. The prior connect already ran its deferred connCancel, so
+	// the prior sender is on its way out and this Wait returns promptly.
+	a.sendWG.Wait()
 
 	conn, err := grpc.NewClient(a.coord, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -160,20 +200,11 @@ func (a *Agent) connect(ctx context.Context) error {
 
 	log.Printf("connected to coordinator %s (worker ID: %s)", a.coord, a.workerID)
 
-	// Start send goroutine — gRPC streams are not concurrent-send-safe.
-	go func() {
-		for {
-			select {
-			case msg := <-a.sendCh:
-				if err := stream.Send(msg); err != nil {
-					connCancel()
-					return
-				}
-			case <-connCtx.Done():
-				return
-			}
-		}
-	}()
+	// Start the single send goroutine for this connection. gRPC streams are not
+	// concurrent-send-safe, so all writes go through this one goroutine. sendWG
+	// lets the NEXT connect join this goroutine before spawning its replacement.
+	a.sendWG.Add(1)
+	go a.runSender(connCtx, connCancel, stream.Send)
 
 	// Recv loop.
 	for {
