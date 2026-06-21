@@ -1,8 +1,10 @@
 ---
 title: Add cwd assertions to the three perforce unit tests
 type: idea
-status: open
+status: closed
 created: 2026-05-01
+closed: 2026-06-21
+resolution: fixed
 source: p4client-explicit-flag retro — Known Limitations
 ---
 
@@ -30,3 +32,13 @@ for _, c := range fr.calls {
 - `internal/agent/source/perforce/fixtures_test.go` — `runCall.cwd` field
 - `internal/agent/source/perforce/perforce_test.go` — the three tests to update
 - Retro: `docs/retros/2026-05-01-p4client-explicit-flag.md` § Known Limitations
+
+## Resolution
+Fixed 2026-06-21 (autopilot batch, item add-cwd-assertions-perforce). Added a shared
+`assertCwdContract(t, fr, wsRoot)` helper in `internal/agent/source/perforce/perforce_test.go` and
+wired it into all three `TestProvider_*` unit tests. Rather than the proposal's per-argv match on one
+representative call, the helper uses the cleaner total discriminator found in `client.go`: every
+workspace-scoped invocation prepends `-c <client>` and runs from wsRoot; every global invocation
+(`ResolveHead`, `client -o/-i/-d`) runs with `cwd == ""`. It asserts that contract on every recorded
+call and requires at least one workspace-scoped call. Proven non-vacuous: temporarily breaking the
+production sync cwd to `""` fails all three tests. Test-only; no production change.
