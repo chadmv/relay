@@ -99,6 +99,7 @@ func main() {
 					Client:        pp.Client(),
 					ListLocked:    pp.LockedShortIDs,
 					FreeDiskGB:    freeDiskGB,
+					Claim:         pp.ReserveForEvict,
 					OnEvictedCB:   pp.InvalidateWorkspace,
 				}
 				go sw.Run(ctx)
