@@ -6,6 +6,7 @@ import { useRevokedWorkers } from './useRevokedWorkers'
 import { WorkersGrid } from './WorkersGrid'
 import { WorkersTable, type SortField } from './WorkersTable'
 import { RevokedWorkersTable } from './RevokedWorkersTable'
+import { computePageRange } from '../lib/pageRange'
 import type { Worker, WorkerSort, WorkerStats, WorkerStatus } from './api'
 
 type View = 'grid' | 'table'
@@ -34,13 +35,41 @@ export function WorkersPage() {
   const [sort, setSort] = useState<WorkerSort>('-created_at')
   const [view, setView] = useState<View>(loadView)
   const [section, setSection] = useState<Section>('active')
+
+  // Revoked-workers pagination state (mirrors JobsPage cursor-stack pattern).
+  const [revokedCursor, setRevokedCursor] = useState('')
+  const [revokedStack, setRevokedStack] = useState<string[]>([])
+  const [revokedStartOffset, setRevokedStartOffset] = useState(0)
+  const [revokedOffsets, setRevokedOffsets] = useState<number[]>([])
+
   const { data, error, isLoading, isFetching, refetch } = useWorkers(sort)
   const { data: stats } = useWorkerStats()
-  const revoked = useRevokedWorkers(section === 'decommissioned')
+  const revoked = useRevokedWorkers(section === 'decommissioned', revokedCursor)
 
   function chooseView(v: View) {
     setView(v)
     localStorage.setItem(VIEW_KEY, v)
+  }
+
+  function revokedNext() {
+    if (!revoked.data?.next_cursor) return
+    const currentPageSize = revoked.data.items.length
+    setRevokedStack([...revokedStack, revokedCursor])
+    setRevokedCursor(revoked.data.next_cursor)
+    setRevokedOffsets([...revokedOffsets, revokedStartOffset])
+    setRevokedStartOffset(revokedStartOffset + currentPageSize)
+  }
+
+  function revokedPrev() {
+    if (revokedStack.length === 0) return
+    const copy = [...revokedStack]
+    const back = copy.pop() ?? ''
+    setRevokedStack(copy)
+    setRevokedCursor(back)
+    const offsetsCopy = [...revokedOffsets]
+    const prevOffset = offsetsCopy.pop() ?? 0
+    setRevokedOffsets(offsetsCopy)
+    setRevokedStartOffset(prevOffset)
   }
 
   const sectionTabs = (
@@ -70,6 +99,14 @@ export function WorkersPage() {
   )
 
   if (section === 'decommissioned') {
+    const revokedWorkers = revoked.data?.items ?? []
+    const revokedTotal = revoked.data?.total ?? 0
+    const { x, y } = computePageRange(revokedStartOffset, revokedWorkers.length)
+    const rangeText =
+      revokedWorkers.length === 0
+        ? `0 of ${revokedTotal.toLocaleString()}`
+        : `${x.toLocaleString()}-${y.toLocaleString()} of ${revokedTotal.toLocaleString()}`
+
     return (
       <div className="flex flex-col gap-4">
         {header}
@@ -83,7 +120,33 @@ export function WorkersPage() {
             </Button>
           </div>
         ) : (
-          <RevokedWorkersTable workers={revoked.data?.items ?? []} />
+          <>
+            <RevokedWorkersTable workers={revokedWorkers} />
+            <div className="flex items-center justify-between px-1 font-mono text-[10.5px] tracking-wider text-fg-mute">
+              <span>
+                SHOWING <span className="text-fg">{rangeText}</span>
+                {' · '}CURSOR PAGINATED
+              </span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={revokedPrev}
+                  disabled={revokedStack.length === 0 || revoked.isPlaceholderData}
+                  className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
+                >
+                  &larr; prev
+                </button>
+                <button
+                  type="button"
+                  onClick={revokedNext}
+                  disabled={!revoked.data?.next_cursor || revoked.isPlaceholderData}
+                  className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
+                >
+                  next 50 &rarr;
+                </button>
+              </div>
+            </div>
+          </>
         )}
       </div>
     )

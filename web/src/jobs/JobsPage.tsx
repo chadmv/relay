@@ -4,7 +4,7 @@ import { useJobs } from './useJobs'
 import { useJobStats } from './useJobStats'
 import { JobsTable } from './JobsTable'
 import { SortControl } from './SortControl'
-import { computePageRange } from './pageRange'
+import { computePageRange } from '../lib/pageRange'
 import type { JobSort } from './api'
 
 const FILTERS: { key: string; label: string; status: string }[] = [
