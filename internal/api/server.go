@@ -100,13 +100,25 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/auth/tokens", auth(http.HandlerFunc(s.handleLogoutAll)))
 
 	// Jobs
+	//
+	// Read routes (GET) are intentionally global: any authenticated user may
+	// read any job's metadata, task list, and logs. This is deliberate
+	// render-farm semantics - a shared farm where operators inspect any job.
+	// Only the destructive cancel (DELETE) is owner-or-admin gated.
+	//
+	// Note the interaction with that cancel gate: handleCancelJob returns 404
+	// (not 403) on deny to avoid leaking job existence, but these global reads
+	// already expose existence and metadata to any authenticated user. The
+	// cancel 404 is therefore defense-in-depth for the destructive action, not
+	// a true existence secret. See the closed item
+	// docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md.
 	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
 	mux.Handle("GET /v1/jobs", auth(http.HandlerFunc(s.handleListJobs)))
 	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
 
-	// Tasks
+	// Tasks (read routes are intentionally global - see Jobs note above).
 	mux.Handle("GET /v1/jobs/{id}/tasks", auth(http.HandlerFunc(s.handleListTasks)))
 	mux.Handle("GET /v1/tasks/{id}", auth(http.HandlerFunc(s.handleGetTask)))
 	mux.Handle("GET /v1/tasks/{id}/logs", auth(http.HandlerFunc(s.handleGetTaskLogs)))
