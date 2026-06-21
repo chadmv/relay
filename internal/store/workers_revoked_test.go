@@ -80,6 +80,29 @@ func TestSetWorkerAgentToken_RevivesRevokedStatus(t *testing.T) {
 	require.Equal(t, "offline", reloaded.Status, "revived worker should be offline until it connects")
 }
 
+func TestSetWorkerAgentToken_LeavesNonRevokedStatusUnchanged(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+	w := newTestWorker(t, q)
+
+	// Put the worker in a live, non-revoked state.
+	_, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: w.ID, Status: "online",
+	})
+	require.NoError(t, err)
+
+	// Re-enrolling a non-revoked worker must NOT clobber its status: the CASE's
+	// ELSE branch is a no-op for anything other than 'revoked'.
+	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: w.ID, AgentTokenHash: ptrStr("hash-1"),
+	}))
+
+	reloaded, err := q.GetWorker(ctx, w.ID)
+	require.NoError(t, err)
+	require.Equal(t, "online", reloaded.Status, "non-revoked status must be left unchanged")
+	require.False(t, reloaded.RevokedAt.Valid, "revoked_at must remain null for a live worker")
+}
+
 func TestListRevokedWorkersPage_ReturnsOnlyRevoked(t *testing.T) {
 	ctx := context.Background()
 	q := newTestQueries(t)
