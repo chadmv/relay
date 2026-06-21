@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -219,7 +220,10 @@ func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, 
 	}
 	rows, err := s.q.GetUserEmailsByIDs(r.Context(), ids)
 	if err != nil {
-		return // best-effort: leave owner_email empty on lookup failure
+		// best-effort: leave owner_email empty on lookup failure, but log it
+		// so the failure is visible to operators instead of silently swallowed.
+		log.Printf("scheduled_jobs: GetUserEmailsByIDs (%d owner id(s)): %v", len(ids), err)
+		return
 	}
 	emailByID := make(map[string]string, len(rows))
 	for _, row := range rows {
