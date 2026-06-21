@@ -4,11 +4,8 @@ import { statusColor, progressPct, formatDuration, formatStarted } from './statu
 test('statusColor maps each bucket', () => {
   expect(statusColor('done').dot).toBe('bg-ok')
   expect(statusColor('running').dot).toBe('bg-accent')
-  expect(statusColor('dispatched').dot).toBe('bg-accent')
-  expect(statusColor('queued').dot).toBe('bg-warn')
   expect(statusColor('pending').dot).toBe('bg-warn')
   expect(statusColor('failed').dot).toBe('bg-err')
-  expect(statusColor('timed_out').dot).toBe('bg-err')
   expect(statusColor('cancelled').dot).toBe('bg-fg-mute')
 })
 

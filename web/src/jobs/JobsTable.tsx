@@ -47,7 +47,7 @@ export function JobsTable({ jobs }: { jobs: Job[] }) {
               <span className="relative h-1 overflow-hidden rounded bg-white/10">
                 <span
                   className={`absolute inset-y-0 left-0 rounded ${
-                    j.status === 'done' ? 'bg-ok' : j.status === 'failed' || j.status === 'timed_out' ? 'bg-err' : 'bg-accent'
+                    j.status === 'done' ? 'bg-ok' : j.status === 'failed' ? 'bg-err' : 'bg-accent'
                   }`}
                   style={{ width: `${pct}%` }}
                 />
