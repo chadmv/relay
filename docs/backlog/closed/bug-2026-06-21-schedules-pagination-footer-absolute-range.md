@@ -1,8 +1,10 @@
 ---
 title: Schedules pagination footer lacks absolute X-Y range
 type: bug
-status: open
+status: closed
 created: 2026-06-21
+closed: 2026-06-21
+resolution: fixed
 priority: low
 source: code review of jobs-pagination-footer-absolute-range (2026-06-21)
 ---
@@ -38,3 +40,14 @@ the cursor stack uses so the two stacks cannot desync.
 - `web/src/jobs/pageRange.ts` (reusable range helper)
 - `web/src/jobs/JobsPage.tsx` (reference implementation)
 - [[bug-2026-06-05-jobs-pagination-footer-absolute-range]]
+
+## Resolution
+Fixed 2026-06-21 (autopilot batch, item schedules-pagination-footer-absolute-range). `SchedulesPage`
+gained a `startOffset` + `offsets[]` accumulator mirroring its `cursorStack` depth, with extracted
+`goNext`/`goPrev` handlers that mutate `cursorStack`/`offsets`/`startOffset` in lockstep via plain
+setters (and `chooseSort` resets all three). The footer now renders `{x}-{y} of {total}` (plain hyphen)
+from the shared `computePageRange` helper, advancing by the actual page size so partial last pages stay
+exact. Both pagination buttons remain gated on `isPlaceholderData` so the stacks cannot desync. Three
+new SchedulesPage.test.tsx cases (first page, partial last page, page-back) proven RED against the old
+`SHOWING N OF total` footer; full web suite (172) + tsc green; adversarial review found no
+high/medium/low issues.
