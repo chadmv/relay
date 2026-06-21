@@ -30,7 +30,7 @@ type Client struct {
 // NewClient returns a Client for the given server URL and token.
 // Pass token="" for unauthenticated requests.
 func NewClient(serverURL, token string) *Client {
-	return &Client{base: serverURL, token: token, http: &http.Client{}}
+	return &Client{base: strings.TrimRight(serverURL, "/"), token: token, http: &http.Client{}}
 }
 
 // BaseURL returns the base server URL this client connects to.
