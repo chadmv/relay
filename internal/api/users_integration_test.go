@@ -4,6 +4,8 @@ package api_test
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -708,7 +711,16 @@ func TestArchiveUser_SelfArchiveForbidden(t *testing.T) {
 // guard. BearerAuth does not filter on archived_at (see middleware.go), so
 // A's still-valid token passes auth; the guard then catches the inconsistent
 // state when A tries to archive admin B (the only remaining active admin).
-func TestArchiveUser_LastAdminGuard(t *testing.T) {
+// TestArchiveUser_ArchivedAdminTokenRejected supersedes the old
+// TestArchiveUser_LastAdminGuard. That test simulated the login-vs-archive race
+// by archiving admin A via direct SQL while keeping A's token, then relied on
+// A's still-valid token reaching the last-admin guard. With the archived_at
+// predicate now on GetTokenWithUser (Change A), A's token is rejected at the
+// auth boundary (401 invalid token) before the handler runs, which is the
+// correct, fixed behavior. The CountActiveAdmins guard in the handler remains as
+// defense in depth; it is simply no longer reachable through an archived admin's
+// own token.
+func TestArchiveUser_ArchivedAdminTokenRejected(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
 	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
@@ -716,17 +728,15 @@ func TestArchiveUser_LastAdminGuard(t *testing.T) {
 	adminAToken := loginAsAdmin(t, srv, q, "admin-a@test.com", "passa")
 	adminB := seedAdmin(t, q, "admin-b@test.com", "Admin B")
 
-	// Simulate the race: archive A directly in the DB, leaving B as the only
-	// active admin. A's token is still valid because we used direct SQL.
+	// Archive A directly in the DB, leaving A's token row in place (the race).
 	_, err := pool.Exec(t.Context(),
 		`UPDATE users SET archived_at = NOW() WHERE email = 'admin-a@test.com'`)
 	require.NoError(t, err)
 
-	// A (using their still-valid token) tries to archive B. CountActiveAdmins
-	// returns 1 (just B). Guard fires.
+	// A's still-present token is now rejected at the auth boundary.
 	code, body := archiveUser(t, srv, adminAToken, uuidStrTest(adminB.ID))
-	require.Equal(t, http.StatusBadRequest, code)
-	assert.Equal(t, "cannot archive the last active admin", body["error"])
+	require.Equal(t, http.StatusUnauthorized, code)
+	assert.Equal(t, "invalid token", body["error"])
 }
 
 func TestCountActiveAdmins(t *testing.T) {
@@ -941,4 +951,186 @@ func emailSet(users []map[string]any) map[string]bool {
 		out[u["email"].(string)] = true
 	}
 	return out
+}
+
+// mintRawToken inserts an api_tokens row directly for userID and returns the
+// raw bearer string. Mirrors how auth.go issues tokens (random 32 bytes ->
+// hex -> tokenhash.Hash), but bypasses login so the token survives a direct-SQL
+// archive (reproducing the login-vs-archive race).
+func mintRawToken(t *testing.T, q *store.Queries, userID pgtype.UUID) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	_, err := rand.Read(raw)
+	require.NoError(t, err)
+	rawHex := hex.EncodeToString(raw)
+	_, err = q.CreateToken(t.Context(), store.CreateTokenParams{
+		UserID:    userID,
+		TokenHash: tokenhash.Hash(rawHex),
+		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(24 * time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	return rawHex
+}
+
+// TestArchivedUser_TokenRejected reproduces the login-vs-archive race: a token
+// minted for a user that is then archived via direct SQL (leaving the token in
+// place) must be rejected at the auth boundary. Regression for the gap
+// documented in TestArchiveUser_LastAdminGuard's comment.
+func TestArchivedUser_TokenRejected(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	aliceToken := mintRawToken(t, q, alice.ID)
+
+	// Sanity: the token authenticates while alice is active.
+	req := httptest.NewRequest("GET", "/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Archive alice via direct SQL, leaving the token row in place (the race).
+	_, err := pool.Exec(t.Context(),
+		`UPDATE users SET archived_at = NOW() WHERE email = 'alice@test.com'`)
+	require.NoError(t, err)
+
+	// The still-present token must now be rejected with the generic 401.
+	req = httptest.NewRequest("GET", "/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	assert.Equal(t, "invalid token", body["error"])
+}
+
+// TestActiveUser_TokenStillValid guards against a regression where the new
+// archived predicate would reject active users.
+func TestActiveUser_TokenStillValid(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	aliceToken := mintRawToken(t, q, alice.ID)
+
+	req := httptest.NewRequest("GET", "/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+// seedEnabledScheduledJob inserts an enabled scheduled job owned by ownerID and
+// returns the created row. (Named to avoid colliding with the pool-based
+// seedScheduledJob helper in scheduled_jobs_sort_integration_test.go.)
+func seedEnabledScheduledJob(t *testing.T, q *store.Queries, ownerID pgtype.UUID, name string) store.ScheduledJob {
+	t.Helper()
+	sj, err := q.CreateScheduledJob(t.Context(), store.CreateScheduledJobParams{
+		Name:          name,
+		OwnerID:       ownerID,
+		CronExpr:      "@daily",
+		Timezone:      "UTC",
+		JobSpec:       []byte(`{"name":"x","tasks":[{"name":"t","command":"echo","args":["hi"]}]}`),
+		OverlapPolicy: "skip",
+		Enabled:       true,
+		NextRunAt:     pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	return sj
+}
+
+// TestArchiveUser_DisablesSchedules verifies archiving a user flips their
+// enabled scheduled jobs to enabled = FALSE and bumps updated_at.
+func TestArchiveUser_DisablesSchedules(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	sj := seedEnabledScheduledJob(t, q, alice.ID, "nightly")
+	before := sj.UpdatedAt.Time
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	got, err := q.GetScheduledJob(t.Context(), sj.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Enabled, "schedule should be disabled after archive")
+	assert.True(t, got.UpdatedAt.Time.After(before), "updated_at should advance")
+}
+
+// TestArchiveUser_LeavesDisabledSchedulesUntouched guards the enabled = TRUE
+// predicate: an already-disabled schedule's updated_at must NOT be bumped.
+func TestArchiveUser_LeavesDisabledSchedulesUntouched(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	sj := seedEnabledScheduledJob(t, q, alice.ID, "paused")
+
+	// Disable it directly first and capture updated_at.
+	_, err := pool.Exec(t.Context(),
+		`UPDATE scheduled_jobs SET enabled = FALSE, updated_at = NOW() WHERE id = $1`, sj.ID)
+	require.NoError(t, err)
+	pre, err := q.GetScheduledJob(t.Context(), sj.ID)
+	require.NoError(t, err)
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	post, err := q.GetScheduledJob(t.Context(), sj.ID)
+	require.NoError(t, err)
+	assert.False(t, post.Enabled)
+	assert.Equal(t, pre.UpdatedAt.Time, post.UpdatedAt.Time,
+		"already-disabled schedule's updated_at must not be bumped")
+}
+
+// TestArchiveUser_DoesNotAffectOtherOwners verifies the WHERE owner_id = $1
+// scoping: archiving alice does not disable bob's schedules.
+func TestArchiveUser_DoesNotAffectOtherOwners(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	bob := seedUser(t, q, "bob@test.com", "Bob")
+	_ = seedEnabledScheduledJob(t, q, alice.ID, "alice-job")
+	bobJob := seedEnabledScheduledJob(t, q, bob.ID, "bob-job")
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	got, err := q.GetScheduledJob(t.Context(), bobJob.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Enabled, "bob's schedule must stay enabled")
+}
+
+// TestUnarchiveUser_DoesNotReEnableSchedules locks in AUTONOMOUS DECISION 2:
+// unarchiving does NOT resurrect schedules that archiving disabled.
+func TestUnarchiveUser_DoesNotReEnableSchedules(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	adminToken := loginAsAdmin(t, srv, q, "admin@test.com", "adminpass")
+	alice := seedUser(t, q, "alice@test.com", "Alice")
+	sj := seedEnabledScheduledJob(t, q, alice.ID, "nightly")
+
+	code, _ := archiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	code, _ = unarchiveUser(t, srv, adminToken, uuidStrTest(alice.ID))
+	require.Equal(t, http.StatusOK, code)
+
+	got, err := q.GetScheduledJob(t.Context(), sj.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Enabled, "schedule must remain disabled after unarchive")
 }

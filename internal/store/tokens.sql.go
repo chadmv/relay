@@ -96,6 +96,7 @@ SELECT
 FROM api_tokens t
 JOIN users u ON u.id = t.user_id
 WHERE t.token_hash = $1
+  AND u.archived_at IS NULL
 `
 
 type GetTokenWithUserRow struct {
@@ -125,6 +126,7 @@ type GetTokenWithUserRow struct {
 //	FROM api_tokens t
 //	JOIN users u ON u.id = t.user_id
 //	WHERE t.token_hash = $1
+//	  AND u.archived_at IS NULL
 func (q *Queries) GetTokenWithUser(ctx context.Context, tokenHash string) (GetTokenWithUserRow, error) {
 	row := q.db.QueryRow(ctx, getTokenWithUser, tokenHash)
 	var i GetTokenWithUserRow
