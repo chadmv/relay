@@ -1162,7 +1162,9 @@ func (q *Queries) RegisterWorkerConnection(ctx context.Context, arg RegisterWork
 }
 
 const setWorkerAgentToken = `-- name: SetWorkerAgentToken :exec
-UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1
+UPDATE workers SET agent_token_hash = $2, revoked_at = NULL,
+    status = CASE WHEN status = 'revoked' THEN 'offline' ELSE status END
+WHERE id = $1
 `
 
 type SetWorkerAgentTokenParams struct {
@@ -1170,12 +1172,18 @@ type SetWorkerAgentTokenParams struct {
 	AgentTokenHash *string     `json:"agent_token_hash"`
 }
 
-// Sets the long-lived agent token on (re)enrollment. Clears revoked_at because
-// regaining a valid token means the worker is no longer revoked; this is the
-// one place a revoked worker is revived (revocation nulls the token, so the
-// reconnect-by-token path can no longer find it).
+// Sets the long-lived agent token on (re)enrollment. Clears revoked_at and, for
+// a previously revoked worker, resets status to 'offline' so revoked_at and the
+// revoked status are cleared together (regaining a valid token means the worker
+// is no longer revoked). This is the one place a revoked worker is revived
+// (revocation nulls the token, so the reconnect-by-token path can no longer find
+// it). The CASE leaves every non-revoked caller's status unchanged. 'offline' is
+// the natural not-yet-connected state; RegisterWorkerConnection flips it to
+// 'online' a moment later when the agent's connection registers.
 //
-//	UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1
+//	UPDATE workers SET agent_token_hash = $2, revoked_at = NULL,
+//	    status = CASE WHEN status = 'revoked' THEN 'offline' ELSE status END
+//	WHERE id = $1
 func (q *Queries) SetWorkerAgentToken(ctx context.Context, arg SetWorkerAgentTokenParams) error {
 	_, err := q.db.Exec(ctx, setWorkerAgentToken, arg.ID, arg.AgentTokenHash)
 	return err
