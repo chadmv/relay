@@ -43,23 +43,24 @@ func TestJobStats_BucketsAndWindow(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// running=2 (running + dispatched), queued=2 (queued + pending),
-	// done_24h=1 (a second done is 48h old, outside the window),
-	// failed_24h=2 (failed + timed_out within 24h).
-	seed("running", "1 hour")
-	seed("dispatched", "1 hour")
-	seed("queued", "1 hour")
-	seed("pending", "1 hour")
-	seed("done", "1 hour")
-	seed("done", "48 hours") // outside window - not counted
-	seed("failed", "1 hour")
-	seed("timed_out", "1 hour")
-	seed("cancelled", "1 hour") // in no bucket
+	// New bucketing after JobStatusCounts reconciliation:
+	//   running    = COUNT(status = 'running')
+	//   queued     = COUNT(status = 'pending')
+	//   done_24h   = COUNT(status = 'done'                  within 24h)
+	//   failed_24h = COUNT(status IN ('failed','cancelled') within 24h)
+	// Only valid jobs.status values may be seeded now that jobs_status_check
+	// exists: pending, running, done, failed, cancelled.
+	seed("running", "1 hour")   // running=1
+	seed("pending", "1 hour")   // queued=1
+	seed("done", "1 hour")      // done_24h=1
+	seed("done", "48 hours")    // outside window - not counted
+	seed("failed", "1 hour")    // failed_24h += 1
+	seed("cancelled", "1 hour") // failed_24h += 1 (cancelled folds into failed_24h)
 
 	code, body := getJobStats(t, srv, token)
 	require.Equal(t, http.StatusOK, code)
-	require.EqualValues(t, 2, body["running"])
-	require.EqualValues(t, 2, body["queued"])
+	require.EqualValues(t, 1, body["running"])
+	require.EqualValues(t, 1, body["queued"])
 	require.EqualValues(t, 1, body["done_24h"])
 	require.EqualValues(t, 2, body["failed_24h"])
 }
