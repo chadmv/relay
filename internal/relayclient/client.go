@@ -91,9 +91,12 @@ type SSEEvent struct {
 }
 
 // StreamEvents opens an SSE connection to path and calls handler for each complete event.
+// onSubscribed, if non-nil, is called once after the server returns HTTP 200 (the
+// subscription is established server-side at that point) and before any event is read;
+// if it returns false, StreamEvents returns nil immediately without reading the stream.
 // handler returns false to stop streaming cleanly. Returns nil when the handler stops
 // or the server closes the connection; returns an error on network/HTTP failure.
-func (c *Client) StreamEvents(ctx context.Context, path string, handler func(SSEEvent) bool) error {
+func (c *Client) StreamEvents(ctx context.Context, path string, onSubscribed func() bool, handler func(SSEEvent) bool) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.base+path, nil)
 	if err != nil {
 		return err
@@ -111,6 +114,10 @@ func (c *Client) StreamEvents(ctx context.Context, path string, handler func(SSE
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server error (%d)", resp.StatusCode)
+	}
+
+	if onSubscribed != nil && !onSubscribed() {
+		return nil
 	}
 
 	scanner := bufio.NewScanner(resp.Body)

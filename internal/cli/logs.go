@@ -41,31 +41,43 @@ func doLogs(ctx context.Context, cfg *Config, args []string, w io.Writer) error 
 	return nil
 }
 
-// watchJobLogs watches SSE events for jobID.
-// When a task reaches a terminal state its logs are fetched and printed.
+// watchJobLogs subscribes to SSE events for jobID, then takes a snapshot so a job
+// that went terminal before the subscribe is still caught (the broker has no replay).
+// When a task reaches a terminal state its logs are fetched and printed once.
 // Returns the final job status ("done", "failed", or "cancelled") and any error.
 func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io.Writer) (string, error) {
-	var job jobResp
-	if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
-		return "", fmt.Errorf("get job: %w", err)
-	}
+	taskNames := make(map[string]string)
+	printed := make(map[string]bool)
+	var finalStatus string
 
-	taskNames := make(map[string]string, len(job.Tasks))
-	for _, t := range job.Tasks {
-		taskNames[t.ID] = t.Name
-	}
-
-	if job.Status == "done" || job.Status == "failed" || job.Status == "cancelled" {
+	// onSubscribed runs after the SSE subscription is live. Any task or job already
+	// terminal at this point would never produce a future event, so we GET a snapshot
+	// and handle it here. Returning false stops the stream when the job is done.
+	onSubscribed := func() bool {
+		var job jobResp
+		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+			// Fall through to the stream; a transient snapshot error should not abort.
+			return true
+		}
+		for _, t := range job.Tasks {
+			taskNames[t.ID] = t.Name
+		}
 		for _, t := range job.Tasks {
 			if t.Status == "done" || t.Status == "failed" || t.Status == "timed_out" {
-				printTaskLogs(ctx, c, t.ID, t.Name, w)
+				if !printed[t.ID] {
+					printed[t.ID] = true
+					printTaskLogs(ctx, c, t.ID, t.Name, w)
+				}
 			}
 		}
-		return job.Status, nil
+		if job.Status == "done" || job.Status == "failed" || job.Status == "cancelled" {
+			finalStatus = job.Status
+			return false
+		}
+		return true
 	}
 
-	var finalStatus string
-	err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, func(e relayclient.SSEEvent) bool {
+	handler := func(e relayclient.SSEEvent) bool {
 		switch e.Type {
 		case "task":
 			var data struct {
@@ -76,7 +88,10 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io
 				return true
 			}
 			if data.Status == "done" || data.Status == "failed" || data.Status == "timed_out" {
-				printTaskLogs(ctx, c, data.ID, taskNames[data.ID], w)
+				if !printed[data.ID] {
+					printed[data.ID] = true
+					printTaskLogs(ctx, c, data.ID, taskNames[data.ID], w)
+				}
 			}
 		case "job":
 			var data struct {
@@ -91,8 +106,9 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io
 			}
 		}
 		return true
-	})
-	if err != nil {
+	}
+
+	if err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, onSubscribed, handler); err != nil {
 		return "", err
 	}
 	if finalStatus == "" {
