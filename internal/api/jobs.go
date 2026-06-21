@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"relay/internal/events"
-	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -761,16 +760,15 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cancels := make([]cancelSignal, 0, len(runningTasks))
 	for _, t := range runningTasks {
-		_ = s.registry.Send(uuidStr(t.WorkerID), &relayv1.CoordinatorMessage{
-			Payload: &relayv1.CoordinatorMessage_CancelTask{
-				CancelTask: &relayv1.CancelTask{
-					TaskId: uuidStr(t.ID),
-					Force:  force,
-				},
-			},
+		cancels = append(cancels, cancelSignal{
+			workerID: uuidStr(t.WorkerID),
+			taskID:   uuidStr(t.ID),
+			force:    force,
 		})
 	}
+	s.sendCancelSignals(cancels)
 
 	s.broker.Publish(events.Event{
 		Type:  "job",

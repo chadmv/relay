@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
@@ -497,16 +496,15 @@ func (s *Server) handleDisableWorker(w http.ResponseWriter, r *http.Request) {
 
 		// Tell the still-connected agent to kill the now-orphaned subprocesses.
 		// Best-effort: a failed send just means the agent already lost the task.
+		cancels := make([]cancelSignal, 0, len(requeuedIDs))
 		for _, tid := range requeuedIDs {
-			_ = s.registry.Send(uuidStr(id), &relayv1.CoordinatorMessage{
-				Payload: &relayv1.CoordinatorMessage_CancelTask{
-					CancelTask: &relayv1.CancelTask{
-						TaskId: uuidStr(tid),
-						Force:  false,
-					},
-				},
+			cancels = append(cancels, cancelSignal{
+				workerID: uuidStr(id),
+				taskID:   uuidStr(tid),
+				force:    false,
 			})
 		}
+		s.sendCancelSignals(cancels)
 	} else {
 		if _, err := s.q.DisableWorker(ctx, id); err != nil {
 			writeError(w, http.StatusInternalServerError, "disable worker failed")
