@@ -27,7 +27,7 @@ export function JobsPage() {
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
-  const { data, error, isLoading, isFetching, refetch } = useJobs(sort, status, cursor)
+  const { data, error, isLoading, isFetching, isPlaceholderData, refetch } = useJobs(sort, status, cursor)
   const { data: stats } = useJobStats()
 
   function pickFilter(key: string) {
@@ -139,7 +139,7 @@ export function JobsPage() {
           <button
             type="button"
             onClick={prev}
-            disabled={stack.length === 0}
+            disabled={stack.length === 0 || isPlaceholderData}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
             ← prev
@@ -147,7 +147,7 @@ export function JobsPage() {
           <button
             type="button"
             onClick={next}
-            disabled={!data?.next_cursor}
+            disabled={!data?.next_cursor || isPlaceholderData}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
             next 50 →
