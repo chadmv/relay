@@ -68,11 +68,17 @@ ON CONFLICT (hostname) DO UPDATE
 RETURNING id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, disabled_at, supports_workspaces;
 
 -- name: SetWorkerAgentToken :exec
--- Sets the long-lived agent token on (re)enrollment. Clears revoked_at because
--- regaining a valid token means the worker is no longer revoked; this is the
--- one place a revoked worker is revived (revocation nulls the token, so the
--- reconnect-by-token path can no longer find it).
-UPDATE workers SET agent_token_hash = $2, revoked_at = NULL WHERE id = $1;
+-- Sets the long-lived agent token on (re)enrollment. Clears revoked_at and, for
+-- a previously revoked worker, resets status to 'offline' so revoked_at and the
+-- revoked status are cleared together (regaining a valid token means the worker
+-- is no longer revoked). This is the one place a revoked worker is revived
+-- (revocation nulls the token, so the reconnect-by-token path can no longer find
+-- it). The CASE leaves every non-revoked caller's status unchanged. 'offline' is
+-- the natural not-yet-connected state; RegisterWorkerConnection flips it to
+-- 'online' a moment later when the agent's connection registers.
+UPDATE workers SET agent_token_hash = $2, revoked_at = NULL,
+    status = CASE WHEN status = 'revoked' THEN 'offline' ELSE status END
+WHERE id = $1;
 
 -- name: ClearWorkerAgentToken :execrows
 UPDATE workers
