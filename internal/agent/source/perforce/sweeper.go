@@ -10,6 +10,13 @@ import (
 	"time"
 )
 
+// ErrEvictClaimLost is returned by Sweeper.evict when the optional Claim hook
+// declines the reservation - the workspace is currently held by a task or is
+// already being evicted. It is a benign, expected outcome of losing the
+// eviction race, not a failure: SweepOnce skips such entries without logging
+// or counting them. Callers distinguish it with errors.Is.
+var ErrEvictClaimLost = errors.New("sweeper: evict claim lost (workspace in use or already evicting)")
+
 // Sweeper evicts stale workspaces by age and/or disk pressure.
 type Sweeper struct {
 	Root          string
@@ -24,6 +31,15 @@ type Sweeper struct {
 	ListLocked  func() map[string]bool           // returns short_ids of currently-held workspaces
 	FreeDiskGB  func(root string) (int64, error) // injectable for tests
 	OnEvictedCB func(shortID string)
+
+	// Claim, when non-nil, is invoked by evict before any destructive work to
+	// atomically reserve the short_id against a concurrent Prepare (mirroring
+	// Provider.EvictWorkspace's p.evicting reservation). If ok is false the
+	// entry is held or already being evicted: evict performs no deletion and
+	// returns ErrEvictClaimLost. If ok is true, evict defers release() and
+	// proceeds. Left nil where the caller already holds the reservation (the
+	// internal Sweeper that EvictWorkspace builds).
+	Claim func(shortID string) (release func(), ok bool)
 }
 
 // Run starts the background sweep loop. Blocks until ctx is cancelled.
@@ -79,6 +95,9 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 		for _, w := range candidates {
 			if now.Sub(w.LastUsedAt) > s.MaxAge {
 				if err := s.evict(ctx, reg, w); err != nil {
+					if errors.Is(err, ErrEvictClaimLost) {
+						continue
+					}
 					log.Printf("sweeper: evict %s: %v", w.ShortID, err)
 					continue
 				}
@@ -102,6 +121,9 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 				break
 			}
 			if err := s.evict(ctx, reg, w); err != nil {
+				if errors.Is(err, ErrEvictClaimLost) {
+					continue
+				}
 				log.Printf("sweeper: evict %s: %v", w.ShortID, err)
 				continue
 			}
@@ -112,6 +134,17 @@ func (s *Sweeper) SweepOnce(ctx context.Context) ([]string, error) {
 }
 
 func (s *Sweeper) evict(ctx context.Context, reg *Registry, w WorkspaceEntry) error {
+	if s.Claim != nil {
+		release, ok := s.Claim(w.ShortID)
+		if !ok {
+			return ErrEvictClaimLost
+		}
+		// release() must stay the outermost deferred cleanup so the reservation
+		// outlives OnEvictedCB (which clears p.workspaces). A Prepare arriving
+		// between OnEvictedCB and release() still sees p.evicting set and backs
+		// out; only after release() does it find no registry entry and rebuild.
+		defer release()
+	}
 	// When w.DirtyDelete is set, a prior sweep already deleted the p4 client
 	// and only the on-disk directory remains. Calling DeleteClient again would
 	// fail ("client doesn't exist") and previously wedged the whole sweep.
