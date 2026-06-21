@@ -47,9 +47,10 @@ func TestListJobs_Sort_OrderingAcrossKeys(t *testing.T) {
 	// Seed 10 jobs with unique names and priorities chosen so the default
 	// created_at order differs from each non-default sort key's order.
 	// Names are descending in creation order so name-sort != created_at-sort.
-	// Priorities cycle through all 4 values, giving unambiguous alphabetical
-	// ordering when combined with unique names as tiebreaker.
-	priorities := []string{"critical", "high", "low", "normal", "critical", "high", "low", "normal", "critical", "high"}
+	// Priorities cycle through the valid {low,normal,high} vocabulary, giving a
+	// non-trivial alphabetical ordering when combined with unique names as
+	// tiebreaker.
+	priorities := []string{"low", "normal", "high", "low", "normal", "high", "low", "normal", "high", "low"}
 	for i := 0; i < 10; i++ {
 		// job-09 is created first, job-00 last — so name-desc != created_at-desc.
 		submitJobWithFields(t, srv, token, fmt.Sprintf("job-%02d", 9-i), priorities[i])
@@ -71,7 +72,7 @@ func TestListJobs_Sort_PaginationAcrossPages(t *testing.T) {
 	user := createTestUser(t, q, "Bob", "page-bob@test.com", false)
 	token := createTestToken(t, q, user.ID)
 
-	priorities := []string{"critical", "high", "low", "normal", "critical", "high", "low", "normal", "critical", "high"}
+	priorities := []string{"low", "normal", "high", "low", "normal", "high", "low", "normal", "high", "low"}
 	for i := 0; i < 10; i++ {
 		submitJobWithFields(t, srv, token, fmt.Sprintf("p-%02d", 9-i), priorities[i])
 		time.Sleep(2 * time.Millisecond)
