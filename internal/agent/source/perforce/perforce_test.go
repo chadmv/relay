@@ -13,6 +13,27 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 )
 
+// assertCwdContract pins the cwd half of the client-selection contract introduced
+// by the p4client-explicit-flag fix: every workspace-scoped invocation (argv
+// begins with `-c <client>`) must run from wsRoot, while every global invocation
+// (no `-c` prefix - ResolveHead's `changes -m1`, the `client` create/delete
+// calls) must run with an empty cwd. The `-c <client>` argv assertions already
+// pin the client half; this locks the cwd half, previously only covered
+// implicitly by the integration test.
+func assertCwdContract(t *testing.T, fr *fakeRunner, wsRoot string) {
+	t.Helper()
+	sawWorkspaceCall := false
+	for _, c := range fr.calls {
+		if len(c.args) > 0 && c.args[0] == "-c" {
+			sawWorkspaceCall = true
+			require.Equalf(t, wsRoot, c.cwd, "workspace-scoped call %q must run from wsRoot", c.args)
+		} else {
+			require.Equalf(t, "", c.cwd, "global call %q must run with empty cwd", c.args)
+		}
+	}
+	require.True(t, sawWorkspaceCall, "expected at least one workspace-scoped (-c) invocation")
+}
+
 func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
@@ -62,6 +83,8 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	require.NotNil(t, syncCall, "expected a sync invocation in argHistory")
 	require.Equal(t, []string{"-c", expectedClient}, syncCall[:2],
 		"sync invocation must begin with -c <client>")
+
+	assertCwdContract(t, fr, h.WorkingDir())
 }
 
 func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
@@ -115,6 +138,8 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	require.True(t, found([]string{"-c", expectedClient, "unshelve", "-s", "12346", "-c", "91244"}))
 	require.True(t, found([]string{"-c", expectedClient, "revert", "-c", "91244", "//..."}))
 	require.True(t, found([]string{"-c", expectedClient, "change", "-d", "91244"}))
+
+	assertCwdContract(t, fr, h.WorkingDir())
 
 	// Registry must be clean after Finalize.
 	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
@@ -180,6 +205,8 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	require.True(t, found([]string{"-c", clientName, "change", "-d", "91244"}))
 	// Must NOT touch CL 99999 (not relay-owned)
 	require.False(t, found([]string{"-c", clientName, "change", "-d", "99999"}))
+
+	assertCwdContract(t, fr, h.WorkingDir())
 }
 
 func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
