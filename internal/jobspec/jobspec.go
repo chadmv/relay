@@ -75,6 +75,17 @@ func Validate(spec *JobSpec) error {
 	if len(spec.Tasks) == 0 {
 		return errors.New("at least one task is required")
 	}
+	// Priority is optional. Empty is allowed (jobcreate defaults it to "normal").
+	// A non-empty value must be one of the known levels; this rejects typos that
+	// would otherwise be stored silently and break the jobs_priority_check
+	// constraint. This set MUST stay identical to jobs_priority_check in
+	// migration 000019_status_vocabulary_checks.
+	switch spec.Priority {
+	case "", "low", "normal", "high":
+		// ok
+	default:
+		return fmt.Errorf("invalid priority %q: must be low, normal, or high", spec.Priority)
+	}
 	nameSet := make(map[string]struct{}, len(spec.Tasks))
 	for i := range spec.Tasks {
 		ts := &spec.Tasks[i]

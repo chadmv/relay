@@ -144,3 +144,33 @@ func TestValidate_DuplicateDependsOnAccepted(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+func TestValidate_PriorityEmptyOK(t *testing.T) {
+	spec := JobSpec{
+		Name:  "ok",
+		Tasks: []TaskSpec{{Name: "t1", Command: []string{"echo", "hi"}}},
+	}
+	require.NoError(t, Validate(&spec))
+}
+
+func TestValidate_PriorityKnownLevelsOK(t *testing.T) {
+	for _, p := range []string{"low", "normal", "high"} {
+		spec := JobSpec{
+			Name:     "ok",
+			Priority: p,
+			Tasks:    []TaskSpec{{Name: "t1", Command: []string{"echo", "hi"}}},
+		}
+		require.NoError(t, Validate(&spec), "priority %q must be accepted", p)
+	}
+}
+
+func TestValidate_PriorityTypoRejected(t *testing.T) {
+	spec := JobSpec{
+		Name:     "x",
+		Priority: "hgih",
+		Tasks:    []TaskSpec{{Name: "t1", Command: []string{"echo", "hi"}}},
+	}
+	err := Validate(&spec)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid priority")
+}
