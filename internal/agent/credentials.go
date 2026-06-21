@@ -19,6 +19,11 @@ type Credentials struct {
 	enrollmentToken string
 }
 
+// secureTokenFileFn is the indirection through which Persist tightens OS-level
+// access on the token file. It defaults to the platform secureTokenFile and is
+// overridable in tests to exercise the securing-failed cleanup path.
+var secureTokenFileFn = secureTokenFile
+
 // LoadCredentials reads the token file at <stateDir>/token if it exists.
 // Missing file → empty credentials (no error). Unreadable file → error.
 func LoadCredentials(stateDir string) (*Credentials, error) {
@@ -51,14 +56,23 @@ func (c *Credentials) EnrollmentToken() string { return c.enrollmentToken }
 // startup, from the RELAY_AGENT_ENROLLMENT_TOKEN env var.
 func (c *Credentials) SetEnrollmentToken(t string) { c.enrollmentToken = t }
 
-// Persist writes the given agent token to the state file with 0600 perms and
-// clears any in-memory enrollment token.
+// Persist writes the given agent token to the state file with 0600 perms,
+// tightens the OS-level access controls on the file (an explicit restrictive
+// DACL on Windows, where 0600 carries no ACL meaning; a no-op on Unix where
+// 0600 already restricts access), and clears any in-memory enrollment token.
 func (c *Credentials) Persist(agentToken string) error {
 	if err := os.MkdirAll(filepath.Dir(c.tokenFilePath), 0755); err != nil {
 		return fmt.Errorf("mkdir state dir: %w", err)
 	}
 	if err := os.WriteFile(c.tokenFilePath, []byte(agentToken), 0600); err != nil {
 		return fmt.Errorf("write token file: %w", err)
+	}
+	if err := secureTokenFileFn(c.tokenFilePath); err != nil {
+		// The file exists with its (on Windows, broad inherited) DACL live but
+		// could not be restricted. Remove it best-effort so a failed Persist
+		// never leaves a broadly-readable token behind, then return the error.
+		_ = os.Remove(c.tokenFilePath)
+		return fmt.Errorf("secure token file: %w", err)
 	}
 	c.agentToken = agentToken
 	c.enrollmentToken = ""
