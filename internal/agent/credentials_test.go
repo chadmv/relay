@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,6 +60,25 @@ func TestPersist_WritesWithRestrictivePerms(t *testing.T) {
 	}
 	if c2.AgentToken() != "new-token-xyz" {
 		t.Fatalf("got %q", c2.AgentToken())
+	}
+}
+
+func TestPersist_RemovesTokenWhenSecuringFails(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := LoadCredentials(dir)
+
+	orig := secureTokenFileFn
+	t.Cleanup(func() { secureTokenFileFn = orig })
+	secureTokenFileFn = func(string) error { return errors.New("boom") }
+
+	err := c.Persist("leaky-token")
+	if err == nil {
+		t.Fatal("expected Persist to return an error when securing fails")
+	}
+	// A failed Persist must not leave a (potentially broadly-readable) token on
+	// disk.
+	if _, statErr := os.Stat(c.tokenFilePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected token file removed after securing failed, stat err = %v", statErr)
 	}
 }
 
