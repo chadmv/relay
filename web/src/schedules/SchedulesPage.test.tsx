@@ -132,6 +132,81 @@ test('next and prev are disabled while a page fetch is in flight', async () => {
   expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
 })
 
+// Helper to build a page of schedule items.
+function makeSchedules(count: number, startId = 0) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `s${startId + i}`,
+    name: `sched-${startId + i}`,
+    owner_id: 'o1',
+    owner_email: 'dev@studio.com',
+    cron_expr: '0 2 * * *',
+    timezone: 'UTC',
+    job_spec: {},
+    overlap_policy: 'skip',
+    enabled: true,
+    next_run_at: '2099-01-01T00:00:00Z',
+    last_run_at: '2026-06-05T11:00:00Z',
+    last_job_id: null,
+    created_at: '2026-06-01T00:00:00Z',
+    updated_at: '2026-06-05T11:00:00Z',
+  }))
+}
+
+test('pagination footer shows 1-N of total on the first full page', async () => {
+  server.use(
+    http.get('/v1/scheduled-jobs', () =>
+      HttpResponse.json({ items: makeSchedules(50), next_cursor: 'CUR1', total: 120 }),
+    ),
+  )
+  renderWithQuery(<SchedulesPage />)
+  await screen.findByText('sched-0')
+  expect(await screen.findByText(/1-50 of 120/i)).toBeInTheDocument()
+})
+
+test('pagination footer shows correct absolute range on partial last page after paging forward', async () => {
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: makeSchedules(50, 0), next_cursor: 'CUR1', total: 63 },
+    CUR1: { items: makeSchedules(13, 50), next_cursor: '', total: 63 },
+  }
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<SchedulesPage />)
+  await screen.findByText('sched-0')
+  expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('sched-50')
+  expect(await screen.findByText(/51-63 of 63/i)).toBeInTheDocument()
+})
+
+test('pagination footer restores prior range when paging back', async () => {
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: makeSchedules(50, 0), next_cursor: 'CUR1', total: 63 },
+    CUR1: { items: makeSchedules(13, 50), next_cursor: '', total: 63 },
+  }
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<SchedulesPage />)
+  await screen.findByText('sched-0')
+  expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('sched-50')
+  expect(await screen.findByText(/51-63 of 63/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /prev/i }))
+  await screen.findByText('sched-0')
+  expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
+})
+
 test('clicking Disable PATCHes the schedule', async () => {
   let patched: unknown
   server.use(

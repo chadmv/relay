@@ -4,6 +4,7 @@ import type { Schedule, ScheduleSort } from './api'
 import { useSchedules } from './useSchedules'
 import { useScheduleActions } from './useScheduleActions'
 import { SchedulesTable } from './SchedulesTable'
+import { computePageRange } from '../lib/pageRange'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-created_at', label: 'Newest' },
@@ -27,6 +28,10 @@ export function SchedulesPage() {
   // Cursor stack: [] is the first page; each entry is the cursor for a deeper page.
   const [cursorStack, setCursorStack] = useState<string[]>([])
   const cursor = cursorStack[cursorStack.length - 1]
+  // Accumulated actual-row offset to the start of the current page. Mirrors
+  // cursorStack depth so partial pages stay correct (same pattern as JobsPage).
+  const [startOffset, setStartOffset] = useState(0)
+  const [offsets, setOffsets] = useState<number[]>([])
   const [pendingId, setPendingId] = useState<string | null>(null)
 
   const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, cursor)
@@ -43,6 +48,31 @@ export function SchedulesPage() {
   function chooseSort(next: ScheduleSort) {
     setSort(next)
     setCursorStack([]) // restart paging when the sort changes
+    setOffsets([])
+    setStartOffset(0)
+  }
+
+  // goNext/goPrev use plain setters (not functional updaters): cursorStack,
+  // offsets, and startOffset are all read from the current render and React
+  // batches the updates in one event. Mixing a functional setCursorStack
+  // updater with plain offset setters would desync the stacks under StrictMode.
+  function goNext() {
+    if (!data?.next_cursor) return
+    const currentPageSize = data.items.length
+    setCursorStack([...cursorStack, data.next_cursor])
+    setOffsets([...offsets, startOffset])
+    setStartOffset(startOffset + currentPageSize)
+  }
+
+  function goPrev() {
+    if (cursorStack.length === 0) return
+    const cursorCopy = [...cursorStack]
+    cursorCopy.pop()
+    setCursorStack(cursorCopy)
+    const offsetsCopy = [...offsets]
+    const prevOffset = offsetsCopy.pop() ?? 0
+    setOffsets(offsetsCopy)
+    setStartOffset(prevOffset)
   }
 
   async function onRunNow(id: string) {
@@ -95,6 +125,7 @@ export function SchedulesPage() {
 
   const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
+  const { x, y } = computePageRange(startOffset, schedules.length)
   const actionError = (runNow.error ?? setEnabled.error) as Error | null
 
   return (
@@ -141,14 +172,13 @@ export function SchedulesPage() {
 
       <div className="flex items-center justify-between font-mono text-[10.5px] tracking-wide text-fg-mute">
         <span>
-          SHOWING <span className="text-fg">{schedules.length}</span> OF{' '}
-          <span className="text-fg">{total}</span> · OWNED + ADMINISTRATIVE
+          SHOWING <span className="text-fg">{x}-{y} of {total}</span> · OWNED + ADMINISTRATIVE
         </span>
         <div className="flex gap-1.5">
           <button
             type="button"
             disabled={cursorStack.length === 0 || isPlaceholderData}
-            onClick={() => setCursorStack((s) => s.slice(0, -1))}
+            onClick={goPrev}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
             ← prev
@@ -156,7 +186,7 @@ export function SchedulesPage() {
           <button
             type="button"
             disabled={!data?.next_cursor || isPlaceholderData}
-            onClick={() => data?.next_cursor && setCursorStack((s) => [...s, data.next_cursor])}
+            onClick={goNext}
             className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
           >
             next 50 →
