@@ -1,11 +1,23 @@
 ---
 title: Trailing slash in the server URL breaks every POST/PATCH/DELETE
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-20
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
+
+## Resolution
+Resolved 2026-06-20. `relayclient.NewClient` now normalizes the base URL once with
+`strings.TrimRight(serverURL, "/")` (`internal/relayclient/client.go:33`), so a
+trailing slash in `RELAY_URL` no longer produces `//v1/...` (which the server
+301-redirected, downgrading the POST to a body-less GET and 405ing). Normalization
+stays at the single constructor chokepoint - all callers (`login`, `register`,
+`mcp/server`, and `cfg.NewClient` for every CLI subcommand) benefit. Covered by a
+table test (no/single/multiple trailing slashes) plus a behavioral test that POSTs
+through a trailing-slash base and asserts the clean path is reached and the method
+stays POST (not downgraded to GET via a redirect).
 
 # Trailing slash in the server URL breaks every POST/PATCH/DELETE
 
