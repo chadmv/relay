@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -23,33 +22,15 @@ type getJobArgs struct {
 }
 
 func (s *Server) registerJobs() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_list_jobs",
 		Description: "List relay jobs with optional status filter and pagination.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args listJobsArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callListJobs(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callListJobs)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_job",
 		Description: "Get details of a single relay job by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args getJobArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callGetJob(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callGetJob)
 }
 
 func (s *Server) callListJobs(ctx context.Context, args listJobsArgs) (map[string]any, *ToolError) {

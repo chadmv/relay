@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -22,33 +21,15 @@ type getWorkerArgs struct {
 }
 
 func (s *Server) registerWorkers() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_list_workers",
 		Description: "List relay workers (agents) connected to the server.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args listWorkersArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callListWorkers(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callListWorkers)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_worker",
 		Description: "Get details of a single relay worker by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args getWorkerArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callGetWorker(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callGetWorker)
 }
 
 func (s *Server) callListWorkers(ctx context.Context, args listWorkersArgs) (map[string]any, *ToolError) {
