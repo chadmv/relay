@@ -33,24 +33,17 @@ vet-integration:
 	go vet -tags integration ./...
 
 # Run tests under the race detector (unit tests only - no Docker). Catches
-# concurrency regressions across the worker/grace registries, the scheduler, and
-# the perforce registry race guard.
-# SCOPE: excludes relay/internal/agent because its Windows-only proctree code
-# (internal/agent/proctree_windows.go) has a pre-existing data race surfaced when
-# this target was first run under -race (docs/backlog/bug-2026-06-20-agent-proctree-windows-race.md). The
-# race is //go:build windows so Linux never compiles it (proctree_unix.go is the
-# clean Linux build), and the integration tester proved `go test -race ./...` is
-# fully green on Linux including internal/agent. CI runs on Linux and therefore
-# invokes the full `go test -race ./...` set directly (see
-# .github/workflows/go-ci.yml) rather than this target, for complete coverage of
-# the agent send goroutine and Runner. This target stays descoped only so the
-# same command is green for local Windows devs until the proctree race is fixed;
-# re-include relay/internal/agent here once it is.
+# concurrency regressions across the agent send goroutine and Runner, the
+# worker/grace registries, the scheduler, and the perforce registry race guard.
+# internal/agent is included: its former Windows-only proctree race
+# (internal/agent/proctree_windows.go, docs/backlog/closed/bug-2026-06-20-agent-proctree-windows-race.md)
+# is fixed - the proctree is now assigned synchronously after cmd.Start instead
+# of from a goroutine that polled cmd.Process.
 # NOTE (Windows): -race needs cgo with a working gcc. The default Strawberry Perl
 # gcc fails (exit status 0xc0000139); use MSYS2 mingw64 via
 # CC=/c/msys64/mingw64/bin/gcc.exe (with its bin on PATH). Linux/CI is unaffected.
 test-race:
-	go test -race -timeout 180s $(shell go list ./... | grep -v '^relay/internal/agent$$')
+	go test -race ./... -timeout 180s
 
 # Regenerate sqlc store layer and protobuf code
 generate:

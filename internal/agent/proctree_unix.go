@@ -13,7 +13,11 @@ import (
 //   - cmd.Cancel (invoked when the context tied to exec.CommandContext is
 //     cancelled) sends SIGKILL to the entire process group, killing every
 //     descendant in one shot.
-func setupProcTree(cmd *exec.Cmd) func() {
+//
+// Returns two functions to match the Windows build's signature: assign is a
+// no-op on Unix (the process group is configured before Start via SysProcAttr),
+// and cleanup is a no-op (there is no kernel handle to release).
+func setupProcTree(cmd *exec.Cmd) (assign func(), cleanup func()) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
@@ -31,5 +35,5 @@ func setupProcTree(cmd *exec.Cmd) func() {
 		}
 		return nil
 	}
-	return func() {} // no kernel handle to release on Unix
+	return func() {}, func() {} // no kernel handle to release on Unix
 }
