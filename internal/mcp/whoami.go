@@ -2,24 +2,16 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func (s *Server) registerWhoami() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_whoami",
 		Description: "Return the identity of the authenticated relay user (email, user ID, admin flag) and the server URL.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callWhoami(ctx)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
+	}, func(ctx context.Context, _ struct{}) (map[string]any, *ToolError) {
+		return s.callWhoami(ctx)
 	})
 }
 

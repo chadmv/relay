@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -81,3 +82,25 @@ func (s *Server) registerResources() {
 type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
+
+// addTool registers a relay MCP tool whose call function returns either a result
+// to JSON-encode or a structured *ToolError. On a *ToolError it returns an
+// IsError CallToolResult carrying the marshaled ToolError (code/message/hint),
+// instead of returning the error to the SDK (which would flatten it to plain text
+// via CallToolResult.SetError and drop the hint and JSON structure).
+func addTool[A, R any](s *Server, tool *mcpsdk.Tool, call func(context.Context, A) (R, *ToolError)) {
+	mcpsdk.AddTool(s.mcp, tool, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args A) (*mcpsdk.CallToolResult, any, error) {
+		out, terr := call(ctx, args)
+		if terr != nil {
+			b, _ := json.Marshal(terr)
+			return &mcpsdk.CallToolResult{
+				Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
+				IsError: true,
+			}, nil, nil
+		}
+		b, _ := json.Marshal(out)
+		return &mcpsdk.CallToolResult{
+			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
+		}, nil, nil
+	})
+}
