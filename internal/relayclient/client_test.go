@@ -26,7 +26,7 @@ func TestStreamEvents_ParsesFrames(t *testing.T) {
 
 	c := NewClient(srv.URL, "tok")
 	var got []SSEEvent
-	err := c.StreamEvents(context.Background(), "/v1/events", func(e SSEEvent) bool {
+	err := c.StreamEvents(context.Background(), "/v1/events", nil, func(e SSEEvent) bool {
 		got = append(got, e)
 		return true // keep going until server closes
 	})
@@ -51,7 +51,7 @@ func TestStreamEvents_HandlerReturnFalseStops(t *testing.T) {
 
 	c := NewClient(srv.URL, "")
 	count := 0
-	_ = c.StreamEvents(context.Background(), "/v1/events", func(e SSEEvent) bool {
+	_ = c.StreamEvents(context.Background(), "/v1/events", nil, func(e SSEEvent) bool {
 		count++
 		return false // stop after first event
 	})
