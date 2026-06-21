@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,19 +12,10 @@ type cancelJobArgs struct {
 }
 
 func (s *Server) registerCancel() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_cancel_job",
 		Description: "Cancel a running or pending relay job by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args cancelJobArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callCancelJob(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callCancelJob)
 }
 
 func (s *Server) callCancelJob(ctx context.Context, args cancelJobArgs) (map[string]any, *ToolError) {
