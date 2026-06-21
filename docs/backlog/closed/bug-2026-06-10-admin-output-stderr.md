@@ -1,8 +1,10 @@
 ---
 title: relay admin users list/get and profile update print data output to stderr
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-21
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -20,3 +22,6 @@ Route prompts to stderr and results to stdout: give `doAdminUsers*` and the prof
 - `internal/cli/profile.go:18`
 - `internal/cli/admin_users.go:76-78`
 - `internal/cli/jobs.go:52`, `internal/cli/workers.go:38` (the correct pattern)
+
+## Resolution
+fixed (2026-06-21). `AdminCommand`/`ProfileCommand` now pass `os.Stdout` as the data writer (mirroring the jobs/workers pattern) while password prompts in `doAdminPasswd` and `doAdminUsersCreate` route explicitly to `stderrWriter()`. Admin users list/get tables, profile-update results, and `printUserDetail` (also used by create/update/archive) now land on stdout, so redirect and pipe capture them. Covered by three tests that drive the real command constructors with `os.Stdout`/`os.Stderr` redirected to pipes, proven RED against the old wiring.

@@ -208,14 +208,14 @@ func doAdminUsersCreate(ctx context.Context, cfg *Config, args []string, out io.
 		return fmt.Errorf("--email is required")
 	}
 
-	password, err := readPasswordFn(out, "Password: ")
+	password, err := readPasswordFn(stderrWriter(), "Password: ")
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}
 	if password == "" {
 		return fmt.Errorf("password is required")
 	}
-	confirm, err := readPasswordFn(out, "Confirm password: ")
+	confirm, err := readPasswordFn(stderrWriter(), "Confirm password: ")
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}
