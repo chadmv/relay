@@ -26,6 +26,13 @@ var ErrP4BinaryMissing = errors.New("p4 binary not found on PATH")
 // pattern used elsewhere in this codebase.
 var lookPath = exec.LookPath
 
+// prepareAcquireHook, when non-nil, is invoked in Prepare after the pre-Acquire
+// evicting pre-check and before ws.Acquire. It exists solely to let tests drive
+// a concurrent EvictWorkspace into the gap between the pre-check and the
+// acquire/re-check. Production keeps it nil. Package-level var pattern, as with
+// lookPath above.
+var prepareAcquireHook func(shortID string)
+
 // Config holds constructor parameters for the Perforce provider.
 type Config struct {
 	Root     string  // RELAY_WORKSPACE_ROOT — directory for all workspaces
@@ -38,6 +45,7 @@ type Provider struct {
 	cfg        Config
 	mu         sync.Mutex
 	workspaces map[string]*Workspace // keyed by short_id
+	evicting   map[string]bool       // short_ids reserved by an in-flight EvictWorkspace; guarded by mu
 	reg        *Registry             // cached; loaded lazily
 }
 
@@ -47,7 +55,7 @@ func New(cfg Config) *Provider {
 		cfg.Client = NewClient()
 	}
 	cfg.Hostname = sanitizeHostname(cfg.Hostname)
-	return &Provider{cfg: cfg, workspaces: map[string]*Workspace{}}
+	return &Provider{cfg: cfg, workspaces: map[string]*Workspace{}, evicting: map[string]bool{}}
 }
 
 func (p *Provider) Type() string { return "perforce" }
@@ -157,12 +165,20 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 
 	// Get or create the in-memory Workspace arbitrator.
 	p.mu.Lock()
+	if p.evicting[shortID] {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
+	}
 	ws, ok := p.workspaces[shortID]
 	if !ok {
 		ws = NewWorkspace(shortID)
 		p.workspaces[shortID] = ws
 	}
 	p.mu.Unlock()
+
+	if prepareAcquireHook != nil {
+		prepareAcquireHook(shortID)
+	}
 
 	req := Request{
 		BaselineHash:       baseline,
@@ -173,6 +189,22 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	handle, err := ws.Acquire(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+
+	// Re-check the eviction reservation now that we hold a workspace handle.
+	// EvictWorkspace's holder-check and reservation are one p.mu critical
+	// section; ws.Acquire happens-before this re-check. So if an eviction
+	// reserved this short ID in the gap between the pre-Acquire check above and
+	// this Acquire (when it saw zero holders), we observe it here and back out -
+	// releasing the handle so we never sync into a workspace being deleted. If
+	// instead our Acquire landed first, EvictWorkspace sees holders > 0 and
+	// refuses; exactly one of the two proceeds.
+	p.mu.Lock()
+	evicting := p.evicting[shortID]
+	p.mu.Unlock()
+	if evicting {
+		handle.Release()
+		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
 	}
 
 	// First time: create on-disk dir and p4 client spec.
@@ -264,12 +296,42 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}, nil
 }
 
-// EvictWorkspace deletes the workspace identified by shortID if it is not locked.
+// EvictWorkspace deletes the workspace identified by shortID if it is not in
+// use. Under p.mu it verifies the workspace is neither held nor already being
+// evicted, then reserves it in p.evicting; the holder-check and the reservation
+// are one p.mu critical section. The reservation is held for the whole (slow)
+// evict and cleared afterward; the lock is never held across the p4/disk I/O.
+//
+// This does not by itself fully exclude a concurrent Prepare, because Prepare
+// registers its holder under ws.mu (not p.mu): an eviction can reserve in the
+// window after Prepare's pre-Acquire check but before Prepare's ws.Acquire. The
+// race is closed on the Prepare side, which re-checks p.evicting after Acquire
+// and backs out if it lost. Net guarantee: a workspace is never deleted while a
+// Prepare holds (or is about to hold) it, and exactly one of the two proceeds.
 func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
-	locked := p.lockedShortIDs()
-	if locked[shortID] {
-		return fmt.Errorf("workspace %s is currently in use", shortID)
+	p.mu.Lock()
+	if ws, ok := p.workspaces[shortID]; ok {
+		ws.mu.Lock()
+		held := len(ws.holders) > 0
+		ws.mu.Unlock()
+		if held {
+			p.mu.Unlock()
+			return fmt.Errorf("workspace %s is currently in use", shortID)
+		}
 	}
+	if p.evicting[shortID] {
+		p.mu.Unlock()
+		return fmt.Errorf("workspace %s is already being evicted", shortID)
+	}
+	p.evicting[shortID] = true
+	p.mu.Unlock()
+
+	defer func() {
+		p.mu.Lock()
+		delete(p.evicting, shortID)
+		p.mu.Unlock()
+	}()
+
 	reg, err := p.loadRegistry()
 	if err != nil {
 		return fmt.Errorf("load registry: %w", err)
@@ -278,7 +340,15 @@ func (p *Provider) EvictWorkspace(ctx context.Context, shortID string) error {
 	if !ok {
 		return fmt.Errorf("workspace %s not found in registry", shortID)
 	}
-	sw := &Sweeper{Root: p.cfg.Root, Reg: reg, Client: p.cfg.Client, ListLocked: p.lockedShortIDs}
+	// ListLocked is intentionally omitted: sw.evict (the single-entry path used
+	// here) never reads it - only SweepOnce does. The inline holder check above
+	// plus the p.evicting reservation are the sole holder gate for this path.
+	sw := &Sweeper{
+		Root:        p.cfg.Root,
+		Reg:         reg,
+		Client:      p.cfg.Client,
+		OnEvictedCB: p.InvalidateWorkspace,
+	}
 	return sw.evict(ctx, reg, e)
 }
 
