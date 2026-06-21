@@ -68,8 +68,7 @@ func TestAgent_BuildRegisterRequest_IncludesRunningTasks(t *testing.T) {
 	a.runners["task-2"] = &Runner{taskID: "task-2", epoch: 7}
 	a.mu.Unlock()
 
-	req, err := a.buildRegisterRequest()
-	require.NoError(t, err)
+	req := a.buildRegisterRequest()
 	assert.Equal(t, "worker-xyz", req.WorkerId)
 	assert.NotNil(t, req.Credential, "credential must be populated")
 	assert.Equal(t, "test-enrollment", req.GetEnrollmentToken())
@@ -98,8 +97,7 @@ func TestAgent_BuildRegisterRequest_IncludesInventory(t *testing.T) {
 	creds, _ := LoadCredentials(t.TempDir())
 	creds.SetEnrollmentToken("test-enrollment")
 	a := NewAgent("addr", Capabilities{Hostname: "h"}, "", creds, func(string) error { return nil }, p)
-	req, err := a.buildRegisterRequest()
-	require.NoError(t, err)
+	req := a.buildRegisterRequest()
 	require.Len(t, req.Inventory, 1)
 	require.Equal(t, "//s/x", req.Inventory[0].SourceKey)
 	require.Equal(t, "abcdef", req.Inventory[0].ShortId)
@@ -112,7 +110,6 @@ func TestAgent_BuildRegisterRequest_NoCredentialsLeavesCredentialUnset(t *testin
 		Hostname: "test", CPUCores: 1, RAMGB: 1, OS: "linux",
 	}, "worker-xyz", creds, func(string) error { return nil }, nil)
 
-	req, err := a.buildRegisterRequest()
-	require.NoError(t, err)
+	req := a.buildRegisterRequest()
 	assert.Nil(t, req.Credential, "credential must be unset for token-less auto-enroll")
 }

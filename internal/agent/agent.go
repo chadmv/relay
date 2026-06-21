@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -56,18 +57,50 @@ func NewAgent(coord string, caps Capabilities, workerID string, creds *Credentia
 	}
 }
 
+// dialContextFn, when non-nil, overrides the transport dialer used by connect.
+// Tests set it to a bufconn dialer; production leaves it nil. (No build tag,
+// matching the existing untagged-override pattern used elsewhere in the tree.)
+var dialContextFn func(context.Context) (net.Conn, error)
+
+// initialReconnectBackoff is the wait before the first reconnect attempt. It is
+// a package var (not a const) only so the ordering test can seed an accumulated
+// backoff; production always uses 1s.
+var initialReconnectBackoff = time.Second
+
+// reconnectSleep, when non-nil, overrides the inter-attempt wait in Run so the
+// ordering test can observe the requested duration without real sleeping. It
+// returns false when ctx is cancelled, telling the loop to stop. Production
+// leaves it nil and Run uses a real time.After/ctx.Done select.
+var reconnectSleep func(ctx context.Context, d time.Duration) bool
+
+// nextReconnectBackoff returns the backoff to use before the next reconnect
+// attempt. A healthy session (one that registered before dropping) resets the
+// backoff to 1s; an unhealthy session doubles it, capped at 60s. Keeping this a
+// pure function lets the reset rule be unit-tested without timing or -race.
+func nextReconnectBackoff(current time.Duration, healthy bool) time.Duration {
+	if healthy {
+		return time.Second
+	}
+	next := current * 2
+	if next > 60*time.Second {
+		next = 60 * time.Second
+	}
+	return next
+}
+
 // Run connects to the coordinator and reconnects with exponential backoff until
 // ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) {
 	a.runCtx = ctx
 	go a.runTelemetry(ctx)
-	backoff := time.Second
+	backoff := initialReconnectBackoff
 	for {
 		if ctx.Err() != nil {
 			a.runnerWG.Wait()
 			return
 		}
-		if err := a.connect(ctx); err != nil {
+		registered, err := a.connect(ctx)
+		if err != nil {
 			if ctx.Err() != nil {
 				a.runnerWG.Wait()
 				return
@@ -81,19 +114,37 @@ func (a *Agent) Run(ctx context.Context) {
 				a.runnerWG.Wait()
 				return
 			}
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
+			// A healthy session that dropped resets the wait to 1s BEFORE
+			// sleeping, so the FIRST reconnect is prompt even when prior
+			// failures had ramped backoff to the cap. This reset-before-sleep
+			// ordering is the fix; the post-sleep doubling below preserves
+			// exponential backoff for repeated unhealthy failures (and the
+			// initial 1s wait for a first unhealthy failure from a fresh start).
+			if registered {
+				backoff = time.Second
+			}
+			if !a.reconnectWait(ctx, backoff) {
 				a.runnerWG.Wait()
 				return
 			}
-			backoff *= 2
-			if backoff > 60*time.Second {
-				backoff = 60 * time.Second
-			}
+			backoff = nextReconnectBackoff(backoff, false)
 			continue
 		}
-		backoff = time.Second
+	}
+}
+
+// reconnectWait sleeps for d before the next reconnect attempt, returning false
+// if ctx is cancelled during the wait (the caller should then return). The
+// reconnectSleep package var lets tests observe d without real sleeping.
+func (a *Agent) reconnectWait(ctx context.Context, d time.Duration) bool {
+	if reconnectSleep != nil {
+		return reconnectSleep(ctx, d)
+	}
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -130,7 +181,7 @@ func (a *Agent) runSender(connCtx context.Context, connCancel context.CancelFunc
 
 // connect dials the coordinator, registers, and runs the recv loop until the
 // stream closes or ctx is cancelled.
-func (a *Agent) connect(ctx context.Context) error {
+func (a *Agent) connect(ctx context.Context) (registered bool, err error) {
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
@@ -142,41 +193,44 @@ func (a *Agent) connect(ctx context.Context) error {
 	// the prior sender is on its way out and this Wait returns promptly.
 	a.sendWG.Wait()
 
-	conn, err := grpc.NewClient(a.coord, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if dialContextFn != nil {
+		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return dialContextFn(ctx)
+		}))
+	}
+	conn, err := grpc.NewClient(a.coord, opts...)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 
 	client := relayv1.NewAgentServiceClient(conn)
 	stream, err := client.Connect(connCtx)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Send RegisterRequest.
-	regReq, err := a.buildRegisterRequest()
-	if err != nil {
-		return fmt.Errorf("build register: %w", err)
-	}
+	regReq := a.buildRegisterRequest()
 	if err := stream.Send(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_Register{Register: regReq},
 	}); err != nil {
-		return err
+		return false, err
 	}
 
 	// First response must be RegisterResponse.
 	resp, err := stream.Recv()
 	if err != nil {
-		return err
+		return false, err
 	}
 	reg := resp.GetRegisterResponse()
 	if reg == nil {
-		return fmt.Errorf("agent: expected RegisterResponse, got %T", resp.Payload)
+		return false, fmt.Errorf("agent: expected RegisterResponse, got %T", resp.Payload)
 	}
 	if reg.AgentToken != "" {
 		if err := a.creds.Persist(reg.AgentToken); err != nil {
-			return fmt.Errorf("persist agent token: %w", err)
+			return false, fmt.Errorf("persist agent token: %w", err)
 		}
 		log.Printf("agent token persisted to %s", a.creds.TokenFilePath())
 	}
@@ -200,6 +254,11 @@ func (a *Agent) connect(ctx context.Context) error {
 
 	log.Printf("connected to coordinator %s (worker ID: %s)", a.coord, a.workerID)
 
+	// From here the session is established: the coordinator accepted our
+	// registration and we are about to stream. Any error after this point is a
+	// drop of a healthy session, so report registered=true to reset the backoff.
+	registered = true
+
 	// Start the single send goroutine for this connection. gRPC streams are not
 	// concurrent-send-safe, so all writes go through this one goroutine. sendWG
 	// lets the NEXT connect join this goroutine before spawning its replacement.
@@ -213,7 +272,7 @@ func (a *Agent) connect(ctx context.Context) error {
 			// Stream dropped. Runners survive (they bind to runCtx, not connCtx).
 			// Coordinator will start a grace timer; reconnect will reconcile.
 			connCancel()
-			return err
+			return registered, err
 		}
 
 		switch p := msg.Payload.(type) {
@@ -270,7 +329,7 @@ func (a *Agent) handleCancel(msg *relayv1.CancelTask) {
 // buildRegisterRequest constructs the RegisterRequest sent on (re)connect.
 // Includes the caller's capabilities AND the list of currently-executing
 // tasks with their epochs, so the coordinator can reconcile.
-func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
+func (a *Agent) buildRegisterRequest() *relayv1.RegisterRequest {
 	a.mu.Lock()
 	running := make([]*relayv1.RunningTask, 0, len(a.runners))
 	for _, r := range a.runners {
@@ -324,5 +383,5 @@ func (a *Agent) buildRegisterRequest() (*relayv1.RegisterRequest, error) {
 		}
 	}
 
-	return req, nil
+	return req
 }
