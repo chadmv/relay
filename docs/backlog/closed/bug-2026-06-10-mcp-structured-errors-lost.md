@@ -1,8 +1,10 @@
 ---
 title: MCP structured errors (code/hint) never reach clients
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-21
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -31,3 +33,19 @@ Best done once in a shared generic wrapper, which also removes the ~12 copy-past
 - `internal/mcp/errors.go:10-20` (`ToolError`, `MapError`)
 - `internal/mcp/jobs.go:29-52` (representative registration)
 - `internal/mcp/errors_test.go:31`
+
+## Resolution
+Fixed 2026-06-21 (mcp-structured-errors-lost). A generic `addTool[A, R]` registration wrapper was
+added to `internal/mcp/server.go`: on a `*ToolError` it returns a `CallToolResult{IsError: true}`
+carrying `json.Marshal(terr)` (preserving code/message/hint), instead of returning the error to the
+go-sdk (which flattened it via `CallToolResult.SetError` to `Code + ": " + Message` text, dropping
+the hint and JSON). All 18 tool-registration closures across 12 files (jobs, tasks, task_logs,
+workers, schedules read/write, reservations, submit, cancel, wait, run_now, whoami) were migrated to
+call the wrapper, removing the ~18 copy-pasted closures and each file's now-unused `encoding/json`
+import; whoami's no-args call is adapted with a one-line `struct{}` shim. No `call*` method,
+`ToolError`, or `MapError` was changed, and every success path is byte-identical (single
+`TextContent` of `json.Marshal(out)`). Two delivery tests were added that drive a real registered
+tool over the in-memory MCP transport: a 401 case (asserts `IsError` + the delivered text unmarshals
+to `code: auth_expired` with the `relay login` hint) proven RED before the fix, and a validation case
+(empty `job_id`, backend never hit) - the regression coverage the item asked for. Code review
+returned no findings.
