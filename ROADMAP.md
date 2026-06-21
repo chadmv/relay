@@ -24,24 +24,24 @@ still pending). MCP, CLI, and store/schema work fill in behind those two.
 ## Now / Next / Later
 
 ### Now
-- [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) - medium; one migration that can also carry the JobStatusCounts index and the status-vocabulary CHECK constraints.
 - [No CHECK constraints on status vocabularies; JobStatusCounts counts phantom statuses](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) - medium; free-TEXT status columns with no CHECK; priority typos store silently and the KPI query counts statuses never written.
 - [Add a -race test target for the perforce package](docs/backlog/idea-2026-06-19-race-test-target-perforce-package.md) - medium; the new registry race test only catches a regression when invoked with `-race`, which neither `make test` nor CI runs.
+- [Trailing slash in the server URL breaks every POST/PATCH/DELETE](docs/backlog/bug-2026-06-10-trailing-slash-breaks-posts.md) - quick win; a trailing slash in `RELAY_URL` makes `relay login` fail with an opaque 405.
 
 ### Next
-- [Trailing slash in the server URL breaks every POST/PATCH/DELETE](docs/backlog/bug-2026-06-10-trailing-slash-breaks-posts.md) - quick win; a trailing slash in `RELAY_URL` makes `relay login` fail with an opaque 405.
 - [Query cache is not cleared on logout; previous user's data flashes for the next user](docs/backlog/bug-2026-06-10-spa-query-cache-logout.md) - now a quick win; the spa-401 fix put `queryClient` in `AuthProvider` scope, so clearing on the manual `logout()` path is a one-liner.
+- [Dispatch failure paths are inconsistent and silent](docs/backlog/bug-2026-06-10-dispatch-failure-paths-silent.md) - medium; the bad-source-JSON path still strands a claimed task and the top-level dispatch loop swallows DB errors with no log.
 
 ### Later
-- [Dispatch failure paths are inconsistent and silent](docs/backlog/bug-2026-06-10-dispatch-failure-paths-silent.md) - medium; the bad-source-JSON path still strands a claimed task and the top-level dispatch loop swallows DB errors with no log.
 - [Agent send goroutine not awaited across reconnect](docs/backlog/bug-2026-06-18-agent-reconnect-send-goroutine-not-awaited.md) - medium; `connect()` returns without joining its send goroutine, so a reconnect can leave two goroutines draining one `sendCh` (violates the one-bounded-sender invariant).
+- [Reconnect backoff never resets in agent and NotifyListener](docs/backlog/bug-2026-06-10-reconnect-backoff-never-resets.md) - medium; the backoff reset is unreachable on the drop path, so reconnect delay degrades monotonically toward the 60s cap.
 - [Brief inconsistent-state window on worker re-enroll](docs/backlog/bug-2026-06-05-inconsistent-state-window-reenroll.md) - low; between the enroll tx clearing `revoked_at` and the post-commit status flip, a worker momentarily appears revoked with a null timestamp.
 
 ## What moved
 
-- Closed since the prior 2026-06-20 pass: [archived-users-tokens-schedules](docs/backlog/closed/bug-2026-06-10-archived-users-tokens-schedules.md) (was Now #1 / api-auth #1, bug medium), resolved 2026-06-20. Both offboarding gaps closed with two small atomic backend changes: `GetTokenWithUser` now carries `AND u.archived_at IS NULL` so an archived user's token resolves to 401 via the existing `BearerAuth` path, and `handleAdminArchiveUser` disables the owner's `scheduled_jobs` (`DisableScheduledJobsByOwner`) inside the same archive transaction. Unarchive deliberately does not re-enable schedules.
-- Reordered: with archived-users shipped, Now backfills from Next - `race-test-target-perforce-package` promotes into Now; `trailing-slash-breaks-posts` and `spa-query-cache-logout` fill Next; Later backfills with `agent-reconnect-send-goroutine-not-awaited` (the next invariant-violating dispatch-races bug, medium). The api-auth theme renumbers 1-3 with `owner-email-lookup-errors` now leading.
-- No new backlog items filed this cycle: the iteration's retro triage explicitly declined the operational-backfill candidate (covered by the deploy note in the closed item) and the archive-tx atomicity fault-injection test (low value, no precedent in the suite).
+- Closed since the prior 2026-06-20 pass: [hot-path-indexes](docs/backlog/closed/feature-2026-06-10-hot-path-indexes.md) (was Now #1, feature medium) and [index-jobstatuscounts-full-table-scan](docs/backlog/closed/bug-2026-06-05-index-jobstatuscounts-full-table-scan.md) (was store-schema #3, bug low, folded in), both resolved 2026-06-20 via migration `000018_hot_path_indexes`: ADD 5 indexes (task-deps cascade, partial `tasks(worker_id) WHERE status IN ('dispatched','running')`, the `task_logs(task_id, id)` keyset composite, and covering `jobs(status, updated_at)` / `workers(status, disabled_at)` for the stats KPIs); DROP 4 redundant ones (each superseded by a UNIQUE-constraint btree or the new composite). Down migration restores the originals byte-faithfully; full store integration suite green.
+- Reordered: with hot-path-indexes shipped, Now backfills - `trailing-slash-breaks-posts` promotes into Now; `dispatch-failure-paths-silent` fills Next; Later surfaces `reconnect-backoff-never-resets` (the next dispatch-races concurrency bug). The store-schema theme drops to 2 items, led by `status-vocabulary-drift` (which deliberately stayed out of the index migration - CHECK constraints are a separate data-integrity change).
+- No new backlog items filed this cycle: the retro declined an index-only-scan verification follow-up (data-dependent, the brittle EXPLAIN assertion this migration avoided) and a VACUUM/ANALYZE note (autovacuum handles it). `status-vocabulary-drift` remains the clean standalone next store-schema item.
 
 ## Dispatch, epoch & stream-teardown races (dispatch-races)
 
@@ -73,10 +73,7 @@ still pending). MCP, CLI, and store/schema work fill in behind those two.
 ## Store schema integrity & query performance (store-schema)
 
 1. [No CHECK constraints on status vocabularies; JobStatusCounts counts statuses that are never written](docs/backlog/bug-2026-06-10-status-vocabulary-drift.md) (bug, medium) - free-TEXT status columns with no CHECK; the KPI query counts `dispatched`/`queued`/`timed_out` (always zero) and omits `cancelled`, and priority typos store silently.
-2. [Add missing hot-path indexes and drop redundant ones](docs/backlog/feature-2026-06-10-hot-path-indexes.md) (feature, medium) - missing indexes on hot task queries plus three indexes that duplicate UNIQUE constraints; one consistency migration.
-   quick win - co-schedule the two items below into the same migration.
-3. [Index JobStatusCounts to avoid full-table scan](docs/backlog/bug-2026-06-05-index-jobstatuscounts-full-table-scan.md) (bug, low) - a partial index on `jobs(status, updated_at)` for the stats KPI; its own note says the hot-path-indexes migration could carry it.
-4. [Jobs stats 24h buckets rely on updated_at finish proxy](docs/backlog/bug-2026-06-05-jobs-stats-24h-updated-at-proxy.md) (bug, low) - correct today; a conditional watch that becomes inaccurate only if a job-retry endpoint that re-opens terminal jobs is added.
+2. [Jobs stats 24h buckets rely on updated_at finish proxy](docs/backlog/bug-2026-06-05-jobs-stats-24h-updated-at-proxy.md) (bug, low) - correct today; a conditional watch that becomes inaccurate only if a job-retry endpoint that re-opens terminal jobs is added.
 
 ## MCP server fidelity (mcp)
 
@@ -134,6 +131,7 @@ still pending). MCP, CLI, and store/schema work fill in behind those two.
 
 ## Recently shipped
 
+- [Add missing hot-path indexes and drop redundant ones](docs/backlog/closed/feature-2026-06-10-hot-path-indexes.md) - closed 2026-06-20 (also closes [index-jobstatuscounts-full-table-scan](docs/backlog/closed/bug-2026-06-05-index-jobstatuscounts-full-table-scan.md), folded in); migration `000018_hot_path_indexes` adds 5 hot-path indexes (task-deps cascade, partial `tasks(worker_id) WHERE status IN ('dispatched','running')`, the `task_logs(task_id, id)` keyset composite, and covering `jobs(status, updated_at)` / `workers(status, disabled_at)` for the stats KPIs) and drops 4 redundant ones (each superseded by a UNIQUE-constraint btree or the new composite). Plain `CREATE INDEX` in the migration transaction; the down migration restores the originals byte-faithfully (including the workers index's partial WHERE). Verified by an index-set + down/up round-trip integration test; full store suite green (36/36).
 - [Archived users - token validation race and schedules that keep firing](docs/backlog/closed/bug-2026-06-10-archived-users-tokens-schedules.md) - closed 2026-06-20; `GetTokenWithUser` gained `AND u.archived_at IS NULL` (an archived user's token now resolves to `401 invalid token` via the existing `BearerAuth` path), and `handleAdminArchiveUser` calls the new `DisableScheduledJobsByOwner` inside the archive transaction so the owner's schedules stop firing atomically with the archive. Unarchive deliberately does not re-enable. Backend-only, no migration. A side effect of the auth predicate: an archived admin's own token is rejected at the boundary, making the handler-level last-admin guard structurally unreachable via the API (kept as store-tested defense-in-depth).
 - [Job and task READ routes have no owner check](docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md) - closed 2026-06-20 (PR #48); resolved working-as-intended - global READ across all jobs/tasks is deliberate render-farm semantics, documented next to the route registrations in `internal/api/server.go` rather than gated. The follow-up the code reviewer filed off the cancel fix is now answered, not scoped.
 - [Any authenticated user can cancel any other user's job](docs/backlog/closed/bug-2026-06-10-job-cancel-missing-authz.md) - closed 2026-06-20; `handleCancelJob` now gates on owner-or-admin (404 for non-owners, enumeration-safe) before any side effect, so a non-owner can no longer destructively cancel another user's job. Code review filed a follow-up for the read routes, since resolved as working-as-intended.
@@ -143,7 +141,6 @@ still pending). MCP, CLI, and store/schema work fill in behind those two.
 - [Drain-mode disable test asserts 'running' but seedRunningTask seeds 'dispatched'](docs/backlog/closed/bug-2026-06-19-drain-mode-disable-test-asserts-running.md) - closed 2026-06-20 (PR #43); `seedRunningTask` now advances the claimed task to `running` at the claimed epoch so the drain-mode test exercises a running task.
 - [One poisoned schedule aborts the whole schedrunner tick and hot-loops](docs/backlog/closed/bug-2026-06-10-schedrunner-poisoned-tick.md) - closed 2026-06-20 (PR #40); per-fire pgx savepoints isolate a poisoned schedule so healthy schedules still commit, with a reconcile-only `AdvanceScheduledJobNextRun` that no longer falsifies `last_run_at`.
 - [Stale teardown can still clobber during the finishRegister gap](docs/backlog/closed/bug-2026-06-19-finishregister-gap-connection-epoch-race.md) - closed 2026-06-20 (PR #38); a DB-enforced `connection_epoch` fence (migration 000016) no-ops a stale connection's offline/grace-requeue writes once a fresher `finishRegister` has bumped the epoch.
-- [Job status recompute race can leave a job stuck in running forever](docs/backlog/closed/bug-2026-06-10-job-status-recompute-race.md) - closed 2026-06-20 (PR #36); replaced the read-modify-write job-status update with an atomic `RecomputeJobStatus` statement.
 
 ## Deferred
 

@@ -1,11 +1,22 @@
 ---
 title: Index JobStatusCounts to avoid full-table scan
 type: bug
-status: open
+status: closed
 created: 2026-06-05
+closed: 2026-06-20
 priority: low
 source: jobs-list-frontend retro (2026-06-05)
 ---
+
+## Resolution
+Resolved 2026-06-20, folded into migration `000018_hot_path_indexes` (see
+`feature-2026-06-10-hot-path-indexes`). Added `idx_jobs_status_updated ON jobs(status, updated_at)`
+for `JobStatusCounts` and the symmetric `idx_workers_status_disabled ON workers(status, disabled_at)`
+for `WorkerStatusCounts`. Correction to this item's original proposal: the index must be a
+plain COVERING index, not partial - `JobStatusCounts` counts every row via `FILTER` with no
+overall WHERE clause, so a partial index would exclude rows the aggregate must count. Both
+KPI queries read only the two indexed columns, enabling an index-only scan in place of the
+sequential heap scan.
 
 # Index JobStatusCounts to avoid full-table scan
 
