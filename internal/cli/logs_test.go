@@ -141,6 +141,57 @@ func TestWatchJobLogs_TerminalBeforeSubscribe_DoesNotHang(t *testing.T) {
 	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
 }
 
+// fakeOverlapJobServer returns the job already terminal (task done) AND streams a
+// duplicate terminal task event plus a job event - modeling the snapshot/stream overlap.
+func fakeOverlapJobServer(t *testing.T, jobID, taskID string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "running", // not terminal, so the stream is still consumed
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			// Duplicate terminal task event for the same task already seen in the snapshot.
+			fmt.Fprintf(w, "event: task\ndata: {\"id\":%q,\"status\":\"done\"}\n\n", taskID)
+			fmt.Fprintf(w, "event: job\ndata: {\"status\":\"done\"}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			json.NewEncoder(w).Encode([]struct {
+				Stream  string `json:"stream"`
+				Content string `json:"content"`
+			}{
+				{Stream: "stdout", Content: "frame rendered"},
+			})
+		}
+	}))
+}
+
+func TestWatchJobLogs_TaskInSnapshotAndStream_PrintedOnce(t *testing.T) {
+	jobID, taskID := "job-dup", "task-dup"
+	srv := fakeOverlapJobServer(t, jobID, taskID)
+	defer srv.Close()
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var out strings.Builder
+	status, err := watchJobLogs(ctx, c, jobID, &out)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, strings.Count(out.String(), "[frame-001 stdout] frame rendered"),
+		"task terminal in both snapshot and stream must print exactly once")
+}
+
 func TestWatchJobLogs_DoneExits0(t *testing.T) {
 	jobID, taskID := "job-1", "task-1"
 	srv := fakeJobServer(t, jobID, taskID, "done")
