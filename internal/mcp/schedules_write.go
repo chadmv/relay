@@ -14,7 +14,7 @@ type createScheduleArgs struct {
 	Name          string          `json:"name"           jsonschema:"Name for the scheduled job (required)."`
 	CronExpr      string          `json:"cron_expr"      jsonschema:"Cron expression (required, 5-field or @hourly/@daily/@every <dur>)."`
 	Timezone      string          `json:"timezone"       jsonschema:"IANA timezone for the cron schedule (e.g. America/New_York). Defaults to UTC."`
-	OverlapPolicy string          `json:"overlap_policy" jsonschema:"What to do when a run is already active: skip or queue."`
+	OverlapPolicy string          `json:"overlap_policy" jsonschema:"What to do when a run is already active: skip or allow."`
 	JobSpec       jobspec.JobSpec `json:"job_spec"       jsonschema:"The job template to run on each trigger."`
 }
 
