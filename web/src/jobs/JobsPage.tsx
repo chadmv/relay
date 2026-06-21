@@ -4,6 +4,7 @@ import { useJobs } from './useJobs'
 import { useJobStats } from './useJobStats'
 import { JobsTable } from './JobsTable'
 import { SortControl } from './SortControl'
+import { computePageRange } from './pageRange'
 import type { JobSort } from './api'
 
 const FILTERS: { key: string; label: string; status: string }[] = [
@@ -24,6 +25,11 @@ export function JobsPage() {
   // next_cursor).
   const [cursor, setCursor] = useState('')
   const [stack, setStack] = useState<string[]>([])
+  // Accumulated actual-row offset to the start of the current page. Grows by
+  // the real page size on each forward page, shrinks on back. Tracks in parallel
+  // with stack so partial pages stay correct.
+  const [startOffset, setStartOffset] = useState(0)
+  const [offsets, setOffsets] = useState<number[]>([])
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
@@ -34,6 +40,8 @@ export function JobsPage() {
     setFilter(key)
     setCursor('')
     setStack([])
+    setStartOffset(0)
+    setOffsets([])
     if (key !== 'all') setSort(DEFAULT_SORT) // server rejects sort + status
   }
 
@@ -41,6 +49,8 @@ export function JobsPage() {
     setSort(s)
     setCursor('')
     setStack([])
+    setStartOffset(0)
+    setOffsets([])
   }
 
   // next/prev use plain setters (not functional updaters): cursor and stack are
@@ -49,8 +59,12 @@ export function JobsPage() {
   // StrictMode.
   function next() {
     if (!data?.next_cursor) return
+    const currentPageSize = data.items.length
     setStack([...stack, cursor])
     setCursor(data.next_cursor)
+    // Accumulate the actual row count of this page before moving forward.
+    setOffsets([...offsets, startOffset])
+    setStartOffset(startOffset + currentPageSize)
   }
 
   function prev() {
@@ -59,6 +73,11 @@ export function JobsPage() {
     const back = copy.pop() ?? ''
     setStack(copy)
     setCursor(back)
+    // Restore the offset of the previous page.
+    const offsetsCopy = [...offsets]
+    const prevOffset = offsetsCopy.pop() ?? 0
+    setOffsets(offsetsCopy)
+    setStartOffset(prevOffset)
   }
 
   if (isLoading && !data) {
@@ -83,6 +102,12 @@ export function JobsPage() {
   }
 
   const jobs = data?.items ?? []
+  const total = data?.total ?? 0
+  const { x, y } = computePageRange(startOffset, jobs.length)
+  const rangeText =
+    jobs.length === 0
+      ? `0 of ${total.toLocaleString()}`
+      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}`
 
   return (
     <div className="flex flex-col gap-4">
@@ -132,7 +157,7 @@ export function JobsPage() {
 
       <div className="flex items-center justify-between px-1 font-mono text-[10.5px] tracking-wider text-fg-mute">
         <span>
-          SHOWING <span className="text-fg">{jobs.length}</span> OF <span className="text-fg">{data?.total ?? 0}</span>
+          SHOWING <span className="text-fg">{rangeText}</span>
           {' · '}SORT <span className="text-accent-b">{statusFiltered ? `status=${status}` : sort}</span> · CURSOR PAGINATED
         </span>
         <div className="flex gap-2">

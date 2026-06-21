@@ -134,6 +134,108 @@ test('next and prev are disabled while a page fetch is in flight', async () => {
   expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
 })
 
+// Helper to build a page response with a given number of items.
+function makeItems(count: number, startId = 0) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `ID${String(startId + i).padStart(4, '0')}`,
+    name: `job-${startId + i}`,
+    priority: 'normal',
+    status: 'done',
+    submitted_by_email: 'a@x.dev',
+    labels: null,
+    created_at: '2026-06-05T10:00:00Z',
+    updated_at: '2026-06-05T10:00:00Z',
+    total_tasks: 1,
+    done_tasks: 1,
+  }))
+}
+
+test('pagination footer shows 1-N of total on first full page', async () => {
+  server.use(
+    http.get('/v1/jobs', () =>
+      HttpResponse.json({ items: makeItems(50), next_cursor: 'CUR1', total: 2341 }),
+    ),
+  )
+  renderWithQuery(<JobsPage />)
+  await screen.findByText('job-0')
+  expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
+})
+
+test('pagination footer updates to next range after paging forward', async () => {
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: makeItems(50, 0), next_cursor: 'CUR1', total: 2341 },
+    CUR1: { items: makeItems(50, 50), next_cursor: 'CUR2', total: 2341 },
+  }
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<JobsPage />)
+  await screen.findByText('job-0')
+  expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('job-50')
+  expect(await screen.findByText(/51-100 of 2,341/i)).toBeInTheDocument()
+})
+
+test('pagination footer shows correct range for partial last page', async () => {
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: makeItems(50, 0), next_cursor: 'CUR1', total: 120 },
+    CUR1: { items: makeItems(50, 50), next_cursor: 'CUR2', total: 120 },
+    CUR2: { items: makeItems(20, 100), next_cursor: '', total: 120 },
+  }
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<JobsPage />)
+  await screen.findByText('job-0')
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('job-50')
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('job-100')
+  expect(await screen.findByText(/101-120 of 120/i)).toBeInTheDocument()
+})
+
+test('pagination footer restores prior range when paging back', async () => {
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': { items: makeItems(50, 0), next_cursor: 'CUR1', total: 2341 },
+    CUR1: { items: makeItems(50, 50), next_cursor: 'CUR2', total: 2341 },
+  }
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<JobsPage />)
+  await screen.findByText('job-0')
+  expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await screen.findByText('job-50')
+  expect(await screen.findByText(/51-100 of 2,341/i)).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: /prev/i }))
+  await screen.findByText('job-0')
+  expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
+})
+
+test('pagination footer shows 0 of 0 for empty results', async () => {
+  server.use(
+    http.get('/v1/jobs', () =>
+      HttpResponse.json({ items: [], next_cursor: '', total: 0 }),
+    ),
+  )
+  renderWithQuery(<JobsPage />)
+  expect(await screen.findByText(/0 of 0/i)).toBeInTheDocument()
+})
+
 test('paginates forward and back via the cursor stack', async () => {
   const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
     '': {
