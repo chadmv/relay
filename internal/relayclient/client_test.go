@@ -58,6 +58,43 @@ func TestStreamEvents_HandlerReturnFalseStops(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestNewClient_TrimsTrailingSlash(t *testing.T) {
+	cases := []struct {
+		name      string
+		serverURL string
+		wantBase  string
+	}{
+		{"no trailing slash", "http://host:8080", "http://host:8080"},
+		{"single trailing slash", "http://host:8080/", "http://host:8080"},
+		{"multiple trailing slashes", "http://host:8080//", "http://host:8080"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewClient(tc.serverURL, "")
+			require.Equal(t, tc.wantBase, c.BaseURL())
+		})
+	}
+}
+
+// TestClientDo_TrailingSlashReachesCleanPath exercises the actual failure mode:
+// a POST against a trailing-slash base must reach the clean path without being
+// 301-redirected (and downgraded to a body-less GET) by the server's ServeMux.
+func TestClientDo_TrailingSlashReachesCleanPath(t *testing.T) {
+	var gotPath, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/", "")
+	err := c.Do(context.Background(), http.MethodPost, "/v1/login", map[string]string{"k": "v"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "/v1/login", gotPath)
+	require.Equal(t, http.MethodPost, gotMethod, "redirect downgraded the POST to GET")
+}
+
 func TestClientDo_4xxReturnsErrorField(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
