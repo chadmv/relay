@@ -150,9 +150,9 @@ func randHex(n int) string {
 }
 
 var (
-	jobPriorities = []string{"low", "normal", "normal", "normal", "high", "high", "critical"}
+	jobPriorities = []string{"low", "normal", "normal", "normal", "high", "high"}
 	jobStatuses   = []string{
-		"pending", "queued", "running", "dispatched",
+		"pending", "running",
 		"done", "done", "done", "done",
 		"failed", "cancelled",
 	}

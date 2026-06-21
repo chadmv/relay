@@ -377,16 +377,6 @@ func TestWorkerWorkspacesAndSourceColumn(t *testing.T) {
 	require.NoError(t, err)
 	require.JSONEq(t, string(src), string(task.Source))
 
-	// status must accept new enum values
-	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
-		ID: task.ID, Status: "preparing", Epoch: 0,
-	})
-	require.NoError(t, err)
-	_, err = q.UpdateTaskStatusEpoch(ctx, store.UpdateTaskStatusEpochParams{
-		ID: task.ID, Status: "prepare_failed", Epoch: 0,
-	})
-	require.NoError(t, err)
-
 	// worker_workspaces upsert + list round-trip
 	worker := newTestWorker(t, q)
 	err = q.UpsertWorkerWorkspace(ctx, store.UpsertWorkerWorkspaceParams{
