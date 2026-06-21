@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,47 +19,20 @@ type createScheduleArgs struct {
 }
 
 func (s *Server) registerSchedulesWrite() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_create_schedule",
 		Description: "Create a new relay scheduled job (cron schedule).",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args createScheduleArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callCreateSchedule(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callCreateSchedule)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_update_schedule",
 		Description: "Update an existing relay scheduled job. Only provided fields are changed.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args updateScheduleArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callUpdateSchedule(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callUpdateSchedule)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_delete_schedule",
 		Description: "Delete a relay scheduled job by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args deleteScheduleArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callDeleteSchedule(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callDeleteSchedule)
 }
 
 func (s *Server) callCreateSchedule(ctx context.Context, args createScheduleArgs) (map[string]any, *ToolError) {

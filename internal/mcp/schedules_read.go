@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -22,33 +21,15 @@ type getScheduleArgs struct {
 }
 
 func (s *Server) registerSchedules() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_list_schedules",
 		Description: "List relay scheduled jobs (cron schedules).",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args listSchedulesArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callListSchedules(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callListSchedules)
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_schedule",
 		Description: "Get details of a single relay scheduled job by ID.",
-	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, args getScheduleArgs) (*mcpsdk.CallToolResult, any, error) {
-		out, terr := s.callGetSchedule(ctx, args)
-		if terr != nil {
-			return nil, nil, terr
-		}
-		b, _ := json.Marshal(out)
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}},
-		}, nil, nil
-	})
+	}, s.callGetSchedule)
 }
 
 func (s *Server) callListSchedules(ctx context.Context, args listSchedulesArgs) (map[string]any, *ToolError) {
