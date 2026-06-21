@@ -77,6 +77,61 @@ test('next/prev pagination walks the cursor', async () => {
   await waitFor(() => expect(cursors.filter((c) => c === null).length).toBeGreaterThanOrEqual(2))
 })
 
+test('next and prev are disabled while a page fetch is in flight', async () => {
+  let resolvePage2!: () => void
+  const page2Ready = new Promise<void>((res) => { resolvePage2 = res })
+
+  const makeSchedule = (id: string, name: string) => ({
+    id, name, owner_id: 'o1', owner_email: 'dev@studio.com',
+    cron_expr: '0 2 * * *', timezone: 'UTC', job_spec: {}, overlap_policy: 'skip',
+    enabled: true, next_run_at: '2099-01-01T00:00:00Z', last_run_at: '2026-06-05T11:00:00Z',
+    last_job_id: null, created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-05T11:00:00Z',
+  })
+
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': {
+      items: [makeSchedule('s-A', 'sched-A')],
+      next_cursor: 'CUR1', total: 2,
+    },
+    CUR1: {
+      items: [makeSchedule('s-B', 'sched-B')],
+      next_cursor: '', total: 2,
+    },
+  }
+  server.use(
+    http.get('/v1/scheduled-jobs', async ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      if (cur === 'CUR1') await page2Ready
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<SchedulesPage />)
+
+  // Page 1 loaded: prev disabled, next enabled.
+  expect(await screen.findByText('sched-A')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  expect(screen.getByRole('button', { name: /next/i })).toBeEnabled()
+
+  // Click next; fetch is in flight (hanging). Both buttons must be disabled.
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /next/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  })
+
+  // Resolve the fetch; page 2 lands.
+  resolvePage2()
+  expect(await screen.findByText('sched-B')).toBeInTheDocument()
+  // Page 2: no next_cursor so next disabled; prev should be re-enabled.
+  await waitFor(() => expect(screen.getByRole('button', { name: /next/i })).toBeDisabled())
+  expect(screen.getByRole('button', { name: /prev/i })).toBeEnabled()
+
+  // Go back to page 1.
+  await userEvent.click(screen.getByRole('button', { name: /prev/i }))
+  expect(await screen.findByText('sched-A')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+})
+
 test('clicking Disable PATCHes the schedule', async () => {
   let patched: unknown
   server.use(

@@ -61,6 +61,65 @@ test('shows the error banner with retry, then recovers', async () => {
   expect(await screen.findByText('film-x render')).toBeInTheDocument()
 })
 
+test('next and prev are disabled while a page fetch is in flight', async () => {
+  let resolvePage2!: () => void
+  const page2Ready = new Promise<void>((res) => { resolvePage2 = res })
+
+  const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
+    '': {
+      items: [{
+        id: 'AAAAAA', name: 'job-A', priority: 'normal', status: 'running',
+        submitted_by_email: 'a@x.dev', labels: null,
+        created_at: '2026-06-05T10:00:00Z', updated_at: '2026-06-05T10:00:00Z',
+        total_tasks: 1, done_tasks: 0,
+      }],
+      next_cursor: 'CUR1', total: 2,
+    },
+    CUR1: {
+      items: [{
+        id: 'BBBBBB', name: 'job-B', priority: 'normal', status: 'done',
+        submitted_by_email: 'b@x.dev', labels: null,
+        created_at: '2026-06-05T09:00:00Z', updated_at: '2026-06-05T09:00:00Z',
+        total_tasks: 1, done_tasks: 1,
+      }],
+      next_cursor: '', total: 2,
+    },
+  }
+  server.use(
+    http.get('/v1/jobs', async ({ request }) => {
+      const cur = new URL(request.url).searchParams.get('cursor') ?? ''
+      if (cur === 'CUR1') await page2Ready
+      return HttpResponse.json(pages[cur])
+    }),
+  )
+  renderWithQuery(<JobsPage />)
+
+  // Page 1 loaded: prev disabled, next enabled.
+  expect(await screen.findByText('job-A')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  expect(screen.getByRole('button', { name: /next/i })).toBeEnabled()
+
+  // Click next; the page-2 fetch is now in flight (hanging). While
+  // isPlaceholderData is true both buttons must be disabled.
+  await userEvent.click(screen.getByRole('button', { name: /next/i }))
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /next/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+  })
+
+  // Resolve the fetch; page 2 lands.
+  resolvePage2()
+  expect(await screen.findByText('job-B')).toBeInTheDocument()
+  // Page 2: no next_cursor so next disabled; prev should be re-enabled.
+  await waitFor(() => expect(screen.getByRole('button', { name: /next/i })).toBeDisabled())
+  expect(screen.getByRole('button', { name: /prev/i })).toBeEnabled()
+
+  // Go back to page 1.
+  await userEvent.click(screen.getByRole('button', { name: /prev/i }))
+  expect(await screen.findByText('job-A')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /prev/i })).toBeDisabled()
+})
+
 test('paginates forward and back via the cursor stack', async () => {
   const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
     '': {
