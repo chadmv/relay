@@ -18,16 +18,18 @@ import (
 
 // Runner manages the execution of a single dispatched task as a subprocess.
 type Runner struct {
-	taskID    string
-	epoch     int64
-	sendCh    chan *relayv1.AgentMessage
-	ctx       context.Context // parent (agent) context — lives for the agent lifetime, not the connection
-	cancel    context.CancelFunc
-	cancelled atomic.Bool
-	forced    atomic.Bool
-	abandoned atomic.Bool
-	forcedCh  chan struct{} // closed exactly once by Cancel(force=true); signals in-flight log writes to abandon
-	provider  source.Provider
+	taskID         string
+	epoch          int64
+	sendCh         chan *relayv1.AgentMessage
+	ctx            context.Context // parent (agent) context — lives for the agent lifetime, not the connection
+	cancel         context.CancelFunc
+	cancelled      atomic.Bool
+	forced         atomic.Bool
+	abandoned      atomic.Bool
+	forcedCh       chan struct{} // closed exactly once by Cancel(force=true); signals in-flight log writes to abandon
+	cancelledCh    chan struct{} // closed exactly once by Cancel(false) or Abandon(); signals in-flight log writes to abandon on a per-task cancel
+	cancelledClose sync.Once     // guards the single close of cancelledCh across mixed/repeated cancels
+	provider       source.Provider
 }
 
 // newRunner creates a Runner and its execution context.
@@ -41,13 +43,23 @@ func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, pa
 	} else {
 		runCtx, cancel = context.WithCancel(parent)
 	}
-	return &Runner{taskID: taskID, epoch: epoch, sendCh: sendCh, ctx: parent, cancel: cancel, forcedCh: make(chan struct{})}, runCtx
+	return &Runner{
+		taskID:      taskID,
+		epoch:       epoch,
+		sendCh:      sendCh,
+		ctx:         parent,
+		cancel:      cancel,
+		forcedCh:    make(chan struct{}),
+		cancelledCh: make(chan struct{}),
+	}, runCtx
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
 // If force is true, the runner skips workspace finalize, bypasses pipe drain
 // when killing the subprocess, and closes forcedCh so in-flight log writes
-// abandon instead of parking on a full sendCh.
+// abandon instead of parking on a full sendCh. A non-forced (default) cancel
+// closes cancelledCh, which gives in-flight log writes the same per-task escape
+// without skipping workspace finalize.
 func (r *Runner) Cancel(force bool) {
 	if force {
 		// CompareAndSwap guarantees exactly one forced caller closes forcedCh,
@@ -57,6 +69,10 @@ func (r *Runner) Cancel(force bool) {
 			close(r.forcedCh)
 		}
 	}
+	// Both cancel kinds free a parked log send via cancelledCh. The sync.Once
+	// makes this safe under repeated, concurrent, or mixed forced/default/abandon
+	// calls on the same runner.
+	r.cancelledClose.Do(func() { close(r.cancelledCh) })
 	r.cancelled.Store(true)
 	r.cancel()
 }
@@ -66,6 +82,7 @@ func (r *Runner) Cancel(force bool) {
 // reassigned to another worker during a grace-expiry requeue.
 func (r *Runner) Abandon() {
 	r.abandoned.Store(true)
+	r.cancelledClose.Do(func() { close(r.cancelledCh) })
 	r.cancel()
 }
 
