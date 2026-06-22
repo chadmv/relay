@@ -179,6 +179,56 @@ func TestRunner_ForceCancel_StillSendsTerminalFailed(t *testing.T) {
 	}
 }
 
+// TestRunner_DefaultCancel_NonWedged_SendsTerminalFailed guards spec criterion 2:
+// the bounded terminal send is room-first, not drop-always. With a sendCh that has
+// room, a default cancel must still report a terminal FAILED, mirroring
+// TestRunner_ForceCancel_StillSendsTerminalFailed for the default path.
+func TestRunner_DefaultCancel_NonWedged_SendsTerminalFailed(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4096)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-default-term",
+		JobId:    "j-default-term",
+		Commands: singleCmd([]string{"sleep", "30"}),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	time.Sleep(200 * time.Millisecond) // let the subprocess start
+	r.Cancel(false)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("runner did not return within 8s after default cancel")
+	}
+
+	// Drain sendCh and assert a terminal FAILED was reported.
+	var sawFailed bool
+	for {
+		select {
+		case msg := <-sendCh:
+			if ts := msg.GetTaskStatus(); ts != nil &&
+				ts.Status == relayv1.TaskStatus_TASK_STATUS_FAILED {
+				sawFailed = true
+			}
+		default:
+			require.True(t, sawFailed,
+				"default cancel with room on sendCh must still report terminal FAILED")
+			return
+		}
+	}
+}
+
 // TestRunner_NormalExit_LeakedChildHoldingStdout_DoesNotHang reproduces the
 // go.dev/issue/23019 pattern: the foreground command exits 0 while a background
 // grandchild keeps the inherited stdout pipe open. With the old

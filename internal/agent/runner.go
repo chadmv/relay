@@ -319,16 +319,15 @@ func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
 			Epoch:    r.epoch,
 		}},
 	}
-	if r.forced.Load() {
-		// Forced cancel: best-effort, bounded enqueue so Run returns even when
-		// sendCh is wedged full. Try the enqueue first; only abandon when sendCh
-		// is genuinely full. forcedCh is already closed (Cancel closed it), so a
-		// plain two-case select would race the always-ready closed channel
-		// against the send even when there is headroom; the non-blocking try-send
-		// prefers delivery and falls back to abandon only on a full channel.
-		// Dropping the message is safe: the server's CancelJobTasks already set
-		// the task failed and bumped assignment_epoch, so this terminal message
-		// (carrying the old r.epoch) is epoch-fenced out.
+	// Per-task cancel (forced OR default): best-effort, bounded enqueue so Run
+	// returns even when sendCh is wedged full. Cancel(true) sets r.forced AND
+	// r.cancelled; Cancel(false) sets r.cancelled; Abandon set r.abandoned and
+	// already returned above. So r.cancelled covers both cancel kinds. Try the
+	// enqueue first and only abandon when sendCh is genuinely full; dropping the
+	// message is safe because the server's CancelJobTasks already set the task
+	// failed and bumped assignment_epoch, so this terminal message (carrying the
+	// old r.epoch) is epoch-fenced out.
+	if r.cancelled.Load() {
 		select {
 		case r.sendCh <- msg:
 		default:
