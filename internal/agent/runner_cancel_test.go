@@ -270,6 +270,45 @@ func TestRunner_DefaultCancel_NonWedged_SendsTerminalFailed(t *testing.T) {
 	}
 }
 
+// TestRunner_Abandon_WedgedFull_ReturnsQuickly is spec criterion 3: with sendCh
+// wedged full and the subprocess still producing output, Abandon() (grace-expiry
+// requeue) must free Run within the bound instead of hanging unbounded on a
+// parked log send. No terminal-status assertion: abandon suppresses terminal
+// status via the r.abandoned early return in sendFinalStatus.
+func TestRunner_Abandon_WedgedFull_ReturnsQuickly(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4)
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-abandon-wedge",
+		JobId:    "j-abandon-wedge",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo x; done"}),
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sendCh) < cap(sendCh) {
+		if time.Now().After(deadline) {
+			t.Fatal("sendCh never filled to capacity; cannot reproduce the wedged-full park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	r.Abandon()
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("abandon hung: Run did not return within 8s with sendCh wedged full")
+	}
+	require.Less(t, time.Since(start), 8*time.Second,
+		"abandon should free Run well under the unbounded hang; took %s", time.Since(start))
+}
+
 // TestRunner_NormalExit_LeakedChildHoldingStdout_DoesNotHang reproduces the
 // go.dev/issue/23019 pattern: the foreground command exits 0 while a background
 // grandchild keeps the inherited stdout pipe open. With the old
