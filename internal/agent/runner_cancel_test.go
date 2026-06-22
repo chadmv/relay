@@ -179,6 +179,136 @@ func TestRunner_ForceCancel_StillSendsTerminalFailed(t *testing.T) {
 	}
 }
 
+// TestRunner_DefaultCancel_WedgedFull_ReturnsQuickly is spec criterion 1: with
+// sendCh wedged full and the subprocess still producing output, a default cancel
+// must free Run within the bound instead of hanging unbounded on a parked log
+// send. Return-bound assertion only; terminal status may be dropped when wedged.
+func TestRunner_DefaultCancel_WedgedFull_ReturnsQuickly(t *testing.T) {
+	// Small cap so we can wedge it full quickly. No consumer ever drains it.
+	sendCh := make(chan *relayv1.AgentMessage, 4)
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-default-wedge",
+		JobId:    "j-default-wedge",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo x; done"}),
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	// Wait until sendCh is wedged full: the continuous-output subprocess fills the
+	// buffer and a copy goroutine parks on r.sendCh <- msg inside chunkWriter.Write.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sendCh) < cap(sendCh) {
+		if time.Now().After(deadline) {
+			t.Fatal("sendCh never filled to capacity; cannot reproduce the wedged-full park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	r.Cancel(false)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("default cancel hung: Run did not return within 8s with sendCh wedged full")
+	}
+	require.Less(t, time.Since(start), 8*time.Second,
+		"default cancel should free Run well under the unbounded hang; took %s", time.Since(start))
+}
+
+// TestRunner_DefaultCancel_NonWedged_SendsTerminalFailed guards spec criterion 2:
+// the bounded terminal send is room-first, not drop-always. With a sendCh that has
+// room, a default cancel must still report a terminal FAILED, mirroring
+// TestRunner_ForceCancel_StillSendsTerminalFailed for the default path.
+func TestRunner_DefaultCancel_NonWedged_SendsTerminalFailed(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4096)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-default-term",
+		JobId:    "j-default-term",
+		Commands: singleCmd([]string{"sleep", "30"}),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	time.Sleep(200 * time.Millisecond) // let the subprocess start
+	r.Cancel(false)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("runner did not return within 8s after default cancel")
+	}
+
+	// Drain sendCh and assert a terminal FAILED was reported.
+	var sawFailed bool
+	for {
+		select {
+		case msg := <-sendCh:
+			if ts := msg.GetTaskStatus(); ts != nil &&
+				ts.Status == relayv1.TaskStatus_TASK_STATUS_FAILED {
+				sawFailed = true
+			}
+		default:
+			require.True(t, sawFailed,
+				"default cancel with room on sendCh must still report terminal FAILED")
+			return
+		}
+	}
+}
+
+// TestRunner_Abandon_WedgedFull_ReturnsQuickly is spec criterion 3: with sendCh
+// wedged full and the subprocess still producing output, Abandon() (grace-expiry
+// requeue) must free Run within the bound instead of hanging unbounded on a
+// parked log send. No terminal-status assertion: abandon suppresses terminal
+// status via the r.abandoned early return in sendFinalStatus.
+func TestRunner_Abandon_WedgedFull_ReturnsQuickly(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4)
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-abandon-wedge",
+		JobId:    "j-abandon-wedge",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo x; done"}),
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sendCh) < cap(sendCh) {
+		if time.Now().After(deadline) {
+			t.Fatal("sendCh never filled to capacity; cannot reproduce the wedged-full park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	r.Abandon()
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("abandon hung: Run did not return within 8s with sendCh wedged full")
+	}
+	require.Less(t, time.Since(start), 8*time.Second,
+		"abandon should free Run well under the unbounded hang; took %s", time.Since(start))
+}
+
 // TestRunner_NormalExit_LeakedChildHoldingStdout_DoesNotHang reproduces the
 // go.dev/issue/23019 pattern: the foreground command exits 0 while a background
 // grandchild keeps the inherited stdout pipe open. With the old

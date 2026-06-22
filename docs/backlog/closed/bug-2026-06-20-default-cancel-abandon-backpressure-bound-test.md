@@ -1,8 +1,10 @@
 ---
 title: Default cancel / Abandon() hang unbounded under a wedged sendCh
 type: bug
-status: open
+status: closed
 created: 2026-06-20
+closed: 2026-06-21
+resolution: fixed
 priority: medium
 source: deferred open question in 2026-06-19-forced-cancel-send-backpressure-design.md; premise corrected 2026-06-21 (autopilot)
 ---
@@ -104,3 +106,18 @@ The bound, once it exists, must be regression-tested (below). Decide the approac
   "Risks and open questions" (deferred: default cancel and `Abandon()` under a
   wedged channel remain `WaitDelay`-bounded and out of scope there).
 - `docs/retros/2026-06-20-forced-cancel-send-backpressure.md`
+
+## Resolution
+Fixed. Added a per-runner `cancelledCh` (closed once via a `sync.Once` by both
+`Cancel(false)` and `Abandon()`), gave `sendOrAbort` a fourth select case on it so an
+in-flight log write parked on a wedged `sendCh` abandons and lets `cmd.Wait()` return, and
+extended `sendFinalStatus`'s bounded best-effort try-send from the forced-only gate to any
+per-task cancel (`r.cancelled.Load()`). Default cancel still runs workspace Finalize +
+sendInventory (the Finalize gate keys off `r.forced`, untouched); abandon still suppresses
+terminal status. RED-vs-GREEN proven on Linux/Docker (both paths hung past 8s pre-fix;
+return in ~0.01s post-fix), `-race` clean, adversarial review found no issues. Commits
+`0aa0fec`, `8ed3f4f`, `d07baed`, `aef78b2`. Design:
+`docs/superpowers/specs/2026-06-21-default-cancel-abandon-hang-design.md`; plan:
+`docs/superpowers/plans/2026-06-21-default-cancel-abandon-hang-plan.md`. One pre-existing
+out-of-scope residual (`sendInventory` blocking send under a wedge) filed as
+[[bug-2026-06-21-sendinventory-blocking-send-under-wedge]].

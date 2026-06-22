@@ -18,16 +18,18 @@ import (
 
 // Runner manages the execution of a single dispatched task as a subprocess.
 type Runner struct {
-	taskID    string
-	epoch     int64
-	sendCh    chan *relayv1.AgentMessage
-	ctx       context.Context // parent (agent) context — lives for the agent lifetime, not the connection
-	cancel    context.CancelFunc
-	cancelled atomic.Bool
-	forced    atomic.Bool
-	abandoned atomic.Bool
-	forcedCh  chan struct{} // closed exactly once by Cancel(force=true); signals in-flight log writes to abandon
-	provider  source.Provider
+	taskID         string
+	epoch          int64
+	sendCh         chan *relayv1.AgentMessage
+	ctx            context.Context // parent (agent) context — lives for the agent lifetime, not the connection
+	cancel         context.CancelFunc
+	cancelled      atomic.Bool
+	forced         atomic.Bool
+	abandoned      atomic.Bool
+	forcedCh       chan struct{} // closed exactly once by Cancel(force=true); signals in-flight log writes to abandon
+	cancelledCh    chan struct{} // closed exactly once by Cancel(false) or Abandon(); signals in-flight log writes to abandon on a per-task cancel
+	cancelledClose sync.Once     // guards the single close of cancelledCh across mixed/repeated cancels
+	provider       source.Provider
 }
 
 // newRunner creates a Runner and its execution context.
@@ -41,13 +43,23 @@ func newRunner(taskID string, epoch int64, sendCh chan *relayv1.AgentMessage, pa
 	} else {
 		runCtx, cancel = context.WithCancel(parent)
 	}
-	return &Runner{taskID: taskID, epoch: epoch, sendCh: sendCh, ctx: parent, cancel: cancel, forcedCh: make(chan struct{})}, runCtx
+	return &Runner{
+		taskID:      taskID,
+		epoch:       epoch,
+		sendCh:      sendCh,
+		ctx:         parent,
+		cancel:      cancel,
+		forcedCh:    make(chan struct{}),
+		cancelledCh: make(chan struct{}),
+	}, runCtx
 }
 
 // Cancel signals the subprocess to stop. The task is reported as FAILED.
 // If force is true, the runner skips workspace finalize, bypasses pipe drain
 // when killing the subprocess, and closes forcedCh so in-flight log writes
-// abandon instead of parking on a full sendCh.
+// abandon instead of parking on a full sendCh. A non-forced (default) cancel
+// closes cancelledCh, which gives in-flight log writes the same per-task escape
+// without skipping workspace finalize.
 func (r *Runner) Cancel(force bool) {
 	if force {
 		// CompareAndSwap guarantees exactly one forced caller closes forcedCh,
@@ -57,6 +69,10 @@ func (r *Runner) Cancel(force bool) {
 			close(r.forcedCh)
 		}
 	}
+	// Both cancel kinds free a parked log send via cancelledCh. The sync.Once
+	// makes this safe under repeated, concurrent, or mixed forced/default/abandon
+	// calls on the same runner.
+	r.cancelledClose.Do(func() { close(r.cancelledCh) })
 	r.cancelled.Store(true)
 	r.cancel()
 }
@@ -66,6 +82,7 @@ func (r *Runner) Cancel(force bool) {
 // reassigned to another worker during a grace-expiry requeue.
 func (r *Runner) Abandon() {
 	r.abandoned.Store(true)
+	r.cancelledClose.Do(func() { close(r.cancelledCh) })
 	r.cancel()
 }
 
@@ -241,10 +258,11 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 	}})
 }
 
-// errForcedAbort is returned by chunkWriter.Write when a forced cancel closes
-// r.forcedCh while a log send is in flight. A non-nil Write error makes exec's
-// io.Copy stop copying so cmd.Wait() returns promptly instead of waiting out
-// WaitDelay. It is consumed only by exec's copy loop; the runner's terminal
+// errForcedAbort is returned by chunkWriter.Write when a per-task cancel
+// (forced via forcedCh, or default/abandon via cancelledCh) signals while a log
+// send is in flight, or the agent context is done. A non-nil Write error makes
+// exec's io.Copy stop copying so cmd.Wait() returns promptly instead of waiting
+// out WaitDelay. It is consumed only by exec's copy loop; the runner's terminal
 // status is decided independently in Run (the cancelled branch yields FAILED),
 // so this sentinel never leaks as an extra task failure.
 var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log write")
@@ -253,10 +271,10 @@ var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log writ
 // Write copies its slice (exec reuses the buffer between calls), wraps it in a
 // TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
 // through r.sendOrAbort. On a successful enqueue Write returns (len(p), nil) so
-// exec keeps copying until EOF (unchanged slow-consumer behavior). If a forced
-// cancel has closed r.forcedCh (or the agent context is done), the enqueue is
-// abandoned and Write returns errForcedAbort so exec's io.Copy stops and
-// cmd.Wait() returns promptly instead of waiting out WaitDelay.
+// exec keeps copying until EOF (unchanged slow-consumer behavior). If a per-task
+// cancel has closed r.forcedCh or r.cancelledCh (or the agent context is done),
+// the enqueue is abandoned and Write returns errForcedAbort so exec's io.Copy
+// stops and cmd.Wait() returns promptly instead of waiting out WaitDelay.
 type chunkWriter struct {
 	r         *Runner
 	stream    relayv1.LogStream
@@ -302,16 +320,15 @@ func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
 			Epoch:    r.epoch,
 		}},
 	}
-	if r.forced.Load() {
-		// Forced cancel: best-effort, bounded enqueue so Run returns even when
-		// sendCh is wedged full. Try the enqueue first; only abandon when sendCh
-		// is genuinely full. forcedCh is already closed (Cancel closed it), so a
-		// plain two-case select would race the always-ready closed channel
-		// against the send even when there is headroom; the non-blocking try-send
-		// prefers delivery and falls back to abandon only on a full channel.
-		// Dropping the message is safe: the server's CancelJobTasks already set
-		// the task failed and bumped assignment_epoch, so this terminal message
-		// (carrying the old r.epoch) is epoch-fenced out.
+	// Per-task cancel (forced OR default): best-effort, bounded enqueue so Run
+	// returns even when sendCh is wedged full. Cancel(true) sets r.forced AND
+	// r.cancelled; Cancel(false) sets r.cancelled; Abandon set r.abandoned and
+	// already returned above. So r.cancelled covers both cancel kinds. Try the
+	// enqueue first and only abandon when sendCh is genuinely full; dropping the
+	// message is safe because the server's CancelJobTasks already set the task
+	// failed and bumped assignment_epoch, so this terminal message (carrying the
+	// old r.epoch) is epoch-fenced out.
+	if r.cancelled.Load() {
 		select {
 		case r.sendCh <- msg:
 		default:
@@ -331,10 +348,10 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 }
 
 // sendOrAbort enqueues a log chunk like send, but additionally abandons the
-// enqueue if a forced cancel has closed r.forcedCh. It returns true on a
-// successful enqueue and false if it abandoned (agent shutdown or forced abort).
-// Only chunkWriter.Write uses this; all other callers use send so their
-// blocking discipline is unchanged.
+// enqueue if a forced cancel (forcedCh) or a per-task default cancel / abandon
+// (cancelledCh) has signalled, or the agent context is done. It returns true on a
+// successful enqueue and false if it abandoned. Only chunkWriter.Write uses this;
+// all other callers use send so their blocking discipline is unchanged.
 func (r *Runner) sendOrAbort(msg *relayv1.AgentMessage) bool {
 	select {
 	case r.sendCh <- msg:
@@ -344,6 +361,10 @@ func (r *Runner) sendOrAbort(msg *relayv1.AgentMessage) bool {
 		return false
 	case <-r.forcedCh:
 		// Forced cancel in progress; abandon this chunk so cmd.Wait can return.
+		return false
+	case <-r.cancelledCh:
+		// Default cancel or abandon in progress; abandon this chunk so cmd.Wait
+		// can return instead of parking unbounded on a wedged sendCh.
 		return false
 	}
 }
