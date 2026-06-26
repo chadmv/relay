@@ -11,6 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFakeRunner_BlockHookHonorsCtxCancel(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.setBlock("client -d relay_h_x")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := fr.Run(ctx, "", []string{"client", "-d", "relay_h_x"}, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), 2*time.Second, "block hook must unblock on ctx deadline")
+}
+
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)

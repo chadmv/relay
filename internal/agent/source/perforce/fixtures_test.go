@@ -20,6 +20,7 @@ type fakeRunner struct {
 	calls     []runCall
 	out       map[string]string
 	err       map[string]error
+	block     map[string]bool
 	streamOut map[string]string
 	streamErr map[string]error
 }
@@ -35,6 +36,7 @@ func newFakeP4Fixture(t tHelper) *fakeRunner {
 		t:         t,
 		out:       map[string]string{},
 		err:       map[string]error{},
+		block:     map[string]bool{},
 		streamOut: map[string]string{},
 		streamErr: map[string]error{},
 	}
@@ -46,6 +48,13 @@ func (f *fakeRunner) set(key, out string) {
 
 func (f *fakeRunner) setErr(key string, err error) {
 	f.err[key] = err
+}
+
+// setBlock makes Run block on the given args key until ctx is cancelled, then
+// return ctx.Err(). Models a wedged p4 subprocess that exec.CommandContext kills
+// on deadline.
+func (f *fakeRunner) setBlock(key string) {
+	f.block[key] = true
 }
 
 func (f *fakeRunner) setStream(key, out string) {
@@ -62,6 +71,10 @@ func (f *fakeRunner) argHistory() [][]string {
 
 func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin io.Reader) ([]byte, error) {
 	key := strings.Join(args, " ")
+	if f.block[key] {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if e, ok := f.err[key]; ok && e != nil {
 		return nil, e
 	}
