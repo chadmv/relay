@@ -49,7 +49,7 @@ func (s *Server) callListWorkers(ctx context.Context, args listWorkersArgs) (map
 	path := "/v1/workers?" + params.Encode()
 
 	var resp relayclient.PageEnvelope[map[string]any]
-	if err := s.client.Do(ctx, "GET", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 
@@ -70,7 +70,7 @@ func (s *Server) callGetWorker(ctx context.Context, args getWorkerArgs) (map[str
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", fmt.Sprintf("/v1/workers/%s", args.WorkerID), nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/workers/%s", args.WorkerID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil

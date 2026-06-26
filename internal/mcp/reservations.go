@@ -39,7 +39,7 @@ func (s *Server) callListReservations(ctx context.Context, args listReservations
 	path := "/v1/reservations?" + params.Encode()
 
 	var resp relayclient.PageEnvelope[map[string]any]
-	if err := s.client.Do(ctx, "GET", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 

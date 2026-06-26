@@ -64,7 +64,7 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 
 	var lastResp map[string]any
 	for {
-		if err := s.client.Do(ctx, "GET", path, nil, &lastResp); err != nil {
+		if err := s.do(ctx, "GET", path, nil, &lastResp); err != nil {
 			return nil, MapError(err)
 		}
 		status, _ := lastResp["status"].(string)

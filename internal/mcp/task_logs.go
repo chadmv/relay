@@ -44,7 +44,7 @@ func (s *Server) callGetTaskLogs(ctx context.Context, args getTaskLogsArgs) (map
 	path := fmt.Sprintf("/v1/tasks/%s/logs?%s", args.TaskID, params.Encode())
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil

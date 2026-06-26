@@ -53,7 +53,7 @@ func (s *Server) readServerInfo(ctx context.Context) ([]byte, *ToolError) {
 		Name    string `json:"name"`
 		IsAdmin bool   `json:"is_admin"`
 	}
-	if err := s.client.Do(ctx, "GET", "/v1/users/me", nil, &user); err != nil {
+	if err := s.do(ctx, "GET", "/v1/users/me", nil, &user); err != nil {
 		return nil, MapError(err)
 	}
 
@@ -61,7 +61,7 @@ func (s *Server) readServerInfo(ctx context.Context) ([]byte, *ToolError) {
 		Status  string `json:"status"`
 		Version string `json:"version"`
 	}
-	_ = s.client.Do(ctx, "GET", "/v1/health", nil, &health) // tolerate failure
+	_ = s.do(ctx, "GET", "/v1/health", nil, &health) // tolerate failure
 
 	body, err := json.Marshal(map[string]any{
 		"server_url":     s.client.BaseURL(),
@@ -76,7 +76,7 @@ func (s *Server) readServerInfo(ctx context.Context) ([]byte, *ToolError) {
 
 func (s *Server) readRecentJobs(ctx context.Context) ([]byte, *ToolError) {
 	var resp relayclient.PageEnvelope[map[string]any]
-	if err := s.client.Do(ctx, "GET", "/v1/jobs?limit=20", nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", "/v1/jobs?limit=20", nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	items := resp.Items

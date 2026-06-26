@@ -59,7 +59,7 @@ func (s *Server) callCreateSchedule(ctx context.Context, args createScheduleArgs
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "POST", "/v1/scheduled-jobs", body, &resp); err != nil {
+	if err := s.do(ctx, "POST", "/v1/scheduled-jobs", body, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil
@@ -99,7 +99,7 @@ func (s *Server) callUpdateSchedule(ctx context.Context, args updateScheduleArgs
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "PATCH", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), body, &resp); err != nil {
+	if err := s.do(ctx, "PATCH", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), body, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil
@@ -117,7 +117,7 @@ func (s *Server) callDeleteSchedule(ctx context.Context, args deleteScheduleArgs
 	}
 
 	// Pass nil as response target — the server returns 204 No Content.
-	if err := s.client.Do(ctx, "DELETE", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), nil, nil); err != nil {
+	if err := s.do(ctx, "DELETE", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), nil, nil); err != nil {
 		return nil, MapError(err)
 	}
 	return map[string]any{"ok": true}, nil

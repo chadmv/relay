@@ -49,7 +49,7 @@ func (s *Server) callListSchedules(ctx context.Context, args listSchedulesArgs) 
 	path := "/v1/scheduled-jobs?" + params.Encode()
 
 	var resp relayclient.PageEnvelope[map[string]any]
-	if err := s.client.Do(ctx, "GET", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 
@@ -70,7 +70,7 @@ func (s *Server) callGetSchedule(ctx context.Context, args getScheduleArgs) (map
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil
