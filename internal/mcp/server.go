@@ -19,6 +19,7 @@ type Server struct {
 	client   *relayclient.Client
 	mcp      *mcpsdk.Server
 	waitPoll time.Duration // overridable in tests; 0 means use defaultWaitPoll
+	isAdmin  bool          // resolved once at startup via GET /v1/users/me
 }
 
 // NewServer constructs a Server that talks to the relay API at serverURL
@@ -41,6 +42,19 @@ func NewServer(serverURL, token string) (*Server, error) {
 		client: relayclient.NewClient(serverURL, token),
 		mcp:    mcpServer,
 	}
+
+	// Resolve the caller identity once at startup so admin-only tools can be
+	// filtered at registration time. A failure here (unreachable backend, expired
+	// token) is fatal: the server is useless without an authenticated backend, and
+	// internal/cli/mcp.go already exits cleanly on a NewServer error.
+	who, terr := s.callWhoami(context.Background())
+	if terr != nil {
+		return nil, terr
+	}
+	if v, ok := who["is_admin"].(bool); ok {
+		s.isAdmin = v
+	}
+
 	s.registerTools()
 	s.registerResources()
 	return s, nil
@@ -66,7 +80,12 @@ func (s *Server) registerTools() {
 	s.registerWorkers()
 	s.registerSchedules()
 	s.registerSchedulesWrite()
-	s.registerReservations()
+	if s.isAdmin {
+		// Admin-only: hidden from non-admin sessions at discovery time. The
+		// server-side AdminOnly check and the forbidden ToolError in
+		// callListReservations remain the authoritative enforcement.
+		s.registerReservations()
+	}
 	s.registerSubmit()
 	s.registerCancel()
 	s.registerWait()
