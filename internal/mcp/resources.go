@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"strings"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -74,11 +75,15 @@ func (s *Server) registerResourcesImpl() {
 // as ResourceNotFoundError(uri); any other error is returned to the SDK as-is.
 func (s *Server) readEntityByID(ctx context.Context, uri, prefix, apiPath string) (*mcpsdk.ReadResourceResult, error) {
 	id := strings.TrimPrefix(uri, prefix)
-	if id == "" || strings.ContainsRune(id, '/') {
+	if id == "" {
 		return nil, mcpsdk.ResourceNotFoundError(uri)
 	}
+	// Escape the client-supplied id so it can only be a single literal path
+	// segment: PathEscape encodes '/', '?', '#', etc., preventing query-string
+	// injection and encoded path traversal through the s.do request path.
+	escaped := url.PathEscape(id)
 	var entity map[string]any
-	if err := s.do(ctx, "GET", apiPath+id, nil, &entity); err != nil {
+	if err := s.do(ctx, "GET", apiPath+escaped, nil, &entity); err != nil {
 		if MapError(err).Code == "not_found" {
 			return nil, mcpsdk.ResourceNotFoundError(uri)
 		}
