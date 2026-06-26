@@ -12,6 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNextWaitInterval_AdaptiveSchedule(t *testing.T) {
+	// First fastWaitCount (4) intervals are the fast poll; everything after is steady.
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(0))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(1))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(2))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(3))
+	require.Equal(t, 2*time.Second, nextWaitInterval(4))
+	require.Equal(t, 2*time.Second, nextWaitInterval(5))
+	require.Equal(t, 2*time.Second, nextWaitInterval(100))
+}
+
 func TestWaitForJob_TerminalImmediately(t *testing.T) {
 	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs/j1", r.URL.Path)
@@ -44,6 +55,32 @@ func TestWaitForJob_RunningThenDone(t *testing.T) {
 	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 5})
 	require.Nil(t, terr)
 	require.Equal(t, "done", out["status"])
+}
+
+func TestWaitForJob_AdaptiveScheduleFastJob(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&n, 1)
+		status := "running"
+		if current >= 2 {
+			status = "done"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": status})
+	}))
+	defer srv.Close()
+
+	s, _ := NewServer(srv.URL, "t")
+	// waitPoll left 0: exercise the adaptive schedule (first sleep is fastWaitPoll).
+
+	start := time.Now()
+	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 5})
+	require.Nil(t, terr)
+	require.Equal(t, "done", out["status"])
+	require.GreaterOrEqual(t, atomic.LoadInt32(&n), int32(2))
+	// The first inter-poll sleep is the adaptive fastWaitPoll (500ms), so the call
+	// returns well under 1.5s. A regression to a flat defaultWaitPoll (2s) would
+	// sleep ~2s here and blow this bound, keeping the assertion non-vacuous.
+	require.Less(t, time.Since(start), 1500*time.Millisecond)
 }
 
 func TestWaitForJob_Timeout(t *testing.T) {

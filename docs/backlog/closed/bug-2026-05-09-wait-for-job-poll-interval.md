@@ -1,8 +1,10 @@
 ---
 title: relay_wait_for_job poll interval too coarse for sub-2s jobs
 type: bug
-status: open
+status: closed
 created: 2026-05-09
+closed: 2026-06-25
+resolution: fixed
 source: MCP server session retro
 ---
 
@@ -29,3 +31,19 @@ Drop the default poll interval to 500 ms, or wire the wait loop to Postgres LIST
   load; if LISTEN/NOTIFY is wired, the poll interval matters less and becomes a fallback.
 - Merged [[idea-2026-05-09-relay-wait-job-shorter-poll]] here (closed as duplicate
   2026-06-18); that item asked the same "shorter default poll for fast jobs" question.
+
+## Resolution
+Fixed 2026-06-25 via Option A (adaptive client-side poll schedule). `relay_wait_for_job`
+(`internal/mcp/wait.go`) now drives its inter-poll sleep from a pure `nextWaitInterval(attempt)`
+helper: 500ms for the first 4 attempts (covering the first ~2s where fast completion is likely),
+then the existing 2s steady cadence for longer waits. So sub-2s jobs return within ~500ms of
+completion while long-job GET load stays within ~10% of before. The first GET is immediate; the
+deadline clamp, ctx-cancel, and terminal-state behavior are unchanged. The existing `s.waitPoll`
+test override is preserved as a flat-interval bypass. LISTEN/NOTIFY (the deeper alternative) was
+ruled out of scope: the MCP server is an HTTP client holding only a `relayclient.Client` with no
+Postgres connection, so `NotifyTaskCompleted` is unreachable. An auth'd SSE endpoint
+(`GET /v1/events?job_id=`) does exist and is a feasible future enhancement, but still needs a
+terminal-check-after-subscribe plus a poll fallback for a sub-second marginal win, so it was filed
+separately rather than blocking this fix. Pure client-side change; no Invariant touched. Unit
+(incl. a wall-clock-bounded regression test proven non-vacuous) + integration green on
+Windows/Docker; `go vet` clean; review found no high/medium issues.
