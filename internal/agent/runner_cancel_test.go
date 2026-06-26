@@ -371,3 +371,160 @@ func TestRunner_NormalExit_LeakedChildHoldingStdout_DoesNotHang(t *testing.T) {
 		}
 	}
 }
+
+// TestRunner_DefaultCancel_WedgedFull_InventoryDoesNotPark is the
+// sendInventory-wedge-escape criterion 1. It isolates the deferred
+// sendInventory park as the residual hang after the parent default-cancel fix.
+//
+// A source-bearing task drives the cleanup defer (Finalize then sendInventory).
+// fakeHandle.Finalize returns immediately and does not re-park, and its
+// Inventory() returns a non-empty entry, so once cmd.Wait is freed by the
+// parent fix the ONLY thing that can still park Run is sendInventory's send.
+// With sendCh wedged full, the blocking send parks until agent shutdown; the
+// bounded try-send must instead free Run within the bound.
+//
+// Return-bound assertion only: inventory may legitimately be dropped when
+// sendCh is wedged full, so this makes no inventory-delivery assertion.
+func TestRunner_DefaultCancel_WedgedFull_InventoryDoesNotPark(t *testing.T) {
+	// Small cap so we can wedge it full quickly. No consumer ever drains it.
+	sendCh := make(chan *relayv1.AgentMessage, 4)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-inv-default-wedge",
+		JobId:    "j-inv-default-wedge",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo x; done"}),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	// Wait until sendCh is wedged full: the continuous-output subprocess fills
+	// the buffer and a copy goroutine parks inside chunkWriter.Write.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sendCh) < cap(sendCh) {
+		if time.Now().After(deadline) {
+			t.Fatal("sendCh never filled to capacity; cannot reproduce the wedged-full park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	r.Cancel(false)
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("default cancel hung: Run did not return within 8s; deferred sendInventory parked on a wedged sendCh")
+	}
+	require.Less(t, time.Since(start), 8*time.Second,
+		"default cancel should free Run well under the unbounded hang; took %s", time.Since(start))
+
+	require.True(t, fh.finalized, "Finalize must still run on default cancel before sendInventory")
+}
+
+// TestRunner_Abandon_WedgedFull_InventoryDoesNotPark is the
+// sendInventory-wedge-escape criterion 2. Abandon() sets r.abandoned but not
+// r.cancelled, and the Finalize defer still runs on abandon (gated only on
+// r.forced), so the deferred sendInventory is reached. This exercises the
+// r.abandoned.Load() arm of the inventory bounded-send gate.
+//
+// Return-bound assertion only; abandon also suppresses terminal status via the
+// r.abandoned early return in sendFinalStatus.
+func TestRunner_Abandon_WedgedFull_InventoryDoesNotPark(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-inv-abandon-wedge",
+		JobId:    "j-inv-abandon-wedge",
+		Commands: singleCmd([]string{"sh", "-c", "while true; do echo x; done"}),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(sendCh) < cap(sendCh) {
+		if time.Now().After(deadline) {
+			t.Fatal("sendCh never filled to capacity; cannot reproduce the wedged-full park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	r.Abandon()
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("abandon hung: Run did not return within 8s; deferred sendInventory parked on a wedged sendCh")
+	}
+	require.Less(t, time.Since(start), 8*time.Second,
+		"abandon should free Run well under the unbounded hang; took %s", time.Since(start))
+
+	require.True(t, fh.finalized, "Finalize must still run on abandon before sendInventory")
+}
+
+// TestRunner_NormalCompletion_DeliversInventory is the sendInventory-wedge-escape
+// criterion 3. With headroom on sendCh and no cancel/abandon, a task that runs
+// to normal completion must still deliver a WorkspaceInventory message via the
+// blocking send. Guards that the bounded drop-on-cancel branch did not leak into
+// the normal-completion path.
+func TestRunner_NormalCompletion_DeliversInventory(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 4096)
+	fh := &fakeHandle{dir: t.TempDir()}
+	prov := &fakeProvider{handle: fh}
+
+	task := &relayv1.DispatchTask{
+		TaskId:   "t-inv-normal",
+		JobId:    "j-inv-normal",
+		Commands: singleCmd([]string{"sh", "-c", "echo done"}),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}
+
+	r, runCtx := newRunner(task.TaskId, task.Epoch, sendCh, context.Background(), 0)
+	r.SetProviderForTest(prov)
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.Run(runCtx, task) }()
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("runner did not return within 8s on normal completion")
+	}
+
+	require.True(t, fh.finalized, "Finalize must run on normal completion")
+
+	// Drain sendCh and assert a WorkspaceInventory message was delivered.
+	var sawInventory bool
+	for {
+		select {
+		case msg := <-sendCh:
+			if msg.GetWorkspaceInventory() != nil {
+				sawInventory = true
+			}
+		default:
+			require.True(t, sawInventory,
+				"normal completion must deliver a WorkspaceInventory message via the blocking send")
+			return
+		}
+	}
+}
