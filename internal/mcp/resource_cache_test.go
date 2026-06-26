@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,4 +21,23 @@ func TestResolveResourceCacheTTL(t *testing.T) {
 
 	t.Setenv("RELAY_MCP_RESOURCE_CACHE_TTL", "not-a-duration")
 	require.Equal(t, defaultResourceCacheTTL, resolveResourceCacheTTL())
+}
+
+func TestRecentJobsCache_HitWithinTTL(t *testing.T) {
+	var calls int32
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		atomic.AddInt32(&calls, 1)
+		return []byte(`{"items":[],"total":0}`), nil
+	}
+	c := &recentJobsCache{ttl: time.Minute, now: time.Now}
+
+	b1, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, `{"items":[],"total":0}`, string(b1))
+
+	b2, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, `{"items":[],"total":0}`, string(b2))
+
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "second read should be served from cache")
 }
