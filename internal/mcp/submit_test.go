@@ -15,7 +15,7 @@ import (
 )
 
 func TestSubmitJob_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
 		require.Equal(t, "/v1/jobs", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
@@ -46,7 +46,7 @@ func TestSubmitJob_ValidationError(t *testing.T) {
 }
 
 func TestSubmitJob_ServerRejected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "server-side validation failed"})
 	}))

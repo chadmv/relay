@@ -13,7 +13,7 @@ import (
 )
 
 func TestListJobs_PassesQueryParams(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs", r.URL.Path)
 		require.Equal(t, "running", r.URL.Query().Get("status"))
 		require.Equal(t, "10", r.URL.Query().Get("limit"))
@@ -37,7 +37,7 @@ func TestListJobs_PassesQueryParams(t *testing.T) {
 }
 
 func TestGetJob_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs/j1", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "name": "n", "status": "done"})
 	}))
@@ -50,7 +50,7 @@ func TestGetJob_HappyPath(t *testing.T) {
 }
 
 func TestGetJob_NotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such job"})
 	}))

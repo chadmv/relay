@@ -15,7 +15,7 @@ import (
 )
 
 func TestCreateSchedule_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
 		require.Equal(t, "/v1/scheduled-jobs", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
@@ -46,7 +46,7 @@ func TestCreateSchedule_BadCron(t *testing.T) {
 }
 
 func TestUpdateSchedule_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "PATCH", r.Method)
 		require.Equal(t, "/v1/scheduled-jobs/s1", r.URL.Path)
 		body, _ := io.ReadAll(r.Body)
@@ -66,7 +66,7 @@ func TestUpdateSchedule_HappyPath(t *testing.T) {
 }
 
 func TestDeleteSchedule_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "DELETE", r.Method)
 		require.Equal(t, "/v1/scheduled-jobs/s1", r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)

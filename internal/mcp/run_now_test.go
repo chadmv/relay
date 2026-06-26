@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunScheduleNow_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "POST", r.Method)
 		require.Equal(t, "/v1/scheduled-jobs/s1/run-now", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "newjob", "status": "pending"})
@@ -25,7 +25,7 @@ func TestRunScheduleNow_HappyPath(t *testing.T) {
 }
 
 func TestRunScheduleNow_Forbidden(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "admin only"})
 	}))

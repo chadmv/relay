@@ -13,6 +13,8 @@ import (
 )
 
 func TestResource_ServerInfo(t *testing.T) {
+	// This handler already serves /v1/users/me (which the startup probe also hits),
+	// so it is not wrapped with whoamiHandler.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/users/me":
@@ -38,6 +40,7 @@ func TestResource_ServerInfo(t *testing.T) {
 }
 
 func TestResource_ServerInfo_HealthFails(t *testing.T) {
+	// This handler already serves /v1/users/me, so it is not wrapped.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/users/me":
@@ -61,7 +64,7 @@ func TestResource_ServerInfo_HealthFails(t *testing.T) {
 }
 
 func TestResource_RecentJobs(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs", r.URL.Path)
 		require.Equal(t, "20", r.URL.Query().Get("limit"))
 		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{

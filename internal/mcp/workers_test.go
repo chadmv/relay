@@ -13,7 +13,7 @@ import (
 )
 
 func TestListWorkers_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/workers", r.URL.Path)
 		require.Equal(t, "25", r.URL.Query().Get("limit"))
 		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
@@ -29,7 +29,7 @@ func TestListWorkers_HappyPath(t *testing.T) {
 }
 
 func TestGetWorker_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/workers/w1", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "w1", "name": "host"})
 	}))

@@ -11,7 +11,7 @@ import (
 )
 
 func TestGetTaskLogs_PassesParams(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/tasks/t1/logs", r.URL.Path)
 		require.Equal(t, "5", r.URL.Query().Get("since_seq"))
 		require.Equal(t, "10", r.URL.Query().Get("limit"))

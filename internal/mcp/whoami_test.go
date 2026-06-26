@@ -33,7 +33,18 @@ func TestWhoami_Success(t *testing.T) {
 }
 
 func TestWhoami_AuthExpired(t *testing.T) {
+	// The first /v1/users/me (NewServer's startup identity probe) must succeed so
+	// construction does not fail; the second (the explicit callWhoami under test)
+	// returns 401 so we can assert the auth_expired mapping.
+	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "abc", "email": "a@b.com", "name": "A B", "is_admin": false,
+			})
+			return
+		}
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "token expired"})
 	}))
