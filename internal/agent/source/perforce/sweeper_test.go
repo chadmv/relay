@@ -74,6 +74,60 @@ func TestSweeper_EvictTimesOutOnHangingDeleteClient(t *testing.T) {
 	require.False(t, e.DirtyDelete, "a p4 timeout must NOT set DirtyDelete (dir untouched)")
 }
 
+func TestSweeper_ContinuesPastEvictTimeout(t *testing.T) {
+	prev := evictTimeout
+	evictTimeout = 50 * time.Millisecond
+	defer func() { evictTimeout = prev }()
+
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	// Oldest candidate hangs; newer candidate's client -d succeeds.
+	fr.setBlock("client -d relay_h_stuck")
+	fr.set("client -d relay_h_good", "Client deleted.\n")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "stuck", SourceKey: "//s/stuck",
+		ClientName: "relay_h_stuck", LastUsedAt: time.Now().Add(-40 * 24 * time.Hour)})
+	reg.Upsert(WorkspaceEntry{ShortID: "good", SourceKey: "//s/good",
+		ClientName: "relay_h_good", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "stuck"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "good"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+
+	done := make(chan struct{})
+	var evicted []string
+	var err error
+	go func() {
+		evicted, err = s.SweepOnce(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SweepOnce wedged on the stuck candidate; pass did not continue")
+	}
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"good"}, evicted, "the second candidate must still be evicted")
+
+	// good is fully gone; stuck remains (un-dirty) for a future retry.
+	_, statErr := os.Stat(filepath.Join(root, "good"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, ok := reg.Get("good")
+	require.False(t, ok)
+	stuckEntry, ok := reg.Get("stuck")
+	require.True(t, ok)
+	require.False(t, stuckEntry.DirtyDelete)
+}
+
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
