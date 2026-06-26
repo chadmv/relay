@@ -109,3 +109,21 @@ func TestRecentJobsCache_ErrorKeepsStale(t *testing.T) {
 	require.NotNil(t, terr)
 	require.Equal(t, string(good), string(c.body), "stale value must survive a failed refetch")
 }
+
+func TestRecentJobsCache_ReturnsCopy(t *testing.T) {
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		return []byte(`{"items":[],"total":0}`), nil
+	}
+	c := &recentJobsCache{ttl: time.Minute, now: time.Now}
+
+	b1, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	// Mutate the returned slice; the cached value must be unaffected.
+	for i := range b1 {
+		b1[i] = 'X'
+	}
+
+	b2, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, `{"items":[],"total":0}`, string(b2), "mutating a returned slice must not corrupt the cache")
+}
