@@ -72,10 +72,15 @@ func TestWaitForJob_AdaptiveScheduleFastJob(t *testing.T) {
 	s, _ := NewServer(srv.URL, "t")
 	// waitPoll left 0: exercise the adaptive schedule (first sleep is fastWaitPoll).
 
+	start := time.Now()
 	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 5})
 	require.Nil(t, terr)
 	require.Equal(t, "done", out["status"])
 	require.GreaterOrEqual(t, atomic.LoadInt32(&n), int32(2))
+	// The first inter-poll sleep is the adaptive fastWaitPoll (500ms), so the call
+	// returns well under 1.5s. A regression to a flat defaultWaitPoll (2s) would
+	// sleep ~2s here and blow this bound, keeping the assertion non-vacuous.
+	require.Less(t, time.Since(start), 1500*time.Millisecond)
 }
 
 func TestWaitForJob_Timeout(t *testing.T) {
