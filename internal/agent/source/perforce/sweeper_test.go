@@ -128,6 +128,25 @@ func TestSweeper_ContinuesPastEvictTimeout(t *testing.T) {
 	require.False(t, stuckEntry.DirtyDelete)
 }
 
+func TestResolveEvictTimeout(t *testing.T) {
+	t.Run("valid duration is honored", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "45m")
+		require.Equal(t, 45*time.Minute, resolveEvictTimeout())
+	})
+	t.Run("unset falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+	t.Run("garbage falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "not-a-duration")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+	t.Run("non-positive falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "0s")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+}
+
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
