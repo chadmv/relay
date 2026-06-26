@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,4 +127,26 @@ func TestRecentJobsCache_ReturnsCopy(t *testing.T) {
 	b2, terr := c.get(context.Background(), fetch)
 	require.Nil(t, terr)
 	require.Equal(t, `{"items":[],"total":0}`, string(b2), "mutating a returned slice must not corrupt the cache")
+}
+
+func TestRecentJobsCache_ConcurrentReads_Race(t *testing.T) {
+	var calls int32
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		atomic.AddInt32(&calls, 1)
+		return []byte(`{"items":[],"total":0}`), nil
+	}
+	c := &recentJobsCache{ttl: time.Minute, now: time.Now}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b, terr := c.get(context.Background(), fetch)
+			require.Nil(t, terr)
+			require.Equal(t, `{"items":[],"total":0}`, string(b))
+		}()
+	}
+	wg.Wait()
+	require.GreaterOrEqual(t, atomic.LoadInt32(&calls), int32(1))
 }
