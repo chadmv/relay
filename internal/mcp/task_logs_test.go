@@ -31,13 +31,17 @@ func TestGetTaskLogs_PassesParams(t *testing.T) {
 }
 
 func TestGetTaskLogs_MissingID(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callGetTaskLogs(context.Background(), getTaskLogsArgs{})
 	require.Equal(t, "validation", terr.Code)
 }
 
 func TestGetTaskLogs_LimitTooBig(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callGetTaskLogs(context.Background(), getTaskLogsArgs{TaskID: "x", Limit: 500})
 	require.Equal(t, "validation", terr.Code)
 }

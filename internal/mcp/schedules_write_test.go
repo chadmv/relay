@@ -36,7 +36,9 @@ func TestCreateSchedule_HappyPath(t *testing.T) {
 }
 
 func TestCreateSchedule_BadCron(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callCreateSchedule(context.Background(), createScheduleArgs{
 		Name: "x", CronExpr: "",
 		JobSpec: jobspec.JobSpec{Name: "j", Tasks: []jobspec.TaskSpec{{Name: "t", Command: []string{"x"}}}},

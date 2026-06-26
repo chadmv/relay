@@ -63,7 +63,9 @@ func TestGetJob_NotFound(t *testing.T) {
 }
 
 func TestGetJob_MissingID(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callGetJob(context.Background(), getJobArgs{JobID: ""})
 	require.NotNil(t, terr)
 	require.Equal(t, "validation", terr.Code)

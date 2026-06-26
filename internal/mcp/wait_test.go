@@ -62,13 +62,17 @@ func TestWaitForJob_Timeout(t *testing.T) {
 }
 
 func TestWaitForJob_NegativeTimeout(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j", TimeoutSeconds: -1})
 	require.Equal(t, "validation", terr.Code)
 }
 
 func TestWaitForJob_TimeoutTooLarge(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j", TimeoutSeconds: 9999})
 	require.Equal(t, "validation", terr.Code)
 }

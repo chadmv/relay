@@ -27,7 +27,9 @@ func TestListTasks_HappyPath(t *testing.T) {
 }
 
 func TestListTasks_MissingJobID(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callListTasks(context.Background(), listTasksArgs{})
 	require.Equal(t, "validation", terr.Code)
 }

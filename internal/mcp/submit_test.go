@@ -36,7 +36,9 @@ func TestSubmitJob_HappyPath(t *testing.T) {
 }
 
 func TestSubmitJob_ValidationError(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	out, terr := s.callSubmitJob(context.Background(), submitJobArgs{
 		JobSpec: jobspec.JobSpec{Name: ""}, // missing name
 	})
