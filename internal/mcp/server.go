@@ -20,6 +20,11 @@ type Server struct {
 	mcp      *mcpsdk.Server
 	waitPoll time.Duration // overridable in tests; 0 means use defaultWaitPoll
 	isAdmin  bool          // resolved once at startup via GET /v1/users/me
+	// reloadToken, when non-nil, re-reads the auth token from config (file + env)
+	// so a token refreshed out of band (relay login) is picked up on a 401 without
+	// restarting the process. Nil means no reload is attempted. Set once at
+	// construction; read-only thereafter.
+	reloadToken func() (string, error)
 }
 
 // NewServer constructs a Server that talks to the relay API at serverURL

@@ -17,7 +17,7 @@ func (s *Server) registerWhoami() {
 
 func (s *Server) callWhoami(ctx context.Context) (map[string]any, *ToolError) {
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", "/v1/users/me", nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", "/v1/users/me", nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 
