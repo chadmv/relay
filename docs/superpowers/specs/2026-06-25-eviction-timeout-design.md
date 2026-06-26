@@ -148,27 +148,34 @@ If, after Option A ships, an `os.RemoveAll` hang is ever actually observed in th
 field, that is a new, separately-scoped backlog item with concrete evidence -
 not speculative scope here.
 
-### Default timeout value: fixed constant, 2 minutes
+### Default timeout value: env-configurable, 30-minute default
 
 ```go
-// evictTimeout bounds a single workspace eviction's p4 client -d subprocess so a
-// wedged Perforce call cannot stall the serialized sweep loop (and thus disk
-// reclamation) for the agent's lifetime. os.RemoveAll is local I/O and is not
+// defaultEvictTimeout bounds a single workspace eviction's p4 client -d subprocess
+// so a wedged Perforce call cannot stall the serialized sweep loop (and thus disk
+// reclamation) for the agent's lifetime. os.RemoveAll is local I/O and is NOT
 // bounded by this deadline (os.RemoveAll does not honor context).
-const evictTimeout = 2 * time.Minute
+const defaultEvictTimeout = 30 * time.Minute
 ```
 
-Justification:
-- A healthy `p4 client -d` is sub-second; it deletes a client spec, not file
-  content. 2 minutes is generous headroom for a momentarily slow-but-alive
-  Perforce server while still being short relative to the 15-minute default
-  sweep interval, so a stuck eviction cannot consume a whole sweep cycle.
-- **Fixed, not configurable.** CLAUDE.md discourages unrequested configurability.
-  No operator has asked to tune this; the existing `RELAY_WORKSPACE_*` env vars
-  tune policy (max age, min free, interval), not subprocess safety bounds. A
-  safety ceiling that exists to prevent a permanent wedge does not need to be
-  operator-visible. If a real need to tune it emerges, promoting the constant to
-  an env var is a trivial follow-up.
+The effective value is read from the `RELAY_EVICTION_TIMEOUT` environment variable
+(a Go duration, e.g. `45m`, `2h`), falling back to `defaultEvictTimeout` when the
+var is unset or unparseable. Parsing follows the existing
+`RELAY_WORKER_GRACE_WINDOW` convention (`time.ParseDuration`, ignore-on-error).
+
+Justification (updated per maintainer input 2026-06-25):
+- **Configurable, by explicit request.** The maintainer flagged that production
+  Perforce workspaces can be 1 TB+ and operators must be able to tune this bound
+  per fleet, so it is exposed as `RELAY_EVICTION_TIMEOUT`. This is a deliberate
+  override of CLAUDE.md's anti-configurability default: the user asked for it.
+- **Generous 30-minute default.** Even though this deadline bounds only the
+  (normally sub-second, size-independent) `p4 client -d` spec deletion - not the
+  `os.RemoveAll` of the tree, which stays unbounded - a generous default ensures a
+  momentarily slow-but-alive Perforce server is never killed prematurely, while
+  still converting a truly permanent wedge into a bounded, retryable failure.
+  Operators who want aggressive disk reclamation can lower it.
+- The value bounds a *single* eviction; with the serialized sweeper, a generous
+  default trades faster wedge-detection for safety against false-positive kills.
 
 ### Invariants and best-effort contract
 
@@ -215,15 +222,14 @@ Use the existing `fakeRunner` fixture (`fixtures_test.go`) as the test seam.
    canned output. This faithfully models `exec.CommandContext` killing a wedged
    subprocess on deadline. Assert that `s.evict` (or `SweepOnce`) returns within
    a small multiple of a *test-shortened* timeout.
-   - To keep the test fast and deterministic without a real 2-minute wait,
-     expose `evictTimeout` as a package var overridable in tests (mirroring the
-     existing untagged-override pattern: `initialReconnectBackoff`,
-     `reconnectSleep`, `dialContextFn` in agent.go), OR have the test pass an
-     already-deadline-bounded parent `ctx` and assert the deadline is honored.
-     Prefer the parent-ctx approach if it suffices, to avoid adding a new
-     override var; fall back to the override var only if the fixed internal
-     timeout would otherwise dominate. Implementer's choice, justified in the
-     plan.
+   - To keep the test fast and deterministic without a real 30-minute wait, the
+     resolved eviction timeout should live in a place a test can shorten. Since
+     the value is now read from `RELAY_EVICTION_TIMEOUT` (env) with a default,
+     the cleanest seam is to resolve it into a package var / Sweeper field that a
+     test sets to a few milliseconds and restores (mirroring the untagged-override
+     pattern: `initialReconnectBackoff`, `reconnectSleep`, `dialContextFn` in
+     agent.go), OR have the test pass an already-deadline-bounded parent `ctx` and
+     assert the deadline is honored. Implementer's choice, justified in the plan.
 2. **Pass continues after a timeout.** Register two stale candidates; make the
    first one's `client -d` hang and the second's succeed. Assert the second is
    still evicted (its directory removed, registry entry gone) and `SweepOnce`
@@ -239,8 +245,8 @@ These are pure unit tests (no Docker, no real p4): `make test` exercises them.
 ## Out of scope
 
 - Bounding or cancelling `os.RemoveAll` (Option B). Revisit only with field
-  evidence of a hung local delete.
-- Making the timeout operator-configurable via env var.
+  evidence of a hung local delete. (Note: because only `p4 client -d` is bounded,
+  a 1 TB+ workspace `rm -rf` is never interrupted by `RELAY_EVICTION_TIMEOUT`.)
 - Concurrent (parallel) eviction in the sweeper. The serialized loop is fine once
   each step is bounded.
 - Any change to the on-demand eviction's one-goroutine-per-request structure in
