@@ -21,3 +21,13 @@ func TestMCPCommand_NotLoggedIn(t *testing.T) {
 func TestMCPCommand_Name(t *testing.T) {
 	require.Equal(t, "mcp", MCPCommand().Name)
 }
+
+// TestMCPConfigReloader_ResolvesEnv verifies the reloader the CLI builds reads the
+// token via LoadConfig (config file + env overrides). RELAY_TOKEN must win.
+func TestMCPConfigReloader_ResolvesEnv(t *testing.T) {
+	t.Setenv("RELAY_TOKEN", "from-env")
+	t.Setenv("RELAY_URL", "http://x")
+	tok, err := mcpTokenReloader()
+	require.NoError(t, err)
+	require.Equal(t, "from-env", tok)
+}

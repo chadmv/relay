@@ -41,3 +41,10 @@ func is401(err error) bool {
 	var re *relayclient.ResponseError
 	return errors.As(err, &re) && re.StatusCode == 401
 }
+
+// SetTokenReloader installs a config-backed token reloader used to recover from a
+// mid-session 401. Call once after NewServer and before Run. Passing nil disables
+// reload (the construction default).
+func (s *Server) SetTokenReloader(fn func() (string, error)) {
+	s.reloadToken = fn
+}
