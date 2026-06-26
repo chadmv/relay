@@ -66,17 +66,15 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 		timeout = t
 	}
 
-	// Determine poll interval.
-	poll := s.waitPoll
-	if poll == 0 {
-		poll = defaultWaitPoll
-	}
+	// Determine poll interval. A non-zero s.waitPoll is a flat-interval override
+	// (used by tests for determinism); zero means use the adaptive schedule.
+	flatPoll := s.waitPoll
 
 	deadline := time.Now().Add(timeout)
 	path := fmt.Sprintf("/v1/jobs/%s", args.JobID)
 
 	var lastResp map[string]any
-	for {
+	for attempt := 0; ; attempt++ {
 		if err := s.do(ctx, "GET", path, nil, &lastResp); err != nil {
 			return nil, MapError(err)
 		}
@@ -91,6 +89,11 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 				"timed_out":  true,
 				"last_state": lastResp,
 			}, nil
+		}
+
+		poll := flatPoll
+		if poll == 0 {
+			poll = nextWaitInterval(attempt)
 		}
 
 		remaining := time.Until(deadline)

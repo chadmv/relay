@@ -57,6 +57,27 @@ func TestWaitForJob_RunningThenDone(t *testing.T) {
 	require.Equal(t, "done", out["status"])
 }
 
+func TestWaitForJob_AdaptiveScheduleFastJob(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&n, 1)
+		status := "running"
+		if current >= 2 {
+			status = "done"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": status})
+	}))
+	defer srv.Close()
+
+	s, _ := NewServer(srv.URL, "t")
+	// waitPoll left 0: exercise the adaptive schedule (first sleep is fastWaitPoll).
+
+	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 5})
+	require.Nil(t, terr)
+	require.Equal(t, "done", out["status"])
+	require.GreaterOrEqual(t, atomic.LoadInt32(&n), int32(2))
+}
+
 func TestWaitForJob_Timeout(t *testing.T) {
 	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "running"})
