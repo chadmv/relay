@@ -56,7 +56,7 @@ func (s *Server) callListJobs(ctx context.Context, args listJobsArgs) (map[strin
 	}
 
 	var resp relayclient.PageEnvelope[map[string]any]
-	if err := s.client.Do(ctx, "GET", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 
@@ -78,7 +78,7 @@ func (s *Server) callGetJob(ctx context.Context, args getJobArgs) (map[string]an
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", fmt.Sprintf("/v1/jobs/%s", args.JobID), nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/jobs/%s", args.JobID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil

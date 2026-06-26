@@ -24,7 +24,7 @@ func (s *Server) callCancelJob(ctx context.Context, args cancelJobArgs) (map[str
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "DELETE", fmt.Sprintf("/v1/jobs/%s", args.JobID), nil, &resp); err != nil {
+	if err := s.do(ctx, "DELETE", fmt.Sprintf("/v1/jobs/%s", args.JobID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // ResponseError is returned by Client.Do for non-2xx responses.
@@ -22,9 +23,11 @@ func (e *ResponseError) Error() string { return e.Message }
 
 // Client wraps *http.Client with a base URL and Bearer token.
 type Client struct {
-	base  string
+	base string
+	http *http.Client
+
+	mu    sync.RWMutex
 	token string
-	http  *http.Client
 }
 
 // NewClient returns a Client for the given server URL and token.
@@ -35,6 +38,21 @@ func NewClient(serverURL, token string) *Client {
 
 // BaseURL returns the base server URL this client connects to.
 func (c *Client) BaseURL() string { return c.base }
+
+// Token returns the current bearer token.
+func (c *Client) Token() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
+}
+
+// SetToken atomically replaces the bearer token used by subsequent requests.
+// Safe for concurrent use with Do and StreamEvents.
+func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
 
 // Do sends a JSON request and decodes the response into out (may be nil).
 // Returns an error for non-2xx responses using the server's "error" field when available.
@@ -52,8 +70,8 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	if err != nil {
 		return err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if tok := c.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -101,8 +119,8 @@ func (c *Client) StreamEvents(ctx context.Context, path string, onSubscribed fun
 	if err != nil {
 		return err
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if tok := c.Token(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 

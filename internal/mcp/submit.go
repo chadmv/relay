@@ -28,7 +28,7 @@ func (s *Server) callSubmitJob(ctx context.Context, args submitJobArgs) (map[str
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
-	if err := s.client.Do(ctx, "POST", "/v1/jobs", spec, &resp); err != nil {
+	if err := s.do(ctx, "POST", "/v1/jobs", spec, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return map[string]any{"job_id": resp.ID, "status": resp.Status}, nil

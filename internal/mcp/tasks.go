@@ -33,7 +33,7 @@ func (s *Server) callListTasks(ctx context.Context, args listTasksArgs) (map[str
 	}
 
 	var items []map[string]any
-	if err := s.client.Do(ctx, "GET", fmt.Sprintf("/v1/jobs/%s/tasks", args.JobID), nil, &items); err != nil {
+	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/jobs/%s/tasks", args.JobID), nil, &items); err != nil {
 		return nil, MapError(err)
 	}
 
@@ -50,7 +50,7 @@ func (s *Server) callGetTask(ctx context.Context, args getTaskArgs) (map[string]
 	}
 
 	var resp map[string]any
-	if err := s.client.Do(ctx, "GET", fmt.Sprintf("/v1/tasks/%s", args.TaskID), nil, &resp); err != nil {
+	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/tasks/%s", args.TaskID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return resp, nil

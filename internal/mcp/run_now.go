@@ -28,7 +28,7 @@ func (s *Server) callRunScheduleNow(ctx context.Context, args runScheduleNowArgs
 		Status string `json:"status"`
 	}
 	path := fmt.Sprintf("/v1/scheduled-jobs/%s/run-now", args.ScheduleID)
-	if err := s.client.Do(ctx, "POST", path, nil, &resp); err != nil {
+	if err := s.do(ctx, "POST", path, nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
 	return map[string]any{"job_id": resp.ID, "status": resp.Status}, nil
