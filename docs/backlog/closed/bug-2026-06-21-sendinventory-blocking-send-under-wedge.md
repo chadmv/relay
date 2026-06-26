@@ -1,8 +1,10 @@
 ---
 title: sendInventory in the default-cancel defer can park unbounded under a wedged sendCh
 type: bug
-status: open
+status: closed
 created: 2026-06-21
+closed: 2026-06-25
+resolution: fixed
 priority: low
 source: residual flagged during 2026-06-21-default-cancel-abandon-hang-design (out of scope there)
 ---
@@ -59,3 +61,17 @@ under a merely-slow consumer) - only the cancelled/abandoned cleanup path needs 
 - `docs/superpowers/specs/2026-06-21-default-cancel-abandon-hang-design.md` - "Risks" section,
   residual #3 (this item).
 - `docs/backlog/bug-2026-06-20-default-cancel-abandon-backpressure-bound-test.md` - the parent bug.
+
+## Resolution
+Fixed 2026-06-25 (fix commit 8d816a0). `sendInventory` in `internal/agent/runner.go` now uses
+a room-first bounded best-effort try-send (`select { case r.sendCh <- msg: default: }`, mirroring
+`sendFinalStatus`'s cancelled branch) when `r.cancelled.Load() || r.abandoned.Load()`; normal
+completion keeps the blocking two-case `r.send`. The `|| r.abandoned.Load()` arm is load-bearing
+because `Abandon()` sets only `r.abandoned` yet still reaches the Finalize-and-inventory defer. No
+new field, channel, or sender, so the "one bounded sender per gRPC stream" invariant is preserved
+and the previously-unbounded cleanup park is bounded. Three `//go:build !windows` tests
+(`TestRunner_DefaultCancel_WedgedFull_InventoryDoesNotPark`,
+`TestRunner_Abandon_WedgedFull_InventoryDoesNotPark`,
+`TestRunner_NormalCompletion_DeliversInventory`) proven RED-vs-GREEN on Linux/Docker; full
+`internal/agent` suite and `go vet` clean. Adversarial review found no high/medium/low findings.
+Closes residual #3 of the 2026-06-21 default-cancel/Abandon hang design.
