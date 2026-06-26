@@ -35,7 +35,7 @@ func (s *Server) registerResourcesImpl() {
 		Description: "The 20 most recently created jobs on the relay server.",
 		MIMEType:    "application/json",
 	}, func(ctx context.Context, req *mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error) {
-		body, terr := s.readRecentJobs(ctx)
+		body, terr := s.recentJobs.get(ctx, s.readRecentJobs)
 		if terr != nil {
 			return nil, terr
 		}

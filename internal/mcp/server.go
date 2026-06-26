@@ -25,6 +25,9 @@ type Server struct {
 	// restarting the process. Nil means no reload is attempted. Set once at
 	// construction; read-only thereafter.
 	reloadToken func() (string, error)
+	// recentJobs caches the relay://recent-jobs resource for resourceCacheTTL so
+	// repeated polls within a session do not refetch GET /v1/jobs?limit=20.
+	recentJobs recentJobsCache
 }
 
 // NewServer constructs a Server that talks to the relay API at serverURL
@@ -44,8 +47,9 @@ func NewServer(serverURL, token string) (*Server, error) {
 	mcpServer := mcpsdk.NewServer(impl, nil)
 
 	s := &Server{
-		client: relayclient.NewClient(serverURL, token),
-		mcp:    mcpServer,
+		client:     relayclient.NewClient(serverURL, token),
+		mcp:        mcpServer,
+		recentJobs: recentJobsCache{ttl: resourceCacheTTL, now: time.Now},
 	}
 
 	// Resolve the caller identity once at startup so admin-only tools can be

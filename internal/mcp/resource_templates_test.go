@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -112,4 +114,33 @@ func TestResourceTemplate_EmptyID_NotFound(t *testing.T) {
 	cs := connectClient(t, s)
 	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://jobs/"})
 	require.Error(t, err)
+}
+
+func TestRecentJobsResource_CachedAcrossReads(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/jobs" {
+			atomic.AddInt32(&calls, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{"id": "j1"}},
+				"total": 1,
+			})
+			return
+		}
+		http.Error(w, "unexpected: "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	s, err := NewServer(srv.URL, "t")
+	require.NoError(t, err)
+	// Force a long TTL regardless of the ambient env value.
+	s.recentJobs.ttl = time.Minute
+
+	cs := connectClient(t, s)
+	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://recent-jobs"})
+	require.NoError(t, err)
+	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://recent-jobs"})
+	require.NoError(t, err)
+
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "second recent-jobs read should hit the cache")
 }
