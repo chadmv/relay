@@ -113,7 +113,31 @@ func TestResourceTemplate_EmptyID_NotFound(t *testing.T) {
 
 	cs := connectClient(t, s)
 	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://jobs/"})
-	require.Error(t, err)
+	requireResourceNotFound(t, err, "relay://jobs/")
+}
+
+func TestResourceTemplate_ID_EscapedToSingleSegment(t *testing.T) {
+	var gotReqURI, gotRawQuery string
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		gotReqURI = r.RequestURI
+		gotRawQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "x", "status": "done"})
+	}))
+	defer srv.Close()
+
+	s, err := NewServer(srv.URL, "t")
+	require.NoError(t, err)
+
+	cs := connectClient(t, s)
+	// The handler receives the raw id "..%2fadmin" from the matched URI. With a
+	// raw apiPath+id concat the on-the-wire request becomes /v1/jobs/..%2fadmin,
+	// which a router percent-decodes to a /v1/jobs/../admin traversal that escapes
+	// the /v1/jobs/ namespace. PathEscape re-encodes the '%' so the id stays a
+	// single literal segment (..%252fadmin) that can never be decoded to a slash.
+	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://jobs/..%2fadmin"})
+	require.NoError(t, err)
+	require.Empty(t, gotRawQuery, "client-supplied id must not become a query string")
+	require.Equal(t, "/v1/jobs/..%252fadmin", gotReqURI, "id must be a single escaped path segment, not a traversal sequence")
 }
 
 func TestRecentJobsResource_CachedAcrossReads(t *testing.T) {
