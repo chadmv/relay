@@ -410,9 +410,18 @@ func (r *Runner) makePrepareProgressFn() (progress func(line string), flush func
 	return
 }
 
-// sendInventory reports a workspace inventory entry to the coordinator.
+// sendInventory reports a workspace inventory entry to the coordinator. On a
+// per-task cancel or abandon the cleanup runs through the deferred path while
+// sendCh may still be wedged full and r.ctx (the parent/agent context) is not
+// done, so a blocking send would park until agent shutdown. Mirror
+// sendFinalStatus's cancelled branch: a room-first, bounded try-send that
+// abandons the entry best-effort when sendCh is full. Dropping it is safe -
+// Finalize already reconciled the workspace locally, the server is
+// authoritative, and the entry is recomputed on next workspace use. Normal
+// completion (none of cancelled/abandoned set) keeps the blocking send so
+// inventory is still delivered under a merely-slow-but-live consumer.
 func (r *Runner) sendInventory(e source.InventoryEntry) {
-	r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_WorkspaceInventory{
+	msg := &relayv1.AgentMessage{Payload: &relayv1.AgentMessage_WorkspaceInventory{
 		WorkspaceInventory: &relayv1.WorkspaceInventoryUpdate{
 			SourceType:   e.SourceType,
 			SourceKey:    e.SourceKey,
@@ -421,5 +430,15 @@ func (r *Runner) sendInventory(e source.InventoryEntry) {
 			LastUsedAt:   e.LastUsedAt.Format("2006-01-02T15:04:05Z07:00"),
 			Deleted:      e.Deleted,
 		},
-	}})
+	}}
+	if r.cancelled.Load() || r.abandoned.Load() {
+		select {
+		case r.sendCh <- msg:
+		default:
+			// sendCh full and wedged; abandon best-effort. Cleanup path only;
+			// server is authoritative and Finalize already reconciled the workspace.
+		}
+		return
+	}
+	r.send(msg)
 }
