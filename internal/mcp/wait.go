@@ -11,8 +11,21 @@ import (
 const (
 	defaultWaitTimeout = 60 * time.Second
 	maxWaitTimeout     = 300 * time.Second
-	defaultWaitPoll    = 2 * time.Second
+	defaultWaitPoll    = 2 * time.Second        // steady-state poll interval
+	fastWaitPoll       = 500 * time.Millisecond // poll interval during the fast phase
+	fastWaitCount      = 4                       // number of fast intervals before widening
 )
+
+// nextWaitInterval returns the inter-poll sleep for the given zero-based attempt.
+// The first fastWaitCount sleeps are fast (catching sub-2s jobs within ~500 ms of
+// completion); every sleep thereafter is the steady interval, so a long wait does
+// not increase GET load beyond today's 2 s cadence.
+func nextWaitInterval(attempt int) time.Duration {
+	if attempt < fastWaitCount {
+		return fastWaitPoll
+	}
+	return defaultWaitPoll
+}
 
 var terminalStatuses = map[string]bool{
 	"done":      true,

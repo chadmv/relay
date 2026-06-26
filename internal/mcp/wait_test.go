@@ -12,6 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNextWaitInterval_AdaptiveSchedule(t *testing.T) {
+	// First fastWaitCount (4) intervals are the fast poll; everything after is steady.
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(0))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(1))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(2))
+	require.Equal(t, 500*time.Millisecond, nextWaitInterval(3))
+	require.Equal(t, 2*time.Second, nextWaitInterval(4))
+	require.Equal(t, 2*time.Second, nextWaitInterval(5))
+	require.Equal(t, 2*time.Second, nextWaitInterval(100))
+}
+
 func TestWaitForJob_TerminalImmediately(t *testing.T) {
 	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs/j1", r.URL.Path)
