@@ -69,3 +69,43 @@ func TestRecentJobsCache_ExpiryRefetches(t *testing.T) {
 	require.Nil(t, terr)
 	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
+
+func TestRecentJobsCache_DisabledAlwaysFetches(t *testing.T) {
+	var calls int32
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		atomic.AddInt32(&calls, 1)
+		return []byte(`{"items":[],"total":0}`), nil
+	}
+	c := &recentJobsCache{ttl: 0, now: time.Now}
+
+	_, _ = c.get(context.Background(), fetch)
+	_, _ = c.get(context.Background(), fetch)
+
+	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "ttl<=0 must refetch every read")
+	require.Nil(t, c.body, "disabled cache must store nothing")
+}
+
+func TestRecentJobsCache_ErrorKeepsStale(t *testing.T) {
+	good := []byte(`{"items":[{"id":"j1"}],"total":1}`)
+	var fail bool
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		if fail {
+			return nil, &ToolError{Code: "server_error", Message: "boom"}
+		}
+		return good, nil
+	}
+
+	var fake time.Time = time.Unix(0, 0)
+	c := &recentJobsCache{ttl: 10 * time.Second, now: func() time.Time { return fake }}
+
+	b1, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, string(good), string(b1))
+
+	// Expire, then fail the refetch: stale value must remain, error returned.
+	fail = true
+	fake = fake.Add(time.Minute)
+	_, terr = c.get(context.Background(), fetch)
+	require.NotNil(t, terr)
+	require.Equal(t, string(good), string(c.body), "stale value must survive a failed refetch")
+}
