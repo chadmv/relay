@@ -16,7 +16,8 @@ func TestNewServer_MissingCredentials(t *testing.T) {
 }
 
 func TestNewServer_ValidCredentials(t *testing.T) {
-	s, err := NewServer("http://localhost:8080", "tok")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "tok")
 	require.NoError(t, err)
 	require.NotNil(t, s)
 }

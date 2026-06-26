@@ -11,7 +11,7 @@ import (
 )
 
 func TestCancelJob_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "DELETE", r.Method)
 		require.Equal(t, "/v1/jobs/j1", r.URL.Path)
 		require.Empty(t, r.URL.Query().Get("force")) // no force in v1
@@ -26,7 +26,7 @@ func TestCancelJob_HappyPath(t *testing.T) {
 }
 
 func TestCancelJob_NotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "no such job"})
 	}))

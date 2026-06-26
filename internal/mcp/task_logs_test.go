@@ -11,7 +11,7 @@ import (
 )
 
 func TestGetTaskLogs_PassesParams(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/tasks/t1/logs", r.URL.Path)
 		require.Equal(t, "5", r.URL.Query().Get("since_seq"))
 		require.Equal(t, "10", r.URL.Query().Get("limit"))
@@ -31,13 +31,17 @@ func TestGetTaskLogs_PassesParams(t *testing.T) {
 }
 
 func TestGetTaskLogs_MissingID(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callGetTaskLogs(context.Background(), getTaskLogsArgs{})
 	require.Equal(t, "validation", terr.Code)
 }
 
 func TestGetTaskLogs_LimitTooBig(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callGetTaskLogs(context.Background(), getTaskLogsArgs{TaskID: "x", Limit: 500})
 	require.Equal(t, "validation", terr.Code)
 }

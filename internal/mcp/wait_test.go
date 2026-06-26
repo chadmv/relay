@@ -13,7 +13,7 @@ import (
 )
 
 func TestWaitForJob_TerminalImmediately(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs/j1", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "done"})
 	}))
@@ -28,7 +28,7 @@ func TestWaitForJob_TerminalImmediately(t *testing.T) {
 
 func TestWaitForJob_RunningThenDone(t *testing.T) {
 	var n int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		current := atomic.AddInt32(&n, 1)
 		status := "running"
 		if current >= 2 {
@@ -47,7 +47,7 @@ func TestWaitForJob_RunningThenDone(t *testing.T) {
 }
 
 func TestWaitForJob_Timeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "running"})
 	}))
 	defer srv.Close()
@@ -62,13 +62,17 @@ func TestWaitForJob_Timeout(t *testing.T) {
 }
 
 func TestWaitForJob_NegativeTimeout(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j", TimeoutSeconds: -1})
 	require.Equal(t, "validation", terr.Code)
 }
 
 func TestWaitForJob_TimeoutTooLarge(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j", TimeoutSeconds: 9999})
 	require.Equal(t, "validation", terr.Code)
 }

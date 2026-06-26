@@ -13,7 +13,7 @@ import (
 )
 
 func TestListSchedules_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/scheduled-jobs", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
 			Items: []map[string]any{{"id": "s1", "name": "nightly"}},
@@ -28,7 +28,7 @@ func TestListSchedules_HappyPath(t *testing.T) {
 }
 
 func TestGetSchedule_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/scheduled-jobs/s1", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "s1", "cron_expr": "0 2 * * *"})
 	}))

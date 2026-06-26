@@ -11,7 +11,7 @@ import (
 )
 
 func TestListTasks_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/jobs/j1/tasks", r.URL.Path)
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"id": "t1", "name": "task-a"},
@@ -27,13 +27,15 @@ func TestListTasks_HappyPath(t *testing.T) {
 }
 
 func TestListTasks_MissingJobID(t *testing.T) {
-	s, _ := NewServer("http://x", "t")
+	backend := newWhoamiBackend(t, true)
+	s, err := NewServer(backend.URL, "t")
+	require.NoError(t, err)
 	_, terr := s.callListTasks(context.Background(), listTasksArgs{})
 	require.Equal(t, "validation", terr.Code)
 }
 
 func TestGetTask_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/tasks/t1", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "t1", "status": "done"})
 	}))

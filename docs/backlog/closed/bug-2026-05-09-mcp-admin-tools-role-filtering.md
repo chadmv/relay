@@ -1,8 +1,10 @@
 ---
 title: MCP admin-only tools have no discovery-time role filtering
 type: bug
-status: open
+status: closed
 created: 2026-05-09
+closed: 2026-06-25
+resolution: fixed
 source: MCP server session retro
 ---
 
@@ -27,3 +29,18 @@ At server startup (after `whoami` resolves the logged-in user), conditionally re
 ## Related
 - `internal/mcp/server.go` — `registerTools` and `NewServer`
 - `internal/mcp/reservations.go`, `internal/mcp/run_now.go`
+
+## Resolution
+Fixed 2026-06-25. `NewServer` (`internal/mcp/server.go`) now resolves the caller identity once at
+startup via the existing `callWhoami` (`GET /v1/users/me`), stores `isAdmin`, and registers the
+admin-only `relay_list_reservations` tool only when `is_admin == true`. A fail-closed comma-ok
+assertion (`who["is_admin"].(bool)`) defaults to NOT registering on any ambiguous response shape.
+A startup whoami failure returns the error from `NewServer`, preserving the existing clean exit
+(`internal/cli/mcp.go` untouched). Discovery filtering is cosmetic only - the authoritative
+boundary remains the server-side `auth(admin(...))` gate on `GET /v1/reservations`
+(`internal/api/server.go`) plus the `forbidden` ToolError fallback in `reservations.go`, both
+unchanged. New unit tests over the real SDK `ListTools` discovery surface (non-admin absent /
+admin present + functional / whoami-failure clean) plus integration assertions; ~16 existing MCP
+test files repaired for the new startup probe via a shared `whoamiHandler`/`newWhoamiBackend`
+helper. Full unit + Docker + integration suites green; `go vet` clean; adversarial review found no
+high/medium/low findings.

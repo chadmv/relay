@@ -246,12 +246,14 @@ func TestIntegration_AuthExpired(t *testing.T) {
 	resp.Body.Close()
 	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
-	// Now try to use the revoked token.
+	// NewServer now resolves identity at startup via GET /v1/users/me, so a revoked
+	// token fails construction with the same auth_expired ToolError that callWhoami
+	// would have returned.
 	s, err := NewServer(baseURL, adminToken)
-	require.NoError(t, err)
-
-	_, terr := s.callWhoami(context.Background())
-	require.NotNil(t, terr)
+	require.Nil(t, s)
+	require.Error(t, err)
+	terr, ok := err.(*ToolError)
+	require.True(t, ok, "NewServer error must be a *ToolError, got %T", err)
 	assert.Equal(t, "auth_expired", terr.Code)
 }
 
@@ -298,6 +300,38 @@ func TestIntegration_ScheduleRoundTrip(t *testing.T) {
 	_, terr = s.callGetSchedule(context.Background(), getScheduleArgs{ScheduleID: scheduleID})
 	require.NotNil(t, terr)
 	assert.Equal(t, "not_found", terr.Code)
+}
+
+// TestIntegration_NonAdminHidesReservations verifies a non-admin session does not
+// list relay_list_reservations against a real /v1/users/me.
+func TestIntegration_NonAdminHidesReservations(t *testing.T) {
+	baseURL, _, userToken, teardown := startRelayForMCP(t)
+	defer teardown()
+
+	s, err := NewServer(baseURL, userToken)
+	require.NoError(t, err)
+
+	names := listedToolNames(t, s)
+	require.False(t, names["relay_list_reservations"],
+		"non-admin must not list relay_list_reservations")
+	require.True(t, names["relay_whoami"], "relay_whoami must always be present")
+}
+
+// TestIntegration_AdminListsAndCallsReservations verifies an admin session lists
+// relay_list_reservations and can call it against a real backend.
+func TestIntegration_AdminListsAndCallsReservations(t *testing.T) {
+	baseURL, adminToken, _, teardown := startRelayForMCP(t)
+	defer teardown()
+
+	s, err := NewServer(baseURL, adminToken)
+	require.NoError(t, err)
+
+	names := listedToolNames(t, s)
+	require.True(t, names["relay_list_reservations"],
+		"admin must list relay_list_reservations")
+
+	_, terr := s.callListReservations(context.Background(), listReservationsArgs{})
+	require.Nil(t, terr, "admin call to reservations must succeed: %v", terr)
 }
 
 // doAuthRequest is a small helper that sends an authenticated HTTP request.

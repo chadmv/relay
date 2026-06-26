@@ -34,7 +34,11 @@ func connectClient(t *testing.T, s *Server) *mcpsdk.ClientSession {
 // transport with a backend that returns 401 and asserts the structured ToolError
 // (code + hint) is delivered as an IsError result, not flattened to plain text.
 func TestDelivery_ToolErrorReachesClient(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Serve a successful whoami at startup, then 401 for the tool path under test.
+	// relay_whoami's tool call would hit /v1/users/me (same as the startup probe),
+	// so drive relay_list_jobs (-> /v1/jobs) to keep the 401-on-tool-path
+	// assertion meaningful while NewServer's startup whoami succeeds.
+	backend := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "token expired"})
 	}))
@@ -46,8 +50,8 @@ func TestDelivery_ToolErrorReachesClient(t *testing.T) {
 	cs := connectClient(t, s)
 
 	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{
-		Name:      "relay_whoami",
-		Arguments: map[string]any{},
+		Name:      "relay_list_jobs",
+		Arguments: map[string]any{"status": "", "limit": 0, "cursor": "", "sort": ""},
 	})
 	require.NoError(t, err, "transport-level call must succeed; the failure is a tool result, not a protocol error")
 	require.True(t, res.IsError, "tool result must have IsError=true")
@@ -67,8 +71,9 @@ func TestDelivery_ToolErrorReachesClient(t *testing.T) {
 // (a client-side validation *ToolError that never reaches the backend) and asserts the
 // structured error is delivered as an IsError result.
 func TestDelivery_ValidationErrorReachesClient(t *testing.T) {
-	// Backend should never be hit; fail loudly if it is.
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Only the startup whoami probe may hit the backend; the tool path must not be
+	// reached for a client-side validation error - fail loudly if it is.
+	backend := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("backend should not be called for a validation error; got %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))

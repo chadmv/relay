@@ -13,7 +13,7 @@ import (
 )
 
 func TestListReservations_HappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/reservations", r.URL.Path)
 		_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[map[string]any]{
 			Items: []map[string]any{{"id": "r1", "name": "vfx"}},
@@ -28,7 +28,7 @@ func TestListReservations_HappyPath(t *testing.T) {
 }
 
 func TestListReservations_Forbidden(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "admin only"})
 	}))
