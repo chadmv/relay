@@ -3,13 +3,32 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 )
+
+// requireResourceNotFound asserts that err unwraps to a jsonrpc resource-not-found
+// error (code CodeResourceNotFound) whose Data carries the requested uri, which is
+// the contract ResourceNotFoundError(uri) produces. The transport flattens the
+// message text, so the uri lives in Data, not err.Error().
+func requireResourceNotFound(t *testing.T, err error, uri string) {
+	t.Helper()
+	require.Error(t, err)
+	var je *jsonrpc.Error
+	require.True(t, errors.As(err, &je), "want *jsonrpc.Error, got %T: %v", err, err)
+	require.Equal(t, int64(mcpsdk.CodeResourceNotFound), je.Code)
+	var data struct {
+		URI string `json:"uri"`
+	}
+	require.NoError(t, json.Unmarshal(je.Data, &data))
+	require.Equal(t, uri, data.URI)
+}
 
 func TestResourceTemplates_Listed(t *testing.T) {
 	b := newWhoamiBackend(t, true)
@@ -65,4 +84,32 @@ func TestResourceTemplate_Task_ResolvesEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "/v1/tasks/t1", hit)
 	require.Contains(t, res.Contents[0].Text, `"t1"`)
+}
+
+func TestResourceTemplate_NotFound(t *testing.T) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	s, err := NewServer(srv.URL, "t")
+	require.NoError(t, err)
+
+	cs := connectClient(t, s)
+	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://jobs/missing"})
+	requireResourceNotFound(t, err, "relay://jobs/missing")
+}
+
+func TestResourceTemplate_EmptyID_NotFound(t *testing.T) {
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("backend should not be hit for empty id, got %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	s, err := NewServer(srv.URL, "t")
+	require.NoError(t, err)
+
+	cs := connectClient(t, s)
+	_, err = cs.ReadResource(context.Background(), &mcpsdk.ReadResourceParams{URI: "relay://jobs/"})
+	require.Error(t, err)
 }
