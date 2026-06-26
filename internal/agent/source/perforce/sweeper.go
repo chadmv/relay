@@ -17,6 +17,31 @@ import (
 // or counting them. Callers distinguish it with errors.Is.
 var ErrEvictClaimLost = errors.New("sweeper: evict claim lost (workspace in use or already evicting)")
 
+// defaultEvictTimeout bounds a single workspace eviction's p4 client -d subprocess
+// so a wedged Perforce call cannot stall the serialized sweep loop (and thus disk
+// reclamation) for the agent's lifetime. os.RemoveAll is local I/O and is NOT
+// bounded by this deadline (os.RemoveAll does not honor context).
+const defaultEvictTimeout = 30 * time.Minute
+
+// evictTimeout is the effective per-eviction p4 deadline. It is resolved once from
+// RELAY_EVICTION_TIMEOUT (a Go duration, e.g. 45m, 2h), falling back to
+// defaultEvictTimeout when the var is unset or unparseable, mirroring the
+// RELAY_WORKER_GRACE_WINDOW convention. It is a package var (not a const) so tests
+// can shorten it to a few milliseconds; this is the only override seam and adds no
+// production config beyond the env var.
+var evictTimeout = resolveEvictTimeout()
+
+// resolveEvictTimeout reads RELAY_EVICTION_TIMEOUT and falls back to
+// defaultEvictTimeout on unset/unparseable input (ignore-on-error).
+func resolveEvictTimeout() time.Duration {
+	if v := os.Getenv("RELAY_EVICTION_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultEvictTimeout
+}
+
 // Sweeper evicts stale workspaces by age and/or disk pressure.
 type Sweeper struct {
 	Root          string
@@ -145,11 +170,17 @@ func (s *Sweeper) evict(ctx context.Context, reg *Registry, w WorkspaceEntry) er
 		// out; only after release() does it find no registry entry and rebuild.
 		defer release()
 	}
+	// Bound the p4 client -d subprocess so a wedged Perforce call cannot stall the
+	// serialized sweep. os.RemoveAll below is local I/O and intentionally NOT bounded
+	// (it does not honor context). On deadline, DeleteClient returns before
+	// os.RemoveAll, so no DirtyDelete marker is set and the next sweep retries fully.
+	evictCtx, cancelEvict := context.WithTimeout(ctx, evictTimeout)
+	defer cancelEvict()
 	// When w.DirtyDelete is set, a prior sweep already deleted the p4 client
 	// and only the on-disk directory remains. Calling DeleteClient again would
 	// fail ("client doesn't exist") and previously wedged the whole sweep.
 	if !w.DirtyDelete {
-		if err := s.Client.DeleteClient(ctx, w.ClientName); err != nil {
+		if err := s.Client.DeleteClient(evictCtx, w.ClientName); err != nil {
 			return err
 		}
 	}

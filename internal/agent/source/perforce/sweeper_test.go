@@ -25,6 +25,55 @@ func TestFakeRunner_BlockHookHonorsCtxCancel(t *testing.T) {
 	require.Less(t, time.Since(start), 2*time.Second, "block hook must unblock on ctx deadline")
 }
 
+func TestSweeper_EvictTimesOutOnHangingDeleteClient(t *testing.T) {
+	prev := evictTimeout
+	evictTimeout = 50 * time.Millisecond
+	defer func() { evictTimeout = prev }()
+
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	fr.setBlock("client -d relay_h_stuck")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "stuck", SourceKey: "//s/x",
+		ClientName: "relay_h_stuck", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "stuck"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+
+	done := make(chan struct{})
+	var evicted []string
+	var err error
+	go func() {
+		evicted, err = s.SweepOnce(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SweepOnce did not return; per-eviction timeout not enforced")
+	}
+
+	require.NoError(t, err, "a timed-out eviction is logged-and-skipped, not a SweepOnce error")
+	require.Empty(t, evicted, "the stuck workspace must not be reported as evicted")
+
+	// os.RemoveAll was never reached: the directory still exists.
+	_, statErr := os.Stat(filepath.Join(root, "stuck"))
+	require.NoError(t, statErr, "os.RemoveAll must not run when p4 client -d times out")
+
+	// No DirtyDelete marker: the next sweep retries the FULL eviction.
+	e, ok := reg.Get("stuck")
+	require.True(t, ok, "the entry stays in the registry for retry")
+	require.False(t, e.DirtyDelete, "a p4 timeout must NOT set DirtyDelete (dir untouched)")
+}
+
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
