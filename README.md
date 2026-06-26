@@ -1006,7 +1006,9 @@ Add an entry to your MCP client's config file. For Claude Desktop on Windows the
 }
 ```
 
-For Claude Code, add it via `claude mcp add relay -- relay mcp` or by editing `~/.claude.json` directly. Restart the client. The relay tools (prefixed `relay_*`) and resources (`relay://server-info`, `relay://recent-jobs`) become available.
+For Claude Code, add it via `claude mcp add relay -- relay mcp` or by editing `~/.claude.json` directly. Restart the client. The relay tools (prefixed `relay_*`) and resources (`relay://server-info`, `relay://recent-jobs`) become available, along with the URI-templated resources `relay://jobs/{id}` and `relay://tasks/{id}` for reading a single job or task by id.
+
+`relay://recent-jobs` is cached so repeated polls within a session do not refetch `GET /v1/jobs?limit=20`. The cache window is controlled by `RELAY_MCP_RESOURCE_CACHE_TTL` (a Go duration, default `10s`); set `RELAY_MCP_RESOURCE_CACHE_TTL=0` to disable caching so every read refetches.
 
 ### Tools (v1)
 
