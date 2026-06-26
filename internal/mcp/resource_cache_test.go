@@ -41,3 +41,31 @@ func TestRecentJobsCache_HitWithinTTL(t *testing.T) {
 
 	require.Equal(t, int32(1), atomic.LoadInt32(&calls), "second read should be served from cache")
 }
+
+func TestRecentJobsCache_ExpiryRefetches(t *testing.T) {
+	var calls int32
+	fetch := func(ctx context.Context) ([]byte, *ToolError) {
+		atomic.AddInt32(&calls, 1)
+		return []byte(`{"items":[],"total":0}`), nil
+	}
+
+	var fake time.Time = time.Unix(0, 0)
+	clock := func() time.Time { return fake }
+	c := &recentJobsCache{ttl: 10 * time.Second, now: clock}
+
+	_, terr := c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls))
+
+	// Within TTL: still one call.
+	fake = fake.Add(5 * time.Second)
+	_, terr = c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, int32(1), atomic.LoadInt32(&calls))
+
+	// Past TTL: refetch.
+	fake = fake.Add(10 * time.Second)
+	_, terr = c.get(context.Background(), fetch)
+	require.Nil(t, terr)
+	require.Equal(t, int32(2), atomic.LoadInt32(&calls))
+}
