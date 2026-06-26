@@ -11,6 +11,142 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestFakeRunner_BlockHookHonorsCtxCancel(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.setBlock("client -d relay_h_x")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := fr.Run(ctx, "", []string{"client", "-d", "relay_h_x"}, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), 2*time.Second, "block hook must unblock on ctx deadline")
+}
+
+func TestSweeper_EvictTimesOutOnHangingDeleteClient(t *testing.T) {
+	prev := evictTimeout
+	evictTimeout = 50 * time.Millisecond
+	defer func() { evictTimeout = prev }()
+
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	fr.setBlock("client -d relay_h_stuck")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "stuck", SourceKey: "//s/x",
+		ClientName: "relay_h_stuck", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "stuck"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+
+	done := make(chan struct{})
+	var evicted []string
+	var err error
+	go func() {
+		evicted, err = s.SweepOnce(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SweepOnce did not return; per-eviction timeout not enforced")
+	}
+
+	require.NoError(t, err, "a timed-out eviction is logged-and-skipped, not a SweepOnce error")
+	require.Empty(t, evicted, "the stuck workspace must not be reported as evicted")
+
+	// os.RemoveAll was never reached: the directory still exists.
+	_, statErr := os.Stat(filepath.Join(root, "stuck"))
+	require.NoError(t, statErr, "os.RemoveAll must not run when p4 client -d times out")
+
+	// No DirtyDelete marker: the next sweep retries the FULL eviction.
+	e, ok := reg.Get("stuck")
+	require.True(t, ok, "the entry stays in the registry for retry")
+	require.False(t, e.DirtyDelete, "a p4 timeout must NOT set DirtyDelete (dir untouched)")
+}
+
+func TestSweeper_ContinuesPastEvictTimeout(t *testing.T) {
+	prev := evictTimeout
+	evictTimeout = 50 * time.Millisecond
+	defer func() { evictTimeout = prev }()
+
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	// Oldest candidate hangs; newer candidate's client -d succeeds.
+	fr.setBlock("client -d relay_h_stuck")
+	fr.set("client -d relay_h_good", "Client deleted.\n")
+
+	reg, _ := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	reg.Upsert(WorkspaceEntry{ShortID: "stuck", SourceKey: "//s/stuck",
+		ClientName: "relay_h_stuck", LastUsedAt: time.Now().Add(-40 * 24 * time.Hour)})
+	reg.Upsert(WorkspaceEntry{ShortID: "good", SourceKey: "//s/good",
+		ClientName: "relay_h_good", LastUsedAt: time.Now().Add(-30 * 24 * time.Hour)})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "stuck"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "good"), 0o755))
+
+	s := &Sweeper{
+		Root:       root,
+		Reg:        reg,
+		MaxAge:     14 * 24 * time.Hour,
+		Client:     &Client{r: fr},
+		ListLocked: func() map[string]bool { return nil },
+	}
+
+	done := make(chan struct{})
+	var evicted []string
+	var err error
+	go func() {
+		evicted, err = s.SweepOnce(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SweepOnce wedged on the stuck candidate; pass did not continue")
+	}
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"good"}, evicted, "the second candidate must still be evicted")
+
+	// good is fully gone; stuck remains (un-dirty) for a future retry.
+	_, statErr := os.Stat(filepath.Join(root, "good"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, ok := reg.Get("good")
+	require.False(t, ok)
+	stuckEntry, ok := reg.Get("stuck")
+	require.True(t, ok)
+	require.False(t, stuckEntry.DirtyDelete)
+}
+
+func TestResolveEvictTimeout(t *testing.T) {
+	t.Run("valid duration is honored", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "45m")
+		require.Equal(t, 45*time.Minute, resolveEvictTimeout())
+	})
+	t.Run("unset falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+	t.Run("garbage falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "not-a-duration")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+	t.Run("non-positive falls back to default", func(t *testing.T) {
+		t.Setenv("RELAY_EVICTION_TIMEOUT", "0s")
+		require.Equal(t, defaultEvictTimeout, resolveEvictTimeout())
+	})
+}
+
 func TestSweeper_AgeEviction(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)

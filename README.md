@@ -370,6 +370,7 @@ identity is keyed by hostname, a renamed host can still rejoin as a new worker.)
 | `RELAY_WORKSPACE_MAX_AGE` | Idle workspace age threshold (e.g. `14d`, `8h`). Workspaces unused longer than this are evicted by the sweeper. |
 | `RELAY_WORKSPACE_MIN_FREE_GB` | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted until the threshold is met. |
 | `RELAY_WORKSPACE_SWEEP_INTERVAL` | How often the sweeper runs. Default `15m`. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
+| `RELAY_EVICTION_TIMEOUT` | Per-eviction deadline (Go duration, e.g. `45m`, `2h`) bounding the `p4 client -d` call during workspace eviction. Default `30m`. A wedged delete becomes a logged, retryable best-effort skip instead of stalling the sweeper. Does NOT bound the on-disk `os.RemoveAll`. |
 
 ### Hardware detection
 
