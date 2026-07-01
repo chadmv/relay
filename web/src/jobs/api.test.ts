@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { ApiError } from '../lib/api'
-import { listJobs, getJobStats, cancelJob, type JobsPage } from './api'
+import { listJobs, getJobStats, cancelJob, createJob, type JobsPage } from './api'
 
 const emptyPage: JobsPage = { items: [], next_cursor: '', total: 0 }
 
@@ -86,4 +86,26 @@ test('cancelJob DELETEs /jobs/{id}?force=true when force=true', async () => {
   )
   await cancelJob('j1', true)
   expect(search).toBe('true')
+})
+
+test('createJob POSTs the spec to /v1/jobs and returns the created job', async () => {
+  let body: unknown = null
+  let method = ''
+  server.use(
+    http.post('/v1/jobs', async ({ request }) => {
+      method = request.method
+      body = await request.json()
+      return HttpResponse.json(
+        { id: 'job-123', name: 'my-job', status: 'pending' },
+        { status: 201 },
+      )
+    }),
+  )
+
+  const spec = { name: 'my-job', tasks: [{ name: 'hello', command: ['echo', 'hi'] }] }
+  const job = await createJob(spec)
+
+  expect(method).toBe('POST')
+  expect(body).toEqual(spec)
+  expect(job.id).toBe('job-123')
 })

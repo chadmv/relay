@@ -1,10 +1,12 @@
 ---
 title: "New Job submit form (+ New job)"
 type: feature
-status: open
+status: closed
 created: 2026-07-01
 priority: high
 source: carved from feature-2026-06-26-job-actions-submit-cancel-retry during 2026-07-01 job-cancel-actions
+closed: 2026-07-01
+resolution: fixed
 ---
 
 # New Job submit form (+ New job)
@@ -46,3 +48,17 @@ confirm dialog.
 ## Notes
 Frontend-only; the endpoint exists. The complexity is the job-spec editor surface, which is why this
 is its own item rather than a sub-task of the cancel work.
+
+## Resolution
+Shipped the "+ New job" flow (feature commit 23eadae, autopilot iteration 4, 2026-07-01
+job-submit-form). A /jobs/new route (NewJobPage) with a JSON job-spec textarea editor prefilled
+with a minimal valid starter spec, a "+ New job" entry point on the jobs list (auth-only, not
+admin-gated), createJob(spec) + useCreateJob (invalidates ['jobs'] + ['job-stats'], navigates to
+the created job on 201). Client validation stays minimal (valid JSON + name + non-empty tasks) and
+defers the rest to the server's jobspec.Validate so no parallel validation path drifts from the
+single job-spec pipeline; backend {"error": msg} errors surface inline in a role="alert" banner.
+Full web suite green (290 tests), production build clean, code review CLEAN with mutation-tested
+non-vacuous assertions. A structured/visual form-builder is deferred to
+[[idea-2026-07-01-job-spec-form-builder]]; a YAML mode and draft persistence remain possible
+follow-ups. Design: docs/superpowers/specs/2026-07-01-job-submit-form-design.md;
+plan: docs/plans/2026-07-01-job-submit-form-plan.md.

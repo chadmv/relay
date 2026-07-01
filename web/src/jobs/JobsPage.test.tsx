@@ -245,6 +245,14 @@ test('pagination footer shows 0 of 0 for empty results', async () => {
   expect(await screen.findByText(/0 of 0/i)).toBeInTheDocument()
 })
 
+test('shows a "+ New job" link to /jobs/new for any authenticated user', async () => {
+  server.use(http.get('/v1/jobs', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByText('film-x render')
+  const link = screen.getByRole('link', { name: /new job/i })
+  expect(link).toHaveAttribute('href', '/jobs/new')
+})
+
 test('paginates forward and back via the cursor stack', async () => {
   const pages: Record<string, { items: unknown[]; next_cursor: string; total: number }> = {
     '': {
