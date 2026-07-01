@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Button } from '../components/Button'
 import { useJobs } from './useJobs'
 import { useJobStats } from './useJobStats'
@@ -126,6 +127,12 @@ export function JobsPage() {
           <span className="font-mono text-[10px] text-fg-mute">
             <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
           </span>
+          <Link
+            to="/jobs/new"
+            className="rounded-[8px] bg-accent px-3 py-2 text-[13px] font-medium text-bg transition hover:bg-accent-b"
+          >
+            + New job
+          </Link>
         </div>
       </div>
 

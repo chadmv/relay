@@ -131,3 +131,12 @@ export function getTaskLogs(taskId: string, sinceSeq?: number): Promise<TaskLogP
 export function cancelJob(id: string, force: boolean): Promise<JobDetail> {
   return apiFetch<JobDetail>(`/jobs/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' })
 }
+
+// Creates a job from a raw parsed job-spec object. The client keeps the spec
+// type permissive (unknown) and posts it verbatim; the server (ValidateJobSpec)
+// is the validator of record, so new TaskSpec fields need no client change. The
+// 201 body is a jobResponse; JobDetail is the closest existing type and carries
+// the `id` the caller navigates to.
+export function createJob(spec: unknown): Promise<JobDetail> {
+  return apiFetch<JobDetail>('/jobs', { method: 'POST', json: spec })
+}
