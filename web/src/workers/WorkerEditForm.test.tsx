@@ -119,3 +119,33 @@ test('a whitespace-only name blocks save', async () => {
   expect(onSubmit).not.toHaveBeenCalled()
   expect(screen.getByText(/name is required/i)).toBeInTheDocument()
 })
+
+test('two mounts with distinct idPrefix values produce unique, correctly-associated ids', () => {
+  render(
+    <>
+      <WorkerEditForm
+        worker={WORKER}
+        pending={false}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        idPrefix="header"
+      />
+      <WorkerEditForm
+        worker={WORKER}
+        pending={false}
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        idPrefix="labels"
+      />
+    </>,
+  )
+  const nameInputs = screen.getAllByLabelText(/^name$/i)
+  expect(nameInputs).toHaveLength(2)
+  const nameIds = nameInputs.map((el) => el.id)
+  expect(new Set(nameIds).size).toBe(2)
+
+  const slotsInputs = screen.getAllByLabelText(/max slots/i)
+  expect(slotsInputs).toHaveLength(2)
+  const slotsIds = slotsInputs.map((el) => el.id)
+  expect(new Set(slotsIds).size).toBe(2)
+})

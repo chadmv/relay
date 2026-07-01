@@ -54,6 +54,13 @@ test('clicking Evict opens a confirm dialog; confirm POSTs the evict path', asyn
   await waitFor(() => expect(hits).toBe(1))
 })
 
+test('does not render its own SOURCE WORKSPACES heading (the page Panel supplies it)', async () => {
+  server.use(http.get('/v1/workers/w1/workspaces', () => HttpResponse.json([])))
+  renderWithQuery(<WorkspacesPanel workerId="w1" />)
+  await screen.findByText('No workspaces.')
+  expect(screen.queryByText('SOURCE WORKSPACES')).not.toBeInTheDocument()
+})
+
 test('cancelling the evict confirm fires no request', async () => {
   let hits = 0
   server.use(

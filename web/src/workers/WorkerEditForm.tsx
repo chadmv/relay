@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Field } from '../components/Field'
+import { GlassPanel, PillButton } from '../components/holo'
 import { Input } from '../components/Input'
 import type { Worker, WorkerPatch } from './api'
 
@@ -34,12 +35,16 @@ interface WorkerEditFormProps {
   pending: boolean
   onSubmit: (patch: WorkerPatch) => void
   onCancel: () => void
+  // Distinguishes ids/htmlFor when two mounts of this form can be open at once
+  // (the header Edit pill and the Labels "+ add label" chip each own their own
+  // editing state). Defaults to "worker" to keep prior ids for back-compat.
+  idPrefix?: string
 }
 
 // Inline edit form for name / labels / max_slots. Builds a WorkerPatch with only
 // changed fields; labels, when changed, is submitted as the full rebuilt map
 // (the server does a full replace of the label map, not a per-key merge).
-export function WorkerEditForm({ worker, pending, onSubmit, onCancel }: WorkerEditFormProps) {
+export function WorkerEditForm({ worker, pending, onSubmit, onCancel, idPrefix = 'worker' }: WorkerEditFormProps) {
   const [name, setName] = useState(worker.name)
   const [maxSlots, setMaxSlots] = useState(String(worker.max_slots))
   const [rows, setRows] = useState<LabelRow[]>(toRows(worker.labels))
@@ -74,13 +79,13 @@ export function WorkerEditForm({ worker, pending, onSubmit, onCancel }: WorkerEd
   }
 
   return (
-    <form onSubmit={submit} className="rounded-card border border-border bg-white/5 p-4">
-      <Field label="Name" htmlFor="worker-name" error={nameError}>
-        <Input id="worker-name" value={name} onChange={(e) => setName(e.target.value)} />
+    <GlassPanel as="form" onSubmit={submit} className="p-4">
+      <Field label="Name" htmlFor={`${idPrefix}-name`} error={nameError}>
+        <Input id={`${idPrefix}-name`} value={name} onChange={(e) => setName(e.target.value)} />
       </Field>
-      <Field label="Max slots" htmlFor="worker-slots" error={maxSlotsError}>
+      <Field label="Max slots" htmlFor={`${idPrefix}-slots`} error={maxSlotsError}>
         <Input
-          id="worker-slots"
+          id={`${idPrefix}-slots`}
           type="number"
           value={maxSlots}
           onChange={(e) => setMaxSlots(e.target.value)}
@@ -125,21 +130,11 @@ export function WorkerEditForm({ worker, pending, onSubmit, onCancel }: WorkerEd
         </button>
       </div>
       <div className="flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded-md border border-border bg-white/5 px-3 py-1.5 text-[12px] text-fg-mute"
-        >
-          Cancel
-        </button>
-        <button
-          type="submit"
-          disabled={pending}
-          className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-bg disabled:opacity-50"
-        >
+        <PillButton onClick={onCancel}>Cancel</PillButton>
+        <PillButton type="submit" variant="primary" disabled={pending}>
           Save
-        </button>
+        </PillButton>
       </div>
-    </form>
+    </GlassPanel>
   )
 }
