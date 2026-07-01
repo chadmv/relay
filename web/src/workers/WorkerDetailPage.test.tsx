@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -170,6 +171,27 @@ test('renders read-only labels for non-admins', async () => {
   expect(await screen.findByText('rack=A')).toBeInTheDocument()
   // Non-admins get no add-label affordance.
   expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument()
+})
+
+test('admins can add a label inline without opening the full Edit dialog', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  await userEvent.click(await screen.findByRole('button', { name: /add label/i }))
+  // Inline input appears, not the full name/max-slots Edit form.
+  expect(screen.getByRole('textbox')).toBeInTheDocument()
+  expect(screen.queryByLabelText(/max slots/i)).not.toBeInTheDocument()
+})
+
+test('the header Edit pill still opens the name/slots form (not label editing)', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+  expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/max slots/i)).toBeInTheDocument()
 })
 
 test('shows not-found for a 404 worker', async () => {

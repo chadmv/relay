@@ -1,16 +1,14 @@
 import { Link, useParams } from 'react-router-dom'
-import { useState } from 'react'
 import { ApiError } from '../lib/api'
 import { useAuth } from '../auth/AuthProvider'
 import { Button } from '../components/Button'
 import { Chip, GlassPanel, KpiStat, Panel, StatusDot } from '../components/holo'
 import { MetricChart } from './MetricChart'
 import { WorkerActions } from './WorkerActions'
-import { WorkerEditForm } from './WorkerEditForm'
+import { WorkerLabels } from './WorkerLabels'
 import { WorkspacesPanel } from './WorkspacesPanel'
-import { formatGB, formatRelativeTime, labelChips, livenessView } from './liveness'
+import { formatGB, formatRelativeTime, livenessView } from './liveness'
 import { useWorker } from './useWorker'
-import { useWorkerActions } from './useWorkerActions'
 import { useWorkerMetrics } from './useWorkerMetrics'
 import type { MetricSample } from './api'
 
@@ -28,8 +26,6 @@ export function WorkerDetailPage() {
   const isAdmin = Boolean(user?.is_admin)
   const { data: worker, error, isLoading, refetch } = useWorker(id)
   const { data: metrics } = useWorkerMetrics(id)
-  const { update } = useWorkerActions(id)
-  const [editing, setEditing] = useState(false)
 
   if (isLoading && !worker) {
     return <GlassPanel className="h-40" />
@@ -68,7 +64,6 @@ export function WorkerDetailPage() {
   const latest = last(samples)
   const memTotal = latest?.mem_total ?? 0
   const gpuMemTotal = latest?.gpu_mem_total ?? 0
-  const chips = labelChips(worker.labels)
   const view = livenessView(worker.status)
   const isStale = worker.status === 'stale'
 
@@ -137,32 +132,8 @@ export function WorkerDetailPage() {
         {/* Right column. */}
         <div className="flex flex-col gap-3">
           <Panel title="Labels" meta={isAdmin ? 'PATCH /v1/workers' : undefined}>
-            <div className="flex flex-wrap gap-1.5 px-4 py-3">
-              {chips.length === 0 && !isAdmin && (
-                <span className="font-mono text-[11px] text-fg-dim">no labels</span>
-              )}
-              {chips.map((c) => (
-                <Chip key={c} tone="accent">
-                  {c}
-                </Chip>
-              ))}
-              {isAdmin && (
-                <Chip dashed onClick={() => setEditing(true)}>
-                  + add label
-                </Chip>
-              )}
-            </div>
+            <WorkerLabels worker={worker} />
           </Panel>
-
-          {isAdmin && editing && (
-            <WorkerEditForm
-              worker={worker}
-              pending={update.isPending}
-              onSubmit={(patch) => update.mutate(patch, { onSuccess: () => setEditing(false) })}
-              onCancel={() => setEditing(false)}
-              idPrefix="worker-labels"
-            />
-          )}
 
           {isAdmin && (
             <>

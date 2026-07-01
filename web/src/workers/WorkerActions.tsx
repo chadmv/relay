@@ -89,7 +89,6 @@ export function WorkerActions({ worker }: { worker: Worker }) {
           pending={update.isPending}
           onSubmit={onSave}
           onCancel={() => setEditing(false)}
-          idPrefix="worker-header"
         />
       )}
 
