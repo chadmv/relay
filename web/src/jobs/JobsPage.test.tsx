@@ -2,9 +2,18 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, expect, test } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { JobsPage } from './JobsPage'
+
+function renderPage() {
+  return renderWithQuery(
+    <MemoryRouter>
+      <JobsPage />
+    </MemoryRouter>,
+  )
+}
 
 const page = {
   items: [
@@ -27,7 +36,7 @@ beforeEach(() => {
 
 test('renders jobs and the KPI strip', async () => {
   server.use(http.get('/v1/jobs', () => HttpResponse.json(page)))
-  renderWithQuery(<JobsPage />)
+  renderPage()
   expect(await screen.findByText('film-x render')).toBeInTheDocument()
   // KPI numbers come from the separately-polled stats query; await them.
   expect(await screen.findByText('487')).toBeInTheDocument() // done_24h
@@ -42,7 +51,7 @@ test('selecting a status chip re-requests with status and disables sort', async 
       return HttpResponse.json(page)
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('film-x render')
   await userEvent.click(screen.getByRole('button', { name: 'Running' }))
   await waitFor(() => expect(requests.some((q) => q.get('status') === 'running')).toBe(true))
@@ -60,7 +69,7 @@ test('selecting the Queued chip requests status=pending', async () => {
       return HttpResponse.json(page)
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('film-x render')
   await userEvent.click(screen.getByRole('button', { name: 'Queued' }))
   await waitFor(() => expect(requests.some((q) => q.get('status') === 'pending')).toBe(true))
@@ -68,7 +77,7 @@ test('selecting the Queued chip requests status=pending', async () => {
 
 test('shows the error banner with retry, then recovers', async () => {
   server.use(http.get('/v1/jobs', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
-  renderWithQuery(<JobsPage />)
+  renderPage()
   expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
   server.use(http.get('/v1/jobs', () => HttpResponse.json(page)))
   await userEvent.click(screen.getByRole('button', { name: /retry/i }))
@@ -106,7 +115,7 @@ test('next and prev are disabled while a page fetch is in flight', async () => {
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
 
   // Page 1 loaded: prev disabled, next enabled.
   expect(await screen.findByText('job-A')).toBeInTheDocument()
@@ -156,7 +165,7 @@ test('pagination footer shows 1-N of total on first full page', async () => {
       HttpResponse.json({ items: makeItems(50), next_cursor: 'CUR1', total: 2341 }),
     ),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('job-0')
   expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
 })
@@ -172,7 +181,7 @@ test('pagination footer updates to next range after paging forward', async () =>
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('job-0')
   expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
 
@@ -193,7 +202,7 @@ test('pagination footer shows correct range for partial last page', async () => 
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('job-0')
   await userEvent.click(screen.getByRole('button', { name: /next/i }))
   await screen.findByText('job-50')
@@ -213,7 +222,7 @@ test('pagination footer restores prior range when paging back', async () => {
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   await screen.findByText('job-0')
   expect(await screen.findByText(/1-50 of 2,341/i)).toBeInTheDocument()
 
@@ -232,7 +241,7 @@ test('pagination footer shows 0 of 0 for empty results', async () => {
       HttpResponse.json({ items: [], next_cursor: '', total: 0 }),
     ),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
   expect(await screen.findByText(/0 of 0/i)).toBeInTheDocument()
 })
 
@@ -263,7 +272,7 @@ test('paginates forward and back via the cursor stack', async () => {
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<JobsPage />)
+  renderPage()
 
   // Page 1: job-A, prev disabled, next enabled.
   expect(await screen.findByText('job-A')).toBeInTheDocument()

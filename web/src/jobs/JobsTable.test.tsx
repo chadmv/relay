@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
 import { JobsTable } from './JobsTable'
 import type { Job } from './api'
@@ -19,8 +20,16 @@ const jobs: Job[] = [
   },
 ]
 
+function renderTable(rows: Job[]) {
+  return render(
+    <MemoryRouter>
+      <JobsTable jobs={rows} />
+    </MemoryRouter>,
+  )
+}
+
 test('renders job rows with name, owner, and progress percent', () => {
-  render(<JobsTable jobs={jobs} />)
+  renderTable(jobs)
   expect(screen.getByText('film-x / shot-042 render')).toBeInTheDocument()
   expect(screen.getByText('mira@studio.dev')).toBeInTheDocument()
   expect(screen.getByText('75%')).toBeInTheDocument()
@@ -28,11 +37,17 @@ test('renders job rows with name, owner, and progress percent', () => {
 })
 
 test('renders the schedule chip only when scheduled_job_name is present', () => {
-  render(<JobsTable jobs={jobs} />)
+  renderTable(jobs)
   expect(screen.getByText(/nightly-etl/)).toBeInTheDocument()
 })
 
 test('renders the empty state when there are no jobs', () => {
-  render(<JobsTable jobs={[]} />)
+  renderTable([])
   expect(screen.getByText(/no jobs/i)).toBeInTheDocument()
+})
+
+test('the job name links to the job detail page', () => {
+  renderTable(jobs)
+  const link = screen.getByRole('link', { name: 'film-x / shot-042 render' })
+  expect(link).toHaveAttribute('href', '/jobs/9F4E1C')
 })
