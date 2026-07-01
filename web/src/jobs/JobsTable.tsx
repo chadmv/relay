@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import type { Job } from './api'
 import { statusColor, progressPct, formatDuration, formatStarted } from './status'
 
@@ -32,7 +33,9 @@ export function JobsTable({ jobs }: { jobs: Job[] }) {
           >
             <span className="text-fg-mute">{j.id.slice(0, 6)}</span>
             <span className="flex min-w-0 items-center gap-2">
-              <span className="truncate font-sans text-[13px] text-fg">{j.name}</span>
+              <Link to={`/jobs/${j.id}`} className="truncate font-sans text-[13px] text-fg hover:text-accent">
+                {j.name}
+              </Link>
               {j.scheduled_job_name && (
                 <span className="flex-none rounded-full border border-accent-b/40 bg-accent-b/10 px-1.5 py-0.5 text-[9.5px] text-accent-b">
                   ⟳ {j.scheduled_job_name}
