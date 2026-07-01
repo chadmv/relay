@@ -239,3 +239,15 @@ func rawJSON(b []byte) json.RawMessage {
 	}
 	return json.RawMessage(b)
 }
+
+// rawObject is like rawJSON but for fields that are always JSON *objects* (env,
+// requires). An omitted map is stored as the literal `null` (json.Marshal of a
+// nil map), which rawJSON would pass through unchanged; rawObject normalizes both
+// empty and `null` to `{}` so a client never receives a null where an object is
+// expected (the web job-detail page did Object.entries() on it and crashed).
+func rawObject(b []byte) json.RawMessage {
+	if len(b) == 0 || string(b) == "null" {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
+}
