@@ -133,6 +133,7 @@ test('non-admins never see or fetch workspaces', async () => {
   await new Promise((r) => setTimeout(r, 50))
   expect(wsCount).toBe(0)
   expect(screen.queryByText('SOURCE WORKSPACES')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /evict/i })).not.toBeInTheDocument()
 })
 
 test('shows a generic error with a Retry button for a non-404 failure', async () => {
@@ -140,4 +141,24 @@ test('shows a generic error with a Retry button for a non-404 failure', async ()
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))))
   renderDetail(false)
   expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
+})
+
+test('admins see the worker action bar', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument()
+})
+
+test('non-admins see none of the action controls', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  await screen.findByText('render-rig-A')
+  expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Disable' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument()
 })

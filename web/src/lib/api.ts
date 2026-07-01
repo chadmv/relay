@@ -52,6 +52,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
     throw new ApiError(res.status, code, `${res.status} ${code}`)
   }
 
-  if (res.status === 204) return undefined as T
+  // 204 (revoke) and 202 (evict, best-effort async) return no body.
+  if (res.status === 204 || res.status === 202) return undefined as T
   return (await res.json()) as T
 }

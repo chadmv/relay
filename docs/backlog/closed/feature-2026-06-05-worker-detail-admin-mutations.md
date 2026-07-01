@@ -1,10 +1,12 @@
 ---
 title: Worker detail page admin mutation actions
 type: feature
-status: open
+status: closed
 created: 2026-06-05
 priority: medium
 source: deferred from the worker-detail-page read-only slice (2026-06-05 brainstorm)
+closed: 2026-07-01
+resolution: fixed
 ---
 
 # Worker detail page admin mutation actions
@@ -42,3 +44,14 @@ evict).
 - `web/src/workers/` (detail page from the read-only slice)
 - `internal/api/workers.go`, `internal/api/workspaces.go`
 - `docs/superpowers/specs/2026-06-05-worker-detail-page-design.md`
+
+## Resolution
+Shipped the worker-detail admin mutations slice (feature commit 0616029, autopilot
+iteration 1, 2026-07-01 worker-detail-mutations). Admins can rename, edit labels,
+set max_slots, disable/drain/enable, revoke the agent token, and evict workspaces
+from the detail page; non-admins see none of the controls. Revoke navigates back to
+/workers (revoked workers 404); labels are a full-replace map; max_slots and name are
+client-validated. Introduced the reusable useWorkerActions mutation pattern and a
+shared ConfirmDialog primitive. Full web suite green (209 tests) and production build
+clean. Design: docs/superpowers/specs/2026-07-01-worker-detail-mutations-design.md;
+plan: docs/plans/2026-07-01-worker-detail-mutations-plan.md.
