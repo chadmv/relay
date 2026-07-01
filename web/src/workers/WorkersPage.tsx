@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Button } from '../components/Button'
+import { Eyebrow, GlassPanel } from '../components/holo'
 import { useWorkers } from './useWorkers'
 import { useWorkerStats } from './useWorkerStats'
 import { useRevokedWorkers } from './useRevokedWorkers'
@@ -91,7 +92,7 @@ export function WorkersPage() {
   const header = (
     <div className="flex flex-wrap items-end gap-6">
       <div>
-        <div className="font-mono text-[11px] tracking-widest text-fg-mute">FLEET</div>
+        <Eyebrow>FLEET</Eyebrow>
         <h1 className="text-[32px] font-normal tracking-tight">Workers</h1>
       </div>
       <div className="ml-auto">{sectionTabs}</div>
@@ -113,12 +114,12 @@ export function WorkersPage() {
         {revoked.isLoading && !revoked.data ? (
           <div className="text-[13px] text-fg-mute">Loading...</div>
         ) : revoked.error && !revoked.data ? (
-          <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center">
+          <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center">
             <div className="mb-3 text-[13px] text-err">{(revoked.error as Error).message}</div>
             <Button className="w-auto px-4" onClick={() => revoked.refetch()}>
               Retry
             </Button>
-          </div>
+          </GlassPanel>
         ) : (
           <>
             <RevokedWorkersTable workers={revokedWorkers} />
@@ -158,7 +159,7 @@ export function WorkersPage() {
         {header}
         <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-28 rounded-card border border-border bg-white/5" />
+            <GlassPanel key={i} className="h-28" />
           ))}
         </div>
       </div>
@@ -169,12 +170,12 @@ export function WorkersPage() {
     return (
       <div className="flex flex-col gap-4">
         {header}
-        <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center">
+        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center">
           <div className="mb-3 text-[13px] text-err">{(error as Error).message}</div>
           <Button className="w-auto px-4" onClick={() => refetch()}>
             Retry
           </Button>
-        </div>
+        </GlassPanel>
       </div>
     )
   }
@@ -184,9 +185,9 @@ export function WorkersPage() {
     return (
       <div className="flex flex-col gap-4">
         {header}
-        <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center text-[13px] text-fg-mute">
+        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
           No workers enrolled yet.
-        </div>
+        </GlassPanel>
       </div>
     )
   }
@@ -206,7 +207,7 @@ export function WorkersPage() {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end gap-6">
         <div>
-          <div className="font-mono text-[11px] tracking-widest text-fg-mute">FLEET</div>
+          <Eyebrow>FLEET</Eyebrow>
           <h1 className="text-[32px] font-normal tracking-tight">Workers</h1>
         </div>
         <div className="flex gap-4 font-mono text-[11px] text-fg-mute">

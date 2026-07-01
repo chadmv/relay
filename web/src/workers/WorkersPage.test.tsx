@@ -40,6 +40,13 @@ test('renders workers and the fleet-wide summary', async () => {
   expect(screen.getByText('2 workers')).toBeInTheDocument()
 })
 
+test('the FLEET eyebrow renders via the holo Eyebrow primitive', async () => {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByText('render-01')
+  expect(screen.getByText('FLEET')).toHaveClass('uppercase', 'tracking-[0.18em]')
+})
+
 test('view toggle switches to the table and persists to localStorage', async () => {
   server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
   renderPage()
