@@ -6,17 +6,20 @@ export function SpecTab({ task }: { task: TaskDetail | undefined }) {
   if (!task) {
     return <div className="p-4 text-[12px] text-fg-mute">Select a task to view its spec.</div>
   }
-  const env = Object.entries(task.env)
-  const requires = Object.entries(task.requires)
+  // env/requires/commands are nullable on the wire (see TaskDetail); coerce to
+  // empty so an omitted field renders "(none)" instead of throwing.
+  const env = Object.entries(task.env ?? {})
+  const requires = Object.entries(task.requires ?? {})
+  const commands = task.commands ?? []
   return (
     <div className="flex flex-col gap-4 p-4">
       <section>
         <div className="mb-1 font-mono text-[10px] tracking-widest text-fg-mute">COMMANDS</div>
         <div className="flex flex-col gap-1 rounded-card border border-border bg-black/20 p-3 font-mono text-[11.5px] text-fg">
-          {task.commands.length === 0 ? (
+          {commands.length === 0 ? (
             <span className="text-fg-mute">(none)</span>
           ) : (
-            task.commands.map((cmd, i) => <div key={i}>$ {cmd.join(' ')}</div>)
+            commands.map((cmd, i) => <div key={i}>$ {cmd.join(' ')}</div>)
           )}
         </div>
       </section>

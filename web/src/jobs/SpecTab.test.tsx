@@ -27,3 +27,13 @@ test('renders a placeholder when no task is selected', () => {
   render(<SpecTab task={undefined} />)
   expect(screen.getByText(/select a task/i)).toBeInTheDocument()
 })
+
+// The real GET /v1/jobs/:id returns env/requires as `null` (not `{}`) for a task
+// that omits them - json.Marshal(nil map) => null, passed through server-side. The
+// old code did Object.entries(task.env) which throws on null and blanked the whole
+// job-detail page. This is the exact shape MSW mocks never reproduced.
+test('renders placeholders when the API returns null env/requires/commands', () => {
+  const bare = { ...task, commands: null, env: null, requires: null } as unknown as TaskDetail
+  render(<SpecTab task={bare} />)
+  expect(screen.getAllByText('(none)')).toHaveLength(3)
+})

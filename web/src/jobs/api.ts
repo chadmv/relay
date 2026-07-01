@@ -71,9 +71,12 @@ export interface TaskDetail {
   id: string
   name: string
   status: TaskStatus
-  commands: string[][]
-  env: Record<string, string>
-  requires: Record<string, string>
+  // commands/env/requires come from opaque JSON columns. The server returns `null`
+  // (not `{}`/`[]`) for a task that omits env/requires (json.Marshal of a nil map is
+  // `null`), so these are nullable on the wire; consumers must guard.
+  commands: string[][] | null
+  env: Record<string, string> | null
+  requires: Record<string, string> | null
   timeout_seconds: number | null
   retries: number
   retry_count: number
