@@ -1,10 +1,12 @@
 ---
 title: "Job write-actions: submit (New Job), cancel / force-cancel, retry"
 type: feature
-status: open
+status: closed
 created: 2026-06-26
 priority: high
 source: ROADMAP web-frontend deep review against design_handoff_relay_holo (2026-06-26)
+closed: 2026-07-01
+resolution: fixed
 ---
 
 # Job write-actions: submit (New Job), cancel / force-cancel, retry
@@ -42,3 +44,20 @@ Backend contract in the handoff README plus `reference/screens/{jobs-list,job-de
 ## Notes
 Cancel + submit are frontend-only (endpoints exist); only retry is backend-blocked. The submit
 form (job-spec editor) may warrant splitting into its own item once scoped.
+
+## Resolution
+Shipped the cancel slice: graceful cancel + force-cancel on the job-detail header, wired to
+DELETE /v1/jobs/{id}[?force=true] (feature commit 37cb190, autopilot iteration 3, 2026-07-01
+job-cancel-actions). One useJobActions mutation (force as a call-site arg), three-key
+invalidation (['job',id] + ['jobs'] + ['job-stats']), owner-or-admin UI gate, terminal-state
+button hiding (done/cancelled), and 409 error surfacing. Full web suite green (266 tests),
+production build clean, code review CLEAN with mutation-tested non-vacuous assertions.
+
+The omnibus item is decomposed; the two remaining sub-features are carved to their own items:
+- [[feature-2026-07-01-job-submit-new-job-form]] (the "+ New job" submit form, FE-ready).
+- [[feature-2026-07-01-job-retry-action]] (retry, blocked on the POST /v1/jobs/{id}/retry route
+  in [[feature-2026-06-26-web-enabler-backend-endpoints]] plus the jobs-stats-24h and
+  retry-resurrects-cancelled-task bugs).
+
+Design: docs/superpowers/specs/2026-07-01-job-cancel-actions-design.md;
+plan: docs/plans/2026-07-01-job-cancel-actions-plan.md.

@@ -2,11 +2,13 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/Button'
+import { useAuth } from '../auth/AuthProvider'
 import { statusColor, progressPct } from './status'
 import { TasksTable } from './TasksTable'
 import { TaskDag } from './TaskDag'
 import { SpecTab } from './SpecTab'
 import { LogTab } from './LogTab'
+import { JobActions } from './JobActions'
 import { useJob } from './useJob'
 import { useTaskLogs } from './useTaskLogs'
 import type { TaskDetail } from './api'
@@ -22,6 +24,7 @@ function defaultTaskId(tasks: TaskDetail[]): string {
 
 export function JobDetailPage() {
   const { id = '' } = useParams()
+  const { user } = useAuth()
   const { data: job, error, isLoading, refetch } = useJob(id)
   const [tab, setTab] = useState<Tab>('spec')
   const [pickedTaskId, setPickedTaskId] = useState<string>('')
@@ -64,6 +67,8 @@ export function JobDetailPage() {
 
   if (!job) return null
 
+  const canManage = Boolean(user && (user.is_admin || job.submitted_by === user.id))
+
   const c = statusColor(job.status)
   const done = tasks.filter((t) => t.status === 'done').length
   const total = tasks.length
@@ -81,8 +86,9 @@ export function JobDetailPage() {
             <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
             {job.status}
           </span>
-          {/* Reserved actions slot: cancel/retry deferred to a later slice. Intentionally empty. */}
-          <div data-testid="job-actions" className="ml-auto flex items-center gap-2" />
+          <div data-testid="job-actions" className="ml-auto flex items-center gap-2">
+            {canManage && <JobActions job={job} />}
+          </div>
         </div>
         <div className="font-mono text-[11px] text-fg-mute">
           id {job.id.slice(0, 8)} · submitted by {job.submitted_by_email ?? '-'} · priority {job.priority}

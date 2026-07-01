@@ -122,3 +122,12 @@ export function getTaskLogs(taskId: string, sinceSeq?: number): Promise<TaskLogP
   const qs = q.toString()
   return apiFetch<TaskLogPage>(`/tasks/${taskId}/logs${qs ? `?${qs}` : ''}`)
 }
+
+// Cancels a job. force=true asks agents to force-kill running tasks; the DB
+// effect (mark all non-terminal tasks and the job cancelled) is identical either
+// way. Server 409s a job already `cancelled`/`done`, 404s a non-owner non-admin.
+// The server returns the updated job body, but the caller invalidates rather than
+// writing it into the cache, so the typed result is unused.
+export function cancelJob(id: string, force: boolean): Promise<JobDetail> {
+  return apiFetch<JobDetail>(`/jobs/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' })
+}

@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { ApiError } from '../lib/api'
-import { listJobs, getJobStats, type JobsPage } from './api'
+import { listJobs, getJobStats, cancelJob, type JobsPage } from './api'
 
 const emptyPage: JobsPage = { items: [], next_cursor: '', total: 0 }
 
@@ -59,4 +59,31 @@ test('getJobStats fetches /jobs/stats', async () => {
 test('throws ApiError on the error envelope', async () => {
   server.use(http.get('/v1/jobs', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
   await expect(listJobs('-created_at')).rejects.toBeInstanceOf(ApiError)
+})
+
+test('cancelJob DELETEs /jobs/{id} with no force param when force=false', async () => {
+  let method: string | undefined
+  let search: string | undefined
+  server.use(
+    http.delete('/v1/jobs/j1', ({ request }) => {
+      method = request.method
+      search = new URL(request.url).search
+      return HttpResponse.json({ id: 'j1', status: 'cancelled' })
+    }),
+  )
+  await cancelJob('j1', false)
+  expect(method).toBe('DELETE')
+  expect(search).toBe('')
+})
+
+test('cancelJob DELETEs /jobs/{id}?force=true when force=true', async () => {
+  let search: string | null = null
+  server.use(
+    http.delete('/v1/jobs/j1', ({ request }) => {
+      search = new URL(request.url).searchParams.get('force')
+      return HttpResponse.json({ id: 'j1', status: 'cancelled' })
+    }),
+  )
+  await cancelJob('j1', true)
+  expect(search).toBe('true')
 })

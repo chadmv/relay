@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
@@ -35,9 +35,9 @@ const JOB = {
   ],
 }
 
-function renderDetail() {
+function renderDetail(me = { id: 'u1', email: 'a@b.co', name: 'A', is_admin: false }) {
   setToken('test-token')
-  server.use(http.get('/v1/users/me', () => HttpResponse.json({ id: 'u1', email: 'a@b.co', name: 'A', is_admin: false })))
+  server.use(http.get('/v1/users/me', () => HttpResponse.json(me)))
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
@@ -139,13 +139,36 @@ test('selecting a task updates aria-selected and drives the spec pane', async ()
   expect(screen.getByText(/blender -b/)).toBeInTheDocument()
 })
 
-test('reserved actions slot renders but contains no action buttons (deferred)', async () => {
+test('owner (non-admin) sees the cancel actions in the reserved slot', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
+  // Default me handler is id:'u1', is_admin:false; JOB.submitted_by is 'u1'.
   renderDetail()
   await screen.findByText('shot-042 render')
-  expect(screen.queryByRole('button', { name: /cancel/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /retry job/i })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /submit/i })).not.toBeInTheDocument()
+  const slot = screen.getByTestId('job-actions')
+  expect(within(slot).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+  expect(within(slot).getByRole('button', { name: 'Force cancel' })).toBeInTheDocument()
+})
+
+test('admin non-owner sees the cancel actions', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
+  // renderDetail() registers its /v1/users/me handler internally before
+  // AuthProvider's mount effect fires the request, so the user must be passed
+  // in rather than overridden with a second server.use() call (which would
+  // race the synchronous effect flush inside render()).
+  renderDetail({ id: 'other', email: 'a@b.co', name: 'A', is_admin: true })
+  await screen.findByText('shot-042 render')
+  const slot = screen.getByTestId('job-actions')
+  expect(within(slot).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+  expect(within(slot).getByRole('button', { name: 'Force cancel' })).toBeInTheDocument()
+})
+
+test('non-owner non-admin does NOT see the cancel actions', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
+  renderDetail({ id: 'other', email: 'a@b.co', name: 'A', is_admin: false })
+  await screen.findByText('shot-042 render')
+  const slot = screen.getByTestId('job-actions')
+  expect(within(slot).queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  expect(within(slot).queryByRole('button', { name: 'Force cancel' })).not.toBeInTheDocument()
 })
 
 test('derives progress from the tasks array (1 of 2 done)', async () => {
