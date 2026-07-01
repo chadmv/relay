@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { StatusDot } from './StatusDot'
+import { StatusDot } from '../components/holo/StatusDot'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
 

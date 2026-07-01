@@ -1,6 +1,9 @@
-import { livenessView } from './liveness'
-import type { WorkerStatus } from './api'
+import { livenessView } from '../../workers/liveness'
+import type { WorkerStatus } from '../../workers/api'
 
+// The dot + mono status label. Moved here from web/src/workers/ so non-worker
+// pages can use it. Keeps the livenessView-based API (worker statuses are the only
+// consumer today).
 export function StatusDot({ status }: { status: WorkerStatus }) {
   const v = livenessView(status)
   return (

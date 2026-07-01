@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { PillButton } from '../components/holo'
 import { WorkerEditForm } from './WorkerEditForm'
 import { useWorkerActions } from './useWorkerActions'
 import type { Worker, WorkerPatch } from './api'
@@ -55,53 +56,31 @@ export function WorkerActions({ worker }: { worker: Worker }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => setEditing((v) => !v)}
-          className="rounded-md border border-border bg-white/5 px-3 py-1.5 text-[12px] text-fg"
-        >
-          Edit
-        </button>
+        <PillButton onClick={() => setEditing((v) => !v)}>Edit</PillButton>
         {isDisabled ? (
-          <button
-            type="button"
+          <PillButton
+            variant="primary"
             disabled={busy}
             onClick={() => {
               disable.reset()
               enable.mutate()
             }}
-            className="rounded-md border border-accent/50 bg-accent/15 px-3 py-1.5 text-[12px] text-fg disabled:opacity-40"
           >
             Enable
-          </button>
+          </PillButton>
         ) : (
           <>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setConfirm('disable')}
-              className="rounded-md border border-border bg-white/5 px-3 py-1.5 text-[12px] text-fg-mute disabled:opacity-40"
-            >
+            <PillButton variant="muted" disabled={busy} onClick={() => setConfirm('disable')}>
               Disable
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setConfirm('drain')}
-              className="rounded-md border border-border bg-white/5 px-3 py-1.5 text-[12px] text-fg-mute disabled:opacity-40"
-            >
+            </PillButton>
+            <PillButton variant="muted" disabled={busy} onClick={() => setConfirm('drain')}>
               Drain
-            </button>
+            </PillButton>
           </>
         )}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => setConfirm('revoke')}
-          className="rounded-md border border-err/50 bg-err/10 px-3 py-1.5 text-[12px] text-err disabled:opacity-40"
-        >
+        <PillButton variant="danger" disabled={busy} onClick={() => setConfirm('revoke')}>
           Revoke
-        </button>
+        </PillButton>
       </div>
 
       {editing && (

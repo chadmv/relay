@@ -39,3 +39,13 @@ test('each card links to the worker detail page', () => {
   renderGrid([worker({ id: 'w9', name: 'render-09' })])
   expect(screen.getByRole('link', { name: /render-09/ })).toHaveAttribute('href', '/workers/w9')
 })
+
+test('label chips render as accent holo chips', () => {
+  renderGrid([worker({})])
+  expect(screen.getByText('pool=render')).toHaveClass('rounded-full', 'text-accent', 'text-[10.5px]')
+})
+
+test('cards still dim offline workers after adopting GlassPanel', () => {
+  const { container } = renderGrid([worker({ id: 'o', name: 'off-01', status: 'offline' })])
+  expect(container.querySelector('.opacity-\\[0\\.55\\]')).not.toBeNull()
+})

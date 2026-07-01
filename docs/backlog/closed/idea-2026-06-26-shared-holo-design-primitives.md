@@ -1,10 +1,12 @@
 ---
 title: Extract shared Holo design primitives (GlassPanel / Eyebrow / Chip / KPI / StatusDot)
 type: idea
-status: open
+status: closed
 created: 2026-06-26
 priority: low
 source: ROADMAP web-frontend deep review against design_handoff_relay_holo (2026-06-26)
+closed: 2026-07-01
+resolution: fixed
 ---
 
 # Extract shared Holo design primitives (GlassPanel / Eyebrow / Chip / KPI / StatusDot)
@@ -39,3 +41,14 @@ default is fine).
 ## Notes
 Frontend-only, small. Best done just before or alongside the first new page so the primitives are
 validated against real usage.
+
+## Resolution
+Extracted the shared primitive set under web/src/components/holo/ (GlassPanel, Panel, Eyebrow,
+KpiStat, Chip, PillButton, ProgressBar, and StatusDot lifted out of web/src/workers/), mapped onto
+the app's existing cyan token theme, and adopted them in the already-shipped WorkersPage/WorkersGrid
+with no visual regression (Slice 1). The worker detail page was then relaid out to the hi-fi
+HoloWorkerDetail using them (Slice 2), which validated the primitives against real usage. Spark was
+deferred (no consumer yet). Shipped as the worker-detail Holo redesign (2026-07-01
+holo-primitives-worker-detail; spec docs/superpowers/specs/2026-07-01-holo-primitives-worker-detail-design.md).
+The remaining pages (jobs, schedules, auth, shell) adopt the primitives via a follow-on per-page
+hi-fi relayout program, now underway.

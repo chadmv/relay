@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -62,13 +63,72 @@ function renderDetail(isAdmin: boolean) {
 
 afterEach(() => clearToken())
 
-test('renders identity, hardware, and CPU/memory telemetry charts', async () => {
+test('renders the breadcrumb, worker name, and identity sub-line', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   renderDetail(false)
-  expect(await screen.findByText('render-rig-A')).toBeInTheDocument()
+  expect(await screen.findByRole('link', { name: /workers/i })).toBeInTheDocument()
+  expect(screen.getByText('render-rig-A')).toBeInTheDocument()
   expect(screen.getByText(/render-a\.studio\.dev/)).toBeInTheDocument()
-  expect(screen.getByText('32c · 128GB')).toBeInTheDocument()
+})
+
+test('renders the CPU/RAM and Slots KPI cards', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  expect(await screen.findByText('32c · 128G')).toBeInTheDocument()
+  // Slots: no active-slots field exists yet, so used renders as an em dash.
+  expect(screen.getByText('— / 4')).toBeInTheDocument()
+})
+
+test('renders the Jobs-today placeholder KPI with no fabricated data', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  expect(await screen.findByText('activity endpoint pending')).toBeInTheDocument()
+  // Guard against a fabricated count like the hi-fi mock's "47".
+  expect(screen.queryByText('47')).not.toBeInTheDocument()
+})
+
+test('renders the current-tasks placeholder note, not an empty table', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  expect(await screen.findByText('no per-worker task feed yet')).toBeInTheDocument()
+})
+
+test('the GPU KPI card renders no fabricated telemetry sub-string', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  await screen.findByText('2 × RTX 4090')
+  expect(screen.queryByText(/cuda 12\.3/i)).not.toBeInTheDocument()
+  expect(screen.queryByText(/nvidia-smi/i)).not.toBeInTheDocument()
+})
+
+test('the current-tasks panel contains no fabricated task rows', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  await screen.findByText('no per-worker task feed yet')
+  expect(screen.queryByRole('row')).not.toBeInTheDocument()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+})
+
+test('the reservations panel contains no fabricated reservation rows', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  expect(await screen.findByText('no per-worker reservation lookup yet')).toBeInTheDocument()
+  expect(screen.queryByRole('row')).not.toBeInTheDocument()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+})
+
+test('renders CPU/memory telemetry charts', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
   expect(await screen.findByRole('img', { name: 'CPU' })).toBeInTheDocument()
   expect(screen.getByRole('img', { name: 'MEMORY' })).toBeInTheDocument()
 })
@@ -96,6 +156,44 @@ test('shows an empty telemetry state when there are no samples', async () => {
   expect(await screen.findByText('No telemetry yet.')).toBeInTheDocument()
 })
 
+test('non-admins still see the header status indicator', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  await screen.findByText('render-rig-A')
+  expect(screen.getByText('ONLINE')).toBeInTheDocument()
+})
+
+test('renders read-only labels for non-admins', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false)
+  expect(await screen.findByText('rack=A')).toBeInTheDocument()
+  // Non-admins get no add-label affordance.
+  expect(screen.queryByRole('button', { name: /add label/i })).not.toBeInTheDocument()
+})
+
+test('admins can add a label inline without opening the full Edit dialog', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  await userEvent.click(await screen.findByRole('button', { name: /add label/i }))
+  // Inline input appears, not the full name/max-slots Edit form.
+  expect(screen.getByRole('textbox')).toBeInTheDocument()
+  expect(screen.queryByLabelText(/max slots/i)).not.toBeInTheDocument()
+})
+
+test('the header Edit pill still opens the name/slots form (not label editing)', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  await userEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+  expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument()
+  expect(screen.getByLabelText(/max slots/i)).toBeInTheDocument()
+})
+
 test('shows not-found for a 404 worker', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json({ error: 'worker not found' }, { status: 404 })))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))))
@@ -103,7 +201,14 @@ test('shows not-found for a 404 worker', async () => {
   expect(await screen.findByText('Worker not found.')).toBeInTheDocument()
 })
 
-test('admins see the workspaces panel', async () => {
+test('shows a generic error with a Retry button for a non-404 failure', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))))
+  renderDetail(false)
+  expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
+})
+
+test('admins see the action bar, the Source workspaces panel, and the reservations placeholder', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   server.use(
@@ -114,10 +219,14 @@ test('admins see the workspaces panel', async () => {
     ),
   )
   renderDetail(true)
+  expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument()
   expect(await screen.findByText('ws-a4f2')).toBeInTheDocument()
+  expect(screen.getByText('no per-worker reservation lookup yet')).toBeInTheDocument()
 })
 
-test('non-admins never see or fetch workspaces', async () => {
+test('non-admins see none of the action controls and never fetch workspaces', async () => {
   let wsCount = 0
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
@@ -132,33 +241,11 @@ test('non-admins never see or fetch workspaces', async () => {
   await screen.findByRole('img', { name: 'CPU' })
   await new Promise((r) => setTimeout(r, 50))
   expect(wsCount).toBe(0)
-  expect(screen.queryByText('SOURCE WORKSPACES')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /evict/i })).not.toBeInTheDocument()
-})
-
-test('shows a generic error with a Retry button for a non-404 failure', async () => {
-  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
-  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))))
-  renderDetail(false)
-  expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
-})
-
-test('admins see the worker action bar', async () => {
-  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
-  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
-  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
-  renderDetail(true)
-  expect(await screen.findByRole('button', { name: 'Edit' })).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument()
-})
-
-test('non-admins see none of the action controls', async () => {
-  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
-  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
-  renderDetail(false)
-  await screen.findByText('render-rig-A')
   expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Disable' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /evict/i })).not.toBeInTheDocument()
+  // Admin-only right-column pieces are hidden.
+  expect(screen.queryByText('no per-worker reservation lookup yet')).not.toBeInTheDocument()
+  expect(screen.queryByText(/Long-lived agent token/)).not.toBeInTheDocument()
 })
