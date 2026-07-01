@@ -53,3 +53,15 @@ test('surfaces 429 as ApiError with status 429', async () => {
   const err = await apiFetch('/auth/login', { method: 'POST', json: {} }).catch((e) => e)
   expect((err as ApiError).status).toBe(429)
 })
+
+test('returns undefined for a 204 No Content response', async () => {
+  server.use(http.delete('/v1/workers/w1/token', () => new HttpResponse(null, { status: 204 })))
+  const out = await apiFetch<void>('/workers/w1/token', { method: 'DELETE' })
+  expect(out).toBeUndefined()
+})
+
+test('returns undefined for a 202 Accepted empty-body response', async () => {
+  server.use(http.post('/v1/workers/w1/workspaces/ws-a/evict', () => new HttpResponse(null, { status: 202 })))
+  const out = await apiFetch<void>('/workers/w1/workspaces/ws-a/evict', { method: 'POST' })
+  expect(out).toBeUndefined()
+})

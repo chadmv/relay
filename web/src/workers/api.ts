@@ -105,3 +105,46 @@ export function listRevokedWorkers(cursor = ''): Promise<WorkersPage> {
   if (cursor) q.set('cursor', cursor)
   return apiFetch<WorkersPage>(`/workers/revoked?${q}`)
 }
+
+export interface DisableWorkerResponse extends Worker {
+  requeued_tasks: number
+}
+
+export interface WorkerPatch {
+  name?: string
+  labels?: Record<string, string>
+  max_slots?: number
+}
+
+// Admin-only. Rename / edit labels / set max_slots. Fields omitted keep their
+// current value; `labels`, when present, is a full replace of the label map (the
+// server marshals the whole map), not a per-key merge.
+export function updateWorker(id: string, patch: WorkerPatch): Promise<Worker> {
+  return apiFetch<Worker>(`/workers/${id}`, { method: 'PATCH', json: patch })
+}
+
+// Admin-only. Disable (pause) the worker. requeue=true is the "drain" concept:
+// in-flight tasks are requeued to other workers and cancelled here.
+export function disableWorker(id: string, requeue: boolean): Promise<DisableWorkerResponse> {
+  const q = requeue ? '?requeue=true' : ''
+  return apiFetch<DisableWorkerResponse>(`/workers/${id}/disable${q}`, { method: 'POST' })
+}
+
+// Admin-only. Re-enable a disabled worker.
+export function enableWorker(id: string): Promise<Worker> {
+  return apiFetch<Worker>(`/workers/${id}/enable`, { method: 'POST' })
+}
+
+// Admin-only. Revoke the agent token. TERMINAL: also sets the worker to
+// `revoked`, which excludes it from every list/get endpoint. Returns 204 (no
+// body). After success the caller must navigate away, not re-fetch the worker.
+export function revokeWorkerToken(id: string): Promise<void> {
+  return apiFetch<void>(`/workers/${id}/token`, { method: 'DELETE' })
+}
+
+// Admin-only. Request eviction of a source workspace. Best-effort/async: returns
+// 202 (no body); the agent evicts on its stream and confirms later via an
+// inventory update. A held workspace is refused by the agent, not this endpoint.
+export function evictWorkspace(id: string, shortId: string): Promise<void> {
+  return apiFetch<void>(`/workers/${id}/workspaces/${shortId}/evict`, { method: 'POST' })
+}

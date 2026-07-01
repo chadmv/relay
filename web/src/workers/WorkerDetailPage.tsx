@@ -4,6 +4,7 @@ import { useAuth } from '../auth/AuthProvider'
 import { Button } from '../components/Button'
 import { MetricChart } from './MetricChart'
 import { StatusDot } from './StatusDot'
+import { WorkerActions } from './WorkerActions'
 import { WorkspacesPanel } from './WorkspacesPanel'
 import { formatGB, formatRelativeTime, labelChips, livenessView } from './liveness'
 import { useWorker } from './useWorker'
@@ -79,6 +80,8 @@ export function WorkerDetailPage() {
           {worker.last_sample_at ? ` · sampled ${formatRelativeTime(worker.last_sample_at)}` : ''}
         </div>
       </div>
+
+      {user?.is_admin && <WorkerActions worker={worker} />}
 
       <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
         <div className="rounded-card border border-border bg-white/5 p-4">
