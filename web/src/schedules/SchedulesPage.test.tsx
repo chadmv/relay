@@ -33,6 +33,17 @@ test('renders schedules and the page-scoped summary', async () => {
   expect(screen.getByText('2 schedules')).toBeInTheDocument()
 })
 
+test('does not render the backend-blocked filter chips, search, or FAILED-24H stat', async () => {
+  server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json(page)))
+  renderWithQuery(<SchedulesPage />)
+  await screen.findByText('nightly-build')
+  // Omitted per spec: All/Enabled/Disabled filter chips, free-text search, FAILED-24H stat.
+  expect(screen.queryByRole('button', { name: /^enabled$/i })).toBeNull()
+  expect(screen.queryByRole('button', { name: /^disabled$/i })).toBeNull()
+  expect(screen.queryByRole('searchbox')).toBeNull()
+  expect(screen.queryByText(/failed.*24h/i)).toBeNull()
+})
+
 test('shows the empty state when there are no schedules', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })))
   renderWithQuery(<SchedulesPage />)

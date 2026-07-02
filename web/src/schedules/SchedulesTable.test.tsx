@@ -66,3 +66,39 @@ test('missing last_job_id renders a dash', () => {
   // last run cell and last job cell both could be '-'; assert the LAST JOB short id is absent
   expect(screen.queryByText('abcdef12')).not.toBeInTheDocument()
 })
+
+test('wraps the table in a GlassPanel surface', () => {
+  render(<SchedulesTable schedules={[sched()]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />)
+  // The GlassPanel base classes carry the gradient glass fidelity upgrade.
+  const surface = screen.getByTestId('schedules-table')
+  expect(surface).toHaveClass('rounded-card', 'border', 'border-border', 'backdrop-blur-[8px]')
+})
+
+test('renders a footer slot inside the table surface when rows are present', () => {
+  render(
+    <SchedulesTable
+      schedules={[sched()]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+      footer={<span>FOOTER-MARKER</span>}
+    />,
+  )
+  const surface = screen.getByTestId('schedules-table')
+  const footer = screen.getByText('FOOTER-MARKER')
+  expect(surface).toContainElement(footer)
+})
+
+test('renders the empty state and still shows the footer slot when there are no rows', () => {
+  render(
+    <SchedulesTable
+      schedules={[]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+      footer={<span>FOOTER-MARKER</span>}
+    />,
+  )
+  expect(screen.getByText('No schedules yet.')).toBeInTheDocument()
+  expect(screen.getByText('FOOTER-MARKER')).toBeInTheDocument()
+})

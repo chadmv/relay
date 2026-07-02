@@ -5,6 +5,7 @@ import { useSchedules } from './useSchedules'
 import { useScheduleActions } from './useScheduleActions'
 import { SchedulesTable } from './SchedulesTable'
 import { computePageRange } from '../lib/pageRange'
+import { Eyebrow, GlassPanel } from '../components/holo'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-created_at', label: 'Newest' },
@@ -97,7 +98,7 @@ export function SchedulesPage() {
     return (
       <div className="flex flex-col gap-2">
         {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="h-10 rounded-card border border-border bg-white/5" />
+          <GlassPanel key={i} className="h-10" />
         ))}
       </div>
     )
@@ -105,23 +106,16 @@ export function SchedulesPage() {
 
   if (error && !data) {
     return (
-      <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center">
+      <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center">
         <div className="mb-3 text-[13px] text-err">{(error as Error).message}</div>
         <Button className="w-auto px-4" onClick={() => refetch()}>
           Retry
         </Button>
-      </div>
+      </GlassPanel>
     )
   }
 
   const schedules = data?.items ?? []
-  if (schedules.length === 0) {
-    return (
-      <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center text-[13px] text-fg-mute">
-        No schedules yet.
-      </div>
-    )
-  }
 
   const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
@@ -130,9 +124,20 @@ export function SchedulesPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/*
+        The hi-fi HoloSchedules also shows filter chips (All/Enabled/Disabled), a
+        free-text search input, and a FAILED-24H summary stat. All three are
+        backend-blocked and deliberately omitted here (a dead list control or a
+        fabricated stat reads as broken):
+          - filter chips + search: docs/backlog/idea-2026-06-05-schedules-filter-search.md
+          - FAILED-24H stat:       docs/backlog/idea-2026-06-05-failed-24h-stat.md
+        The ENABLED/PAUSED summary strip below is page-scoped (counts only the
+        loaded page) until the stats endpoint lands:
+          - fleet-wide counts:     docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md
+      */}
       <div className="flex flex-wrap items-end gap-6">
         <div>
-          <div className="font-mono text-[11px] tracking-widest text-fg-mute">RECURRING</div>
+          <Eyebrow>RECURRING</Eyebrow>
           <h1 className="text-[32px] font-normal tracking-tight">Schedules</h1>
         </div>
         <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
@@ -168,31 +173,33 @@ export function SchedulesPage() {
         pendingId={pendingId}
         onRunNow={onRunNow}
         onToggleEnabled={onToggleEnabled}
+        footer={
+          <div className="flex items-center justify-between font-mono text-[10.5px] tracking-wide text-fg-mute">
+            <span>
+              SHOWING <span className="text-fg">{x}-{y} of {total}</span>
+              {' · '}SORT <span className="text-accent-b">{sort}</span> · OWNED + ADMINISTRATIVE
+            </span>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                disabled={cursorStack.length === 0 || isPlaceholderData}
+                onClick={goPrev}
+                className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
+              >
+                ← prev
+              </button>
+              <button
+                type="button"
+                disabled={!data?.next_cursor || isPlaceholderData}
+                onClick={goNext}
+                className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
+              >
+                next 50 →
+              </button>
+            </div>
+          </div>
+        }
       />
-
-      <div className="flex items-center justify-between font-mono text-[10.5px] tracking-wide text-fg-mute">
-        <span>
-          SHOWING <span className="text-fg">{x}-{y} of {total}</span> · OWNED + ADMINISTRATIVE
-        </span>
-        <div className="flex gap-1.5">
-          <button
-            type="button"
-            disabled={cursorStack.length === 0 || isPlaceholderData}
-            onClick={goPrev}
-            className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
-          >
-            ← prev
-          </button>
-          <button
-            type="button"
-            disabled={!data?.next_cursor || isPlaceholderData}
-            onClick={goNext}
-            className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
-          >
-            next 50 →
-          </button>
-        </div>
-      </div>
     </div>
   )
 }
