@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+import { GlassPanel } from '../components/holo'
 import type { Schedule } from './api'
 import { formatRelativeTime, nextRunDisplay, shortId } from './format'
 
@@ -8,14 +10,26 @@ export function SchedulesTable({
   pendingId,
   onRunNow,
   onToggleEnabled,
+  footer,
 }: {
   schedules: Schedule[]
   pendingId: string | null
   onRunNow: (id: string) => void
   onToggleEnabled: (id: string, nextEnabled: boolean) => void
+  footer?: ReactNode
 }) {
+  if (schedules.length === 0) {
+    return (
+      <div className="flex flex-col gap-4">
+        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
+          No schedules yet.
+        </GlassPanel>
+        {footer && <div className="px-1">{footer}</div>}
+      </div>
+    )
+  }
   return (
-    <div className="rounded-card border border-border bg-white/5 backdrop-blur">
+    <GlassPanel data-testid="schedules-table">
       <div className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
         <span>NAME</span>
         <span>CRON</span>
@@ -48,7 +62,7 @@ export function SchedulesTable({
               </span>
             </span>
             <span className={s.enabled ? 'text-fg' : 'text-fg-dim'}>
-              {s.enabled ? <span className="text-accent">&#9658;</span> : null} {nextRunDisplay(s.next_run_at)}
+              {s.enabled ? <span className="text-accent-b">&#9658;</span> : null} {nextRunDisplay(s.next_run_at)}
             </span>
             <span className="text-fg-mute">{s.last_run_at ? formatRelativeTime(s.last_run_at) : '-'}</span>
             <span className="text-[10.5px] text-fg-mute">{shortId(s.last_job_id)}</span>
@@ -74,6 +88,7 @@ export function SchedulesTable({
           </div>
         )
       })}
-    </div>
+      {footer && <div className="border-t border-border px-4 py-3">{footer}</div>}
+    </GlassPanel>
   )
 }
