@@ -176,3 +176,34 @@ test('derives progress from the tasks array (1 of 2 done)', async () => {
   renderDetail()
   expect(await screen.findByText(/1\s*\/\s*2 tasks done/i)).toBeInTheDocument()
 })
+
+test('does not fabricate unbacked timing or the live-log affordances', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
+  renderDetail()
+  await screen.findByText('shot-042 render')
+  // Omitted per spec (no backend field / SSE blocked): elapsed, ETA, and a
+  // Retry/Abort header pill are not rendered. A dead control reads as broken.
+  expect(screen.queryByText(/elapsed/i)).toBeNull()
+  expect(screen.queryByText(/\beta\b/i)).toBeNull()
+  expect(screen.queryByRole('button', { name: /^abort$/i })).toBeNull()
+  expect(screen.queryByRole('button', { name: /^retry$/i })).toBeNull() // no 404 -> no Retry
+})
+
+test('the Log tab shows a static/history marker, not a LIVE badge', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
+  server.use(
+    http.get('/v1/tasks/t2/logs', () =>
+      HttpResponse.json({
+        items: [{ seq: 1, stream: 'stdout', content: 'rendering', created_at: '2026-07-01T00:00:00Z' }],
+        next_seq: 0,
+        total: 1,
+      }),
+    ),
+  )
+  renderDetail()
+  await screen.findByText('shot-042 render')
+  await userEvent.click(screen.getByRole('tab', { name: /log/i }))
+  await screen.findByText('rendering')
+  expect(screen.getByText(/static|history/i)).toBeInTheDocument()
+  expect(screen.queryByText(/^live$/i)).toBeNull()
+})

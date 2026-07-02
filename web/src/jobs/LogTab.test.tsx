@@ -25,3 +25,13 @@ test('shows a retry control on error', () => {
   expect(screen.getByText(/failed to load logs/i)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
 })
+
+test('shows a STATIC history marker and a live-pending note, never a LIVE badge', () => {
+  render(<LogTab items={items} isLoading={false} isError={false} onRetry={() => {}} />)
+  // Honest signalling: the log is fetch-once history, not a live stream. SSE
+  // tailing is backend-blocked (feature-2026-06-26-sse-task-log-publishing).
+  expect(screen.getByText(/static|history/i)).toBeInTheDocument()
+  expect(screen.getByText(/live tailing pending/i)).toBeInTheDocument()
+  // A green LIVE badge would imply a stream we cannot deliver.
+  expect(screen.queryByText(/^live$/i)).toBeNull()
+})

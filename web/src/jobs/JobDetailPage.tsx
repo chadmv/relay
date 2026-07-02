@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/Button'
+import { Chip, GlassPanel } from '../components/holo'
 import { useAuth } from '../auth/AuthProvider'
 import { statusColor, progressPct } from './status'
 import { TasksTable } from './TasksTable'
@@ -40,16 +41,18 @@ export function JobDetailPage() {
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId)
 
+  // Log query is decoupled from ['job', ...] and gated to the Log tab, so a job
+  // poll never disturbs it and we never fetch logs for an unopened tab.
   const logs = useTaskLogs(selectedTaskId, selectedTaskId !== '' && tab === 'log')
 
   if (isLoading && !job) {
-    return <div className="h-40 rounded-card border border-border bg-white/5" />
+    return <GlassPanel className="h-40" />
   }
 
   if (error && !job) {
     const notFound = error instanceof ApiError && error.status === 404
     return (
-      <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center">
+      <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center">
         {notFound ? (
           <div className="text-[13px] text-fg-mute">Job not found.</div>
         ) : (
@@ -61,7 +64,7 @@ export function JobDetailPage() {
         <div className="mt-4">
           <Link to="/jobs" className="font-mono text-[11px] text-accent">&larr; Jobs</Link>
         </div>
-      </div>
+      </GlassPanel>
     )
   }
 
@@ -70,18 +73,32 @@ export function JobDetailPage() {
   const canManage = Boolean(user && (user.is_admin || job.submitted_by === user.id))
 
   const c = statusColor(job.status)
+  // Progress is DERIVED from tasks[]: the detail endpoint returns no total_tasks/
+  // done_tasks/started_at/finished_at (those are list-only enrichment). The hi-fi
+  // header also shows STARTED/elapsed/ETA/duration - all omitted (no field on the
+  // wire): docs/backlog/feature-2026-07-01-job-detail-timing-enrichment.md.
   const done = tasks.filter((t) => t.status === 'done').length
   const total = tasks.length
   const active = tasks.filter((t) => t.status === 'running' || t.status === 'dispatched').length
   const pct = progressPct(done, total)
+  const queued = tasks.filter((t) => t.status === 'pending').length
   const chips = Object.entries(job.labels ?? {}).map(([k, v]) => (v ? `${k}=${v}` : k))
 
   return (
     <div className="flex flex-col gap-5">
+      {/* Breadcrumb + header row: back link, id, name, inline status; the reserved
+          JobActions slot (ml-auto). No Retry/Abort header pill - there is no per-job
+          retry endpoint and "Abort" is just cancel; the real Cancel/Force cancel
+          live in JobActions. */}
       <div className="flex flex-col gap-1">
-        <Link to="/jobs" className="font-mono text-[11px] text-fg-mute hover:text-fg">&larr; Jobs</Link>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
+          <Link to="/jobs" className="font-mono text-[11px] text-fg-mute hover:text-fg">&larr; Jobs</Link>
+          <span className="text-fg-dim">/</span>
+          <span className="font-mono text-[12px] text-accent">{job.id.slice(0, 8)}</span>
+          <span className="text-fg-dim">/</span>
           <h1 className="text-[28px] font-normal tracking-tight">{job.name}</h1>
+          {/* Inline status uses the JobStatus map (status.ts), NOT the worker
+              StatusDot (WorkerStatus vocabulary). */}
           <span className={`flex items-center gap-2 font-mono text-[12px] ${c.text}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
             {job.status}
@@ -96,16 +113,18 @@ export function JobDetailPage() {
         {chips.length > 0 && (
           <div className="mt-1 flex flex-wrap gap-1">
             {chips.map((ch) => (
-              <span key={ch} className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 font-mono text-[10px] text-accent">
-                {ch}
-              </span>
+              <Chip key={ch} tone="accent">{ch}</Chip>
             ))}
           </div>
         )}
       </div>
 
+      {/* Body: fixed 55/45 split. The accessible drag-resizer is a filed follow-up:
+          docs/backlog/idea-2026-07-01-job-detail-resizable-split.md. */}
       <div className="flex flex-col gap-5 lg:flex-row">
         <div className="flex flex-col gap-4 lg:w-[55%]">
+          {/* Derived progress strip: done/total + active, status-toned bar. Kept as
+              an inline per-status bar (ProgressBar has only accent/muted tones). */}
           <div className="flex flex-col gap-2">
             <div className="flex items-baseline justify-between font-mono text-[11px] text-fg-mute">
               <span>{done} / {total} tasks done</span>
@@ -121,6 +140,13 @@ export function JobDetailPage() {
             </span>
           </div>
 
+          {/* Pipeline panel header carries the real derived active/queued counts
+              (replaces the hi-fi "STAGE 4 / 8" + "CLICK TO STREAM" mock strings;
+              click-to-stream implies live logs we cannot deliver). */}
+          <div className="flex items-center justify-between px-1 font-mono text-[10px] tracking-[0.14em] text-fg-mute">
+            <span>PIPELINE</span>
+            <span>{active} ACTIVE · {queued} QUEUED</span>
+          </div>
           <TaskDag tasks={tasks} />
           <TasksTable tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setPickedTaskId} />
         </div>
@@ -146,7 +172,7 @@ export function JobDetailPage() {
               Log
             </button>
           </div>
-          <div className="rounded-b-card border border-t-0 border-border bg-white/5">
+          <GlassPanel className="rounded-t-none border-t-0">
             {tab === 'spec' ? (
               <SpecTab task={selectedTask} />
             ) : (
@@ -157,7 +183,7 @@ export function JobDetailPage() {
                 onRetry={() => logs.refetch()}
               />
             )}
-          </div>
+          </GlassPanel>
         </div>
       </div>
     </div>
