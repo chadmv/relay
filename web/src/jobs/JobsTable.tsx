@@ -1,19 +1,24 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import { GlassPanel } from '../components/holo'
 import type { Job } from './api'
 import { statusColor, progressPct, formatDuration, formatStarted } from './status'
 
 const COLS = 'grid grid-cols-[90px_1fr_120px_150px_120px_70px_150px]'
 
-export function JobsTable({ jobs }: { jobs: Job[] }) {
+export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode }) {
   if (jobs.length === 0) {
     return (
-      <div className="mx-auto mt-10 max-w-md rounded-card border border-border bg-white/5 p-6 text-center text-[13px] text-fg-mute">
-        No jobs yet.
+      <div className="flex flex-col gap-4">
+        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
+          No jobs yet.
+        </GlassPanel>
+        {footer && <div className="px-1">{footer}</div>}
       </div>
     )
   }
   return (
-    <div className="rounded-card border border-border bg-white/5 backdrop-blur">
+    <GlassPanel data-testid="jobs-table">
       <div className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
         <span>ID</span>
         <span>NAME</span>
@@ -29,7 +34,10 @@ export function JobsTable({ jobs }: { jobs: Job[] }) {
         return (
           <div
             key={j.id}
-            className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px]`}
+            data-testid={`job-row-${j.id}`}
+            className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${
+              j.status === 'running' ? 'bg-accent/[0.04]' : ''
+            }`}
           >
             <span className="text-fg-mute">{j.id.slice(0, 6)}</span>
             <span className="flex min-w-0 items-center gap-2">
@@ -63,6 +71,7 @@ export function JobsTable({ jobs }: { jobs: Job[] }) {
           </div>
         )
       })}
-    </div>
+      {footer && <div className="border-t border-border px-4 py-3">{footer}</div>}
+    </GlassPanel>
   )
 }

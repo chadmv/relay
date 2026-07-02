@@ -51,3 +51,30 @@ test('the job name links to the job detail page', () => {
   const link = screen.getByRole('link', { name: 'film-x / shot-042 render' })
   expect(link).toHaveAttribute('href', '/jobs/9F4E1C')
 })
+
+test('wraps the table in a GlassPanel surface', () => {
+  renderTable(jobs)
+  // The GlassPanel base classes carry the gradient glass fidelity upgrade.
+  const surface = screen.getByTestId('jobs-table')
+  expect(surface).toHaveClass('rounded-card', 'border', 'border-border', 'backdrop-blur-[8px]')
+})
+
+test('tints the running row with a subtle accent background', () => {
+  renderTable(jobs)
+  // film-x / shot-042 render is status:running; ci build is status:done.
+  const runningRow = screen.getByTestId('job-row-9F4E1C')
+  const doneRow = screen.getByTestId('job-row-C41A02')
+  expect(runningRow).toHaveClass('bg-accent/[0.04]')
+  expect(doneRow).not.toHaveClass('bg-accent/[0.04]')
+})
+
+test('renders a footer slot inside the table surface when provided', () => {
+  render(
+    <MemoryRouter>
+      <JobsTable jobs={jobs} footer={<span>FOOTER-MARKER</span>} />
+    </MemoryRouter>,
+  )
+  const surface = screen.getByTestId('jobs-table')
+  const footer = screen.getByText('FOOTER-MARKER')
+  expect(surface).toContainElement(footer)
+})
