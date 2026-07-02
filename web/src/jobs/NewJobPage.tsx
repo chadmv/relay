@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Button } from '../components/Button'
+import { GlassPanel, Eyebrow, PillButton } from '../components/holo'
 import { useCreateJob } from './useCreateJob'
 import { STARTER_TEMPLATE, validateSpecText } from './specTemplate'
 
@@ -36,9 +36,10 @@ export function NewJobPage() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <Link to="/jobs" className="font-mono text-[11px] text-fg-mute hover:text-fg">
+        <Link to="/jobs" className="text-[12px] text-fg-mute hover:text-fg">
           &larr; Jobs
         </Link>
+        <Eyebrow>NEW</Eyebrow>
         <h1 className="text-[28px] font-normal tracking-tight">New job</h1>
         <p className="font-mono text-[11px] text-fg-mute">
           Author a job-spec as JSON (the same shape <code>relay submit</code> accepts).
@@ -47,13 +48,15 @@ export function NewJobPage() {
         </p>
       </div>
 
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        spellCheck={false}
-        aria-label="Job spec JSON"
-        className="min-h-[360px] w-full rounded-card border border-border bg-white/5 p-3 font-mono text-[12px] text-fg"
-      />
+      <GlassPanel className="p-3">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          spellCheck={false}
+          aria-label="Job spec JSON"
+          className="min-h-[360px] w-full resize-y bg-transparent font-mono text-[12px] text-fg outline-none"
+        />
+      </GlassPanel>
 
       {bannerMessage ? (
         <div role="alert" className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
@@ -62,9 +65,9 @@ export function NewJobPage() {
       ) : null}
 
       <div>
-        <Button className="w-auto px-4" onClick={onSubmit} disabled={create.isPending}>
+        <PillButton variant="primary" onClick={onSubmit} disabled={create.isPending}>
           Create job
-        </Button>
+        </PillButton>
       </div>
     </div>
   )
