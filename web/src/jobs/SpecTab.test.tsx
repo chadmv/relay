@@ -28,12 +28,18 @@ test('renders a placeholder when no task is selected', () => {
   expect(screen.getByText(/select a task/i)).toBeInTheDocument()
 })
 
-// The real GET /v1/jobs/:id returns env/requires as `null` (not `{}`) for a task
-// that omits them - json.Marshal(nil map) => null, passed through server-side. The
-// old code did Object.entries(task.env) which throws on null and blanked the whole
-// job-detail page. This is the exact shape MSW mocks never reproduced.
+// The real GET /v1/jobs/:id returns env/requires/commands as `null` (not `{}`/`[]`)
+// for a task that omits them - json.Marshal(nil map/slice) => null, passed through
+// server-side. PR #96 added the `?? {}` / `?? []` guards; without them Object.entries
+// throws on null and blanks the whole job-detail page. This test is the regression
+// guard: the restyle must keep the guards.
 test('renders placeholders when the API returns null env/requires/commands', () => {
   const bare = { ...task, commands: null, env: null, requires: null } as unknown as TaskDetail
   render(<SpecTab task={bare} />)
+  // All three sections fall back to "(none)" rather than throwing.
   expect(screen.getAllByText('(none)')).toHaveLength(3)
+  // And the section labels still render, proving the tree did not blank.
+  expect(screen.getByText('COMMANDS')).toBeInTheDocument()
+  expect(screen.getByText('ENV')).toBeInTheDocument()
+  expect(screen.getByText('REQUIRES')).toBeInTheDocument()
 })

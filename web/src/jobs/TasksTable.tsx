@@ -1,3 +1,4 @@
+import { GlassPanel } from '../components/holo'
 import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
@@ -6,7 +7,9 @@ const COLS = 'grid grid-cols-[1fr_110px_80px_120px_1fr]'
 // Tasks table. Rows are SELECTION controls, not navigation: clicking a row sets
 // the selected task that drives the Spec/Log panes. Uses aria-selected on each
 // row (role=row inside role=table). No per-task duration/percent column: the API
-// returns neither per-task timing nor a percent.
+// returns neither per-task timing nor a percent
+// (docs/backlog/feature-2026-07-01-per-task-timing.md). The worker cell stays
+// plain text; a link to the worker is a deferred follow-up.
 export function TasksTable({
   tasks,
   selectedTaskId,
@@ -18,13 +21,11 @@ export function TasksTable({
 }) {
   if (tasks.length === 0) {
     return (
-      <div className="rounded-card border border-border bg-white/5 p-4 text-[12px] text-fg-mute">
-        No tasks.
-      </div>
+      <GlassPanel className="p-4 text-[12px] text-fg-mute">No tasks.</GlassPanel>
     )
   }
   return (
-    <div role="table" aria-label="Tasks" className="rounded-card border border-border bg-white/5">
+    <GlassPanel as="div" role="table" aria-label="Tasks">
       <div
         role="row"
         className={`${COLS} border-b border-border px-4 py-2 font-mono text-[10px] tracking-wider text-fg-mute`}
@@ -46,7 +47,7 @@ export function TasksTable({
             aria-selected={selected}
             onClick={() => onSelect(t.id)}
             className={`${COLS} w-full items-center border-b border-border/40 px-4 py-2 text-left font-mono text-[11.5px] ${
-              selected ? 'bg-accent/10' : ''
+              selected ? 'border-l-2 border-accent bg-accent/[0.08]' : ''
             }`}
           >
             <span role="cell" className="truncate font-sans text-[13px] text-fg">{t.name}</span>
@@ -64,6 +65,6 @@ export function TasksTable({
           </button>
         )
       })}
-    </div>
+    </GlassPanel>
   )
 }

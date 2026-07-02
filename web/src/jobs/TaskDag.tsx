@@ -1,4 +1,5 @@
 import type { TaskDetail } from './api'
+import { GlassPanel } from '../components/holo'
 import { taskStatusColor } from './taskStatus'
 import { dagLayout, type DagNode } from './dagLayout'
 
@@ -22,9 +23,7 @@ function nodeClass(node: DagNode): string {
 export function TaskDag({ tasks }: { tasks: TaskDetail[] }) {
   if (tasks.length === 0) {
     return (
-      <div className="rounded-card border border-border bg-white/5 p-4 text-[12px] text-fg-mute">
-        No tasks to graph.
-      </div>
+      <GlassPanel className="p-4 text-[12px] text-fg-mute">No tasks to graph.</GlassPanel>
     )
   }
 
@@ -47,7 +46,7 @@ export function TaskDag({ tasks }: { tasks: TaskDetail[] }) {
   const label = `Task dependency graph: ${nodes.length} tasks, ${edges.length} dependency edges`
 
   return (
-    <div className="overflow-x-auto rounded-card border border-border bg-white/5 p-2">
+    <GlassPanel className="overflow-x-auto p-2">
       <svg role="img" aria-label={label} width={width} height={height} className="text-fg-mute">
         {edges.map((e, i) => {
           const from = pos.get(e.from)!
@@ -94,6 +93,6 @@ export function TaskDag({ tasks }: { tasks: TaskDetail[] }) {
           )
         })}
       </svg>
-    </div>
+    </GlassPanel>
   )
 }

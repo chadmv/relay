@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { PillButton } from '../components/holo'
 import { useJobActions } from './useJobActions'
 import type { JobDetail } from './api'
 
@@ -51,22 +52,12 @@ export function JobActions({ job }: { job: JobDetail }) {
     <div className="flex flex-col gap-2">
       {!terminal && (
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled={cancel.isPending}
-            onClick={() => openConfirm('cancel')}
-            className="rounded-md border border-border bg-white/5 px-3 py-1.5 text-[12px] text-fg-mute disabled:opacity-40"
-          >
+          <PillButton variant="ghost" disabled={cancel.isPending} onClick={() => openConfirm('cancel')}>
             Cancel
-          </button>
-          <button
-            type="button"
-            disabled={cancel.isPending}
-            onClick={() => openConfirm('force')}
-            className="rounded-md border border-err/50 bg-err/10 px-3 py-1.5 text-[12px] text-err disabled:opacity-40"
-          >
+          </PillButton>
+          <PillButton variant="danger" disabled={cancel.isPending} onClick={() => openConfirm('force')}>
             Force cancel
-          </button>
+          </PillButton>
         </div>
       )}
 
