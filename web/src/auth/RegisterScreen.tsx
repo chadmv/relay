@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, apiFetch } from '../lib/api'
-import { Button } from '../components/Button'
+import { GlassPanel, Eyebrow, PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
 import type { ConfigResponse } from '../lib/types'
@@ -59,12 +59,10 @@ export function RegisterScreen() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg">
-      <form
-        onSubmit={onSubmit}
-        className="w-[360px] rounded-card border border-border bg-white/5 p-6 backdrop-blur"
-      >
-        <div className="mb-1 text-[18px] font-medium">Create your relay account</div>
-        <div className="mb-5 text-[12px] text-fg-mute">
+      <GlassPanel as="form" onSubmit={onSubmit} className="w-[360px] p-6">
+        <Eyebrow>REGISTER</Eyebrow>
+        <h1 className="text-[28px] font-normal tracking-tight">Create your relay account</h1>
+        <div className="mb-5 text-[13px] text-fg-mute">
           {selfRegister ? 'Open registration is enabled.' : 'You need an invite to register.'}
         </div>
 
@@ -104,14 +102,22 @@ export function RegisterScreen() {
         </Field>
 
         {emailExists && (
-          <div className="mb-3 text-[12px] text-err">
+          <div
+            role="alert"
+            className="mb-3 rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err"
+          >
             That email is already registered.
           </div>
         )}
 
-        <Button type="submit" disabled={busy}>
+        <PillButton
+          variant="primary"
+          type="submit"
+          disabled={busy}
+          className="w-full justify-center"
+        >
           Create account →
-        </Button>
+        </PillButton>
 
         <div className="mt-4 text-center text-[11px] text-fg-mute">
           Already have an account?{' '}
@@ -119,7 +125,7 @@ export function RegisterScreen() {
             Sign in
           </Link>
         </div>
-      </form>
+      </GlassPanel>
     </div>
   )
 }

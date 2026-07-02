@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError } from '../lib/api'
-import { Button } from '../components/Button'
+import { GlassPanel, Eyebrow, PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
 import { useAuth } from './AuthProvider'
@@ -32,14 +32,10 @@ export function LoginScreen() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-bg">
-      <form
-        onSubmit={onSubmit}
-        className="w-[320px] rounded-card border border-border bg-white/5 p-6 backdrop-blur"
-      >
-        <div className="mb-1 font-sans text-[32px] font-bold leading-none">
-          relay<span className="text-accent">.</span>
-        </div>
-        <div className="mb-5 text-[12px] text-fg-mute">Sign in to the coordinator</div>
+      <GlassPanel as="form" onSubmit={onSubmit} className="w-[360px] p-6">
+        <Eyebrow>COORDINATOR</Eyebrow>
+        <h1 className="text-[28px] font-normal tracking-tight">Sign in</h1>
+        <div className="mb-5 text-[13px] text-fg-mute">Sign in to the coordinator</div>
 
         <Field label="Email" htmlFor="email">
           <Input
@@ -60,11 +56,23 @@ export function LoginScreen() {
           />
         </Field>
 
-        {error && <div className="mb-3 text-[12px] text-err">{error}</div>}
+        {error && (
+          <div
+            role="alert"
+            className="mb-3 rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err"
+          >
+            {error}
+          </div>
+        )}
 
-        <Button type="submit" disabled={busy}>
+        <PillButton
+          variant="primary"
+          type="submit"
+          disabled={busy}
+          className="w-full justify-center"
+        >
           Sign in →
-        </Button>
+        </PillButton>
 
         <div className="mt-4 text-center text-[11px] text-fg-mute">
           New here?{' '}
@@ -75,7 +83,7 @@ export function LoginScreen() {
         <div className="mt-2 text-center text-[10px] text-fg-dim">
           Tokens last 30 days.
         </div>
-      </form>
+      </GlassPanel>
     </div>
   )
 }
