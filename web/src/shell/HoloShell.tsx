@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
+import { Eyebrow } from '../components/holo'
 import { UserMenu } from './UserMenu'
 
 const NAV = [
@@ -21,18 +22,20 @@ export function HoloShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="min-h-screen bg-bg text-fg">
-      <header className="flex items-center justify-between border-b border-border px-5 py-3">
+      <header className="flex items-center justify-between border-b border-border bg-white/[0.025] px-[22px] py-3 backdrop-blur-[10px]">
         <div className="flex items-center gap-6">
-          <span className="font-sans text-[18px] font-bold">
-            relay<span className="text-accent">.</span>
-          </span>
-          <nav className="flex gap-4 text-[12px]">
+          <Eyebrow className="text-accent">RELAY</Eyebrow>
+          <nav className="flex gap-0.5">
             {NAV.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 className={({ isActive }) =>
-                  isActive ? 'text-accent' : 'text-fg-mute hover:text-fg'
+                  `border-b-2 px-[14px] py-[7px] text-[13px] tracking-[0.02em] transition-colors ${
+                    isActive
+                      ? 'border-accent text-fg'
+                      : 'border-transparent text-fg-mute hover:text-fg'
+                  }`
                 }
               >
                 {n.label}
