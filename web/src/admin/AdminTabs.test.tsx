@@ -13,13 +13,14 @@ function renderTabs(path: string) {
 }
 
 test('the registry holds exactly the built tabs', () => {
-  expect(ADMIN_TABS.map((t) => t.slug)).toEqual(['users', 'enrollments'])
+  expect(ADMIN_TABS.map((t) => t.slug)).toEqual(['users', 'enrollments', 'reservations'])
   expect(DEFAULT_ADMIN_TAB).toBe('users')
 })
 
 test('findAdminTab resolves a known slug and rejects everything else', () => {
   expect(findAdminTab('users')?.label).toBe('Users')
   expect(findAdminTab('enrollments')?.label).toBe('Agent enrolls')
+  expect(findAdminTab('reservations')?.label).toBe('Reservations')
   expect(findAdminTab('invites')).toBeUndefined()
   expect(findAdminTab('bogus')).toBeUndefined()
   expect(findAdminTab(undefined)).toBeUndefined()
@@ -32,7 +33,11 @@ test('renders one link per registry entry, pointing at /admin/<slug>', () => {
     'href',
     '/admin/enrollments',
   )
-  expect(screen.getAllByRole('link')).toHaveLength(2)
+  expect(screen.getByRole('link', { name: 'Reservations' })).toHaveAttribute(
+    'href',
+    '/admin/reservations',
+  )
+  expect(screen.getAllByRole('link')).toHaveLength(3)
 })
 
 test('the current tab is marked as the current page', () => {
@@ -46,9 +51,18 @@ test('the enrollments tab is marked current on its own route', () => {
   expect(screen.getByRole('link', { name: 'Users' })).not.toHaveAttribute('aria-current')
 })
 
+test('the reservations tab is marked current on its own route', () => {
+  renderTabs('/admin/reservations')
+  expect(screen.getByRole('link', { name: 'Reservations' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  expect(screen.getByRole('link', { name: 'Users' })).not.toHaveAttribute('aria-current')
+})
+
 test('tabs that are not built yet are absent', () => {
   renderTabs('/admin/users')
-  for (const label of ['Invites', 'Reservations', 'Server']) {
+  for (const label of ['Invites', 'Server']) {
     expect(screen.queryByText(label)).not.toBeInTheDocument()
   }
 })

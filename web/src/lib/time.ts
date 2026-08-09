@@ -35,3 +35,23 @@ export function formatTimeUntil(iso: string, now: Date = new Date()): string {
   if (hours < 24) return `in ${hours}h`
   return `in ${Math.floor(hours / 24)}d`
 }
+
+// Absolute LOCAL wall-clock rendering, 'YYYY-MM-DD HH:MM'.
+//
+// Local, not UTC, because the only writers of these values are the admin's own
+// `datetime-local` inputs (web/src/admin/reservations/CreateReservationForm.tsx):
+// the cell must read back what they typed.
+//
+// Built from Date getters rather than toLocaleString/Intl on purpose. Intl output
+// depends on the runner's ICU locale, which makes it both unassertable in tests
+// and inconsistent across machines; getters give one fixed shape everywhere.
+export function formatDateTime(iso: string): string {
+  const d = new Date(iso)
+  // Not reachable from the Go server (which only ever emits well-formed RFC3339),
+  // but a hand-edited row via SQL/CLI/MCP could carry garbage. Without this guard
+  // the cell would render the literal 'NaN-NaN-NaN NaN:NaN' rather than the same
+  // dash placeholder used for every other absent/unparseable value in this table.
+  if (Number.isNaN(d.getTime())) return '-'
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
