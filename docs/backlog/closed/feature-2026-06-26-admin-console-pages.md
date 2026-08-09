@@ -63,7 +63,7 @@ wired **Users tab** on the shared Holo primitives: list with sort, cursor pagina
 `is_admin` is settable); rename via the UUID-keyed name-only PATCH; archive/unarchive behind
 `ConfirmDialog`; and admin password reset, whose dialog warns that all of the target's sessions
 are revoked - including your own if you target yourself. Archive and Unarchive are not rendered
-on the acting admin's own row. Frontend-only; web suite green at 444 tests, build clean. Review
+on the acting admin's own row. Frontend-only; web suite green at 445 tests, build clean. Review
 returned 0 high / 4 medium / 8 low, with all four mediums and four lows fixed (including a
 vacuous no-poll test and a password reset that failed silently behind its own dialog scrim).
 
