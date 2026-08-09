@@ -31,7 +31,7 @@ export function TasksTable({
     return <GlassPanel className="p-4 text-[12px] text-fg-mute">No tasks.</GlassPanel>
   }
   return (
-    <GlassPanel as="div">
+    <GlassPanel>
       <Table label="Tasks" columns={COLS} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
         {tasks.map((t) => {
           const c = taskStatusColor(t.status)

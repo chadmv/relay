@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom'
-import { StatusDot } from '../components/holo/StatusDot'
-import { Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import { StatusDot, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
 
