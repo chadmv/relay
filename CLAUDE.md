@@ -92,10 +92,13 @@ agents hold no git access; both commits land at the phase boundary before any co
 written. `relay-backend-engineer`, `relay-frontend-engineer`, and `relay-integration-tester`
 edit code (and tests) under TDD and the Invariants above.
 
-**Verification.** Phase 4 runs the `relay-verify` workflow (`.claude/workflows/relay-verify.js`),
-a parallel fan-out of the code reviewer across dimensions plus the integration tester. Running
-a Workflow requires explicit opt-in. Confirmed findings route back to the owning engineer, then
-re-verify until clean.
+**Verification.** Phase 4 is a conductor-run `/code-review` followed by a parallel fan-out of four
+agents dispatched in one message: `relay-code-reviewer` on three separate lenses (invariants,
+correctness, security) plus `relay-integration-tester`. No Workflow, so no opt-in to obtain. The
+agents cannot run `/code-review` themselves - it is a slash command, not a skill - so the conductor
+runs it and feeds the output in as prior findings, which each agent then confirms or refutes with its
+own evidence before adding its own passes. Confirmed findings route back to the owning engineer, then
+re-verify until clean. See [docs/agent-team/README.md](docs/agent-team/README.md) for the lens briefs.
 
 **Closing backlog items.** Always close a backlog item with the `/backlog close <fragment>`
 command, never by hand-editing the item's `status` field in place. The command runs the full

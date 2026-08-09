@@ -24,7 +24,7 @@ Phase 0  DISCOVERY    Explore xN (parallel, read-only)    -> subsystem map (opt-
 Phase 1  SPEC         relay-tpm (brainstorming)           -> spec doc          * GATE -> commit
 Phase 2  PLAN         relay-planner (writing-plans)       -> impl plan         * GATE -> commit
 Phase 3  IMPLEMENT    backend + frontend (parallel*)      -> code + tests
-Phase 4  VERIFY       relay-verify workflow               -> findings          loop to 3 if fails
+Phase 4  VERIFY       /code-review + 4 agents (parallel)  -> findings          loop to 3 if fails
 Phase 5  INTEGRATE    finishing-a-development-branch       -> merge / PR        * GATE
 Phase 6  RETRO        relay-tpm (retro + backlog)         -> retro + backlog items
 ```
@@ -61,29 +61,43 @@ plan").
 - **Phase 3 parallelism** depends on the planner's independence declaration.
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
-- **Phase 4** always begins with the **conductor running `/code-review` itself**
-  on the diff, then feeding that output into the `relay-code-reviewer` dispatch
-  as prior findings. The agent cannot run it: `/code-review` ships as
-  `commands/code-review.md` with no `skills/` directory, so it is a slash command
-  no subagent can invoke, and `security-review` is harness-provided rather than a
-  file. Earlier versions of this playbook and of the agent's own prose claimed
-  otherwise, and the call silently never happened.
+- **Phase 4** is a conductor-run `/code-review` followed by a **parallel fan-out of
+  four agents in a single message**. There is no Workflow and no opt-in to obtain.
 
-  The agent's job is then to **triage and extend**, not to re-derive: confirm or
-  refute each fed-in finding with evidence, then run its own adversarial passes
-  over the dimensions it owns (the seven Invariants, security, test non-vacuity).
-  Feeding the output in rather than replacing the agent matters because the two
-  find different things - across the 2026-08-09 batch the agent's own passes
-  produced 2 high and 13 medium findings, several reproduced with probes.
+  1. The conductor runs `/code-review` itself on the diff. The agents cannot: it
+     ships as `commands/code-review.md` with no `skills/` directory, so it is a
+     slash command no subagent can invoke, and `security-review` is
+     harness-provided rather than a file. Earlier versions of this playbook and of
+     the reviewer's own prose said to call both via the Skill tool, and the calls
+     silently never happened.
+  2. Then dispatch these four in **one message** so they run concurrently, feeding
+     the `/code-review` output into the three reviewer lenses as prior findings:
 
-  After that, `relay-verify` (a parallel fan-out) if its Workflow opt-in is
-  available. That opt-in is per-session, so an unattended run (e.g.
-  `/autopilot`) does not have it unless the user granted it in that session; when
-  it is missing, the direct dispatch above plus `relay-integration-tester` when
-  the diff has integration surface (skip that lane on a zero-Go diff and say so)
-  is the full path. Same agents, same coverage, conductor-orchestrated - not a
-  licence to lower the bar. Log which path ran. Confirmed findings route back to
-  the owning engineer, then re-verify until clean.
+     | agentType | lens | brief |
+     |---|---|---|
+     | `relay-code-reviewer` | invariants | Only the seven Invariants in CLAUDE.md. Report any path that sidesteps one. Read them for their shape, not their nouns, on a `web/` diff. |
+     | `relay-code-reviewer` | correctness | Correctness bugs and needless complexity. Attack the tests as their own artifact. |
+     | `relay-code-reviewer` | security | Auth and authorization paths, input validation, secret handling, token hashing via `internal/tokenhash.Hash`. |
+     | `relay-integration-tester` | integration | Run the integration tests relevant to the diff (`go test -tags integration -p 1`). Failures are high, flakes medium. Skip this lane entirely on a zero-Go diff and say so. |
+
+     Three narrow lenses beat one long multi-dimension prompt, which is the one
+     thing the old fan-out did better than a single dispatch. Keep them separate.
+
+  Each agent triages the fed-in findings before adding its own: confirm or refute
+  each with `file:line` evidence and a concrete failure scenario, and say which.
+  A fed-in finding is a lead, not a verdict. Then run its own adversarial passes -
+  that is the part that finds what a generic pass does not, so do not stop early
+  because the list already looks long. Across the 2026-08-09 batch the agents' own
+  passes produced 2 high and 13 medium findings, several reproduced with probes.
+
+  Ask for **prose with evidence**, not a rigid findings schema. The most valuable
+  output of that batch was a 25-cycle probe showing 26 connections, a
+  demonstration that `JSON.stringify([new Error(secret)])` is `'[{}]'`, and a trace
+  through library source proving a cache setting both necessary and sufficient -
+  all of which a `{file, severity, summary}` schema would have flattened into
+  assertions the conductor could not check.
+
+  Confirmed findings route back to the owning engineer, then re-verify until clean.
 - **Phase 5** uses the finishing-a-development-branch skill.
 - **Phase 6** is TPM-owned; backlog acceptance keeps the human as final approver,
   and closing backlog items requires the git mv to docs/backlog/closed/.
@@ -94,5 +108,5 @@ plan").
 
 The conductor then: (optionally) runs discovery, dispatches `relay-tpm` for the
 spec, pauses for your approval, dispatches `relay-planner`, pauses, dispatches the
-engineers, runs `relay-verify`, loops on findings, pauses before merge, and
-finishes with a retro.
+engineers, runs `/code-review` and fans out the four verify agents in parallel,
+loops on findings, pauses before merge, and finishes with a retro.
