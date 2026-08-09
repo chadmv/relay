@@ -1,21 +1,21 @@
 import { Link } from 'react-router-dom'
 import { StatusDot } from '../components/holo/StatusDot'
+import { Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
 
 export type SortField = 'name' | 'status' | 'last_seen_at'
 
-const COLS = 'grid grid-cols-[1fr_120px_70px_140px_1.2fr_120px]'
+const COLS = 'grid-cols-[1fr_120px_70px_140px_1.2fr_120px]'
 
-function caret(field: SortField, sort: WorkerSort): string {
-  if (sort.replace('-', '') !== field) return ''
-  return sort.startsWith('-') ? ' ▼' : ' ▲'
-}
-
-function ariaSort(field: SortField, sort: WorkerSort): 'ascending' | 'descending' | 'none' {
-  if (sort.replace('-', '') !== field) return 'none'
-  return sort.startsWith('-') ? 'descending' : 'ascending'
-}
+const HEADERS: TableColumn<SortField>[] = [
+  { label: 'NAME', field: 'name' },
+  { label: 'STATUS', field: 'status' },
+  { label: 'SLOTS' },
+  { label: 'SPEC' },
+  { label: 'LABELS' },
+  { label: 'LAST SEEN', field: 'last_seen_at' },
+]
 
 export function WorkersTable({
   workers,
@@ -27,56 +27,48 @@ export function WorkersTable({
   onSort: (field: SortField) => void
 }) {
   return (
-    <div role="table" aria-label="Workers" className="rounded-card border border-border bg-white/5 backdrop-blur">
-      <div role="row" className={`${COLS} border-b border-border px-4 py-3 font-mono text-[10px] tracking-wider text-fg-mute`}>
-        <div role="columnheader" aria-sort={ariaSort('name', sort)}>
-          <button type="button" className="text-left" onClick={() => onSort('name')}>
-            NAME{caret('name', sort)}
-          </button>
-        </div>
-        <div role="columnheader" aria-sort={ariaSort('status', sort)}>
-          <button type="button" className="text-left" onClick={() => onSort('status')}>
-            STATUS{caret('status', sort)}
-          </button>
-        </div>
-        <span role="columnheader">SLOTS</span>
-        <span role="columnheader">SPEC</span>
-        <span role="columnheader">LABELS</span>
-        <div role="columnheader" aria-sort={ariaSort('last_seen_at', sort)}>
-          <button type="button" className="text-left" onClick={() => onSort('last_seen_at')}>
-            LAST SEEN{caret('last_seen_at', sort)}
-          </button>
-        </div>
-      </div>
-      {workers.map((w) => (
-        <div
-          key={w.id}
-          role="row"
-          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
-        >
-          <span role="cell">
-            <Link to={`/workers/${w.id}`} className="text-fg hover:text-accent">
-              {w.name}
-            </Link>
-          </span>
-          <span role="cell"><StatusDot status={w.status} /></span>
-          <span role="cell" className="text-fg-mute">{w.max_slots}</span>
-          <span role="cell" className="text-[10.5px] text-fg-mute">{specLine(w)}</span>
-          <span role="cell" className="flex flex-wrap gap-1">
-            {labelChips(w.labels).map((c) => (
-              <span
-                key={c}
-                className="rounded-full border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9.5px] text-accent"
-              >
-                {c}
-              </span>
-            ))}
-          </span>
-          <span role="cell" className="text-fg-mute">
-            {w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}
-          </span>
-        </div>
-      ))}
+    // The frame stays with the caller and is deliberately left as-is: adopting
+    // GlassPanel here would add the gradient and shadow, which is a visible change.
+    <div className="rounded-card border border-border bg-white/5 backdrop-blur">
+      <Table
+        label="Workers"
+        columns={COLS}
+        headers={HEADERS}
+        sort={sort}
+        onSort={onSort}
+        headerClassName="px-4 py-3 tracking-wider"
+      >
+        {workers.map((w) => (
+          <TableRow
+            key={w.id}
+            className={`border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
+          >
+            <TableCell>
+              <Link to={`/workers/${w.id}`} className="text-fg hover:text-accent">
+                {w.name}
+              </Link>
+            </TableCell>
+            <TableCell>
+              <StatusDot status={w.status} />
+            </TableCell>
+            <TableCell className="text-fg-mute">{w.max_slots}</TableCell>
+            <TableCell className="text-[10.5px] text-fg-mute">{specLine(w)}</TableCell>
+            <TableCell className="flex flex-wrap gap-1">
+              {labelChips(w.labels).map((c) => (
+                <span
+                  key={c}
+                  className="rounded-full border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9.5px] text-accent"
+                >
+                  {c}
+                </span>
+              ))}
+            </TableCell>
+            <TableCell className="text-fg-mute">
+              {w.last_seen_at ? formatRelativeTime(w.last_seen_at) : '-'}
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
     </div>
   )
 }
