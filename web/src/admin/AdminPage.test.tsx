@@ -35,6 +35,21 @@ function renderAt(path: string) {
         total: 1,
       }),
     ),
+    http.get('/v1/agent-enrollments', () =>
+      HttpResponse.json({
+        items: [
+          {
+            id: 'e1',
+            created_at: '2026-08-09T09:30:00Z',
+            expires_at: '2026-08-10T09:42:00Z',
+            created_by: 'u1',
+            hostname_hint: 'farm-west-13',
+          },
+        ],
+        next_cursor: '',
+        total: 1,
+      }),
+    ),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -79,4 +94,18 @@ test('an unknown tab segment redirects to the users tab', async () => {
 test('a not-yet-built tab segment redirects rather than rendering an empty shell', async () => {
   renderAt('/admin/invites')
   expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+})
+
+test('/admin/enrollments renders the enrollments panel inside the same shell', async () => {
+  renderAt('/admin/enrollments')
+  expect(screen.getByText('SETTINGS · ADMIN ONLY')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument()
+  expect(await screen.findByText('farm-west-13')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Agent enrolls' })).toHaveAttribute('aria-current', 'page')
+})
+
+test('/admin/users still renders the Users panel', async () => {
+  renderAt('/admin/users')
+  expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+  expect(screen.queryByText('farm-west-13')).not.toBeInTheDocument()
 })
