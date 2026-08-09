@@ -61,16 +61,29 @@ plan").
 - **Phase 3 parallelism** depends on the planner's independence declaration.
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
-- **Phase 4** runs the `relay-verify` workflow (a parallel fan-out). Running a
-  Workflow requires explicit opt-in, and that opt-in is per-session - an
-  unattended run (e.g. `/autopilot`) does not have it unless the user granted it
-  in that session. When it is unavailable, the documented fallback is a direct
-  `relay-code-reviewer` dispatch, plus `relay-integration-tester` when the diff
-  has integration surface (skip that lane on a zero-Go diff and say so). That is
-  the same agents with the same coverage, conductor-orchestrated instead of
-  script-orchestrated - it is not a licence to lower the bar. Log which path ran.
-  Confirmed findings route back to the owning engineer, then re-verify until
-  clean.
+- **Phase 4** always begins with the **conductor running `/code-review` itself**
+  on the diff, then feeding that output into the `relay-code-reviewer` dispatch
+  as prior findings. The agent cannot run it: `/code-review` ships as
+  `commands/code-review.md` with no `skills/` directory, so it is a slash command
+  no subagent can invoke, and `security-review` is harness-provided rather than a
+  file. Earlier versions of this playbook and of the agent's own prose claimed
+  otherwise, and the call silently never happened.
+
+  The agent's job is then to **triage and extend**, not to re-derive: confirm or
+  refute each fed-in finding with evidence, then run its own adversarial passes
+  over the dimensions it owns (the seven Invariants, security, test non-vacuity).
+  Feeding the output in rather than replacing the agent matters because the two
+  find different things - across the 2026-08-09 batch the agent's own passes
+  produced 2 high and 13 medium findings, several reproduced with probes.
+
+  After that, `relay-verify` (a parallel fan-out) if its Workflow opt-in is
+  available. That opt-in is per-session, so an unattended run (e.g.
+  `/autopilot`) does not have it unless the user granted it in that session; when
+  it is missing, the direct dispatch above plus `relay-integration-tester` when
+  the diff has integration surface (skip that lane on a zero-Go diff and say so)
+  is the full path. Same agents, same coverage, conductor-orchestrated - not a
+  licence to lower the bar. Log which path ran. Confirmed findings route back to
+  the owning engineer, then re-verify until clean.
 - **Phase 5** uses the finishing-a-development-branch skill.
 - **Phase 6** is TPM-owned; backlog acceptance keeps the human as final approver,
   and closing backlog items requires the git mv to docs/backlog/closed/.

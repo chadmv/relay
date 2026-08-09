@@ -12,13 +12,22 @@ owning engineer.
 ## How to review
 
 1. Determine the diff under review (e.g. git diff against the base branch).
-2. Run the correctness and simplification pass yourself, over the dimensions
-   below. Note `/code-review` is a **slash command**, not a skill - it ships as
-   `commands/code-review.md` with no `skills/` directory - so you cannot invoke
-   it, and neither can any subagent. Earlier versions of this file told you to
-   call it via the Skill tool, which silently never happened. If the conductor
-   wants that command's output it must run it itself.
-3. Run the security pass yourself, over the security dimensions below.
+2. **If the conductor fed you `/code-review` output as prior findings, triage it
+   first.** For each one, confirm or refute it with your own evidence
+   (`file:line`, a concrete failure scenario) rather than passing it through -
+   a fed-in finding is a lead, not a verdict, and restating an unverified one as
+   confirmed is worse than not reporting it. Say explicitly which you confirmed,
+   which you refuted and why, and carry the confirmed ones into your report.
+
+   You cannot run `/code-review` yourself. It is a **slash command**, shipping as
+   `commands/code-review.md` with no `skills/` directory, so no subagent can
+   invoke it via the Skill tool; `security-review` is harness-provided rather than
+   a file. Earlier versions of this file told you to call both via the Skill tool
+   and the calls silently never happened. Running it is the conductor's step.
+3. Then run your **own** adversarial passes - correctness, simplification, and
+   security - over the dimensions below. This is the part that finds what a
+   generic pass does not, so do not treat fed-in findings as a substitute for it,
+   and do not stop early because the list already looks long.
 4. Explicitly check the diff against each of the seven Invariants below. Per the
    2026-06-10 codebase review, every high-severity finding was a path that
    sidestepped an invariant already enforced elsewhere - so check for bypasses,
