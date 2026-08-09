@@ -10,6 +10,7 @@ import {
 import {
   appendEntries,
   createLogState,
+  markDropped,
   visibleRows,
   type LogChunk,
   type LogRow,
@@ -21,6 +22,15 @@ export const MAX_BACKFILL_PAGES = 10
 
 /** Frames are coalesced into one state update per window. */
 export const FLUSH_MS = 100
+
+/** Delays for consecutive failed reconnects, last value repeated. */
+export const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000]
+
+/** Consecutive failed attempts before a human click is required. */
+export const MAX_RECONNECT_ATTEMPTS = 5
+
+/** A connection that stays open this long has proven itself. */
+export const RESET_AFTER_MS = 10_000
 
 export type LogStreamStatus =
   | 'idle'
@@ -106,6 +116,10 @@ export function useTaskLogStream(
     // to them must never trigger a render and never reorder the join.
     let buffering = true
     let pending: TaskLogEvent[] = []
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let openTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+    let proven = false
 
     setView(logState)
     setStatus('loading')
@@ -137,12 +151,62 @@ export function useTaskLogStream(
       publish()
     }
 
-    // Task 8 replaces this with markDropped plus a bounded retry.
-    function endConnection(myGen: number) {
+    // A connection earns a backoff-counter reset only by PROVING itself: staying
+    // open past RESET_AFTER_MS or delivering at least one frame. Resetting on
+    // open alone is exactly the bug relay already shipped once on the agent side
+    // (docs/retros/2026-06-20-reconnect-backoff-never-resets.md), where a
+    // connection that opens and immediately fails becomes an unbounded tight
+    // loop.
+    function markProven() {
+      proven = true
+      if (attempts !== 0) {
+        attempts = 0
+        setAttempt(0)
+      }
+    }
+
+    function recover(myGen: number, reason: 'dropped' | 'closed') {
       if (cancelled || myGen !== gen) return
+      // Bump the generation FIRST so the dying connection's remaining callbacks
+      // cannot trigger a second recovery: the server writes `dropped` and then
+      // closes, so both fire for one event.
       gen++
       controller.abort()
-      setStatus('disconnected')
+      if (openTimer !== null) {
+        clearTimeout(openTimer)
+        openTimer = null
+      }
+      // Lines may have been missed either way, so the permanent marker goes in
+      // for both reasons.
+      logState = markDropped(logState)
+      flushNow()
+
+      if (reason === 'dropped') {
+        // The server told us it dropped us (README.md:1346-1348). One immediate
+        // recovery is correct: no backoff, attempt counter untouched.
+        setStatus('recovering')
+        void run(logState.maxSeq)
+        return
+      }
+      // A clean close is abnormal (README.md:1310-1313), so it is treated as a
+      // failure for backoff purposes, not as an end of data.
+      scheduleRetry(logState.maxSeq)
+    }
+
+    function scheduleRetry(sinceSeq: number) {
+      if (proven) attempts = 0
+      if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+        setStatus('disconnected')
+        return
+      }
+      const delay = RETRY_DELAYS_MS[Math.min(attempts, RETRY_DELAYS_MS.length - 1)]
+      attempts++
+      setAttempt(attempts)
+      setStatus('reconnecting')
+      retryTimer = setTimeout(() => {
+        retryTimer = null
+        if (!cancelled) void run(sinceSeq)
+      }, delay)
     }
 
     // Resolves once the response is 200, which means handleEvents has already
@@ -157,23 +221,28 @@ export function useTaskLogStream(
           fetchImpl,
           onOpen: () => {
             opened = true
+            openTimer = setTimeout(() => {
+              openTimer = null
+              if (myGen === gen) markProven()
+            }, RESET_AFTER_MS)
             resolveOpen()
           },
           onLine: (e) => {
             if (myGen !== gen) return
+            markProven() // a delivered frame proves the connection
             if (buffering) pending.push(e)
             else ingest([e])
           },
-          onDropped: () => endConnection(myGen),
+          onDropped: () => recover(myGen, 'dropped'),
         })
           .then(() => {
             // The server never ends a stream on its own (README.md:1310-1313),
             // so a resolve is abnormal.
-            if (opened) endConnection(myGen)
+            if (opened) recover(myGen, 'closed')
           })
           .catch((err: unknown) => {
             if (cancelled || myGen !== gen) return
-            if (opened) endConnection(myGen)
+            if (opened) recover(myGen, 'closed')
             else rejectOpen(err)
           })
       })
@@ -184,6 +253,7 @@ export function useTaskLogStream(
       buffering = true
       pending = []
       controller = new AbortController()
+      proven = false
 
       if (live) {
         try {
@@ -206,9 +276,7 @@ export function useTaskLogStream(
               return
             }
           }
-          // Task 8 replaces this with the bounded backoff.
-          setErrorMessage(err instanceof Error ? err.message : 'stream failed')
-          setStatus('disconnected')
+          scheduleRetry(sinceSeq)
           return
         }
         if (cancelled || myGen !== gen) return
@@ -257,6 +325,8 @@ export function useTaskLogStream(
       gen++
       controller.abort()
       if (flushTimer !== null) clearTimeout(flushTimer)
+      if (retryTimer !== null) clearTimeout(retryTimer)
+      if (openTimer !== null) clearTimeout(openTimer)
     }
   }, [taskId, live, enabled, fetchImpl, manualRetry])
 
