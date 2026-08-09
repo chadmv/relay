@@ -40,6 +40,13 @@ export function CreateUserForm({ pending, error, onSubmit, onCancel }: CreateUse
       setPasswordError('Password must be at least 8 characters.')
       return
     }
+    // bcrypt rejects anything over 72 bytes, so the server would 500 rather than
+    // return a useful error. Same boundary as ResetPasswordDialog - Go measures
+    // len() in UTF-8 bytes, which is what TextEncoder produces.
+    if (new TextEncoder().encode(password).length > 72) {
+      setPasswordError('Password must be 72 bytes or fewer.')
+      return
+    }
     setPasswordError(undefined)
     onSubmit({ email: trimmedEmail, name: name.trim(), password, is_admin: isAdmin })
   }

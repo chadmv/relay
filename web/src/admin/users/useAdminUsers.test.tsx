@@ -70,6 +70,14 @@ test('does not poll - the users table is not live data', async () => {
   const query = client
     .getQueryCache()
     .find({ queryKey: ['users', '-created_at', false, '', ''] })
-  const options = query?.options as { refetchInterval?: unknown } | undefined
+  const options = query?.options as
+    | { refetchInterval?: unknown; placeholderData?: unknown }
+    | undefined
+  // Positive control on the same path first: this assertion is a property *absence*,
+  // so if TanStack ever stops merging observer options onto Query.options it would
+  // silently re-green. placeholderData: keepPreviousData is set on this hook and
+  // lands via the identical merge, so if it is missing the probe itself is broken
+  // and the refetchInterval check below proves nothing.
+  expect(options?.placeholderData).toBeDefined()
   expect(options?.refetchInterval).toBeUndefined()
 })

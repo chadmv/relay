@@ -60,6 +60,17 @@ test('rejects a password under 8 characters without submitting', async () => {
   expect(props.onSubmit).not.toHaveBeenCalled()
 })
 
+test('rejects a password over 72 bytes without submitting', async () => {
+  // Same bcrypt boundary ResetPasswordDialog enforces: over 72 bytes the server
+  // 500s on ErrPasswordTooLong instead of returning something actionable.
+  const { props } = renderForm()
+  await userEvent.type(screen.getByLabelText('Email'), 'new@studio.dev')
+  await userEvent.type(screen.getByLabelText('Password'), 'p'.repeat(73))
+  await userEvent.click(screen.getByRole('button', { name: 'Create' }))
+  expect(screen.getByText('Password must be 72 bytes or fewer.')).toBeInTheDocument()
+  expect(props.onSubmit).not.toHaveBeenCalled()
+})
+
 test('a 409 renders as a duplicate-email field error and preserves form state', async () => {
   renderForm({ error: new ApiError(409, 'email already registered', '409 email already registered') })
   await userEvent.type(screen.getByLabelText('Email'), 'dupe@studio.dev')
