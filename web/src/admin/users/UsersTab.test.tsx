@@ -101,7 +101,7 @@ test('toggling include archived sets include_archived=true and resets the cursor
   await userEvent.click(screen.getByLabelText(/include archived/i))
   await waitFor(() => expect(seen.at(-1)?.get('include_archived')).toBe('true'))
   expect(seen.at(-1)?.has('cursor')).toBe(false)
-  expect(await screen.findByRole('button', { name: 'Unarchive' })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: 'Unarchive ada@studio.dev' })).toBeInTheDocument()
 })
 
 test('typing in the email filter issues exactly one ?email= request and hides the pager', async () => {
@@ -112,8 +112,16 @@ test('typing in the email filter issues exactly one ?email= request and hides th
   expect(screen.getByRole('button', { name: /next 50/ })).toBeInTheDocument()
 
   await userEvent.type(screen.getByLabelText('Filter by email'), 'ada@studio.dev')
-  await waitFor(() => expect(seen.filter((p) => p.has('email')).length).toBe(1))
-  expect(seen.filter((p) => p.has('email'))[0].get('email')).toBe('ada@studio.dev')
+  // Wait on the full debounced value landing - that is the actual proof the
+  // debounce collapsed the keystroke burst into one request. Asserting the raw
+  // count with toBe(1) is timing-fragile on a loaded machine (a real 10ms
+  // debounce can occasionally observe 2), and since the count only grows,
+  // waitFor could never recover from an early over-count; toBeLessThanOrEqual
+  // keeps the count check honest without that flakiness.
+  await waitFor(() =>
+    expect(seen.some((p) => p.get('email') === 'ada@studio.dev')).toBe(true),
+  )
+  expect(seen.filter((p) => p.has('email')).length).toBeLessThanOrEqual(1)
 
   // The server returns before parsePage on the ?email= branch, so the pager would
   // claim a page that does not exist.
@@ -216,7 +224,7 @@ test('renaming a row PATCHes and refreshes without a confirm dialog', async () =
   )
   renderTab()
   await screen.findByText('Ada')
-  await userEvent.click(screen.getByRole('button', { name: 'Rename' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Rename ada@studio.dev' }))
   const input = screen.getByLabelText('Name for ada@studio.dev')
   await userEvent.clear(input)
   await userEvent.type(input, 'Ada L')
@@ -238,14 +246,17 @@ test('Archive is behind a confirm dialog: Cancel fires no request, Confirm fires
   renderTab()
   await screen.findByText('ada@studio.dev')
 
-  await userEvent.click(screen.getByRole('button', { name: 'Archive' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Archive ada@studio.dev' }))
   expect(screen.getByRole('dialog')).toBeInTheDocument()
   expect(screen.getByText(/revokes all of their API tokens/i)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
   expect(archiveCalls).toBe(0)
 
+  await userEvent.click(screen.getByRole('button', { name: 'Archive ada@studio.dev' }))
+  // The row button is now labelled "Archive ada@studio.dev" (M4) and the dialog's
+  // confirm button is plain "Archive", so this no longer needs
+  // getAllByRole(...).at(-1) DOM-order trickery to disambiguate them.
   await userEvent.click(screen.getByRole('button', { name: 'Archive' }))
-  await userEvent.click(screen.getAllByRole('button', { name: 'Archive' }).at(-1)!)
   await waitFor(() => expect(archiveCalls).toBe(1))
 })
 
@@ -265,9 +276,11 @@ test('Unarchive is behind a confirm dialog', async () => {
   )
   renderTab()
   await userEvent.click(await screen.findByLabelText(/include archived/i))
-  await userEvent.click(await screen.findByRole('button', { name: 'Unarchive' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Unarchive ada@studio.dev' }))
   expect(screen.getByRole('dialog')).toBeInTheDocument()
-  await userEvent.click(screen.getAllByRole('button', { name: 'Unarchive' }).at(-1)!)
+  // Row button is "Unarchive ada@studio.dev"; the dialog's confirm button is
+  // plain "Unarchive" - unambiguous without DOM-order trickery.
+  await userEvent.click(screen.getByRole('button', { name: 'Unarchive' }))
   await waitFor(() => expect(unarchiveCalls).toBe(1))
 })
 
@@ -283,7 +296,7 @@ test('Reset pw opens the dialog and POSTs email + new_password', async () => {
   )
   renderTab()
   await screen.findByText('ada@studio.dev')
-  await userEvent.click(screen.getByRole('button', { name: 'Reset pw' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }))
   await userEvent.type(screen.getByLabelText('New password'), 'password1')
   await userEvent.type(screen.getByLabelText('Confirm password'), 'password1')
   await userEvent.click(screen.getByRole('button', { name: 'Reset password' }))
@@ -304,8 +317,8 @@ test('a server-guard rejection renders inline and leaves the table mounted', asy
   )
   renderTab()
   await screen.findByText('ada@studio.dev')
+  await userEvent.click(screen.getByRole('button', { name: 'Archive ada@studio.dev' }))
   await userEvent.click(screen.getByRole('button', { name: 'Archive' }))
-  await userEvent.click(screen.getAllByRole('button', { name: 'Archive' }).at(-1)!)
 
   expect(await screen.findByText('400 cannot archive the last active admin')).toBeInTheDocument()
   expect(screen.getByText('ada@studio.dev')).toBeInTheDocument()
@@ -322,7 +335,60 @@ test('the acting admin own row has no Archive control', async () => {
   )
   renderTab()
   expect(await screen.findByText('me@studio.dev')).toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+  // Wait via polling rather than a single-shot assertion right after the row
+  // text appears: /v1/users and /v1/users/me resolve independently, so if the
+  // row list settles before AuthProvider's user does, currentUserId is
+  // momentarily '' and Archive could transiently render. Polling absence gives
+  // the auth fetch a chance to land before this is treated as a failure (L8).
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: 'Archive me@studio.dev' })).not.toBeInTheDocument(),
+  )
+})
+
+test('reopening the create form after a duplicate-email error clears the stale error', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })),
+    http.post('/v1/users', () =>
+      HttpResponse.json({ error: 'email already registered' }, { status: 409 }),
+    ),
+  )
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(screen.getByRole('button', { name: '+ Create user' }))
+  await userEvent.type(screen.getByLabelText('Email'), 'dupe@studio.dev')
+  await userEvent.type(screen.getByLabelText('Password'), 'password1')
+  await userEvent.click(screen.getByRole('button', { name: 'Create' }))
+  expect(await screen.findByText('That email is already registered.')).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await userEvent.click(screen.getByRole('button', { name: '+ Create user' }))
+
+  expect(screen.queryByText('That email is already registered.')).not.toBeInTheDocument()
+})
+
+test('reopening the reset-password dialog after a failed reset clears the stale error', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })),
+    http.post('/v1/users/password-reset', () =>
+      HttpResponse.json({ error: 'internal error' }, { status: 500 }),
+    ),
+  )
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }))
+  await userEvent.type(screen.getByLabelText('New password'), 'password1')
+  await userEvent.type(screen.getByLabelText('Confirm password'), 'password1')
+  await userEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+  expect(await screen.findByText('500 internal error')).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }))
+
+  expect(screen.queryByText('500 internal error')).not.toBeInTheDocument()
 })
 
 test('the footnote explains the archive and reset side effects', async () => {

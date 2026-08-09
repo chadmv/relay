@@ -50,11 +50,12 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
   )
   const { create, rename, archive, unarchive, resetPassword } = useAdminUserActions()
 
-  // create.error is routed into CreateUserForm (it owns the 409 copy), so it is
-  // deliberately not part of the shared inline error box.
-  const actionError = (rename.error ?? archive.error ?? unarchive.error ?? resetPassword.error) as
-    | Error
-    | null
+  // create.error is routed into CreateUserForm (it owns the 409 copy) and
+  // resetPassword.error is routed into ResetPasswordDialog (its scrim sits above
+  // this page-level box, so a stale reset error rendered only here would be
+  // invisible while the dialog is open) - both are deliberately excluded from the
+  // shared inline error box below.
+  const actionError = (rename.error ?? archive.error ?? unarchive.error) as Error | null
   const busy =
     rename.isPending || archive.isPending || unarchive.isPending || resetPassword.isPending
   const filtering = email !== ''
@@ -169,7 +170,13 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
           currentUserId={me?.id ?? ''}
           busy={busy}
           onRename={(id, name) => rename.mutate({ id, name })}
-          onResetPassword={(u) => setResetting(u)}
+          onResetPassword={(u) => {
+            // Clear a stale error/plaintext-password from a previous reset attempt
+            // before opening for a (possibly different) row - matches JobActions'
+            // openConfirm convention (cancel.reset() before setConfirm).
+            resetPassword.reset()
+            setResetting(u)
+          }}
           onArchive={(u) => setConfirm({ kind: 'archive', user: u })}
           onUnarchive={(u) => setConfirm({ kind: 'unarchive', user: u })}
         />
@@ -221,12 +228,22 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
         </label>
         <input
           aria-label="Filter by email"
-          placeholder="?email=… exact match"
+          placeholder="?email=… exact, case-sensitive match"
           value={emailInput}
           onChange={(e) => pickEmail(e.target.value)}
           className="ml-auto min-w-[240px] rounded-full border border-border bg-black/25 px-3.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-accent"
         />
-        <PillButton variant="primary" onClick={() => setCreating((v) => !v)}>
+        <PillButton
+          variant="primary"
+          onClick={() => {
+            // Clear a stale error (e.g. a previous 409) before toggling, so a
+            // freshly reopened empty form never shows a leftover message -
+            // matches the convention at web/src/jobs/JobActions.tsx (cancel.reset())
+            // and web/src/jobs/NewJobPage.tsx (create.reset()).
+            create.reset()
+            setCreating((v) => !v)
+          }}
+        >
           + Create user
         </PillButton>
       </div>
@@ -236,7 +253,10 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
           pending={create.isPending}
           error={create.error as Error | null}
           onSubmit={onCreate}
-          onCancel={() => setCreating(false)}
+          onCancel={() => {
+            create.reset()
+            setCreating(false)
+          }}
         />
       )}
 
@@ -278,6 +298,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
         <ResetPasswordDialog
           email={resetting.email}
           pending={resetPassword.isPending}
+          error={resetPassword.error as Error | null}
           onSubmit={onResetSubmit}
           onCancel={() => setResetting(null)}
         />

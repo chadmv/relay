@@ -1,12 +1,14 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
+import { ApiError } from '../../lib/api'
 import { ResetPasswordDialog } from './ResetPasswordDialog'
 
 function renderDialog(over: Partial<Parameters<typeof ResetPasswordDialog>[0]> = {}) {
   const props = {
     email: 'ada@studio.dev',
     pending: false,
+    error: null as Error | null,
     onSubmit: vi.fn(),
     onCancel: vi.fn(),
     ...over,
@@ -68,4 +70,24 @@ test('Escape and Cancel both dismiss', async () => {
 test('pending disables the submit button', () => {
   renderDialog({ pending: true })
   expect(screen.getByRole('button', { name: 'Reset password' })).toBeDisabled()
+})
+
+test('rejects a password over 72 bytes without submitting', async () => {
+  // bcrypt.GenerateFromPassword returns ErrPasswordTooLong above 72 bytes, which
+  // handleAdminPasswordReset turns into a 500. A routine password-manager output
+  // can be longer than 72 characters, so this must be caught client-side.
+  const { props } = renderDialog()
+  const longPw = 'x'.repeat(73)
+  fireEvent.change(screen.getByLabelText('New password'), { target: { value: longPw } })
+  fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: longPw } })
+  await userEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+  expect(screen.getByText('Password must be 72 bytes or fewer.')).toBeInTheDocument()
+  expect(props.onSubmit).not.toHaveBeenCalled()
+})
+
+test('a failing reset surfaces a visible error message inside the dialog', () => {
+  renderDialog({ error: new ApiError(500, 'error', '500 error') })
+  const dialog = screen.getByRole('dialog')
+  expect(screen.getByText('500 error')).toBeInTheDocument()
+  expect(dialog).toContainElement(screen.getByText('500 error'))
 })

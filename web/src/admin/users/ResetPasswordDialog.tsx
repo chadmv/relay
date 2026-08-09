@@ -5,6 +5,12 @@ import { Input } from '../../components/Input'
 interface ResetPasswordDialogProps {
   email: string
   pending: boolean
+  // The mutation's error, surfaced visibly inside the dialog. Without this a
+  // failed reset gave zero feedback: the dialog stayed mounted, the submit
+  // button re-enabled, and the only error rendering lived in UsersTab's
+  // page-level error box, which sits behind this dialog's fixed inset-0 z-50
+  // scrim.
+  error?: Error | null
   onSubmit: (newPassword: string) => void
   onCancel: () => void
 }
@@ -15,11 +21,11 @@ interface ResetPasswordDialogProps {
 // focused on open (via autoFocus, so the shared Input primitive does not need to
 // forward a ref). No focus trap, same as ConfirmDialog; that debt is tracked by
 // docs/backlog/idea-2026-07-01-confirmdialog-focus-trap-hardening.md.
-export function ResetPasswordDialog({ email, pending, onSubmit, onCancel }: ResetPasswordDialogProps) {
+export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel }: ResetPasswordDialogProps) {
   const titleId = useId()
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
-  const [error, setError] = useState<string | undefined>()
+  const [validationError, setValidationError] = useState<string | undefined>()
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -32,14 +38,22 @@ export function ResetPasswordDialog({ email, pending, onSubmit, onCancel }: Rese
   function submit(e: FormEvent) {
     e.preventDefault()
     if (password.length < 8) {
-      setError('Password must be at least 8 characters.')
+      setValidationError('Password must be at least 8 characters.')
+      return
+    }
+    // bcrypt.GenerateFromPassword (internal/api/auth.go) rejects passwords over
+    // 72 BYTES with ErrPasswordTooLong, which handleAdminPasswordReset turns into
+    // an opaque 500. A routine password-manager-generated password can exceed 72
+    // characters, so catch it client-side rather than let the server 500.
+    if (new TextEncoder().encode(password).length > 72) {
+      setValidationError('Password must be 72 bytes or fewer.')
       return
     }
     if (password !== confirm) {
-      setError('The two passwords do not match.')
+      setValidationError('The two passwords do not match.')
       return
     }
-    setError(undefined)
+    setValidationError(undefined)
     onSubmit(password)
   }
 
@@ -63,19 +77,22 @@ export function ResetPasswordDialog({ email, pending, onSubmit, onCancel }: Rese
           <Input
             id="reset-pw"
             type="password"
+            autoComplete="new-password"
             autoFocus
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
         </Field>
-        <Field label="Confirm password" htmlFor="reset-pw-confirm" error={error}>
+        <Field label="Confirm password" htmlFor="reset-pw-confirm" error={validationError}>
           <Input
             id="reset-pw-confirm"
             type="password"
+            autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
           />
         </Field>
+        {error && <div className="mb-3 text-[11px] text-err">{error.message}</div>}
         <div className="mt-5 flex justify-end gap-2">
           <button
             type="button"

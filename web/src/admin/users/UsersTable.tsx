@@ -150,20 +150,27 @@ export function UsersTable({
 
             <span role="cell" className="flex justify-end gap-1.5">
               {archived ? (
-                <button
-                  type="button"
-                  className={MINI_ACCENT}
-                  disabled={busy}
-                  onClick={() => onUnarchive(u)}
-                >
-                  Unarchive
-                </button>
+                // No Unarchive on your own archived row either: the server 400s
+                // "cannot unarchive yourself" (symmetric with the Archive guard
+                // below), so the button would be a guaranteed-failing control.
+                !isSelf && (
+                  <button
+                    type="button"
+                    className={MINI_ACCENT}
+                    disabled={busy}
+                    aria-label={`Unarchive ${u.email}`}
+                    onClick={() => onUnarchive(u)}
+                  >
+                    Unarchive
+                  </button>
+                )
               ) : (
                 <>
                   <button
                     type="button"
                     className={MINI_GHOST}
                     disabled={busy}
+                    aria-label={`Reset password for ${u.email}`}
                     onClick={() => onResetPassword(u)}
                   >
                     Reset pw
@@ -172,6 +179,7 @@ export function UsersTable({
                     type="button"
                     className={MINI_GHOST}
                     disabled={busy}
+                    aria-label={`Rename ${u.email}`}
                     onClick={() => startRename(u)}
                   >
                     Rename
@@ -183,6 +191,7 @@ export function UsersTable({
                       type="button"
                       className={MINI_DANGER}
                       disabled={busy}
+                      aria-label={`Archive ${u.email}`}
                       onClick={() => onArchive(u)}
                     >
                       Archive

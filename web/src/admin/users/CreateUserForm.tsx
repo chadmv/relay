@@ -60,6 +60,7 @@ export function CreateUserForm({ pending, error, onSubmit, onCancel }: CreateUse
         <Input
           id="new-user-password"
           type="password"
+          autoComplete="new-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />

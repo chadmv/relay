@@ -50,20 +50,26 @@ test('caches under ["users", sort, includeArchived, cursor, email] and passes th
 })
 
 test('does not poll - the users table is not live data', async () => {
-  let calls = 0
   server.use(
-    http.get('/v1/users', () => {
-      calls++
-      return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
-    }),
+    http.get('/v1/users', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })),
   )
+  const client = newClient()
   const { result } = renderHook(() => useAdminUsers('-created_at', false, '', ''), {
-    wrapper: makeWrapper(newClient()),
+    wrapper: makeWrapper(client),
   })
   await waitFor(() => expect(result.current.status).toBe('success'))
-  expect(calls).toBe(1)
-  // Long enough that any accidental refetchInterval (the shipped list hooks use
-  // 3000ms, and a copy-paste of useWorkers would inherit it) would have fired.
-  await new Promise((r) => setTimeout(r, 120))
-  expect(calls).toBe(1)
+
+  // Deterministic: inspect the resolved query's own options rather than racing a
+  // wall-clock timer against a 3000ms refetchInterval. A short wait (as this test
+  // used to do) only proves nothing fired in that window, not that polling is
+  // disabled - it stays green even if refetchInterval: 3000 is added below.
+  // `Query.options` is publicly typed as the base QueryOptions (no
+  // refetchInterval field), but useQuery merges the full observer options
+  // (including refetchInterval) into the object it hands the cache at runtime -
+  // hence the narrow cast rather than `as any`.
+  const query = client
+    .getQueryCache()
+    .find({ queryKey: ['users', '-created_at', false, '', ''] })
+  const options = query?.options as { refetchInterval?: unknown } | undefined
+  expect(options?.refetchInterval).toBeUndefined()
 })
