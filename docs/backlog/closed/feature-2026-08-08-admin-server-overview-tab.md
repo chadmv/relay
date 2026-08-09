@@ -1,8 +1,10 @@
 ---
 title: "Admin console: Server / overview tab"
 type: feature
-status: open
+status: closed
 created: 2026-08-08
+closed: 2026-08-09
+resolution: fixed
 priority: medium
 source: carved from feature-2026-06-26-admin-console-pages during the 2026-08-08 admin-console-shell-users-tab slice
 ---
@@ -64,3 +66,10 @@ Recommended split: ship this tab with only the four already-existing sources, an
 `GET /v1/server/info` allowlist endpoint as its own backend item if the facts strip and env table are
 still wanted. Also worth noting `bug-2026-06-05-jobs-stats-24h-updated-at-proxy` before putting
 `done_24h`/`failed_24h` on a page labelled as an operational source of truth.
+
+## Resolution
+Shipped 2026-08-09 (autopilot, admin-server-overview-tab): /admin/server tab on the four existing
+endpoints only (jobs/stats, workers/stats, config, health), per-region degradation with staleness
+age, honest health-pill semantics (listener reachability, no DB claim), no fabricated facts strip
+or env table. The GET /v1/server/info allowlist endpoint was filed separately as
+feature-2026-08-09-server-info-allowlist-endpoint. Web suite 710 -> 761 tests.
