@@ -17,6 +17,15 @@ function newClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
 
+test('gcTime is Infinity so a remount past the default 5-minute window still hits cache', async () => {
+  server.use(http.get('/v1/config', () => HttpResponse.json({ allow_self_register: false })))
+  const client = newClient()
+  const { result } = renderHook(() => useServerConfig(), { wrapper: makeWrapper(client) })
+  await waitFor(() => expect(result.current.status).toBe('success'))
+  const query = client.getQueryCache().find({ queryKey: ['server-config'] })
+  expect(query?.options.gcTime).toBe(Infinity)
+})
+
 test('caches under ["server-config"]', async () => {
   server.use(http.get('/v1/config', () => HttpResponse.json({ allow_self_register: false })))
   const client = newClient()
