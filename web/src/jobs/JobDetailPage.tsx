@@ -11,7 +11,8 @@ import { SpecTab } from './SpecTab'
 import { LogTab } from './LogTab'
 import { JobActions } from './JobActions'
 import { useJob } from './useJob'
-import { useTaskLogs } from './useTaskLogs'
+import { useTaskLogStream } from './useTaskLogStream'
+import { isTerminalTask } from './taskStatus'
 import type { TaskDetail } from './api'
 
 type Tab = 'spec' | 'log'
@@ -41,9 +42,17 @@ export function JobDetailPage() {
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId)
 
-  // Log query is decoupled from ['job', ...] and gated to the Log tab, so a job
-  // poll never disturbs it and we never fetch logs for an unopened tab.
-  const logs = useTaskLogs(selectedTaskId, selectedTaskId !== '' && tab === 'log')
+  // Log state lives in the hook, not the query cache (spec Decision 3), so a job
+  // poll can never disturb it and no log line ever enters TanStack. `live` comes
+  // from useJob's poll: a ?task_id= subscription has no terminal signal of its
+  // own (README.md:1310-1313), and the selected task's status reaching a terminal
+  // value within one poll interval is what tells us to stop tailing. A terminal
+  // task therefore opens no connection at all, and leaving the Log tab flips
+  // `enabled` false, which tears the connection down.
+  const logStream = useTaskLogStream(selectedTaskId, {
+    live: !isTerminalTask(selectedTask?.status),
+    enabled: selectedTaskId !== '' && tab === 'log',
+  })
 
   if (isLoading && !job) {
     return <GlassPanel className="h-40" />
@@ -176,12 +185,7 @@ export function JobDetailPage() {
             {tab === 'spec' ? (
               <SpecTab task={selectedTask} />
             ) : (
-              <LogTab
-                items={logs.data?.items ?? []}
-                isLoading={logs.isLoading}
-                isError={logs.isError}
-                onRetry={() => logs.refetch()}
-              />
+              <LogTab jobId={job.id} taskId={selectedTaskId} stream={logStream} />
             )}
           </GlassPanel>
         </div>

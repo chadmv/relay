@@ -24,3 +24,12 @@ export function taskStatusColor(status: TaskStatus): StatusView {
       return { text: 'text-fg-mute', dot: 'bg-fg-mute' }
   }
 }
+
+// The terminal task statuses. A ?task_id= subscription has no terminal signal of
+// its own (README.md:1310-1313), so this is what useJob's 3 s poll turns into
+// "stop tailing" - which is what makes one log-only connection sufficient.
+const TERMINAL: TaskStatus[] = ['done', 'failed', 'timed_out']
+
+export function isTerminalTask(status: TaskStatus | undefined): boolean {
+  return status !== undefined && TERMINAL.includes(status)
+}

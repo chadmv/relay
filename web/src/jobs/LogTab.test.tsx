@@ -1,37 +1,78 @@
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
 import { LogTab } from './LogTab'
-import type { LogEntry } from './api'
+import type { LogRow } from './logBuffer'
+import type { TaskLogStreamResult } from './useTaskLogStream'
 
-const items: LogEntry[] = [
-  { seq: 1, stream: 'stdout', content: 'building', created_at: '2026-07-01T00:00:00Z' },
-  { seq: 2, stream: 'stderr', content: 'warning: x', created_at: '2026-07-01T00:00:01Z' },
-]
+function row(key: number, text: string, over: Partial<LogRow> = {}): LogRow {
+  return { key, kind: 'line', stream: 'stdout', text, time: '2026-07-01T00:00:00Z', ...over }
+}
+
+function streamOf(over: Partial<TaskLogStreamResult> = {}): TaskLogStreamResult {
+  return {
+    rows: [row(1, 'building'), row(2, 'warning: x', { stream: 'stderr' })],
+    status: 'live',
+    attempt: 0,
+    dropped: false,
+    evicted: false,
+    historyTruncated: false,
+    total: 2,
+    errorMessage: '',
+    reconnect: () => {},
+    ...over,
+  }
+}
+
+function renderTab(stream = streamOf(), taskId = 't2') {
+  return render(
+    <MemoryRouter>
+      <LogTab jobId="j1" taskId={taskId} stream={stream} />
+    </MemoryRouter>,
+  )
+}
 
 test('renders log lines with a stdout/stderr distinction', () => {
-  render(<LogTab items={items} isLoading={false} isError={false} onRetry={() => {}} />)
+  renderTab()
   expect(screen.getByText('building')).toBeInTheDocument()
-  const stderrLine = screen.getByText('warning: x')
-  expect(stderrLine.className).toMatch(/text-err/)
+  expect(screen.getByText('warning: x').className).toMatch(/text-err/)
+})
+
+// Replaces the old 'shows a STATIC history marker ... never a LIVE badge' case:
+// live tailing has shipped, so the honest signal is now the inverse.
+test('shows a LIVE badge while the stream is open and no STATIC marker', () => {
+  renderTab()
+  expect(screen.getByText('LIVE')).toBeInTheDocument()
+  expect(screen.queryByText(/static/i)).toBeNull()
+  expect(screen.queryByText(/live tailing pending/i)).toBeNull()
+})
+
+test('does not show LIVE for a terminal task', () => {
+  renderTab(streamOf({ status: 'history' }))
+  expect(screen.queryByText('LIVE')).toBeNull()
+  expect(screen.getByText('HISTORY')).toBeInTheDocument()
 })
 
 test('shows the empty state when there is no output', () => {
-  render(<LogTab items={[]} isLoading={false} isError={false} onRetry={() => {}} />)
+  renderTab(streamOf({ rows: [], status: 'history' }))
   expect(screen.getByText(/no log output/i)).toBeInTheDocument()
 })
 
 test('shows a retry control on error', () => {
-  render(<LogTab items={[]} isLoading={false} isError={true} onRetry={() => {}} />)
+  renderTab(streamOf({ rows: [], status: 'error', errorMessage: 'boom' }))
   expect(screen.getByText(/failed to load logs/i)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
 })
 
-test('shows a STATIC history marker and a live-pending note, never a LIVE badge', () => {
-  render(<LogTab items={items} isLoading={false} isError={false} onRetry={() => {}} />)
-  // Honest signalling: the log is fetch-once history, not a live stream. SSE
-  // tailing is backend-blocked (feature-2026-06-26-sse-task-log-publishing).
-  expect(screen.getByText(/static|history/i)).toBeInTheDocument()
-  expect(screen.getByText(/live tailing pending/i)).toBeInTheDocument()
-  // A green LIVE badge would imply a stream we cannot deliver.
-  expect(screen.queryByText(/^live$/i)).toBeNull()
+test('links to the full-screen view for the selected task', () => {
+  renderTab()
+  expect(screen.getByRole('link', { name: /full screen/i })).toHaveAttribute(
+    'href',
+    '/jobs/j1/tasks/t2',
+  )
+})
+
+test('omits the full-screen link when no task is selected', () => {
+  renderTab(streamOf({ rows: [], status: 'idle' }), '')
+  expect(screen.queryByRole('link', { name: /full screen/i })).toBeNull()
 })

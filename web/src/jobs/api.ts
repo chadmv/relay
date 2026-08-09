@@ -1,4 +1,4 @@
-import { apiFetch } from '../lib/api'
+import { apiFetch, apiStream } from '../lib/api'
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -118,12 +118,79 @@ export function getJob(id: string): Promise<JobDetail> {
   return apiFetch<JobDetail>(`/jobs/${id}`)
 }
 
-// Static historical task log (GET, seq-paginated). Fetch-once; no tailing.
-export function getTaskLogs(taskId: string, sinceSeq?: number): Promise<TaskLogPage> {
-  const q = new URLSearchParams()
-  if (sinceSeq !== undefined) q.set('since_seq', String(sinceSeq))
-  const qs = q.toString()
-  return apiFetch<TaskLogPage>(`/tasks/${taskId}/logs${qs ? `?${qs}` : ''}`)
+/**
+ * Backfill page size. The server caps ?limit= at 200 (internal/api/tasks.go:84),
+ * and 200 is used so a full history costs the fewest requests.
+ */
+export const BACKFILL_PAGE_SIZE = 200
+
+/**
+ * The SSE task_log payload. seq/stream/content/created_at are field-identical to
+ * LogEntry above, which is a backend guarantee (README.md:1330-1332), so one
+ * client-side type covers both the live and the polled surface.
+ */
+export interface TaskLogEvent extends LogEntry {
+  task_id: string
+  job_id: string
+}
+
+/**
+ * One page of a task's log history, forward-only from sinceSeq. next_seq is 0
+ * when drained (internal/api/tasks.go:128-130). Always sends an explicit limit so
+ * the caller is never silently truncated to the server default of 50.
+ */
+export function getTaskLogs(
+  taskId: string,
+  sinceSeq = 0,
+  limit = BACKFILL_PAGE_SIZE,
+): Promise<TaskLogPage> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (sinceSeq > 0) q.set('since_seq', String(sinceSeq))
+  return apiFetch<TaskLogPage>(`/tasks/${taskId}/logs?${q}`)
+}
+
+export interface TaskLogStreamOptions {
+  signal: AbortSignal
+  onLine: (entry: TaskLogEvent) => void
+  onDropped: () => void
+  onOpen?: () => void
+  fetchImpl?: typeof fetch
+}
+
+/**
+ * Subscribes to one task's live log lines. Resolves when the stream ENDS - which
+ * is abnormal, because the server never ends a stream on its own
+ * (README.md:1310-1313), so the caller treats a resolve as a failure for backoff
+ * purposes rather than as an end of data. Rejects on a non-ok response, a
+ * transport error, or an abort.
+ *
+ * Only ?task_id= is sent. Adding ?job_id= would put status frames on the same
+ * 64-slot buffer, so a log burst could drop-close the connection including its
+ * status frames (README.md:1352-1355); job/task status comes from useJob's poll
+ * instead (spec Decision 2).
+ */
+export function streamTaskLog(taskId: string, opts: TaskLogStreamOptions): Promise<void> {
+  return apiStream(`/events?task_id=${encodeURIComponent(taskId)}`, {
+    signal: opts.signal,
+    fetchImpl: opts.fetchImpl,
+    onOpen: opts.onOpen,
+    onEvent: (frame) => {
+      if (frame.event === 'task_log') {
+        try {
+          opts.onLine(JSON.parse(frame.data) as TaskLogEvent)
+        } catch {
+          // A malformed frame is dropped silently. Never log frame.data: it is
+          // raw subprocess output and can carry secrets.
+        }
+        return
+      }
+      if (frame.event === 'dropped') {
+        opts.onDropped()
+      }
+      // Anything else is ignored: a ?task_id=-only subscription receives no status
+      // frames (README.md:1312-1313), and unknown event types are additive.
+    },
+  })
 }
 
 // Cancels a job. force=true asks agents to force-kill running tasks; the DB

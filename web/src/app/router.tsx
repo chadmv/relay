@@ -4,6 +4,7 @@ import { RegisterScreen } from '../auth/RegisterScreen'
 import { JobsPlaceholder } from './JobsPlaceholder'
 import { JobsPage } from '../jobs/JobsPage'
 import { JobDetailPage } from '../jobs/JobDetailPage'
+import { TaskLogPage } from '../jobs/TaskLogPage'
 import { NewJobPage } from '../jobs/NewJobPage'
 import { WorkersPage } from '../workers/WorkersPage'
 import { WorkerDetailPage } from '../workers/WorkerDetailPage'
@@ -24,6 +25,7 @@ export function AppRoutes() {
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/jobs/new" element={<NewJobPage />} />
         <Route path="/jobs/:id" element={<JobDetailPage />} />
+        <Route path="/jobs/:id/tasks/:taskId" element={<TaskLogPage />} />
         <Route path="/workers" element={<WorkersPage />} />
         <Route path="/workers/:id" element={<WorkerDetailPage />} />
         <Route path="/schedules" element={<SchedulesPage />} />
