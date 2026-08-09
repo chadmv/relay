@@ -18,7 +18,7 @@ interface ResetPasswordDialogProps {
 
 // A sibling of ConfirmDialog, not a variant of it: ConfirmDialog takes a
 // text-only `body` and cannot host form fields. Both compose the same
-// DialogShell, which owns role="dialog", aria-modal, the portal, the focus trap,
+// DialogShell, which owns the labelled modal role, the portal, the focus trap,
 // the inert background, the scroll lock and the scoped Escape. The <form> lives
 // INSIDE the shell's panel and carries no dialog semantics of its own; a
 // type="submit" button still submits its nearest form regardless. First field
