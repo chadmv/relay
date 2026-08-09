@@ -6,11 +6,23 @@ import { GlassPanel } from '../../components/holo'
 // a region that fails shows what failed and offers a way to try again, and NEVER a
 // fabricated value. Same shape as the sibling tabs' error state
 // (ReservationsTab.tsx:133-141), scoped to a region rather than the page.
-export function ErrorStrip({ message, onRetry }: { message: string; onRetry: () => void }) {
+export function ErrorStrip({
+  message,
+  label,
+  onRetry,
+}: {
+  message: string
+  label: string
+  onRetry: () => void
+}) {
   return (
-    <GlassPanel className="flex flex-col items-start gap-2 p-4">
+    <GlassPanel role="alert" className="flex flex-col items-start gap-2 p-4">
       <div className="text-[12px] text-err">{message}</div>
-      <Button className="w-auto px-3 py-1 text-[12px]" onClick={onRetry}>
+      <Button
+        aria-label={`Retry ${label}`}
+        className="w-auto px-3 py-1 text-[12px]"
+        onClick={onRetry}
+      >
         Retry
       </Button>
     </GlassPanel>

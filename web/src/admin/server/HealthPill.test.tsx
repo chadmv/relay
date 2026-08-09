@@ -27,6 +27,18 @@ test('an error is UNREACHABLE in the err tone even if stale data exists', () => 
   })
 })
 
+test('an empty string status renders UNKNOWN rather than an empty label', () => {
+  expect(deriveHealthPill({ status: '' }, null)).toEqual({ text: 'UNKNOWN', tone: 'text-warn' })
+})
+
+test('non-printable characters are stripped from a non-ok status', () => {
+  // Bidi control characters (e.g. RTL override) are stripped, not rendered verbatim.
+  expect(deriveHealthPill({ status: 'degr‮aded' }, null)).toEqual({
+    text: 'DEGRADED',
+    tone: 'text-warn',
+  })
+})
+
 test('the dot is a separate node so the label is assertable on its own', () => {
   render(<HealthPill data={{ status: 'ok' }} error={null} />)
   expect(screen.getByText('HEALTHY')).toBeInTheDocument()
@@ -36,4 +48,11 @@ test('renders UNREACHABLE from an error', () => {
   render(<HealthPill data={undefined} error={new Error('500 boom')} />)
   expect(screen.getByText('UNREACHABLE')).toBeInTheDocument()
   expect(screen.queryByText('HEALTHY')).not.toBeInTheDocument()
+})
+
+test('the wrapper announces state transitions to assistive tech', () => {
+  render(<HealthPill data={{ status: 'ok' }} error={null} />)
+  const status = screen.getByRole('status')
+  expect(status).toHaveAttribute('aria-live', 'polite')
+  expect(status).toHaveTextContent('HEALTHY')
 })
