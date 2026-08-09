@@ -110,11 +110,18 @@ test('the tab never claims worker affinity the scheduler does not implement', as
 test('the confirm dialog also carries no affinity claim when open', async () => {
   const seen: URLSearchParams[] = []
   server.use(listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })))
-  const { container } = renderTab()
+  renderTab()
   await screen.findByText('gpu-farm-hold')
   await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
   await screen.findByRole('dialog')
-  const html = container.innerHTML
+  // document.body, not container: the dialog is portaled to a layer under <body>
+  // (web/src/components/dialog/dialogStack.ts), so a container-scoped sweep no
+  // longer sees it and every negative assertion below would be vacuous. The
+  // test's stated intent has always been "the confirm dialog carries no affinity
+  // claim"; `container` was only ever a proxy for "what the user sees", and the
+  // assertion's scope was narrower than its intent. Line 84's sweep, in the test
+  // where no dialog is open, is unaffected and deliberately untouched.
+  const html = document.body.innerHTML
 
   for (const claim of [
     /reserved for/i,
@@ -126,8 +133,12 @@ test('the confirm dialog also carries no affinity claim when open', async () => 
   ]) {
     expect(html).not.toMatch(claim)
   }
-  // Positive control on the same instrument: the dialog DOES carry real copy.
-  expect(html).toMatch(/general dispatch pool/i)
+  // Positive control on the same instrument, on a phrase that exists ONLY in the
+  // dialog body (ReservationsTab.tsx:45). The previous control was
+  // /general dispatch pool/i, which also matches the tab's own footnote at
+  // ReservationsTab.tsx:253 - so it stayed green under exactly the scope error it
+  // existed to catch.
+  expect(html).toMatch(/tasks already running on them are unaffected/i)
 })
 
 test('shows the loading skeleton, then rows', async () => {
