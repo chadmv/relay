@@ -499,3 +499,100 @@ test('closing a dialog returns focus to the control that opened it', async () =>
 
   expect(archive).toHaveFocus()
 })
+
+// Every direct child of <body> that is not the dialog layer. Defined structurally
+// rather than as #root: in production the app is mounted in #root, but under
+// React Testing Library it lives in an unnamed container div, so an assertion
+// keyed on #root would be vacuously green here while proving nothing.
+function backgroundNodes(): HTMLElement[] {
+  return Array.from(document.body.children).filter(
+    (el) => !el.hasAttribute('data-dialog-layer'),
+  ) as HTMLElement[]
+}
+
+test('the background stays inert and the page stays locked until the LAST dialog closes', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  await screen.findByRole('dialog')
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Archive ada@studio.dev', hidden: true }),
+  )
+  expect(screen.getAllByRole('dialog')).toHaveLength(2)
+
+  // Control on the instrument itself: the loops below assert over a list, and an
+  // empty list satisfies every one of them.
+  expect(backgroundNodes().length).toBeGreaterThan(0)
+  for (const el of backgroundNodes()) {
+    expect(el).toHaveAttribute('inert')
+    expect(el).toHaveAttribute('aria-hidden', 'true')
+  }
+  expect(document.body.style.overflow).toBe('hidden')
+
+  await userEvent.keyboard('{Escape}')
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+
+  // One dialog is still open, so NOTHING global may be released yet. A cleanup
+  // that restores unconditionally instead of deriving from the post-removal stack
+  // unlocks the page and un-inerts the background while a modal is on screen.
+  expect(backgroundNodes().length).toBeGreaterThan(0)
+  for (const el of backgroundNodes()) {
+    expect(el).toHaveAttribute('inert')
+    expect(el).toHaveAttribute('aria-hidden', 'true')
+  }
+  expect(document.body.style.overflow).toBe('hidden')
+
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  for (const el of backgroundNodes()) {
+    expect(el).not.toHaveAttribute('inert')
+    expect(el).not.toHaveAttribute('aria-hidden')
+  }
+  expect(document.body.style.overflow).toBe('')
+  // The layer leaves <body> too, so the child list returns to exactly what it was
+  // and nothing leaks between tests.
+  expect(document.querySelector('[data-dialog-layer]')).toBeNull()
+})
+
+test('closing the LOWER dialog leaves the upper one open, focused and still dismissible', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  const reset = await screen.findByRole('dialog')
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Archive ada@studio.dev', hidden: true }),
+  )
+  expect(screen.getAllByRole('dialog')).toHaveLength(2)
+
+  // Dismiss the one UNDERNEATH. This is the exact shape a stack.pop() teardown
+  // gets wrong: it would remove the ARCHIVE dialog's entry instead, leaving the
+  // reset dialog's dead id topmost, after which Escape reaches nothing.
+  // Scoped with querySelector rather than `within` so this file's import block
+  // stays byte-identical.
+  const cancelInReset = Array.from(reset.querySelectorAll('button')).find(
+    (b) => b.textContent === 'Cancel',
+  ) as HTMLButtonElement
+  expect(cancelInReset).toBeInTheDocument()
+  await userEvent.click(cancelInReset)
+
+  const survivors = screen.getAllByRole('dialog')
+  expect(survivors).toHaveLength(1)
+  expect(survivors[0]).toHaveAccessibleName('Archive ada@studio.dev?')
+  // Focus did not escape to <body> behind a still-open modal.
+  expect(survivors[0].contains(document.activeElement)).toBe(true)
+
+  // And the survivor is genuinely still topmost, so Escape still reaches it.
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
