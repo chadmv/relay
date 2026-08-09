@@ -44,10 +44,15 @@ export type WorkerSort =
   | 'last_seen_at'
   | '-last_seen_at'
 
-// First page only. limit=50 is the server default, passed explicitly so the
-// client's page size is self-documenting and decoupled from server changes.
-export function listWorkers(sort: WorkerSort): Promise<WorkersPage> {
-  const q = new URLSearchParams({ sort, limit: '50' })
+// First page only. `limit` defaults to 50 (the server default) so every existing
+// caller keeps its exact URL - useWorkers (useWorkers.ts:10) and the workers page
+// are unchanged by this parameter. The admin reservation worker picker passes 200,
+// the server's maxLimit (internal/api/pagination.go:207); a value outside [1, 200]
+// is a 400 from parsePage (:244), not a clamp, so pass literals, never a computed
+// number. Cursor paging is deliberately still not exposed here - see
+// web/src/admin/reservations/useWorkerOptions.ts for the ceiling this leaves.
+export function listWorkers(sort: WorkerSort, limit = 50): Promise<WorkersPage> {
+  const q = new URLSearchParams({ sort, limit: String(limit) })
   return apiFetch<WorkersPage>(`/workers?${q}`)
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { formatRelativeTime, formatTimeUntil } from './time'
+import { formatDateTime, formatRelativeTime, formatTimeUntil } from './time'
 
 describe('formatRelativeTime', () => {
   const now = new Date('2026-06-03T12:00:00Z')
@@ -68,5 +68,51 @@ describe('formatTimeUntil', () => {
   test('a 1ms-past instant still reads expired', () => {
     const justPast = new Date(now.getTime() - 1).toISOString()
     expect(formatTimeUntil(justPast, now)).toBe('expired')
+  })
+})
+
+describe('formatDateTime', () => {
+  // TZ-INDEPENDENT BY CONSTRUCTION. The input is built from LOCAL Date components
+  // and the expected string spells out those same components, so this holds in
+  // every runner timezone. A test that asserted a literal against a 'Z' input
+  // would pass only in a UTC CI, which is worse than no test at all.
+  test('renders an instant as local YYYY-MM-DD HH:MM', () => {
+    const local = new Date(2026, 7, 9, 14, 5) // 2026-08-09 14:05 LOCAL
+    expect(formatDateTime(local.toISOString())).toBe('2026-08-09 14:05')
+  })
+
+  test('zero-pads month, day, hour and minute', () => {
+    const local = new Date(2026, 0, 3, 9, 7) // 2026-01-03 09:07 LOCAL
+    expect(formatDateTime(local.toISOString())).toBe('2026-01-03 09:07')
+  })
+
+  test('midnight is 00:00, not 24:00 and not blank', () => {
+    const local = new Date(2026, 11, 31, 0, 0)
+    expect(formatDateTime(local.toISOString())).toBe('2026-12-31 00:00')
+  })
+
+  test('the shape is fixed, so it is not toLocaleString output', () => {
+    // toLocaleString would emit '8/9/2026, 2:05:00 PM' under en-US and something
+    // else entirely under another ICU locale. This asserts the invariant shape.
+    const local = new Date(2026, 7, 9, 14, 5)
+    expect(formatDateTime(local.toISOString())).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+  })
+
+  test('positive control: off UTC the local rendering really does differ from the ISO text', () => {
+    // Proves the first test is exercising a conversion rather than an accidental
+    // pass-through. The control is on the TEST DATA, not on the function: for this
+    // same instant the raw ISO text only reads '2026-01-15 09:30' at UTC+0.
+    const local = new Date(2026, 0, 15, 9, 30)
+    expect(formatDateTime(local.toISOString())).toBe('2026-01-15 09:30')
+    const isoText = local.toISOString().slice(0, 16).replace('T', ' ')
+    if (local.getTimezoneOffset() !== 0) {
+      expect(isoText).not.toBe('2026-01-15 09:30')
+    }
+  })
+
+  test('a nanosecond-precision RFC3339 timestamp parses (Go marshals time.Time this way)', () => {
+    const local = new Date(2026, 7, 9, 14, 5)
+    const withNanos = local.toISOString().replace('.000Z', '.123456789Z')
+    expect(formatDateTime(withNanos)).toBe('2026-08-09 14:05')
   })
 })

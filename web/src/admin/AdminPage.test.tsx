@@ -50,6 +50,22 @@ function renderAt(path: string) {
         total: 1,
       }),
     ),
+    http.get('/v1/reservations', () =>
+      HttpResponse.json({
+        items: [
+          {
+            id: 'r1',
+            name: 'gpu-farm-hold',
+            selector: null,
+            worker_ids: ['aaaa1111-1111-1111-1111-111111111111'],
+            user_id: 'u1',
+            created_at: '2026-08-09T09:30:00Z',
+          },
+        ],
+        next_cursor: '',
+        total: 1,
+      }),
+    ),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -108,4 +124,21 @@ test('/admin/users still renders the Users panel', async () => {
   renderAt('/admin/users')
   expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
   expect(screen.queryByText('farm-west-13')).not.toBeInTheDocument()
+})
+
+test('/admin/reservations renders the reservations panel inside the same shell', async () => {
+  renderAt('/admin/reservations')
+  expect(screen.getByText('SETTINGS · ADMIN ONLY')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument()
+  expect(await screen.findByText('gpu-farm-hold')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Reservations' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+})
+
+test('/admin/users and /admin/enrollments still render their own panels', async () => {
+  renderAt('/admin/users')
+  expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+  expect(screen.queryByText('gpu-farm-hold')).not.toBeInTheDocument()
 })

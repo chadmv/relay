@@ -28,6 +28,23 @@ test('requests the first page with the given sort and limit=50', async () => {
   expect(captured?.get('cursor')).toBeNull()
 })
 
+test('an explicit limit overrides the default and changes nothing else', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/workers', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  // 200 is the server's maxLimit (internal/api/pagination.go:207). A value outside
+  // [1, 200] is a 400 from parsePage (:244), not a clamp, so callers pass literals -
+  // never a computed number.
+  await listWorkers('name', 200)
+  expect(captured?.get('limit')).toBe('200')
+  expect(captured?.get('sort')).toBe('name')
+  expect(captured?.get('cursor')).toBeNull()
+})
+
 test('parses the page payload', async () => {
   server.use(
     http.get('/v1/workers', () =>
