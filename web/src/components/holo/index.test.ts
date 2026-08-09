@@ -13,6 +13,8 @@ test('barrel re-exports the built primitives', () => {
   expect(typeof holo.Table).toBe('function')
   expect(typeof holo.TableRow).toBe('function')
   expect(typeof holo.TableCell).toBe('function')
+  expect(typeof holo.ariaSort).toBe('function')
+  expect(typeof holo.sortCaret).toBe('function')
 })
 
 test('does not export the deferred Spark primitive', () => {

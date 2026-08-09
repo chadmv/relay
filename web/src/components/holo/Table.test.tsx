@@ -18,6 +18,18 @@ test('sortCaret returns a caret only for the active field', () => {
   expect(sortCaret('name', '')).toBe('')
 })
 
+test('ariaSort and sortCaret anchor the descending prefix, not any interior hyphen', () => {
+  // Field names are generic (F extends string), so a field containing a hyphen is
+  // representable even though none of today's eight consumers use one. An
+  // unanchored `sort.replace('-', '')` strips the FIRST hyphen anywhere in the
+  // string, which for an ascending sort on a hyphenated field removes the field's
+  // own interior hyphen and makes the comparison fail.
+  expect(ariaSort('a-b', 'a-b')).toBe('ascending')
+  expect(ariaSort('a-b', '-a-b')).toBe('descending')
+  expect(sortCaret('a-b', 'a-b')).toBe(' ▲')
+  expect(sortCaret('a-b', '-a-b')).toBe(' ▼')
+})
+
 test('renders a table role whose accessible name is the label', () => {
   render(<Table label="Widgets" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]} />)
   expect(screen.getByRole('table', { name: 'Widgets' })).toBeInTheDocument()
@@ -93,15 +105,15 @@ test('clicking a sortable header calls onSort with that column field', async () 
   expect(screen.queryByRole('button', { name: 'STATIC' })).not.toBeInTheDocument()
 })
 
-test('a right-aligned header carries text-right plus its own className, and a plain one carries no class attribute', () => {
+test('a right-aligned header carries text-right, and a plain one carries no class attribute', () => {
   render(
     <Table
       label="W"
       columns="grid-cols-[1fr_1fr]"
-      headers={[{ label: 'A' }, { label: 'ACT', align: 'right', className: 'pr-2' }]}
+      headers={[{ label: 'A' }, { label: 'ACT', align: 'right' }]}
     />,
   )
-  expect(screen.getByRole('columnheader', { name: 'ACT' })).toHaveClass('text-right', 'pr-2')
+  expect(screen.getByRole('columnheader', { name: 'ACT' })).toHaveClass('text-right')
   expect(screen.getByRole('columnheader', { name: 'A' })).not.toHaveAttribute('class')
 })
 
@@ -135,6 +147,51 @@ test('TableCell exposes role=cell and merges its className', () => {
   expect(cells).toHaveLength(1)
   expect(cells[0]).toHaveTextContent('only')
   expect(cells[0]).toHaveClass('text-fg-mute')
+})
+
+test('a caller-passed role does not override the role the primitive owns', () => {
+  // Typed as a loose bag so the spread compiles even though TableRowProps and
+  // TableCellProps no longer include `role` in their type: the hazard this guards
+  // is a `role` slipping through at runtime (a JS caller, a stale .d.ts, a cast),
+  // not just what today's TypeScript call sites can express.
+  const rowProps = { role: 'presentation' } as Record<string, string>
+  const cellProps = { role: 'rowheader' } as Record<string, string>
+  render(
+    <Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]}>
+      <TableRow data-testid="row" {...rowProps}>
+        <TableCell data-testid="cell" {...cellProps}>
+          x
+        </TableCell>
+      </TableRow>
+    </Table>,
+  )
+  expect(screen.getByTestId('row')).toHaveAttribute('role', 'row')
+  expect(screen.getByTestId('cell')).toHaveAttribute('role', 'cell')
+})
+
+test('a sortable header without an onSort handler throws instead of rendering a dead affordance', () => {
+  // Without this guard, a header with `field` set but no `onSort` passed to Table
+  // renders a focusable, screen-reader-announced sort button that does nothing
+  // when activated - it type-checks and looks correct but is silently broken.
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  expect(() =>
+    render(<Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'NAME', field: 'name' as const }]} />),
+  ).toThrow(/onSort/)
+  spy.mockRestore()
+})
+
+test('does not warn about duplicate React keys when two headers share a label', () => {
+  // headers is a static config array that is never reordered, so keying by index
+  // is safe; keying by h.label is not, because duplicate labels are
+  // representable (e.g. two headers legitimately both named the same thing) and
+  // would collide as React keys.
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  render(
+    <Table label="W" columns="grid-cols-[1fr_1fr]" headers={[{ label: 'DUP' }, { label: 'DUP' }]} />,
+  )
+  const dupKeyWarning = spy.mock.calls.some((args) => String(args[0]).includes('same key'))
+  expect(dupKeyWarning).toBe(false)
+  spy.mockRestore()
 })
 
 test('TableRow rendered outside a Table throws, naming both components', () => {
