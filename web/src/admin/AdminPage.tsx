@@ -3,10 +3,15 @@ import { Eyebrow } from '../components/holo'
 import { AdminTabs } from './AdminTabs'
 import { DEFAULT_ADMIN_TAB, findAdminTab } from './tabs'
 
-// The admin shell. The hi-fi's right-aligned VERSION / BUILD / DB / UPTIME strip
-// is omitted: no endpoint returns build or uptime facts (GET /v1/health returns
-// {"status":"ok"}, GET /v1/config returns only {allow_self_register}). It belongs
-// to the future Server/overview tab.
+// The admin shell. The hi-fi's right-aligned VERSION / BUILD / DB / UPTIME strip is
+// omitted, and that is a decision rather than a deferral: no endpoint returns build
+// or uptime facts (GET /v1/health returns {"status":"ok"} and does not check the
+// database; GET /v1/config returns only {allow_self_register}). The Server tab
+// (admin/server/ServerTab.tsx) ships without it for the same reason. Reviving the
+// strip requires a new admin-gated endpoint returning a hand-written ALLOWLIST of
+// non-secret config keys - see
+// docs/backlog/feature-2026-08-09-server-info-allowlist-endpoint.md - never a
+// redacted dump of os.Environ().
 export function AdminPage() {
   const { tab } = useParams()
   // No :tab segment (e.g. an exact "/admin/users" route with no dynamic param)

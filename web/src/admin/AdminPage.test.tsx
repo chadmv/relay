@@ -66,6 +66,14 @@ function renderAt(path: string) {
         total: 1,
       }),
     ),
+    http.get('/v1/jobs/stats', () =>
+      HttpResponse.json({ running: 11, queued: 22, done_24h: 33, failed_24h: 44 }),
+    ),
+    http.get('/v1/workers/stats', () =>
+      HttpResponse.json({ online: 55, stale: 66, offline: 77, disabled: 88, total: 99 }),
+    ),
+    http.get('/v1/config', () => HttpResponse.json({ allow_self_register: false })),
+    http.get('/v1/health', () => HttpResponse.json({ status: 'ok' })),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -151,4 +159,18 @@ test('/admin/enrollments still renders its own panel, not reservations', async (
   renderAt('/admin/enrollments')
   expect(await screen.findByText('farm-west-13')).toBeInTheDocument()
   expect(screen.queryByText('gpu-farm-hold')).not.toBeInTheDocument()
+})
+
+test('/admin/server renders the server panel inside the same shell and marks the pill active', async () => {
+  renderAt('/admin/server')
+  expect(screen.getByText('SETTINGS · ADMIN ONLY')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument()
+  expect(await screen.findByText('Server overview')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Server' })).toHaveAttribute('aria-current', 'page')
+})
+
+test('/admin/users still renders its own panel, not the server overview', async () => {
+  renderAt('/admin/users')
+  expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+  expect(screen.queryByText('Server overview')).not.toBeInTheDocument()
 })

@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react'
 import { EnrollmentsTab } from './enrollments/EnrollmentsTab'
 import { ReservationsTab } from './reservations/ReservationsTab'
+import { ServerTab } from './server/ServerTab'
 import { UsersTab } from './users/UsersTab'
 
 export interface AdminTab {
@@ -13,14 +14,15 @@ export interface AdminTab {
 // ABSENT on purpose: an unknown /admin/:tab segment redirects to /admin/users
 // instead of rendering an empty panel, so this slice cannot ship dead tabs.
 // Adding a tab later is one entry here - see
-// docs/backlog/feature-2026-08-08-admin-invites-tab.md,
-// docs/backlog/feature-2026-08-08-admin-server-overview-tab.md.
+// docs/backlog/feature-2026-08-08-admin-invites-tab.md, which stays blocked on a
+// GET /v1/invites that does not exist.
 // Order matches the hi-fi's tab order (Invites, still absent, sits between Users and
 // Agent enrolls).
 export const ADMIN_TABS: AdminTab[] = [
   { slug: 'users', label: 'Users', Panel: UsersTab },
   { slug: 'enrollments', label: 'Agent enrolls', Panel: EnrollmentsTab },
   { slug: 'reservations', label: 'Reservations', Panel: ReservationsTab },
+  { slug: 'server', label: 'Server', Panel: ServerTab },
 ]
 
 export const DEFAULT_ADMIN_TAB = 'users'
