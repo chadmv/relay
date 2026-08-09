@@ -67,6 +67,23 @@ export interface StreamOptions {
   fetchImpl?: typeof fetch
 }
 
+// Test-environment-only compatibility shim. Under vitest's jsdom environment,
+// `AbortController`/`AbortSignal` on globalThis are jsdom's own classes (a
+// distinct realm from Node's native fetch, which - confirmed empirically -
+// rejects a jsdom-constructed AbortSignal with this exact TypeError even with
+// zero MSW involvement, and even the npm `undici` package's own fetch rejects
+// it the same way, because the check is an `instanceof` against a class
+// reference internal to Node's bundled undici, unreachable from userland once
+// jsdom's environment setup has overwritten globalThis.AbortSignal). This NEVER
+// happens in a real browser, where these classes share one realm, and it never
+// happens in any test that injects `fetchImpl` (the seam does not validate
+// signal identity), so this fallback is dead code outside this one scenario:
+// a component test exercising useTaskLogStream's default (real fetch) path
+// through MSW, as JobDetailPage.test.tsx and TaskLogPage.test.tsx do.
+function isAbortSignalRealmMismatch(err: unknown): boolean {
+  return err instanceof TypeError && /AbortSignal/.test(err.message)
+}
+
 /**
  * Opens an authenticated Server-Sent Events stream, calling onEvent for every
  * frame. Resolves when the stream ends; rejects on a non-ok response, a transport
@@ -97,7 +114,15 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const res = await doFetch(`/v1${path}`, { headers, signal })
+  let res: Response
+  let signalForwarded = true
+  try {
+    res = await doFetch(`/v1${path}`, { headers, signal })
+  } catch (err) {
+    if (!isAbortSignalRealmMismatch(err)) throw err
+    signalForwarded = false
+    res = await doFetch(`/v1${path}`, { headers })
+  }
 
   if (res.status === 401) {
     unauthorizedListeners.forEach((fn) => fn())
@@ -125,6 +150,17 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   const parser = createSseParser()
+
+  // Only needed when the realm-mismatch fallback above skipped forwarding
+  // signal to fetch: cancelling the reader directly is a spec-valid way to
+  // abort a fetch body read, so abort still works even without fetch's own
+  // native signal wiring. Harmless to skip when the signal WAS forwarded -
+  // fetch already tears the stream down on abort in that case.
+  const onAbort = () => {
+    reader.cancel().catch(() => {})
+  }
+  if (!signalForwarded) signal.addEventListener('abort', onAbort)
+
   try {
     for (;;) {
       const { done, value } = await reader.read()
@@ -134,6 +170,7 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
       for (const frame of parser.push(decoder.decode(value, { stream: true }))) onEvent(frame)
     }
   } finally {
+    if (!signalForwarded) signal.removeEventListener('abort', onAbort)
     // cancel() closes the stream and releases the lock in one step, so an aborted
     // or abandoned stream never leaves a dangling reader.
     await reader.cancel().catch(() => {})

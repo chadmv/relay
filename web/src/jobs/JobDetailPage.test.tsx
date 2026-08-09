@@ -5,6 +5,7 @@ import { afterEach, expect, test } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '../test/setup-helpers'
+import { openSseResponse } from '../test/sseStream'
 import { AuthProvider } from '../auth/AuthProvider'
 import { clearToken, setToken } from '../lib/token'
 import { JobDetailPage } from './JobDetailPage'
@@ -90,8 +91,9 @@ test('defaults to the Spec tab and shows the selected task spec', async () => {
   expect(screen.getByText(/CUDA/)).toBeInTheDocument()
 })
 
-test('does NOT hit the log endpoint while the Spec tab is active', async () => {
+test('does NOT hit the log endpoint or open a stream while the Spec tab is active', async () => {
   let logCount = 0
+  let streamCount = 0
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
   server.use(
     http.get('/v1/tasks/:tid/logs', () => {
@@ -99,23 +101,37 @@ test('does NOT hit the log endpoint while the Spec tab is active', async () => {
       return HttpResponse.json({ items: [], next_seq: 0, total: 0 })
     }),
   )
+  server.use(
+    http.get('/v1/events', () => {
+      streamCount++
+      return openSseResponse()
+    }),
+  )
   renderDetail()
   await screen.findByText('shot-042 render')
   await new Promise((r) => setTimeout(r, 60))
   expect(logCount).toBe(0)
+  expect(streamCount).toBe(0)
 })
 
-test('switching to the Log tab fetches once and renders lines', async () => {
+test('switching to the Log tab subscribes once, backfills once, and renders lines', async () => {
   let logCount = 0
+  let streamUrl = ''
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
   server.use(
     http.get('/v1/tasks/t2/logs', () => {
       logCount++
       return HttpResponse.json({
-        items: [{ seq: 1, stream: 'stdout', content: 'rendering', created_at: '2026-07-01T00:00:00Z' }],
+        items: [{ seq: 1, stream: 'stdout', content: 'rendering\n', created_at: '2026-07-01T00:00:00Z' }],
         next_seq: 0,
         total: 1,
       })
+    }),
+  )
+  server.use(
+    http.get('/v1/events', ({ request }) => {
+      streamUrl = request.url
+      return openSseResponse()
     }),
   )
   renderDetail()
@@ -123,6 +139,10 @@ test('switching to the Log tab fetches once and renders lines', async () => {
   await userEvent.click(screen.getByRole('tab', { name: /log/i }))
   expect(await screen.findByText('rendering')).toBeInTheDocument()
   expect(logCount).toBe(1)
+  // t2 is the default selected task (the first running one) and is not terminal,
+  // so exactly one ?task_id= subscription is opened - and no token in the URL.
+  expect(streamUrl).toContain('task_id=t2')
+  expect(streamUrl).not.toMatch(/token|access_token/)
 })
 
 test('selecting a task updates aria-selected and drives the spec pane', async () => {
@@ -189,21 +209,30 @@ test('does not fabricate unbacked timing or the live-log affordances', async () 
   expect(screen.queryByRole('button', { name: /^retry$/i })).toBeNull() // no 404 -> no Retry
 })
 
-test('the Log tab shows a static/history marker, not a LIVE badge', async () => {
+test('the Log tab shows LIVE for a running task and HISTORY for a terminal one', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
   server.use(
-    http.get('/v1/tasks/t2/logs', () =>
+    http.get('/v1/tasks/:tid/logs', () =>
       HttpResponse.json({
-        items: [{ seq: 1, stream: 'stdout', content: 'rendering', created_at: '2026-07-01T00:00:00Z' }],
+        items: [{ seq: 1, stream: 'stdout', content: 'rendering\n', created_at: '2026-07-01T00:00:00Z' }],
         next_seq: 0,
         total: 1,
       }),
     ),
   )
+  server.use(http.get('/v1/events', () => openSseResponse()))
   renderDetail()
   await screen.findByText('shot-042 render')
   await userEvent.click(screen.getByRole('tab', { name: /log/i }))
-  await screen.findByText('rendering')
-  expect(screen.getByText(/static|history/i)).toBeInTheDocument()
-  expect(screen.queryByText(/^live$/i)).toBeNull()
+  // t2 (running) tails live.
+  expect(await screen.findByText('LIVE')).toBeInTheDocument()
+  expect(screen.queryByText(/static/i)).toBeNull()
+
+  // t1 is `done`: selecting it must open NO stream and settle to HISTORY.
+  const frameRow = screen
+    .getAllByRole('row')
+    .find((r) => r.textContent?.startsWith('frame-001'))!
+  await userEvent.click(frameRow)
+  expect(await screen.findByText('HISTORY')).toBeInTheDocument()
+  expect(screen.queryByText('LIVE')).toBeNull()
 })
