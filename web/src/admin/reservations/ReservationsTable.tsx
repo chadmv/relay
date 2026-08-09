@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Chip } from '../../components/holo'
+import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
 import { formatDateTime } from '../../lib/time'
 import { deriveStatus, statusTone } from './reservationStatus'
 import type { Reservation, ReservationSort, ReservationSortField } from './api'
@@ -16,23 +16,21 @@ import type { Reservation, ReservationSort, ReservationSortField } from './api'
 // The header is WORKERS, not "RESERVED FOR": the listed workers are EXCLUDED from
 // dispatch for everyone, so any possessive header would be a claim the scheduler does
 // not implement (internal/scheduler/dispatch.go:185-223).
-const COLS = 'grid grid-cols-[1.3fr_110px_1.5fr_130px_130px_110px_110px_100px]'
+const COLS = 'grid-cols-[1.3fr_110px_1.5fr_130px_130px_110px_110px_100px]'
+
+const HEADERS: TableColumn<ReservationSortField>[] = [
+  { label: 'NAME', field: 'name' },
+  { label: 'PROJECT' },
+  { label: 'WORKERS' },
+  { label: 'STARTS', field: 'starts_at' },
+  { label: 'ENDS', field: 'ends_at' },
+  { label: 'STATUS' },
+  { label: 'CREATED', field: 'created_at' },
+  { label: 'ACT.', align: 'right' },
+]
 
 const MINI = 'rounded-full border px-2.5 py-1 font-mono text-[10.5px] tracking-[0.04em] disabled:opacity-40'
 const MINI_DANGER = `${MINI} border-err/40 bg-err/10 text-err`
-
-function caret(field: ReservationSortField, sort: ReservationSort): string {
-  if (sort.replace('-', '') !== field) return ''
-  return sort.startsWith('-') ? ' ▼' : ' ▲'
-}
-
-function ariaSort(
-  field: ReservationSortField,
-  sort: ReservationSort,
-): 'ascending' | 'descending' | 'none' {
-  if (sort.replace('-', '') !== field) return 'none'
-  return sort.startsWith('-') ? 'descending' : 'ascending'
-}
 
 // Absent KEY (not null) for project/starts_at/ends_at: plain ASCII hyphen, never an
 // em dash.
@@ -49,27 +47,6 @@ interface ReservationsTableProps {
   onDelete: (reservation: Reservation) => void
 }
 
-function SortHeader({
-  label,
-  field,
-  sort,
-  onSort,
-}: {
-  label: string
-  field: ReservationSortField
-  sort: ReservationSort
-  onSort: (f: ReservationSortField) => void
-}) {
-  return (
-    <div role="columnheader" aria-sort={ariaSort(field, sort)}>
-      <button type="button" className="text-left" onClick={() => onSort(field)}>
-        {label}
-        {caret(field, sort)}
-      </button>
-    </div>
-  )
-}
-
 export function ReservationsTable({
   reservations,
   sort,
@@ -79,101 +56,85 @@ export function ReservationsTable({
   onDelete,
 }: ReservationsTableProps) {
   return (
-    <div
-      role="table"
-      aria-label="Reservations"
-      className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]"
-    >
-      <div
-        role="row"
-        className={`${COLS} border-b border-border px-[18px] py-3 font-mono text-[10px] tracking-[0.16em] text-fg-mute`}
+    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+      <Table
+        label="Reservations"
+        columns={COLS}
+        headers={HEADERS}
+        sort={sort}
+        onSort={onSort}
+        headerClassName="px-[18px] py-3 tracking-[0.16em]"
       >
-        <SortHeader label="NAME" field="name" sort={sort} onSort={onSort} />
-        <span role="columnheader">PROJECT</span>
-        <span role="columnheader">WORKERS</span>
-        <SortHeader label="STARTS" field="starts_at" sort={sort} onSort={onSort} />
-        <SortHeader label="ENDS" field="ends_at" sort={sort} onSort={onSort} />
-        <span role="columnheader">STATUS</span>
-        <SortHeader label="CREATED" field="created_at" sort={sort} onSort={onSort} />
-        <span role="columnheader" className="text-right">
-          ACT.
-        </span>
-      </div>
+        {reservations.map((r) => {
+          const status = deriveStatus(r, now)
+          // `selector` can be null (a create with no selector marshals a nil map to the
+          // literal `null`) or {} (column default) or pairs - all three must render
+          // without null/undefined reaching the DOM.
+          const pairs = r.selector ? Object.entries(r.selector) : []
+          return (
+            <TableRow
+              key={r.id}
+              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+                status === 'ENDED' ? 'opacity-[0.55]' : ''
+              }`}
+            >
+              <TableCell className="flex min-w-0 items-center gap-2">
+                <span className="truncate font-sans text-[12.5px] text-fg">{r.name}</span>
+                {pairs.length > 0 && (
+                  <Chip tone="muted">
+                    <span title={pairs.map(([k, v]) => `${k}=${v}`).join(' ')}>sel</span>
+                  </Chip>
+                )}
+              </TableCell>
 
-      {reservations.map((r) => {
-        const status = deriveStatus(r, now)
-        // `selector` can be null (a create with no selector marshals a nil map to the
-        // literal `null`) or {} (column default) or pairs - all three must render
-        // without null/undefined reaching the DOM.
-        const pairs = r.selector ? Object.entries(r.selector) : []
-        return (
-          <div
-            key={r.id}
-            role="row"
-            className={`${COLS} items-center border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
-              status === 'ENDED' ? 'opacity-[0.55]' : ''
-            }`}
-          >
-            <span role="cell" className="flex min-w-0 items-center gap-2">
-              <span className="truncate font-sans text-[12.5px] text-fg">{r.name}</span>
-              {pairs.length > 0 && (
-                <Chip tone="muted">
-                  <span title={pairs.map(([k, v]) => `${k}=${v}`).join(' ')}>sel</span>
-                </Chip>
-              )}
-            </span>
+              <TableCell className="truncate font-sans text-[12px] text-fg-mute">{r.project ?? DASH}</TableCell>
 
-            <span role="cell" className="truncate font-sans text-[12px] text-fg-mute">
-              {r.project ?? DASH}
-            </span>
+              <TableCell className="flex flex-wrap gap-1">
+                {r.worker_ids.length === 0 ? (
+                  <span className="text-[11px] text-fg-dim">none</span>
+                ) : (
+                  // No FK on worker_ids, so a link can 404 on a deleted or revoked
+                  // worker. That is the existing detail page's error state, and an
+                  // unresolvable id is itself useful information. Wrapping in a Link
+                  // rather than giving Chip an href keeps the shared primitive untouched.
+                  r.worker_ids.map((id) => (
+                    <Link key={id} to={`/workers/${id}`} title={id}>
+                      <Chip tone="muted">{id.slice(0, 8)}</Chip>
+                    </Link>
+                  ))
+                )}
+              </TableCell>
 
-            <span role="cell" className="flex flex-wrap gap-1">
-              {r.worker_ids.length === 0 ? (
-                <span className="text-[11px] text-fg-dim">none</span>
-              ) : (
-                // No FK on worker_ids, so a link can 404 on a deleted or revoked
-                // worker. That is the existing detail page's error state, and an
-                // unresolvable id is itself useful information. Wrapping in a Link
-                // rather than giving Chip an href keeps the shared primitive untouched.
-                r.worker_ids.map((id) => (
-                  <Link key={id} to={`/workers/${id}`} title={id}>
-                    <Chip tone="muted">{id.slice(0, 8)}</Chip>
-                  </Link>
-                ))
-              )}
-            </span>
+              <TableCell className="text-[10.5px] text-fg-mute">
+                {r.starts_at ? formatDateTime(r.starts_at) : DASH}
+              </TableCell>
+              <TableCell className="text-[10.5px] text-fg-mute">
+                {r.ends_at ? formatDateTime(r.ends_at) : DASH}
+              </TableCell>
 
-            <span role="cell" className="text-[10.5px] text-fg-mute">
-              {r.starts_at ? formatDateTime(r.starts_at) : DASH}
-            </span>
-            <span role="cell" className="text-[10.5px] text-fg-mute">
-              {r.ends_at ? formatDateTime(r.ends_at) : DASH}
-            </span>
+              <TableCell>
+                <Chip tone={statusTone(status)}>{status}</Chip>
+              </TableCell>
 
-            <span role="cell">
-              <Chip tone={statusTone(status)}>{status}</Chip>
-            </span>
+              <TableCell className="text-[10.5px] text-fg-mute">{r.created_at.slice(0, 10)}</TableCell>
 
-            <span role="cell" className="text-[10.5px] text-fg-mute">
-              {r.created_at.slice(0, 10)}
-            </span>
-
-            <span role="cell" className="flex justify-end">
-              {/* Row identity in the accessible name: a page of 50 buttons all named
-                  "Delete" is indistinguishable to a screen reader and to a test. */}
-              <button
-                type="button"
-                className={MINI_DANGER}
-                disabled={busy}
-                aria-label={`Delete reservation ${r.name}`}
-                onClick={() => onDelete(r)}
-              >
-                Delete
-              </button>
-            </span>
-          </div>
-        )
-      })}
+              <TableCell className="flex justify-end">
+                {/* Row identity in the accessible name: a page of 50 buttons all named
+                    "Delete" is indistinguishable to a screen reader and to a test. */}
+                <button
+                  type="button"
+                  className={MINI_DANGER}
+                  disabled={busy}
+                  aria-label={`Delete reservation ${r.name}`}
+                  onClick={() => onDelete(r)}
+                >
+                  Delete
+                </button>
+              </TableCell>
+            </TableRow>
+          )
+        })}
+      </Table>
     </div>
   )
 }
