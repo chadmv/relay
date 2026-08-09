@@ -105,3 +105,29 @@ test('exposes table, row, columnheader, and cell roles', async () => {
   const firstDataRow = screen.getAllByRole('row')[1]
   expect(within(firstDataRow).getAllByRole('cell')).toHaveLength(6)
 })
+
+test('the evict confirm scrim is portaled to <body>, not trapped inside the glass panel', async () => {
+  server.use(
+    http.get('/v1/workers/w1/workspaces', () =>
+      HttpResponse.json([
+        { source_type: 'perforce', source_key: '//depot/x', short_id: 'ws-a4f2', baseline_hash: '@1', last_used_at: '2026-06-05T00:00:00Z' },
+      ]),
+    ),
+  )
+  const { container } = renderWithQuery(<WorkspacesPanel workerId="w1" />)
+  await screen.findByText('ws-a4f2')
+  await userEvent.click(screen.getByRole('button', { name: /evict/i }))
+
+  const scrim = screen.getByRole('dialog').parentElement as HTMLElement
+  // This panel renders inside <Panel title="Source workspaces">, which composes
+  // GlassPanel and carries backdrop-blur-[8px]. An element with a backdrop-filter
+  // other than `none` becomes the containing block for its position:fixed
+  // descendants, so before the portal this `fixed inset-0` scrim was clipped to
+  // the panel box instead of covering the viewport - and the mouse path to a
+  // second dialog on WorkerDetailPage was wide open. The portal removes every
+  // ancestor stacking context by construction, for this caller and every future
+  // one.
+  expect(container.contains(scrim)).toBe(false)
+  expect(scrim.parentElement).toBe(document.querySelector('[data-dialog-layer]'))
+  expect(document.querySelector('[data-dialog-layer]')?.parentElement).toBe(document.body)
+})
