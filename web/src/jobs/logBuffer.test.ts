@@ -1,5 +1,16 @@
 import { expect, test } from 'vitest'
-import { appendEntries, createLogState, finalizePartials, visibleRows, type LogChunk } from './logBuffer'
+import {
+  appendEntries,
+  createLogState,
+  finalizePartials,
+  visibleRows,
+  MAX_LINES,
+  FOLLOW_EPSILON,
+  DROP_MARKER_TEXT,
+  markDropped,
+  shouldFollow,
+  type LogChunk,
+} from './logBuffer'
 
 function chunk(seq: number, content: string, stream: 'stdout' | 'stderr' = 'stdout'): LogChunk {
   return { seq, stream, content, created_at: '2026-08-09T14:36:25.000Z' }
@@ -151,4 +162,67 @@ test('visibleRows returns the lines array itself when there is no partial', () =
   let s = createLogState()
   s = appendEntries(s, [chunk(1, 'a\n')])
   expect(visibleRows(s)).toBe(s.lines)
+})
+
+// Non-vacuity: assert WHICH lines were retained, not just how many. A cap that
+// kept the OLDEST MAX_LINES would pass a length-only assertion.
+test('the line cap retains the newest MAX_LINES and flags eviction', () => {
+  let s = createLogState()
+  const entries: LogChunk[] = []
+  for (let i = 1; i <= MAX_LINES + 50; i++) entries.push(chunk(i, `line-${i}\n`))
+  s = appendEntries(s, entries)
+
+  expect(s.lines).toHaveLength(MAX_LINES)
+  expect(s.evicted).toBe(true)
+  expect(s.lines[0].text).toBe('line-51')
+  expect(s.lines[s.lines.length - 1].text).toBe(`line-${MAX_LINES + 50}`)
+})
+
+test('exactly MAX_LINES does not set the eviction flag', () => {
+  let s = createLogState()
+  const entries: LogChunk[] = []
+  for (let i = 1; i <= MAX_LINES; i++) entries.push(chunk(i, `line-${i}\n`))
+  s = appendEntries(s, entries)
+  expect(s.lines).toHaveLength(MAX_LINES)
+  expect(s.evicted).toBe(false)
+})
+
+test('markDropped appends a marker row and sets the dropped flag', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'before\n')])
+  s = markDropped(s)
+  s = appendEntries(s, [chunk(2, 'after\n')])
+
+  expect(s.dropped).toBe(true)
+  expect(s.lines.map((l) => [l.kind, l.text])).toEqual([
+    ['line', 'before'],
+    ['marker', DROP_MARKER_TEXT],
+    ['line', 'after'],
+  ])
+})
+
+// The marker is permanent for the session: once lines have been missed the view
+// is no longer provably complete, so silence would misrepresent an incomplete log
+// as complete.
+test('markDropped twice leaves two markers and stays dropped', () => {
+  const s = markDropped(markDropped(createLogState()))
+  expect(s.lines.filter((l) => l.kind === 'marker')).toHaveLength(2)
+  expect(s.dropped).toBe(true)
+})
+
+test('shouldFollow is true at the bottom and just inside the epsilon', () => {
+  expect(shouldFollow(1000, 2000, 1000)).toBe(true) // exactly at the bottom
+  expect(shouldFollow(1000 - FOLLOW_EPSILON, 2000, 1000)).toBe(true) // exactly at epsilon
+  expect(shouldFollow(1000 - (FOLLOW_EPSILON - 1), 2000, 1000)).toBe(true)
+})
+
+test('shouldFollow is false once scrolled further than the epsilon off the bottom', () => {
+  expect(shouldFollow(1000 - (FOLLOW_EPSILON + 1), 2000, 1000)).toBe(false)
+  expect(shouldFollow(0, 2000, 1000)).toBe(false)
+})
+
+test('shouldFollow is true for a container smaller than its viewport', () => {
+  // jsdom reports 0/0/0 for an unlaid-out element; that must not read as
+  // "scrolled away", or follow-tail would switch itself off on mount.
+  expect(shouldFollow(0, 0, 0)).toBe(true)
 })

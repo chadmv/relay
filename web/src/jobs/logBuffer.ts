@@ -205,3 +205,35 @@ export function finalizePartials(state: LogState): LogState {
     evicted: state.evicted || capped.evicted,
   }
 }
+
+/**
+ * Records that lines may have been missed: appends a permanent in-stream marker
+ * row and sets the dropped flag. The marker stays for the session even after
+ * recovery succeeds, because the view is no longer provably complete - silence
+ * here would misrepresent an incomplete log as complete, which is the exact
+ * failure today's STATIC/HISTORY label exists to avoid.
+ */
+export function markDropped(state: LogState): LogState {
+  const capped = capLines([
+    ...state.lines,
+    { key: state.nextKey, kind: 'marker', stream: 'stdout', text: DROP_MARKER_TEXT, time: '' },
+  ])
+  return {
+    ...state,
+    lines: capped.lines,
+    nextKey: state.nextKey + 1,
+    evicted: state.evicted || capped.evicted,
+    dropped: true,
+  }
+}
+
+/**
+ * Whether follow-tail should stay on given a scroll container's geometry. The
+ * whole threshold decision is extracted as a pure function because the pixel
+ * effect cannot be honestly asserted in jsdom (scrollTop/scrollHeight are 0
+ * there, so a test asserting scrollTop === scrollHeight would be vacuously
+ * green).
+ */
+export function shouldFollow(scrollTop: number, scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight - scrollTop - clientHeight <= FOLLOW_EPSILON
+}
