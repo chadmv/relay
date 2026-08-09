@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../../test/setup-helpers'
@@ -130,4 +131,137 @@ test('the footnote states the 24h proxy and that the pill is not a database prob
   const footnote = screen.getByTestId('server-footnote').textContent ?? ''
   expect(footnote).toContain('updated_at')
   expect(footnote).toContain('does not check the database')
+})
+
+const fail = (path: string) =>
+  http.get(path, () => HttpResponse.json({ error: 'boom' }, { status: 500 }))
+
+test('a jobs/stats 500 degrades ONLY the jobs section', async () => {
+  // fail(...) MUST be listed before handlers(): MSW resolves handlers registered
+  // in one server.use() call in order, first match wins, so a later handler for
+  // the same path is dead code.
+  server.use(fail('/v1/jobs/stats'), ...handlers())
+  renderTab()
+  // The fleet numbers, the chip and the pill all survive.
+  expect(await screen.findByText('55')).toBeInTheDocument()
+  expect(screen.getByText('99')).toBeInTheDocument()
+  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
+  expect(screen.getByText('HEALTHY')).toBeInTheDocument()
+  // The jobs section shows the strip, and no jobs number is on screen.
+  expect(screen.getByText('500 boom')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  expect(screen.queryByText('RUNNING')).not.toBeInTheDocument()
+  expect(screen.queryByText('11')).not.toBeInTheDocument()
+})
+
+test('Retry issues exactly one more jobs/stats request and restores the grid', async () => {
+  let calls = 0
+  server.use(
+    http.get('/v1/jobs/stats', () => {
+      calls++
+      return calls === 1
+        ? HttpResponse.json({ error: 'boom' }, { status: 500 })
+        : HttpResponse.json(JOB_STATS)
+    }),
+    ...handlers(),
+  )
+  renderTab()
+  await screen.findByText('500 boom')
+  expect(calls).toBe(1)
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(await screen.findByText('11')).toBeInTheDocument()
+  expect(screen.getByText('RUNNING')).toBeInTheDocument()
+  expect(screen.queryByText('500 boom')).not.toBeInTheDocument()
+  expect(calls).toBe(2)
+})
+
+test('a workers/stats 500 degrades ONLY the fleet section', async () => {
+  server.use(fail('/v1/workers/stats'), ...handlers())
+  renderTab()
+  expect(await screen.findByText('11')).toBeInTheDocument()
+  expect(screen.getByText('44')).toBeInTheDocument()
+  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
+  expect(screen.getByText('HEALTHY')).toBeInTheDocument()
+  expect(screen.getByText('500 boom')).toBeInTheDocument()
+  expect(screen.queryByText('ONLINE')).not.toBeInTheDocument()
+  expect(screen.queryByText('99')).not.toBeInTheDocument()
+})
+
+test('a config 500 renders NO self-registration chip in either state', async () => {
+  server.use(fail('/v1/config'), ...handlers())
+  renderTab()
+  expect(await screen.findByText('11')).toBeInTheDocument()
+  expect(screen.getByText('55')).toBeInTheDocument()
+  // Absence of BOTH as a chip (span), so a fabricated default cannot pass this
+  // test. 'DISABLED' still appears once as the FLEET KPI label, which is expected.
+  expect(screen.queryByText('ENABLED')).not.toBeInTheDocument()
+  expect(
+    screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN'),
+  ).toBe(false)
+  expect(screen.getByText('Access')).toBeInTheDocument()
+  expect(screen.getByText('500 boom')).toBeInTheDocument()
+})
+
+test('a health 500 shows UNREACHABLE and nothing else changes', async () => {
+  server.use(fail('/v1/health'), ...handlers())
+  renderTab()
+  expect(await screen.findByText('UNREACHABLE')).toBeInTheDocument()
+  for (const v of ['11', '22', '33', '44', '55', '66', '77', '88', '99']) {
+    expect(screen.getByText(v)).toBeInTheDocument()
+  }
+  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
+})
+
+test('the realistic outage: health ok while BOTH stats endpoints 500', async () => {
+  // Postgres down, server up. The pill is a listener probe, not a database probe,
+  // so HEALTHY here is CORRECT - and this test fails loudly if anyone later derives
+  // the pill from the stat queries to make it look smarter.
+  server.use(fail('/v1/jobs/stats'), fail('/v1/workers/stats'), ...handlers())
+  renderTab()
+  expect(await screen.findByText('HEALTHY')).toBeInTheDocument()
+  expect(screen.getAllByText('500 boom')).toHaveLength(2)
+  expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2)
+  expect(screen.queryByText('RUNNING')).not.toBeInTheDocument()
+  expect(screen.queryByText('ONLINE')).not.toBeInTheDocument()
+})
+
+test('all four failing still renders the header, both captions, the panel and the footnote', async () => {
+  server.use(
+    fail('/v1/jobs/stats'),
+    fail('/v1/workers/stats'),
+    fail('/v1/config'),
+    fail('/v1/health'),
+  )
+  renderTab()
+  expect(await screen.findByText('UNREACHABLE')).toBeInTheDocument()
+  expect(screen.getByText('Server overview')).toBeInTheDocument()
+  expect(screen.getByText('JOBS · GET /v1/jobs/stats')).toBeInTheDocument()
+  expect(screen.getByText('FLEET · GET /v1/workers/stats')).toBeInTheDocument()
+  expect(screen.getByText('Access')).toBeInTheDocument()
+  expect(screen.getByTestId('server-footnote')).toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(3)
+})
+
+test('a poll that fails AFTER a good load keeps the numbers and marks them stale', async () => {
+  let calls = 0
+  server.use(
+    http.get('/v1/jobs/stats', () => {
+      calls++
+      return calls === 1
+        ? HttpResponse.json(JOB_STATS)
+        : HttpResponse.json({ error: 'boom' }, { status: 500 })
+    }),
+    ...handlers(),
+  )
+  const { client } = renderTab()
+  expect(await screen.findByText('11')).toBeInTheDocument()
+
+  // Drive the second fetch explicitly rather than waiting out the 10s interval.
+  await client.refetchQueries({ queryKey: ['job-stats'] })
+
+  await waitFor(() => expect(screen.getByText('stale · last update failed')).toBeInTheDocument())
+  // The numbers are STILL on screen - a dropped poll must not blank good data.
+  expect(screen.getByText('11')).toBeInTheDocument()
+  expect(screen.getByText('44')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
 })
