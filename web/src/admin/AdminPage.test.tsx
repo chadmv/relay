@@ -137,8 +137,18 @@ test('/admin/reservations renders the reservations panel inside the same shell',
   )
 })
 
-test('/admin/users and /admin/enrollments still render their own panels', async () => {
+test('/admin/users still renders its own panel, not reservations', async () => {
   renderAt('/admin/users')
   expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+  expect(screen.queryByText('gpu-farm-hold')).not.toBeInTheDocument()
+})
+
+// L8 (review 2026-08-09): the previous test's name promised both /admin/users AND
+// /admin/enrollments but only ever rendered /admin/users - it duplicated the check
+// at line ~123 above and would still pass if /admin/enrollments regressed to
+// rendering the Reservations panel instead of its own.
+test('/admin/enrollments still renders its own panel, not reservations', async () => {
+  renderAt('/admin/enrollments')
+  expect(await screen.findByText('farm-west-13')).toBeInTheDocument()
   expect(screen.queryByText('gpu-farm-hold')).not.toBeInTheDocument()
 })

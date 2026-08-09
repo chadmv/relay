@@ -8,7 +8,13 @@ export const WORKER_PICKER_LIMIT = 200
 // Worker options for the reservation create form. Deliberately NOT useWorkers:
 //  - useWorkers polls every 3s for the live workers page; a form does not need that,
 //    and a list that reorders under the admin's cursor mid-selection is hostile.
-//  - staleTime keeps the list stable while the panel is open and across reopens.
+//  - staleTime only DELAYS a refetch for 30s; it does NOT disable
+//    refetchOnWindowFocus (the app's QueryClient does not override the TanStack
+//    default of true), so a long-idle panel can still refetch and land a `data`
+//    whose `items` no longer include a worker the admin already checked (revoked,
+//    renamed away, or simply paged past on the server). WorkerPicker handles that
+//    divergence explicitly - see the staleSelected note and removeStale() there -
+//    rather than this comment overstating that the list "stays stable".
 //
 // The key sits under the BARE ['workers'] prefix, so the shipped worker mutations
 // (useWorkerActions.ts:26, :50, :73, :82) invalidate it for free, and

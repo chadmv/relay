@@ -97,6 +97,19 @@ test('selecting and deselecting emits ids in loaded order, not click order', asy
   expect(third.onChange).toHaveBeenLastCalledWith([A.id])
 })
 
+// L9 (review 2026-08-09): individual checkboxes are correctly named, but the GROUP
+// itself had no accessible name - "Workers to reserve" was a plain <span>, invisible
+// to assistive tech navigating by landmark/group.
+test('the checkbox group has an accessible name from the visible label', async () => {
+  server.use(
+    http.get('/v1/workers', () => HttpResponse.json({ items: [A, B, C], next_cursor: '', total: 3 })),
+  )
+  renderPicker()
+  const group = await screen.findByRole('group', { name: /workers to reserve/i })
+  expect(group).toBeInTheDocument()
+  expect(screen.getAllByRole('checkbox').every((c) => group.contains(c))).toBe(true)
+})
+
 test('a selected worker stays checked and the count is shown', async () => {
   server.use(
     http.get('/v1/workers', () => HttpResponse.json({ items: [A, B, C], next_cursor: '', total: 3 })),
@@ -135,11 +148,61 @@ test('the ceiling note is ABSENT when the whole fleet is loaded (both directions
 })
 
 test('an empty fleet and a failed load both say so instead of rendering a silent empty list', async () => {
+  // L7 (review 2026-08-09): unmount between renders in the SAME test. Two live
+  // roots in one test previously passed only because the two asserted strings
+  // happen to never collide - not because the test proved isolation - the exact
+  // hazard already fixed once in the "loaded order" test above.
   server.use(http.get('/v1/workers', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })))
-  renderPicker()
+  const empty = renderPicker()
   expect(await screen.findByText('No workers are registered.')).toBeInTheDocument()
+  empty.unmount()
 
   server.use(http.get('/v1/workers', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
   renderPicker()
   expect(await screen.findByText('500 boom')).toBeInTheDocument()
+})
+
+// M1 (review 2026-08-09): the query default does not override refetchOnWindowFocus
+// (true), and staleTime only DELAYS a refetch, so an admin who alt-tabs for >30s and
+// returns can have `value` diverge from the freshly-loaded `data.items` (e.g. a
+// worker they already checked was revoked meanwhile). `toggle` used to project the
+// emitted array through the loaded `workers` array only, which silently dropped any
+// selected id no longer present the instant the admin toggled ANY other box - while
+// simply reopening the panel (no toggle) kept it, submitting a vanished id the
+// server would happily persist (no FK on worker_ids). Two opposite behaviors from
+// the same state was the bug.
+const STALE_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+
+test('a selected id no longer on the loaded page is shown as a stale selection, not hidden', async () => {
+  server.use(
+    http.get('/v1/workers', () => HttpResponse.json({ items: [A, B, C], next_cursor: '', total: 3 })),
+  )
+  renderPicker([STALE_ID])
+  await screen.findByRole('checkbox', { name: /render-01/ })
+  // Visible, not silent: the admin can see the id no longer resolves to a loaded
+  // worker rather than the count just quietly including a name nobody can see.
+  expect(screen.getByText(new RegExp(STALE_ID.slice(0, 8)))).toBeInTheDocument()
+  expect(screen.getByText(/no longer on this page/i)).toBeInTheDocument()
+  expect(screen.getByText('1 selected')).toBeInTheDocument()
+})
+
+test('toggling a different worker does not silently drop a stale selected id', async () => {
+  server.use(
+    http.get('/v1/workers', () => HttpResponse.json({ items: [A, B, C], next_cursor: '', total: 3 })),
+  )
+  const { onChange } = renderPicker([STALE_ID])
+  await userEvent.click(await screen.findByRole('checkbox', { name: /render-01/ }))
+  // A.id is loaded (goes first, in loaded order); STALE_ID has no loaded position
+  // and is appended after, preserving it rather than losing it.
+  expect(onChange).toHaveBeenLastCalledWith([A.id, STALE_ID])
+})
+
+test('the stale selection can be explicitly removed - the admin decides, nothing removes it for them', async () => {
+  server.use(
+    http.get('/v1/workers', () => HttpResponse.json({ items: [A, B, C], next_cursor: '', total: 3 })),
+  )
+  const { onChange } = renderPicker([STALE_ID, A.id])
+  await screen.findByRole('checkbox', { name: /render-01/ })
+  await userEvent.click(screen.getByRole('button', { name: new RegExp(`remove.*${STALE_ID.slice(0, 8)}`, 'i') }))
+  expect(onChange).toHaveBeenLastCalledWith([A.id])
 })

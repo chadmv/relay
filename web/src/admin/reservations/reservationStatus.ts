@@ -24,8 +24,22 @@ export function deriveStatus(
   now: Date,
 ): ReservationStatus {
   const t = now.getTime()
-  const startsMs = r.starts_at !== undefined ? new Date(r.starts_at).getTime() : undefined
-  const endsMs = r.ends_at !== undefined ? new Date(r.ends_at).getTime() : undefined
+  const rawStartsMs = r.starts_at !== undefined ? new Date(r.starts_at).getTime() : undefined
+  const rawEndsMs = r.ends_at !== undefined ? new Date(r.ends_at).getTime() : undefined
+
+  // Malformed timestamps degrade safely rather than silently. Not reachable from the
+  // Go server (which only ever emits well-formed RFC3339), but a row could be
+  // hand-edited via SQL/CLI/MCP. Without this guard, `new Date('garbage').getTime()`
+  // is NaN and EVERY comparison against it is false, so a garbage ends_at fell
+  // through every check below to ACTIVE - the single most misleading of the three
+  // outcomes (a dead/malformed row reading as "in force now"). A garbage ends_at
+  // therefore reads ENDED outright; a garbage starts_at is treated as ABSENT so it
+  // cannot itself force a false SCHEDULED, and cannot block a real ENDED read from
+  // a valid ends_at.
+  if (rawEndsMs !== undefined && Number.isNaN(rawEndsMs)) return 'ENDED'
+  const startsMs = rawStartsMs !== undefined && !Number.isNaN(rawStartsMs) ? rawStartsMs : undefined
+  const endsMs = rawEndsMs
+
   // An inverted or zero-length window (ends_at <= starts_at) can NEVER satisfy
   // ListActiveReservations regardless of `now` - comparing each bound to `now`
   // independently is not enough, because a window entirely in the future on both

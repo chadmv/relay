@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Input } from '../../components/Input'
 import { useWorkerOptions, WORKER_PICKER_LIMIT } from './useWorkerOptions'
 
@@ -17,6 +17,7 @@ interface WorkerPickerProps {
 export function WorkerPicker({ value, onChange }: WorkerPickerProps) {
   const [filter, setFilter] = useState('')
   const { data, error, isLoading } = useWorkerOptions()
+  const groupLabelId = useId()
 
   const workers = data?.items ?? []
   const total = data?.total ?? 0
@@ -31,20 +32,41 @@ export function WorkerPicker({ value, onChange }: WorkerPickerProps) {
     : workers
 
   const selected = new Set(value)
+  const loadedIds = new Set(workers.map((w) => w.id))
+  // A `value` id absent from the loaded page (revoked/renamed since selection, or a
+  // refetch simply landed a different page while the panel sat open - the query's
+  // staleTime only DELAYS a refetch, it does not disable refetchOnWindowFocus). The
+  // note below is what lets the admin decide rather than the id being silently
+  // dropped or silently kept with no visibility either way.
+  const staleSelected = data ? value.filter((id) => !loadedIds.has(id)) : []
 
   function toggle(id: string) {
-    const next = new Set(selected)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    // Emit in the LOADED (name-sorted) order, never click order, so the submitted
-    // worker_ids array is a deterministic function of the selection. Selections can
-    // only originate from `workers`, so nothing is dropped by this projection.
-    onChange(workers.filter((w) => next.has(w.id)).map((w) => w.id))
+    const alreadySelected = selected.has(id)
+    // Work from `value` itself, not from a projection through `workers` - the
+    // previous version rebuilt the whole emitted array as
+    // `workers.filter(w => next.has(w.id))`, which can only ever contain LOADED
+    // ids, so any stale id in `value` vanished the instant any OTHER box was
+    // toggled. Only ever add/remove the one id this call is actually about.
+    const nextValues = alreadySelected ? value.filter((v) => v !== id) : [...value, id]
+    // Re-sort the loaded subset into loaded (name-sorted) order so the submitted
+    // worker_ids array is a deterministic function of the selection and not of
+    // click order; ids with no loaded position (stale) are appended after,
+    // preserving them rather than losing them.
+    const known = workers.filter((w) => nextValues.includes(w.id)).map((w) => w.id)
+    const stale = nextValues.filter((v) => !loadedIds.has(v))
+    onChange([...known, ...stale])
+  }
+
+  function removeStale(id: string) {
+    onChange(value.filter((v) => v !== id))
   }
 
   return (
     <div className="mb-3">
-      <span className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-fg-mute">
+      <span
+        id={groupLabelId}
+        className="mb-1 block font-mono text-[10px] uppercase tracking-[0.16em] text-fg-mute"
+      >
         Workers to reserve
       </span>
 
@@ -64,7 +86,11 @@ export function WorkerPicker({ value, onChange }: WorkerPickerProps) {
             onChange={(e) => setFilter(e.target.value)}
             className="py-1 text-[12px]"
           />
-          <div className="mt-1.5 max-h-48 overflow-y-auto rounded-[6px] border border-border bg-black/20 px-2.5 py-1.5">
+          <div
+            role="group"
+            aria-labelledby={groupLabelId}
+            className="mt-1.5 max-h-48 overflow-y-auto rounded-[6px] border border-border bg-black/20 px-2.5 py-1.5"
+          >
             {shown.map((w) => (
               <label
                 key={w.id}
@@ -97,6 +123,24 @@ export function WorkerPicker({ value, onChange }: WorkerPickerProps) {
             )}
           </div>
         </>
+      )}
+
+      {staleSelected.length > 0 && (
+        <div className="mt-1.5 flex flex-col gap-1 rounded-[6px] border border-warn/40 bg-warn/10 px-2.5 py-1.5 font-mono text-[10.5px] text-warn">
+          {staleSelected.map((id) => (
+            <div key={id} className="flex items-center justify-between gap-2">
+              <span>{id.slice(0, 8)} - no longer on this page (may have been revoked)</span>
+              <button
+                type="button"
+                className="underline"
+                aria-label={`remove ${id.slice(0, 8)} from the selection`}
+                onClick={() => removeStale(id)}
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

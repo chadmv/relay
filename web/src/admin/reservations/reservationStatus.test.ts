@@ -74,6 +74,23 @@ test('ACTIVE agrees with the scheduler predicate on a matrix of windows', () => 
   expect(cases.filter((c) => !sqlSaysActive(c)).length).toBeGreaterThan(0)
 })
 
+// L5 (review 2026-08-09): not reachable from the Go server (which only ever emits
+// well-formed RFC3339), but defense-in-depth against a hand-edited row via SQL/CLI/
+// MCP. Without a guard, `new Date('garbage').getTime()` is NaN and EVERY comparison
+// against it is false, so a garbage ends_at fell through every check to ACTIVE - the
+// single most misleading of the three statuses (reading a dead/malformed row as "in
+// force now").
+test('a NaN ends_at (malformed timestamp) reads ENDED, never ACTIVE', () => {
+  expect(deriveStatus({ ends_at: 'not-a-real-timestamp' }, NOW)).toBe('ENDED')
+})
+
+test('a NaN starts_at is treated as absent - it neither blocks a real ENDED read nor forces a false SCHEDULED', () => {
+  expect(deriveStatus({ starts_at: 'not-a-real-timestamp' }, NOW)).toBe('ACTIVE')
+  expect(
+    deriveStatus({ starts_at: 'not-a-real-timestamp', ends_at: '2026-08-01T00:00:00Z' }, NOW),
+  ).toBe('ENDED')
+})
+
 test('tones map to the three Chip tones that exist', () => {
   expect(statusTone('ACTIVE')).toBe('accent')
   expect(statusTone('SCHEDULED')).toBe('warn')

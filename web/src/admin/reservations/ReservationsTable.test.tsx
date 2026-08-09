@@ -110,15 +110,21 @@ test('worker_ids: [] renders no chips, says none, and does not crash', () => {
 })
 
 test('a non-empty selector renders a sel chip; null and {} render none', () => {
-  renderTable([row({ id: 'p', name: 'with-sel', selector: { tier: 'gpu', site: 'west' } })])
+  // L7 (review 2026-08-09): unmount between renders in the SAME test. Without it
+  // this passed only because the two later renders happen to add zero "sel" chips
+  // of their own - not because the test proves isolation between the three roots.
+  const withSel = renderTable([row({ id: 'p', name: 'with-sel', selector: { tier: 'gpu', site: 'west' } })])
   const chip = screen.getByText('sel')
   expect(chip).toBeInTheDocument()
   expect(chip).toHaveAttribute('title', 'tier=gpu site=west')
+  withSel.unmount()
 
-  renderTable([row({ id: 'n', selector: null })])
+  const withNull = renderTable([row({ id: 'n', selector: null })])
+  expect(screen.queryByText('sel')).not.toBeInTheDocument()
+  withNull.unmount()
+
   renderTable([row({ id: 'z', selector: {} })])
-  // One chip total across the three renders: only the first row has a selector.
-  expect(screen.getAllByText('sel')).toHaveLength(1)
+  expect(screen.queryByText('sel')).not.toBeInTheDocument()
 })
 
 test('the four sortable headers call onSort with the server field names', async () => {

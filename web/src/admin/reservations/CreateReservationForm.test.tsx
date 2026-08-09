@@ -32,6 +32,19 @@ function renderForm(over: Record<string, unknown> = {}) {
 
 const submitButton = () => screen.getByRole('button', { name: 'Reserve' })
 
+// Also-worth-fixing (review 2026-08-09): the validation list used to render
+// unconditionally whenever the form was invalid, so opening a blank panel greeted
+// the admin with two error messages before they had typed anything - matching
+// neither CreateUserForm's nor CreateEnrollmentForm's pattern of only surfacing
+// validation after an interaction.
+test('validation errors do not greet the admin before any interaction', async () => {
+  renderForm()
+  await screen.findByRole('checkbox', { name: /render-01/ })
+  expect(screen.queryByText('Name is required.')).not.toBeInTheDocument()
+  expect(screen.queryByText('Select at least one worker.')).not.toBeInTheDocument()
+  expect(screen.queryByText('Ends must be after starts.')).not.toBeInTheDocument()
+})
+
 test('an empty name blocks submit, and filling it unblocks (paired positive)', async () => {
   renderForm()
   await userEvent.click(await screen.findByRole('checkbox', { name: /render-01/ }))
@@ -137,13 +150,25 @@ test('dates are sent as RFC3339 with an offset, not the raw datetime-local value
 
 test('the panel states the exclusion effect and claims no affinity', () => {
   const { container } = renderForm()
-  const text = (container.textContent ?? '').replace(/\s+/g, ' ')
-  expect(text).toMatch(/removes these workers from the dispatch pool for every job/i)
+  // L4 (review 2026-08-09): innerHTML, not textContent - textContent excludes
+  // attribute values, so a regression via aria-label/title/placeholder would pass
+  // every negative matcher below undetected.
+  const html = container.innerHTML
+  expect(html).toMatch(/removes these workers from the dispatch pool for every job/i)
   // A reservation does not route the owner's work anywhere
   // (internal/scheduler/dispatch.go:221-223).
   for (const claim of [/reserved for/i, /dedicated/i, /priority/i, /exclusive/i, /assigned to/i]) {
-    expect(text).not.toMatch(claim)
+    expect(html).not.toMatch(claim)
   }
+})
+
+// L3 (review 2026-08-09): "in force immediately" implies an immediacy the system
+// lacks - the effect only lands on the next ~30s dispatch tick, exactly as the
+// footnote and the warning box already say. The hint must not contradict them.
+test('the Starts hint does not imply an immediacy the dispatcher lacks', () => {
+  renderForm()
+  expect(screen.getByText(/in force from creation/i)).toBeInTheDocument()
+  expect(screen.queryByText(/in force immediately/i)).not.toBeInTheDocument()
 })
 
 test('a create error renders inline and Cancel is wired', async () => {

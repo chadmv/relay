@@ -115,4 +115,11 @@ describe('formatDateTime', () => {
     const withNanos = local.toISOString().replace('.000Z', '.123456789Z')
     expect(formatDateTime(withNanos)).toBe('2026-08-09 14:05')
   })
+
+  // L5 (review 2026-08-09): not reachable from the Go server today (RFC3339
+  // timestamps only), but a garbage value must degrade to a dash rather than the
+  // literal 'NaN-NaN-NaN NaN:NaN' rendering into a table cell.
+  test('a malformed timestamp renders a dash, never NaN garbage', () => {
+    expect(formatDateTime('not-a-real-timestamp')).toBe('-')
+  })
 })

@@ -5,6 +5,7 @@ import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
 import { useNow } from '../../lib/useNow'
 import { CreateReservationForm } from './CreateReservationForm'
+import { deriveStatus } from './reservationStatus'
 import { ReservationsTable } from './ReservationsTable'
 import { useReservationActions } from './useReservationActions'
 import { useReservations } from './useReservations'
@@ -22,6 +23,26 @@ function toggleSort(field: ReservationSortField, current: ReservationSort): Rese
     return (current.startsWith('-') ? field : `-${field}`) as ReservationSort
   }
   return field
+}
+
+// M2 (review 2026-08-09): the delete confirm body used to be unconditional -
+// "returns its N worker(s) to the general dispatch pool" - regardless of whether the
+// row was ever actually withheld. Only an ACTIVE row (deriveStatus, which already
+// mirrors ListActiveReservations exactly) with at least one worker was ever in the
+// dispatcher's reservedIDs set; a SCHEDULED or ENDED row's workers were never
+// withheld, and worker_ids: [] withholds nothing regardless of status, so deleting
+// either changes nothing about dispatch - it only removes the record.
+function confirmDeleteBody(r: Reservation, now: Date): string {
+  const workerCount = r.worker_ids.length
+  const status = deriveStatus(r, now)
+  const tail = 'It only removes the record. This cannot be undone.'
+  if (workerCount === 0) {
+    return `This reservation holds no workers, so deleting it does not change dispatch. ${tail}`
+  }
+  if (status !== 'ACTIVE') {
+    return `This reservation is not currently in force (${status.toLowerCase()}), so deleting it does not change dispatch - its workers are not currently withheld from the pool. ${tail}`
+  }
+  return `Deleting returns its ${workerCount} worker(s) to the general dispatch pool on the next dispatch cycle (about 30s). Tasks already running on them are unaffected. This cannot be undone.`
 }
 
 export function ReservationsTab() {
@@ -240,7 +261,7 @@ export function ReservationsTab() {
       {confirm && (
         <ConfirmDialog
           title={`Delete reservation "${confirm.name}"?`}
-          body={`Deleting returns its ${confirm.worker_ids.length} worker(s) to the general dispatch pool on the next dispatch cycle (about 30s). Tasks already running on them are unaffected. This cannot be undone.`}
+          body={confirmDeleteBody(confirm, now)}
           confirmLabel="Delete"
           destructive
           onConfirm={runConfirmed}

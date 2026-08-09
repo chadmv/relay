@@ -39,6 +39,14 @@ export function CreateReservationForm({
   const [workerIds, setWorkerIds] = useState<string[]>([])
   const [startsAt, setStartsAt] = useState('')
   const [endsAt, setEndsAt] = useState('')
+  // Also-worth-fixing (review 2026-08-09): gates the validation list, matching
+  // CreateUserForm's pattern of only surfacing a field error once the admin has
+  // done something - opening a blank panel must not greet them with two error
+  // messages before they have typed anything. One shared flag (rather than
+  // per-field touched state) is enough: every test that expects a message visible
+  // interacts with SOME field first, which is also the realistic case - an admin
+  // who has touched nothing has nothing to correct yet.
+  const [touched, setTouched] = useState(false)
 
   const trimmedName = name.trim()
   const nameMissing = trimmedName === ''
@@ -52,6 +60,7 @@ export function CreateReservationForm({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    setTouched(true)
     if (!valid) return
     const body: CreateReservationBody = { name: trimmedName, worker_ids: workerIds }
     const p = project.trim()
@@ -72,11 +81,20 @@ export function CreateReservationForm({
           id="new-reservation-name"
           placeholder="gpu-farm-hold"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setTouched(true)
+            setName(e.target.value)
+          }}
         />
       </Field>
 
-      <WorkerPicker value={workerIds} onChange={setWorkerIds} />
+      <WorkerPicker
+        value={workerIds}
+        onChange={(ids) => {
+          setTouched(true)
+          setWorkerIds(ids)
+        }}
+      />
 
       <Field
         label="Project"
@@ -87,7 +105,10 @@ export function CreateReservationForm({
           id="new-reservation-project"
           placeholder="atlas"
           value={project}
-          onChange={(e) => setProject(e.target.value)}
+          onChange={(e) => {
+            setTouched(true)
+            setProject(e.target.value)
+          }}
         />
       </Field>
 
@@ -96,13 +117,16 @@ export function CreateReservationForm({
           <Field
             label="Starts"
             htmlFor="new-reservation-starts"
-            hint="Optional. Open start = in force immediately."
+            hint="Optional. Open start = in force from creation (effective on the next dispatch cycle)."
           >
             <Input
               id="new-reservation-starts"
               type="datetime-local"
               value={startsAt}
-              onChange={(e) => setStartsAt(e.target.value)}
+              onChange={(e) => {
+                setTouched(true)
+                setStartsAt(e.target.value)
+              }}
             />
           </Field>
         </div>
@@ -116,7 +140,10 @@ export function CreateReservationForm({
               id="new-reservation-ends"
               type="datetime-local"
               value={endsAt}
-              onChange={(e) => setEndsAt(e.target.value)}
+              onChange={(e) => {
+                setTouched(true)
+                setEndsAt(e.target.value)
+              }}
             />
           </Field>
         </div>
@@ -131,7 +158,7 @@ export function CreateReservationForm({
         send your work to them instead.
       </div>
 
-      {!valid && (
+      {touched && !valid && (
         <ul className="mb-3 list-inside list-disc text-[11px] text-err">
           {nameMissing && <li>Name is required.</li>}
           {noWorkers && <li>Select at least one worker.</li>}

@@ -76,10 +76,12 @@ test('the tab never claims worker affinity the scheduler does not implement', as
   server.use(listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })))
   const { container } = renderTab()
   await screen.findByText('gpu-farm-hold')
-  // Normalized container text, not getByText: the copy spans element boundaries and
-  // whitespace, and "anywhere in the tab" is the representation a real regression
-  // would take.
-  const text = (container.textContent ?? '').replace(/\s+/g, ' ')
+  // L4 (review 2026-08-09): innerHTML, not textContent. textContent excludes
+  // attribute values entirely, so a regression adding e.g.
+  // aria-label="Reserved for ada@studio.dev" to some element would pass every
+  // negative matcher below while textContent-based sweeping could never see it -
+  // that is the representation the real failure would take, not a hypothetical one.
+  const html = container.innerHTML
 
   for (const claim of [
     /reserved for/i,
@@ -89,18 +91,43 @@ test('the tab never claims worker affinity the scheduler does not implement', as
     /assigned to/i,
     /only .{0,24} can use/i,
   ]) {
-    expect(text).not.toMatch(claim)
+    expect(html).not.toMatch(claim)
   }
 
   // Paired positive controls on the SAME instrument, so the absences above are about
   // the copy and not about a matcher that can never match.
-  expect(text).toMatch(/removes its worker_ids from the general dispatch pool/i)
-  expect(text).toMatch(/including the owner's own jobs/i)
-  expect(text).toMatch(/never read by the scheduler/i)
-  expect(text).toMatch(/next dispatch cycle/i)
-  expect(text).toMatch(/never preempt/i)
+  expect(html).toMatch(/removes its worker_ids from the general dispatch pool/i)
+  expect(html).toMatch(/including the owner's own jobs/i)
+  expect(html).toMatch(/never read by the scheduler/i)
+  expect(html).toMatch(/next dispatch cycle/i)
+  expect(html).toMatch(/never preempt/i)
   // And the column header is the neutral one.
   expect(screen.getByText('WORKERS')).toBeInTheDocument()
+})
+
+// L4 (review 2026-08-09): the sweep above never covers the confirm dialog, which is
+// new copy of its own (M2) and was never checked for an affinity claim before.
+test('the confirm dialog also carries no affinity claim when open', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })))
+  const { container } = renderTab()
+  await screen.findByText('gpu-farm-hold')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
+  await screen.findByRole('dialog')
+  const html = container.innerHTML
+
+  for (const claim of [
+    /reserved for/i,
+    /dedicated/i,
+    /priority/i,
+    /exclusive/i,
+    /assigned to/i,
+    /only .{0,24} can use/i,
+  ]) {
+    expect(html).not.toMatch(claim)
+  }
+  // Positive control on the same instrument: the dialog DOES carry real copy.
+  expect(html).toMatch(/general dispatch pool/i)
 })
 
 test('shows the loading skeleton, then rows', async () => {
@@ -259,6 +286,85 @@ test('Delete is gated: Cancel sends NO request, Confirm sends exactly one', asyn
   await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
   await waitFor(() => expect(deletes).toBe(1))
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
+// M2 (review 2026-08-09): the dialog body was unconditional - "returns its N
+// worker(s) to the general dispatch pool" - but that effect only exists for a row
+// the tab itself derives as ACTIVE. A SCHEDULED or ENDED row was never in
+// ListActiveReservations' result, so its workers were never withheld and deleting it
+// changes nothing about dispatch; the same sentence also read "returns its 0
+// worker(s)" for a worker_ids: [] row. deriveStatus is already computed for the
+// STATUS column, so the dialog reuses it rather than asserting an effect the row
+// does not have.
+test('the delete dialog for a SCHEDULED reservation says deletion has no dispatch effect', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, () => ({
+      items: [row({ starts_at: '2099-01-01T00:00:00Z' })], // far future -> SCHEDULED
+      next_cursor: '',
+      total: 1,
+    })),
+  )
+  renderTab()
+  await screen.findByText('gpu-farm-hold')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
+  const dialog = await screen.findByRole('dialog')
+  const text = (dialog.textContent ?? '').replace(/\s+/g, ' ')
+  expect(text).toMatch(/not currently in force/i)
+  expect(text).toMatch(/does not change dispatch/i)
+  expect(text).not.toMatch(/returns its \d+ worker/i)
+})
+
+test('the delete dialog for an ENDED reservation says deletion has no dispatch effect', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, () => ({
+      items: [row({ ends_at: '2000-01-01T00:00:00Z' })], // far past -> ENDED
+      next_cursor: '',
+      total: 1,
+    })),
+  )
+  renderTab()
+  await screen.findByText('gpu-farm-hold')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
+  const dialog = await screen.findByRole('dialog')
+  const text = (dialog.textContent ?? '').replace(/\s+/g, ' ')
+  expect(text).toMatch(/not currently in force/i)
+  expect(text).toMatch(/does not change dispatch/i)
+  expect(text).not.toMatch(/returns its \d+ worker/i)
+})
+
+test('the delete dialog for a reservation holding zero workers says so, not "returns its 0 worker(s)"', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, () => ({
+      items: [row({ worker_ids: [] })], // ACTIVE (open bounds) but reserves nothing
+      next_cursor: '',
+      total: 1,
+    })),
+  )
+  renderTab()
+  await screen.findByText('gpu-farm-hold')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
+  const dialog = await screen.findByRole('dialog')
+  const text = (dialog.textContent ?? '').replace(/\s+/g, ' ')
+  expect(text).toMatch(/holds no workers/i)
+  expect(text).toMatch(/does not change dispatch/i)
+  expect(text).not.toMatch(/returns its \d+ worker/i)
+})
+
+// Positive control on the same instrument: an ACTIVE row with workers still gets the
+// real-effect sentence - the branch above must not have swallowed this case too.
+test('the delete dialog for an ACTIVE reservation still states the real dispatch effect', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('gpu-farm-hold')
+  await userEvent.click(screen.getByRole('button', { name: 'Delete reservation gpu-farm-hold' }))
+  const dialog = await screen.findByRole('dialog')
+  const text = (dialog.textContent ?? '').replace(/\s+/g, ' ')
+  expect(text).toMatch(/returns its 1 worker/i)
+  expect(text).not.toMatch(/not currently in force/i)
 })
 
 test('deleting the SECOND row deletes that row, not the first', async () => {
