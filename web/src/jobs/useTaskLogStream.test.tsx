@@ -382,6 +382,59 @@ test('switching tasks opens exactly one stream each and leaves none open', async
   await waitFor(() => expect(fake.abortedCount()).toBe(4))
 })
 
+// Regression: found via a live browser check against a real backend (killing
+// relay-server mid-tail, letting the hook exhaust its 5 retries to
+// 'disconnected', then clicking the manual Reconnect control). The manual path
+// must behave like the automatic 'closed' recovery path - continue from
+// maxSeq and keep the permanent drop marker - not reset to a fresh empty
+// state. A fresh reset both re-fetches the entire history from seq 0 AND
+// silently drops the marker, which is exactly the "misrepresents an
+// incomplete log as complete" failure the marker exists to prevent.
+test('a manual reconnect after a drop preserves the marker and pages from maxSeq, not from scratch', async () => {
+  const fake = fakeSseServer()
+  const sinceSeqsRequested: (string | null)[] = []
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const since = new URL(request.url).searchParams.get('since_seq')
+      sinceSeqsRequested.push(since)
+      if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(2)], next_seq: 0, total: 2 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-1'])
+
+  // Cause a drop: one immediate re-backfill, marker inserted, maxSeq now 2.
+  fake.latest().emit('dropped', { reason: 'slow_consumer' })
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(result.current.dropped).toBe(true)
+  expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
+  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+    'line-1',
+    'line-2',
+  ])
+
+  // Manual reconnect while still live (not the terminal-task carry path).
+  await act(async () => {
+    result.current.reconnect()
+  })
+  await waitFor(() => expect(result.current.status).toBe('live'))
+
+  // The marker must still be there, and the reconnect's own backfill must page
+  // from maxSeq (2), never from scratch (null/0) - a scratch re-page would
+  // duplicate line-1 and line-2, or (per this mock) would re-request since=null.
+  expect(result.current.dropped).toBe(true)
+  expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
+  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+    'line-1',
+    'line-2',
+  ])
+  expect(sinceSeqsRequested[sinceSeqsRequested.length - 1]).toBe('2')
+})
+
 test('coalesces a burst of 50 frames into far fewer than 50 renders', async () => {
   vi.useFakeTimers()
   try {

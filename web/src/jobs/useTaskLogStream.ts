@@ -96,12 +96,17 @@ export function useTaskLogStream(
     setManualRetry((n) => n + 1)
   }, [])
 
-  // Carries log state across the effect re-run caused by `live` flipping to false
-  // (the task reached a terminal status), so the final pass is ONE
-  // ?since_seq=<maxSeq> reconciliation page instead of a full re-backfill. That
-  // closes the "did we get the tail" question without depending on frame
-  // delivery, and costs one request per completed task view. Keyed on taskId, so
-  // a task switch or a tab exit always starts clean.
+  // Carries log state across an effect re-run that should CONTINUE the same
+  // logical tail rather than start over: `live` flipping to false (the task
+  // reached a terminal status, seeding a single ?since_seq=<maxSeq>
+  // reconciliation page instead of a full re-backfill) and a manual
+  // reconnect() while still live (which must behave like the automatic
+  // 'closed' recovery path - continue from maxSeq, keep the permanent drop
+  // marker - not silently reset to a fresh empty state; found via a live
+  // browser check against a real backend, where clicking Reconnect after a
+  // disconnect wiped the marker and re-fetched history from seq 0). Keyed on
+  // taskId, and cleared whenever the effect runs disabled, so a task switch or
+  // a tab exit always starts clean - re-enabling never inherits a stale carry.
   const carry = useRef<{ taskId: string; state: LogState } | null>(null)
 
   useEffect(() => {
@@ -121,7 +126,12 @@ export function useTaskLogStream(
     let gen = 0
     let controller = new AbortController()
     let flushTimer: ReturnType<typeof setTimeout> | null = null
-    const carried = !live && carry.current?.taskId === taskId ? carry.current.state : null
+    // Carry applies whenever the previous run's state belongs to this same
+    // task, regardless of `live`: the disabled early-return above always
+    // clears carry.current first, so a genuinely fresh subscription (a task
+    // switch, or re-enabling after leaving the tab) never sees a stale carry -
+    // only a same-task re-run (terminal transition or manual reconnect) does.
+    const carried = carry.current?.taskId === taskId ? carry.current.state : null
     carry.current = null
     let logState = carried ?? createLogState()
     // maxSeq and the pre-backfill buffer live here, NOT in React state: writing
