@@ -142,6 +142,21 @@ export function useTaskLogStream(
     let openTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
     let proven = false
+    // Consecutive drop-recoveries with no intervening RESET_AFTER_MS-proven
+    // connection. `proven` itself cannot gate this: a connection that is about
+    // to be dropped again usually DOES deliver a frame first, so per-frame
+    // proof would never block a self-recurring drop storm on a high-volume
+    // task - exactly the case where it matters most. Only resets on the
+    // TIME-based proof (staying open the full RESET_AFTER_MS), not on a
+    // delivered frame; see the openTimer callback below.
+    let consecutiveDrops = 0
+    // Set the instant a backfill page fails fatally (status settles to
+    // 'error'). This is the epoch-fence shape from the backend invariants:
+    // ending the assignment (bumping gen) before aborting is not, by itself,
+    // proof against every re-entry race, so `fatal` is a second, explicit
+    // guard recover() checks - once true, nothing in this run may ever start
+    // a new recovery cycle again.
+    let fatal = false
 
     setView(logState)
     setStatus('loading')
@@ -193,7 +208,7 @@ export function useTaskLogStream(
     }
 
     function recover(myGen: number, reason: 'dropped' | 'closed') {
-      if (cancelled || myGen !== gen) return
+      if (cancelled || fatal || myGen !== gen) return
       // Bump the generation FIRST so the dying connection's remaining callbacks
       // cannot trigger a second recovery: the server writes `dropped` and then
       // closes, so both fire for one event.
@@ -209,10 +224,20 @@ export function useTaskLogStream(
       flushNow()
 
       if (reason === 'dropped') {
-        // The server told us it dropped us (README.md:1346-1348). One immediate
-        // recovery is correct: no backoff, attempt counter untouched.
-        setStatus('recovering')
-        void run(logState.maxSeq)
+        // The server told us it dropped us (README.md:1346-1348), and the
+        // first couple of these are worth an immediate, no-backoff recovery.
+        // But a drop is caused by slow consumption, which is self-recurring
+        // exactly on the high-volume tasks where it matters most - so beyond
+        // a small free allowance, a repeating drop falls through to the SAME
+        // bounded backoff ladder and 5-attempt cap that governs an abnormal
+        // close, rather than resubscribing forever with no delay.
+        consecutiveDrops++
+        if (consecutiveDrops <= 2) {
+          setStatus('recovering')
+          void run(logState.maxSeq)
+          return
+        }
+        scheduleRetry(logState.maxSeq)
         return
       }
       // A clean close is abnormal (README.md:1310-1313), so it is treated as a
@@ -250,7 +275,14 @@ export function useTaskLogStream(
             opened = true
             openTimer = setTimeout(() => {
               openTimer = null
-              if (myGen === gen) markProven()
+              if (myGen === gen) {
+                markProven()
+                // A connection that stayed open the FULL RESET_AFTER_MS
+                // without being dropped again is genuine evidence of
+                // stability - unlike a single delivered frame, which a
+                // connection about to be dropped again usually has anyway.
+                consecutiveDrops = 0
+              }
             }, RESET_AFTER_MS)
             resolveOpen()
           },
@@ -268,7 +300,15 @@ export function useTaskLogStream(
             if (opened) recover(myGen, 'closed')
           })
           .catch((err: unknown) => {
-            if (cancelled || myGen !== gen) return
+            // Always settle this promise - never leave rejectOpen/resolveOpen
+            // both uncalled. If this run has been cancelled or superseded,
+            // recover() and run()'s own catch block each re-check
+            // `cancelled`/`myGen !== gen` at their own top and no-op safely;
+            // the only thing an early return here achieves is leaving
+            // `await openStream(myGen)` suspended forever, pinning this run's
+            // whole closure (logState, pending) in memory for the page's
+            // lifetime - React's StrictMode dev double-mount hits this on
+            // every single mount.
             if (opened) recover(myGen, 'closed')
             else rejectOpen(err)
           })
@@ -317,6 +357,16 @@ export function useTaskLogStream(
           page = await getTaskLogs(taskId, since, BACKFILL_PAGE_SIZE)
         } catch (err) {
           if (cancelled || myGen !== gen) return
+          // End the assignment BEFORE aborting: the SSE stream opened by this
+          // same run is still open, and aborting it makes its promise
+          // reject/resolve on the very next microtask. Without bumping gen
+          // (and setting fatal) first, that dying connection's own
+          // .then()/.catch() would see myGen still === gen and call
+          // recover('closed'), silently overwriting this 'error' status with
+          // 'reconnecting' and inserting a bogus drop marker for lines that
+          // were never actually missed.
+          fatal = true
+          gen++
           setErrorMessage(err instanceof Error ? err.message : 'failed to load logs')
           setStatus('error')
           controller.abort()

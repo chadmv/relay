@@ -203,10 +203,27 @@ test('markDropped appends a marker row and sets the dropped flag', () => {
 
 // The marker is permanent for the session: once lines have been missed the view
 // is no longer provably complete, so silence would misrepresent an incomplete log
-// as complete.
-test('markDropped twice leaves two markers and stays dropped', () => {
+// as complete. But it must not STACK: a real recovery cycle (Task 8's
+// retry-exhaustion path, or the H2 fix's bounded drop-recovery path) can call
+// markDropped many times in a row with no intervening line, and each one must
+// be a no-op once the last retained row is already a marker - otherwise a
+// normal retry exhaustion alone leaves 6 markers, and the review's 25-drop
+// probe left 25.
+test('markDropped is a no-op when the last retained row is already a marker', () => {
   const s = markDropped(markDropped(createLogState()))
-  expect(s.lines.filter((l) => l.kind === 'marker')).toHaveLength(2)
+  expect(s.lines.filter((l) => l.kind === 'marker')).toHaveLength(1)
+  expect(s.dropped).toBe(true)
+})
+
+test('markDropped inserts a new marker again once a real line has been appended since the last one', () => {
+  let s = markDropped(createLogState())
+  s = appendEntries(s, [chunk(1, 'recovered\n')])
+  s = markDropped(s)
+  expect(s.lines.map((l) => [l.kind, l.text])).toEqual([
+    ['marker', DROP_MARKER_TEXT],
+    ['line', 'recovered'],
+    ['marker', DROP_MARKER_TEXT],
+  ])
   expect(s.dropped).toBe(true)
 })
 

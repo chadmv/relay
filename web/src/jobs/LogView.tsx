@@ -108,10 +108,13 @@ export function LogView({
   // The page cap holds the OLDEST lines of a long history, which is the wrong end
   // for a tail view (spec Decision 7). The notice says so with the real total,
   // and switches once drop-oldest has converged the view to a true tail.
+  // MAX_LINES counts reassembled LINES; `total` counts server-side log ENTRIES
+  // - two different units (code review, L5) - so the notice names them
+  // separately rather than implying a single "N of M" count of the same thing.
   const notice = evicted
     ? 'Earlier output not shown.'
     : historyTruncated
-      ? `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} lines. Live output continues below.`
+      ? `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} log entries. Live output continues below.`
       : null
 
   let body: ReactNode

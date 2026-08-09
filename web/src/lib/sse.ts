@@ -21,6 +21,13 @@ export interface SseParser {
   push(chunk: string): SseFrame[]
 }
 
+// relay's server always writes one flush per frame (internal/api/events.go:90-92)
+// and never emits an unterminated line, so this bound is never reached in
+// practice. It exists so a misbehaving proxy or server that stops emitting '\n'
+// cannot grow the pending buffer without limit for as long as the connection
+// stays open.
+const MAX_PENDING_BUFFER_CHARS = 1024 * 1024
+
 export function createSseParser(): SseParser {
   // Everything after the last '\n' seen so far. A lone trailing '\r' stays here
   // too, so a CRLF split across two chunks is joined rather than mis-parsed.
@@ -32,6 +39,17 @@ export function createSseParser(): SseParser {
     push(chunk: string): SseFrame[] {
       const frames: SseFrame[] = []
       buf += chunk
+
+      // A frame that has grown past the cap with no terminating '\n' in sight
+      // is dropped outright, along with any field already parsed for it: a
+      // partial "event:"/"data:" pair spanning megabytes with no end is not
+      // recoverable data, only unbounded memory growth.
+      if (buf.length > MAX_PENDING_BUFFER_CHARS) {
+        buf = ''
+        eventType = ''
+        dataLines = []
+      }
+
 
       let nl = buf.indexOf('\n')
       while (nl !== -1) {

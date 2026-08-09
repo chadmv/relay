@@ -151,6 +151,17 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   const decoder = new TextDecoder()
   const parser = createSseParser()
 
+  // The realm-mismatch fallback skips forwarding `signal` to fetch, so if the
+  // caller already aborted BEFORE or DURING that fallback call, the 'abort'
+  // event already fired in the past - a listener registered now would never
+  // see it, and the read loop below would await reader.read() forever with
+  // nothing telling it to stop. Handle the already-aborted case explicitly,
+  // before ever entering the loop.
+  if (!signalForwarded && signal.aborted) {
+    await reader.cancel().catch(() => {})
+    return
+  }
+
   // Only needed when the realm-mismatch fallback above skipped forwarding
   // signal to fetch: cancelling the reader directly is a spec-valid way to
   // abort a fetch body read, so abort still works even without fetch's own

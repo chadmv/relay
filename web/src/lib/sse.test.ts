@@ -70,3 +70,24 @@ test('keeps a colon inside a data value', () => {
     { event: 'message', data: '{"url":"http://x/y"}' },
   ])
 })
+
+// relay's server always writes one flush per frame (internal/api/events.go:90-92)
+// and never emits an unterminated line, so this never happens in practice. But
+// the parse buffer has no size check of its own, so a misbehaving proxy or
+// server that stops emitting '\n' would otherwise grow it without limit for as
+// long as the connection stays open.
+test('caps the pending buffer so a stream that never emits a newline cannot grow it unbounded', () => {
+  const p = createSseParser()
+  // One chunk already well past the cap, with no newline anywhere in it, so
+  // no frame ever completes and the reset must happen within this same call.
+  const runaway = 'x'.repeat(2_000_000)
+  expect(p.push(runaway)).toEqual([])
+  // Non-vacuity: prove the runaway partial was actually DROPPED, not merely
+  // that a later frame still parses. If the 2,000,000-char garbage prefix
+  // were still sitting in the buffer, the first '\n' in the combined string
+  // would land inside "...xxxxevent: x", producing a garbled `field` that is
+  // not recognised as "event" - so the frame below would come back as
+  // { event: 'message', data: 'ok' }, never { event: 'x', ... }.
+  const frames = p.push('event: x\ndata: ok\n\n')
+  expect(frames).toEqual([{ event: 'x', data: 'ok' }])
+})

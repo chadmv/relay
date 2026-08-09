@@ -110,6 +110,36 @@ test('stops at MAX_BACKFILL_PAGES, flags truncation, and still applies live fram
   await waitFor(() => expect(result.current.rows.some((r) => r.text === 'after-cap')).toBe(true))
 })
 
+// H1 regression (code review): the catch around a failing backfill page set
+// status='error' and called controller.abort() but never bumped gen, so the
+// still-open stream's own promise later rejected/resolved with myGen still
+// equal to gen, re-entering recover('closed') - inserting a bogus drop marker
+// and scheduling a retry that silently overwrote 'error' with 'reconnecting'.
+// This is the epoch-fence shape: aborting without ending the assignment
+// (bumping the generation) leaves a stale connection able to write.
+test('a failing backfill page settles to error and the dying stream cannot resurrect it', async () => {
+  const fake = fakeSseServer()
+  let logReqs = 0
+  server.use(
+    http.get('/v1/tasks/t1/logs', () => {
+      logReqs++
+      return HttpResponse.json({ error: 'task not found' }, { status: 404 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('error'))
+  // Give the aborted stream's own promise every chance to settle and try to
+  // re-enter recovery before asserting the final state stuck.
+  await tick()
+  await tick()
+  expect(result.current.status).toBe('error')
+  expect(fake.connections).toHaveLength(1)
+  expect(logReqs).toBe(1)
+  expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(false)
+})
+
 test('a 404 on the stream is a terminal error with no retry', async () => {
   const fake = fakeSseServer()
   fake.status = 404
@@ -170,6 +200,62 @@ test('an event: dropped frame produces exactly ONE re-backfill plus a permanent 
   fake.latest().emit('task_log', logEvent(500, 'recovered\n'))
   await waitFor(() => expect(result.current.rows.some((r) => r.text === 'recovered')).toBe(true))
   expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
+})
+
+// H2 regression (code review): recover(..., 'dropped') always re-subscribed
+// immediately with no cap and no delay, and nothing counted consecutive
+// drop-recoveries. Server-side drop is caused by slow consumption, so it is
+// self-recurring exactly on the high-volume tasks where it matters most - a
+// naive fix using `proven` as the gate does not work, because the recovering
+// connection usually DOES deliver a frame before being dropped again.
+test('repeated dropped frames are bounded: after 2 immediate recoveries, the backoff ladder and 5-attempt cap apply', async () => {
+  vi.useFakeTimers()
+  try {
+    const fake = fakeSseServer()
+    server.use(
+      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+    )
+    const { result } = renderHook(() =>
+      useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+    )
+
+    // Two "free" immediate recoveries, matching a single drop event's own
+    // no-delay recovery (README.md:1346-1348) - each closed well under
+    // RESET_AFTER_MS so neither ever "proves" its connection.
+    for (let i = 0; i < 2; i++) {
+      const conn = await fake.waitForConnection(i + 1)
+      conn.emit('dropped', { reason: 'slow_consumer' })
+      conn.close()
+      await advance(1)
+    }
+    // 1 initial connection + 2 recovery-opened connections.
+    expect(fake.connections).toHaveLength(3)
+    expect(result.current.status).toBe('live')
+
+    // From the 3rd drop onward a self-recurring drop must fall through to the
+    // SAME bounded backoff ladder and 5-attempt cap that governs an abnormal
+    // close - never an unbounded per-frame resubscribe. Drive it to
+    // 'disconnected' or 25 cycles, whichever comes first - 25 to match the
+    // review's own probe.
+    const retryDelays = [1000, 2000, 4000, 8000, 15000]
+    let backoffCycle = 0
+    while (result.current.status !== 'disconnected' && fake.connections.length < 25) {
+      const conn = fake.latest()
+      conn.emit('dropped', { reason: 'slow_consumer' })
+      conn.close()
+      await advance(retryDelays[Math.min(backoffCycle, retryDelays.length - 1)])
+      backoffCycle++
+      if (backoffCycle > 10) break // safety valve; must never be reached
+    }
+
+    expect(result.current.status).toBe('disconnected')
+    // Non-vacuity: an unbounded per-frame resubscribe reaches 25 connections
+    // for 25 drop cycles (confirmed empirically against the unfixed hook).
+    // The fix caps it far below that.
+    expect(fake.connections.length).toBeLessThan(10)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('reconnects at 1/2/4/8/15 s, stops after 5 attempts, and the manual control resets', async () => {
@@ -339,6 +425,72 @@ test('a task that becomes terminal mid-tail closes the stream and reconciles onc
   expect(result.current.rows.every((r) => r.kind !== 'partial')).toBe(true)
 })
 
+// L3 (code review): when a run is cancelled (unmount, task switch, or a live
+// dependency change) before its stream has ever finished opening, the old
+// code's openStream() promise settled via neither resolveOpen nor
+// rejectOpen, so run()'s `await openStream(myGen)` stayed suspended forever -
+// pinning that run's whole closure (logState, pending) in memory for the
+// page's lifetime. React's StrictMode dev double-mount hits this on every
+// mount (mount, immediate cleanup, remount).
+//
+// This is a pure memory-retention bug with no behavioural surface inside
+// jsdom/vitest, which has no heap-inspection primitive: run()'s own catch
+// block already re-checks `cancelled || myGen !== gen` and bails out
+// immediately regardless of whether openStream's promise ever settles, so
+// there is no state difference to assert either way. The closest available
+// regression guard: cancelling mid-connect, then letting the aborted fetch's
+// rejection propagate LATE (as a real browser would), must never open a new
+// connection and must never throw an unhandled rejection.
+test('cancelling a run before its stream opens settles cleanly with no zombie side effects', async () => {
+  let releaseFetch: (() => void) | null = null
+  const gate = new Promise<void>((r) => {
+    releaseFetch = r
+  })
+  let fetchCalls = 0
+  const hangingFetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    fetchCalls++
+    return new Promise<Response>((resolve, reject) => {
+      const onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'))
+      init?.signal?.addEventListener('abort', onAbort)
+      void gate.then(() => {
+        init?.signal?.removeEventListener('abort', onAbort)
+        resolve(
+          new Response(new ReadableStream(), {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+        )
+      })
+    })
+  }) as unknown as typeof fetch
+
+  const { unmount } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: hangingFetchImpl }),
+  )
+  await tick()
+  expect(fetchCalls).toBe(1)
+
+  // Unmount WHILE still connecting: cleanup sets cancelled=true and aborts.
+  unmount()
+  await tick()
+
+  let unhandled = false
+  const onUnhandled = () => {
+    unhandled = true
+  }
+  process.once('unhandledRejection', onUnhandled)
+  // Let the aborted fetch's own promise settle LATE, exactly as a real
+  // browser would once the abort actually propagates to the in-flight
+  // request.
+  releaseFetch!()
+  await tick()
+  await tick()
+  process.removeListener('unhandledRejection', onUnhandled)
+
+  expect(unhandled).toBe(false)
+  expect(fetchCalls).toBe(1) // no zombie retry as a side effect of the late settlement
+})
+
 test('switching tasks opens exactly one stream each and leaves none open', async () => {
   const fake = fakeSseServer()
   server.use(
@@ -433,6 +585,110 @@ test('a manual reconnect after a drop preserves the marker and pages from maxSeq
     'line-2',
   ])
   expect(sinceSeqsRequested[sinceSeqsRequested.length - 1]).toBe('2')
+})
+
+// L7 (code review): the carry condition broadened for the manual-reconnect-
+// while-live fix (`carry.current?.taskId === taskId`, dropping the `!live`
+// requirement) had two uncovered paths. This is the second: reconnect() on a
+// task that is, and always was, terminal (live=false from the first render,
+// never opened a stream). Debug reading only: reconnect() is UI-unreachable
+// here in practice, since LogView only renders the Reconnect control when
+// status is 'disconnected', and a `live: false` hook can never reach
+// 'disconnected' (it never attempts to open a stream at all) - but the hook
+// itself has no such guard, so a defensive test covers the call directly.
+test('a manual reconnect on an always-terminal task re-backfills from maxSeq and never opens a stream', async () => {
+  const fake = fakeSseServer()
+  const sinceSeqsRequested: (string | null)[] = []
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const since = new URL(request.url).searchParams.get('since_seq')
+      sinceSeqsRequested.push(since)
+      if (since === null) return HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, total: 2 })
+      return HttpResponse.json({ items: [], next_seq: 0, total: 2 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: false, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(sinceSeqsRequested).toHaveLength(1))
+  expect(fake.connections).toHaveLength(0) // terminal task: never opens a stream
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-1', 'line-2'])
+
+  await act(async () => {
+    result.current.reconnect()
+  })
+  await waitFor(() => expect(sinceSeqsRequested).toHaveLength(2))
+
+  // Still no stream, ever - a manual reconnect on a terminal task is just a
+  // re-backfill, never a live subscription.
+  expect(fake.connections).toHaveLength(0)
+  // Pages from maxSeq (2), never from scratch (null).
+  expect(sinceSeqsRequested[1]).toBe('2')
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-1', 'line-2'])
+})
+
+// L7 (code review): the OTHER uncovered path through the broadened carry
+// condition, and the actual live-browser scenario that exposed the original
+// H1-adjacent bug - the existing regression test above triggers reconnect()
+// while status is still 'live' (immediately after a no-backoff drop
+// recovery); this one drives the hook all the way to 'disconnected' via the
+// retry ladder FIRST, matching what a real user actually clicks Reconnect
+// against.
+test('a manual reconnect from disconnected (not just from live) preserves the marker and pages from maxSeq', async () => {
+  vi.useFakeTimers()
+  try {
+    const fake = fakeSseServer()
+    const sinceSeqsRequested: (string | null)[] = []
+    server.use(
+      http.get('/v1/tasks/t1/logs', ({ request }) => {
+        const since = new URL(request.url).searchParams.get('since_seq')
+        sinceSeqsRequested.push(since)
+        if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, total: 1 })
+        if (since === '1') return HttpResponse.json({ items: [entry(2)], next_seq: 0, total: 2 })
+        return HttpResponse.json({ items: [entry(3)], next_seq: 0, total: 3 })
+      }),
+    )
+    const { result } = renderHook(() =>
+      useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+    )
+    await advance(0)
+    expect(result.current.status).toBe('live')
+
+    // One drop: immediate, no-backoff recovery. maxSeq becomes 2, marker present.
+    fake.latest().emit('dropped', { reason: 'slow_consumer' })
+    await advance(0)
+    expect(result.current.status).toBe('live')
+    expect(result.current.dropped).toBe(true)
+
+    // Now simulate a genuine outage: every further connection attempt fails
+    // outright, so the SECOND drop's own immediate-recovery attempt fails too,
+    // and the retry ladder engages and exhausts all 5 attempts down to
+    // 'disconnected'.
+    fake.status = 500
+    fake.errorBody = { error: 'boom' }
+    fake.latest().emit('dropped', { reason: 'slow_consumer' })
+
+    const delays = [1000, 2000, 4000, 8000, 15000]
+    for (const d of delays) await advance(d)
+    expect(result.current.status).toBe('disconnected')
+    expect(result.current.dropped).toBe(true)
+    expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
+
+    // The server comes back; the user clicks Reconnect from 'disconnected'.
+    fake.status = 200
+    await act(async () => {
+      result.current.reconnect()
+    })
+    await advance(0)
+    expect(result.current.status).toBe('live')
+
+    expect(result.current.dropped).toBe(true)
+    expect(result.current.rows.some((r) => r.kind === 'marker')).toBe(true)
+    // Pages from maxSeq (2), never from scratch.
+    expect(sinceSeqsRequested[sinceSeqsRequested.length - 1]).toBe('2')
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('coalesces a burst of 50 frames into far fewer than 50 renders', async () => {

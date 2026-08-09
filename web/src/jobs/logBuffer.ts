@@ -212,8 +212,19 @@ export function finalizePartials(state: LogState): LogState {
  * recovery succeeds, because the view is no longer provably complete - silence
  * here would misrepresent an incomplete log as complete, which is the exact
  * failure today's STATIC/HISTORY label exists to avoid.
+ *
+ * A no-op when the last retained row is ALREADY a marker: a real recovery
+ * cycle can call this many times in a row with no intervening line (a normal
+ * 5-attempt retry exhaustion, or a run of bounded drop-recoveries), and
+ * without this guard each call stacks another marker - 6 markers for one
+ * ordinary disconnect, 25 for 25 drop cycles. One marker already says
+ * everything a second adjacent one would.
  */
 export function markDropped(state: LogState): LogState {
+  const last = state.lines[state.lines.length - 1]
+  if (last?.kind === 'marker') {
+    return state.dropped ? state : { ...state, dropped: true }
+  }
   const capped = capLines([
     ...state.lines,
     { key: state.nextKey, kind: 'marker', stream: 'stdout', text: DROP_MARKER_TEXT, time: '' },

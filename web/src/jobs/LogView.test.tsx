@@ -80,7 +80,10 @@ test('shows the truncation notice with real counts, then the eviction notice', (
   )
   expect(
     screen.getByText(
-      `Showing the first ${MAX_LINES.toLocaleString('en-US')} of 94,312 lines. Live output continues below.`,
+      // MAX_LINES counts reassembled LINES; total counts server-side log
+      // ENTRIES - two different units (code review, L5). Comparing "2,000 of
+      // 94,312 lines" implies they are the same unit, which they are not.
+      `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${(94312).toLocaleString('en-US')} log entries. Live output continues below.`,
     ),
   ).toBeInTheDocument()
 

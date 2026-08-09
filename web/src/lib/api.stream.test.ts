@@ -122,6 +122,88 @@ test('abort stops delivery and the transport sees the abort', async () => {
   expect(frames).toHaveLength(1) // nothing after abort
 })
 
+// L4 (code review): the realm-mismatch fallback (see api.ts's
+// isAbortSignalRealmMismatch) skips forwarding `signal` to the SECOND fetch
+// call, and instead relies on a manual signal.addEventListener('abort', ...)
+// registered AFTER that call resolves. If the caller's signal was ALREADY
+// aborted by the time that registration happens, the 'abort' event already
+// fired in the past - a listener added now never sees it - so the read loop
+// would await reader.read() forever with nothing telling it to stop.
+test('an already-aborted signal is honored even when the fallback skipped forwarding it', async () => {
+  let cancelCalled = false
+  let call = 0
+  const ac = new AbortController()
+  const fetchImpl = (async () => {
+    call++
+    if (call === 1) {
+      // Triggers apiStream's realm-mismatch fallback.
+      throw new TypeError(
+        'RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal.',
+      )
+    }
+    // The fallback's own (signal-less) call. Abort the caller's signal before
+    // returning, simulating an abort that raced ahead of this call's own
+    // resolution - the exact ordering the fix must handle.
+    ac.abort()
+    const body = new ReadableStream<Uint8Array>({
+      start() {
+        // Deliberately never enqueues and never closes: reading this stream
+        // would hang forever unless it is explicitly cancelled.
+      },
+      cancel() {
+        cancelCalled = true
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }) as unknown as typeof fetch
+
+  // Bounded: if the fix is missing this hangs forever rather than failing
+  // cleanly, and a hanging test is worse than a vacuous one. Race it against a
+  // timeout so a regression here fails fast instead of hanging the suite.
+  await Promise.race([
+    apiStream('/events?task_id=t1', { signal: ac.signal, onEvent: () => {}, fetchImpl }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('apiStream did not settle')), 4000)),
+  ])
+  expect(cancelCalled).toBe(true)
+}, 6000)
+
+// L7 (code review): the read loop decodes with `decoder.decode(value, {
+// stream: true })` specifically so a multi-byte UTF-8 character split across
+// two reader chunks is buffered and reassembled rather than corrupted - but
+// nothing exercised that until now.
+test('reassembles a multi-byte UTF-8 character split across two reader chunks', async () => {
+  let ctl!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({ start: (c) => { ctl = c } })
+  const fetchImpl = (async () =>
+    new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  ) as unknown as typeof fetch
+
+  const frames: SseFrame[] = []
+  const p = apiStream('/events?task_id=t1', {
+    signal: new AbortController().signal,
+    onEvent: (f) => frames.push(f),
+    fetchImpl,
+  })
+  await tick()
+
+  // '€' (U+20AC) encodes as the 3 bytes 0xE2 0x82 0xAC in UTF-8. Split the
+  // frame so the first chunk ends with only the FIRST byte of that sequence,
+  // and the second chunk carries the remaining two bytes plus the rest of the
+  // frame (data field close, blank line).
+  const full = new TextEncoder().encode('event: x\ndata: price: 5€\n\n')
+  const splitAt = full.indexOf(0xe2)
+  ctl.enqueue(full.slice(0, splitAt + 1))
+  await tick()
+  expect(frames).toHaveLength(0) // no complete frame yet, and no decode crash
+  ctl.enqueue(full.slice(splitAt + 1))
+  await tick()
+  ctl.close()
+  await p
+
+  expect(frames).toHaveLength(1)
+  expect(frames[0].data).toBe('price: 5€')
+})
+
 // The default fetchImpl path, through MSW, so the seam cannot hide a broken
 // default. These two do not depend on incremental delivery.
 //
