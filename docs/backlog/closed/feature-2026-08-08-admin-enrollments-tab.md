@@ -1,8 +1,10 @@
 ---
 title: "Admin console: Agent enrollments tab (create + list)"
 type: feature
-status: open
+status: closed
 created: 2026-08-08
+closed: 2026-08-09
+resolution: fixed
 priority: high
 source: carved from feature-2026-06-26-admin-console-pages during the 2026-08-08 admin-console-shell-users-tab slice
 ---
@@ -63,3 +65,52 @@ columns are therefore unbacked and must be omitted rather than faked:
 
 There is also no per-row revoke action until the revocation item lands; the Holo's action cell copy
 ("consumed on first agent connect") is informational and can ship as-is.
+
+## Resolution
+Fixed 2026-08-09 (admin-enrollments-tab). The second admin-console tab, plugging into the registry
+the shell shipped with earlier the same day: create an agent-enrollment token, and list the
+unconsumed unexpired ones. Frontend-only; web suite 530 -> 617 tests.
+
+**The new piece was the token reveal.** `POST` returns a token shown clear-text exactly once and
+unrecoverable afterward, so `TokenRevealDialog` is a **shared** component - the Invites tab needs the
+identical surface and it carries the security invariants - while the create form stays tab-local,
+since the fields, TTLs and endpoint differ and the hi-fi's shared `isInvite` flag is the rot pattern.
+
+Keeping the token out of every store took more than clearing component state. TanStack retains a
+mutation's `data` and `variables` for the mutation's lifetime, and `reset()` only detaches the
+observer - it does **not** delete the underlying `Mutation` from the cache, whose default `gcTime` is
+5 minutes. So the create mutation sets `gcTime: 0`. Verified against library source during review:
+`reset()` -> `removeObserver` -> `scheduleGc()`, and `optionalRemove` removes only when
+`observers.length === 0` and the status is settled, so `gcTime: 0` is both necessary and sufficient
+and cannot evict while pending.
+
+**Ships with no revoke control**, following the Users tab's precedent: `DELETE
+/v1/agent-enrollments/{id}` does not exist and rendering a guaranteed-failing button is a dead
+control. That endpoint stays [[feature-2026-06-26-agent-enrollment-revocation]], since adding it
+makes this a backend slice carrying an integration requirement - revoking must not disturb an
+already-enrolled worker. Blast radius meanwhile is bounded by single-use consumption, the TTL, and
+`DELETE /v1/workers/{id}/token`.
+
+Also omitted, none of them supportable by the list response: a TOKEN PREFIX column, CREATED BY, and
+a CONSUMED status - every query filters `consumed_at IS NULL AND expires_at > NOW()`, so consumed and
+expired rows simply vanish.
+
+Three claims in this item were wrong and were corrected at spec time: it named the create form as the
+reveal surface, so the reveal was actually undesigned and deferred to a "success toast" existing
+nowhere in the handoff or the app; it omitted the mandatory request body and the 60s minimum TTL; and
+it claimed two derivable enrollment states where three are observable. Worth recording that the same
+agent authored both the item and the correction - verifying a proposal against the code matters even
+when the proposal is your own.
+
+Review returned 0 high / 2 medium / 5 low. The two mediums are worth remembering: the reveal dialog
+**stole focus back every 60 seconds** (its focus effect depended on an inline `onDone` whose identity
+changed each render, and the tab re-renders on a `useNow(60_000)` tick), so a keyboard admin who
+tabbed to Done and paused to read the warning got nothing on Enter - with Escape as the plausible
+next keystroke, permanently destroying the credential. And the shared leak checker had the exact
+blind spot it was written to close, falling back to `JSON.stringify` for plain objects so
+`console.error({err: new Error(token)})` passed.
+
+`hostname_hint` is absent rather than null when unset, so its type is honestly optional and the table
+renders a plain hyphen. Timestamps are RFC3339-nanosecond and are parsed, never string-compared.
+Verified live against a real backend: the token is absent from the DOM, both web storages, every
+request URL, and the console after the dialog closes.
