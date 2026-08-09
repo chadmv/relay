@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
 import { JobsTable } from './JobsTable'
@@ -77,4 +77,22 @@ test('renders a footer slot inside the table surface when provided', () => {
   const surface = screen.getByTestId('jobs-table')
   const footer = screen.getByText('FOOTER-MARKER')
   expect(surface).toContainElement(footer)
+})
+
+test('exposes table, row, columnheader, and cell roles', () => {
+  renderTable(jobs)
+  expect(screen.getByRole('table', { name: 'Jobs' })).toBeInTheDocument()
+  // 1 header row + 2 data rows.
+  expect(screen.getAllByRole('row')).toHaveLength(3)
+  // ID, NAME, STATUS, PROGRESS, STARTED, DUR, OWNER - one per grid track.
+  expect(screen.getAllByRole('columnheader')).toHaveLength(7)
+  // 7 columns x 2 rows. The count is load-bearing: getByRole('table') alone passes
+  // on a partial migration where the wrapper got a role and the rows did not.
+  expect(screen.getAllByRole('cell')).toHaveLength(14)
+  // Structural, not just a page-global count: cells emitted OUTSIDE the
+  // role="table" subtree (the invalid-child hazard a footer or banner would be)
+  // would still satisfy the counts above if they happened to sum correctly, so
+  // this pins the first data row's cells to that row specifically.
+  const firstDataRow = screen.getAllByRole('row')[1]
+  expect(within(firstDataRow).getAllByRole('cell')).toHaveLength(7)
 })

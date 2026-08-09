@@ -1,11 +1,20 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { Chip } from '../components/holo'
+import { Chip, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import { formatRelativeTime } from './liveness'
 import { useWorkerActions } from './useWorkerActions'
 import { useWorkerWorkspaces } from './useWorkerWorkspaces'
 
-const COLS = 'grid grid-cols-[120px_90px_1fr_120px_90px_90px]'
+const COLS = 'grid-cols-[120px_90px_1fr_120px_90px_90px]'
+
+const HEADERS: TableColumn[] = [
+  { label: 'SHORT ID' },
+  { label: 'TYPE' },
+  { label: 'SOURCE KEY' },
+  { label: 'BASELINE' },
+  { label: 'LAST USED' },
+  { label: 'ACTIONS', align: 'right' },
+]
 
 // Admin-only source workspaces table with per-row evict. Rendered inside the
 // page's Panel (which supplies the glass frame and the "Source workspaces"
@@ -26,34 +35,31 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      <div className={`${COLS} border-b border-border px-4 py-2 font-mono text-[10px] tracking-wider text-fg-mute`}>
-        <span>SHORT ID</span>
-        <span>TYPE</span>
-        <span>SOURCE KEY</span>
-        <span>BASELINE</span>
-        <span>LAST USED</span>
-        <span className="text-right">ACTIONS</span>
-      </div>
+      {/* aria-label matches the visible title on the page Panel that wraps this. */}
+      <Table label="Source workspaces" columns={COLS} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+        {rows.map((ws) => (
+          <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
+            <TableCell className="text-fg">{ws.short_id}</TableCell>
+            <TableCell className="text-fg-mute">{ws.source_type}</TableCell>
+            <TableCell className="truncate text-fg-mute">{ws.source_key}</TableCell>
+            <TableCell className="text-fg-mute">{ws.baseline_hash}</TableCell>
+            <TableCell className="text-fg-mute">{formatRelativeTime(ws.last_used_at)}</TableCell>
+            <TableCell className="flex justify-end">
+              <Chip tone="accent" onClick={evict.isPending ? undefined : () => setConfirmId(ws.short_id)}>
+                Evict
+              </Chip>
+            </TableCell>
+          </TableRow>
+        ))}
+      </Table>
+
+      {/* The empty state, the error banner and the dialog are siblings of the table,
+          never children: none of them is a valid child of role="table". The empty
+          state only renders when there are no rows, so it still appears directly
+          below the header row. */}
       {!isLoading && rows.length === 0 && (
         <div className="px-4 py-3 text-[12px] text-fg-mute">No workspaces.</div>
       )}
-      {rows.map((ws) => (
-        <div
-          key={ws.short_id}
-          className={`${COLS} items-center border-b border-border/40 px-4 py-2 font-mono text-[11px]`}
-        >
-          <span className="text-fg">{ws.short_id}</span>
-          <span className="text-fg-mute">{ws.source_type}</span>
-          <span className="truncate text-fg-mute">{ws.source_key}</span>
-          <span className="text-fg-mute">{ws.baseline_hash}</span>
-          <span className="text-fg-mute">{formatRelativeTime(ws.last_used_at)}</span>
-          <span className="flex justify-end">
-            <Chip tone="accent" onClick={evict.isPending ? undefined : () => setConfirmId(ws.short_id)}>
-              Evict
-            </Chip>
-          </span>
-        </div>
-      ))}
 
       {evict.error ? (
         <div className="mx-4 my-2 rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">

@@ -1,8 +1,10 @@
 ---
 title: Extract a shared accessible-table primitive - 5 tables duplicate the pattern and 3 lack it entirely
 type: idea
-status: open
+status: closed
 created: 2026-06-05
+closed: 2026-08-09
+resolution: fixed
 priority: medium
 source: 2026-06-05 workers-table-aria-semantics retro; re-measured 2026-08-09
 ---
@@ -92,3 +94,35 @@ Priority raised low -> medium on 2026-08-09. Not because extraction became more 
 because three surfaces silently shipped without semantics while this sat open - which is what the
 item was filed to prevent. The cost also grows monotonically: every new table is another hand-wired
 copy, and every future a11y fix is an eight-place change.
+
+## Resolution
+Shipped 2026-08-09 (autopilot, shared-accessible-table-primitive). `web/src/components/holo/Table.tsx`
+provides Table + TableRow + TableCell with declarative header config and the grid template carried on
+a React context, so the header and body cannot be put out of agreement by hand. All eight grid
+pseudo-tables consume it, including the three that had no table semantics at all (JobsTable,
+SchedulesTable, WorkspacesPanel) - the correctness half of this item. `ariaSort` and `sortCaret` exist
+once, replacing four duplicated pairs plus ReservationsTable's local SortHeader.
+
+The primitive deliberately renders no frame: the caller keeps its wrapper, which made the migration
+visually neutral across four different frame styles and kept footers, error banners and dialogs inside
+the visual surface but outside the `role="table"` subtree, where they would be invalid children.
+
+Neutrality was proved rather than asserted: the five already-roled tables' test files are byte-identical
+to their pre-migration versions (a zero-line `git diff`), so the refactor could not have quietly
+redefined the semantics it was preserving. The three newly-roled tables got RED-proven role/row/
+columnheader/cell count tests plus a structural within-row assertion. `WorkerDetailPage.test.tsx` was
+the one sanctioned edit, since its page-global "no table anywhere" assertion passed only because of the
+defect this work fixed.
+
+Acceptance criterion 3 was corrected during specification: "no file declares a COLS constant the
+primitive could own" is unsatisfiable, because Tailwind v4's static scan requires the grid-template
+literal to stay in the consumer file. Restated and met as: declared once, applied to one element,
+passed as `columns`.
+
+Review: 0 high; all three lenses independently found the same top issue (rest props spread after
+`role`, letting a caller strip the semantics the primitive exists to guarantee). Fixed by spreading
+first and by typing the props as `Omit<..., 'role' | 'dangerouslySetInnerHTML'>`. Suite 761 -> 780
+tests. Three a11y follow-ups filed rather than folded in:
+[[idea-2026-08-09-tasks-table-grid-role-selection]],
+[[idea-2026-08-09-table-accessible-name-consistency]],
+[[idea-2026-08-09-sort-caret-in-accessible-name]].
