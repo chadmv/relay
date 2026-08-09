@@ -121,8 +121,13 @@ test('the reservations panel contains no fabricated reservation rows', async () 
   server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
   renderDetail(true)
   expect(await screen.findByText('no per-worker reservation lookup yet')).toBeInTheDocument()
-  expect(screen.queryByRole('row')).not.toBeInTheDocument()
-  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  // Scoped, not page-global: the admin Source workspaces table is a real table and
+  // with no workspaces it contributes exactly its header row. A fabricated
+  // reservations table would show up here as a second table or as extra rows.
+  const tables = screen.getAllByRole('table')
+  expect(tables).toHaveLength(1)
+  expect(tables[0]).toHaveAccessibleName('Source workspaces')
+  expect(screen.getAllByRole('row')).toHaveLength(1)
 })
 
 test('renders CPU/memory telemetry charts', async () => {

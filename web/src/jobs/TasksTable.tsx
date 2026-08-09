@@ -1,8 +1,16 @@
-import { GlassPanel } from '../components/holo'
+import { GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
-const COLS = 'grid grid-cols-[1fr_110px_80px_120px_1fr]'
+const COLS = 'grid-cols-[1fr_110px_80px_120px_1fr]'
+
+const HEADERS: TableColumn[] = [
+  { label: 'NAME' },
+  { label: 'STATUS' },
+  { label: 'RETRY' },
+  { label: 'WORKER' },
+  { label: 'DEPS' },
+]
 
 // Tasks table. Rows are SELECTION controls, not navigation: clicking a row sets
 // the selected task that drives the Spec/Log panes. Uses aria-selected on each
@@ -20,51 +28,41 @@ export function TasksTable({
   onSelect: (id: string) => void
 }) {
   if (tasks.length === 0) {
-    return (
-      <GlassPanel className="p-4 text-[12px] text-fg-mute">No tasks.</GlassPanel>
-    )
+    return <GlassPanel className="p-4 text-[12px] text-fg-mute">No tasks.</GlassPanel>
   }
   return (
-    <GlassPanel as="div" role="table" aria-label="Tasks">
-      <div
-        role="row"
-        className={`${COLS} border-b border-border px-4 py-2 font-mono text-[10px] tracking-wider text-fg-mute`}
-      >
-        <span role="columnheader">NAME</span>
-        <span role="columnheader">STATUS</span>
-        <span role="columnheader">RETRY</span>
-        <span role="columnheader">WORKER</span>
-        <span role="columnheader">DEPS</span>
-      </div>
-      {tasks.map((t) => {
-        const c = taskStatusColor(t.status)
-        const selected = t.id === selectedTaskId
-        return (
-          <button
-            key={t.id}
-            type="button"
-            role="row"
-            aria-selected={selected}
-            onClick={() => onSelect(t.id)}
-            className={`${COLS} w-full items-center border-b border-border/40 px-4 py-2 text-left font-mono text-[11.5px] ${
-              selected ? 'border-l-2 border-accent bg-accent/[0.08]' : ''
-            }`}
-          >
-            <span role="cell" className="truncate font-sans text-[13px] text-fg">{t.name}</span>
-            <span role="cell" className={`flex items-center gap-2 ${c.text}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
-              {t.status}
-            </span>
-            <span role="cell" className="text-fg-mute">{t.retry_count}/{t.retries}</span>
-            <span role="cell" className="truncate text-fg-mute">
-              {t.worker_id ? t.worker_id.slice(0, 6) : '-'}
-            </span>
-            <span role="cell" className="truncate text-fg-mute">
-              {t.depends_on && t.depends_on.length > 0 ? t.depends_on.join(', ') : '-'}
-            </span>
-          </button>
-        )
-      })}
+    <GlassPanel as="div">
+      <Table label="Tasks" columns={COLS} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+        {tasks.map((t) => {
+          const c = taskStatusColor(t.status)
+          const selected = t.id === selectedTaskId
+          return (
+            <TableRow
+              key={t.id}
+              as="button"
+              type="button"
+              aria-selected={selected}
+              onClick={() => onSelect(t.id)}
+              className={`w-full border-b border-border/40 px-4 py-2 text-left font-mono text-[11.5px] ${
+                selected ? 'border-l-2 border-accent bg-accent/[0.08]' : ''
+              }`}
+            >
+              <TableCell className="truncate font-sans text-[13px] text-fg">{t.name}</TableCell>
+              <TableCell className={`flex items-center gap-2 ${c.text}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
+                {t.status}
+              </TableCell>
+              <TableCell className="text-fg-mute">
+                {t.retry_count}/{t.retries}
+              </TableCell>
+              <TableCell className="truncate text-fg-mute">{t.worker_id ? t.worker_id.slice(0, 6) : '-'}</TableCell>
+              <TableCell className="truncate text-fg-mute">
+                {t.depends_on && t.depends_on.length > 0 ? t.depends_on.join(', ') : '-'}
+              </TableCell>
+            </TableRow>
+          )
+        })}
+      </Table>
     </GlassPanel>
   )
 }
