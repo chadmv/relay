@@ -77,18 +77,30 @@ test('the token field is readonly, focused, and pre-selected', () => {
   expect(input.selectionEnd).toBe(TOKEN.length)
 })
 
-test('a backdrop click does NOT dismiss it, but Escape does (paired positive control)', async () => {
+test('neither a backdrop click nor Escape dismisses it - Done is the only exit (paired positive control)', async () => {
   const { props } = renderDialog()
-  const backdrop = screen.getByRole('dialog').parentElement as HTMLElement
 
+  // Escape FIRST, while the mount focus is still on the token input, so the
+  // keydown genuinely reaches the dialog panel. Done the other way round it would
+  // land on <body> after the backdrop click blurs the input, and this assertion
+  // would pass for the wrong reason. The live-instrument control - that a
+  // DialogShell with the default dismissOnEscape DOES close on Escape - lives in
+  // web/src/components/dialog/DialogShell.test.tsx.
+  expect(screen.getByLabelText('Token')).toHaveFocus()
+  await userEvent.keyboard('{Escape}')
+  expect(props.onDone).not.toHaveBeenCalled()
+
+  const backdrop = screen.getByRole('dialog').parentElement as HTMLElement
   await userEvent.click(backdrop)
-  // A stray click must never destroy the only copy of the credential.
+  // A stray click must never destroy the only copy of the credential, and neither
+  // must a reflexive Escape: dismissal here IS the destructive act.
   expect(props.onDone).not.toHaveBeenCalled()
   expect(screen.getByLabelText('Token')).toHaveValue(TOKEN)
 
-  // Positive control: something CAN close it, so the assertion above is about the
-  // backdrop and not about a dialog that is impossible to dismiss.
-  await userEvent.keyboard('{Escape}')
+  // Positive control on the same instrument: something CAN close it, so the two
+  // negatives above are about the backdrop and Escape and not about a dialog that
+  // is impossible to dismiss.
+  await userEvent.click(screen.getByRole('button', { name: /I have copied it/ }))
   expect(props.onDone).toHaveBeenCalledTimes(1)
 })
 
