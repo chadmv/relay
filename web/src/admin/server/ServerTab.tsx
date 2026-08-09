@@ -13,6 +13,13 @@ import { useServerHealth } from './useServerHealth'
 // so this tab introduces no new worst case for either stats endpoint.
 const POLL_MS = 10_000
 
+// Floors a query error to a non-empty, user-facing string. A thrown value with no
+// message (or a non-Error thrown value) must not render an empty ErrorStrip.
+function errorMessage(e: unknown, fallback: string): string {
+  const msg = e instanceof Error ? e.message : ''
+  return msg.length > 0 ? msg : fallback
+}
+
 export function ServerTab() {
   // Reused across module boundaries on purpose: these hooks already own
   // ['job-stats'] and ['workers','stats'], so mounting this tab creates an OBSERVER
@@ -65,12 +72,16 @@ export function ServerTab() {
           caption="JOBS · GET /v1/jobs/stats"
           cells={jobCells}
           error={jobs.error as Error | null}
+          label="jobs stats"
+          dataUpdatedAt={jobs.dataUpdatedAt}
           onRetry={() => jobs.refetch()}
         />
         <StatSection
           caption="FLEET · GET /v1/workers/stats"
           cells={fleetCells}
           error={fleet.error as Error | null}
+          label="fleet stats"
+          dataUpdatedAt={fleet.dataUpdatedAt}
           onRetry={() => fleet.refetch()}
         />
       </div>
@@ -81,7 +92,8 @@ export function ServerTab() {
           // registration policy, which is a security-relevant claim; a page that
           // reports nothing is strictly better than one that reports a guess.
           <ErrorStrip
-            message={(config.error as Error).message}
+            message={errorMessage(config.error, 'Failed to load /v1/config')}
+            label="access config"
             onRetry={() => config.refetch()}
           />
         ) : (

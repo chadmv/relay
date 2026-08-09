@@ -105,23 +105,41 @@ test('the self-registration chip reads ENABLED for allow_self_register: true', a
   ).toBeInTheDocument()
 })
 
-test('renders no version, build, uptime, database or environment content', async () => {
+test('renders no version, build, uptime, database or environment content outside the footnote', async () => {
+  // Case-insensitive, and computed on the container with the footnote's own node
+  // removed: the original case-sensitive-only check against the whole innerHTML
+  // could pass with a differently-cased leak (e.g. '<div>Build 1.2.3</div>')
+  // sitting right next to the footnote's legitimate prose, and would also have
+  // been vacuously satisfied by the footnote's own text. Cloning the container and
+  // stripping the footnote node isolates the check to content that is NOT the
+  // footnote's known-safe prose.
   server.use(...handlers())
   const { container } = renderTab()
   await screen.findByText('11')
-  // innerHTML, not textContent: an env row rendered into a title or aria-label
-  // would be invisible to textContent.
-  const html = container.innerHTML
-  for (const forbidden of [
-    'VERSION',
-    'BUILD',
-    'UPTIME',
-    'RELAY_',
-    'postgres://',
-    'go1.',
-  ]) {
+  const clone = container.cloneNode(true) as HTMLElement
+  clone.querySelector('[data-testid="server-footnote"]')?.remove()
+  const html = clone.innerHTML.toUpperCase()
+  for (const forbidden of ['VERSION', 'BUILD', 'UPTIME', 'RELAY_', 'POSTGRES://', 'GO1.']) {
     expect(html).not.toContain(forbidden)
   }
+})
+
+test('the forbidden-content check catches a leak outside the footnote, proving it is not vacuous', async () => {
+  // Renders a probe node with a lowercase, differently-cased leak OUTSIDE the
+  // footnote, and confirms the same clone-and-strip technique above catches it.
+  // This is the counter-proof that finding 3 fixed: the original test (case-
+  // sensitive, whole-container innerHTML) would have missed 'build 1.2.3' here.
+  server.use(...handlers())
+  const { container } = renderTab()
+  await screen.findByText('11')
+  const probe = document.createElement('div')
+  probe.textContent = 'leaked build 1.2.3'
+  container.appendChild(probe)
+
+  const clone = container.cloneNode(true) as HTMLElement
+  clone.querySelector('[data-testid="server-footnote"]')?.remove()
+  const html = clone.innerHTML.toUpperCase()
+  expect(html).toContain('BUILD')
 })
 
 test('the footnote states the 24h proxy and that the pill is not a database probe', async () => {
@@ -142,14 +160,18 @@ test('a jobs/stats 500 degrades ONLY the jobs section', async () => {
   // the same path is dead code.
   server.use(fail('/v1/jobs/stats'), ...handlers())
   renderTab()
-  // The fleet numbers, the chip and the pill all survive.
+  // The fleet numbers, the chip and the pill all survive. Each comes from a
+  // DIFFERENT query than the one just awaited (the jobs/stats error strip), so
+  // each is found with findBy/waitFor rather than assumed settled via getBy.
+  expect(await screen.findByText('500 boom')).toBeInTheDocument()
   expect(await screen.findByText('55')).toBeInTheDocument()
-  expect(screen.getByText('99')).toBeInTheDocument()
-  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
-  expect(screen.getByText('HEALTHY')).toBeInTheDocument()
+  expect(await screen.findByText('99')).toBeInTheDocument()
+  await waitFor(() =>
+    expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true),
+  )
+  expect(await screen.findByText('HEALTHY')).toBeInTheDocument()
   // The jobs section shows the strip, and no jobs number is on screen.
-  expect(screen.getByText('500 boom')).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry jobs stats' })).toBeInTheDocument()
   expect(screen.queryByText('RUNNING')).not.toBeInTheDocument()
   expect(screen.queryByText('11')).not.toBeInTheDocument()
 })
@@ -168,7 +190,7 @@ test('Retry issues exactly one more jobs/stats request and restores the grid', a
   renderTab()
   await screen.findByText('500 boom')
   expect(calls).toBe(1)
-  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Retry jobs stats' }))
   expect(await screen.findByText('11')).toBeInTheDocument()
   expect(screen.getByText('RUNNING')).toBeInTheDocument()
   expect(screen.queryByText('500 boom')).not.toBeInTheDocument()
@@ -178,11 +200,14 @@ test('Retry issues exactly one more jobs/stats request and restores the grid', a
 test('a workers/stats 500 degrades ONLY the fleet section', async () => {
   server.use(fail('/v1/workers/stats'), ...handlers())
   renderTab()
+  expect(await screen.findByText('500 boom')).toBeInTheDocument()
   expect(await screen.findByText('11')).toBeInTheDocument()
-  expect(screen.getByText('44')).toBeInTheDocument()
-  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
-  expect(screen.getByText('HEALTHY')).toBeInTheDocument()
-  expect(screen.getByText('500 boom')).toBeInTheDocument()
+  expect(await screen.findByText('44')).toBeInTheDocument()
+  await waitFor(() =>
+    expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true),
+  )
+  expect(await screen.findByText('HEALTHY')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry fleet stats' })).toBeInTheDocument()
   expect(screen.queryByText('ONLINE')).not.toBeInTheDocument()
   expect(screen.queryByText('99')).not.toBeInTheDocument()
 })
@@ -190,16 +215,15 @@ test('a workers/stats 500 degrades ONLY the fleet section', async () => {
 test('a config 500 renders NO self-registration chip in either state', async () => {
   server.use(fail('/v1/config'), ...handlers())
   renderTab()
+  expect(await screen.findByText('500 boom')).toBeInTheDocument()
   expect(await screen.findByText('11')).toBeInTheDocument()
-  expect(screen.getByText('55')).toBeInTheDocument()
+  expect(await screen.findByText('55')).toBeInTheDocument()
   // Absence of BOTH as a chip (span), so a fabricated default cannot pass this
   // test. 'DISABLED' still appears once as the FLEET KPI label, which is expected.
   expect(screen.queryByText('ENABLED')).not.toBeInTheDocument()
-  expect(
-    screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN'),
-  ).toBe(false)
+  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(false)
   expect(screen.getByText('Access')).toBeInTheDocument()
-  expect(screen.getByText('500 boom')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry access config' })).toBeInTheDocument()
 })
 
 test('a health 500 shows UNREACHABLE and nothing else changes', async () => {
@@ -207,9 +231,11 @@ test('a health 500 shows UNREACHABLE and nothing else changes', async () => {
   renderTab()
   expect(await screen.findByText('UNREACHABLE')).toBeInTheDocument()
   for (const v of ['11', '22', '33', '44', '55', '66', '77', '88', '99']) {
-    expect(screen.getByText(v)).toBeInTheDocument()
+    expect(await screen.findByText(v)).toBeInTheDocument()
   }
-  expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true)
+  await waitFor(() =>
+    expect(screen.getAllByText('DISABLED').some((el) => el.tagName === 'SPAN')).toBe(true),
+  )
 })
 
 test('the realistic outage: health ok while BOTH stats endpoints 500', async () => {
@@ -219,8 +245,13 @@ test('the realistic outage: health ok while BOTH stats endpoints 500', async () 
   server.use(fail('/v1/jobs/stats'), fail('/v1/workers/stats'), ...handlers())
   renderTab()
   expect(await screen.findByText('HEALTHY')).toBeInTheDocument()
-  expect(screen.getAllByText('500 boom')).toHaveLength(2)
-  expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2)
+  expect(await screen.findAllByText('500 boom')).toHaveLength(2)
+  expect(
+    screen.getByRole('button', { name: 'Retry jobs stats' }),
+  ).toBeInTheDocument()
+  expect(
+    screen.getByRole('button', { name: 'Retry fleet stats' }),
+  ).toBeInTheDocument()
   expect(screen.queryByText('RUNNING')).not.toBeInTheDocument()
   expect(screen.queryByText('ONLINE')).not.toBeInTheDocument()
 })
@@ -239,10 +270,12 @@ test('all four failing still renders the header, both captions, the panel and th
   expect(screen.getByText('FLEET · GET /v1/workers/stats')).toBeInTheDocument()
   expect(screen.getByText('Access')).toBeInTheDocument()
   expect(screen.getByTestId('server-footnote')).toBeInTheDocument()
-  expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(3)
+  expect(await screen.findByRole('button', { name: 'Retry jobs stats' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry fleet stats' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry access config' })).toBeInTheDocument()
 })
 
-test('a poll that fails AFTER a good load keeps the numbers and marks them stale', async () => {
+test('a poll that fails AFTER a good load keeps the numbers and marks them stale with an age', async () => {
   let calls = 0
   server.use(
     http.get('/v1/jobs/stats', () => {
@@ -259,9 +292,27 @@ test('a poll that fails AFTER a good load keeps the numbers and marks them stale
   // Drive the second fetch explicitly rather than waiting out the 10s interval.
   await client.refetchQueries({ queryKey: ['job-stats'] })
 
-  await waitFor(() => expect(screen.getByText('stale · last update failed')).toBeInTheDocument())
+  const stale = await screen.findByText(/stale · last update failed/)
+  expect(stale.textContent).toMatch(/stale · last update failed · .+ago/)
   // The numbers are STILL on screen - a dropped poll must not blank good data.
   expect(screen.getByText('11')).toBeInTheDocument()
   expect(screen.getByText('44')).toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Retry jobs stats' })).not.toBeInTheDocument()
+})
+
+test('jobs and fleet stats poll at exactly POLL_MS, read off the query cache wiring', async () => {
+  // Reads the actual observer options rather than a copy of the literal: passing
+  // useJobStats()/useWorkerStats() with no explicit interval (falling back to
+  // their own 3000ms default) must fail this test, since that would silently
+  // triple the shared dashboards' polling load.
+  server.use(...handlers())
+  const { client } = renderTab()
+  await screen.findByText('11')
+  const jobsQuery = client.getQueryCache().find({ queryKey: ['job-stats'] })
+  const fleetQuery = client.getQueryCache().find({ queryKey: ['workers', 'stats'] })
+  // refetchInterval lives on QueryObserverOptions, not the cache Query's own
+  // QueryOptions type, though useQuery's options flow through onto the cache
+  // entry at runtime - hence the cast rather than a type mismatch at the call site.
+  expect((jobsQuery?.options as { refetchInterval?: number })?.refetchInterval).toBe(10_000)
+  expect((fleetQuery?.options as { refetchInterval?: number })?.refetchInterval).toBe(10_000)
 })
