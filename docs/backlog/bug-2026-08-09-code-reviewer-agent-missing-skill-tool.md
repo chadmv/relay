@@ -45,3 +45,36 @@ Impact is degraded coverage, not zero coverage - the fallback manual review on 2
 thorough and did find four medium findings including a vacuous test. But the pipeline was silently
 running something other than what the playbook documents, and reviews are exactly where an
 unnoticed gap is most expensive.
+
+## Update 2026-08-09 - root cause is deeper than the tool grant
+
+Partially addressed, **still open**. The `tools:` line now grants `Skill` on both
+`relay-code-reviewer` and `relay-tpm` (the audit found the same drift in the TPM, whose body says to
+"invoke the roadmap and backlog skills via the Skill tool" - which is why it could not run `/retro`
+or `/roadmap` itself during the 2026-08-09 autopilot batch). But a verification dispatch proved the
+grant insufficient, and found the real problem:
+
+1. **`/code-review` is a slash command, not a skill.** The plugin at
+   `~/.claude/plugins/marketplaces/claude-plugins-official/plugins/code-review/` ships **only**
+   `commands/code-review.md` - there is no `skills/` directory. So no subagent can invoke it via the
+   Skill tool no matter what its `tools:` line says. The agent's prose was not merely
+   under-permissioned, it was describing something that does not exist. That prose is now corrected
+   to say so explicitly, so the next reader does not re-derive this.
+2. **`security-review` is not on disk either** under `~/.claude/plugins` or `~/.claude/skills`; it
+   appears in the parent session's available-skills list, so it is harness-provided rather than a
+   file the project can point an agent at.
+3. **Agent definitions appear to be cached from session start.** The verification dispatch, made
+   after editing the frontmatter, still reported exactly the old four tools. So even a correct grant
+   may need a fresh session to take effect - which is itself worth knowing before anyone concludes a
+   future frontmatter fix "did not work".
+
+## What is left to do
+- Determine whether `Skill` is even a valid entry in this project's agent `tools:` allowlist, in a
+  **fresh session** so the caching in (3) does not confound the result.
+- Decide what the reviewer should actually run. Options: leave it doing its own passes (which has
+  been producing strong results - 2 high and 13 medium findings across the 2026-08-09 batch, several
+  empirically reproduced with probes); or have the **conductor** run `/code-review` itself and feed
+  the output to the agent; or find genuine skill-form equivalents.
+- Do not close this item on the strength of a frontmatter edit alone. The acceptance criterion above
+  deliberately requires a real dispatch that reports having run the skills, precisely because the
+  original defect was a config that looked right and silently did nothing.

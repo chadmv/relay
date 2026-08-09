@@ -62,8 +62,15 @@ plan").
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
 - **Phase 4** runs the `relay-verify` workflow (a parallel fan-out). Running a
-  Workflow requires explicit opt-in. Confirmed findings route back to the owning
-  engineer, then re-verify until clean.
+  Workflow requires explicit opt-in, and that opt-in is per-session - an
+  unattended run (e.g. `/autopilot`) does not have it unless the user granted it
+  in that session. When it is unavailable, the documented fallback is a direct
+  `relay-code-reviewer` dispatch, plus `relay-integration-tester` when the diff
+  has integration surface (skip that lane on a zero-Go diff and say so). That is
+  the same agents with the same coverage, conductor-orchestrated instead of
+  script-orchestrated - it is not a licence to lower the bar. Log which path ran.
+  Confirmed findings route back to the owning engineer, then re-verify until
+  clean.
 - **Phase 5** uses the finishing-a-development-branch skill.
 - **Phase 6** is TPM-owned; backlog acceptance keeps the human as final approver,
   and closing backlog items requires the git mv to docs/backlog/closed/.
