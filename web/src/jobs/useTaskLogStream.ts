@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../lib/api'
 import {
   BACKFILL_PAGE_SIZE,
@@ -10,6 +10,7 @@ import {
 import {
   appendEntries,
   createLogState,
+  finalizePartials,
   markDropped,
   visibleRows,
   type LogChunk,
@@ -95,8 +96,17 @@ export function useTaskLogStream(
     setManualRetry((n) => n + 1)
   }, [])
 
+  // Carries log state across the effect re-run caused by `live` flipping to false
+  // (the task reached a terminal status), so the final pass is ONE
+  // ?since_seq=<maxSeq> reconciliation page instead of a full re-backfill. That
+  // closes the "did we get the tail" question without depending on frame
+  // delivery, and costs one request per completed task view. Keyed on taskId, so
+  // a task switch or a tab exit always starts clean.
+  const carry = useRef<{ taskId: string; state: LogState } | null>(null)
+
   useEffect(() => {
     if (!enabled || taskId === '') {
+      carry.current = null
       setView(createLogState())
       setStatus('idle')
       return
@@ -111,7 +121,9 @@ export function useTaskLogStream(
     let gen = 0
     let controller = new AbortController()
     let flushTimer: ReturnType<typeof setTimeout> | null = null
-    let logState = createLogState()
+    const carried = !live && carry.current?.taskId === taskId ? carry.current.state : null
+    carry.current = null
+    let logState = carried ?? createLogState()
     // maxSeq and the pre-backfill buffer live here, NOT in React state: writing
     // to them must never trigger a render and never reorder the join.
     let buffering = true
@@ -126,6 +138,11 @@ export function useTaskLogStream(
     setHistoryTruncated(false)
     setErrorMessage('')
 
+    function setLogState(next: LogState) {
+      logState = next
+      carry.current = { taskId, state: next }
+    }
+
     function publish() {
       flushTimer = null
       if (cancelled) return
@@ -139,7 +156,7 @@ export function useTaskLogStream(
     function ingest(entries: LogChunk[]) {
       const next = appendEntries(logState, entries)
       if (next === logState) return // everything was a duplicate
-      logState = next
+      setLogState(next)
       if (flushTimer === null) flushTimer = setTimeout(publish, FLUSH_MS)
     }
 
@@ -178,7 +195,7 @@ export function useTaskLogStream(
       }
       // Lines may have been missed either way, so the permanent marker goes in
       // for both reasons.
-      logState = markDropped(logState)
+      setLogState(markDropped(logState))
       flushNow()
 
       if (reason === 'dropped') {
@@ -315,10 +332,17 @@ export function useTaskLogStream(
       pending = []
       ingest(replay)
       flushNow()
-      setStatus(live ? 'live' : 'history')
+      if (!live) {
+        // No further output is possible, so a dangling partial is final.
+        setLogState(finalizePartials(logState))
+        flushNow()
+        setStatus(carried ? 'ended' : 'history')
+        return
+      }
+      setStatus('live')
     }
 
-    void run(0)
+    void run(carried ? carried.maxSeq : 0)
 
     return () => {
       cancelled = true

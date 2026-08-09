@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { fakeSseServer, tick } from '../test/sseStream'
-import { MAX_BACKFILL_PAGES, useTaskLogStream } from './useTaskLogStream'
+import { FLUSH_MS, MAX_BACKFILL_PAGES, useTaskLogStream } from './useTaskLogStream'
 
 function entry(seq: number, content = `line-${seq}\n`) {
   return { seq, stream: 'stdout' as const, content, created_at: '2026-08-09T00:00:00Z' }
@@ -268,6 +268,159 @@ test('the backoff counter resets only for a connection that PROVED itself', asyn
       expect(r2.result.current.status).not.toBe('disconnected')
     }
     r2.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// Paired positive control in one test: the same harness, live true vs false.
+test('a terminal task opens no stream at all, while a live one opens exactly one', async () => {
+  const fake = fakeSseServer()
+  server.use(
+    http.get('/v1/tasks/t1/logs', () =>
+      HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, total: 2 }),
+    ),
+  )
+  const terminal = renderHook(() =>
+    useTaskLogStream('t1', { live: false, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(terminal.result.current.status).toBe('history'))
+  expect(terminal.result.current.rows.map((r) => r.text)).toEqual(['line-1', 'line-2'])
+  await tick()
+  expect(fake.connections).toHaveLength(0)
+  terminal.unmount()
+
+  const running = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(running.result.current.status).toBe('live'))
+  expect(fake.connections).toHaveLength(1)
+  running.unmount()
+})
+
+test('a task that becomes terminal mid-tail closes the stream and reconciles once', async () => {
+  const fake = fakeSseServer()
+  const sinceParams: (string | null)[] = []
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const since = new URL(request.url).searchParams.get('since_seq')
+      sinceParams.push(since)
+      if (since === null) return HttpResponse.json({ items: [entry(10)], next_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(30, 'tail\n')], next_seq: 0, total: 3 })
+    }),
+  )
+  const { result, rerender } = renderHook(
+    ({ live }: { live: boolean }) =>
+      useTaskLogStream('t1', { live, enabled: true, fetchImpl: fake.fetchImpl }),
+    { initialProps: { live: true } },
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  const conn = fake.latest()
+  // A partial with no trailing newline, plus a live line, before the task ends.
+  conn.emit('task_log', logEvent(20, 'mid\nno-newline-yet'))
+  await waitFor(() => expect(result.current.rows.some((r) => r.text === 'mid')).toBe(true))
+
+  rerender({ live: false })
+  await waitFor(() => expect(result.current.status).toBe('ended'))
+  expect(conn.aborted).toBe(true)
+  expect(fake.connections).toHaveLength(1)
+  // Exactly ONE reconciliation page, and it pages from the last seq seen rather
+  // than re-fetching the whole history.
+  expect(sinceParams).toEqual([null, '20'])
+  // The dangling partial ('no-newline-yet') is carried into the reconciliation
+  // and completed by the next entry's content ('tail\n'), merging into ONE line
+  // - consistent with Task 3's reassembly model (an entry is an arbitrary byte
+  // range; a line split across two entries renders as one line). It is NOT
+  // treated as an orphaned fragment unrelated to what the reconciliation page
+  // returns: the reconciliation page is a continuation of the same byte stream,
+  // not a fresh one.
+  const texts = result.current.rows.map((r) => r.text)
+  expect(texts).toEqual(['line-10', 'mid', 'no-newline-yettail'])
+  expect(result.current.rows.every((r) => r.kind !== 'partial')).toBe(true)
+})
+
+test('switching tasks opens exactly one stream each and leaves none open', async () => {
+  const fake = fakeSseServer()
+  server.use(
+    http.get('/v1/tasks/:tid/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+  )
+  const { result, rerender, unmount } = renderHook(
+    ({ id, enabled }: { id: string; enabled: boolean }) =>
+      useTaskLogStream(id, { live: true, enabled, fetchImpl: fake.fetchImpl }),
+    { initialProps: { id: 't1', enabled: true } },
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(fake.connections).toHaveLength(1)
+
+  rerender({ id: 't2', enabled: true })
+  await waitFor(() => expect(fake.connections).toHaveLength(2))
+  rerender({ id: 't3', enabled: true })
+  await waitFor(() => expect(fake.connections).toHaveLength(3))
+
+  // Exact counts, not "at least one": three opened, the first two aborted, and
+  // the URLs prove each stream really was for the right task (the positive
+  // control that makes the abort assertions meaningful).
+  expect(fake.abortedCount()).toBe(2)
+  expect(fake.connections[2].aborted).toBe(false)
+  expect(fake.connections.map((c) => c.url)).toEqual([
+    '/v1/events?task_id=t1',
+    '/v1/events?task_id=t2',
+    '/v1/events?task_id=t3',
+  ])
+
+  // Leaving the Log tab: enabled goes false, the connection closes, none opens.
+  rerender({ id: 't3', enabled: false })
+  await waitFor(() => expect(fake.abortedCount()).toBe(3))
+  expect(fake.connections).toHaveLength(3)
+  await waitFor(() => expect(result.current.status).toBe('idle'))
+  expect(result.current.rows).toEqual([])
+
+  // Returning re-subscribes exactly once; unmount aborts the last one.
+  rerender({ id: 't3', enabled: true })
+  await waitFor(() => expect(fake.connections).toHaveLength(4))
+  unmount()
+  await waitFor(() => expect(fake.abortedCount()).toBe(4))
+})
+
+test('coalesces a burst of 50 frames into far fewer than 50 renders', async () => {
+  vi.useFakeTimers()
+  try {
+    const fake = fakeSseServer()
+    server.use(
+      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+    )
+    let renders = 0
+    const { result } = renderHook(() => {
+      renders++
+      return useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl })
+    })
+    await advance(0)
+    expect(result.current.status).toBe('live')
+    const before = renders
+
+    const conn = fake.latest()
+    // Non-vacuity note: emitting all 50 frames in one synchronous loop with no
+    // yield between them would let React's automatic batching absorb every
+    // resulting setState into one render regardless of whether FLUSH_MS
+    // coalescing exists at all - the mutation that deletes the debounce would
+    // not turn this test red (confirmed empirically). Real timers are also
+    // unusable here: a real per-iteration `tick()` has nondeterministic
+    // wall-clock overhead that can itself cross the 100 ms FLUSH_MS window
+    // multiple times, making the test flaky in either direction (also
+    // confirmed empirically). Fake timers with a 0 ms advance per frame force
+    // each frame through its own microtask turn - so every frame is genuinely
+    // ingested separately - without ever letting virtual time reach FLUSH_MS
+    // until the loop finishes.
+    for (let i = 1; i <= 50; i++) {
+      conn.emit('task_log', logEvent(i))
+      await advance(0)
+    }
+    // One more flush window lets the debounced update land.
+    await advance(FLUSH_MS)
+    // Positive control: all 50 lines really arrived, so a broken transport
+    // cannot make the render-count assertion pass.
+    expect(result.current.rows).toHaveLength(50)
+    expect(renders - before).toBeLessThanOrEqual(5)
   } finally {
     vi.useRealTimers()
   }
