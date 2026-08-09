@@ -1299,10 +1299,77 @@ Returns the raw token once:
 ### Events (Server-Sent Events)
 
 ```
-GET /v1/events?job_id=<id>
+GET /v1/events                                  # all job/task/worker status changes
+GET /v1/events?job_id=<id>                      # status changes for one job
+GET /v1/events?task_id=<id>                     # live log lines for one task
+GET /v1/events?job_id=<id>&task_id=<id>         # both, on one connection
 ```
 
-Streams job and task status changes as SSE until the job reaches a terminal state. Events have type `job` or `task` and JSON data payloads.
+Authenticated (bearer token), one held connection per subscription.
+
+The server never ends the stream on its own: it holds the connection until the
+client disconnects or the subscriber is dropped for falling behind. There is no
+terminal event, and a `?task_id=`-only subscription receives no status frames at
+all, so add `job_id` if you need to know when to stop tailing.
+
+**Event types**
+
+| Type | Payload | Delivered to |
+|---|---|---|
+| `job` | `{"id": "...", "status": "..."}` | subscriptions with no `job_id`, or a matching `job_id` |
+| `task` | `{"id": "...", "status": "..."}` | subscriptions with no `job_id`, or a matching `job_id` |
+| `worker` | `{"id": "...", "status": "..."}` | subscriptions with no `job_id` (worker events carry no job scope) |
+| `task_log` | `{"task_id","job_id","seq","stream","content","created_at"}` | **only** subscriptions that named that exact `task_id` |
+| `dropped` | `{"reason":"slow_consumer"}` | the one subscription being closed, as its final frame |
+
+Log events are opt-in and per-task: there is no job-wide or cluster-wide log
+firehose, so a plain `GET /v1/events` never receives `task_log` frames. A
+subscription that supplies only `task_id` receives log frames and no status
+events.
+
+`seq`, `stream`, `content` and `created_at` are identical in name and type to
+the items returned by `GET /v1/tasks/{id}/logs`, so one client-side type covers
+both surfaces. `seq` is a per-task total order.
+
+**Backfilling a task log without a gap or a duplicate - do these in order:**
+
+1. Open the SSE subscription **first** and start buffering `task_log` events.
+   The subscription is live by the time the response returns 200.
+2. Then page `GET /v1/tasks/{id}/logs?since_seq=0`, repeating with
+   `since_seq=<next_seq>` until `next_seq` is `0`. Record the highest `seq` seen
+   as `maxSeq`.
+3. Render the backfill, then apply the buffered and subsequent events,
+   discarding any event whose `seq <= maxSeq`.
+
+Reversing steps 1 and 2 leaves a hole between the last page and the first event.
+
+**`dropped` and reconnection.** If a subscriber stops reading, the server closes
+its 64-slot buffer rather than blocking the producer, and writes one final
+`event: dropped` frame. The database remains the source of truth, so recover by
+re-running step 2 with `since_seq=<last seq seen>`. There is no `id:` /
+`Last-Event-ID` resume.
+
+A `?job_id=&task_id=` subscription is a single channel with a single 64-slot
+buffer shared by both event families, so a burst of log lines can drop the whole
+connection - including its status frames. Recover by re-backfilling the log
+**and** refetching job/task state, not just the log.
+
+`seq` values increase but are **not** contiguous: they come from a table-wide
+sequence shared by every task, so any other task logging concurrently consumes
+ids. A gap in `seq` is therefore **not** a drop signal - do not re-page on one.
+The `dropped` frame and an unexpectedly closed stream are the only drop signals.
+
+**Validation.** `?task_id=` returns `400` for a malformed UUID and `404` for an
+unknown task. `?job_id=` is not validated - an unknown job yields an open but
+permanently empty stream. This asymmetry is deliberate: `?job_id=` is an
+existing contract with existing clients, while an unvalidated `?task_id=` would
+look identical to "this task produced no output".
+
+**Single-process caveat.** The broker is in-memory, so events are visible only
+to clients connected to the `relay-server` process that owns the relevant
+agent's gRPC stream. Behind a load balancer with more than one replica, live
+delivery degrades to best-effort while the polling endpoints stay correct. This
+already applies to status events; a live log view just makes it more visible.
 
 ---
 

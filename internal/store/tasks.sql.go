@@ -11,38 +11,64 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const appendTaskLog = `-- name: AppendTaskLog :exec
-INSERT INTO task_logs (task_id, stream, content)
-SELECT $1, $2, $3
-WHERE EXISTS (
-    SELECT 1 FROM tasks WHERE id = $1 AND assignment_epoch = $4
+const appendTaskLog = `-- name: AppendTaskLog :one
+WITH fence AS (
+    SELECT t.job_id FROM tasks t
+    WHERE t.id = $1 AND t.assignment_epoch = $2
+), ins AS (
+    INSERT INTO task_logs (task_id, stream, content)
+    SELECT $1, $3, $4 FROM fence
+    RETURNING id, created_at
 )
+SELECT ins.id, ins.created_at, fence.job_id FROM ins, fence
 `
 
 type AppendTaskLogParams struct {
 	TaskID          pgtype.UUID `json:"task_id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
 	Stream          string      `json:"stream"`
 	Content         string      `json:"content"`
-	AssignmentEpoch int32       `json:"assignment_epoch"`
+}
+
+type AppendTaskLogRow struct {
+	ID        int64              `json:"id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	JobID     pgtype.UUID        `json:"job_id"`
 }
 
 // Inserts a log chunk only if the caller's epoch matches the task's current
-// assignment. Stale chunks (from a reassigned generation) silently insert
-// zero rows.
+// assignment, and returns the inserted row's id (the seq the polling endpoint
+// pages by) plus created_at plus the task's job_id - all from one round trip,
+// because this runs synchronously on the agent's gRPC recv goroutine and a
+// second query here would delay that worker's status and telemetry ingest too.
+// A stale chunk (from a reassigned or cancelled generation) matches no fence
+// row, inserts nothing, and returns zero rows -> pgx.ErrNoRows. Callers must
+// treat ErrNoRows as "stale, drop silently" and any other error as a real
+// failure worth logging.
+// The tasks alias and the qualified column references are load-bearing: without
+// them sqlc's analyzer cannot resolve "id" across the two CTEs and fails with
+// 'column reference "id" is ambiguous'. Only job_id is selected because that is
+// all the publish needs; the fence's job is to yield exactly one row, or none.
 //
-//	INSERT INTO task_logs (task_id, stream, content)
-//	SELECT $1, $2, $3
-//	WHERE EXISTS (
-//	    SELECT 1 FROM tasks WHERE id = $1 AND assignment_epoch = $4
+//	WITH fence AS (
+//	    SELECT t.job_id FROM tasks t
+//	    WHERE t.id = $1 AND t.assignment_epoch = $2
+//	), ins AS (
+//	    INSERT INTO task_logs (task_id, stream, content)
+//	    SELECT $1, $3, $4 FROM fence
+//	    RETURNING id, created_at
 //	)
-func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) error {
-	_, err := q.db.Exec(ctx, appendTaskLog,
+//	SELECT ins.id, ins.created_at, fence.job_id FROM ins, fence
+func (q *Queries) AppendTaskLog(ctx context.Context, arg AppendTaskLogParams) (AppendTaskLogRow, error) {
+	row := q.db.QueryRow(ctx, appendTaskLog,
 		arg.TaskID,
+		arg.AssignmentEpoch,
 		arg.Stream,
 		arg.Content,
-		arg.AssignmentEpoch,
 	)
-	return err
+	var i AppendTaskLogRow
+	err := row.Scan(&i.ID, &i.CreatedAt, &i.JobID)
+	return i, err
 }
 
 const cancelJobTasks = `-- name: CancelJobTasks :exec
