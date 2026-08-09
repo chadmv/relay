@@ -8,6 +8,8 @@ import { NewJobPage } from '../jobs/NewJobPage'
 import { WorkersPage } from '../workers/WorkersPage'
 import { WorkerDetailPage } from '../workers/WorkerDetailPage'
 import { SchedulesPage } from '../schedules/SchedulesPage'
+import { AdminPage } from '../admin/AdminPage'
+import { AdminRoute } from './AdminRoute'
 import { ProtectedRoute } from './ProtectedRoute'
 import { PublicOnlyRoute } from './PublicOnlyRoute'
 
@@ -25,7 +27,10 @@ export function AppRoutes() {
         <Route path="/workers" element={<WorkersPage />} />
         <Route path="/workers/:id" element={<WorkerDetailPage />} />
         <Route path="/schedules" element={<SchedulesPage />} />
-        <Route path="/admin" element={<JobsPlaceholder />} />
+        <Route element={<AdminRoute />}>
+          <Route path="/admin" element={<Navigate to="/admin/users" replace />} />
+          <Route path="/admin/:tab" element={<AdminPage />} />
+        </Route>
         <Route path="/profile/*" element={<JobsPlaceholder />} />
       </Route>
       <Route path="*" element={<Navigate to="/jobs" replace />} />

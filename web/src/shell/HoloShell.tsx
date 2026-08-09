@@ -8,12 +8,16 @@ const NAV = [
   { to: '/jobs', label: 'Jobs' },
   { to: '/workers', label: 'Workers' },
   { to: '/schedules', label: 'Schedules' },
-  { to: '/admin', label: 'Admin' },
+  // Cosmetic gate only - AdminRoute redirects and the server's AdminOnly
+  // middleware is the real boundary. Hiding it keeps non-admins out of a route
+  // that would only 403 for them.
+  { to: '/admin', label: 'Admin', adminOnly: true },
 ]
 
 export function HoloShell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
+  const nav = NAV.filter((n) => !n.adminOnly || user?.is_admin)
 
   async function onLogout() {
     await logout()
@@ -26,7 +30,7 @@ export function HoloShell({ children }: { children: ReactNode }) {
         <div className="flex items-center gap-6">
           <Eyebrow className="text-accent">RELAY</Eyebrow>
           <nav className="flex gap-0.5">
-            {NAV.map((n) => (
+            {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
