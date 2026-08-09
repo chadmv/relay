@@ -14,11 +14,20 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
 // callers can drive it from useNow (or a fixed date in tests).
 //
 // A non-future instant reads "expired" rather than a negative duration, which
-// keeps the EXPIRES cell consistent with the EXPIRED status pill derived from the
-// same arithmetic.
+// keeps the EXPIRES cell consistent with the EXPIRED status pill: both derive
+// from the SAME raw millisecond delta (target - now) and both expire at exactly
+// remaining <= 0ms (enrollmentStatus.deriveStatus, enrollmentStatus.ts:19-24).
+// The "expired" check therefore runs on the raw ms diff, before any rounding for
+// display - an earlier version rounded to whole seconds first and then checked
+// secs <= 0, which rounded any positive sub-500ms remainder down to 0 and
+// reported it "expired" while deriveStatus (operating on the same instant) still
+// called it EXPIRING. Flooring the remainder for display (rather than rounding)
+// only ever loses precision on values already confirmed positive, so it cannot
+// reopen that gap.
 export function formatTimeUntil(iso: string, now: Date = new Date()): string {
-  const secs = Math.round((new Date(iso).getTime() - now.getTime()) / 1000)
-  if (secs <= 0) return 'expired'
+  const remainingMs = new Date(iso).getTime() - now.getTime()
+  if (remainingMs <= 0) return 'expired'
+  const secs = Math.floor(remainingMs / 1000)
   if (secs < 60) return `in ${secs}s`
   const mins = Math.floor(secs / 60)
   if (mins < 60) return `in ${mins}m`

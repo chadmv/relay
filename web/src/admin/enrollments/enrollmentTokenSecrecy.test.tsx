@@ -106,6 +106,24 @@ test('the console matcher catches a token on an Error cause', () => {
   spies.forEach((s) => s.mockRestore())
 })
 
+test('the console matcher catches an Error nested inside a plain object', () => {
+  // JSON.stringify(new Error('x')) is '{}' (no own enumerable properties), so a
+  // plain object wrapping an Error - {err: new Error(...)}, the shape both React
+  // and TanStack log internally - falls through stringifyArg's object branch to
+  // JSON.stringify and renders as '{"err":{}}', silently dropping the secret.
+  const spies = spyOnConsole()
+  console.error({ err: new Error(`boom ${TOKEN}`) })
+  expect(findConsoleLeak(spies, TOKEN)).not.toBeNull()
+  spies.forEach((s) => s.mockRestore())
+})
+
+test('the console matcher catches an Error nested inside an array', () => {
+  const spies = spyOnConsole()
+  console.error(['context', new Error(`boom ${TOKEN}`)])
+  expect(findConsoleLeak(spies, TOKEN)).not.toBeNull()
+  spies.forEach((s) => s.mockRestore())
+})
+
 test('the storage matcher catches a manual write', () => {
   localStorage.setItem('probe', TOKEN)
   expect(storageContainsSecret(TOKEN)).toBe(true)
@@ -116,9 +134,24 @@ test('the storage matcher catches a manual write', () => {
 test('the DOM matcher sees a value that lives only in an input property', () => {
   // queryByText / textContent would both miss this. If this control ever fails,
   // every "token is gone" assertion below is vacuous.
-  const { container } = render(<input readOnly value={TOKEN} aria-label="probe" />)
-  expect(container.textContent).not.toContain(TOKEN)
+  //
+  // NOT a React-controlled <input value={TOKEN}>: React mirrors a controlled
+  // input's value into the DOM value ATTRIBUTE on mount too (confirmed
+  // empirically - its outerHTML is `<input ... value="...">`), so
+  // document.body.innerHTML already contains the token in that case and this
+  // control would pass even with domContainsSecret's input/textarea value loop
+  // deleted, proving nothing about that loop. A plain DOM node with `.value` set
+  // imperatively has the token ONLY as a live property - the attribute stays
+  // unset - which is the actual case the loop exists for (a user-typed value, or
+  // any future consumer that sets .value without going through React).
+  document.body.innerHTML = ''
+  const el = document.createElement('input')
+  document.body.appendChild(el)
+  el.value = TOKEN
+  expect(el.getAttribute('value')).not.toBe(TOKEN)
+  expect(document.body.innerHTML).not.toContain(TOKEN)
   expect(domContainsSecret(TOKEN)).toBe(true)
+  document.body.innerHTML = ''
 })
 
 // ---- the real flow ---------------------------------------------------------

@@ -1,6 +1,5 @@
 import { Chip } from '../../components/holo'
-import { formatTimeUntil } from '../../lib/time'
-import { deriveStatus, statusTone } from './enrollmentStatus'
+import { deriveStatus, formatExpiryLabel, statusTone } from './enrollmentStatus'
 import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api'
 
 // HOSTNAME HINT | CREATED | EXPIRES | STATUS | NOTE.
@@ -89,7 +88,7 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
               role="cell"
               className={`text-[11px] ${status === 'ACTIVE' ? 'text-fg' : 'text-fg-mute'}`}
             >
-              {formatTimeUntil(e.expires_at, now)}
+              {formatExpiryLabel(e.expires_at, now)}
             </span>
             <span role="cell">
               <Chip tone={statusTone(status)}>{status}</Chip>

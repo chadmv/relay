@@ -48,4 +48,25 @@ describe('formatTimeUntil', () => {
   test('formatRelativeTime cannot do this - it renders the same future as 0s ago', () => {
     expect(formatRelativeTime('2026-08-10T09:42:00Z', now)).toBe('0s ago')
   })
+
+  // enrollmentStatus.deriveStatus expires a row exactly at remaining <= 0ms
+  // (enrollmentStatus.ts:20-21). The old Math.round-based implementation here
+  // rounded any sub-500ms remainder DOWN to 0 whole seconds and then treated
+  // secs <= 0 as expired, so a row with genuinely positive time left (e.g.
+  // 300ms) read "expired" while deriveStatus still called it EXPIRING - the two
+  // derivations disagreeing in the last half-second despite both operating on
+  // the same instant.
+  test('a still-positive sub-second remainder is not reported as expired (matches deriveStatus, which only expires at <= 0ms)', () => {
+    const soon = new Date(now.getTime() + 300).toISOString() // 300ms remaining
+    expect(formatTimeUntil(soon, now)).toBe('in 0s')
+  })
+
+  // The other side of the same boundary: the exact expiry instant, and anything
+  // past it, must still read "expired" - unchanged behavior, asserted again here
+  // pinned to raw millisecond deltas rather than whole seconds, so a future edit
+  // to the rounding strategy cannot silently widen the boundary back open.
+  test('a 1ms-past instant still reads expired', () => {
+    const justPast = new Date(now.getTime() - 1).toISOString()
+    expect(formatTimeUntil(justPast, now)).toBe('expired')
+  })
 })

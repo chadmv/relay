@@ -103,5 +103,8 @@ test('a different now re-derives the pill and the label from the same row', () =
   const later = new Date('2026-08-10T09:41:30Z') // 30s before expiry
   renderTable({ now: later })
   expect(screen.getByText('EXPIRING')).toBeInTheDocument()
-  expect(screen.getByText('in 30s')).toBeInTheDocument()
+  // Not "in 30s": the table's `now` comes from a 60s clock tick (useNow), so a
+  // seconds-precision label would go stale for up to 59 more real seconds after
+  // the render that produced it - see enrollmentStatus.formatExpiryLabel.
+  expect(screen.getByText('in <1m')).toBeInTheDocument()
 })

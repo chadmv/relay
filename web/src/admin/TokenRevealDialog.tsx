@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { PillButton } from '../components/holo'
+import { formatTimeUntil } from '../lib/time'
 
 interface TokenRevealDialogProps {
   // The raw credential. MUST be passed straight from the mutation's data
@@ -9,6 +10,12 @@ interface TokenRevealDialogProps {
   title: string
   // The endpoint that minted it, e.g. "POST /v1/agent-enrollments". Display only.
   endpoint: string
+  // ISO expiry of the credential (e.g. CreateEnrollmentResponse.expires_at,
+  // api.ts). Optional and display-only - not every future consumer of this
+  // shared dialog necessarily has one. Rendered once from `now` at mount; there
+  // is no live tick here (unlike EnrollmentsTable's useNow(60_000)) because the
+  // dialog is short-lived and this is not live data - no new fetch either way.
+  expiresAt?: string
   warning?: string
   // Called on Done AND on Escape. The caller MUST reset() the mutation here: that
   // is what actually drops the token. Unmounting this component alone does not,
@@ -47,6 +54,7 @@ export function TokenRevealDialog({
   token,
   title,
   endpoint,
+  expiresAt,
   warning,
   onDone,
 }: TokenRevealDialogProps) {
@@ -63,12 +71,28 @@ export function TokenRevealDialog({
     () => typeof navigator.clipboard?.writeText === 'function',
   )
 
+  // Focus + select the token ONCE, on mount only: satisfies "first field
+  // focused" and gives keyboard users select-all for free, which is the manual
+  // copy path when the clipboard API is unavailable. This must NOT depend on
+  // onDone: EnrollmentsTab passes an inline `onDone={() => create.reset()}`
+  // whose identity changes on every parent re-render (the 60s useNow tick, or
+  // the list refetch after invalidation), and an effect keyed on that identity
+  // re-fires focus()+select() on every one of those re-renders - yanking focus
+  // away from wherever the admin has tabbed to (e.g. the Done button) back onto
+  // the token input. A keyboard admin who pauses more than 60s and then presses
+  // Enter on what they believe is Done gets nothing, and a plausible next
+  // keystroke is Escape, which destroys the only copy of the credential.
   useEffect(() => {
-    // Focus + select the token: satisfies "first field focused" and gives keyboard
-    // users select-all for free, which is the manual copy path when the clipboard
-    // API is unavailable.
     inputRef.current?.focus()
     inputRef.current?.select()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Escape handling is a separate effect so it can depend on onDone (reading
+  // the latest closure) without re-running the focus/select effect above.
+  // Re-attaching a keydown listener has no visible side effect, unlike
+  // re-focusing.
+  useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') onDone()
     }
@@ -114,6 +138,12 @@ export function TokenRevealDialog({
         <div className="mt-4 rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 font-mono text-[10.5px] leading-relaxed tracking-[0.04em] text-warn">
           ⚠ {warning ?? DEFAULT_WARNING}
         </div>
+
+        {expiresAt && (
+          <div className="mt-2 font-mono text-[10.5px] text-fg-dim">
+            Expires {formatTimeUntil(expiresAt)}
+          </div>
+        )}
 
         <label
           htmlFor="reveal-token"

@@ -106,10 +106,27 @@ export function EnrollmentsTab() {
       </GlassPanel>
     )
   } else if (enrollments.length === 0) {
+    // Unlike UsersTab, this list is active-only: a row can be consumed or expire
+    // between paging forward and the next fetch, so a non-first page landing on
+    // zero rows is reachable in normal use, not just a data-corruption edge case.
+    // Without a way back here, a reload is the admin's only exit.
     body = (
-      <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
-        No active enrollments.
-      </GlassPanel>
+      <>
+        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
+          No active enrollments.
+        </GlassPanel>
+        {stack.length > 0 && (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={prev}
+              className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute"
+            >
+              ← prev
+            </button>
+          </div>
+        )}
+      </>
     )
   } else {
     body = (
@@ -196,6 +213,7 @@ export function EnrollmentsTab() {
           token={create.data.token}
           title="Agent enrollment created"
           endpoint="POST /v1/agent-enrollments"
+          expiresAt={create.data.expires_at}
           onDone={() => create.reset()}
         />
       )}

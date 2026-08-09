@@ -1,3 +1,5 @@
+import { formatTimeUntil } from '../../lib/time'
+
 export type EnrollmentStatus = 'ACTIVE' | 'EXPIRING' | 'EXPIRED'
 
 const EXPIRING_WINDOW_MS = 60 * 60 * 1000
@@ -28,4 +30,19 @@ export function statusTone(status: EnrollmentStatus): 'accent' | 'warn' | 'muted
   if (status === 'EXPIRED') return 'muted'
   if (status === 'EXPIRING') return 'warn'
   return 'accent'
+}
+
+// EnrollmentsTable's EXPIRES cell uses this instead of calling formatTimeUntil
+// directly. The row's `now` is useNow(60_000) - a local clock tick refreshed
+// once a MINUTE - so a seconds-precision label such as "in 20s" is only accurate
+// at the instant of the tick; for up to 59 more real seconds the row's actual
+// remaining time keeps falling while the label stays frozen, so a row can read
+// "in 20s" / EXPIRING for nearly a minute after it has genuinely expired.
+// Collapsing anything under a minute to "in <1m" means the displayed precision
+// never promises more freshness than the 60s refresh cadence actually delivers.
+// formatTimeUntil itself is left general-purpose (full seconds precision) for
+// callers that render from a fresh `now`, e.g. a one-shot render in a dialog.
+export function formatExpiryLabel(expiresAt: string, now: Date): string {
+  const label = formatTimeUntil(expiresAt, now)
+  return /^in \d+s$/.test(label) ? 'in <1m' : label
 }

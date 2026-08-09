@@ -33,6 +33,23 @@ function renderDialog(over: Partial<Parameters<typeof TokenRevealDialog>[0]> = {
   return { props, ...render(<TokenRevealDialog {...props} />) }
 }
 
+test('shows when the token expires, when an expiresAt is supplied', () => {
+  // CreateEnrollmentResponse.expires_at (api.ts) was already typed and parsed but
+  // never surfaced - an admin was handed a credential with no idea when it stops
+  // working. Reuse formatTimeUntil (already used by EnrollmentsTable); no new
+  // fetch, expiresAt is data the caller already has from the 201 response.
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-08-09T12:00:00Z'))
+  renderDialog({ expiresAt: '2026-08-09T13:00:00Z' })
+  expect(screen.getByText(/expires in 1h/i)).toBeInTheDocument()
+  vi.useRealTimers()
+})
+
+test('omits the expiry line when expiresAt is not supplied', () => {
+  renderDialog({ expiresAt: undefined })
+  expect(screen.queryByText(/expires/i)).not.toBeInTheDocument()
+})
+
 test('shows the endpoint, title, the one-time warning, and the token', () => {
   renderDialog()
   expect(screen.getByText('POST /v1/agent-enrollments')).toBeInTheDocument()
@@ -107,6 +124,27 @@ test('positive control: the Copy button IS present when the API exists', () => {
   // Without this, the absence assertion above could pass on a typo'd query.
   expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
   expect(screen.queryByText(/needs HTTPS/i)).not.toBeInTheDocument()
+})
+
+test('a re-render with a fresh onDone identity does not steal focus back to the token input', async () => {
+  const { props, rerender } = renderDialog()
+  const doneButton = screen.getByRole('button', { name: /I have copied it/ })
+  doneButton.focus()
+  expect(doneButton).toHaveFocus()
+
+  // EnrollmentsTab passes an inline `onDone={() => create.reset()}`, so its
+  // identity changes on every parent re-render (the 60s useNow tick, or the
+  // list refetch after invalidation). Simulate exactly that: a new function
+  // reference, same behavior, no user action in between.
+  rerender(
+    <TokenRevealDialog {...props} onDone={vi.fn()} />,
+  )
+
+  // If the focus/select effect re-runs on every onDone identity change, this
+  // would now be the token input instead of the button the admin was reading
+  // toward.
+  expect(doneButton).toHaveFocus()
+  expect(screen.getByLabelText('Token')).not.toHaveFocus()
 })
 
 test('a rejected clipboard write falls back to the manual hint and logs nothing', async () => {

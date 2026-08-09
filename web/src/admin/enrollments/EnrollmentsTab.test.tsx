@@ -132,6 +132,39 @@ test('the pager walks the cursor stack and the footer range tracks the offset', 
   expect(screen.getByText('1-1 of 2')).toBeInTheDocument()
 })
 
+test('a non-first page that comes back empty still offers a way back (active-only rows can vanish mid-page)', async () => {
+  // This is the reachable case UsersTab does not have as sharply: the list is
+  // active-only, so a row can be consumed or expire between paging forward and
+  // the next fetch, landing the admin on an empty page-2 with no rows to page
+  // from. Without a visible prev control there, a reload is the only way out.
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, (p) =>
+      p.get('cursor')
+        ? { items: [], next_cursor: '', total: 1 }
+        : { items: [row()], next_cursor: 'c2', total: 1 },
+    ),
+  )
+  renderTab()
+  await screen.findByText('farm-west-13')
+
+  await userEvent.click(screen.getByRole('button', { name: /next 50/ }))
+  expect(await screen.findByText('No active enrollments.')).toBeInTheDocument()
+
+  const prevButton = screen.getByRole('button', { name: /prev/ })
+  expect(prevButton).toBeEnabled()
+  await userEvent.click(prevButton)
+  expect(await screen.findByText('farm-west-13')).toBeInTheDocument()
+})
+
+test('the empty card on the FIRST page (no rows ever) shows no prev control', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [], next_cursor: '', total: 0 })))
+  renderTab()
+  expect(await screen.findByText('No active enrollments.')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /prev/ })).not.toBeInTheDocument()
+})
+
 test('creating posts the exact body, opens the reveal dialog, and refreshes the list', async () => {
   const seen: URLSearchParams[] = []
   let body: unknown
@@ -154,6 +187,9 @@ test('creating posts the exact body, opens the reveal dialog, and refreshes the 
   expect(body).toEqual({ hostname_hint: 'farm-east-01', ttl_seconds: 86400 })
   expect(screen.getByLabelText('Token')).toHaveValue(TOKEN)
   expect(dialog).toHaveTextContent(/cannot be retrieved again/i)
+  // The 201's expires_at (row().expires_at here) is threaded through to the
+  // reveal dialog so the admin knows when the credential stops working.
+  expect(dialog).toHaveTextContent(/expires/i)
   // The inline panel closes behind the dialog.
   expect(screen.queryByLabelText('Hostname hint')).not.toBeInTheDocument()
   // The bare-prefix invalidation refetched the mounted list.
