@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { appendEntries, createLogState, type LogChunk } from './logBuffer'
+import { appendEntries, createLogState, finalizePartials, visibleRows, type LogChunk } from './logBuffer'
 
 function chunk(seq: number, content: string, stream: 'stdout' | 'stderr' = 'stdout'): LogChunk {
   return { seq, stream, content, created_at: '2026-08-09T14:36:25.000Z' }
@@ -53,8 +53,7 @@ test('assigns a unique increasing render key to every row', () => {
   let s = createLogState()
   s = appendEntries(s, [chunk(1, 'a\nb\n'), chunk(2, 'c\n')])
   const keys = s.lines.map((l) => l.key)
-  // Task 3 tightens this to an exact 3 once entries are reassembled into lines.
-  expect(new Set(keys).size).toBe(s.lines.length)
+  expect(new Set(keys).size).toBe(3)
   expect(keys).toEqual([...keys].sort((x, y) => x - y))
 })
 
@@ -62,4 +61,94 @@ test('normalises an unexpected stream value to stdout', () => {
   let s = createLogState()
   s = appendEntries(s, [{ seq: 1, stream: 'weird', content: 'a\n', created_at: '' }])
   expect(s.lines[0].stream).toBe('stdout')
+})
+
+test('one entry containing three newlines yields three lines', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'one\ntwo\nthree\n')])
+  expect(s.lines.map((l) => l.text)).toEqual(['one', 'two', 'three'])
+})
+
+// The reassembly test. Asserting only "the text appears" would pass against an
+// implementation that renders one row per ENTRY, which is today's behaviour and
+// exactly the defect being fixed - so assert the exact row COUNT.
+test('a line split across two entries renders as ONE line', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'abc'), chunk(2, 'def\n')])
+  expect(s.lines).toHaveLength(1)
+  expect(s.lines[0].text).toBe('abcdef')
+})
+
+test('a dangling partial is a provisional row, not a completed line', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'done\nprompt> ')])
+  expect(s.lines.map((l) => l.text)).toEqual(['done'])
+
+  const rows = visibleRows(s)
+  expect(rows).toHaveLength(2)
+  expect(rows[1]).toMatchObject({ kind: 'partial', text: 'prompt> ' })
+  // Provisional rows use negative keys so they can never collide with the
+  // positive keys of retained lines.
+  expect(rows[1].key).toBeLessThan(0)
+})
+
+test('finalizePartials flushes a dangling partial into a real line', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'no trailing newline')])
+  expect(s.lines).toHaveLength(0)
+
+  s = finalizePartials(s)
+  expect(s.lines.map((l) => l.text)).toEqual(['no trailing newline'])
+  expect(visibleRows(s).every((r) => r.kind === 'line')).toBe(true)
+  // Idempotent: a second call must not duplicate the line.
+  expect(finalizePartials(s)).toBe(s)
+})
+
+test('a carriage-return run collapses to the segment after the final CR', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'frame 1/100\rframe 2/100\rframe 3/100\n')])
+  expect(s.lines.map((l) => l.text)).toEqual(['frame 3/100'])
+})
+
+test('ANSI SGR escape sequences are stripped', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, '[32mgreen[0m and [1;31mred[0m\n')])
+  expect(s.lines[0].text).toBe('green and red')
+  expect(s.lines[0].text).not.toContain('')
+  expect(s.lines[0].text).not.toContain('[32m')
+})
+
+test('an ANSI erase-line sequence is stripped too', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, '[2Kprogress\n')])
+  expect(s.lines[0].text).toBe('progress')
+})
+
+test('stdout and stderr partials do not corrupt each other', () => {
+  let s = createLogState()
+  s = appendEntries(s, [
+    chunk(1, 'out-a', 'stdout'),
+    chunk(2, 'err-a', 'stderr'),
+    chunk(3, 'out-b\n', 'stdout'),
+    chunk(4, 'err-b\n', 'stderr'),
+  ])
+  expect(s.lines.map((l) => [l.stream, l.text])).toEqual([
+    ['stdout', 'out-aout-b'],
+    ['stderr', 'err-aerr-b'],
+  ])
+})
+
+test('a completed line carries the created_at of the entry that terminated it', () => {
+  let s = createLogState()
+  s = appendEntries(s, [
+    { seq: 1, stream: 'stdout', content: 'half', created_at: '2026-08-09T00:00:01.000Z' },
+    { seq: 2, stream: 'stdout', content: 'done\n', created_at: '2026-08-09T00:00:02.000Z' },
+  ])
+  expect(s.lines[0].time).toBe('2026-08-09T00:00:02.000Z')
+})
+
+test('visibleRows returns the lines array itself when there is no partial', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'a\n')])
+  expect(visibleRows(s)).toBe(s.lines)
 })
