@@ -78,3 +78,15 @@ test('renders a footer slot inside the table surface when provided', () => {
   const footer = screen.getByText('FOOTER-MARKER')
   expect(surface).toContainElement(footer)
 })
+
+test('exposes table, row, columnheader, and cell roles', () => {
+  renderTable(jobs)
+  expect(screen.getByRole('table', { name: 'Jobs' })).toBeInTheDocument()
+  // 1 header row + 2 data rows.
+  expect(screen.getAllByRole('row')).toHaveLength(3)
+  // ID, NAME, STATUS, PROGRESS, STARTED, DUR, OWNER - one per grid track.
+  expect(screen.getAllByRole('columnheader')).toHaveLength(7)
+  // 7 columns x 2 rows. The count is load-bearing: getByRole('table') alone passes
+  // on a partial migration where the wrapper got a role and the rows did not.
+  expect(screen.getAllByRole('cell')).toHaveLength(14)
+})

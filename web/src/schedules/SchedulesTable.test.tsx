@@ -102,3 +102,21 @@ test('renders the empty state and still shows the footer slot when there are no 
   expect(screen.getByText('No schedules yet.')).toBeInTheDocument()
   expect(screen.getByText('FOOTER-MARKER')).toBeInTheDocument()
 })
+
+test('exposes table, row, columnheader, and cell roles', () => {
+  render(
+    <SchedulesTable
+      schedules={[sched(), sched({ id: 's2', name: 'weekly-report' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.getByRole('table', { name: 'Schedules' })).toBeInTheDocument()
+  // 1 header row + 2 data rows.
+  expect(screen.getAllByRole('row')).toHaveLength(3)
+  // NAME, CRON, TZ, OVERLAP, NEXT RUN, LAST RUN, LAST JOB, OWNER, ACTIONS.
+  expect(screen.getAllByRole('columnheader')).toHaveLength(9)
+  // 9 columns x 2 rows.
+  expect(screen.getAllByRole('cell')).toHaveLength(18)
+})
