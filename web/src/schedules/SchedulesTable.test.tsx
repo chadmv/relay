@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { render } from '@testing-library/react'
 import { expect, test, vi } from 'vitest'
@@ -119,4 +119,9 @@ test('exposes table, row, columnheader, and cell roles', () => {
   expect(screen.getAllByRole('columnheader')).toHaveLength(9)
   // 9 columns x 2 rows.
   expect(screen.getAllByRole('cell')).toHaveLength(18)
+  // Structural, not just a page-global count: pins the first data row's cells to
+  // that row specifically, which a cell rendered outside the role="table" subtree
+  // would not satisfy even if the page-global counts above still summed correctly.
+  const firstDataRow = screen.getAllByRole('row')[1]
+  expect(within(firstDataRow).getAllByRole('cell')).toHaveLength(9)
 })

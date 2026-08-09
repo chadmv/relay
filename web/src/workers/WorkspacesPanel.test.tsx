@@ -98,4 +98,10 @@ test('exposes table, row, columnheader, and cell roles', async () => {
   expect(screen.getAllByRole('columnheader')).toHaveLength(6)
   // 6 columns x 2 rows.
   expect(screen.getAllByRole('cell')).toHaveLength(12)
+  // Structural, not just a page-global count: pins the first data row's cells to
+  // that row specifically, which a cell rendered outside the role="table" subtree
+  // (the exact invalid-child hazard the primitive exists to prevent) would not
+  // satisfy even if the page-global counts above still summed correctly.
+  const firstDataRow = screen.getAllByRole('row')[1]
+  expect(within(firstDataRow).getAllByRole('cell')).toHaveLength(6)
 })
