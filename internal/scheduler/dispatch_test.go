@@ -566,7 +566,7 @@ func TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal(t *testing.T) {
 	registry.Register(uuidStr(w.ID), sender)
 
 	broker := events.NewBroker()
-	ch, cancel := broker.Subscribe("")
+	ch, cancel := broker.Subscribe(events.Filter{})
 	defer cancel()
 
 	d := scheduler.NewDispatcher(q, registry, broker)

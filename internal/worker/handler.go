@@ -4,10 +4,13 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
@@ -505,7 +508,86 @@ func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	}
 }
 
-// handleTaskLog appends a log chunk from an agent.
+// taskLogEvent is the JSON payload of an events.TypeTaskLog SSE frame. seq,
+// stream, content and created_at are field-identical to the polling endpoint's
+// logEntry (internal/api/tasks.go) so a consumer can merge live frames with
+// GET /v1/tasks/{id}/logs pages using one type. task_id and job_id are added so
+// a "?task_id="-only subscriber can route and cache-key by job without a second
+// request. seq is task_logs.id, so it is a total order per task and an exact
+// dedupe key against the backfill.
+type taskLogEvent struct {
+	TaskID    string    `json:"task_id"`
+	JobID     string    `json:"job_id"`
+	Seq       int64     `json:"seq"`
+	Stream    string    `json:"stream"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// taskLogPublishes counts chunks that got past the HasLogSubscriber fast path,
+// i.e. that are about to be marshalled and published. Test-only observability (read via
+// TaskLogPublishesForTest in export_test.go) for the "nothing is marshalled when
+// nobody is tailing" guarantee, which is otherwise unobservable from outside.
+// Production code never reads it.
+var taskLogPublishes atomic.Int64
+
+// taskLogErrLimiterMax caps how many task ids the persist-failure limiter
+// retains. Only tasks whose chunks actually failed ever land here, but a
+// long-lived server must not accumulate them without bound, so the whole set is
+// dropped on overflow - the worst case is one extra log line per task that is
+// still failing after the reset.
+const taskLogErrLimiterMax = 1024
+
+// taskLogErrs bounds handleTaskLog's persist-failure logging to one line per
+// task per assignment epoch.
+//
+// The realistic non-stale failure repeats for every chunk of a task rather than
+// once: a subprocess writing binary stdout makes Postgres reject each insert with
+// 'invalid byte sequence for encoding "UTF8": 0x00'. Because handleTaskLog runs
+// synchronously on the Connect recv goroutine, logging per chunk would put tens
+// of thousands of serialized log writes in front of that worker's status,
+// inventory and telemetry ingest for a single large binary stream. One line per
+// generation carries the same diagnostic information.
+var taskLogErrs taskLogErrLimiter
+
+type taskLogErrLimiter struct {
+	mu       sync.Mutex
+	reported map[string]int32 // task id -> the assignment epoch already logged
+}
+
+// shouldLog reports whether this task+epoch has not yet been logged, recording
+// it if so. A later epoch for the same task reports again: a new assignment
+// generation is a new failure worth one line.
+func (l *taskLogErrLimiter) shouldLog(taskID string, epoch int32) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.reported == nil {
+		l.reported = make(map[string]int32)
+	}
+	if got, ok := l.reported[taskID]; ok && got == epoch {
+		return false
+	}
+	if len(l.reported) >= taskLogErrLimiterMax {
+		l.reported = make(map[string]int32)
+	}
+	l.reported[taskID] = epoch
+	return true
+}
+
+func (l *taskLogErrLimiter) reset() {
+	l.mu.Lock()
+	l.reported = nil
+	l.mu.Unlock()
+}
+
+// handleTaskLog appends a log chunk from an agent and, if anyone is tailing that
+// task, publishes it to the SSE broker.
+//
+// This runs synchronously on the Connect recv goroutine, which also carries that
+// worker's status, inventory and telemetry messages, so everything below is
+// deliberately cheap: exactly one DB round trip (the insert itself returns the
+// job id and seq), one map lookup when nobody is watching, and a non-blocking
+// Publish. Do not add a query, a goroutine, or a queue here.
 func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(chunk.TaskId); err != nil {
@@ -517,11 +599,64 @@ func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk
 		stream = "stderr"
 	}
 
-	_ = h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+	row, err := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID:          taskID,
 		Stream:          stream,
 		Content:         string(chunk.Content),
 		AssignmentEpoch: int32(chunk.Epoch),
+	})
+	if err != nil {
+		// pgx.ErrNoRows means the epoch fence rejected a stale chunk from a
+		// previous assignment generation (the task was requeued or cancelled, and
+		// both bump assignment_epoch). Expected - drop it silently, and in
+		// particular do NOT publish it: a zombie agent's output would otherwise
+		// appear in a live view and then vanish on refresh, because it was
+		// correctly never stored. Anything else is a real persist failure that
+		// used to be swallowed by `_ =`.
+		//
+		// Rate-limited to one line per task per assignment epoch: the realistic
+		// such failure repeats for every chunk of the task (binary stdout ->
+		// 'invalid byte sequence for encoding "UTF8"'), and this runs on the recv
+		// goroutine, so logging per chunk would delay that worker's status,
+		// inventory and telemetry ingest. See taskLogErrs.
+		//
+		// Never log chunk.Content: it is raw subprocess output and can contain
+		// secrets a job's own script echoed. Logging the error with %v is safe
+		// because pgconn.PgError.Error() renders only severity, message and
+		// SQLSTATE - never Detail, which is where Postgres puts "Failing row
+		// contains (...)". Do not start logging pgErr.Detail here.
+		if !errors.Is(err, pgx.ErrNoRows) && taskLogErrs.shouldLog(chunk.TaskId, int32(chunk.Epoch)) {
+			log.Printf("worker: handleTaskLog AppendTaskLog %s: %v", chunk.TaskId, err)
+		}
+		return
+	}
+
+	// Persistence is unconditional and strictly precedes any publish; the publish
+	// is derived from the stored row, so no line is ever published unstored.
+	taskIDStr := uuidStr(taskID)
+	if !h.broker.HasLogSubscriber(taskIDStr) {
+		return // steady state: one map lookup, no marshal, no allocation
+	}
+
+	taskLogPublishes.Add(1)
+	data, err := json.Marshal(taskLogEvent{
+		TaskID:    taskIDStr,
+		JobID:     uuidStr(row.JobID),
+		Seq:       row.ID,
+		Stream:    stream,
+		Content:   string(chunk.Content),
+		CreatedAt: row.CreatedAt.Time,
+	})
+	if err != nil {
+		log.Printf("worker: handleTaskLog marshal %s: %v", chunk.TaskId, err)
+		return
+	}
+
+	h.broker.Publish(events.Event{
+		Type:   events.TypeTaskLog,
+		JobID:  uuidStr(row.JobID),
+		TaskID: taskIDStr,
+		Data:   data,
 	})
 }
 

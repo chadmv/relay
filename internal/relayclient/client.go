@@ -139,6 +139,16 @@ func (c *Client) StreamEvents(ctx context.Context, path string, onSubscribed fun
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	// bufio.Scanner's default token limit is 64 KiB, which a single task_log
+	// frame can exceed: an agent chunk is up to ~32 KiB raw (os/exec's copy
+	// buffer feeding chunkWriter in internal/agent/runner.go) and JSON escaping
+	// expands arbitrary bytes by up to ~6x, since each control byte becomes a
+	// 6-character \u00XX escape - so a worst-case chunk of binary output reaches
+	// ~192 KiB. Without this, StreamEvents fails the whole stream with
+	// "bufio.Scanner: token too long" on one oversized log line. Status payloads
+	// are tiny, so this never bit before task_log existed. 1 MiB is ~5x that
+	// worst case; do not shrink it on the assumption that escaping only doubles.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	var eventType string
 	var dataLines []string
 

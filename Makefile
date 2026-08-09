@@ -22,9 +22,11 @@ build: web-build
 test:
 	go test ./... -timeout 120s
 
-# Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows
+# Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows.
+# The timeout is deliberately generous: every integration test spins up its own
+# real Postgres container, so internal/api alone runs ~320-340s.
 test-integration:
-	go test -tags integration -p 1 ./... -timeout 300s
+	go test -tags integration -p 1 ./... -timeout 900s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`

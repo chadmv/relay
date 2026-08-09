@@ -3,9 +3,11 @@ package relayclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -117,4 +119,40 @@ func TestClientDo_5xxReturnsGenericMessage(t *testing.T) {
 	c := NewClient(srv.URL, "tok")
 	err := c.Do(context.Background(), "GET", "/v1/jobs/x", nil, nil)
 	require.EqualError(t, err, "server error (500) — try again")
+}
+
+func TestStreamEvents_ParsesALargeDataLine(t *testing.T) {
+	// 512 KiB of content on ONE data: line - far past bufio.Scanner's 64 KiB
+	// default. A single agent log chunk can be ~32 KiB raw, and JSON escaping
+	// can nearly double that, so this is the shape of a real worst-case task_log
+	// frame with headroom.
+	big := strings.Repeat("x", 512*1024)
+	payload, err := json.Marshal(map[string]string{"content": big})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "event: task_log\ndata: %s\n\n", payload)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "")
+	var got []SSEEvent
+	err = c.StreamEvents(context.Background(), "/v1/events", nil, func(e SSEEvent) bool {
+		got = append(got, e)
+		return true
+	})
+	require.NoError(t, err, "large data: line must not fail with bufio.Scanner: token too long")
+	require.Len(t, got, 1)
+	require.Equal(t, "task_log", got[0].Type)
+
+	var out struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(got[0].Data), &out))
+	require.Len(t, out.Content, 512*1024, "the payload must round-trip whole, not truncated")
 }

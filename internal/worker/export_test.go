@@ -19,6 +19,26 @@ func (h *Handler) HandleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 	h.handleTaskStatus(ctx, upd)
 }
 
+// HandleTaskLog exposes the unexported handleTaskLog method for integration
+// tests in package worker_test.
+func (h *Handler) HandleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk) {
+	h.handleTaskLog(ctx, chunk)
+}
+
+// TaskLogPublishesForTest reports how many chunks have got past the
+// HasLogSubscriber fast path and been marshalled + published as task_log events
+// since process start. Lets a test assert the fast path really skipped the
+// marshal, which is otherwise unobservable from outside the package.
+func TaskLogPublishesForTest() int64 {
+	return taskLogPublishes.Load()
+}
+
+// ResetTaskLogErrLimiterForTest clears the persist-failure log rate limiter so a
+// test starts from a known state regardless of what earlier tests reported.
+func ResetTaskLogErrLimiterForTest() {
+	taskLogErrs.reset()
+}
+
 // ApplyInventory exposes the unexported applyInventory method for integration tests.
 func (h *Handler) ApplyInventory(ctx context.Context, workerID pgtype.UUID, inv []*relayv1.WorkspaceInventoryUpdate) error {
 	return h.applyInventory(ctx, workerID, inv)

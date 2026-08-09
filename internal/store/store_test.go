@@ -264,22 +264,38 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	// Log with matching epoch.
-	err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+	// Log with matching epoch: returns the inserted row plus the task's job id.
+	first, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1,
 	})
 	require.NoError(t, err)
+	assert.Equal(t, job.ID, first.JobID, "the row must carry the task's job id so the publish needs no second query")
+	assert.NotZero(t, first.ID, "seq must be the task_logs.id BIGSERIAL")
+	assert.True(t, first.CreatedAt.Valid)
 
-	// Log with stale epoch.
-	err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+	// seq is monotonically increasing across calls - it is the same value
+	// GET /v1/tasks/{id}/logs pages by via ?since_seq.
+	second, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1,
+	})
+	require.NoError(t, err)
+	assert.Greater(t, second.ID, first.ID)
+
+	// Log with a STALE epoch: the fence rejects it, so the statement returns
+	// zero rows and sqlc surfaces pgx.ErrNoRows. This is the signal the publish
+	// gate in handleTaskLog depends on - previously :exec collapsed "inserted one
+	// row" and "inserted zero rows" into the same nil error.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0,
 	})
-	require.NoError(t, err) // :exec returns nil even when 0 rows inserted
+	assert.ErrorIs(t, err, pgx.ErrNoRows)
 
+	// And it inserted nothing.
 	logs, err := q.GetTaskLogs(ctx, task.ID)
 	require.NoError(t, err)
-	require.Len(t, logs, 1)
+	require.Len(t, logs, 2)
 	assert.Equal(t, "hello\n", logs[0].Content)
+	assert.Equal(t, "more\n", logs[1].Content)
 }
 
 func TestReconciliationQueries(t *testing.T) {
