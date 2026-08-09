@@ -1,8 +1,10 @@
 ---
 title: relay-code-reviewer is told to invoke skills but has no Skill tool
 type: bug
-status: open
+status: closed
 created: 2026-08-09
+closed: 2026-08-09
+resolution: fixed
 priority: medium
 source: Phase 4 of the admin-console shell + Users tab iteration (2026-08-09)
 ---
@@ -78,3 +80,39 @@ grant insufficient, and found the real problem:
 - Do not close this item on the strength of a frontmatter edit alone. The acceptance criterion above
   deliberately requires a real dispatch that reports having run the skills, precisely because the
   original defect was a config that looked right and silently did nothing.
+
+## Resolution
+Fixed 2026-08-09, by a different route than this item's original acceptance criteria assumed - and
+the criteria were wrong rather than unmet, so they are worth reading against what follows.
+
+The premise was that the agent needed the `Skill` tool. It was granted (to `relay-code-reviewer` and,
+from the audit this item asked for, to `relay-tpm`, which had the identical drift and could therefore
+never run `/retro` or `/roadmap` itself). A verification dispatch then proved the grant insufficient
+and surfaced the real cause: **`/code-review` is a slash command, not a skill.** It ships as
+`commands/code-review.md` with no `skills/` directory, so no subagent can invoke it via the Skill
+tool no matter what its `tools:` line says, and `security-review` is harness-provided rather than a
+file on disk. The agent's prose was not under-permissioned - it described something that does not
+exist.
+
+**The adopted resolution (user decision): the conductor runs `/code-review` itself and feeds the
+output into the `relay-code-reviewer` dispatch as prior findings.** Verified working - the conductor
+can invoke the skill. The agent's role becomes triage-and-extend: confirm or refute each fed-in
+finding with its own `file:line` evidence and a concrete failure scenario, then run its own
+adversarial passes over the dimensions it owns (the seven Invariants, security, test non-vacuity).
+
+Feeding the output in rather than substituting it is deliberate. The two find different things: across
+the 2026-08-09 five-item autopilot batch, the agent's own passes produced 2 high and 13 medium
+findings, several empirically reproduced with probes rather than argued - including a stream teardown
+that let a dying connection resurrect its own status, and an unbounded re-subscribe whose "exactly one
+retry" guarantee was per-event while the trigger was caused by the retry. A generic pass would not
+have found those, and they are the reason the agent is not merely a formatter for someone else's
+output.
+
+Both `docs/agent-team/README.md` Phase 4 and the agent definition are updated to describe this, each
+stating plainly that the agent cannot run the command and that earlier versions claimed otherwise -
+so the next reader does not re-derive the dead end.
+
+Also recorded from the investigation, because it will otherwise cost someone an afternoon: **agent
+definitions appear to be cached from session start.** The post-edit verification dispatch still
+reported exactly the pre-edit tool list, so a correct frontmatter change can look like a failed one
+until a fresh session.
