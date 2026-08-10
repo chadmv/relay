@@ -239,3 +239,41 @@ test('the reveal is reachable only through the mutation - no route or link carri
     expect(a.getAttribute('href') ?? '').not.toContain(TOKEN)
   }
 })
+
+test('the dialog layer leaves the DOM with the credential, retaining no detached subtree', async () => {
+  const spies = spyOnConsole()
+  server.use(
+    http.get('/v1/agent-enrollments', () =>
+      HttpResponse.json({ items: [ROW], next_cursor: '', total: 1 }),
+    ),
+    http.post('/v1/agent-enrollments', () =>
+      HttpResponse.json({ id: 'e9', token: TOKEN, expires_at: ROW.expires_at }, { status: 201 }),
+    ),
+  )
+  renderTab(newClient())
+  await screen.findByText('farm-west-13')
+  await userEvent.click(screen.getByRole('button', { name: '+ Enroll agent' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Enroll' }))
+  await screen.findByRole('dialog')
+
+  // The dialog is portaled into a single shared layer under <body>
+  // (web/src/components/dialog/dialogStack.ts). Hold a reference to it so the
+  // DETACHED node can be inspected after teardown - a container that is removed
+  // from the document but still holds the credential in a subtree is exactly the
+  // leak a portal could introduce and document.body-scoped sweeps could not see.
+  const layer = document.querySelector('[data-dialog-layer]') as HTMLElement
+  expect(layer).not.toBeNull()
+  // Positive control on THIS instrument: it can see the token when it is present.
+  expect(layer.innerHTML).toContain(TOKEN)
+
+  await userEvent.click(screen.getByRole('button', { name: /I have copied it/ }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  expect(document.querySelector('[data-dialog-layer]')).toBeNull()
+  expect(layer.innerHTML).not.toContain(TOKEN)
+  expect(layer.parentNode).toBeNull()
+  expect(domContainsSecret(TOKEN)).toBe(false)
+  assertNoConsoleLeak(spies, TOKEN)
+
+  spies.forEach((s) => s.mockRestore())
+})

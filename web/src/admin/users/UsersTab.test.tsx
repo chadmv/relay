@@ -398,3 +398,207 @@ test('the footnote explains the archive and reset side effects', async () => {
   await screen.findByText('ada@studio.dev')
   expect(screen.getByText(/Server guards prevent archiving yourself or the last active admin/i)).toBeInTheDocument()
 })
+
+// ---------------------------------------------------------------------------
+// Dialog hardening (docs/superpowers/specs/2026-08-09-dialog-hardening.md).
+// This tab is the only page in the app that can mount two dialogs at once
+// through a purely ordinary path - onResetPassword sets `resetting` and
+// onArchive sets `confirm`, and neither clears the other - so it is where the
+// modal guarantees are measured.
+// ---------------------------------------------------------------------------
+
+test('focus is trapped in the reset dialog: ten tabs each way never reach a background control', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+  // Captured BEFORE the dialog opens. Once it is open the background carries
+  // aria-hidden="true", and @testing-library/dom's role query filters on exactly
+  // that (role-helpers.js:33-45), so getByRole could no longer find this button.
+  const archive = screen.getByRole('button', { name: 'Archive ada@studio.dev' })
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  const dialog = await screen.findByRole('dialog')
+  expect(dialog.contains(document.activeElement)).toBe(true)
+
+  // Ten is more than the dialog's four focusables, so this proves the ring WRAPS
+  // rather than merely not having escaped yet.
+  for (let i = 0; i < 10; i++) {
+    await userEvent.tab()
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    expect(archive).not.toHaveFocus()
+  }
+  for (let i = 0; i < 10; i++) {
+    await userEvent.tab({ shift: true })
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    expect(archive).not.toHaveFocus()
+  }
+})
+
+test('with two dialogs open, one Escape closes exactly one - the topmost', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  // Dialog 1, through the item's real path.
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  await screen.findByRole('dialog')
+
+  // Dialog 2, through the BACKGROUND trigger, with a click and not a tab
+  // sequence. Once the trap lands the tab route to this button is unreachable BY
+  // DESIGN, so a test that reached it by tabbing could only ever be red. The
+  // click route is legitimate rather than synthetic: jsdom performs no
+  // hit-testing so the scrim occludes nothing here, and on WorkerDetailPage the
+  // scrim genuinely fails to cover the page (its ConfirmDialog sits inside a
+  // backdrop-filter ancestor, which becomes the containing block for its
+  // position:fixed descendants). It also models every non-tab route to a second
+  // dialog: a click landing before paint, an AT activation, a dialog opened by an
+  // async result.
+  //
+  // hidden: true because the open dialog marks the background aria-hidden, which
+  // getByRole's accessibility filter honours. The flag makes this query behave
+  // identically before and after the fix, so this test measures Escape scoping
+  // and nothing else.
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Archive ada@studio.dev', hidden: true }),
+  )
+  expect(screen.getAllByRole('dialog')).toHaveLength(2)
+
+  await userEvent.keyboard('{Escape}')
+
+  const survivors = screen.getAllByRole('dialog')
+  expect(survivors).toHaveLength(1)
+  // By accessible name, NEVER by array index: each dialog is portaled
+  // independently (DialogShell composes createPortal), so the DOM order of two
+  // open dialogs follows MOUNT order, not the JSX declaration order at
+  // UsersTab.tsx (ConfirmDialog at :278, ResetPasswordDialog at :297) - verified
+  // by inspecting the rendered dialogs' order directly. That is what makes the
+  // design correct in the first place: logical topmost (last registered) and
+  // visual topmost (last appended to the layer) are the same dialog by
+  // construction. An index assertion would happen to pass here, since this test
+  // always opens Reset first, but it would be testing the wrong property - the
+  // survivor must be identified by what it IS, not by where it landed.
+  expect(survivors[0]).toHaveAccessibleName('Reset password for ada@studio.dev?')
+  expect(screen.getByLabelText('New password')).toBeInTheDocument()
+})
+
+test('closing a dialog returns focus to the control that opened it', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  const archive = screen.getByRole('button', { name: 'Archive ada@studio.dev' })
+  await userEvent.click(archive)
+  await screen.findByRole('dialog')
+  // The dialog took focus, so the assertion below is about restoration and not
+  // about focus that simply never moved.
+  expect(archive).not.toHaveFocus()
+
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  expect(archive).toHaveFocus()
+})
+
+// Every direct child of <body> that is not the dialog layer. Defined structurally
+// rather than as #root: in production the app is mounted in #root, but under
+// React Testing Library it lives in an unnamed container div, so an assertion
+// keyed on #root would be vacuously green here while proving nothing.
+function backgroundNodes(): HTMLElement[] {
+  return Array.from(document.body.children).filter(
+    (el) => !el.hasAttribute('data-dialog-layer'),
+  ) as HTMLElement[]
+}
+
+test('the background stays inert and the page stays locked until the LAST dialog closes', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  await screen.findByRole('dialog')
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Archive ada@studio.dev', hidden: true }),
+  )
+  expect(screen.getAllByRole('dialog')).toHaveLength(2)
+
+  // Control on the instrument itself: the loops below assert over a list, and an
+  // empty list satisfies every one of them.
+  expect(backgroundNodes().length).toBeGreaterThan(0)
+  for (const el of backgroundNodes()) {
+    expect(el).toHaveAttribute('inert')
+    expect(el).toHaveAttribute('aria-hidden', 'true')
+  }
+  expect(document.body.style.overflow).toBe('hidden')
+
+  await userEvent.keyboard('{Escape}')
+  expect(screen.getAllByRole('dialog')).toHaveLength(1)
+
+  // One dialog is still open, so NOTHING global may be released yet. A cleanup
+  // that restores unconditionally instead of deriving from the post-removal stack
+  // unlocks the page and un-inerts the background while a modal is on screen.
+  expect(backgroundNodes().length).toBeGreaterThan(0)
+  for (const el of backgroundNodes()) {
+    expect(el).toHaveAttribute('inert')
+    expect(el).toHaveAttribute('aria-hidden', 'true')
+  }
+  expect(document.body.style.overflow).toBe('hidden')
+
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  for (const el of backgroundNodes()) {
+    expect(el).not.toHaveAttribute('inert')
+    expect(el).not.toHaveAttribute('aria-hidden')
+  }
+  expect(document.body.style.overflow).toBe('')
+  // The layer leaves <body> too, so the child list returns to exactly what it was
+  // and nothing leaks between tests.
+  expect(document.querySelector('[data-dialog-layer]')).toBeNull()
+})
+
+test('closing the LOWER dialog leaves the upper one open, focused and still dismissible', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: '', total: 1 })))
+  renderTab()
+  await screen.findByText('ada@studio.dev')
+
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Reset password for ada@studio.dev' }),
+  )
+  const reset = await screen.findByRole('dialog')
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Archive ada@studio.dev', hidden: true }),
+  )
+  expect(screen.getAllByRole('dialog')).toHaveLength(2)
+
+  // Dismiss the one UNDERNEATH. This is the exact shape a stack.pop() teardown
+  // gets wrong: it would remove the ARCHIVE dialog's entry instead, leaving the
+  // reset dialog's dead id topmost, after which Escape reaches nothing.
+  // Scoped with querySelector rather than `within` so this file's import block
+  // stays byte-identical.
+  const cancelInReset = Array.from(reset.querySelectorAll('button')).find(
+    (b) => b.textContent === 'Cancel',
+  ) as HTMLButtonElement
+  expect(cancelInReset).toBeInTheDocument()
+  await userEvent.click(cancelInReset)
+
+  const survivors = screen.getAllByRole('dialog')
+  expect(survivors).toHaveLength(1)
+  expect(survivors[0]).toHaveAccessibleName('Archive ada@studio.dev?')
+  // Focus did not escape to <body> behind a still-open modal.
+  expect(survivors[0].contains(document.activeElement)).toBe(true)
+
+  // And the survivor is genuinely still topmost, so Escape still reaches it.
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})

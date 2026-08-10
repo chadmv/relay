@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { PillButton } from '../components/holo'
+import { DialogShell } from '../components/dialog/DialogShell'
 import { formatTimeUntil } from '../lib/time'
 
 interface TokenRevealDialogProps {
@@ -39,17 +40,31 @@ const DEFAULT_WARNING =
 //  3. The token never enters a URL, a route, a query param, or a query key. This
 //     dialog is not linkable or bookmarkable by construction, so the credential
 //     cannot leak into history, a Referer header, or a proxy log.
-//  4. Backdrop click does NOT dismiss - there is deliberately no onClick on the
-//     overlay (the hi-fi's AdminTokenModal has one at
+//  4. NEITHER a backdrop click NOR Escape dismisses. There is deliberately no
+//     onClick on the overlay (the hi-fi's AdminTokenModal has one at
 //     design_handoff_relay_holo/hifi3-holo-pages.jsx:2345, which is fine for a
-//     form and catastrophic for a secret). Escape DOES dismiss, preserving the
-//     baseline of the two shipped dialogs.
-//  5. a11y baseline copied from web/src/components/ConfirmDialog.tsx:36-46:
-//     role="dialog", aria-modal, aria-labelledby the title, first field focused.
-//     NO focus trap, same as ConfirmDialog and ResetPasswordDialog. This is the
-//     THIRD un-trapped consumer and the worst one - the credential can be tabbed
-//     past - so docs/backlog/idea-2026-07-01-confirmdialog-focus-trap-hardening.md
-//     should land before a fourth.
+//     form and catastrophic for a secret), and DialogShell is passed
+//     dismissOnEscape={false}. Escape is the same class of input as a stray
+//     click - single, low-intent, no target, frequently reflexive - and here
+//     dismissal IS the destructive act: onDone is what calls create.reset(), so
+//     there is nothing to revert to and no cancel affordance to preserve. WAI-
+//     ARIA APG requires Escape so a keyboard user is never trapped; they are not
+//     trapped, because the Done button is inside the focus trap and one Tab away,
+//     and it is the only exit BY DESIGN. This is the documented irreversible-
+//     dismissal exception, not an oversight. A confirm-before-discarding dialog
+//     was considered and rejected: it stacks a second modal on the credential
+//     modal to guard against a keystroke the user can simply not press, and ends
+//     in a dialog asking whether you meant to close the dialog that says do not
+//     close me.
+//  5. a11y and modal behavior come from web/src/components/dialog/DialogShell.tsx,
+//     which every dialog in the app composes: the labelled modal role, the portal,
+//     the focus trap, the inert + aria-hidden background, the scroll lock, and the
+//     scoped Escape. The credential can no longer be tabbed past - verified true
+//     even through a scrim click, which used to blur focus to <body> and hand
+//     the Tab trap nothing to intercept (code review, 2026-08-09; the scrim's
+//     onMouseDown in DialogShell.tsx now prevents that blur outright, pinned by
+//     DialogShell.test.tsx's "a scrim mousedown does not blur the panel at all"
+//     test, which asserts the trap specifically).
 export function TokenRevealDialog({
   token,
   title,
@@ -88,18 +103,6 @@ export function TokenRevealDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Escape handling is a separate effect so it can depend on onDone (reading
-  // the latest closure) without re-running the focus/select effect above.
-  // Re-attaching a keydown listener has no visible side effect, unlike
-  // re-focusing.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onDone()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onDone])
-
   // The 2s "Copied" timer must be cleared on unmount: Done unmounts this dialog,
   // and a pending setState on an unmounted component warns through console.error -
   // which the secrecy suite spies on.
@@ -122,64 +125,61 @@ export function TokenRevealDialog({
   }
 
   return (
-    // No onClick here. See invariant 4.
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        className="w-full max-w-lg rounded-card border border-border bg-bg p-5 shadow-xl"
-      >
-        <div className="font-mono text-[10px] tracking-[0.18em] text-fg-mute">{endpoint}</div>
-        <h2 id={titleId} className="mt-1 text-[17px] font-medium text-fg">
-          {title}
-        </h2>
+    <DialogShell
+      titleId={titleId}
+      onDismiss={onDone}
+      dismissOnEscape={false}
+      panelClassName="max-w-lg"
+    >
+      <div className="font-mono text-[10px] tracking-[0.18em] text-fg-mute">{endpoint}</div>
+      <h2 id={titleId} className="mt-1 text-[17px] font-medium text-fg">
+        {title}
+      </h2>
 
-        <div className="mt-4 rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 font-mono text-[10.5px] leading-relaxed tracking-[0.04em] text-warn">
-          ⚠ {warning ?? DEFAULT_WARNING}
-        </div>
-
-        {expiresAt && (
-          <div className="mt-2 font-mono text-[10.5px] text-fg-dim">
-            Expires {formatTimeUntil(expiresAt)}
-          </div>
-        )}
-
-        <label
-          htmlFor="reveal-token"
-          className="mb-1 mt-4 block font-mono text-[10px] uppercase tracking-[0.16em] text-fg-mute"
-        >
-          Token
-        </label>
-        <input
-          id="reveal-token"
-          ref={inputRef}
-          type="text"
-          readOnly
-          value={token}
-          spellCheck={false}
-          autoComplete="off"
-          onFocus={(e) => e.currentTarget.select()}
-          className="w-full rounded-[8px] border border-border bg-black/40 px-3 py-2 font-mono text-[12px] text-fg outline-none focus:border-accent"
-        />
-
-        {canCopy ? (
-          <div className="mt-2">
-            <PillButton onClick={copy}>{copied ? 'Copied' : 'Copy'}</PillButton>
-          </div>
-        ) : (
-          <div className="mt-2 text-[11px] text-fg-dim">
-            Clipboard access needs HTTPS, so select the field above and copy it manually. The text
-            is already selected.
-          </div>
-        )}
-
-        <div className="mt-5 flex justify-end">
-          <PillButton variant="primary" onClick={onDone}>
-            Done - I have copied it
-          </PillButton>
-        </div>
+      <div className="mt-4 rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 font-mono text-[10.5px] leading-relaxed tracking-[0.04em] text-warn">
+        ⚠ {warning ?? DEFAULT_WARNING}
       </div>
-    </div>
+
+      {expiresAt && (
+        <div className="mt-2 font-mono text-[10.5px] text-fg-dim">
+          Expires {formatTimeUntil(expiresAt)}
+        </div>
+      )}
+
+      <label
+        htmlFor="reveal-token"
+        className="mb-1 mt-4 block font-mono text-[10px] uppercase tracking-[0.16em] text-fg-mute"
+      >
+        Token
+      </label>
+      <input
+        id="reveal-token"
+        ref={inputRef}
+        type="text"
+        readOnly
+        value={token}
+        spellCheck={false}
+        autoComplete="off"
+        onFocus={(e) => e.currentTarget.select()}
+        className="w-full rounded-[8px] border border-border bg-black/40 px-3 py-2 font-mono text-[12px] text-fg outline-none focus:border-accent"
+      />
+
+      {canCopy ? (
+        <div className="mt-2">
+          <PillButton onClick={copy}>{copied ? 'Copied' : 'Copy'}</PillButton>
+        </div>
+      ) : (
+        <div className="mt-2 text-[11px] text-fg-dim">
+          Clipboard access needs HTTPS, so select the field above and copy it manually. The text
+          is already selected.
+        </div>
+      )}
+
+      <div className="mt-5 flex justify-end">
+        <PillButton variant="primary" onClick={onDone}>
+          Done - I have copied it
+        </PillButton>
+      </div>
+    </DialogShell>
   )
 }

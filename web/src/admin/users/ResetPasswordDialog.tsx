@@ -1,6 +1,7 @@
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { Field } from '../../components/Field'
 import { Input } from '../../components/Input'
+import { DialogShell } from '../../components/dialog/DialogShell'
 
 interface ResetPasswordDialogProps {
   email: string
@@ -15,25 +16,19 @@ interface ResetPasswordDialogProps {
   onCancel: () => void
 }
 
-// A sibling of ConfirmDialog, not a variant of it: ConfirmDialog takes a text-only
-// `body` and cannot host form fields. Matches ConfirmDialog's a11y baseline -
-// role="dialog", aria-modal, labelled by its title, Escape dismisses, first field
-// focused on open (via autoFocus, so the shared Input primitive does not need to
-// forward a ref). No focus trap, same as ConfirmDialog; that debt is tracked by
-// docs/backlog/idea-2026-07-01-confirmdialog-focus-trap-hardening.md.
+// A sibling of ConfirmDialog, not a variant of it: ConfirmDialog takes a
+// text-only `body` and cannot host form fields. Both compose the same
+// DialogShell, which owns the labelled modal role, the portal, the focus trap,
+// the inert background, the scroll lock and the scoped Escape. The <form> lives
+// INSIDE the shell's panel and carries no dialog semantics of its own; a
+// type="submit" button still submits its nearest form regardless. First field
+// focused via autoFocus, which is also what the shell's firstFocusable picks, so
+// the shared Input primitive still does not need to forward a ref.
 export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel }: ResetPasswordDialogProps) {
   const titleId = useId()
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [validationError, setValidationError] = useState<string | undefined>()
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onCancel()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onCancel])
 
   function submit(e: FormEvent) {
     e.preventDefault()
@@ -58,14 +53,8 @@ export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <form
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onSubmit={submit}
-        className="w-full max-w-sm rounded-card border border-border bg-bg p-5 shadow-xl"
-      >
+    <DialogShell titleId={titleId} onDismiss={onCancel} panelClassName="max-w-sm">
+      <form onSubmit={submit}>
         <h2 id={titleId} className="text-[15px] font-medium text-fg">
           Reset password for {email}?
         </h2>
@@ -103,6 +92,17 @@ export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel 
           </button>
           <button
             type="submit"
+            // A focused element that becomes disabled blurs to <body> in real
+            // browsers - jsdom does not reproduce this and user-event will not
+            // dispatch to a disabled target, so there is no test for it here.
+            // It used to mean Escape died mid-request: a keyboard admin who
+            // submitted, then reflexively pressed Escape while this button was
+            // disabled and briefly held focus, hit nothing, because the old
+            // panel-scoped keydown handler only fired when focus was still
+            // inside the panel. DialogShell's document-level Escape listener
+            // (code review, 2026-08-09) covers this the same way it covers
+            // every other focus-outside route - it does not depend on where
+            // focus is, only on this dialog still being the topmost one.
             disabled={pending}
             className="rounded-md border border-err/50 bg-err/20 px-3 py-1.5 text-[12px] font-medium text-err disabled:opacity-40"
           >
@@ -110,6 +110,6 @@ export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel 
           </button>
         </div>
       </form>
-    </div>
+    </DialogShell>
   )
 }

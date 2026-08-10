@@ -1,8 +1,10 @@
 ---
 title: "Harden the shared dialogs: focus trap + scoped Escape (3 implementations, 5 ConfirmDialog call sites)"
 type: idea
-status: open
+status: closed
 created: 2026-07-01
+closed: 2026-08-09
+resolution: fixed
 priority: medium
 source: worker-detail-mutations review (2026-07-01); re-measured 2026-08-09 after the admin console
 ---
@@ -97,3 +99,43 @@ Priority raised low -> medium on 2026-08-09, for two reasons rather than the cou
 document-global Escape gap became genuinely reachable via the missing focus trap, and one consumer
 now discards an unrecoverable credential on Escape. The Invites tab will make it a fourth consumer,
 so doing this before that tab is the cheap ordering.
+
+## Resolution
+Shipped 2026-08-09 (autopilot, dialog-hardening). `web/src/components/dialog/dialogStack.ts` is a
+module-level LIFO owning the shared portal layer, the body scroll lock and the inert/aria-hidden
+background marking, every one of them derived from the post-removal stack rather than restored
+directly; `DialogShell.tsx` is the one modal shell. All three implementations compose it and their
+`document`-level Escape listeners are gone as independent listeners.
+
+Route chosen on measured evidence rather than preference. Native `<dialog>`/`showModal()` was
+rejected because jsdom's `HTMLDialogElementImpl` is an empty subclass, so every existing dialog test
+would throw and any workaround would test a polyfill instead of the platform. A headless focus-trap
+library was rejected by the same reasoning inverted: those enforce via `inert`/`focusin`/top-layer,
+and `user-event@14` computes its Tab destination from a document-wide `querySelectorAll` that never
+consults `inert` - the property that must be proved is exactly what a library makes unprovable in
+this harness. `preventDefault()` on keydown *is* honored, so a Tab-intercepting trap is both correct
+and testable. Both routes are filed for revisit with explicit trigger conditions
+([[idea-2026-08-09-native-dialog-element-reconsideration]]).
+
+`TokenRevealDialog` takes `dismissOnEscape={false}`: Escape there is not a cancel, it is the
+destructive act, and Done stays inside the trap two Tabs away. That decision is the one this item
+asked to be recorded.
+
+Review found one HIGH, and its history is the lesson: moving Escape onto the panel broke it whenever
+focus is outside the panel, which a scrim click always causes - a regression against main on all
+three dialogs. It had already been correctly diagnosed inside the diff, as a comment justifying a
+test's ordering rather than as a defect. All three lenses found it independently. Fixed by restoring
+a document-level listener gated on `isTopmost(id)` plus a scrim `onMouseDown` that prevents the blur
+outright, then re-verified with probes. A follow-up pass found the focus-parking branch was
+overwritten by React DOM's `restoreSelection`; deferred one microtask and pinned by a test.
+
+Two live defects were fixed as side effects: `WorkspacesPanel`'s scrim never covered the viewport
+(`GlassPanel`'s `backdrop-blur` is the containing block for `position: fixed` descendants), and
+`ReservationsTab`'s secret-leak sweep read a render container that no longer holds the portaled
+dialog while its positive control also matched the page footnote, so it would have passed while its
+negatives went vacuous.
+
+Suite 780 -> 811 tests, with the byte-identical existing-tests gate holding across nine protected
+files (additions only, two sanctioned exceptions named before implementation). Follow-ups filed:
+[[idea-2026-08-09-body-level-portal-inert-marking]], [[idea-2026-08-09-dialog-shell-sweep-test]],
+[[idea-2026-08-09-native-dialog-element-reconsideration]].
