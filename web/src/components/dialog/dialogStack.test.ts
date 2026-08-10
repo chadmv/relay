@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'vitest'
 import {
   __resetForTest,
   getLayer,
+  getTopmostPanel,
   isEmpty,
   isTopmost,
   registerDialog,
@@ -48,6 +49,23 @@ test('registering the same id twice is idempotent', () => {
   unregisterDialog('a')
   unregisterDialog('b')
   expect(isEmpty()).toBe(true)
+})
+
+test('re-registering an existing id refreshes its panel node in place', () => {
+  const first = panel()
+  registerDialog('a', first)
+  expect(getTopmostPanel()).toBe(first)
+
+  // StrictMode's dev double-invoke, or a hot reload, can re-register an id
+  // whose cleanup never ran - WITH a fresh node. Dropping the new panel (the
+  // old `if (stack.some(...)) return` guard did exactly that) would leave
+  // getTopmostPanel and Tab's wrap-around targeting a DETACHED element from a
+  // previous render.
+  const second = panel()
+  registerDialog('a', second)
+
+  expect(getTopmostPanel()).toBe(second)
+  expect(getTopmostPanel()).not.toBe(first)
 })
 
 test('unregistering an id that is not on the stack is a no-op', () => {

@@ -56,19 +56,36 @@ import {
 // browser- and AT-facing mechanism and as defence in depth - but note that the
 // tests assert them as ATTRIBUTES only. Nothing here proves inert blocks anything.
 //
+// WHY ESCAPE IS A DOCUMENT-LEVEL LISTENER, NOT PART OF THE PANEL'S onKeyDown
+// (code review, 2026-08-09). The Tab trap above is panel-scoped and that is
+// correct, because Tab only needs to be intercepted while focus IS inside the
+// panel. Escape is different: it must still dismiss even when focus has left
+// the panel, and focus leaves the panel through more routes than the shell can
+// close. A React keydown handler only fires when the event's target is a
+// descendant of the panel; once document.activeElement falls back to <body> -
+// a scrim mousedown's default action, a disabled={pending} submit button
+// blurring mid-request (ResetPasswordDialog), a trigger row removed from under
+// a still-focused element - a keydown targeted at <body> never reaches it. On
+// main, every dialog used a document-level listener and so was immune to this;
+// making the trap panel-only was a regression this shell must not repeat. The
+// listener is gated on `dismissOnEscape && isTopmost(id)`, which is the old
+// behavior plus the new stack scoping, so it never fires for a non-topmost or
+// Escape-suppressed dialog. onMouseDown on the scrim (below) additionally stops
+// the ONE most common route (a backdrop press) from blurring the panel at all,
+// but it cannot cover every route, which is why both exist.
+//
 // A focusin sentinel on document was rejected (two naive focus-pulling traps
 // mounted at once livelock, for no gain over the keydown path), and so were
 // zero-size focusable sentinel divs at the panel edges (they add DOM nodes inside
 // a panel whose innerHTML is swept by both the reservations honesty test and the
 // enrollment secrecy suite).
 //
-// KNOWN LIMITATION, ACCEPTED: the focusable selector below does not evaluate
-// display/visibility and does not cross shadow roots. No current consumer has
-// hidden focusables or a shadow root.
-
 const SCRIM = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4'
 const PANEL_BASE = 'w-full rounded-card border border-border bg-bg p-5 shadow-xl'
 
+// KNOWN LIMITATION, ACCEPTED (unchanged by the additions below): this selector
+// does not evaluate display/visibility and does not cross shadow roots. No
+// current consumer has hidden focusables or a shadow root.
 const FOCUSABLE = [
   'a[href]',
   'button:not([disabled])',
@@ -76,10 +93,39 @@ const FOCUSABLE = [
   'select:not([disabled])',
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex^="-"])',
+  '[contenteditable]:not([contenteditable="false"])',
+  'iframe',
+  'object',
+  'embed',
+  'area[href]',
+  'audio[controls]',
+  'video[controls]',
+  'summary',
 ].join(', ')
 
 function focusables(panel: HTMLElement): HTMLElement[] {
-  return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE))
+  const all = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE))
+  // A browser puts only ONE radio per `name` group in the tab order: the
+  // checked one, or the first if none is checked. Leaving every radio in meant
+  // `last` could resolve to an untabbable node, so the wrap-around never fired
+  // once the loop reached it - measured with two unchecked radios after a
+  // button, focus escaped the panel entirely.
+  const radiosByName = new Map<string, HTMLInputElement[]>()
+  for (const el of all) {
+    if (el instanceof HTMLInputElement && el.type === 'radio' && el.name) {
+      const group = radiosByName.get(el.name) ?? []
+      group.push(el)
+      radiosByName.set(el.name, group)
+    }
+  }
+  const radioWinners = new Set<HTMLInputElement>()
+  for (const group of radiosByName.values()) {
+    radioWinners.add(group.find((r) => r.checked) ?? group[0])
+  }
+  return all.filter((el) => {
+    if (!(el instanceof HTMLInputElement) || el.type !== 'radio' || !el.name) return true
+    return radioWinners.has(el)
+  })
 }
 
 interface DialogShellProps {
@@ -134,23 +180,76 @@ export function DialogShell({
     registerDialog(id, panel)
 
     return () => {
-      // Guard on where focus actually is BEFORE releasing anything, so a dialog
-      // that closes while the user has clicked elsewhere does not yank it back.
-      const focusWasInside = panel.contains(document.activeElement)
+      // Read panelRef BEFORE unregisterDialog, deliberately: unregisterDialog's
+      // apply() may detach the layer and move activeElement, so this must read
+      // the world exactly as this dialog leaves it, not after. The read is
+      // null-safe: nothing between effect entry and unregisterDialog may throw,
+      // because unregisterDialog is what ends this dialog's generation, and if a
+      // throw skipped it, the stack would keep a dead entry forever - the
+      // background stays inert and body overflow stays hidden, permanently,
+      // since nothing would ever call unregisterDialog for this id again.
+      const panel = panelRef.current
+      const focusWasInside = !!panel && panel.contains(document.activeElement)
       // Rule 2 of dialogStack: end the generation (leave the stack) before
       // deciding anything about the world.
       unregisterDialog(id)
-      if (!focusWasInside) return
+
+      if (!focusWasInside) {
+        // Focus was already on a background control when this dialog closed
+        // (it was never yanked here to begin with). If another dialog is still
+        // open, that control is now behind ITS scrim and about to go inert, so
+        // park focus on the survivor rather than leave it stranded there. If no
+        // dialog remains, do nothing: the user's own focus target is left alone.
+        if (!isEmpty()) getTopmostPanel()?.focus()
+        return
+      }
       if (isEmpty()) {
         const trigger = triggerRef.current
-        if (trigger && trigger.isConnected) trigger.focus()
+        if (trigger && trigger.isConnected) {
+          trigger.focus()
+          return
+        }
+        // trigger.isConnected is false: the trigger was ALREADY gone by the
+        // time this cleanup ran. Falling through to <body> is a silent a11y
+        // regression - a keyboard user's next Tab starts from the top of the
+        // document instead of near where they were working - so land on `main`
+        // instead, a landmark every page renders (HoloShell.tsx); give it a
+        // programmatic focus stop if it does not already have one, rather than
+        // requiring every page to add one.
+        //
+        // KNOWN GAP, investigated and accepted rather than silently claimed
+        // fixed: all five ConfirmDialog call sites (delete reservation, evict
+        // workspace, archive user, job action, unarchive) close SYNCHRONOUSLY -
+        // setConfirm(null) runs in the same handler as .mutate(), before the
+        // network resolves - so trigger.isConnected is normally still TRUE
+        // right here, and the branch above runs instead. The row only
+        // disappears LATER, once the mutation's invalidate-on-success refetch
+        // completes and React removes it in an UNRELATED commit this cleanup
+        // has already returned from by then. That later removal is not
+        // observable from here: jsdom fires no event when a focused node is
+        // silently detached (confirmed against
+        // jsdom/lib/jsdom/living/nodes/Node-impl.js's _detach(), which nulls
+        // the document's focus record directly with no blur/focusout
+        // dispatch), and the two mechanisms that WOULD observe it in a real
+        // browser - a MutationObserver, or a document-level focusout sentinel -
+        // are the same shape of always-on background watcher the focusin
+        // sentinel above was rejected for, and out of scope here. This branch
+        // still covers every case it CAN see: a trigger already gone at close
+        // time (e.g. a caller with a synchronous/optimistic removal).
+        const landmark = document.querySelector('main')
+        if (landmark instanceof HTMLElement) {
+          if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1
+          landmark.focus()
+        }
         return
       }
       // Another dialog is still open. Park focus on the topmost panel rather
       // than on the trigger (which sits behind the scrim) or on <body> (which
-      // would put focus outside every open modal). If this close also promoted a
-      // new topmost, that dialog's transition effect refines this to its own
-      // initial target a moment later.
+      // would put focus outside every open modal). If THIS close also promoted
+      // a new topmost - i.e. this dialog itself was the one that was topmost -
+      // that dialog's transition effect refines this to its own initial target
+      // a moment later. If a LOWER dialog closed instead, no promotion happens
+      // and this focus() call is the only one that runs.
       getTopmostPanel()?.focus()
     }
   }, [id])
@@ -174,21 +273,49 @@ export function DialogShell({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topmost])
 
-  // Keyboard handling lives on the panel, not on document. With focus inside the
-  // topmost dialog by construction, a panel-scoped onKeyDown is received by
-  // exactly one dialog - which is what makes the Escape scoping mechanical rather
-  // than conventional. isTopmost is read here, at EVENT time, never captured.
+  // Escape is a DOCUMENT-level listener - see the header comment for why the Tab
+  // trap is correctly panel-scoped but Escape cannot be. Gated on
+  // `dismissOnEscape && isTopmost(id)`, read at EVENT time so a captured value
+  // can never go stale, this is the old pre-shell behavior (every dialog used a
+  // document listener) plus the new stack scoping on top of it.
+  useLayoutEffect(() => {
+    function onDocumentKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      if (!dismissOnEscape) return
+      // Defence in depth for the case where focus somehow sits in a lower
+      // dialog, and the actual gate for "am I the one that should act" when
+      // focus is nowhere in particular (outside every panel).
+      if (!isTopmost(id)) return
+      // stopImmediatePropagation, NOT stopPropagation: both listeners are on
+      // `document`, and plain stopPropagation only stops an event travelling
+      // to the NEXT node in the path - it does nothing to another listener
+      // registered on the SAME node (verified directly: two keydown listeners
+      // on document, the first calling stopPropagation, and the second still
+      // ran). Only stopImmediatePropagation blocks a sibling listener on this
+      // node from firing. In THIS app that sibling is UserMenu's own Escape
+      // handler, and the two are structurally prevented from overlapping
+      // anyway - UserMenu's listener only exists while its dropdown is open,
+      // and its toggle button is itself a background control that goes inert
+      // while any dialog is open, so the dropdown cannot be opened in the
+      // first place while this fires. This is defence in depth on top of that
+      // structural guarantee, not the only thing preventing an overlap, and it
+      // only ever blocks a listener registered AFTER this one for the same
+      // dispatch - it cannot un-ring a bell a listener registered EARLIER
+      // already rang.
+      e.stopImmediatePropagation()
+      onDismissRef.current()
+    }
+    document.addEventListener('keydown', onDocumentKeyDown)
+    return () => document.removeEventListener('keydown', onDocumentKeyDown)
+  }, [id, dismissOnEscape])
+
+  // Tab handling stays on the panel, not on document: with focus inside the
+  // topmost dialog by construction, a panel-scoped onKeyDown for Tab is
+  // received by exactly one dialog while focus is where the trap put it.
+  // isTopmost is read here, at EVENT time, never captured.
   function onKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
     const panel = panelRef.current
     if (!panel) return
-
-    if (e.key === 'Escape') {
-      if (!dismissOnEscape) return
-      // Defence in depth for the case where focus somehow sits in a lower dialog.
-      if (!isTopmost(id)) return
-      onDismissRef.current()
-      return
-    }
 
     if (e.key !== 'Tab') return
 
@@ -222,8 +349,22 @@ export function DialogShell({
   }
 
   return createPortal(
-    // No onClick here. See the header.
-    <div className={SCRIM}>
+    // No onClick here. See the header. onMouseDown DOES intercept, but only to
+    // preventDefault the browser's default focus-change behavior for a press
+    // directly on the scrim (e.target === e.currentTarget excludes bubbling
+    // from a child, i.e. from inside the panel) - it never dismisses. Without
+    // this, a press on the non-focusable scrim blurs whatever was focused
+    // (jsdom and browsers both do this), which is the scenario the
+    // document-level Escape listener above must independently survive, but
+    // which also breaks the Tab trap and all other keyboard interaction until
+    // focus is somehow restored. This is the second half of that fix, not a
+    // dismiss route.
+    <div
+      className={SCRIM}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) e.preventDefault()
+      }}
+    >
       <div
         ref={panelRef}
         role="dialog"

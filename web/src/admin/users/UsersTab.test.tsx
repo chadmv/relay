@@ -473,10 +473,16 @@ test('with two dialogs open, one Escape closes exactly one - the topmost', async
 
   const survivors = screen.getAllByRole('dialog')
   expect(survivors).toHaveLength(1)
-  // By accessible name, NEVER by array index: the DOM order of the two dialogs is
-  // ConfirmDialog then ResetPasswordDialog (the JSX order at UsersTab.tsx:278 and
-  // :297) regardless of which opened first, so an index assertion tests the wrong
-  // property and would pass for the wrong reason.
+  // By accessible name, NEVER by array index: each dialog is portaled
+  // independently (DialogShell composes createPortal), so the DOM order of two
+  // open dialogs follows MOUNT order, not the JSX declaration order at
+  // UsersTab.tsx (ConfirmDialog at :278, ResetPasswordDialog at :297) - verified
+  // by inspecting the rendered dialogs' order directly. That is what makes the
+  // design correct in the first place: logical topmost (last registered) and
+  // visual topmost (last appended to the layer) are the same dialog by
+  // construction. An index assertion would happen to pass here, since this test
+  // always opens Reset first, but it would be testing the wrong property - the
+  // survivor must be identified by what it IS, not by where it landed.
   expect(survivors[0]).toHaveAccessibleName('Reset password for ada@studio.dev?')
   expect(screen.getByLabelText('New password')).toBeInTheDocument()
 })

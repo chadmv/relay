@@ -92,6 +92,17 @@ export function ResetPasswordDialog({ email, pending, error, onSubmit, onCancel 
           </button>
           <button
             type="submit"
+            // A focused element that becomes disabled blurs to <body> in real
+            // browsers - jsdom does not reproduce this and user-event will not
+            // dispatch to a disabled target, so there is no test for it here.
+            // It used to mean Escape died mid-request: a keyboard admin who
+            // submitted, then reflexively pressed Escape while this button was
+            // disabled and briefly held focus, hit nothing, because the old
+            // panel-scoped keydown handler only fired when focus was still
+            // inside the panel. DialogShell's document-level Escape listener
+            // (code review, 2026-08-09) covers this the same way it covers
+            // every other focus-outside route - it does not depend on where
+            // focus is, only on this dialog still being the topmost one.
             disabled={pending}
             className="rounded-md border border-err/50 bg-err/20 px-3 py-1.5 text-[12px] font-medium text-err disabled:opacity-40"
           >

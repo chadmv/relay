@@ -110,6 +110,24 @@ test('Done calls onDone exactly once', async () => {
   expect(props.onDone).toHaveBeenCalledTimes(1)
 })
 
+// Code review, 2026-08-09: DialogShell's Escape listener is document-level so it
+// survives focus having left the panel by ANY route, not just a scrim click -
+// this is the dismissOnEscape={false} counterpart, proving the suppression also
+// survives a focus-outside condition rather than only working while focus
+// happens to still be on the token input.
+test('Escape still does NOT dismiss even when focus has moved outside the panel', async () => {
+  const { props } = renderDialog()
+  ;(document.activeElement as HTMLElement).blur()
+  // Instrument control: without this, "Escape does not dismiss" could pass
+  // trivially because the keydown never reached anything relevant.
+  expect(document.activeElement).toBe(document.body)
+
+  await userEvent.keyboard('{Escape}')
+
+  expect(props.onDone).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('Token')).toHaveValue(TOKEN)
+})
+
 test('Copy writes exactly the token and flips the label', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined)
   installClipboard(writeText)

@@ -64,8 +64,17 @@ export function getLayer(): HTMLElement {
 
 export function registerDialog(id: string, panel: HTMLElement): void {
   // Idempotent per id: a dialog that re-registers without its cleanup having run
-  // (StrictMode, hot reload) must not appear twice.
-  if (stack.some((e) => e.id === id)) return
+  // (StrictMode, hot reload) must not appear twice. But it must REFRESH the
+  // panel node in place, not drop the new one: StrictMode's dev double-invoke
+  // and a hot reload both arrive with a live, current node, and the old
+  // `if (stack.some(...)) return` guard silently kept the STALE one, leaving
+  // getTopmostPanel() and the Tab wrap-around targeting a node from a previous
+  // render.
+  const existing = stack.find((e) => e.id === id)
+  if (existing) {
+    existing.panel = panel
+    return
+  }
   stack.push({ id, panel })
   apply()
   notify()
@@ -150,11 +159,30 @@ function apply(): void {
   }
 }
 
-// Belt-and-braces for the two unit-test files that drive this module directly
-// without React. Component tests do not need it: RTL's auto-cleanup unmounts and
-// therefore runs the shells' cleanups, so the stack self-empties.
+// Test-only, DEV-gated so it never ships in a production bundle: this is the
+// one function that can null the layer pointer while a real component still
+// holds that exact node as its portal container.
+//
+// dialogStack.test.ts drives this module directly with no React in the
+// picture, so it genuinely needs this in its own afterEach - nothing else ever
+// empties the stack there.
+//
+// DialogShell.test.tsx ALSO calls it, but in beforeEach, not afterEach and not
+// as a substitute for RTL's own cleanup (code review, 2026-08-09: an afterEach
+// here previously raced RTL's own cleanup-unmounting afterEach under vitest's
+// LIFO hook order, forcibly emptying the stack while a shell from the test that
+// just finished was still mounted - that shell's cleanup then found nothing to
+// unregister and never called apply(), so the file never exercised the real
+// teardown path a regression would need to break). beforeEach is a
+// belt-and-braces guard against a PREVIOUS test's crash leaving stale state;
+// RTL's own afterEach still runs the real per-test teardown every time.
 export function __resetForTest(): void {
+  if (!import.meta.env.DEV) return
   stack.length = 0
   apply()
+  // Clear children too, not just detach: a future secrecy test that reset
+  // before its own unmount would otherwise sweep a document missing a layer
+  // that is still, detached, holding whatever it last rendered.
+  layer?.replaceChildren()
   layer = null
 }

@@ -59,7 +59,12 @@ const DEFAULT_WARNING =
 //  5. a11y and modal behavior come from web/src/components/dialog/DialogShell.tsx,
 //     which every dialog in the app composes: the labelled modal role, the portal,
 //     the focus trap, the inert + aria-hidden background, the scroll lock, and the
-//     scoped Escape. The credential can no longer be tabbed past.
+//     scoped Escape. The credential can no longer be tabbed past - verified true
+//     even through a scrim click, which used to blur focus to <body> and hand
+//     the Tab trap nothing to intercept (code review, 2026-08-09; the scrim's
+//     onMouseDown in DialogShell.tsx now prevents that blur outright, pinned by
+//     DialogShell.test.tsx's "a scrim mousedown does not blur the panel at all"
+//     test, which asserts the trap specifically).
 export function TokenRevealDialog({
   token,
   title,
