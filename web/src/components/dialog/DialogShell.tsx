@@ -86,6 +86,20 @@ const PANEL_BASE = 'w-full rounded-card border border-border bg-bg p-5 shadow-xl
 // KNOWN LIMITATION, ACCEPTED (unchanged by the additions below): this selector
 // does not evaluate display/visibility and does not cross shadow roots. No
 // current consumer has hidden focusables or a shadow root.
+//
+// DELIBERATELY EXCLUDED: iframe, object, embed, and summary (code review,
+// 2026-08-09). Each can match this selector while not actually being
+// focusable - an iframe with no rendered document, an object/embed whose
+// resource never loaded, a summary that is not a <details>' first child - and
+// a selector match that is not really tabbable is exactly M5's failure shape
+// repeated for a different node class: it makes `last` resolve to a node
+// focus() cannot land on, and the wrap silently stops firing. Verifying
+// actual focusability at runtime (attempt focus() and check
+// document.activeElement, then restore) was considered and rejected as too
+// invasive - it would fire on every Tab keypress and risks triggering real
+// focus/blur side effects the app does not otherwise cause. No current
+// consumer contains any of these four elements, so the selector is narrowed
+// to what the app can actually contain rather than probed at runtime.
 const FOCUSABLE = [
   'a[href]',
   'button:not([disabled])',
@@ -94,13 +108,9 @@ const FOCUSABLE = [
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex^="-"])',
   '[contenteditable]:not([contenteditable="false"])',
-  'iframe',
-  'object',
-  'embed',
   'area[href]',
   'audio[controls]',
   'video[controls]',
-  'summary',
 ].join(', ')
 
 function focusables(panel: HTMLElement): HTMLElement[] {
@@ -126,6 +136,29 @@ function focusables(panel: HTMLElement): HTMLElement[] {
     if (!(el instanceof HTMLInputElement) || el.type !== 'radio' || !el.name) return true
     return radioWinners.has(el)
   })
+}
+
+// Identity-checked, same pattern as dialogStack.ts's own data-dialog-inert
+// MARK: this shell mutates `main` (a node it does not own) only when it adds
+// the tabindex itself, and only ever removes what it marked - never a
+// tabindex the page owns. Without this, `main` would carry `tabindex="-1"`
+// permanently after the first time this fallback fired (code review,
+// 2026-08-09).
+const LANDMARK_FOCUS_STOP_MARK = 'data-dialog-focus-stop'
+
+function focusLandmarkFallback(): void {
+  const landmark = document.querySelector('main')
+  if (!(landmark instanceof HTMLElement)) return
+  if (!landmark.hasAttribute('tabindex') && !landmark.hasAttribute(LANDMARK_FOCUS_STOP_MARK)) {
+    landmark.setAttribute(LANDMARK_FOCUS_STOP_MARK, '')
+    landmark.tabIndex = -1
+    landmark.addEventListener('blur', function onLandmarkBlur() {
+      landmark.removeEventListener('blur', onLandmarkBlur)
+      landmark.removeAttribute(LANDMARK_FOCUS_STOP_MARK)
+      landmark.removeAttribute('tabindex')
+    })
+  }
+  landmark.focus()
 }
 
 interface DialogShellProps {
@@ -174,7 +207,16 @@ export function DialogShell({
   // document.activeElement has already fallen back to <body> and the focus
   // restore below has nothing to check and nothing to restore.
   useLayoutEffect(() => {
-    const panel = panelRef.current as HTMLElement
+    // Guarded the same way as the cleanup's read below (code review,
+    // 2026-08-09): an unchecked cast here, next to a deliberately null-safe
+    // read six lines later with a comment explaining why a throw there is
+    // unrecoverable, invites someone to "simplify" the safe one to match.
+    // panelRef.current is never actually null when this runs in practice -
+    // the ref is attached to a div this component always renders
+    // unconditionally - but the guard costs nothing and removes the
+    // asymmetry.
+    const panel = panelRef.current
+    if (!panel) return
     // Captured BEFORE anything moves focus.
     triggerRef.current = document.activeElement as HTMLElement | null
     registerDialog(id, panel)
@@ -196,11 +238,39 @@ export function DialogShell({
 
       if (!focusWasInside) {
         // Focus was already on a background control when this dialog closed
-        // (it was never yanked here to begin with). If another dialog is still
-        // open, that control is now behind ITS scrim and about to go inert, so
-        // park focus on the survivor rather than leave it stranded there. If no
-        // dialog remains, do nothing: the user's own focus target is left alone.
-        if (!isEmpty()) getTopmostPanel()?.focus()
+        // (it was never yanked here to begin with). If no dialog remains, do
+        // nothing: the user's own focus target is left alone. If another
+        // dialog is still open, that control is now behind ITS scrim and
+        // about to go inert, so park focus on the survivor rather than leave
+        // it stranded there - but NOT synchronously here.
+        //
+        // React DOM captures document.activeElement before the commit and, in
+        // resetAfterCommit -> restoreSelection (synchronous, in the SAME
+        // commitRootImpl call as this cleanup, which itself runs during
+        // commitMutationEffects), re-focuses that pre-commit element if it is
+        // still connected - which it always is in this branch specifically:
+        // the whole premise of focusWasInside being false is that focus was
+        // NEVER inside the dialog being removed, so its pre-commit target
+        // (the background control) survives the removal untouched, and a
+        // plain synchronous focus() call here gets silently overwritten a
+        // moment later. Measured directly with an instrumented
+        // HTMLElement.prototype.focus: the call log was [background-control,
+        // survivor-panel, background-control AGAIN], with the background
+        // control winning as the final activeElement. The other two branches
+        // below that DO focus synchronously are unaffected by this, precisely
+        // because THEIR pre-commit focus target is detached along with this
+        // dialog, so React has nothing left to restore.
+        //
+        // queueMicrotask runs strictly after commitRootImpl (a synchronous
+        // function) returns, landing after restoreSelection has already had
+        // its say. Re-reads isEmpty()/getTopmostPanel() at fire time rather
+        // than capturing them now, in case the stack changed in the interim.
+        if (!isEmpty()) {
+          queueMicrotask(() => {
+            if (isEmpty()) return
+            getTopmostPanel()?.focus()
+          })
+        }
         return
       }
       if (isEmpty()) {
@@ -236,11 +306,7 @@ export function DialogShell({
         // sentinel above was rejected for, and out of scope here. This branch
         // still covers every case it CAN see: a trigger already gone at close
         // time (e.g. a caller with a synchronous/optimistic removal).
-        const landmark = document.querySelector('main')
-        if (landmark instanceof HTMLElement) {
-          if (!landmark.hasAttribute('tabindex')) landmark.tabIndex = -1
-          landmark.focus()
-        }
+        focusLandmarkFallback()
         return
       }
       // Another dialog is still open. Park focus on the topmost panel rather

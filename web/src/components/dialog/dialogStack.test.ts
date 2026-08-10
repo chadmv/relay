@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import {
   __resetForTest,
   getLayer,
@@ -116,4 +116,19 @@ test('the background is marked and unmarked, and the layer comes and goes', () =
   expect(document.querySelector('[data-dialog-layer]')).toBeNull()
 
   background.remove()
+})
+
+// Finding 5 (code review, 2026-08-09). A silent no-op when not in DEV means a
+// prod-mode call - or a reference that survives into a production bundle -
+// fails quietly instead of loudly. Throwing also protects the OTHER tests in
+// this file: this suite genuinely depends on __resetForTest doing real work
+// in its own afterEach, so a silent no-op here would let every other test's
+// state leak into the next one without any test ever telling you why.
+test('__resetForTest throws outside DEV instead of silently doing nothing', () => {
+  vi.stubEnv('DEV', false)
+  try {
+    expect(() => __resetForTest()).toThrow()
+  } finally {
+    vi.unstubAllEnvs()
+  }
 })

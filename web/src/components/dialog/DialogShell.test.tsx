@@ -272,6 +272,58 @@ test('when the trigger is already gone at close time, focus lands on the main la
   expect(document.activeElement).toBe(screen.getByRole('main'))
 })
 
+// Finding 2 (code review, 2026-08-09). The landmark fallback writes
+// tabIndex = -1 onto HoloShell's <main> - a node this shell does not own -
+// and, before this test, never removed it: the tabindex attribute stuck
+// around forever after the FIRST time it was needed, unlike every other
+// mutation this module makes to nodes it does not own (dialogStack.ts's
+// data-dialog-inert MARK is the same ownership pattern, applied identically).
+test('the tabindex the landmark fallback adds is removed once focus leaves the landmark', async () => {
+  function Page() {
+    const [open, setOpen] = useState(false)
+    const [triggerGone, setTriggerGone] = useState(false)
+
+    function closeAndRemoveTrigger() {
+      setOpen(false)
+      setTriggerGone(true)
+    }
+
+    return (
+      <div>
+        <button type="button">elsewhere</button>
+        <main>
+          {!triggerGone && (
+            <button type="button" onClick={() => setOpen(true)}>
+              trigger
+            </button>
+          )}
+          {open && (
+            <DialogShell titleId="confirm-title" onDismiss={closeAndRemoveTrigger}>
+              <h2 id="confirm-title">Confirm</h2>
+              <button type="button" onClick={closeAndRemoveTrigger}>
+                Confirm
+              </button>
+            </DialogShell>
+          )}
+        </main>
+      </div>
+    )
+  }
+
+  render(<Page />)
+  await userEvent.click(screen.getByRole('button', { name: 'trigger' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+  const main = screen.getByRole('main')
+  expect(main).toHaveFocus()
+  expect(main).toHaveAttribute('tabindex', '-1')
+
+  await userEvent.click(screen.getByRole('button', { name: 'elsewhere' }))
+
+  expect(main).not.toHaveAttribute('tabindex')
+})
+
 // M5 (code review, 2026-08-09). A browser puts only ONE radio per `name` group
 // in the tab order - the checked one, or the first if none is checked - but the
 // old FOCUSABLE selector matched every enabled radio unconditionally. With two
@@ -386,4 +438,64 @@ test('a handled Escape stops a sibling document keydown listener from also seein
   } finally {
     document.removeEventListener('keydown', sibling)
   }
+})
+
+// Finding 1 (code review, 2026-08-09), option (b). The "another dialog is
+// still open, park focus on the survivor" branch never actually parked
+// anything when focus was OUTSIDE the closing dialog to begin with: React DOM
+// captures document.activeElement before the commit and, in
+// resetAfterCommit -> restoreSelection (synchronous, in the SAME commitRootImpl
+// call as this cleanup, which runs during commitMutationEffects), re-focuses
+// that pre-commit element if it is still connected - which it always is here,
+// since the whole premise of this branch is that focus was never inside the
+// dialog being removed, so its pre-commit target survives untouched. A plain
+// synchronous focus() call in the cleanup gets silently overwritten a moment
+// later. Proven directly with an instrumented HTMLElement.prototype.focus
+// before the fix: the call log was [background-control, survivor-panel,
+// background-control AGAIN], with the background control winning as the
+// final activeElement. queueMicrotask runs strictly after commitRootImpl (a
+// synchronous function) returns, landing after restoreSelection has already
+// had its say.
+test('closing a dialog whose OWN focus was never inside it still parks focus on the surviving dialog, not a background control', async () => {
+  function Page() {
+    const [showA, setShowA] = useState(true)
+    return (
+      <div>
+        {/* Closes A without ever focusing anything inside A's panel - models
+            focus sitting on a background control (e.g. from an earlier route)
+            when a still-open lower dialog closes. */}
+        <button type="button" onClick={() => setShowA(false)}>
+          background button
+        </button>
+        {showA && (
+          <DialogShell titleId="a-title" onDismiss={() => setShowA(false)}>
+            <h2 id="a-title">Dialog A</h2>
+            <button type="button">a-btn</button>
+          </DialogShell>
+        )}
+        <DialogShell titleId="b-title" onDismiss={vi.fn()}>
+          <h2 id="b-title">Dialog B</h2>
+          <button type="button">b-btn</button>
+        </DialogShell>
+      </div>
+    )
+  }
+
+  render(<Page />)
+  const bBtn = screen.getByRole('button', { name: 'b-btn' })
+  // Instrument control: B is the survivor and starts out already focused (its
+  // own initial-focus effect put focus there on mount) - proves the FINAL
+  // assertion is about focus surviving A's close, not about focus never
+  // having moved.
+  expect(bBtn).toHaveFocus()
+
+  const bg = screen.getByRole('button', { name: 'background button', hidden: true })
+  await userEvent.click(bg)
+
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dialog A' })).not.toBeInTheDocument())
+  await waitFor(() =>
+    expect(screen.getByRole('dialog', { name: 'Dialog B' })).toContainElement(
+      document.activeElement as HTMLElement,
+    ),
+  )
 })

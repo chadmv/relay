@@ -177,7 +177,15 @@ function apply(): void {
 // belt-and-braces guard against a PREVIOUS test's crash leaving stale state;
 // RTL's own afterEach still runs the real per-test teardown every time.
 export function __resetForTest(): void {
-  if (!import.meta.env.DEV) return
+  // THROW, not a silent no-op (code review, 2026-08-09): a wrong-mode call -
+  // a prod-mode invocation, or a reference that survived into a production
+  // bundle - must fail loudly. A silent return here would also corrupt THIS
+  // file's own test isolation: dialogStack.test.ts genuinely depends on this
+  // doing real work in its own afterEach, so a quiet no-op would leak state
+  // between tests with nothing to say why.
+  if (!import.meta.env.DEV) {
+    throw new Error('__resetForTest() must not be called outside DEV')
+  }
   stack.length = 0
   apply()
   // Clear children too, not just detach: a future secrecy test that reset
