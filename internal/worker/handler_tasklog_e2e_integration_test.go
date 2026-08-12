@@ -69,19 +69,13 @@ func e2eAPIServer(t *testing.T, ctx context.Context, q *store.Queries, pool *pgx
 	return srv, rawHex
 }
 
-// seedClaimedTaskForUser is seedClaimedTask but reuses an existing user so the
-// job's submitted_by is a real row. It forwards the task's assignee id.
-func seedClaimedTaskForUser(t *testing.T, ctx context.Context, q *store.Queries, email, hostname string) (jobID, taskID, workerID pgtype.UUID, epoch int32) {
-	return seedClaimedTask(t, ctx, q, email, hostname)
-}
-
 func TestEndToEnd_AgentChunkReachesASubscribedSSEClient(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	jobIDU, taskIDU, workerID, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-seed@example.com", "w-e2e1")
+	jobIDU, taskIDU, workerID, epoch := seedClaimedTask(t, ctx, q, "e2e-seed@example.com", "w-e2e1")
 	jobID := h.UUIDStringForTest(jobIDU)
 	taskID := h.UUIDStringForTest(taskIDU)
 
@@ -205,7 +199,7 @@ func TestEndToEnd_BackfillJoinIsGaplessAndDeduped(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	_, taskIDU, workerID, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-bf-seed@example.com", "w-e2e2")
+	_, taskIDU, workerID, epoch := seedClaimedTask(t, ctx, q, "e2e-bf-seed@example.com", "w-e2e2")
 	taskID := h.UUIDStringForTest(taskIDU)
 
 	srv, token := e2eAPIServer(t, ctx, q, pool, broker, "e2e-backfill@example.com")

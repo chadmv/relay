@@ -296,6 +296,11 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.Len(t, logs, 2)
 	assert.Equal(t, "hello\n", logs[0].Content)
 	assert.Equal(t, "more\n", logs[1].Content)
+	// The fence's parameter numbering shifted when the worker_id predicate was
+	// added ($3,$4 -> $4,$5 for stream and content). Read stream back so a future
+	// renumbering that swapped these two cannot pass unnoticed.
+	assert.Equal(t, "stdout", logs[0].Stream)
+	assert.Equal(t, "stderr", logs[1].Stream)
 
 	// --- The assignee half of the fence ---
 
@@ -355,6 +360,65 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	logs, err = q.GetTaskLogs(ctx, task.ID)
 	require.NoError(t, err)
 	assert.Len(t, logs, 2, "the claimed task still has only its two legitimate rows")
+}
+
+// A terminal status transition must NOT release the task's assignee. UpdateTaskStatus
+// writes worker_id but does not bump assignment_epoch, so a caller that passed a
+// zero-value worker id would strand the task at its current epoch with no assignee -
+// and since AppendTaskLog fences on worker_id, every trailing chunk from the agent
+// that legitimately just finished the task would be dropped silently and forever.
+// Trailing chunks arriving just after a terminal status are a real and common
+// ordering, so this pins the contract both callers currently honor by passing
+// task.WorkerID through.
+func TestUpdateTaskStatus_TerminalTransitionKeepsTheAssigneeSoTrailingLogsStillPersist(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Ida", "ida@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-terminal", Hostname: "w-terminal-logs", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// The transition handleTaskStatus performs: worker_id passed straight through.
+	done, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "done", WorkerID: claimed.WorkerID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", done.Status)
+	assert.Equal(t, w.ID, done.WorkerID, "a terminal transition must not release the assignee")
+	assert.Equal(t, claimed.AssignmentEpoch, done.AssignmentEpoch,
+		"UpdateTaskStatus must not bump the epoch - the assignment is retained, not ended")
+
+	// The trailing chunk that arrives just after the terminal status still lands.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "trailing after done\n",
+		AssignmentEpoch: done.AssignmentEpoch, WorkerID: done.WorkerID,
+	})
+	require.NoError(t, err, "a trailing chunk from the assignee must still persist after a terminal status")
+
+	logs, err := q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "trailing after done\n", logs[0].Content)
 }
 
 func TestReconciliationQueries(t *testing.T) {

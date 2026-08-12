@@ -228,8 +228,22 @@ legitimate paths affected.
 
 **Who can attack.** Any principal holding a long-lived agent token, i.e. any
 machine that was ever enrolled; plus, when `AllowAutoEnroll` is set, anyone who
-can reach `:9090` and pick an unused hostname
-(`authenticateAndRegister`, `handler.go:136-148`). Agent tokens are host-local
+can reach `:9090` and name *any* hostname (`authenticateAndRegister`,
+`handler.go:136-148`).
+
+> **Correction (2026-08-12, Phase 4).** This originally said "pick an **unused**
+> hostname". That is wrong, and the error understates auto-enroll's exposure.
+> `autoEnrollAndRegister` rejects only `status == 'revoked'`;
+> `UpsertWorkerByHostname` is `ON CONFLICT (hostname) DO UPDATE ... RETURNING id`
+> and returns the **existing** row's id, after which `SetWorkerAgentToken`
+> overwrites that worker's token hash. So naming an **in-use** hostname is not
+> blocked - it is a full takeover of that worker identity. Combined with
+> `reconcileRunningTasks`, which keeps a task assigned when the agent reports it
+> at the matching epoch, an attacker can take over a worker, keep a live task
+> assigned to it, and then pass this fence *legitimately* as that task's
+> assignee.
+
+Agent tokens are host-local
 files (`internal/agent/credentials.go`, mode 0600) on machines that by design run
 untrusted job payloads, so "a job escaped and read the agent token" is the
 realistic acquisition path, not an exotic one.
@@ -262,11 +276,29 @@ who sends it, in every task state:
 confidentiality: nothing here lets a token read anything it could not already read
 through the polling endpoint. Not availability, beyond log volume.
 
-**After the fix.** Every row in that table except the last collapses to "rejected",
-because the attacker would additionally have to *be* the worker the task is
-assigned to. The remaining reachable surface is a compromised agent forging into
-tasks that same agent legitimately owns, which is not a boundary this or any
-server-side check can restore.
+**After the fix.** Every row in that table except the last collapses to "rejected"
+*for an attacker holding some other worker's token*, because the attacker would
+additionally have to be the worker the task is assigned to.
+
+State the residual honestly, though, because the win is narrower than that
+sentence alone suggests:
+
+- Under this section's own stated acquisition path - "a job escaped and read the
+  agent token" on worker W - the attacker **is** W. The "dispatched or running on
+  worker W" row therefore does *not* collapse for that attacker: it can still
+  forge into the tasks W is assigned, which is exactly the row with the highest
+  impact. What the fence removes for it is every *other* task in the database.
+- Under `RELAY_ALLOW_AUTO_ENROLL`, per the correction above, an attacker can take
+  over any worker identity by hostname. Against that principal the fence is
+  bounded by auto-enroll's trust model rather than restoring a boundary against
+  it: it constrains *which* tasks a given identity can write to, but it cannot
+  stop someone who can freely choose the identity. Auto-enroll's own trust model
+  is the control there, and tightening it is separate work.
+
+So: the fence is a real and complete fix for cross-task forgery by an identity
+the attacker did not already control, and it is not a defense against an attacker
+who controls the assignee identity itself. No server-side check on this path can
+be.
 
 ## 6. Design
 
@@ -384,9 +416,26 @@ reasons.
    carries that worker's status, inventory and telemetry. A logged rejection lets
    an attacker convert a write-forgery attempt into a log-flood and an ingest-delay
    vector for a legitimate worker. The codebase already learned this lesson once,
-   which is why `taskLogErrs` exists and bounds persist-failure logging to one line
-   per task per epoch. Reusing that limiter would work, but it is machinery in
-   service of a signal we cannot even classify (see 1).
+   which is why `taskLogErrs` exists.
+
+   > **Correction (2026-08-12, Phase 4).** This originally continued: "and bounds
+   > persist-failure logging to one line per task per epoch. Reusing that limiter
+   > would work". The limiter does **not** provide that bound against an attacker.
+   > It keys on `chunk.TaskId` and `chunk.Epoch` - both read straight off the wire
+   > - and when the map reaches 1024 entries it *resets* rather than suppressing.
+   > A caller emitting fresh random UUIDs therefore gets one `log.Printf` each,
+   > indefinitely, every one of them contending on `log`'s global mutex on the
+   > recv goroutine. (The NUL-byte path reaches that branch even when the fence
+   > rejects, because Postgres raises `SQLSTATE 22021` while decoding the bind
+   > parameter, before the fence CTE is evaluated.)
+   >
+   > This makes the decision below **more** correct, not less: logging rejections
+   > would have handed an attacker a second flood vector keyed on a string it
+   > fully controls, and the existing limiter would not have contained it. The
+   > limiter's key is tracked separately as its own backlog item.
+
+   Reusing that limiter is in any case machinery in service of a signal we cannot
+   even classify (see 1).
 3. **There is nowhere for the signal to go.** `internal/metrics` is a per-worker
    utilization ring buffer, not a counter registry, and there is no alerting
    pipeline. A counter nobody reads is not detection.

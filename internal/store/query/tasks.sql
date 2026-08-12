@@ -13,6 +13,16 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- Updates a task's status only if the caller's epoch matches the current
 -- assignment. Returns pgx.ErrNoRows if the caller's epoch is stale (zombie
 -- status update from a prior assignment).
+-- Callers MUST pass the task's existing worker_id through in $3. This statement
+-- writes worker_id but does NOT bump assignment_epoch, so clearing it here would
+-- leave the task at its current epoch with no assignee - and AppendTaskLog
+-- fences on worker_id, so every subsequent log chunk from the agent that is
+-- still legitimately running that task would be dropped silently and forever.
+-- Every other statement that clears worker_id (RequeueTask, RequeueTaskByID,
+-- RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, IncrementTaskRetryCount,
+-- CancelJobTasks) bumps the epoch in the same UPDATE, which ends the assignment
+-- cleanly. If you ever need to release the worker slot here, bump
+-- assignment_epoch in this statement too.
 UPDATE tasks
 SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
 WHERE id = $1 AND assignment_epoch = $6

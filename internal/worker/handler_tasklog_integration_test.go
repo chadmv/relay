@@ -133,7 +133,11 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 		ID: taskID, WorkerID: workerID,
 	})
 	require.NoError(t, err)
-	require.Greater(t, fresh.AssignmentEpoch, epoch, "requeue and redispatch must bump the epoch")
+	// Pin the delta exactly, not just "greater". Requeue and redispatch bump once
+	// each, so the chunk below sits at current-2; without this equality a fence
+	// mutated to `assignment_epoch <= $2 + 1` would slip through, which the
+	// original single-bump fixture would have caught.
+	require.Equal(t, epoch+2, fresh.AssignmentEpoch, "requeue and redispatch must bump the epoch twice")
 	require.NotZero(t, epoch, "the stale epoch under test must not be the zero value")
 
 	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
@@ -154,6 +158,22 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	rows, err := q.GetTaskLogs(ctx, taskID)
 	require.NoError(t, err)
 	require.Empty(t, rows, "a stale-epoch chunk must not be stored")
+
+	// The immediately-previous generation (current-1, the requeue that had no
+	// assignee) must be rejected too. The chunk above is current-2, so without
+	// this leg an off-by-one fence - `assignment_epoch <= $2 + 1` - would pass
+	// every assertion in this test.
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("from the requeue generation\n"), Epoch: int64(epoch + 1),
+	})
+	select {
+	case e := <-ch:
+		t.Fatalf("a chunk one generation back must not be published: %s", e.Data)
+	default:
+	}
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Empty(t, rows, "a chunk one generation back must not be stored")
 
 	// Paired positive control on the SAME code path and the same subscriber: at
 	// the current epoch the chunk is both stored and published. Without this a
@@ -301,15 +321,19 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	// Do NOT simplify this back to CancelJobTasks. Cancel bumps the epoch but
 	// leaves worker_id NULL, so the assignee half of the fence rejects every
 	// append and the positive control at the end of this test has nowhere to
-	// write. (epoch = current, worker_id = NULL) is unreachable for a real agent:
-	// every statement that clears worker_id bumps the epoch, and only
-	// ClaimTaskForWorker sets one.
+	// write. (epoch = current, worker_id = NULL) is a perfectly reachable database
+	// state - RequeueTask and CancelJobTasks both produce it - but it is
+	// UNADDRESSABLE by a real agent: every statement that clears worker_id bumps
+	// the epoch, and only ClaimTaskForWorker sets one, so no agent ever holds a
+	// matching epoch for it.
 	require.NoError(t, q.RequeueTask(ctx, taskID))
 	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: taskID, WorkerID: workerID,
 	})
 	require.NoError(t, err)
-	require.Greater(t, fresh.AssignmentEpoch, epoch)
+	// Exact delta: requeue and redispatch bump once each, so the chunks below are
+	// at current and the stale ones at current-2.
+	require.Equal(t, epoch+2, fresh.AssignmentEpoch)
 	for i := 0; i < n; i++ {
 		h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 			TaskId: taskIDStr, Content: []byte(secret + "\x00"),
@@ -492,4 +516,85 @@ func TestHandleTaskLog_RejectsAChunkForANeverClaimedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, "genuine\n", rows[0].Content)
+}
+
+// Every other test in this file reaches handleTaskLog through the export_test
+// shim, passing a worker id the test chose. That leaves the ONE line that wires
+// the connection's real identity into it - Connect's
+// `h.handleTaskLog(ctx, workerUUID, p.TaskLog)` - pinned by nothing. If that
+// call site bound a zero-value UUID, or the wrong variable, every test in this
+// package would stay green while production silently dropped 100% of log
+// ingest, because the assignee predicate would never match. That is precisely
+// the failure mode spec 6.4 calls out as miserable to debug, so it gets a test
+// that drives the real Connect message loop end to end.
+//
+// The register message must report the claimed task in RunningTasks:
+// finishRegister runs reconcileRunningTasks, which requeues any task the
+// coordinator has assigned to this worker but the agent did not report, and a
+// requeue bumps assignment_epoch - which would make the chunk below stale for a
+// reason that has nothing to do with what is under test.
+func TestConnect_TaskLogChunkIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+	q := fx.Q
+
+	const hostname = "w-connect-wiring"
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs7@example.com", hostname)
+	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+
+	stream := newMockConnectStream(t)
+	// Auto-enroll upserts by hostname and returns the EXISTING row's id, so this
+	// connection resolves to the very worker the task above is assigned to.
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: hostname,
+				CpuCores: 1, RamGb: 1, Os: "linux",
+				RunningTasks: []*relayv1.RunningTask{
+					{TaskId: taskIDStr, Epoch: int64(epoch)},
+				},
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId: taskIDStr, Content: []byte("through the real Connect loop\n"),
+				Epoch: int64(epoch),
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp)
+	require.Equal(t, fx.Handler.UUIDStringForTest(workerID), resp.WorkerId,
+		"the connection must resolve to the task's assignee, or this test proves nothing")
+
+	// The chunk is processed after the register response is sent, so poll rather
+	// than racing it.
+	require.Eventually(t, func() bool {
+		rows, err := q.GetTaskLogs(ctx, taskID)
+		return err == nil && len(rows) == 1
+	}, 10*time.Second, 20*time.Millisecond,
+		"Connect must pass its own authenticated worker id to handleTaskLog")
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "through the real Connect loop\n", rows[0].Content)
+
+	// The task must still be assigned at the same generation: if reconciliation
+	// had requeued it, the append above would have been rejected for the wrong
+	// reason and this test would be silently testing nothing.
+	fresh, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, epoch, fresh.AssignmentEpoch, "reconciliation must not have bumped the epoch")
+	assert.Equal(t, workerID, fresh.WorkerID, "the task must still be assigned to this worker")
+
+	stream.CloseSend()
+	<-done
 }
