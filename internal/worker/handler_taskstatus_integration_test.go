@@ -5,6 +5,7 @@ package worker_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"relay/internal/events"
 	relayv1 "relay/internal/proto/relayv1"
@@ -301,4 +302,82 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", running.Status, "positive control: the assignee's RUNNING must land after the claim")
 	assert.True(t, running.StartedAt.Valid, "positive control: started_at must be stamped")
+}
+
+// Modelled on TestConnect_TaskLogChunkIsFencedOnTheConnectionsOwnWorker in
+// handler_tasklog_integration_test.go, for the same reason: the shim-driven
+// tests above leave Connect's own call site unpinned, and a zero-value or wrong
+// worker id there would fail closed on every status update from every agent
+// while the whole package stayed green.
+//
+// Two fixture details are load-bearing:
+//   - Auto-enroll upserts by hostname and returns the EXISTING row's id, so
+//     seeding the claimed task against the same hostname makes this connection
+//     resolve to the very worker the task is assigned to. The assertion on the
+//     register response's worker_id is what proves that actually happened; drop
+//     it and the test proves nothing.
+//   - The register message must report the claimed task in RunningTasks.
+//     finishRegister runs reconcileRunningTasks, which requeues any task the
+//     coordinator has assigned to this worker but the agent did not report, and a
+//     requeue bumps assignment_epoch - which would make the status update below
+//     stale for a reason that has nothing to do with what is under test.
+func TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+	q := fx.Q
+
+	const hostname = "w-connect-status-wiring"
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "status5@example.com", hostname)
+	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: hostname,
+				CpuCores: 1, RamGb: 1, Os: "linux",
+				RunningTasks: []*relayv1.RunningTask{
+					{TaskId: taskIDStr, Epoch: int64(epoch)},
+				},
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: taskIDStr,
+				Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+				Epoch:  int64(epoch),
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp)
+	require.Equal(t, fx.Handler.UUIDStringForTest(workerID), resp.WorkerId,
+		"the connection must resolve to the task's assignee, or this test proves nothing")
+
+	// The status message is processed after the register response is sent, so
+	// poll rather than racing it.
+	require.Eventually(t, func() bool {
+		fresh, err := q.GetTask(ctx, taskID)
+		return err == nil && fresh.Status == "done"
+	}, 10*time.Second, 20*time.Millisecond,
+		"Connect must pass its own authenticated worker id to handleTaskStatus")
+
+	fresh, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	assert.True(t, fresh.FinishedAt.Valid, "a terminal transition must stamp finished_at")
+	// A terminal transition keeps the assignee and does not bump the epoch, so
+	// trailing log chunks from the agent that just finished still pass
+	// AppendTaskLog's fence.
+	assert.Equal(t, epoch, fresh.AssignmentEpoch, "UpdateTaskStatus must not bump the epoch")
+	assert.Equal(t, workerID, fresh.WorkerID, "a terminal transition must not release the assignee")
+
+	stream.CloseSend()
+	<-done
 }
