@@ -1,10 +1,12 @@
 ---
 title: Any enrolled agent can append log lines to any never-claimed task via Epoch 0
 type: bug
-status: open
+status: closed
 created: 2026-08-09
+closed: 2026-08-12
 priority: medium
 source: Phase 4 review of the SSE task-log publishing iteration (2026-08-09)
+resolution: fixed
 ---
 
 # Any enrolled agent can append log lines to any never-claimed task via Epoch 0
@@ -69,3 +71,19 @@ The epoch fence is doing exactly the job it was designed for - preventing a stal
 generation from writing - and this is not a bug in the fence. It is a missing second check that the
 fence was never meant to provide. Worth stating that way in the fix so the invariant's purpose does
 not get muddled.
+
+## Resolution
+
+Fixed by extending the `AppendTaskLog` fence with a third predicate,
+`t.worker_id = sqlc.arg(worker_id)`, bound to the connection's authenticated
+worker id (resolved at registration, never taken from the wire). The reachable
+window was wider than this item's title suggested: the fence compares an
+integer, so it was every task in the database, not only never-claimed ones. See
+`docs/superpowers/specs/2026-08-12-tasklog-append-assignee-fence.md`.
+
+The open question in the Proposal ("check whether any legitimate path appends
+logs for a task with no assignee") was audited and answered: there is none, so
+no blanket epoch-0 allowance was needed. Two existing test fixtures did rely on
+that state and were rebuilt around requeue-then-redispatch; the spec carries a
+dated correction explaining why `(epoch = current, worker_id = NULL)` is
+unreachable for a real agent.
