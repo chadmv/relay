@@ -1,10 +1,12 @@
 ---
 title: Any enrolled agent can set any task's status via the unauthenticated epoch fence, permanently wedging it
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-12
 priority: high
 source: Spec and Phase 4 review of the task-log assignee-fence iteration (2026-08-12)
+resolution: fixed
 ---
 
 # Any enrolled agent can set any task's status via the unauthenticated epoch fence, permanently wedging it
@@ -151,3 +153,25 @@ status a real agent sends.
 The epoch fence is doing exactly what it was designed for here, as on the log path. This is a
 missing second check, not a defect in the fence, and the fix should be framed that way so the
 invariant's purpose does not get muddled.
+
+## Resolution
+
+Fixed in two places, deliberately not one. `handleTaskStatus` gained an identity gate in Go,
+immediately after its `GetTask` and *before* the epoch gate, comparing the task's `worker_id`
+against the connection's authenticated worker (resolved at registration, never taken from the
+wire). That placement is the fix: this item's Proposal assumed a SQL predicate would be enough,
+but the retry branch calls `IncrementTaskRetryCount` - a bare `WHERE id = $1` - and returns before
+`UpdateTaskStatus` is ever reached, so a forged FAILED on a task with retries would have sailed
+past an SQL-only fence, burning a retry and evicting the agent legitimately running it. Both
+`.Valid` checks in the Go comparison are load-bearing: `pgtype.UUID` is a comparable struct, so a
+bare `!=` is the Go form of `IS NOT DISTINCT FROM` and fails open when both sides are zero-valued.
+
+`UpdateTaskStatus` additionally gained `AND worker_id = sqlc.arg(worker_id)` as a structural
+backstop for both callers - one fenced statement, no sentinel, no second un-fenced query - and lost
+`worker_id` from its SET list, so the statement can no longer clear the column and strand a live
+agent at all. `Dispatcher.failClaimedTask` passes `claimed.WorkerID`, where the predicate is
+tautological by design and fails closed and loudly.
+
+`bug-2026-06-26-retry-resurrects-cancelled-task` stays open; this change narrows its remaining
+exposure to the cancel-during-retry race alone. See
+`docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`.
