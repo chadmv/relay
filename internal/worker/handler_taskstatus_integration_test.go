@@ -576,3 +576,119 @@ func TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascad
 	require.Equal(t, "failed", realC.Status, "positive control: a live task's FAILED must still land")
 	assert.Equal(t, "failed", realD.Status, "positive control: the dependent cascade must still fire")
 }
+
+// dispatchable reports whether GetEligibleTasks currently returns taskID, i.e.
+// whether the dispatcher would pick it up right now. Asserting on this rather
+// than on a status string is what makes the resurrection tests express the harm
+// instead of the symptom.
+func dispatchable(t *testing.T, ctx context.Context, q *store.Queries, taskID pgtype.UUID) bool {
+	t.Helper()
+	eligible, err := q.GetEligibleTasks(ctx)
+	require.NoError(t, err)
+	for _, e := range eligible {
+		if e.ID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+// ROUTE B1: the task's OWN assignee, at the CURRENT epoch, resurrecting a task
+// it already completed - on a task that still has a retry budget, so the second
+// terminal takes the RETRY branch and never reaches UpdateTaskStatus.
+//
+// Both gates pass legitimately. A terminal transition does not bump
+// assignment_epoch and does not clear worker_id (that is what lets a trailing
+// log chunk still pass AppendTaskLog's fence), so after a DONE the row still
+// satisfies identity and currency for that worker at that epoch. `terminal`
+// (handler.go:512) and the retry condition (:515) read only the wire status and
+// the T0 row's RetryCount/Retries - never the T0 row's status - so
+// IncrementTaskRetryCount moves a COMPLETED task back to pending.
+//
+// The load-bearing assertion is the one on the dependent: "A is still done" is a
+// string comparison, "B is STILL dispatchable" is the harm - a task resurrected
+// and re-dispatched while its dependents are already running.
+//
+// This test can only be red for IncrementTaskRetryCount's status predicate: its
+// FAILED takes the retry branch and returns, so UpdateTaskStatus is never
+// reached. Its sibling
+// TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade
+// is the mirror image. Removing either predicate reddens exactly one of them.
+func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	jobID, taskAID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "status7", 1)
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskB.ID, DependsOnTaskID: taskAID,
+	}))
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskAID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	require.Equal(t, int32(1), claimed.Retries)
+	taskAStr := h.UUIDStringForTest(taskAID)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+	afterDone, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	require.Equal(t, "done", afterDone.Status, "fixture: the assignee's own DONE must land")
+	require.True(t, dispatchable(t, ctx, q, taskB.ID),
+		"fixture: B must become eligible once A is done, or the assertion below proves nothing")
+
+	// The duplicate. Same worker, same epoch, terminal status, retry budget left.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+
+	afterFailed, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", afterFailed.Status, "a completed task must not be resurrected by a second terminal")
+	assert.Equal(t, int32(0), afterFailed.RetryCount, "a completed task has no generation to fail - no retry may be burned")
+	assert.Equal(t, int32(1), afterFailed.AssignmentEpoch, "a rejected retry must not end the assignment")
+	assert.Equal(t, w1, afterFailed.WorkerID, "a rejected retry must not clear the assignee")
+	assert.True(t, dispatchable(t, ctx, q, taskB.ID),
+		"the dependent must stay dispatchable - resurrecting A drops B out of GetEligibleTasks")
+	if t.Failed() {
+		t.FailNow() // the resurrection got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path: a task that is genuinely running
+	// still burns its retry when its assignee reports FAILED. Without it, a
+	// handleTaskStatus that had stopped accepting anything at all would pass
+	// every assertion above.
+	live, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-live", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	claimedLive, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: live.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(live.ID),
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimedLive.AssignmentEpoch),
+	})
+	retried, err := q.GetTask(ctx, live.ID)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), retried.RetryCount, "positive control: a live task's FAILED must still burn a retry")
+	assert.Equal(t, "pending", retried.Status, "positive control: the retry must requeue the task")
+	assert.Equal(t, int32(2), retried.AssignmentEpoch, "positive control: the requeue must bump the epoch")
+}

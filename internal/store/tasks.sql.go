@@ -620,21 +620,81 @@ func (q *Queries) GetTaskLogsPage(ctx context.Context, arg GetTaskLogsPageParams
 
 const incrementTaskRetryCount = `-- name: IncrementTaskRetryCount :one
 UPDATE tasks
-SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+SET retry_count = retry_count + 1,
+    status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    finished_at = NULL,
     assignment_epoch = assignment_epoch + 1
 WHERE id = $1
+  AND assignment_epoch = $2
+  AND worker_id = $3
+  AND status NOT IN ('done', 'failed', 'timed_out')
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 `
 
-// IncrementTaskRetryCount
+type IncrementTaskRetryCountParams struct {
+	ID              pgtype.UUID `json:"id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
+	WorkerID        pgtype.UUID `json:"worker_id"`
+}
+
+// Burns one retry on a task whose CURRENT generation just failed, and returns it
+// to the queue. Three predicates, each answering a different question; none is
+// redundant with the others and none may be deleted:
+//
+//	assignment_epoch - CURRENCY. The caller decided to retry from a row it read
+//	  earlier; this proves that generation is still the current one. It is what
+//	  makes the retry atomic with respect to that read, so a cancel or a requeue
+//	  landing in the caller's TOCTOU window wins instead of being clobbered, and
+//	  what makes the retry exactly-once per generation when two callers race:
+//	  under READ COMMITTED the second UPDATE re-evaluates its WHERE against the
+//	  already-updated row, sees epoch N+1 and a NULL worker_id, and affects zero
+//	  rows.
+//	worker_id      - IDENTITY. The task must still be assigned to the caller's
+//	  worker. Must stay a plain `=`: tasks.worker_id is NULLABLE, so `=` makes a
+//	  never-claimed task (worker_id NULL, epoch 0 - a free guess) reject every
+//	  retry, and makes a caller that lost its identity (a zero-value pgtype.UUID
+//	  binds SQL NULL) fail closed. `IS NOT DISTINCT FROM` would re-open exactly
+//	  that. Do not "fix the NULL bug" here. Same rule as UpdateTaskStatus and
+//	  AppendTaskLog.
+//	status         - TERMINALITY. A finished task has no generation to fail.
+//	  Without this, a task's own assignee can send DONE at epoch N and then
+//	  FAILED at epoch N - both gates legitimately pass, because a terminal
+//	  transition deliberately does NOT bump the epoch and does not clear
+//	  worker_id - and resurrect a completed task while its dependents are
+//	  already running. The terminal set is the one RecomputeJobStatus uses
+//	  (internal/store/query/jobs.sql:98); keep the two in lockstep.
+//
+// The fix for that last case is this predicate and NOT an epoch bump on terminal
+// transitions: the assignment must survive completion so a trailing log chunk
+// from the agent that just finished still passes AppendTaskLog's fence. See
+// TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+// pgx.ErrNoRows means "one of the three failed": drop, do not recompute the job
+// status, do not wake the dispatcher.
+// This statement is for the AGENT-DRIVEN retry only, and its preconditions are
+// the exact opposite of an operator re-run. POST /v1/jobs/{id}/retry must NOT
+// call it: that endpoint reopens tasks that ARE terminal and has no worker
+// identity to supply, so both the status and the worker predicate would reject
+// every call. It needs its own statement with an explicit
+// `status IN ('failed','timed_out')` allow-list and its own epoch bump - the
+// operator analogue of RequeueTaskByID, not of this. See
+// docs/backlog/feature-2026-06-26-web-enabler-backend-endpoints.md.
 //
 //	UPDATE tasks
-//	SET retry_count = retry_count + 1, status = 'pending', worker_id = NULL, started_at = NULL, finished_at = NULL,
+//	SET retry_count = retry_count + 1,
+//	    status = 'pending',
+//	    worker_id = NULL,
+//	    started_at = NULL,
+//	    finished_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1
+//	  AND assignment_epoch = $2
+//	  AND worker_id = $3
+//	  AND status NOT IN ('done', 'failed', 'timed_out')
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
-func (q *Queries) IncrementTaskRetryCount(ctx context.Context, id pgtype.UUID) (Task, error) {
-	row := q.db.QueryRow(ctx, incrementTaskRetryCount, id)
+func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTaskRetryCountParams) (Task, error) {
+	row := q.db.QueryRow(ctx, incrementTaskRetryCount, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
 	var i Task
 	err := row.Scan(
 		&i.ID,
@@ -970,10 +1030,14 @@ type UpdateTaskStatusParams struct {
 // registered for the same worker row both satisfy it. That matches AppendTaskLog
 // and is what keeps reconnect-within-the-grace-window working, so it is not a
 // regression - but do not read this predicate as connection-scoped.
-// This predicate is NOT sufficient on its own: handleTaskStatus's retry branch
-// calls IncrementTaskRetryCount (bare `WHERE id = $1`) and returns before ever
-// reaching this statement, so the identity check also lives in Go, ahead of
-// every side effect. Do not delete that one as redundant with this one.
+// handleTaskStatus's retry branch calls IncrementTaskRetryCount and returns
+// before ever reaching this statement, so this predicate never sees that path.
+// That statement now carries the same three predicates, so the two together
+// cover every production writer. The Go identity gate in handleTaskStatus stays
+// as well: after the retry statement was fenced it is no longer the correctness
+// control, but it still answers a different question ("may this sender drive
+// this task's status machine at all") one round trip and one log line earlier.
+// Do not delete either as redundant with the other.
 //
 //	UPDATE tasks
 //	SET status = $1,

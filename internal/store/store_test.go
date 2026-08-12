@@ -739,7 +739,9 @@ func TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry(t *testing.T) {
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
 	// Retry: status -> 'pending', retry_count 0 -> 1, epoch 1 -> 2.
-	retried, err := q.IncrementTaskRetryCount(ctx, task.ID)
+	retried, err := q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: claimed.WorkerID,
+	})
 	require.NoError(t, err)
 	require.Equal(t, "pending", retried.Status, "task must be back to pending")
 	require.Equal(t, int32(1), retried.RetryCount, "retry_count must be incremented to 1")
@@ -1208,4 +1210,103 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 	afterCase6, err := q.GetTask(ctx, timedOutTask.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "failed", afterCase6.Status, "a rejected update must not move a terminal row")
+}
+
+// IncrementTaskRetryCount burns one retry on a task whose CURRENT generation
+// just failed, and returns it to the queue. Three predicates guard it - epoch
+// (currency), worker_id (identity) and status (terminality) - and every case
+// below names the one that rejects it, because a case that could be rejected by
+// two predicates isolates neither.
+//
+// Cases 2 and 3 land first and alone: they are the only two that compile
+// against the pre-change single-argument signature, which is what makes their
+// RED behavioral rather than a compile error. Cases 1, 4, 5, 6 and 7 need the
+// params struct and therefore arrive with the fix; their evidence is the
+// mutation matrix in the plan (rows M2, M3, M4, M6), not a RED run.
+func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Kim", "kim@example.com")
+	w1, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1-retry-guard", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	newJob := func(name string) store.Job {
+		t.Helper()
+		job, err := q.CreateJob(ctx, store.CreateJobParams{
+			Name: name, Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+			ScheduledJobID: pgtype.UUID{},
+		})
+		require.NoError(t, err)
+		return job
+	}
+	// Every case gets its own task so a rejection in one cannot mask another.
+	newClaimedTask := func(jobID pgtype.UUID, name string) store.Task {
+		t.Helper()
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: jobID, Name: name, Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+		})
+		require.NoError(t, err)
+		claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+			ID: task.ID, WorkerID: w1.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, int32(1), claimed.AssignmentEpoch)
+		require.Equal(t, "dispatched", claimed.Status)
+		return claimed
+	}
+
+	// Case 2: ROUTE A, the filed bug, and the honest test for it. A cancel lands
+	// in the handler's TOCTOU window - CancelJobTasks makes the task terminal,
+	// NULLs worker_id and bumps the epoch - and the retry then runs with exactly
+	// the two values handleTaskStatus captured at T0: epoch 1 and w1. There is no
+	// seam to interleave on inside the handler and a timing-based test would be
+	// flaky, so the interleaving is proven here, at the statement, in the state
+	// that is the bug, with the handler's own arguments. Rejected by all three
+	// predicates. Its own job, because CancelJobTasks is job-wide.
+	cancelJob := newJob("j-cancelled")
+	cancelled := newClaimedTask(cancelJob.ID, "t-cancelled")
+	require.NoError(t, q.CancelJobTasks(ctx, cancelJob.ID))
+	afterCancel, err := q.GetTask(ctx, cancelled.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", afterCancel.Status, "fixture: the cancel must have landed")
+	require.Equal(t, int32(2), afterCancel.AssignmentEpoch, "fixture: the cancel ends the generation")
+	require.False(t, afterCancel.WorkerID.Valid, "fixture: the cancel clears the assignee")
+
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: cancelled.ID, AssignmentEpoch: cancelled.AssignmentEpoch, WorkerID: cancelled.WorkerID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a stale retry must not resurrect a cancelled task")
+	stillCancelled, err := q.GetTask(ctx, cancelled.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", stillCancelled.Status, "the cancel must win the race, not be clobbered by the retry")
+	assert.Equal(t, int32(0), stillCancelled.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(2), stillCancelled.AssignmentEpoch, "a rejected retry must not bump the epoch")
+
+	// Case 3: ROUTE B1. The assignee completed this task at epoch 1 and then
+	// retries at the same epoch. Epoch matches, worker matches: the status
+	// predicate is the ONLY thing that can reject it, which is what makes this
+	// case discriminating (matrix row M1).
+	bJob := newJob("j-route-b")
+	completed := newClaimedTask(bJob.ID, "t-completed")
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: completed.ID, Status: "done", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: completed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: completed.ID, AssignmentEpoch: completed.AssignmentEpoch, WorkerID: completed.WorkerID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a completed task has no generation to fail and must not be retried")
+	stillDone, err := q.GetTask(ctx, completed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", stillDone.Status, "a finished task must not be resurrected")
+	assert.Equal(t, int32(0), stillDone.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(1), stillDone.AssignmentEpoch, "a rejected retry must not bump the epoch")
+	assert.Equal(t, w1.ID, stillDone.WorkerID, "a rejected retry must not clear the assignee")
 }
