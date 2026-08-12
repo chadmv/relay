@@ -620,11 +620,16 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 		Stream:          stream,
 		Content:         string(chunk.Content),
 		AssignmentEpoch: int32(chunk.Epoch),
+		WorkerID:        workerID,
 	})
 	if err != nil {
-		// pgx.ErrNoRows means the epoch fence rejected a stale chunk from a
-		// previous assignment generation (the task was requeued or cancelled, and
-		// both bump assignment_epoch). Expected - drop it silently, and in
+		// pgx.ErrNoRows means the fence rejected the chunk, for either of two
+		// independent reasons: the sender is not the task's current assignee (a
+		// forged or misrouted chunk - workerID comes from the authenticated
+		// registration, never from the wire), or the sender's generation is stale
+		// because the task was requeued or cancelled (both bump
+		// assignment_epoch). The two are deliberately indistinguishable here; see
+		// the comment on AppendTaskLog. Expected - drop it silently, and in
 		// particular do NOT publish it: a zombie agent's output would otherwise
 		// appear in a live view and then vanish on refresh, because it was
 		// correctly never stored. Anything else is a real persist failure that

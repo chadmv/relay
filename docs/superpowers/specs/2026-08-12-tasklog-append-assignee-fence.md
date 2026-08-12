@@ -171,10 +171,36 @@ that task retains its assignee.
 `IncrementTaskRetryCount` and `CancelJobTasks` all set `worker_id = NULL` *and*
 `assignment_epoch = assignment_epoch + 1` in the same statement. That is the epoch
 fence invariant already being honored ("never return a task to `pending` without
-bumping the epoch"), and it means the two predicates never disagree: a chunk
-rejected by the new assignee predicate on one of these tasks is already rejected
-by the epoch predicate. The assignee predicate adds rejections only where the
-epoch predicate lets something through.
+bumping the epoch").
+
+> **Correction (2026-08-12, Phase 3).** This paragraph originally continued: "it
+> means the two predicates never disagree: a chunk rejected by the new assignee
+> predicate on one of these tasks is already rejected by the epoch predicate. The
+> assignee predicate adds rejections only where the epoch predicate lets something
+> through." **That is false**, and implementation disproved it: two existing tests
+> (`TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished` and
+> `TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch`) failed on it.
+> After a requeue or cancel the task sits at epoch N+1 with `worker_id` NULL, so a
+> chunk carrying the *new* epoch N+1 passes the epoch predicate and is rejected by
+> the assignee predicate alone. The predicates therefore do disagree, on exactly
+> that state.
+>
+> This is correct and desirable, not a regression, because **no agent can hold
+> epoch N+1 for a task it is not assigned to**. `ClaimTaskForWorker` is the only
+> statement that ever sets a non-NULL `worker_id`, and it bumps the epoch in the
+> same atomic `UPDATE`; the six statements above all clear `worker_id` and bump the
+> epoch together. So every epoch value an agent has ever seen arrived via a
+> `DispatchTask` that assigned that same agent, and `(epoch = current, worker_id =
+> NULL)` is unaddressable by any legitimate agent. The true relationship is: the
+> assignee predicate adds rejections wherever the epoch predicate lets something
+> through, *including* the post-requeue epoch of an unassigned task - a state
+> reachable only by a forging caller or a test fixture.
+>
+> Consequence for tests: a fixture that needs a live assignment at a new epoch must
+> use requeue-then-redispatch (`RequeueTask` then `ClaimTaskForWorker`), not
+> `CancelJobTasks`, which leaves no assignee. Note `ClaimTaskForWorker` requires
+> `status = 'pending'`, which requeue produces and cancel (`status = 'failed'`)
+> does not.
 
 **Terminal tasks keep their assignee.** `UpdateTaskStatus`
 (`tasks.sql:16-19`) is called by `handleTaskStatus` with

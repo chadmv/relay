@@ -111,17 +111,29 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	jobID, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs2@example.com", "w-logs2")
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs2@example.com", "w-logs2")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
-	// End the assignment the way production does: cancelling the job bumps
-	// assignment_epoch (CancelJobTasks). The claimed generation's epoch is now
-	// stale and still NON-ZERO, so the fence is exercised against a real previous
-	// generation rather than a zero-value epoch.
-	require.NoError(t, q.CancelJobTasks(ctx, jobID))
-	fresh, err := q.GetTask(ctx, taskID)
+	// End the assignment and then start a new one, the way production does:
+	// RequeueTask returns the task to 'pending' with worker_id NULL and epoch+1,
+	// and ClaimTaskForWorker redispatches it with a worker and epoch+1 again. The
+	// claimed generation's epoch is now stale and still NON-ZERO, so the fence is
+	// exercised against a real previous generation rather than a zero-value epoch.
+	//
+	// Do NOT simplify this back to CancelJobTasks. Cancel bumps the epoch but
+	// leaves worker_id NULL, and the assignee half of the fence correctly rejects
+	// every append to an unassigned task - so the positive control below would
+	// have no reachable state to write into. (epoch = current, worker_id = NULL)
+	// is not a state any real agent can address: every statement that clears
+	// worker_id bumps the epoch, and ClaimTaskForWorker is the only statement that
+	// sets one, so an epoch an agent holds always arrived with an assignment to
+	// that same agent. Requeue-then-redispatch is the reachable equivalent.
+	require.NoError(t, q.RequeueTask(ctx, taskID))
+	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskID, WorkerID: workerID,
+	})
 	require.NoError(t, err)
-	require.Greater(t, fresh.AssignmentEpoch, epoch, "cancel must bump the epoch")
+	require.Greater(t, fresh.AssignmentEpoch, epoch, "requeue and redispatch must bump the epoch")
 	require.NotZero(t, epoch, "the stale epoch under test must not be the zero value")
 
 	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
@@ -246,7 +258,7 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 	worker.ResetTaskLogErrLimiterForTest()
 
-	jobID, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs4@example.com", "w-logs4")
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs4@example.com", "w-logs4")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
 	// A NUL byte cannot be stored in a Postgres text column, so every one of
@@ -281,9 +293,21 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	assert.NotContains(t, logged(), secret, "chunk content must never be logged")
 
 	// A NEW assignment generation is a new failure worth reporting once more, so
-	// the bound is per task per epoch rather than once per task forever.
-	require.NoError(t, q.CancelJobTasks(ctx, jobID))
-	fresh, err := q.GetTask(ctx, taskID)
+	// the bound is per task per epoch rather than once per task forever. The new
+	// generation is produced by requeue-then-redispatch, so the task is genuinely
+	// assigned to this worker at the new epoch and these chunks reach a matching
+	// fence - the failure below is a real persist failure on a live assignment.
+	//
+	// Do NOT simplify this back to CancelJobTasks. Cancel bumps the epoch but
+	// leaves worker_id NULL, so the assignee half of the fence rejects every
+	// append and the positive control at the end of this test has nowhere to
+	// write. (epoch = current, worker_id = NULL) is unreachable for a real agent:
+	// every statement that clears worker_id bumps the epoch, and only
+	// ClaimTaskForWorker sets one.
+	require.NoError(t, q.RequeueTask(ctx, taskID))
+	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskID, WorkerID: workerID,
+	})
 	require.NoError(t, err)
 	require.Greater(t, fresh.AssignmentEpoch, epoch)
 	for i := 0; i < n; i++ {
@@ -294,6 +318,14 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	}
 	assert.Equal(t, 2, countLines(logged(), marker),
 		"a new assignment epoch must be reported once more")
+	// Scope note: this leg pins the LIMITER's key (task + epoch), not the fence.
+	// Postgres rejects a NUL byte while decoding the bind parameter, before the
+	// fence CTE is evaluated, so a NUL chunk surfaces the same non-ErrNoRows error
+	// whether or not the fence would have matched. That is why the fixture above
+	// keeps the task genuinely assigned at this epoch: the error is then a real
+	// persist failure on a live assignment rather than an artifact. The fence
+	// itself is pinned by TestHandleTaskLog_RejectsAChunk* and by
+	// TestAppendTaskLog_EpochGuarded.
 
 	// Positive control on the same code path: the stale-epoch path stays silent,
 	// and a well-formed chunk at the current epoch still persists. Without this a
@@ -311,4 +343,153 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "a well-formed chunk at the current epoch must still persist")
 	assert.Equal(t, "good\n", rows[0].Content)
+}
+
+// The epoch fence answers "is this generation current". It never answered "are
+// you the worker this task is assigned to", so any agent that could guess a
+// task's current epoch could write into it. This test sends the task's CURRENT
+// epoch on purpose: the epoch predicate matches, so nothing but an assignee
+// predicate can reject the chunk. A stale-epoch variant would be green today and
+// therefore vacuous.
+func TestHandleTaskLog_RejectsAChunkFromANonAssignee(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, w1, epoch := seedClaimedTask(t, ctx, q, "logs5@example.com", "w-logs5")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// A second, entirely legitimate worker that simply is not this task's
+	// assignee - the realistic attacker here holds a valid agent token.
+	w2row, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-logs5-other", Hostname: "w-logs5-other", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w2 := w2row.ID
+	require.NotEqual(t, w1, w2, "the forging worker must be a different row")
+
+	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskLog(ctx, w2, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("forged by a non-assignee\n"), Epoch: int64(epoch),
+	})
+
+	// HandleTaskLog is synchronous and Publish delivers into the subscriber's
+	// buffer before returning, so a non-blocking receive is exact here - no
+	// wall-clock window is needed to decide "nothing was published".
+	var published []byte
+	select {
+	case e := <-ch:
+		published = e.Data
+	default:
+	}
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	// Non-fatal asserts so a RED run reports BOTH halves of the exposure - the
+	// forged chunk is stored AND fanned out live - rather than stopping at one.
+	assert.Empty(t, rows, "a chunk from a non-assignee must not be stored")
+	assert.Nil(t, published, "a chunk from a non-assignee must not be published")
+	if t.Failed() {
+		t.FailNow() // the forgery got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path: the real assignee at the same epoch
+	// is stored and published. Without it, a handleTaskLog that had stopped
+	// ingesting anything at all would pass every assertion above.
+	h.HandleTaskLog(ctx, w1, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("genuine\n"), Epoch: int64(epoch),
+	})
+	select {
+	case e := <-ch:
+		require.Contains(t, string(e.Data), "genuine")
+	case <-time.After(5 * time.Second):
+		t.Fatal("positive control: the assignee's own chunk was not published")
+	}
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "genuine\n", rows[0].Content)
+}
+
+// The literal repro from the backlog item: a never-claimed task sits at
+// assignment_epoch 0 with a NULL worker_id, so Epoch 0 is a free guess. Seeded
+// by hand rather than through seedClaimedTask because the whole point is a task
+// that was never claimed.
+func TestHandleTaskLog_RejectsAChunkForANeverClaimedTask(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "logs6@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w1row, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-logs6", Hostname: "w-logs6", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w1 := w1row.ID
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	unclaimed, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unclaimed.AssignmentEpoch, "a never-claimed task must sit at epoch 0")
+	require.False(t, unclaimed.WorkerID.Valid, "a never-claimed task must have a NULL worker_id")
+
+	taskIDStr := h.UUIDStringForTest(task.ID)
+	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskLog(ctx, w1, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("forged at epoch zero\n"), Epoch: 0,
+	})
+
+	var published []byte
+	select {
+	case e := <-ch:
+		published = e.Data
+	default:
+	}
+	rows, err := q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a chunk for a never-claimed task must not be stored")
+	assert.Nil(t, published, "a chunk for a never-claimed task must not be published")
+	if t.Failed() {
+		t.FailNow() // the forgery got through; the positive control below is moot
+	}
+
+	// Positive control: once the task really is claimed by w1, that same worker at
+	// the new epoch is stored and published. Rejection must be about assignment,
+	// not about this worker or this task being inert.
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	h.HandleTaskLog(ctx, w1, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("genuine\n"), Epoch: int64(claimed.AssignmentEpoch),
+	})
+	select {
+	case e := <-ch:
+		require.Contains(t, string(e.Data), "genuine")
+	case <-time.After(5 * time.Second):
+		t.Fatal("positive control: the assignee's chunk was not published after the claim")
+	}
+	rows, err = q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "genuine\n", rows[0].Content)
 }
