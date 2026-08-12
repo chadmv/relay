@@ -1259,6 +1259,40 @@ func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
 		return claimed
 	}
 
+	// Case 1: POSITIVE CONTROL, first, so a suite where the statement stopped
+	// working at all cannot look like a suite of successful rejections. The
+	// legitimate retry: the assignee's current generation really did fail.
+	liveJob := newJob("j-live")
+	live := newClaimedTask(liveJob.ID, "t-live")
+	retried, err := q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: live.ID, AssignmentEpoch: live.AssignmentEpoch, WorkerID: live.WorkerID,
+	})
+	require.NoError(t, err, "the assignee's own retry at the current epoch must succeed")
+	assert.Equal(t, "pending", retried.Status, "the retry returns the task to the queue")
+	assert.Equal(t, int32(1), retried.RetryCount, "the retry burns exactly one retry")
+	assert.Equal(t, int32(2), retried.AssignmentEpoch, "the retry ends the generation")
+	assert.False(t, retried.WorkerID.Valid, "the retry releases the assignee")
+
+	// Case 5: EXACTLY-ONCE PER GENERATION. The same T0 arguments a second time
+	// affect zero rows. This is the deterministic proxy for the concurrent
+	// double-retry property - two callers reading at epoch 1 serialize on the row
+	// lock and the second re-evaluates its WHERE against the already-updated row
+	// - with no goroutines and no sleeps.
+	//
+	// Read this case honestly: it does NOT isolate one predicate. The first retry
+	// both bumped the epoch and NULLed worker_id, so epoch and worker each reject
+	// it independently, and it goes red only if BOTH are removed (matrix row M6).
+	// That is the same defense-in-depth shape as the two .Valid checks in
+	// handleTaskStatus's Go gate. Do not read it as an epoch test.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: live.ID, AssignmentEpoch: live.AssignmentEpoch, WorkerID: live.WorkerID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "one generation must not be able to burn two retries")
+	once, err := q.GetTask(ctx, live.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), once.RetryCount, "the second call must not have incremented retry_count")
+	assert.Equal(t, int32(2), once.AssignmentEpoch, "the second call must not have bumped the epoch again")
+
 	// Case 2: ROUTE A, the filed bug, and the honest test for it. A cancel lands
 	// in the handler's TOCTOU window - CancelJobTasks makes the task terminal,
 	// NULLs worker_id and bumps the epoch - and the retry then runs with exactly
@@ -1309,4 +1343,80 @@ func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
 	assert.Equal(t, int32(0), stillDone.RetryCount, "a rejected retry must not burn a retry")
 	assert.Equal(t, int32(1), stillDone.AssignmentEpoch, "a rejected retry must not bump the epoch")
 	assert.Equal(t, w1.ID, stillDone.WorkerID, "a rejected retry must not clear the assignee")
+
+	// Case 4: STALE EPOCH, same worker, non-terminal row - the requeue variant of
+	// route A, which the backlog item does not name and which the status
+	// predicate does NOT close. Claim to w1 (epoch 1), requeue (epoch 2,
+	// pending), claim to w1 AGAIN (epoch 3, dispatched). A caller holding the T0
+	// pair (epoch 1, w1) is rejected by the EPOCH predicate alone: the status is
+	// not terminal and the worker matches. Re-claiming to the SAME worker is what
+	// makes this discriminating - re-claiming to a second worker would let the
+	// worker predicate reject it too and the case would stop isolating anything.
+	// Without this predicate the stale retry knocks a re-dispatched task back to
+	// pending and evicts the agent that is genuinely running it. Matrix row M2.
+	staleJob := newJob("j-stale-epoch")
+	stale := newClaimedTask(staleJob.ID, "t-stale-epoch")
+	require.NoError(t, q.RequeueTask(ctx, stale.ID))
+	reclaimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: stale.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(3), reclaimed.AssignmentEpoch, "fixture: claim, requeue, claim moves the epoch 1 -> 2 -> 3")
+	require.Equal(t, "dispatched", reclaimed.Status, "fixture: the row must be non-terminal, or the status predicate would reject too")
+
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: stale.ID, AssignmentEpoch: stale.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a retry from an ended generation must not touch the live one")
+	afterStale, err := q.GetTask(ctx, stale.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", afterStale.Status, "the live agent must keep the task it was just dispatched")
+	assert.Equal(t, int32(3), afterStale.AssignmentEpoch, "a stale retry must not bump the current generation")
+	assert.Equal(t, w1.ID, afterStale.WorkerID, "a stale retry must not evict the current assignee")
+	assert.Equal(t, int32(0), afterStale.RetryCount, "a stale retry must not burn a retry")
+
+	// Two separate never-claimed tasks so cases 6 and 7 stay independent: each
+	// sits at assignment_epoch 0 with worker_id NULL, the state both prior bugs
+	// targeted because epoch 0 is a free guess.
+	unclaimedJob := newJob("j-unclaimed")
+	unclaimedA, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: unclaimedJob.ID, Name: "t-unclaimed-a", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	unclaimedB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: unclaimedJob.ID, Name: "t-unclaimed-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unclaimedA.AssignmentEpoch, "fixture: a never-claimed task sits at epoch 0")
+	require.False(t, unclaimedA.WorkerID.Valid, "fixture: a never-claimed task has a NULL worker_id")
+
+	// Case 6: NEVER-CLAIMED task, matching epoch 0, real worker. Rejected by the
+	// WORKER predicate alone - `pending` is not terminal and epoch 0 matches, so
+	// nothing else can reject it. Matrix row M3.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: unclaimedA.ID, AssignmentEpoch: 0, WorkerID: w1.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject a retry from every worker")
+	afterCase6, err := q.GetTask(ctx, unclaimedA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase6.Status, "a rejected retry must not move the row")
+	assert.Equal(t, int32(0), afterCase6.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(0), afterCase6.AssignmentEpoch, "a rejected retry must not bump the epoch")
+
+	// Case 7: NEVER-CLAIMED task, matching epoch 0, ZERO-VALUE worker id - NULL
+	// on both sides. This is THE regression test for the comparison staying a
+	// plain `=`: under `IS NOT DISTINCT FROM` two NULLs compare equal, the fence
+	// matches and the hole is wide open again. Case 6 does not catch that
+	// rewrite, because there the argument is non-NULL. Matrix row M4, where this
+	// case must be the ONLY one that goes red.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: unclaimedB.ID, AssignmentEpoch: 0, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
+	afterCase7, err := q.GetTask(ctx, unclaimedB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase7.Status, "a caller that lost its identity must fail closed")
+	assert.Equal(t, int32(0), afterCase7.RetryCount, "a caller that lost its identity must not burn a retry")
 }
