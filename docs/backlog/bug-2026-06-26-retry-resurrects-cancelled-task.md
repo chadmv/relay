@@ -61,3 +61,14 @@ guard is chosen must end or match the assignment epoch per the invariant.
 ## Notes
 This is the lone epoch-fence writer with no guard; the hardening phase closed the rest. Worth fixing
 before the retry endpoint ships so the new entry point is safe by construction.
+
+**Narrowed, not closed (2026-08-12).** The task-status assignee fence
+(`docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`, section 3.4) added an
+identity gate to `handleTaskStatus` that runs *ahead* of the retry branch, so
+`IncrementTaskRetryCount`'s only production caller is now reachable only by the task's own assignee
+at the current epoch. That closes the forged route into this query - an unrelated agent could
+previously burn a retry on any task by guessing its epoch, NULLing `worker_id` and bumping the
+epoch out from under the agent legitimately running it. What remains is exactly the cancel-during-
+retry race described above, plus whatever `POST /v1/jobs/{id}/retry` opens when it lands. The query
+itself still has a bare `WHERE id = $1` and no status guard, so this item stays open and its
+acceptance criteria are unchanged.
