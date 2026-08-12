@@ -70,8 +70,8 @@ func e2eAPIServer(t *testing.T, ctx context.Context, q *store.Queries, pool *pgx
 }
 
 // seedClaimedTaskForUser is seedClaimedTask but reuses an existing user so the
-// job's submitted_by is a real row.
-func seedClaimedTaskForUser(t *testing.T, ctx context.Context, q *store.Queries, email, hostname string) (jobID, taskID pgtype.UUID, epoch int32) {
+// job's submitted_by is a real row. It forwards the task's assignee id.
+func seedClaimedTaskForUser(t *testing.T, ctx context.Context, q *store.Queries, email, hostname string) (jobID, taskID, workerID pgtype.UUID, epoch int32) {
 	return seedClaimedTask(t, ctx, q, email, hostname)
 }
 
@@ -81,7 +81,7 @@ func TestEndToEnd_AgentChunkReachesASubscribedSSEClient(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	jobIDU, taskIDU, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-seed@example.com", "w-e2e1")
+	jobIDU, taskIDU, workerID, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-seed@example.com", "w-e2e1")
 	jobID := h.UUIDStringForTest(jobIDU)
 	taskID := h.UUIDStringForTest(taskIDU)
 
@@ -130,7 +130,7 @@ func TestEndToEnd_AgentChunkReachesASubscribedSSEClient(t *testing.T) {
 
 	const n = 5
 	for i := 0; i < n; i++ {
-		h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+		h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 			TaskId:  taskID,
 			Stream:  relayv1.LogStream_LOG_STREAM_STDOUT,
 			Content: []byte(fmt.Sprintf("line %d\nmore %d\n", i, i)),
@@ -205,7 +205,7 @@ func TestEndToEnd_BackfillJoinIsGaplessAndDeduped(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	_, taskIDU, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-bf-seed@example.com", "w-e2e2")
+	_, taskIDU, workerID, epoch := seedClaimedTaskForUser(t, ctx, q, "e2e-bf-seed@example.com", "w-e2e2")
 	taskID := h.UUIDStringForTest(taskIDU)
 
 	srv, token := e2eAPIServer(t, ctx, q, pool, broker, "e2e-backfill@example.com")
@@ -246,7 +246,7 @@ func TestEndToEnd_BackfillJoinIsGaplessAndDeduped(t *testing.T) {
 	// index is emitted exactly once, so the row count is an exact assertion.
 	emit := func(from, to int) {
 		for i := from; i < to; i++ {
-			h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+			h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 				TaskId: taskID, Content: []byte(fmt.Sprintf("chunk-%02d\n", i)), Epoch: int64(epoch),
 			})
 		}

@@ -102,10 +102,21 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return err
 	}
 
-	var workerUUID pgtype.UUID
-	_ = workerUUID.Scan(workerID)
-
+	// Registered above, so the teardown defer must be armed BEFORE any path that
+	// can return early below, or a failed connection leaves its sender in the
+	// registry (identity-checked teardown).
 	defer h.teardownConnection(workerID, sender)
+
+	// This UUID is the identity every task_log write from this connection is
+	// fenced on, so a failure to parse it is not survivable: it would silently
+	// drop 100% of this worker's log output. workerID came from uuidStr() over a
+	// UUID the server just read out of Postgres, so a failure here means
+	// something is badly wrong. Fail loudly and close the stream instead.
+	var workerUUID pgtype.UUID
+	if err := workerUUID.Scan(workerID); err != nil {
+		log.Printf("worker: connection rejected, worker id %q is not a usable UUID: %v", workerID, err)
+		return status.Errorf(codes.Internal, "worker identity unusable")
+	}
 
 	// Message loop.
 	for {
@@ -121,7 +132,7 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		case *relayv1.AgentMessage_TaskStatus:
 			h.handleTaskStatus(ctx, p.TaskStatus)
 		case *relayv1.AgentMessage_TaskLog:
-			h.handleTaskLog(ctx, p.TaskLog)
+			h.handleTaskLog(ctx, workerUUID, p.TaskLog)
 		case *relayv1.AgentMessage_WorkspaceInventory:
 			if err := h.applyInventoryUpdate(ctx, workerUUID, p.WorkspaceInventory); err != nil {
 				log.Printf("worker: inventory update failed: %v", err)
@@ -583,12 +594,17 @@ func (l *taskLogErrLimiter) reset() {
 // handleTaskLog appends a log chunk from an agent and, if anyone is tailing that
 // task, publishes it to the SSE broker.
 //
+// workerID is the connection's own authenticated worker, resolved at
+// registration and never taken from the wire - an agent cannot influence it, so
+// it cannot claim to be somebody else. It is threaded here in the same way
+// applyInventoryUpdate already receives it.
+//
 // This runs synchronously on the Connect recv goroutine, which also carries that
 // worker's status, inventory and telemetry messages, so everything below is
 // deliberately cheap: exactly one DB round trip (the insert itself returns the
 // job id and seq), one map lookup when nobody is watching, and a non-blocking
 // Publish. Do not add a query, a goroutine, or a queue here.
-func (h *Handler) handleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk) {
+func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk *relayv1.TaskLogChunk) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(chunk.TaskId); err != nil {
 		return

@@ -31,8 +31,10 @@ type taskLogFrame struct {
 }
 
 // seedClaimedTask creates a user, job, worker and task, claims the task (which
-// bumps assignment_epoch to 1) and returns the ids plus the current epoch.
-func seedClaimedTask(t *testing.T, ctx context.Context, q *store.Queries, email, hostname string) (jobID, taskID pgtype.UUID, epoch int32) {
+// bumps assignment_epoch to 1) and returns the ids plus the current epoch. The
+// worker id is returned because it is the task's assignee: every append to this
+// task must be sent as that worker.
+func seedClaimedTask(t *testing.T, ctx context.Context, q *store.Queries, email, hostname string) (jobID, taskID, workerID pgtype.UUID, epoch int32) {
 	t.Helper()
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
 		Name: "u", Email: email, IsAdmin: false, PasswordHash: "x",
@@ -56,7 +58,7 @@ func seedClaimedTask(t *testing.T, ctx context.Context, q *store.Queries, email,
 		ID: task.ID, WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
 	})
 	require.NoError(t, err)
-	return job.ID, task.ID, claimed.AssignmentEpoch
+	return job.ID, task.ID, w.ID, claimed.AssignmentEpoch
 }
 
 func TestHandleTaskLog_PublishesToATaskScopedSubscriber(t *testing.T) {
@@ -65,14 +67,14 @@ func TestHandleTaskLog_PublishesToATaskScopedSubscriber(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	jobID, taskID, epoch := seedClaimedTask(t, ctx, q, "logs1@example.com", "w-logs1")
+	jobID, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs1@example.com", "w-logs1")
 	taskIDStr := h.UUIDStringForTest(taskID)
 	jobIDStr := h.UUIDStringForTest(jobID)
 
 	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
 	defer cancel()
 
-	h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 		TaskId: taskIDStr, Stream: relayv1.LogStream_LOG_STREAM_STDERR,
 		Content: []byte("line one\nline two\n"), Epoch: int64(epoch),
 	})
@@ -109,7 +111,7 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	jobID, taskID, epoch := seedClaimedTask(t, ctx, q, "logs2@example.com", "w-logs2")
+	jobID, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs2@example.com", "w-logs2")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
 	// End the assignment the way production does: cancelling the job bumps
@@ -126,7 +128,7 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	defer cancel()
 
 	// A zombie agent still streaming output for the generation that just ended.
-	h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 		TaskId: taskIDStr, Content: []byte("from zombie\n"), Epoch: int64(epoch),
 	})
 	// HandleTaskLog is synchronous and Publish delivers into the subscriber's
@@ -144,7 +146,7 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	// Paired positive control on the SAME code path and the same subscriber: at
 	// the current epoch the chunk is both stored and published. Without this a
 	// broken HandleTaskLog that did nothing at all would pass the assertions above.
-	h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 		TaskId: taskIDStr, Content: []byte("current\n"), Epoch: int64(fresh.AssignmentEpoch),
 	})
 	select {
@@ -164,7 +166,7 @@ func TestHandleTaskLog_NoSubscriberSkipsMarshalButStillPersists(t *testing.T) {
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 
-	_, taskID, epoch := seedClaimedTask(t, ctx, q, "logs3@example.com", "w-logs3")
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs3@example.com", "w-logs3")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
 	chunk := func(s string) *relayv1.TaskLogChunk {
@@ -177,7 +179,7 @@ func TestHandleTaskLog_NoSubscriberSkipsMarshalButStillPersists(t *testing.T) {
 
 	before := worker.TaskLogPublishesForTest()
 	for i := 0; i < 3; i++ {
-		h.HandleTaskLog(ctx, chunk("quiet\n"))
+		h.HandleTaskLog(ctx, workerID, chunk("quiet\n"))
 	}
 	assert.Equal(t, before, worker.TaskLogPublishesForTest(),
 		"with no log subscriber, nothing may be marshalled or published")
@@ -193,7 +195,7 @@ func TestHandleTaskLog_NoSubscriberSkipsMarshalButStillPersists(t *testing.T) {
 	defer cancel()
 	before = worker.TaskLogPublishesForTest()
 	for i := 0; i < 3; i++ {
-		h.HandleTaskLog(ctx, chunk("watched\n"))
+		h.HandleTaskLog(ctx, workerID, chunk("watched\n"))
 	}
 	assert.Equal(t, before+3, worker.TaskLogPublishesForTest())
 	for i := 0; i < 3; i++ {
@@ -244,7 +246,7 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
 	worker.ResetTaskLogErrLimiterForTest()
 
-	jobID, taskID, epoch := seedClaimedTask(t, ctx, q, "logs4@example.com", "w-logs4")
+	jobID, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs4@example.com", "w-logs4")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
 	// A NUL byte cannot be stored in a Postgres text column, so every one of
@@ -260,7 +262,7 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	logged := captureLog(t)
 	const n = 8
 	for i := 0; i < n; i++ {
-		h.HandleTaskLog(ctx, bad())
+		h.HandleTaskLog(ctx, workerID, bad())
 	}
 
 	const marker = "handleTaskLog AppendTaskLog"
@@ -285,7 +287,7 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, fresh.AssignmentEpoch, epoch)
 	for i := 0; i < n; i++ {
-		h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+		h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 			TaskId: taskIDStr, Content: []byte(secret + "\x00"),
 			Epoch: int64(fresh.AssignmentEpoch),
 		})
@@ -297,12 +299,12 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	// and a well-formed chunk at the current epoch still persists. Without this a
 	// handleTaskLog that had stopped calling AppendTaskLog at all would pass every
 	// assertion above.
-	h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 		TaskId: taskIDStr, Content: []byte("stale\n"), Epoch: int64(epoch),
 	})
 	assert.Equal(t, 2, countLines(logged(), marker), "a stale-epoch drop must stay silent")
 
-	h.HandleTaskLog(ctx, &relayv1.TaskLogChunk{
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
 		TaskId: taskIDStr, Content: []byte("good\n"), Epoch: int64(fresh.AssignmentEpoch),
 	})
 	rows, err = q.GetTaskLogs(ctx, taskID)
