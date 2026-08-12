@@ -692,3 +692,113 @@ func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *
 	assert.Equal(t, "pending", retried.Status, "positive control: the retry must requeue the task")
 	assert.Equal(t, int32(2), retried.AssignmentEpoch, "positive control: the requeue must bump the epoch")
 }
+
+// Route B over the REAL message loop rather than the exported shim. Three
+// fixture details are load-bearing:
+//   - Auto-enroll upserts by hostname and returns the EXISTING row's id, so
+//     seeding the task against seedTaskAndTwoWorkers' w1 hostname (<prefix>-w1)
+//     makes this connection resolve to the very worker the task is assigned to.
+//     The assertion on the register response's worker_id is what proves that
+//     happened; drop it and the test proves nothing.
+//   - Both tasks must be reported in RunningTasks. finishRegister runs
+//     reconcileRunningTasks, which requeues any task the coordinator has
+//     assigned to this worker but the agent did not report, and a requeue bumps
+//     assignment_epoch - which would make the messages below stale for a reason
+//     that has nothing to do with what is under test.
+//   - The barrier task exists because CloseSend does not drain queued messages
+//     (mockConnectStream.Recv selects on the close channel alongside the queue),
+//     so the test cannot wait for the stream to end. The recv loop handles
+//     messages strictly in order, so once the barrier chunk is stored the FAILED
+//     ahead of it has already been processed. The barrier is on a SEPARATE task
+//     so it stays observable whether or not the FAILED was rejected.
+func TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+	q := fx.Q
+
+	const prefix = "status9"
+	const hostname = prefix + "-w1"
+	jobID, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, prefix, 1)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+
+	barrier, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-barrier", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedBarrier, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: barrier.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	barrierStr := fx.Handler.UUIDStringForTest(barrier.ID)
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: hostname,
+				CpuCores: 1, RamGb: 1, Os: "linux",
+				RunningTasks: []*relayv1.RunningTask{
+					{TaskId: taskIDStr, Epoch: int64(claimed.AssignmentEpoch)},
+					{TaskId: barrierStr, Epoch: int64(claimedBarrier.AssignmentEpoch)},
+				},
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: taskIDStr,
+				Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+				Epoch:  int64(claimed.AssignmentEpoch),
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: taskIDStr,
+				Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+				Epoch:  int64(claimed.AssignmentEpoch),
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId: barrierStr, Content: []byte("barrier\n"),
+				Epoch: int64(claimedBarrier.AssignmentEpoch),
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp)
+	require.Equal(t, fx.Handler.UUIDStringForTest(w1), resp.WorkerId,
+		"the connection must resolve to the task's assignee, or this test proves nothing")
+
+	require.Eventually(t, func() bool {
+		rows, err := q.GetTaskLogs(ctx, barrier.ID)
+		return err == nil && len(rows) == 1
+	}, 10*time.Second, 20*time.Millisecond,
+		"the barrier chunk must be stored, which proves the FAILED ahead of it was processed")
+
+	fresh, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", fresh.Status, "a second terminal over the real loop must not resurrect the task")
+	assert.Equal(t, int32(0), fresh.RetryCount, "a second terminal over the real loop must not burn a retry")
+	assert.Equal(t, int32(1), fresh.AssignmentEpoch, "a rejected retry must not end the assignment")
+	assert.Equal(t, w1, fresh.WorkerID, "a terminal transition must not release the assignee")
+
+	stream.CloseSend()
+	<-done
+}
