@@ -310,8 +310,23 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 	assert.True(t, running.StartedAt.Valid, "positive control: started_at must be stamped")
 }
 
-// The ONE construction that discriminates the Go gate's NULL rejection, and the
-// reason both .Valid checks are in it rather than a bare struct comparison.
+// NOTE (2026-08-12, retry-resurrect status guard): this test no longer
+// discriminates the GO gate. It was written as the permanent guard for that
+// gate's NULL rejection, and it was discriminating only because the retry branch
+// escaped the SQL fence. IncrementTaskRetryCount now carries its own
+// `worker_id = $` predicate, so a zero-value caller is rejected in SQL and this
+// test stays green even with the Go gate deleted outright. It is kept because it
+// is still a valid guard - at the SQL layer, on the `=`-not-`IS NOT DISTINCT
+// FROM` rule, reached through the real handler rather than through a store-level
+// call - and because the construction below is still the only one in this
+// package that is NULL on both sides. Its discriminating power moved; the test
+// did not become worthless, it changed what it proves. That no test now
+// discriminates the Go gate is recorded as a Known Limitation in
+// docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md; the gate's
+// remaining value is non-functional (zero round trips, zero attacker-keyed log
+// lines), which is why it is written down rather than pinned.
+//
+// What the construction below still buys, unchanged:
 //
 // Two properties have to hold at once for a test to catch a gate that dropped
 // them, and no other test in this package has both:
@@ -322,18 +337,23 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 //     compare EQUAL - the Go form of IS NOT DISTINCT FROM - and the gate falls
 //     open. Every other test here puts a real UUID on at least one side, where a
 //     bare comparison still rejects and therefore proves nothing.
-//   - The forged message must take the RETRY branch, so the task carries
-//     Retries: 1 and the status is FAILED. This is what makes the test
-//     independent of the SQL fence: IncrementTaskRetryCount has a bare
-//     `WHERE id = $1` and the branch returns before UpdateTaskStatus is ever
-//     reached, so the SQL predicate cannot rescue a Go gate that let this
-//     through. A DONE or RUNNING variant would be caught by the SQL fence even
-//     with the Go gate deleted outright, and would be silently weaker.
+//   - The forged message is routed through the RETRY branch, so the task
+//     carries Retries: 1 and the status is FAILED. That branch returns before
+//     UpdateTaskStatus is ever reached. Before the retry statement was fenced
+//     this is what made the test independent of the SQL layer entirely; now it
+//     is what selects WHICH statement's worker predicate the test exercises -
+//     IncrementTaskRetryCount's, not UpdateTaskStatus's. A DONE or RUNNING
+//     variant would exercise UpdateTaskStatus's instead, which
+//     TestUpdateTaskStatus_AssigneeGuarded case 4 already covers at the store
+//     layer.
 //
-// So this test goes RED under both mutations a reviewer might try: dropping the
-// two .Valid checks, and deleting the Go gate entirely. epoch 0 on a
-// never-claimed task also means the currency gate matches, leaving identity as
-// the only thing that can reject.
+// Epoch 0 on a never-claimed task means the currency gate matches, leaving
+// identity as the only thing that can reject - in Go, in SQL, or both. Before
+// the SQL fence landed this test went RED under either mutation a reviewer might
+// try (dropping the two .Valid checks, or deleting the Go gate); now it goes red
+// under neither, and it goes red instead if IncrementTaskRetryCount's worker
+// predicate is dropped or rewritten as IS NOT DISTINCT FROM. That is the same
+// property, guarded one layer down.
 func TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()

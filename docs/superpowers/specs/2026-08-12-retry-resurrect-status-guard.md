@@ -872,3 +872,26 @@ check on this path can do better, as #119 section 5 established.
    `bug-2026-06-05-jobs-stats-24h-updated-at-proxy`, which that item already notes.
 5. **It must not reopen a task whose dependents already ran,** or it reproduces route B by
    design rather than by accident.
+
+## 12. Known Limitations (recorded during implementation, 2026-08-12)
+
+1. **No test in the tree discriminates the Go identity gate in `handleTaskStatus`
+   (`handler.go:436-476`).** After this change, deleting that gate outright leaves every
+   test green: a forged terminal from a non-assignee is rejected by
+   `IncrementTaskRetryCount`'s or `UpdateTaskStatus`'s own `worker_id` predicate, and the
+   observable state is identical. `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask`
+   was PR #120's permanent guard for it and stopped discriminating it here (spec 8.5); its
+   comment now says so. **Verified during implementation, not assumed:** the gate was deleted
+   from `handleTaskStatus` and that test was re-run, and it PASSED. The gate's remaining value
+   is non-functional - zero database round trips and zero attacker-keyed `log.Printf` calls on
+   the recv goroutine per forged message, plus a different question ("may this sender drive
+   this task's status machine at all") - and a log-capture assertion would pin that with a
+   globally-scoped mechanism for a property that is a cost control, not a behavior. This is
+   written down instead, because otherwise the next reviewer deletes the gate and sees a green
+   suite. The rationale comment at the gate says the same thing.
+2. **The fence binds a worker, not a connection.** Two concurrent streams registered for the
+   same worker row both satisfy every predicate. Deliberate, unchanged from PR #120, and what
+   keeps reconnect-within-the-grace-window working.
+3. **An attacker holding worker W's own token can still drive W's own tasks through their
+   legal state machine** (`RUNNING`, then one terminal). No server-side check on this path can
+   do better, as the tasklog spec's section 5 established.
