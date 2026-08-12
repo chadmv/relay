@@ -13,6 +13,16 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- Updates a task's status only if the caller's epoch matches the current
 -- assignment. Returns pgx.ErrNoRows if the caller's epoch is stale (zombie
 -- status update from a prior assignment).
+-- Callers MUST pass the task's existing worker_id through in $3. This statement
+-- writes worker_id but does NOT bump assignment_epoch, so clearing it here would
+-- leave the task at its current epoch with no assignee - and AppendTaskLog
+-- fences on worker_id, so every subsequent log chunk from the agent that is
+-- still legitimately running that task would be dropped silently and forever.
+-- Every other statement that clears worker_id (RequeueTask, RequeueTaskByID,
+-- RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, IncrementTaskRetryCount,
+-- CancelJobTasks) bumps the epoch in the same UPDATE, which ends the assignment
+-- cleanly. If you ever need to release the worker slot here, bump
+-- assignment_epoch in this statement too.
 UPDATE tasks
 SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
 WHERE id = $1 AND assignment_epoch = $6
@@ -46,22 +56,36 @@ ON CONFLICT DO NOTHING;
 SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1;
 
 -- name: AppendTaskLog :one
--- Inserts a log chunk only if the caller's epoch matches the task's current
--- assignment, and returns the inserted row's id (the seq the polling endpoint
--- pages by) plus created_at plus the task's job_id - all from one round trip,
--- because this runs synchronously on the agent's gRPC recv goroutine and a
--- second query here would delay that worker's status and telemetry ingest too.
--- A stale chunk (from a reassigned or cancelled generation) matches no fence
--- row, inserts nothing, and returns zero rows -> pgx.ErrNoRows. Callers must
--- treat ErrNoRows as "stale, drop silently" and any other error as a real
--- failure worth logging.
+-- Inserts a log chunk only if BOTH fence predicates hold: the task is currently
+-- assigned to the sending worker (identity), and the caller's epoch matches the
+-- task's current assignment (currency). The epoch answers "is this generation
+-- current"; the worker id answers "are you who you say you are". Neither
+-- substitutes for the other, and neither is redundant - do not delete either.
+-- Returns the inserted row's id (the seq the polling endpoint pages by) plus
+-- created_at plus the task's job_id - all from one round trip, because this runs
+-- synchronously on the agent's gRPC recv goroutine and a second query here would
+-- delay that worker's status and telemetry ingest too.
+-- A chunk failing EITHER predicate - a stale chunk from a reassigned or
+-- cancelled generation, or a chunk from an agent that is not this task's
+-- assignee - matches no fence row, inserts nothing, and returns zero rows ->
+-- pgx.ErrNoRows. Callers must treat ErrNoRows as "one or both checks failed:
+-- drop silently, do not publish" and any other error as a real failure worth
+-- logging. The two cases are deliberately indistinguishable here; see the spec.
+-- The worker_id comparison must stay a plain `=`. tasks.worker_id is NULLABLE,
+-- so `=` makes a never-claimed task (worker_id NULL) reject every append, which
+-- is exactly the hole this predicate closes, and makes a caller that lost its
+-- own identity (a zero-value pgtype.UUID binds SQL NULL) fail closed. Rewriting
+-- it as `IS NOT DISTINCT FROM` would let a NULL parameter match a NULL
+-- worker_id and re-open that hole. Do not "fix the NULL bug" here.
 -- The tasks alias and the qualified column references are load-bearing: without
 -- them sqlc's analyzer cannot resolve "id" across the two CTEs and fails with
 -- 'column reference "id" is ambiguous'. Only job_id is selected because that is
 -- all the publish needs; the fence's job is to yield exactly one row, or none.
 WITH fence AS (
     SELECT t.job_id FROM tasks t
-    WHERE t.id = sqlc.arg(task_id) AND t.assignment_epoch = sqlc.arg(assignment_epoch)
+    WHERE t.id = sqlc.arg(task_id)
+      AND t.assignment_epoch = sqlc.arg(assignment_epoch)
+      AND t.worker_id = sqlc.arg(worker_id)
 ), ins AS (
     INSERT INTO task_logs (task_id, stream, content)
     SELECT sqlc.arg(task_id), sqlc.arg(stream), sqlc.arg(content) FROM fence

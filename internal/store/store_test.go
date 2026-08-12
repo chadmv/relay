@@ -266,7 +266,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 
 	// Log with matching epoch: returns the inserted row plus the task's job id.
 	first, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1,
+		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1, WorkerID: w.ID,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, job.ID, first.JobID, "the row must carry the task's job id so the publish needs no second query")
@@ -276,7 +276,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// seq is monotonically increasing across calls - it is the same value
 	// GET /v1/tasks/{id}/logs pages by via ?since_seq.
 	second, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1,
+		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1, WorkerID: w.ID,
 	})
 	require.NoError(t, err)
 	assert.Greater(t, second.ID, first.ID)
@@ -286,7 +286,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// gate in handleTaskLog depends on - previously :exec collapsed "inserted one
 	// row" and "inserted zero rows" into the same nil error.
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0,
+		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0, WorkerID: w.ID,
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows)
 
@@ -296,6 +296,129 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.Len(t, logs, 2)
 	assert.Equal(t, "hello\n", logs[0].Content)
 	assert.Equal(t, "more\n", logs[1].Content)
+	// The fence's parameter numbering shifted when the worker_id predicate was
+	// added ($3,$4 -> $4,$5 for stream and content). Read stream back so a future
+	// renumbering that swapped these two cannot pass unnoticed.
+	assert.Equal(t, "stdout", logs[0].Stream)
+	assert.Equal(t, "stderr", logs[1].Stream)
+
+	// --- The assignee half of the fence ---
+
+	// A second, entirely legitimate worker that simply is not this task's assignee.
+	w2, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w2", Hostname: "w2-logs", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Case 1: correct epoch, WRONG worker. The epoch predicate matches, so only
+	// the assignee predicate can produce ErrNoRows here.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "from a non-assignee\n",
+		AssignmentEpoch: 1, WorkerID: w2.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a worker that is not the assignee must not be able to append")
+
+	// Case 2: correct epoch, ZERO-VALUE worker id. pgtype.UUID{} binds SQL NULL
+	// and `worker_id = NULL` is never true, so a caller that lost its own
+	// identity fails closed instead of writing.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "from a caller with no identity\n",
+		AssignmentEpoch: 1, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a zero-value worker id must fail closed")
+
+	// A task nobody ever claimed: assignment_epoch 0, worker_id NULL. This is the
+	// state the reported hole targeted, because epoch 0 is a free guess.
+	unclaimed, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-unclaimed", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Case 3: never-claimed task, matching epoch 0, real worker. Rejected.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: unclaimed.ID, Stream: "stdout", Content: "forged at epoch zero\n",
+		AssignmentEpoch: 0, WorkerID: w.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject appends from every worker")
+
+	// Case 4: never-claimed task, matching epoch 0, ZERO-VALUE worker id - NULL on
+	// both sides. This is THE regression test for the comparison staying a plain
+	// `=`: under `IS NOT DISTINCT FROM` two NULLs compare equal, the fence matches
+	// and the hole is wide open again. Case 2 does not catch that rewrite, because
+	// there the task's worker_id is non-NULL.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: unclaimed.ID, Stream: "stdout", Content: "NULL matching NULL\n",
+		AssignmentEpoch: 0, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
+
+	// None of the four rejected appends wrote anything.
+	unclaimedLogs, err := q.GetTaskLogs(ctx, unclaimed.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unclaimedLogs, "no rejected append may insert a row")
+	logs, err = q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Len(t, logs, 2, "the claimed task still has only its two legitimate rows")
+}
+
+// A terminal status transition must NOT release the task's assignee. UpdateTaskStatus
+// writes worker_id but does not bump assignment_epoch, so a caller that passed a
+// zero-value worker id would strand the task at its current epoch with no assignee -
+// and since AppendTaskLog fences on worker_id, every trailing chunk from the agent
+// that legitimately just finished the task would be dropped silently and forever.
+// Trailing chunks arriving just after a terminal status are a real and common
+// ordering, so this pins the contract both callers currently honor by passing
+// task.WorkerID through.
+func TestUpdateTaskStatus_TerminalTransitionKeepsTheAssigneeSoTrailingLogsStillPersist(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Ida", "ida@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-terminal", Hostname: "w-terminal-logs", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// The transition handleTaskStatus performs: worker_id passed straight through.
+	done, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "done", WorkerID: claimed.WorkerID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", done.Status)
+	assert.Equal(t, w.ID, done.WorkerID, "a terminal transition must not release the assignee")
+	assert.Equal(t, claimed.AssignmentEpoch, done.AssignmentEpoch,
+		"UpdateTaskStatus must not bump the epoch - the assignment is retained, not ended")
+
+	// The trailing chunk that arrives just after the terminal status still lands.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "trailing after done\n",
+		AssignmentEpoch: done.AssignmentEpoch, WorkerID: done.WorkerID,
+	})
+	require.NoError(t, err, "a trailing chunk from the assignee must still persist after a terminal status")
+
+	logs, err := q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "trailing after done\n", logs[0].Content)
 }
 
 func TestReconciliationQueries(t *testing.T) {

@@ -20,9 +20,10 @@ func (h *Handler) HandleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusU
 }
 
 // HandleTaskLog exposes the unexported handleTaskLog method for integration
-// tests in package worker_test.
-func (h *Handler) HandleTaskLog(ctx context.Context, chunk *relayv1.TaskLogChunk) {
-	h.handleTaskLog(ctx, chunk)
+// tests in package worker_test. workerID is the sending connection's
+// authenticated worker, exactly as Connect supplies it in production.
+func (h *Handler) HandleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk *relayv1.TaskLogChunk) {
+	h.handleTaskLog(ctx, workerID, chunk)
 }
 
 // TaskLogPublishesForTest reports how many chunks have got past the
