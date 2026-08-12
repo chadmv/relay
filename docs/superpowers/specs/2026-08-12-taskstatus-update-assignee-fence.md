@@ -617,6 +617,16 @@ Autonomous run, no human available. Each call and its reasoning:
    transfers unchanged; detection routed to the audit-log item.
 6. **`bug-2026-06-26-retry-resurrects-cancelled-task` stays open** (3.4), with a note that
    this change narrows its remaining exposure to the cancel race alone.
+
+   > **Correction (2026-08-12, retry-resurrect status-guard iteration).** "The cancel race
+   > alone" is wrong; section 3.4 of this same spec already carries the fuller correction and
+   > this decision entry was never updated to match. Two routes remained after that change,
+   > not one: the cancel-during-retry interleaving, and a single-actor race-free resurrection
+   > by the task's own assignee (`DONE` then `FAILED` at the same epoch, which a terminal
+   > transition permits because it neither bumps the epoch nor clears `worker_id`). A third,
+   > which neither document named, was the requeue variant of the cancel race. All three are
+   > closed by `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`, and the
+   > `06-26` item is closed by that work.
 7. **No `running`-task reaper** (6). Defense in depth against a state this change makes
    unreachable, and it needs its own design. Proposed for the backlog, not built.
 8. **Two existing store tests get fixture repairs** (8.5). Predicted here so they are not

@@ -1529,6 +1529,16 @@ exposure to the cancel-during-retry race alone. See
 `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`.
 ```
 
+> **Correction (2026-08-12, retry-resurrect status-guard iteration).** The resolution text
+> above says the remaining exposure is "the cancel-during-retry race alone". That was refuted
+> by PR #120's own Phase 4 invariants lens: a second route remained, needing one actor and no
+> race - the task's own assignee sending `DONE` and then `FAILED` at the same epoch - plus a
+> requeue variant of the cancel race that neither document named. The as-shipped file
+> `docs/backlog/closed/bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero.md` was
+> corrected before it landed; this plan text was not, and is corrected here rather than
+> rewritten. All three routes are closed by
+> `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`.
+
 Then:
 ```bash
 git add docs/backlog/closed/bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero.md
