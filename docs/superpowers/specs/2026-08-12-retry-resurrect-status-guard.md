@@ -252,11 +252,26 @@ of the argument is uncomfortable:
    message on a retries-exhausted task reaches `UpdateTaskStatus`, which rejects on
    `worker_id`. The observable state is identical. Say this plainly rather than pretending
    otherwise.
-2. What it still buys is real: **zero database round trips and zero log lines per forged
-   message.** Without it, every forged message costs one write attempt and one `log.Printf`
-   on the `Connect` recv goroutine keyed on `upd.TaskId`, which the sender fully controls -
-   the exact shape of `bug-2026-08-12-tasklog-err-limiter-attacker-keyed`, contending on
-   `log`'s global mutex ahead of a legitimate worker's ingest.
+2. What it still buys is **one fewer database round trip per forged message, and no log
+   lines at all.**
+
+   > **Correction (2026-08-12, applied during Phase 4).** As drafted this point claimed "zero
+   > database round trips and zero log lines per forged message", and all three review lenses
+   > independently found it false. Three errors, recorded rather than quietly edited because
+   > the same overstatement pattern was the previous iteration's finding too:
+   > (a) **the log-line claim is refuted by this spec's own section 3.3** - the decision to
+   > drop `pgx.ErrNoRows` silently at *both* write sites means a forged message rejected by
+   > either fence logs nothing whether or not the gate exists, so the gate saves no log lines;
+   > 3.2 and 3.3 contradicted each other and 3.3 is the one that shipped.
+   > (b) **the round-trip claim is overstated** - `GetTask` runs before the gate either way,
+   > so the true saving is one statement instead of two, not two instead of none.
+   > (c) **the "zero attacker-keyed log lines" property never held for this function** - the
+   > bad-task-id and `GetTask` error branches at the top of `handleTaskStatus` both log
+   > unconditionally on `upd.TaskId`, ahead of the gate. `bug-2026-08-12-tasklog-err-limiter-attacker-keyed`
+   > remains live on this path and this gate does not address it.
+   >
+   > The gate still stays, on point 3 (it asks a different question) and point 4 (defense in
+   > depth) plus the one saved round trip. It just does not stand on the cost claim.
 3. It answers a different question. The gate answers "may this sender drive this task's status
    machine at all"; the predicates answer "is the row still in the state the branch decision
    was made from". Merging them loses the first question, and the first question is the one
@@ -875,20 +890,24 @@ check on this path can do better, as #119 section 5 established.
 
 ## 12. Known Limitations (recorded during implementation, 2026-08-12)
 
-1. **No test in the tree discriminates the Go identity gate in `handleTaskStatus`
-   (`handler.go:436-476`).** After this change, deleting that gate outright leaves every
-   test green: a forged terminal from a non-assignee is rejected by
-   `IncrementTaskRetryCount`'s or `UpdateTaskStatus`'s own `worker_id` predicate, and the
-   observable state is identical. `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask`
-   was PR #120's permanent guard for it and stopped discriminating it here (spec 8.5); its
-   comment now says so. **Verified during implementation, not assumed:** the gate was deleted
-   from `handleTaskStatus` and that test was re-run, and it PASSED. The gate's remaining value
-   is non-functional - zero database round trips and zero attacker-keyed `log.Printf` calls on
-   the recv goroutine per forged message, plus a different question ("may this sender drive
-   this task's status machine at all") - and a log-capture assertion would pin that with a
-   globally-scoped mechanism for a property that is a cost control, not a behavior. This is
-   written down instead, because otherwise the next reviewer deletes the gate and sees a green
-   suite. The rationale comment at the gate says the same thing.
+1. **No test in the tree discriminates the Go identity gate in `handleTaskStatus`** (the
+   identity `if` guarding the currency check; cited by symbol because line numbers rot - this
+   entry originally said `handler.go:436-476` and was stale within the same PR). After this
+   change, deleting that gate outright leaves every test green: a forged terminal from a
+   non-assignee is rejected by `IncrementTaskRetryCount`'s or `UpdateTaskStatus`'s own
+   `worker_id` predicate, and the observable state is identical.
+   `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask` was PR #120's
+   permanent guard for it and stopped discriminating it here (spec 8.5); its comment now says
+   so. **Verified during implementation, not assumed:** the gate was deleted from
+   `handleTaskStatus` and that test was re-run, and it PASSED.
+
+   The gate's remaining value is **one saved database round trip per forged message** (not
+   zero round trips - `GetTask` runs ahead of the gate regardless) plus the different question
+   it asks. It saves **no log lines**: section 3.3 drops `pgx.ErrNoRows` silently at both
+   write sites, so a forged message logs nothing either way. See the Correction on 3.2 point
+   2. A test could not pin what remains anyway - a round trip is not observable state - which
+   is why this is written down instead: otherwise the next reviewer deletes the gate and sees
+   a green suite. The rationale comment at the gate says the same thing, at the same size.
 2. **The fence binds a worker, not a connection.** Two concurrent streams registered for the
    same worker row both satisfy every predicate. Deliberate, unchanged from PR #120, and what
    keeps reconnect-within-the-grace-window working.

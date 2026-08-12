@@ -447,19 +447,33 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// being terminal, so the retry branch is atomic with respect to the GetTask
 	// above and cannot resurrect a finished, cancelled or requeued task.
 	//
-	// What the gate still buys is real, and it is why it stays. First, cost:
-	// zero database round trips and zero log lines per forged message. Without
-	// it every forged message costs one write attempt plus one log.Printf on
-	// this recv goroutine keyed on upd.TaskId, which the sender fully controls -
-	// the shape of bug-2026-08-12-tasklog-err-limiter-attacker-keyed, contending
-	// on log's global mutex ahead of a legitimate worker's ingest. Second, it
-	// answers a different question: this gate asks "may this sender drive this
-	// task's status machine at all", the predicates ask "is the row still in the
-	// state the branch decision was made from". Merging them loses the first
-	// question, and the first question is the one this function's branch
-	// structure actually asks. Third, defense in depth against a future edit to
-	// either half. Keep BOTH; do not delete this as redundant with the SQL, and
-	// do not delete the SQL predicates as redundant with this.
+	// What the gate still buys, stated at its true size rather than its
+	// flattering one. An earlier draft of this comment claimed "zero round trips
+	// and zero log lines", and BOTH halves were wrong - measure before you
+	// justify:
+	//
+	// First, cost: ONE FEWER round trip per forged message, not zero. GetTask
+	// above has already run by the time control reaches here, so the saving is
+	// one statement instead of two, not two instead of none. Real on a recv
+	// goroutine that a single sender can drive as fast as it likes, but bounded.
+	//
+	// It does NOT save a log line. Both write-error branches below are wrapped
+	// in `if !errors.Is(err, pgx.ErrNoRows)`, so a forged message rejected by
+	// either fence logs nothing at all - delete this gate and the log volume is
+	// unchanged. Nor did this function ever have a "zero attacker-keyed log
+	// lines" property to protect: the bad-task-id and GetTask branches at the
+	// top of this function both log unconditionally, keyed on upd.TaskId, AHEAD
+	// of this gate. That is bug-2026-08-12-tasklog-err-limiter-attacker-keyed's
+	// shape, it is still live on this path, and this gate does not address it.
+	//
+	// Second, and this is the load-bearing reason: it answers a different
+	// question. This gate asks "may this sender drive this task's status machine
+	// at all", the predicates ask "is the row still in the state the branch
+	// decision was made from". Merging them loses the first question, and the
+	// first question is the one this function's branch structure actually asks.
+	// Third, defense in depth against a future edit to either half. Keep BOTH;
+	// do not delete this as redundant with the SQL, and do not delete the SQL
+	// predicates as redundant with this.
 	//
 	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
 	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
@@ -475,10 +489,10 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
 	// was written as its permanent guard, but once IncrementTaskRetryCount gained
 	// its own worker_id predicate that test stays green with this whole gate
-	// deleted. Its discriminating power moved to the SQL layer, and what remains
-	// here is non-functional (round trips and log lines), which is why it is
-	// recorded as a Known Limitation rather than pinned by a new test. Same rule
-	// the SQL states as "a plain =,
+	// deleted - measured, not assumed. Its discriminating power moved to the SQL
+	// layer, and what remains here is non-functional (one round trip), which is
+	// why it is recorded as a Known Limitation rather than pinned by a new test.
+	// Same rule the SQL states as "a plain =,
 	// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.
 	//
 	// Silent return, exactly like the currency gate below. A log line here would

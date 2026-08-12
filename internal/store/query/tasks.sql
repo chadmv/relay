@@ -34,12 +34,30 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- which both other predicates legitimately accept, because a terminal
 -- transition neither bumps the epoch nor clears worker_id - cannot flip a `done`
 -- task to `failed` and cascade FailDependentTasks across its still-pending
--- downstream. The terminal set is the one RecomputeJobStatus uses
--- (internal/store/query/jobs.sql:98); keep the two in lockstep.
--- The fix for that case is this predicate and NOT an epoch bump on terminal
--- transitions: the assignment must survive completion so a trailing log chunk
--- from the agent that just finished still passes AppendTaskLog's fence. See
--- TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+-- downstream.
+-- CANONICAL STATEMENT OF THE TERMINALITY RULE. IncrementTaskRetryCount carries
+-- the identical predicate and cross-references this paragraph rather than
+-- repeating it; change both or neither.
+--   * It is an ALLOW-LIST, not the complement deny-list, and that choice is
+--     load-bearing even though the two are exactly equivalent against today's
+--     vocabulary (migration 000019's tasks_status_check pins it to the six
+--     values pending/dispatched/running/done/failed/timed_out). A deny-list
+--     fails OPEN on the next status added: a task-level `cancelled` is a
+--     plausible near-term addition, because CancelJobTasks currently squashes
+--     cancellation onto `failed`, and under `NOT IN (terminal)` such a status
+--     would be silently writable and would re-open the resurrection this
+--     predicate closes. The allow-list fails closed instead - a new status is
+--     unwritable until somebody decides it should be. Every other status
+--     predicate in this file is already an allow-list; these two now match.
+--   * The set is the complement of the terminal set RecomputeJobStatus counts
+--     (see the RecomputeJobStatus statement in jobs.sql - by name, because line
+--     numbers rot); keep the two in lockstep. TestTasksStatusVocabularyIsExactly
+--     goes RED when the vocabulary changes and names every site to revisit.
+--   * The fix for the duplicate-terminal case is this predicate and NOT an epoch
+--     bump on terminal transitions: the assignment must survive completion so a
+--     trailing log chunk from the agent that just finished still passes
+--     AppendTaskLog's fence. See
+--     TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
 -- Dispatcher.failClaimedTask's target is `dispatched` by construction
 -- (ClaimTaskForWorker requires `status='pending'`), so this predicate is
 -- tautological there, exactly like the worker predicate above and for the same
@@ -59,8 +77,11 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- cover every production writer. The Go identity gate in handleTaskStatus stays
 -- as well: after the retry statement was fenced it is no longer the correctness
 -- control, but it still answers a different question ("may this sender drive
--- this task's status machine at all") one round trip and one log line earlier.
--- Do not delete either as redundant with the other.
+-- this task's status machine at all") one round trip earlier. It does NOT save
+-- a log line - handleTaskStatus drops pgx.ErrNoRows from both write sites
+-- silently - and the round-trip saving is one statement instead of two, since
+-- GetTask has already run before the gate. Do not delete either as redundant
+-- with the other, but do not oversell the Go one either.
 UPDATE tasks
 SET status = sqlc.arg(status),
     started_at = sqlc.arg(started_at),
@@ -68,7 +89,7 @@ SET status = sqlc.arg(status),
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status NOT IN ('done', 'failed', 'timed_out')
+  AND status IN ('pending', 'dispatched', 'running')
 RETURNING *;
 
 -- name: IncrementTaskRetryCount :one
@@ -95,12 +116,11 @@ RETURNING *;
 --     FAILED at epoch N - both gates legitimately pass, because a terminal
 --     transition deliberately does NOT bump the epoch and does not clear
 --     worker_id - and resurrect a completed task while its dependents are
---     already running. The terminal set is the one RecomputeJobStatus uses
---     (internal/store/query/jobs.sql:98); keep the two in lockstep.
--- The fix for that last case is this predicate and NOT an epoch bump on terminal
--- transitions: the assignment must survive completion so a trailing log chunk
--- from the agent that just finished still passes AppendTaskLog's fence. See
--- TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+--     already running. This predicate is identical to UpdateTaskStatus's, and
+--     the rule is stated once, there: why it is an allow-list rather than the
+--     equivalent deny-list, which set it must stay in lockstep with, and why the
+--     fix is a predicate and never an epoch bump on terminal transitions. Change
+--     both or neither.
 -- pgx.ErrNoRows means "one of the three failed": drop, do not recompute the job
 -- status, do not wake the dispatcher.
 -- This statement is for the AGENT-DRIVEN retry only, and its preconditions are
@@ -121,7 +141,7 @@ SET retry_count = retry_count + 1,
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status NOT IN ('done', 'failed', 'timed_out')
+  AND status IN ('pending', 'dispatched', 'running')
 RETURNING *;
 
 -- name: GetEligibleTasks :many

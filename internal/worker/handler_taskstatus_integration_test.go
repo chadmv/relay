@@ -348,12 +348,26 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 //     layer.
 //
 // Epoch 0 on a never-claimed task means the currency gate matches, leaving
-// identity as the only thing that can reject - in Go, in SQL, or both. Before
-// the SQL fence landed this test went RED under either mutation a reviewer might
-// try (dropping the two .Valid checks, or deleting the Go gate); now it goes red
-// under neither, and it goes red instead if IncrementTaskRetryCount's worker
-// predicate is dropped or rewritten as IS NOT DISTINCT FROM. That is the same
-// property, guarded one layer down.
+// identity as the only thing that can reject - in Go, in SQL, or both. What this
+// test discriminates now, MEASURED rather than reasoned:
+//
+//	Go gate deleted, SQL predicate intact ....... PASSES (verified)
+//	SQL worker predicate neutered (matrix M3) ... PASSES (whole package ok)
+//	SQL worker predicate as IS NOT DISTINCT FROM
+//	  (matrix M4) ............................... PASSES (whole package ok)
+//
+// So it discriminates NEITHER layer on its own - only the conjunction, and no
+// matrix row removes both at once. An earlier draft of this comment claimed it
+// "goes red instead if IncrementTaskRetryCount's worker predicate is dropped or
+// rewritten"; that is false, and the plan's own matrix rows M3 and M4 list the
+// handler tests in the GREEN column, so the matrix was right and the prose was
+// wrong. The SQL-layer property is pinned by store cases 6 and 7 instead, which
+// is where M3 and M4 actually go red.
+//
+// It is therefore retained as a SCENARIO, not as a guard: NULL on both sides of
+// the comparison, driven through the real handler rather than through a
+// store-level call, which is a shape no other test in this package has. Keep it
+// for the coverage of that path; do not cite it as evidence for either layer.
 func TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()
@@ -620,10 +634,12 @@ func dispatchable(t *testing.T, ctx context.Context, q *store.Queries, taskID pg
 // Both gates pass legitimately. A terminal transition does not bump
 // assignment_epoch and does not clear worker_id (that is what lets a trailing
 // log chunk still pass AppendTaskLog's fence), so after a DONE the row still
-// satisfies identity and currency for that worker at that epoch. `terminal`
-// (handler.go:512) and the retry condition (:515) read only the wire status and
-// the T0 row's RetryCount/Retries - never the T0 row's status - so
-// IncrementTaskRetryCount moves a COMPLETED task back to pending.
+// satisfies identity and currency for that worker at that epoch. In
+// handleTaskStatus the `terminal` computation and the retry branch's condition
+// read only the wire status and the T0 row's RetryCount/Retries - never the T0
+// row's status - so IncrementTaskRetryCount moves a COMPLETED task back to
+// pending. (Symbols, not line numbers: an earlier draft cited handler.go:512 and
+// :515, which this PR's own edits made stale before it merged.)
 //
 // The load-bearing assertion is the one on the dependent: "A is still done" is a
 // string comparison, "B is STILL dispatchable" is the harm - a task resurrected

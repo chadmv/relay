@@ -1151,8 +1151,9 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 	// transition neither bumps the epoch nor clears worker_id - so the status
 	// predicate is the ONLY thing that can reject it. Without it a `done` task
 	// flips to `failed` and FailDependentTasks cascades across its still-pending
-	// downstream. The terminal set is the one RecomputeJobStatus uses
-	// (query/jobs.sql:98); keep the two in lockstep.
+	// downstream. The predicate is an allow-list whose complement is the terminal
+	// set RecomputeJobStatus counts (cited by name, not by line - line numbers
+	// rot); TestTasksStatusVocabularyIsExactly guards the two staying in lockstep.
 	terminalTask, err := q.CreateTask(ctx, store.CreateTaskParams{
 		JobID: job.ID, Name: "t-terminal", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),
