@@ -433,8 +433,43 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 		return
 	}
 
-	// Epoch gate: reject any status update whose epoch doesn't match the
-	// current assignment. Retry logic below must not run on stale updates.
+	// Assignment gate, part one: IDENTITY. A task's status machine may only be
+	// driven by the agent the task is assigned to. workerID is resolved at
+	// registration and never read off the wire, so a sender cannot claim to be
+	// somebody else.
+	//
+	// This lives in Go, and not only in UpdateTaskStatus's WHERE clause, because
+	// the retry branch below calls IncrementTaskRetryCount - a bare
+	// `WHERE id = $1`, no epoch fence, no worker fence - and returns before the
+	// fenced statement is ever reached. An SQL-only fence would leave a forged
+	// FAILED on a task with retries free to burn a retry, NULL the worker_id and
+	// bump the epoch, evicting the agent legitimately running it. The gate must
+	// therefore stay AHEAD of every side effect in this function.
+	//
+	// Both .Valid checks are load-bearing and neither is redundant. pgtype.UUID
+	// is a comparable struct, so a bare != is the Go equivalent of SQL's
+	// IS NOT DISTINCT FROM: with the .Valid checks gone, a zero-value workerID (a
+	// caller that lost its identity) compares EQUAL to a never-claimed task's
+	// NULL worker_id and the gate fails OPEN. This is the same rule the SQL
+	// states as "a plain =, never IS NOT DISTINCT FROM"; see
+	// internal/store/query/tasks.sql.
+	//
+	// Silent return, exactly like the currency gate below. A log line here would
+	// be attacker-keyed volume on the recv goroutine, with no sink to send it to;
+	// detection belongs with the audit-log work.
+	if !workerID.Valid || !task.WorkerID.Valid || task.WorkerID.Bytes != workerID.Bytes {
+		return
+	}
+
+	// Assignment gate, part two: CURRENCY. Reject any status update whose epoch
+	// does not match the current assignment. Retry logic below must not run on
+	// stale updates. The epoch answers "is this generation current"; the identity
+	// check above answers "are you who you say you are". Neither substitutes for
+	// the other - do not delete either, and do not merge them into one condition.
+	//
+	// Note this comparison widens the stored int32 to int64 rather than narrowing
+	// the wire value, so there is no truncation window here. Nothing must be
+	// inserted above it that reads or narrows upd.Epoch.
 	if int64(task.AssignmentEpoch) != upd.Epoch {
 		return
 	}
@@ -483,10 +518,15 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 		finishedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
 	}
 
+	// WorkerID is a FENCE here, not a value to write: UpdateTaskStatus no longer
+	// writes worker_id at all. Pass the connection's own identity rather than the
+	// task.WorkerID we just read - the gate above already proved they are equal,
+	// and binding our own identity keeps the SQL predicate a genuine second check
+	// instead of a self-comparison against a value read moments earlier.
 	updated, err := h.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID:              taskID,
 		Status:          statusStr,
-		WorkerID:        task.WorkerID,
+		WorkerID:        workerID,
 		StartedAt:       startedAt,
 		FinishedAt:      finishedAt,
 		AssignmentEpoch: int32(upd.Epoch),
