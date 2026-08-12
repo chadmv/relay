@@ -944,15 +944,15 @@ type UpdateTaskStatusParams struct {
 // pgtype.UUID binds SQL NULL) fail closed. `IS NOT DISTINCT FROM` would let a
 // NULL parameter match a NULL worker_id and re-open it. Do not "fix the NULL
 // bug" here.
-// Both callers are fenced by the same statement deliberately.
+// Both callers are fenced by the same statement deliberately;
 // Dispatcher.failClaimedTask passes claimed.WorkerID from ClaimTaskForWorker,
-// which is non-NULL by construction, so the predicate is tautological there -
-// that is the point, and it fails closed and loudly (that caller already logs
-// any error including pgx.ErrNoRows). A separate un-fenced query for the
-// server-internal path would leave a second, unfenced writer to tasks.status
-// that a future caller could pick by mistake, and a sentinel meaning "skip the
-// check" would be reachable by any caller that merely failed to resolve its
-// identity. See docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md.
+// where the predicate is tautological by design. For why that beats a second
+// un-fenced query or a "skip the check" sentinel, see
+// docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md.
+// The fence binds a WORKER identity, not a connection: two concurrent streams
+// registered for the same worker row both satisfy it. That matches AppendTaskLog
+// and is what keeps reconnect-within-the-grace-window working, so it is not a
+// regression - but do not read this predicate as connection-scoped.
 // This predicate is NOT sufficient on its own: handleTaskStatus's retry branch
 // calls IncrementTaskRetryCount (bare `WHERE id = $1`) and returns before ever
 // reaching this statement, so the identity check also lives in Go, ahead of
@@ -1010,6 +1010,11 @@ type UpdateTaskStatusEpochParams struct {
 	Epoch  int32       `json:"epoch"`
 }
 
+// TEST-ONLY. No assignee fence - this is the one remaining writer to
+// tasks.status that does not demand a worker id, so it fences currency without
+// identity and a never-claimed task at epoch 0 accepts a write from anybody.
+// Do NOT call this from production code: use UpdateTaskStatus, which fences on
+// both. It has no production callers today and must not gain one.
 // Updates a task's status only if the caller's epoch matches the current
 // assignment_epoch. Returns pgx.ErrNoRows if the epoch is stale.
 //

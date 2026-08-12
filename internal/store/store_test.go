@@ -377,15 +377,28 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	assert.Len(t, logs, 2, "the claimed task still has only its two legitimate rows")
 }
 
-// A terminal status transition must NOT release the task's assignee. UpdateTaskStatus
-// writes worker_id but does not bump assignment_epoch, so a caller that passed a
-// zero-value worker id would strand the task at its current epoch with no assignee -
-// and since AppendTaskLog fences on worker_id, every trailing chunk from the agent
-// that legitimately just finished the task would be dropped silently and forever.
-// Trailing chunks arriving just after a terminal status are a real and common
-// ordering, so this pins the contract both callers currently honor by passing
-// task.WorkerID through.
-func TestUpdateTaskStatus_TerminalTransitionKeepsTheAssigneeSoTrailingLogsStillPersist(t *testing.T) {
+// A terminal status transition must NOT end the assignment, because
+// AppendTaskLog fences on BOTH assignment_epoch and worker_id: a trailing chunk
+// arriving just after a terminal status is a real and common ordering, and if
+// the terminal write ended the generation that chunk would be dropped silently
+// and forever.
+//
+// What this test can still catch is the EPOCH half, and that is what it is named
+// for. If someone adds `assignment_epoch = assignment_epoch + 1` to
+// UpdateTaskStatus - a plausible "release the worker slot on terminal" change -
+// the AppendTaskLog call below starts returning pgx.ErrNoRows and this goes red.
+//
+// The worker_id half is no longer assertable here, and the assertion that used
+// to try has been removed rather than left to rot. UpdateTaskStatus no longer
+// writes worker_id at all (the argument is a fence, not a value) and its WHERE
+// now matches on it, so `done.WorkerID == w.ID` follows from require.NoError on
+// the call itself, for any caller: the row could not have been returned unless
+// its worker_id already equalled the argument, and SET never touches the column.
+// It was a real assertion before the assignee fence landed and is a tautology
+// after it. Do not re-add it. The property it was reaching for - that the
+// statement cannot clear the assignee - is now structural in the SQL and covered
+// by TestUpdateTaskStatus_AssigneeGuarded case 1.
+func TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist(t *testing.T) {
 	q := newTestQueries(t)
 	ctx := context.Background()
 
@@ -411,7 +424,7 @@ func TestUpdateTaskStatus_TerminalTransitionKeepsTheAssigneeSoTrailingLogsStillP
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	// The transition handleTaskStatus performs: worker_id passed straight through.
+	// The transition handleTaskStatus performs: the assignee named as the fence.
 	done, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID: task.ID, Status: "done", WorkerID: claimed.WorkerID,
 		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
@@ -419,7 +432,6 @@ func TestUpdateTaskStatus_TerminalTransitionKeepsTheAssigneeSoTrailingLogsStillP
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "done", done.Status)
-	assert.Equal(t, w.ID, done.WorkerID, "a terminal transition must not release the assignee")
 	assert.Equal(t, claimed.AssignmentEpoch, done.AssignmentEpoch,
 		"UpdateTaskStatus must not bump the epoch - the assignment is retained, not ended")
 
@@ -1073,7 +1085,14 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 	// Case 2: correct epoch, WRONG worker. The epoch predicate matches, so only
 	// the assignee predicate can reject here. The follow-up GetTask matters:
 	// before this fix, this call did not merely succeed, it overwrote worker_id
-	// with w2 - stealing the assignment out from under the running agent.
+	// with w2.
+	//
+	// Read that as a store-layer capability, not as a description of the exploited
+	// attack. No production caller could reach it: handleTaskStatus bound
+	// WorkerID: task.WorkerID, a write-back of the value it had just read, so the
+	// forged-status bug moved a task's status without ever moving its assignee.
+	// The capability is what this predicate removes, so that no future caller can
+	// pick it up by passing a worker id it did not verify.
 	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID: task.ID, Status: "done", WorkerID: w2.ID,
 		AssignmentEpoch: claimed.AssignmentEpoch,

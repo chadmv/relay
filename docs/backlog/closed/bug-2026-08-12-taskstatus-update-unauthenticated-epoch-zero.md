@@ -162,9 +162,21 @@ against the connection's authenticated worker (resolved at registration, never t
 wire). That placement is the fix: this item's Proposal assumed a SQL predicate would be enough,
 but the retry branch calls `IncrementTaskRetryCount` - a bare `WHERE id = $1` - and returns before
 `UpdateTaskStatus` is ever reached, so a forged FAILED on a task with retries would have sailed
-past an SQL-only fence, burning a retry and evicting the agent legitimately running it. Both
-`.Valid` checks in the Go comparison are load-bearing: `pgtype.UUID` is a comparable struct, so a
-bare `!=` is the Go form of `IS NOT DISTINCT FROM` and fails open when both sides are zero-valued.
+past an SQL-only fence, burning a retry and evicting the agent legitimately running it. The gate
+placement makes the retry branch unforgeable, not atomic - `GetTask` and `IncrementTaskRetryCount`
+remain separate statements - so `bug-2026-06-26-retry-resurrects-cancelled-task` is narrowed by it,
+not closed.
+
+The comparison keeps both `.Valid` checks as defense in depth. Against a real, non-zero worker UUID
+they are mutually redundant with the `Bytes` comparison, and `!workerID.Valid` is unreachable from
+`Connect` (which closes the stream on a Scan failure), so removing either one alone leaves the hole
+closed. Removing **both** opens it: `pgtype.UUID` is a comparable struct, so a bare `!=` is the Go
+form of `IS NOT DISTINCT FROM` and a zero-value caller compares equal to a never-claimed task's
+NULL `worker_id`. That is pinned permanently by
+`TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask`, which sends a
+zero-value worker id at epoch 0 to a never-claimed task carrying `Retries: 1` - the only shape that
+is both NULL-on-both-sides and routed through the retry branch, so the SQL fence cannot mask a
+regression in the Go gate.
 
 `UpdateTaskStatus` additionally gained `AND worker_id = sqlc.arg(worker_id)` as a structural
 backstop for both callers - one fenced statement, no sentinel, no second un-fenced query - and lost
