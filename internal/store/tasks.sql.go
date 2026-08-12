@@ -908,46 +908,72 @@ func (q *Queries) RequeueWorkerTasksIfEpoch(ctx context.Context, arg RequeueWork
 
 const updateTaskStatus = `-- name: UpdateTaskStatus :one
 UPDATE tasks
-SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
-WHERE id = $1 AND assignment_epoch = $6
+SET status = $1,
+    started_at = $2,
+    finished_at = $3
+WHERE id = $4
+  AND assignment_epoch = $5
+  AND worker_id = $6
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 `
 
 type UpdateTaskStatusParams struct {
-	ID              pgtype.UUID        `json:"id"`
 	Status          string             `json:"status"`
-	WorkerID        pgtype.UUID        `json:"worker_id"`
 	StartedAt       pgtype.Timestamptz `json:"started_at"`
 	FinishedAt      pgtype.Timestamptz `json:"finished_at"`
+	ID              pgtype.UUID        `json:"id"`
 	AssignmentEpoch int32              `json:"assignment_epoch"`
+	WorkerID        pgtype.UUID        `json:"worker_id"`
 }
 
-// Updates a task's status only if the caller's epoch matches the current
-// assignment. Returns pgx.ErrNoRows if the caller's epoch is stale (zombie
-// status update from a prior assignment).
-// Callers MUST pass the task's existing worker_id through in $3. This statement
-// writes worker_id but does NOT bump assignment_epoch, so clearing it here would
-// leave the task at its current epoch with no assignee - and AppendTaskLog
-// fences on worker_id, so every subsequent log chunk from the agent that is
-// still legitimately running that task would be dropped silently and forever.
-// Every other statement that clears worker_id (RequeueTask, RequeueTaskByID,
-// RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, IncrementTaskRetryCount,
-// CancelJobTasks) bumps the epoch in the same UPDATE, which ends the assignment
-// cleanly. If you ever need to release the worker slot here, bump
-// assignment_epoch in this statement too.
+// Updates a task's status only if BOTH fence predicates hold: the task is
+// currently assigned to the caller's worker (identity), and the caller's epoch
+// matches the current assignment (currency). The epoch answers "is this
+// generation current"; the worker id answers "are you who you say you are".
+// Neither substitutes for the other - do not delete either.
+// This statement no longer writes worker_id; the argument is a fence, not a
+// value. That makes the old contract ("callers MUST pass the task's existing
+// worker_id through, because clearing it would strand a live agent forever")
+// structural rather than documented: the statement can no longer clear the
+// column at all. It does not bump assignment_epoch either, so a terminal task
+// keeps its assignee and trailing log chunks from the agent that just finished
+// still pass AppendTaskLog's fence.
+// The worker_id comparison must stay a plain `=`. tasks.worker_id is NULLABLE,
+// so `=` makes a never-claimed task reject every update, which is the hole this
+// predicate closes, and makes a caller that lost its identity (a zero-value
+// pgtype.UUID binds SQL NULL) fail closed. `IS NOT DISTINCT FROM` would let a
+// NULL parameter match a NULL worker_id and re-open it. Do not "fix the NULL
+// bug" here.
+// Both callers are fenced by the same statement deliberately;
+// Dispatcher.failClaimedTask passes claimed.WorkerID from ClaimTaskForWorker,
+// where the predicate is tautological by design. For why that beats a second
+// un-fenced query or a "skip the check" sentinel, see
+// docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md.
+// The fence binds a WORKER identity, not a connection: two concurrent streams
+// registered for the same worker row both satisfy it. That matches AppendTaskLog
+// and is what keeps reconnect-within-the-grace-window working, so it is not a
+// regression - but do not read this predicate as connection-scoped.
+// This predicate is NOT sufficient on its own: handleTaskStatus's retry branch
+// calls IncrementTaskRetryCount (bare `WHERE id = $1`) and returns before ever
+// reaching this statement, so the identity check also lives in Go, ahead of
+// every side effect. Do not delete that one as redundant with this one.
 //
 //	UPDATE tasks
-//	SET status = $2, worker_id = $3, started_at = $4, finished_at = $5
-//	WHERE id = $1 AND assignment_epoch = $6
+//	SET status = $1,
+//	    started_at = $2,
+//	    finished_at = $3
+//	WHERE id = $4
+//	  AND assignment_epoch = $5
+//	  AND worker_id = $6
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
 func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusParams) (Task, error) {
 	row := q.db.QueryRow(ctx, updateTaskStatus,
-		arg.ID,
 		arg.Status,
-		arg.WorkerID,
 		arg.StartedAt,
 		arg.FinishedAt,
+		arg.ID,
 		arg.AssignmentEpoch,
+		arg.WorkerID,
 	)
 	var i Task
 	err := row.Scan(
@@ -984,6 +1010,11 @@ type UpdateTaskStatusEpochParams struct {
 	Epoch  int32       `json:"epoch"`
 }
 
+// TEST-ONLY. No assignee fence - this is the one remaining writer to
+// tasks.status that does not demand a worker id, so it fences currency without
+// identity and a never-claimed task at epoch 0 accepts a write from anybody.
+// Do NOT call this from production code: use UpdateTaskStatus, which fences on
+// both. It has no production callers today and must not gain one.
 // Updates a task's status only if the caller's epoch matches the current
 // assignment_epoch. Returns pgx.ErrNoRows if the epoch is stale.
 //

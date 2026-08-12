@@ -61,3 +61,34 @@ guard is chosen must end or match the assignment epoch per the invariant.
 ## Notes
 This is the lone epoch-fence writer with no guard; the hardening phase closed the rest. Worth fixing
 before the retry endpoint ships so the new entry point is safe by construction.
+
+**Narrowed, not closed (2026-08-12).** The task-status assignee fence
+(`docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`, section 3.4) added an
+identity gate to `handleTaskStatus` that runs *ahead* of the retry branch, so
+`IncrementTaskRetryCount`'s only production caller is now reachable only by the task's own assignee
+at the current epoch. That closes the forged route into this query - an unrelated agent could
+previously burn a retry on any task by guessing its epoch, NULLing `worker_id` and bumping the
+epoch out from under the agent legitimately running it.
+
+Two routes remain, and the second is worse than the cancel race this item was filed for:
+
+1. The cancel-during-retry interleaving described above, plus whatever
+   `POST /v1/jobs/{id}/retry` opens when it lands.
+2. **A single-actor, race-free resurrection by the task's own assignee.** A terminal transition
+   deliberately does not bump `assignment_epoch`, and now structurally keeps `worker_id` (the fence
+   argument is no longer written), so the assignment survives completion by design - that is what
+   lets a trailing `AppendTaskLog` chunk still pass its fence. The consequence is that the assignee
+   can send `DONE` at epoch N, letting dependents dispatch, and then send `FAILED` at the same
+   epoch N. Both gates still pass - it really is the assignee, and the epoch really is current -
+   `terminal && task.RetryCount < task.Retries` holds, and `IncrementTaskRetryCount` moves the
+   **already completed** task back to `pending` and re-dispatches it while its dependents are
+   already running. No concurrency and no second actor required; a buggy or crash-looping agent
+   reaches it by accident.
+
+The structural fix for route 2 is a status predicate - `AND status NOT IN ('done','failed',
+'timed_out')` on both `UpdateTaskStatus` and `IncrementTaskRetryCount` - and explicitly **not** an
+epoch bump on terminal transitions, which would break the trailing-log flush that
+`TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist` pins.
+
+The query itself still has a bare `WHERE id = $1` and no status guard, so this item stays open and
+its acceptance criteria are unchanged, except that they should now also cover route 2.

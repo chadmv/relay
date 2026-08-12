@@ -14,9 +14,11 @@ import (
 )
 
 // HandleTaskStatus exposes the unexported handleTaskStatus method for
-// integration tests in package worker_test.
-func (h *Handler) HandleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusUpdate) {
-	h.handleTaskStatus(ctx, upd)
+// integration tests in package worker_test. workerID is the sending
+// connection's authenticated worker, exactly as Connect supplies it in
+// production.
+func (h *Handler) HandleTaskStatus(ctx context.Context, workerID pgtype.UUID, upd *relayv1.TaskStatusUpdate) {
+	h.handleTaskStatus(ctx, workerID, upd)
 }
 
 // HandleTaskLog exposes the unexported handleTaskLog method for integration
