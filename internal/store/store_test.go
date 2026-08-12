@@ -114,10 +114,23 @@ func TestTaskDependencyAndEligibility(t *testing.T) {
 	require.Len(t, eligible, 1)
 	assert.Equal(t, taskA.ID, eligible[0].ID)
 
-	// Mark A done — WorkerID, StartedAt, FinishedAt are zero-value pgtype structs (Valid: false)
+	// Mark A done. UpdateTaskStatus fences on BOTH the assignment epoch and the
+	// assignee, so a task can only be marked done by the worker it is assigned
+	// to: claim A first and pass that assignee at the claimed epoch. A zero-value
+	// WorkerID here would (correctly) be rejected with pgx.ErrNoRows.
+	dagWorker, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "dag-w1", Hostname: "dag-w1", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	claimedA, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskA.ID, WorkerID: dagWorker.ID,
+	})
+	require.NoError(t, err)
 	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
-		ID:     taskA.ID,
-		Status: "done",
+		ID:              taskA.ID,
+		Status:          "done",
+		WorkerID:        claimedA.WorkerID,
+		AssignmentEpoch: claimedA.AssignmentEpoch,
 	})
 	require.NoError(t, err)
 
@@ -220,6 +233,7 @@ func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
 	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID:              task.ID,
 		Status:          "running",
+		WorkerID:        claimed.WorkerID,
 		AssignmentEpoch: 1,
 	})
 	require.NoError(t, err)
@@ -228,6 +242,7 @@ func TestUpdateTaskStatus_EpochGuarded(t *testing.T) {
 	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID:              task.ID,
 		Status:          "done",
+		WorkerID:        claimed.WorkerID,
 		AssignmentEpoch: 0, // stale
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows)
@@ -1001,4 +1016,110 @@ func TestRequeueWorkerTasksIfEpoch_CurrentEpochRequeues(t *testing.T) {
 	assert.Equal(t, "pending", after.Status, "task must be requeued to pending")
 	assert.Equal(t, int32(2), after.AssignmentEpoch, "assignment_epoch must be bumped 1 -> 2")
 	assert.False(t, after.WorkerID.Valid, "worker_id must be cleared")
+}
+
+// UpdateTaskStatus fences on TWO things: the caller's epoch (currency) and the
+// task's assignee (identity). The epoch answers "is this generation current";
+// the worker id answers "are you who you say you are". Neither substitutes for
+// the other.
+//
+// Both production callers pass a real, non-NULL worker id: handleTaskStatus
+// passes the connection's authenticated worker, and Dispatcher.failClaimedTask
+// passes claimed.WorkerID from ClaimTaskForWorker. The predicate is tautological
+// on the dispatcher path by design - one fenced statement with no exceptions to
+// remember beats a second, unfenced statement a future caller could pick by
+// mistake.
+func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Jack", "jack@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w1, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1-assignee", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w2, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w2", Hostname: "w2-assignee", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// Case 1: correct epoch, correct worker. Succeeds - and worker_id reads back
+	// as w1, which also pins that the statement no longer WRITES worker_id: the
+	// argument is a fence, not a value, so the column is simply left alone.
+	running, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "running", WorkerID: w1.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "running", running.Status)
+	assert.Equal(t, w1.ID, running.WorkerID, "the fence argument must not overwrite the assignee")
+
+	// Case 2: correct epoch, WRONG worker. The epoch predicate matches, so only
+	// the assignee predicate can reject here. The follow-up GetTask matters:
+	// before this fix, this call did not merely succeed, it overwrote worker_id
+	// with w2 - stealing the assignment out from under the running agent.
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "done", WorkerID: w2.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a worker that is not the assignee must not be able to write a status")
+	afterCase2, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", afterCase2.Status, "a rejected update must not move the row")
+	assert.Equal(t, w1.ID, afterCase2.WorkerID, "a rejected update must not steal the assignment")
+
+	// Two separate never-claimed tasks so cases 3 and 4 stay independent: each
+	// sits at assignment_epoch 0 with worker_id NULL, which is the state the
+	// reported hole targeted because epoch 0 is a free guess.
+	unclaimedA, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-unclaimed-a", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	unclaimedB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-unclaimed-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Case 3: never-claimed task, matching epoch 0, real worker. Rejected,
+	// because `worker_id = $n` is never true against a NULL worker_id.
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: unclaimedA.ID, Status: "done", WorkerID: w1.ID, AssignmentEpoch: 0,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject status writes from every worker")
+	afterCase3, err := q.GetTask(ctx, unclaimedA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase3.Status, "a rejected update must not move the row")
+	assert.False(t, afterCase3.WorkerID.Valid, "a rejected update must not assign the task")
+
+	// Case 4: never-claimed task, matching epoch 0, ZERO-VALUE worker id - NULL
+	// on both sides. This is THE regression test for the comparison staying a
+	// plain `=`: under `IS NOT DISTINCT FROM` two NULLs compare equal, the fence
+	// matches and the hole is wide open again. Case 2 does not catch that
+	// rewrite, because there the task's worker_id is non-NULL. Task 8
+	// mutation-proves this case.
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: unclaimedB.ID, Status: "done", WorkerID: pgtype.UUID{}, AssignmentEpoch: 0,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
+	afterCase4, err := q.GetTask(ctx, unclaimedB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase4.Status, "a caller that lost its identity must fail closed")
 }
