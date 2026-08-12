@@ -37,6 +37,19 @@ test('exposes menu semantics and reflects open state via aria attributes', async
   expect(toggle).toHaveAttribute('aria-expanded', 'true')
 })
 
+// The dropdown floats over live page content, so it needs a surface of its own.
+// GlassPanel sets no background-color at all - only a 6%->2% white gradient -
+// which is right on the page floor and see-through over content. The prototype's
+// own menu overrides the glass background for exactly this reason
+// (hifi3-holo-pages.jsx:245-249). z-50 is asserted alongside it as the local
+// ordering inside the header; the fix for the reported bleed-through lives in
+// HoloShell, and HoloShell.test.tsx pins it.
+test('the dropdown is an opaque overlay that paints above page content', async () => {
+  renderMenu()
+  await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
+  expect(screen.getByTestId('user-menu-panel')).toHaveClass('z-50', 'bg-popover')
+})
+
 test('calls onLogout when Log out is clicked', async () => {
   const onLogout = renderMenu()
   await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))

@@ -13,6 +13,12 @@
   --color-err: #fb7185;
   --color-accent: #3dd0f7;
   --color-accent-b: #6fe0fa;
+  /* Surface for anything that floats OVER live page content (the profile
+     dropdown today). --color-bg is the page floor and the glass panels are
+     deliberately translucent against it; a popover needs its own near-opaque
+     fill or the content it covers reads straight through it. Matches the
+     prototype's menu surface (hifi3-holo-pages.jsx:246). */
+  --color-popover: rgba(14, 12, 30, 0.96);
 
   --font-sans: "Space Grotesk Variable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
