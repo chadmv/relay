@@ -1171,9 +1171,16 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, doneRow.FinishedAt.Valid)
 
+	// The rejected write's finished_at must be UNMISTAKABLY different from the
+	// accepted one, not just a second time.Now(). Two consecutive time.Now()
+	// calls can land in the same clock tick (Windows timer granularity is coarse
+	// enough that this actually happened during the mutation matrix), and then
+	// the restamp assertion below passes even when the write got through - a
+	// green that proves nothing. An hour offset makes a successful overwrite
+	// impossible to miss.
 	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID: terminalTask.ID, Status: "failed", WorkerID: w1.ID,
-		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
 		AssignmentEpoch: claimedTerminal.AssignmentEpoch,
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "an already-finished task must not accept a second terminal status")
