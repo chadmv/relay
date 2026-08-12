@@ -49,3 +49,22 @@ test('shows the Admin nav entry to admins', async () => {
   renderShell(true)
   expect(await screen.findByRole('link', { name: 'Admin' })).toHaveAttribute('href', '/admin')
 })
+
+// The header owns the profile dropdown, which hangs down over <main>. <main> is
+// a later sibling and its panels create stacking contexts of their own (every
+// GlassPanel carries backdrop-blur), so with both at z-auto the page content
+// paints over an open dropdown. A z-index on the dropdown alone cannot fix that:
+// the header's own backdrop-blur makes it a stacking context, which confines any
+// z-index inside it. The order has to be declared out here, between the siblings.
+//
+// jsdom does no layout and no hit-testing, so this can only pin the classes;
+// the ordering they produce was measured in Chrome by hit-testing 275 points
+// across the open dropdown (see HoloShell.tsx for the numbers). z-0 on <main>
+// is asserted for the same reason it is written: it is the guard that keeps a
+// future page-level z-index from climbing back over the header.
+test('stacks the header above the page content', async () => {
+  renderShell(false)
+  await waitFor(() => expect(screen.getByText('page body')).toBeInTheDocument())
+  expect(screen.getByRole('banner')).toHaveClass('relative', 'z-10')
+  expect(screen.getByRole('main')).toHaveClass('relative', 'z-0')
+})

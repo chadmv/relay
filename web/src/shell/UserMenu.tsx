@@ -37,8 +37,23 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
       >
         <span className="text-fg normal-case tracking-normal">{email}</span>
       </button>
+      {/* bg-popover is the load-bearing half here. GlassPanel sets NO
+          background-color at all - only a 6%->2% white gradient, which is a
+          background-IMAGE (measured: computed backgroundColor is rgba(0,0,0,0)).
+          That is right for a panel sitting ON the page floor and wrong for one
+          floating over live content, which would read straight through it. The
+          two are different properties, so bg-popover fills in underneath and the
+          gradient stays on top as a sheen.
+
+          z-50 is NOT what stops the page bleeding through - it cannot be, since
+          the header's backdrop-blur confines it (see HoloShell, which owns the
+          fix and the measurements). It is local ordering only: it keeps this
+          dropdown above anything later added to the header. */}
       {open && (
-        <GlassPanel className="absolute right-0 mt-2 w-56 p-1.5 text-[12px]">
+        <GlassPanel
+          data-testid="user-menu-panel"
+          className="absolute right-0 z-50 mt-2 w-56 bg-popover p-1.5 text-[12px]"
+        >
           <div className="mb-1.5 flex items-center gap-2.5 border-b border-border px-2.5 pb-2.5 pt-2">
             <span className="truncate text-[12.5px] text-fg">{email}</span>
           </div>
