@@ -241,9 +241,15 @@ func TestHandleTaskStatus_NonAssigneeCannotBurnARetry(t *testing.T) {
 // is that the task is STILL RETURNED BY GetEligibleTasks, i.e. still
 // dispatchable. That is the property the wedge destroys.
 //
-// This test also pins the Go NULL trap. It is the only case where both sides of
-// the comparison can be zero-valued, which is the only case that discriminates a
-// NULL-tolerant comparison from a NULL-rejecting one. Task 4 mutation-proves it.
+// What this test does NOT pin: the Go NULL trap. It passes a real w1 against a
+// NULL task.WorkerID, so a bare `task.WorkerID.Bytes != workerID.Bytes` with
+// both .Valid checks dropped still rejects it. Only a case where BOTH sides are
+// zero-valued discriminates a NULL-tolerant comparison from a NULL-rejecting
+// one, and this is not that case. What it pins through the handler is the fence
+// as a whole, which the SQL predicate would also satisfy on this path. The Go
+// gate's own NULL rejection is pinned by
+// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
+// below.
 func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()
@@ -302,6 +308,83 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", running.Status, "positive control: the assignee's RUNNING must land after the claim")
 	assert.True(t, running.StartedAt.Valid, "positive control: started_at must be stamped")
+}
+
+// The ONE construction that discriminates the Go gate's NULL rejection, and the
+// reason both .Valid checks are in it rather than a bare struct comparison.
+//
+// Two properties have to hold at once for a test to catch a gate that dropped
+// them, and no other test in this package has both:
+//
+//   - Both sides of the comparison must be zero-valued. A never-claimed task has
+//     worker_id NULL; the caller passes pgtype.UUID{}. pgtype.UUID is a
+//     comparable struct, so with the .Valid checks gone the two zero values
+//     compare EQUAL - the Go form of IS NOT DISTINCT FROM - and the gate falls
+//     open. Every other test here puts a real UUID on at least one side, where a
+//     bare comparison still rejects and therefore proves nothing.
+//   - The forged message must take the RETRY branch, so the task carries
+//     Retries: 1 and the status is FAILED. This is what makes the test
+//     independent of the SQL fence: IncrementTaskRetryCount has a bare
+//     `WHERE id = $1` and the branch returns before UpdateTaskStatus is ever
+//     reached, so the SQL predicate cannot rescue a Go gate that let this
+//     through. A DONE or RUNNING variant would be caught by the SQL fence even
+//     with the Go gate deleted outright, and would be silently weaker.
+//
+// So this test goes RED under both mutations a reviewer might try: dropping the
+// two .Valid checks, and deleting the Go gate entirely. epoch 0 on a
+// never-claimed task also means the currency gate matches, leaving identity as
+// the only thing that can reject.
+func TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "status6", 1)
+
+	unclaimed, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unclaimed.AssignmentEpoch, "a never-claimed task must sit at epoch 0")
+	require.False(t, unclaimed.WorkerID.Valid, "a never-claimed task must have a NULL worker_id")
+	require.Equal(t, int32(1), unclaimed.Retries, "the retry branch is what makes this independent of the SQL fence")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// A caller that lost its identity. In production Connect closes the stream
+	// rather than reaching here with a zero value, so this is defense in depth -
+	// but it is the behavior the two .Valid checks exist to produce, and it must
+	// fail CLOSED.
+	h.HandleTaskStatus(ctx, pgtype.UUID{}, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  0,
+	})
+
+	after, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), after.RetryCount, "a zero-value worker id must not be able to burn a retry")
+	assert.Equal(t, int32(0), after.AssignmentEpoch, "a zero-value worker id must not be able to bump the epoch")
+	assert.Equal(t, "pending", after.Status, "a rejected update must not move the row")
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	// Positive control: the same FAILED, from the task's real assignee at the
+	// real epoch, does burn the retry. Rejection above is about the identity
+	// being absent, not about this task or this branch being inert.
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+	retried, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), retried.RetryCount, "positive control: the assignee's FAILED must burn a retry")
+	assert.Equal(t, int32(2), retried.AssignmentEpoch, "positive control: the requeue must bump the epoch")
 }
 
 // Modelled on TestConnect_TaskLogChunkIsFencedOnTheConnectionsOwnWorker in

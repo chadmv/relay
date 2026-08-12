@@ -446,13 +446,27 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// bump the epoch, evicting the agent legitimately running it. The gate must
 	// therefore stay AHEAD of every side effect in this function.
 	//
-	// Both .Valid checks are load-bearing and neither is redundant. pgtype.UUID
-	// is a comparable struct, so a bare != is the Go equivalent of SQL's
-	// IS NOT DISTINCT FROM: with the .Valid checks gone, a zero-value workerID (a
-	// caller that lost its identity) compares EQUAL to a never-claimed task's
-	// NULL worker_id and the gate fails OPEN. This is the same rule the SQL
-	// states as "a plain =, never IS NOT DISTINCT FROM"; see
-	// internal/store/query/tasks.sql.
+	// Note what that placement does and does not buy. It makes the retry branch
+	// UNFORGEABLE - only the assignee can reach it - but not ATOMIC: the GetTask
+	// above and IncrementTaskRetryCount below are separate statements with no
+	// re-check in between, so a concurrent writer can still move the row after
+	// the gate passed. That residual race is
+	// docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md, which stays
+	// open; do not read this gate as having closed it.
+	//
+	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
+	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
+	// is unreachable from Connect, which closes the stream on a Scan failure
+	// rather than calling in with a zero value. What they buy is NULL rejection:
+	// pgtype.UUID is a comparable struct, so with BOTH .Valid checks dropped a
+	// zero-value workerID (a caller that lost its identity) compares EQUAL to a
+	// never-claimed task's NULL worker_id - the Go form of SQL's
+	// IS NOT DISTINCT FROM - and the gate fails OPEN. Removing either one alone
+	// leaves the hole closed; removing both opens it. That is defense in depth
+	// against a future caller, and it is pinned by
+	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask,
+	// which goes red under both mutations. Same rule the SQL states as "a plain =,
+	// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.
 	//
 	// Silent return, exactly like the currency gate below. A log line here would
 	// be attacker-keyed volume on the recv goroutine, with no sink to send it to;
