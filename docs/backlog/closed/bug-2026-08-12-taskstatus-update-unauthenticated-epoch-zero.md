@@ -184,6 +184,12 @@ backstop for both callers - one fenced statement, no sentinel, no second un-fenc
 agent at all. `Dispatcher.failClaimedTask` passes `claimed.WorkerID`, where the predicate is
 tautological by design and fails closed and loudly.
 
-`bug-2026-06-26-retry-resurrects-cancelled-task` stays open; this change narrows its remaining
-exposure to the cancel-during-retry race alone. See
+`bug-2026-06-26-retry-resurrects-cancelled-task` stays open. This change closes the
+forged-from-a-stranger route into `IncrementTaskRetryCount`, but **two** routes remain, not
+one: the cancel-during-retry race, and a single-actor race-free route where the task's own
+assignee sends `DONE` at epoch N and then `FAILED` at epoch N, resurrecting a completed task
+because a terminal transition neither bumps the epoch nor clears `worker_id`. An earlier
+draft of this note said the remaining exposure was "the cancel-during-retry race alone";
+that was refuted by the Phase 4 invariants lens and is corrected here so the 06-26 item is
+not undersized. Both routes are recorded in that item. See
 `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`.

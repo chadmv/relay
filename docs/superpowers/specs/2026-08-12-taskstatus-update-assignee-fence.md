@@ -239,10 +239,24 @@ absorbed here. Justification:
 
 What this change *does* do for it is narrow it. `IncrementTaskRetryCount` has exactly one
 production caller (`handler.go:462`, confirmed by repo-wide grep). After this change, that
-caller is gated on the sender being the assignee, so the query's remaining exposure is
-exactly the cancel race described in that item and nothing else. Record that in this spec's
-Resolution note when the work lands, so whoever picks up the 06-26 item knows the forged
-route is already closed. Do not close it.
+caller is gated on the sender being the assignee, so the forged-from-a-stranger route into
+that query is closed. Record that in this spec's Resolution note when the work lands, so
+whoever picks up the 06-26 item knows it. Do not close it.
+
+> **Correction (2026-08-12, Phase 4 invariants lens).** This section originally said the
+> remaining exposure is "exactly the cancel race described in that item and nothing else."
+> That is wrong, and the error matters because it undersizes the 06-26 item for whoever
+> picks it up. A second route remains, and unlike the cancel race it needs one actor and no
+> race at all: a terminal transition does not bump `assignment_epoch`, and after this change
+> `worker_id` structurally survives it, so the task's own assignee can send `DONE` at epoch
+> N - dependents become eligible and dispatch - and then `FAILED` at epoch N. Both gates
+> still pass, `terminal && RetryCount < Retries` holds, and `IncrementTaskRetryCount` moves
+> the *completed* task back to `pending` and re-dispatches it while its dependents are
+> already running. The structural fix is a status predicate
+> (`AND status NOT IN ('done','failed','timed_out')` on both `UpdateTaskStatus` and
+> `IncrementTaskRetryCount`), **not** an epoch bump on terminal - bumping there would break
+> the trailing-log flush that section 4 relies on. Both routes are now recorded in
+> `docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md`.
 
 ### 3.5 Question 7 - no int32 truncation, and none introduced
 
