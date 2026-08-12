@@ -28,6 +28,22 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- pgtype.UUID binds SQL NULL) fail closed. `IS NOT DISTINCT FROM` would let a
 -- NULL parameter match a NULL worker_id and re-open it. Do not "fix the NULL
 -- bug" here.
+-- A task's status machine is one-way into a terminal state. The status
+-- predicate makes that structural: an already-finished task cannot be written
+-- again, so a second terminal message from its own assignee at the same epoch -
+-- which both other predicates legitimately accept, because a terminal
+-- transition neither bumps the epoch nor clears worker_id - cannot flip a `done`
+-- task to `failed` and cascade FailDependentTasks across its still-pending
+-- downstream. The terminal set is the one RecomputeJobStatus uses
+-- (internal/store/query/jobs.sql:98); keep the two in lockstep.
+-- The fix for that case is this predicate and NOT an epoch bump on terminal
+-- transitions: the assignment must survive completion so a trailing log chunk
+-- from the agent that just finished still passes AppendTaskLog's fence. See
+-- TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+-- Dispatcher.failClaimedTask's target is `dispatched` by construction
+-- (ClaimTaskForWorker requires `status='pending'`), so this predicate is
+-- tautological there, exactly like the worker predicate above and for the same
+-- reason: one statement with no exceptions to remember.
 -- Both callers are fenced by the same statement deliberately;
 -- Dispatcher.failClaimedTask passes claimed.WorkerID from ClaimTaskForWorker,
 -- where the predicate is tautological by design. For why that beats a second
@@ -48,6 +64,7 @@ SET status = sqlc.arg(status),
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
+  AND status NOT IN ('done', 'failed', 'timed_out')
 RETURNING *;
 
 -- name: IncrementTaskRetryCount :one

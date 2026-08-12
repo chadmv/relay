@@ -1141,4 +1141,71 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 	afterCase4, err := q.GetTask(ctx, unclaimedB.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "pending", afterCase4.Status, "a caller that lost its identity must fail closed")
+
+	// Case 5: TERMINAL ONTO TERMINAL. A task's status machine is one-way into a
+	// terminal state; this predicate makes that structural. w1 completed this
+	// task at epoch 1, and a second terminal from the same worker at the same
+	// epoch passes the epoch and worker predicates legitimately - a terminal
+	// transition neither bumps the epoch nor clears worker_id - so the status
+	// predicate is the ONLY thing that can reject it. Without it a `done` task
+	// flips to `failed` and FailDependentTasks cascades across its still-pending
+	// downstream. The terminal set is the one RecomputeJobStatus uses
+	// (query/jobs.sql:98); keep the two in lockstep.
+	terminalTask, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-terminal", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedTerminal, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: terminalTask.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	doneRow, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: terminalTask.ID, Status: "done", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTerminal.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.True(t, doneRow.FinishedAt.Valid)
+
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: terminalTask.ID, Status: "failed", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTerminal.AssignmentEpoch,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "an already-finished task must not accept a second terminal status")
+	afterCase5, err := q.GetTask(ctx, terminalTask.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", afterCase5.Status, "a rejected update must not flip a done task to failed")
+	assert.True(t, afterCase5.FinishedAt.Time.Equal(doneRow.FinishedAt.Time),
+		"a rejected update must not restamp finished_at")
+
+	// Case 6: the same shape with timed_out over failed, because that is the
+	// ordering a reviewer will ask about. There is no server-side timeout writer
+	// in the tree at all - the agent picks one finalStatus and sends it once - so
+	// this pins the vocabulary rather than a live path.
+	timedOutTask, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-timed-out", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedTimedOut, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: timedOutTask.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: timedOutTask.ID, Status: "failed", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTimedOut.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: timedOutTask.ID, Status: "timed_out", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTimedOut.AssignmentEpoch,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "timed_out must not be writable over an already-failed task")
+	afterCase6, err := q.GetTask(ctx, timedOutTask.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", afterCase6.Status, "a rejected update must not move a terminal row")
 }

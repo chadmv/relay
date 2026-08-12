@@ -546,7 +546,15 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
-		log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		// pgx.ErrNoRows is the fence rejecting, not a failure: the row is
+		// already terminal (a duplicate terminal message), or the generation
+		// ended between the GetTask above and here. Drop silently, exactly like
+		// the two gates - a log line here would be caller-controlled volume on
+		// the recv goroutine with no sink to send it to, and detection belongs
+		// with the audit-log work. Any other error is real.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		}
 		return
 	}
 

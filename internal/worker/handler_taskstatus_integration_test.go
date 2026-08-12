@@ -464,3 +464,115 @@ func TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
 	stream.CloseSend()
 	<-done
 }
+
+// ROUTE B2: a second terminal message from the task's OWN assignee, at the
+// CURRENT epoch, on a task with no retries left. Both of handleTaskStatus's
+// gates legitimately pass - it really is the assignee and the epoch really is
+// current - because a terminal transition deliberately does not bump
+// assignment_epoch and does not clear worker_id (that is what lets a trailing
+// log chunk still pass AppendTaskLog's fence). With retries exhausted the retry
+// branch is skipped, so this message goes straight to UpdateTaskStatus and
+// flips a `done` task to `failed`.
+//
+// The load-bearing assertion is the one on task B. "A's status did not change"
+// is a string comparison; "B is still pending" is the absence of the
+// FailDependentTasks cascade, which is the actual harm: a completed task's
+// entire still-pending downstream destroyed by a duplicate message.
+//
+// A correct agent never produces this - Runner.Run sends exactly one terminal
+// status per invocation and gRPC does not redeliver - but a crash-looping or
+// double-dispatching agent does, with no attacker and no concurrency.
+//
+// This test can only be red for UpdateTaskStatus's status predicate: its FAILED
+// skips the retry branch entirely, so IncrementTaskRetryCount is never reached.
+// Its sibling
+// TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry is the
+// mirror image and can only be red for the retry statement's predicate.
+func TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	jobID, taskAID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "status8", 0)
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskB.ID, DependsOnTaskID: taskAID,
+	}))
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskAID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	taskAStr := h.UUIDStringForTest(taskAID)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+	afterDone, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	require.Equal(t, "done", afterDone.Status, "fixture: the assignee's own DONE must land")
+	require.True(t, afterDone.FinishedAt.Valid, "fixture: DONE must stamp finished_at")
+
+	// The duplicate. Same worker, same epoch, terminal status.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+
+	afterFailed, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	afterB, err := q.GetTask(ctx, taskB.ID)
+	require.NoError(t, err)
+	// Non-fatal asserts so a RED run reports every part of the exposure rather
+	// than stopping at the first one.
+	assert.Equal(t, "done", afterFailed.Status, "a finished task must not be overwritten by a second terminal status")
+	assert.True(t, afterFailed.FinishedAt.Time.Equal(afterDone.FinishedAt.Time),
+		"a rejected update must not restamp finished_at")
+	assert.Equal(t, "pending", afterB.Status,
+		"a duplicate terminal must not cascade FailDependentTasks across a completed task's downstream")
+	if t.Failed() {
+		t.FailNow() // the overwrite got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path: a task that is genuinely running
+	// still fails and still cascades to its dependent. Without it, a
+	// handleTaskStatus that had stopped accepting anything at all would pass
+	// every assertion above.
+	taskC, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-c", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	taskD, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-d", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskD.ID, DependsOnTaskID: taskC.ID,
+	}))
+	claimedC, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskC.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(taskC.ID),
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimedC.AssignmentEpoch),
+	})
+	realC, err := q.GetTask(ctx, taskC.ID)
+	require.NoError(t, err)
+	realD, err := q.GetTask(ctx, taskD.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", realC.Status, "positive control: a live task's FAILED must still land")
+	assert.Equal(t, "failed", realD.Status, "positive control: the dependent cascade must still fire")
+}
