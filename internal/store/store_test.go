@@ -266,7 +266,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 
 	// Log with matching epoch: returns the inserted row plus the task's job id.
 	first, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1,
+		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1, WorkerID: w.ID,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, job.ID, first.JobID, "the row must carry the task's job id so the publish needs no second query")
@@ -276,7 +276,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// seq is monotonically increasing across calls - it is the same value
 	// GET /v1/tasks/{id}/logs pages by via ?since_seq.
 	second, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1,
+		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1, WorkerID: w.ID,
 	})
 	require.NoError(t, err)
 	assert.Greater(t, second.ID, first.ID)
@@ -286,7 +286,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// gate in handleTaskLog depends on - previously :exec collapsed "inserted one
 	// row" and "inserted zero rows" into the same nil error.
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
-		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0,
+		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0, WorkerID: w.ID,
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows)
 
@@ -296,6 +296,65 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.Len(t, logs, 2)
 	assert.Equal(t, "hello\n", logs[0].Content)
 	assert.Equal(t, "more\n", logs[1].Content)
+
+	// --- The assignee half of the fence ---
+
+	// A second, entirely legitimate worker that simply is not this task's assignee.
+	w2, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w2", Hostname: "w2-logs", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Case 1: correct epoch, WRONG worker. The epoch predicate matches, so only
+	// the assignee predicate can produce ErrNoRows here.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "from a non-assignee\n",
+		AssignmentEpoch: 1, WorkerID: w2.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a worker that is not the assignee must not be able to append")
+
+	// Case 2: correct epoch, ZERO-VALUE worker id. pgtype.UUID{} binds SQL NULL
+	// and `worker_id = NULL` is never true, so a caller that lost its own
+	// identity fails closed instead of writing.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, Stream: "stdout", Content: "from a caller with no identity\n",
+		AssignmentEpoch: 1, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a zero-value worker id must fail closed")
+
+	// A task nobody ever claimed: assignment_epoch 0, worker_id NULL. This is the
+	// state the reported hole targeted, because epoch 0 is a free guess.
+	unclaimed, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-unclaimed", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Case 3: never-claimed task, matching epoch 0, real worker. Rejected.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: unclaimed.ID, Stream: "stdout", Content: "forged at epoch zero\n",
+		AssignmentEpoch: 0, WorkerID: w.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject appends from every worker")
+
+	// Case 4: never-claimed task, matching epoch 0, ZERO-VALUE worker id - NULL on
+	// both sides. This is THE regression test for the comparison staying a plain
+	// `=`: under `IS NOT DISTINCT FROM` two NULLs compare equal, the fence matches
+	// and the hole is wide open again. Case 2 does not catch that rewrite, because
+	// there the task's worker_id is non-NULL.
+	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+		TaskID: unclaimed.ID, Stream: "stdout", Content: "NULL matching NULL\n",
+		AssignmentEpoch: 0, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
+
+	// None of the four rejected appends wrote anything.
+	unclaimedLogs, err := q.GetTaskLogs(ctx, unclaimed.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unclaimedLogs, "no rejected append may insert a row")
+	logs, err = q.GetTaskLogs(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Len(t, logs, 2, "the claimed task still has only its two legitimate rows")
 }
 
 func TestReconciliationQueries(t *testing.T) {
