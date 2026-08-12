@@ -39,7 +39,11 @@ writes are serialized against concurrent cancels and terminal recomputes.
 - Coverage for the concurrent-cancel path.
 
 ## Related
-- Same TOCTOU family as [[bug-2026-06-26-retry-resurrects-cancelled-task]]; can be scheduled with it.
+- Same TOCTOU family as `bug-2026-06-26-retry-resurrects-cancelled-task`, which was closed
+  2026-08-12 (`docs/backlog/closed/`) - so this can no longer be scheduled alongside it. Note that
+  close narrows this item: the retry side of the race is now fenced on epoch, assignee and
+  terminality, so a cancel landing in the retry window wins at the statement. What remains here is
+  the read-then-write window inside `handleCancelJob` itself.
 - Source: `internal/api/jobs.go:694-748` (handleCancelJob), `internal/store/query/tasks.sql` (CancelJobTasks).
 
 ## Notes

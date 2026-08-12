@@ -18,9 +18,9 @@ shape, and splitting them would leave the same vector half-closed.
 
 ### A. The task-log persist-failure limiter is keyed on attacker-controlled input
 
-`taskLogErrLimiter.shouldLog` (`internal/worker/handler.go:631-645`) exists to stop a repeating
+`taskLogErrLimiter.shouldLog` (`internal/worker/handler.go`, the `shouldLog` method) exists to stop a repeating
 persist failure from flooding the server log from the gRPC recv goroutine. It keys on
-`chunk.TaskId` and `int32(chunk.Epoch)` (the call at `handler.go:708`), **both read straight off the
+`chunk.TaskId` and `int32(chunk.Epoch)` (the `shouldLog` call inside `handleTaskLog`'s persist-error branch), **both read straight off the
 wire**, and on overflow it drops the whole map rather than suppressing:
 
 ```go
@@ -35,12 +35,12 @@ emitting a fresh random UUID per message gets one `log.Printf` per message, inde
 
 ### B. The task-status path logs twice before either gate, with no limiter at all
 
-`handleTaskStatus` (`internal/worker/handler.go:423`) has two unconditional `log.Printf` calls that
-run **ahead of both** the identity gate (`:474`) and the currency gate (`:487`):
+`handleTaskStatus` (`internal/worker/handler.go`) has two unconditional `log.Printf` calls that
+run **ahead of both** the identity gate and the currency gate:
 
-- `:426` - `log.Printf("worker: handleTaskStatus bad task id %q: %v", upd.TaskId, err)`, when
+- **bad task id** - `log.Printf("worker: handleTaskStatus bad task id %q: %v", upd.TaskId, err)`, when
   `taskID.Scan` rejects the string.
-- `:432` - `log.Printf("worker: handleTaskStatus GetTask %s: %v", upd.TaskId, err)`, when `GetTask`
+- **GetTask failure** - `log.Printf("worker: handleTaskStatus GetTask %s: %v", upd.TaskId, err)`, when `GetTask`
   fails, which for a well-formed but nonexistent UUID is `pgx.ErrNoRows`.
 
 Neither is rate-limited, and the 2026-08-12 assignee fence cannot help: both gates are downstream of
@@ -48,17 +48,17 @@ both lines. Any enrolled agent gets one unbounded log line per gRPC message by s
 `TaskStatusUpdate`s naming freshly generated random UUIDs, synchronously on the recv goroutine, ahead
 of that worker's real status, log, inventory and telemetry ingest.
 
-**This half is strictly more expensive per message than half A**, because the `:432` line is reached
+**This half is strictly more expensive per message than half A**, because the GetTask line is reached
 *after* a `GetTask` round trip: each forged message consumes a pool connection and a query as well as
 the global `log` mutex.
 
 Neither line is a log-*injection* vector, and that should be preserved rather than rediscovered:
-`:426` uses `%q`, which quotes and escapes, and `:432` is reachable only after `taskID.Scan`
+the bad-task-id line uses `%q`, which quotes and escapes, and the GetTask line is reachable only after `taskID.Scan`
 succeeded, so the string has already been constrained to pgtype's accepted UUID forms (32 or 36
 characters, hex plus hyphens). The problem is volume, not content.
 
 Note the asymmetry with the log path, which is worth resolving deliberately in whichever direction:
-`handleTaskLog`'s own `taskID.Scan` failure returns **silently** (`handler.go:668-670`), so the log
+`handleTaskLog`'s own `taskID.Scan` failure returns **silently** (the `taskID.Scan` guard at the top of `handleTaskLog`), so the log
 path has no pre-gate log line at all.
 
 ## Repro / Symptoms
@@ -69,7 +69,7 @@ when `RELAY_ALLOW_AUTO_ENROLL` is on):
 **A.** Send a stream of `TaskLogChunk`s where:
 
 - `TaskId` is a freshly generated random UUID. The only upstream validation is
-  `taskID.Scan(chunk.TaskId)` at `handler.go:668`, which checks that the string **parses** as a
+  `taskID.Scan(chunk.TaskId)` at the top of `handleTaskLog`, which checks that the string **parses** as a
   UUID. It need not name a real task.
 - `Content` contains a NUL byte.
 
@@ -83,7 +83,7 @@ irrelevant, and so is the shipped assignee predicate.
 
 **B.** Simpler, and needs no NUL byte or content trick at all. Send a stream of
 `TaskStatusUpdate`s whose `TaskId` is a freshly generated random UUID. Every message costs a
-`GetTask` and one `log.Printf` at `:432`. Sending garbage that does not parse as a UUID hits `:426`
+`GetTask` and one `log.Printf` on the GetTask branch. Sending garbage that does not parse as a UUID hits the bad-task-id branch
 instead, one line per message, without even the query.
 
 Impact in both cases is a log flood plus lock and pool contention: these handlers run synchronously
@@ -102,6 +102,14 @@ not, against an adversary. The spec now carries a dated correction; the correcti
 section's conclusion *more* correct, not less, since logging rejections would have added a second
 flood vector keyed on a fully attacker-controlled string with no containment.
 
+**Still live as of 2026-08-12 (retry-resurrect status guard).** That iteration wrapped both of
+`handleTaskStatus`'s *write-error* log sites in `!errors.Is(err, pgx.ErrNoRows)`, so a forged
+message rejected by either SQL fence now logs nothing. It did **not** touch the two pre-gate
+lines in half B, which remain unconditional and attacker-keyed. That iteration's Phase 4 review
+corrected a comment in `handleTaskStatus` that had cited this item as a reason the Go identity
+gate saves log lines: it does not, because the pre-gate lines run ahead of the gate and the
+post-gate ones are now silent.
+
 Half B was found while writing the task-status assignee-fence retro
 (`docs/retros/2026-08-12-taskstatus-update-assignee-fence.md`). Note that the same spec's section 3.3
 identified this shape as a reason the status identity check had to go in Go rather than in SQL: an
@@ -111,7 +119,7 @@ lines above it were not addressed, and they are the same defect.
 
 The limiter's honest-failure behavior is well covered by
 `TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch`
-(`internal/worker/handler_tasklog_integration_test.go:274`), which is worth reading before changing
+(`internal/worker/handler_tasklog_integration_test.go`), which is worth reading before changing
 anything here: it pins one line per task per epoch, that a new assignment generation earns one more
 line, that a stale-epoch drop stays silent, and that chunk content never reaches the log.
 
@@ -127,14 +135,13 @@ cannot exceed its own.
 gained it on 2026-08-12), so the same per-connection budget covers both lines. Settle two things
 first:
 
-- **Whether `:432` should log at all when the error is `pgx.ErrNoRows`.** A status update naming a
+- **Whether the GetTask branch should log at all when the error is `pgx.ErrNoRows`.** A status update naming a
   task that does not exist is indistinguishable from a forged one, carries no diagnostic value the
   operator can act on, and is exactly the case an attacker drives. Dropping it silently, as the log
   path already does for its own parse failure, may be the whole fix for that line - and it is
   cheaper than a limiter. Real errors (a pool failure, a context cancellation) should still log,
   under the shared budget.
-- **Whether `:426` should log at all.** `handleTaskLog`'s equivalent returns silently
-  (`handler.go:668-670`). Pick one behavior for both handlers and say why in a comment; the current
+- **Whether the bad-task-id branch should log at all.** `handleTaskLog`'s equivalent returns silently. Pick one behavior for both handlers and say why in a comment; the current
   split is an accident, and a future reader will otherwise "fix" the inconsistency in whichever
   direction they happen to notice first.
 
@@ -157,7 +164,7 @@ Points to settle for the shared mechanism:
   is itself a finding.
 - **Never log `chunk.Content`.** The existing comment block explains why `%v` on the pgx error is
   safe (`pgconn.PgError.Error()` renders severity, message and SQLSTATE, never `Detail`). Preserve
-  that. Preserve the `%q` at `:426` too, for the same class of reason.
+  that. Preserve the `%q` on the bad-task-id line too, for the same class of reason.
 
 ## Acceptance / Done When
 
@@ -179,11 +186,13 @@ Points to settle for the shared mechanism:
   unparsed id, no `pgErr.Detail`).
 
 ## Related
-- Source, log path: `internal/worker/handler.go:604-651` (`taskLogErrLimiterMax`,
-  `taskLogErrLimiter`), `:668` (the `Scan`), `:708` (the limiter call site),
-  `internal/worker/handler_tasklog_integration_test.go:274`
-- Source, status path: `internal/worker/handler.go:423-434` (both pre-gate log lines), with the
-  gates that cannot help them at `:474` and `:487`
+- Source, log path: `internal/worker/handler.go` - `taskLogErrLimiterMax`, the `taskLogErrLimiter`
+  type and its `shouldLog` method, the `taskID.Scan` at the top of `handleTaskLog`, and the
+  `shouldLog` call in that function's persist-error branch;
+  `internal/worker/handler_tasklog_integration_test.go`,
+  `TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch`
+- Source, status path: `internal/worker/handler.go`, `handleTaskStatus` - both pre-gate log lines,
+  with the identity and currency gates that cannot help them further down the same function
 - Corrects section 7 of `docs/superpowers/specs/2026-08-12-tasklog-append-assignee-fence.md`;
   extends the flood-vector reasoning in section 3.3 of
   `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md`
@@ -199,7 +208,10 @@ rate-limited party supplies is not a rate limiter**, and **an unlimited log line
 authorization gate is not protected by that gate**. Anything on the agent-facing ingest path that
 dedupes, caches, bounds or logs by a wire value has the same defect by construction, so it is worth
 a grep for other map keys and log arguments derived from `chunk.*` or `upd.*` while fixing these
-two. The line numbers above are from the tree at the task-status assignee fence (2026-08-12);
-`handleTaskStatus` grew by about 40 lines in that change, so anything citing pre-2026-08-12 offsets
-in `internal/worker/handler.go` is stale.
+two.
+
+**Citations in this item are by symbol, not by line offset (converted 2026-08-12).** They had gone
+stale twice in a row: `handleTaskStatus` grew by about 40 lines in the task-status assignee fence
+and by roughly 30 more in the retry-resurrect status guard, so every offset this item carried was
+wrong within days of being written. Cite symbols here.
 </content>

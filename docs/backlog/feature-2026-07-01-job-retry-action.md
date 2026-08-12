@@ -26,9 +26,16 @@ not.
 - Retry re-opens terminal jobs, which reactivates the latent
   [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] (the `done_24h`/`failed_24h` buckets window on
   `updated_at` as a finish proxy, which breaks once terminal jobs re-open).
-- Retry re-queues tasks and so must respect the epoch fence per
-  [[bug-2026-06-26-retry-resurrects-cancelled-task]] (the lone un-fenced `tasks.status` writer must
-  not resurrect a cancelled/terminal task).
+- ~~Retry re-queues tasks and so must respect the epoch fence per
+  `bug-2026-06-26-retry-resurrects-cancelled-task`.~~ **Resolved 2026-08-12** - that item is closed
+  (`docs/backlog/closed/bug-2026-06-26-retry-resurrects-cancelled-task.md`). It is **not** a blocker
+  any more, but do not read the fix as clearing the way to reuse the retry statement: it did the
+  opposite. `IncrementTaskRetryCount` now fences on `assignment_epoch`, `worker_id` and
+  `status IN ('pending','dispatched','running')`, which are the **exact inverse** of this feature's
+  preconditions - a retry endpoint reopens tasks that ARE terminal and has no worker identity to
+  bind, so every predicate would reject every call. The backend work must add its own statement
+  (`status IN ('failed','timed_out')` allow-list, its own epoch bump); see
+  [[feature-2026-06-26-web-enabler-backend-endpoints]], where that constraint is recorded.
 
 ## Proposal
 Once the backend route lands and the two bugs above are addressed, the frontend wiring mirrors the
@@ -49,8 +56,9 @@ cancel action:
 - Carved from [[feature-2026-06-26-job-actions-submit-cancel-retry]] during the 2026-07-01
   job-cancel-actions slice.
 - Backend route tracked in [[feature-2026-06-26-web-enabler-backend-endpoints]].
-- Correctness deps: [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]],
-  [[bug-2026-06-26-retry-resurrects-cancelled-task]].
+- Correctness deps: [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] (still open);
+  `bug-2026-06-26-retry-resurrects-cancelled-task` (closed 2026-08-12, now a constraint on the
+  backend statement rather than a blocker - see Blocked above).
 - Design: `design_handoff_relay_holo/reference/screens/job-detail.js`
 - Source: `internal/api/jobs.go`, `web/src/jobs/`
 
