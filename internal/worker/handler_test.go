@@ -251,7 +251,7 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 		taskIDStr[0:4], taskIDStr[4:6], taskIDStr[6:8], taskIDStr[8:10], taskIDStr[10:16])
 
 	// Send a stale update (epoch=0) — should be silently dropped.
-	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+	h.HandleTaskStatus(ctx, wk.ID, &relayv1.TaskStatusUpdate{
 		TaskId: taskUUID,
 		Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
 		Epoch:  0,
@@ -263,7 +263,7 @@ func TestHandleTaskStatus_EpochGate(t *testing.T) {
 	assert.Equal(t, "dispatched", afterStale.Status, "stale epoch update must be dropped")
 
 	// Send a valid update (epoch=1) — should be applied.
-	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+	h.HandleTaskStatus(ctx, wk.ID, &relayv1.TaskStatusUpdate{
 		TaskId: taskUUID,
 		Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
 		Epoch:  1,
@@ -315,7 +315,7 @@ func TestHandleTaskStatus_PrepareFailedIsTerminal(t *testing.T) {
 	taskUUID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		idb[0:4], idb[4:6], idb[6:8], idb[8:10], idb[10:16])
 
-	h.HandleTaskStatus(ctx, &relayv1.TaskStatusUpdate{
+	h.HandleTaskStatus(ctx, wk.ID, &relayv1.TaskStatusUpdate{
 		TaskId: taskUUID,
 		Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
 		Epoch:  1,

@@ -130,7 +130,7 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 
 		switch p := msg.Payload.(type) {
 		case *relayv1.AgentMessage_TaskStatus:
-			h.handleTaskStatus(ctx, p.TaskStatus)
+			h.handleTaskStatus(ctx, workerUUID, p.TaskStatus)
 		case *relayv1.AgentMessage_TaskLog:
 			h.handleTaskLog(ctx, workerUUID, p.TaskLog)
 		case *relayv1.AgentMessage_WorkspaceInventory:
@@ -415,7 +415,12 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 }
 
 // handleTaskStatus processes a TaskStatusUpdate from an agent.
-func (h *Handler) handleTaskStatus(ctx context.Context, upd *relayv1.TaskStatusUpdate) {
+//
+// workerID is the connection's own authenticated worker, resolved at
+// registration and never taken from the wire - an agent cannot influence it, so
+// it cannot claim to be somebody else. It is threaded here the same way
+// handleTaskLog and applyInventoryUpdate already receive it.
+func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
 		log.Printf("worker: handleTaskStatus bad task id %q: %v", upd.TaskId, err)
