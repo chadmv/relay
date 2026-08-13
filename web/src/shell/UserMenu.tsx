@@ -21,7 +21,11 @@ interface UserMenuProps {
 // WHY NO role="menu" / role="menuitem" / ARROW KEYS. Three of the four entries are
 // site navigation links, which is the case the menu role's own specification
 // excludes, and role="menuitem" on an <a href> REPLACES the link role: the item
-// stops being announced as a link and drops out of a screen reader's links list. A
+// stops being announced as a link, drops out of a screen reader's links list, and
+// drops out of browse-mode "next link" navigation. This is an AT-exposed-semantics
+// cost only - the anchor is still a real <a href>, so the browser's own context
+// menu and Ctrl/Cmd+click still open it in a new tab exactly as before; nothing
+// about the ARIA role changes what the browser itself does with the element. A
 // conforming menu also uses a roving tabindex, which would make those three links
 // unreachable by Tab. So the toggle carries aria-expanded plus aria-controls and
 // nothing else; the items stay three ordinary links and one ordinary button, and Tab
@@ -41,10 +45,19 @@ interface UserMenuProps {
 // is DialogShell's one high-severity review finding
 // (components/dialog/DialogShell.tsx:59-75) and it binds harder here. Do not "tidy"
 // it onto the panel. DialogShell's own document Escape listener calls
-// stopImmediatePropagation specifically to suppress this one (DialogShell.tsx:355-370),
-// and the two are structurally prevented from overlapping anyway, so do not change
-// this listener's registration site or its open-only lifetime without re-deriving
-// that argument.
+// stopImmediatePropagation (DialogShell.tsx:355-372), but that only suppresses a
+// SIBLING listener registered AFTER it on the same dispatch
+// (DialogShell.test.tsx:425-431 pins exactly that narrower claim) - it cannot
+// un-ring a bell a listener registered earlier already rang. The two DO overlap
+// in practice: open this dropdown by mouse (so focus never lands inside it - the
+// Safari case above), then keyboard-focus a page control and open a dialog; this
+// listener was registered first, so on Escape it runs first, is not suppressed,
+// and closes the dropdown, and DialogShell's own handler then runs right after
+// and closes the dialog too (measured directly). One Escape dismissing both is
+// acceptable and is not changed by that fact - what must not be assumed is that
+// the overlap is structurally impossible, only that dismissing both is fine.
+// Registration order, not "cannot open while a dialog is open", is what decides
+// which listener wins.
 //
 // WHY THE PANEL IS NOT PORTALLED and does not register with dialogStack. Two
 // reasons: the disclosure pattern needs the panel to FOLLOW the toggle in DOM order
@@ -62,17 +75,23 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
   // Close AND return focus to the toggle, but ONLY if focus was inside the
   // container. Used by Escape and by all four items.
   //
-  // The containment check is read BEFORE setOpen, which is CLAUDE.md's "end the
-  // generation before releasing the resource" in its smallest form: setOpen(false)
-  // unmounts the panel and detaches whatever was focused, after which
-  // document.activeElement is <body> and the check can no longer tell "focus was
-  // on an item" from "focus was never in here at all".
+  // The containment check is read BEFORE setOpen, and that ordering is kept
+  // defensively even though it costs nothing to keep - but NOT because setOpen(false)
+  // synchronously unmounts the panel and detaches focus the way a cleanup running
+  // after a real unmount does. It doesn't: React 18.3.1 batches this update, so the
+  // panel is still mounted and document.activeElement is unchanged for the rest of
+  // this handler, and reading the check AFTER setOpen would observe the identical
+  // value (measured directly). DialogShell.tsx:227-240 is the real instance of that
+  // detachment shape - its read runs in an effect CLEANUP, which React defers past
+  // the point the node is actually gone, so ordering there is load-bearing, not
+  // merely tidy.
   //
-  // The guard is what separates a restore from focus theft: a mouse user in Safari
-  // (which does not focus a <button> on click, so the menu can legitimately be open
-  // with activeElement === <body>) must not have focus yanked onto a toggle it was
-  // never on. Same reasoning as DialogShell.tsx:234-239,276-282, reused as REASONING
-  // ONLY - none of its modal machinery applies to a dropdown.
+  // What the guard actually buys here is preventing focus theft: a mouse user in
+  // Safari (which does not focus a <button> on click, so the menu can legitimately
+  // be open with activeElement === <body>) must not have focus yanked onto a toggle
+  // it was never on. Same REASONING as DialogShell.tsx:234-239,276-282 - none of its
+  // modal machinery applies to a dropdown, and unlike that file's use of the
+  // pattern, nothing here depends on beating a synchronous teardown.
   function closeAndRestoreFocus() {
     const focusWasInside = !!ref.current && ref.current.contains(document.activeElement)
     setOpen(false)

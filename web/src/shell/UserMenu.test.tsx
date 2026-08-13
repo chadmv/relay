@@ -230,7 +230,9 @@ test('an outside mousedown closes the menu and never touches the toggle focus', 
 
   // Spying on the CALL rather than reading activeElement at the end, because the
   // end state cannot tell the two implementations apart: user-event moves focus to
-  // the clicked control AFTER the mousedown listeners run (event/focus.js:14-25),
+  // the clicked control AFTER the mousedown listeners run
+  // (system/pointer/mouse.js:74-79 - dispatchUIEvent(target, 'mousedown', init)
+  // fires first, and only once that returns does focus.focusElement(target) run),
   // so a focus-stealing close is overwritten a moment later and both versions
   // finish with activeElement === after. The steal is only observable as the call.
   // Same instrument DialogShell used for the equivalent problem
@@ -302,6 +304,24 @@ test('a blur with a null relatedTarget does NOT close the menu', async () => {
   // A naive onBlur={() => setOpen(false)} passes every other test in this file and
   // fails exactly here.
   expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+})
+
+// Guards the effect's open-only lifetime (UserMenu.tsx:82,107), which
+// DialogShell.tsx:361-363 depends on: it argues UserMenu's document keydown
+// listener cannot overlap DialogShell's own because the toggle is a background
+// control that only exists to be pressed while no dialog is open. If this
+// listener were ever registered unconditionally (e.g. `if (!open) return` and
+// `[open]` in the effect's dependency array both dropped), every OTHER test in
+// this file still passes, because they all open the menu before asserting
+// anything - none of them look at the closed state. This test does.
+test('no document keydown listener is registered while the menu is closed', () => {
+  const addSpy = vi.spyOn(document, 'addEventListener')
+  renderMenu()
+
+  const keydownRegistrations = addSpy.mock.calls.filter(([type]) => type === 'keydown')
+
+  expect(keydownRegistrations).toHaveLength(0)
+  addSpy.mockRestore()
 })
 
 // The durable guard against someone "restoring" role="menu" / role="menuitem" from
