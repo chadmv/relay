@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { LoginScreen } from '../auth/LoginScreen'
 import { RegisterScreen } from '../auth/RegisterScreen'
-import { JobsPlaceholder } from './JobsPlaceholder'
+import { ProfilePage } from '../profile/ProfilePage'
 import { JobsPage } from '../jobs/JobsPage'
 import { JobDetailPage } from '../jobs/JobDetailPage'
 import { TaskLogPage } from '../jobs/TaskLogPage'
@@ -38,7 +38,13 @@ export function AppRoutes() {
           <Route path="/admin" element={<Navigate to="/admin/users" replace />} />
           <Route path="/admin/:tab" element={<AdminPage />} />
         </Route>
-        <Route path="/profile/*" element={<JobsPlaceholder />} />
+        {/* No AdminRoute: every endpoint behind this page is auth(...) and acts
+            on the identity in the bearer token, never on an id from a path or a
+            body (internal/api/server.go:97-100, :153). Gating it on admin would
+            lock out exactly the users who need it. Same two-route shape as
+            /admin above, so UserMenu's /profile link resolves without change. */}
+        <Route path="/profile" element={<Navigate to="/profile/identity" replace />} />
+        <Route path="/profile/:tab" element={<ProfilePage />} />
       </Route>
       <Route path="*" element={<Navigate to="/jobs" replace />} />
     </Routes>

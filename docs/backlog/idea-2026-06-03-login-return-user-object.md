@@ -15,7 +15,16 @@ source: web front end auth slice
 ## Proposal
 Add the user payload (the same shape as `GET /v1/users/me`: `id`, `email`, `name`, `is_admin`) to the login and register response bodies. The web `AuthProvider.applyAuth` could then set the user directly and drop the extra fetch. Weigh against keeping `/users/me` as the single source of identity (current design) and any non-web clients that don't need the object.
 
+**Note added 2026-08-13:** `User` now also carries `created_at` (`web/src/lib/types.ts`), which the
+profile header renders, so the payload added here must include it or the header breaks on a
+fresh login. `AuthProvider` also gained an `applyUser(u: User)` method for exactly this shape of
+"here is the authoritative row, no refetch needed" - `applyAuth` can reuse it rather than calling
+`setUser` a second way.
+
 ## Related
 - `internal/api/auth.go` (login/register response builders)
 - `web/src/auth/AuthProvider.tsx`
 - Retro: `docs/retros/2026-06-03-web-frontend-auth.md`
+- Touches the same `applyAuth` path, and must not be done blind to it:
+  [[bug-2026-08-13-cross-generation-401-clears-a-new-session]] - a stale 401 landing right after
+  this path stores a new token is what clears it

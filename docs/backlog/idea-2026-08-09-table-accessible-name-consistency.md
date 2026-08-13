@@ -42,3 +42,6 @@ behavioral neutrality and so avoided touching anything outside the eight consume
   `web/src/workers/WorkerDetailPage.tsx`
 - Shipped the naming convention these complete:
   [[idea-2026-06-05-shared-accessible-table-primitive]]
+- The same "a shared primitive shipped without the a11y behaviour and every consumer stayed green"
+  pattern, on the form-error surface rather than the table surface:
+  [[idea-2026-08-13-field-error-wiring-audit]] - note `WorkspacesPanel.tsx:65` appears in both
