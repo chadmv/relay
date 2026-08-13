@@ -112,12 +112,16 @@ test('typing in the email filter issues exactly one ?email= request and hides th
   // The debounce is a real setTimeout (web/src/lib/useDebouncedValue.ts) racing
   // against userEvent.type's per-keystroke gaps. On a loaded machine those gaps
   // can exceed the 10ms window and genuinely produce 2-3 requests, which is what
-  // destabilized this test under parallel test-worker load. Fake timers make the
-  // debounce window deterministic so the property - a keystroke burst collapses
-  // into exactly one request - can be asserted exactly instead of loosened.
-  // shouldAdvanceTime keeps React Testing Library's own polling (findBy*/waitFor,
-  // which run on setInterval) alive without manual pumping; advanceTimers wires
-  // userEvent's internal waits to the same fake clock so `.type()` doesn't hang.
+  // destabilized this test under parallel test-worker load. Fake timers NARROW
+  // that race but do not fully fence it: shouldAdvanceTime still advances the fake
+  // clock by real elapsed wall-clock time during `.type()` (that is what keeps
+  // React Testing Library's own polling - findBy*/waitFor, which run on
+  // setInterval - alive without manual pumping, and what lets userEvent's internal
+  // waits progress via `advanceTimers` so `.type()` doesn't hang), so a keystroke
+  // gap can in principle still exceed 10ms under enough load. What this buys is a
+  // materially smaller flake window, not a deterministic one - the test is still
+  // meaningfully strong: a no-op'd useDebouncedValue (returning the live value
+  // immediately) fails it, since that produces far more than one ?email= request.
   vi.useFakeTimers({ shouldAdvanceTime: true })
   try {
     const typist = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
