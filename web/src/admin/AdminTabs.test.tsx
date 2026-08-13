@@ -15,6 +15,7 @@ function renderTabs(path: string) {
 test('the registry holds exactly the built tabs', () => {
   expect(ADMIN_TABS.map((t) => t.slug)).toEqual([
     'users',
+    'invites',
     'enrollments',
     'reservations',
     'server',
@@ -24,10 +25,10 @@ test('the registry holds exactly the built tabs', () => {
 
 test('findAdminTab resolves a known slug and rejects everything else', () => {
   expect(findAdminTab('users')?.label).toBe('Users')
+  expect(findAdminTab('invites')?.label).toBe('Invites')
   expect(findAdminTab('enrollments')?.label).toBe('Agent enrolls')
   expect(findAdminTab('reservations')?.label).toBe('Reservations')
   expect(findAdminTab('server')?.label).toBe('Server')
-  expect(findAdminTab('invites')).toBeUndefined()
   expect(findAdminTab('bogus')).toBeUndefined()
   expect(findAdminTab(undefined)).toBeUndefined()
 })
@@ -35,6 +36,7 @@ test('findAdminTab resolves a known slug and rejects everything else', () => {
 test('renders one link per registry entry, pointing at /admin/<slug>', () => {
   renderTabs('/admin/users')
   expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('href', '/admin/users')
+  expect(screen.getByRole('link', { name: 'Invites' })).toHaveAttribute('href', '/admin/invites')
   expect(screen.getByRole('link', { name: 'Agent enrolls' })).toHaveAttribute(
     'href',
     '/admin/enrollments',
@@ -44,7 +46,7 @@ test('renders one link per registry entry, pointing at /admin/<slug>', () => {
     '/admin/reservations',
   )
   expect(screen.getByRole('link', { name: 'Server' })).toHaveAttribute('href', '/admin/server')
-  expect(screen.getAllByRole('link')).toHaveLength(4)
+  expect(screen.getAllByRole('link')).toHaveLength(5)
 })
 
 test('the current tab is marked as the current page', () => {
@@ -67,7 +69,19 @@ test('the reservations tab is marked current on its own route', () => {
   expect(screen.getByRole('link', { name: 'Users' })).not.toHaveAttribute('aria-current')
 })
 
-test('tabs that are not built yet are absent', () => {
+test('the invites tab sits between Users and Agent enrolls, matching the hi-fi order', () => {
   renderTabs('/admin/users')
-  expect(screen.queryByText('Invites')).not.toBeInTheDocument()
+  expect(screen.getAllByRole('link').map((a) => a.textContent)).toEqual([
+    'Users',
+    'Invites',
+    'Agent enrolls',
+    'Reservations',
+    'Server',
+  ])
+})
+
+test('the invites tab is marked current on its own route', () => {
+  renderTabs('/admin/invites')
+  expect(screen.getByRole('link', { name: 'Invites' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Users' })).not.toHaveAttribute('aria-current')
 })

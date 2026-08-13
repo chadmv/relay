@@ -67,6 +67,7 @@ nothing wraps them in a scroll region:
 | `web/src/schedules/SchedulesTable.tsx:7` | 9 | `grid-cols-[1.4fr_120px_110px_90px_1fr_1fr_110px_1.3fr_150px]` |
 | `web/src/admin/reservations/ReservationsTable.tsx:19` | 8 | `grid-cols-[1.3fr_110px_1.5fr_130px_130px_110px_110px_100px]` |
 | `web/src/jobs/JobsTable.tsx:7` | 7 | `grid-cols-[90px_1fr_120px_150px_120px_70px_150px]` |
+| `web/src/admin/invites/InvitesTable.tsx:9` | 6 | `grid-cols-[1.5fr_110px_110px_1.4fr_110px_1fr]` |
 | `web/src/workers/WorkersTable.tsx:8` | 6 | `grid-cols-[1fr_120px_70px_140px_1.2fr_120px]` |
 | `web/src/workers/WorkspacesPanel.tsx:8` | 6 | `grid-cols-[120px_90px_1fr_120px_90px_90px]` |
 | `web/src/admin/users/UsersTable.tsx:9` | 5 | `grid-cols-[1.6fr_1fr_110px_120px_270px]` |
@@ -153,3 +154,11 @@ could not screenshot (compositing was unavailable), so it measured with `element
 default window size would not have**, and nothing in `npm test` can find it at all, because jsdom
 performs no layout. Until an e2e harness exists, this class of defect is invisible to the project's
 entire automated gate.
+
+## Update 2026-08-13
+Measured again in a real browser during `2026-08-13-admin-invites-tab`, on the Invites tab: **no
+overflow at 1280px or 768px, 148px of overflow at 375px** (`scrollWidth` 523 vs `clientWidth` 375).
+That is the same Cause 2 idiom already listed here, not a new one - the new table was simply added to
+the enumeration above rather than filed separately. Two independent browser measurements now agree
+that the 375px breakage is app-wide and reproduces on whichever surface happens to be under test,
+which is the argument for fixing it once in the shared `Table` primitive rather than per page.

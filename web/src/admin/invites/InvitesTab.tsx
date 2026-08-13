@@ -4,27 +4,33 @@ import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
 import { useNow } from '../../lib/useNow'
 import { TokenRevealDialog } from '../TokenRevealDialog'
-import { CreateEnrollmentForm } from './CreateEnrollmentForm'
-import { EnrollmentsTable } from './EnrollmentsTable'
-import { useAgentEnrollmentActions } from './useAgentEnrollmentActions'
-import { useAgentEnrollments } from './useAgentEnrollments'
-import type { CreateEnrollmentBody, EnrollmentSort, EnrollmentSortField } from './api'
+import { CreateInviteForm } from './CreateInviteForm'
+import { InvitesTable } from './InvitesTable'
+import { useInviteActions } from './useInviteActions'
+import { useInvites } from './useInvites'
+import type { CreateInviteBody, InviteSort, InviteSortField } from './api'
 
-// Same shape as UsersTab's toggleSort (web/src/admin/users/UsersTab.tsx:17-22):
-// clicking the active column flips its direction, clicking the other selects it
-// ascending.
-function toggleSort(field: EnrollmentSortField, current: EnrollmentSort): EnrollmentSort {
+// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx:16-21): clicking
+// the active column flips its direction, clicking the other selects it ascending.
+//
+// SEVENTH consumer of the cursor-pager block below (JobsPage, WorkersPage,
+// SchedulesPage, UsersTab, EnrollmentsTab, ReservationsTab are the first six), and
+// FOURTH of this helper. Not extracted here on purpose: the extraction has to
+// migrate six shipped surfaces under a zero-line-diff gate on their existing test
+// files, which is its own slice with a different risk profile. See
+// docs/superpowers/plans/2026-08-13-admin-invites-tab.md, "Extraction debt".
+function toggleSort(field: InviteSortField, current: InviteSort): InviteSort {
   if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as EnrollmentSort
+    return (current.startsWith('-') ? field : `-${field}`) as InviteSort
   }
   return field
 }
 
-export function EnrollmentsTab() {
-  const [sort, setSort] = useState<EnrollmentSort>('-created_at')
+export function InvitesTab() {
+  const [sort, setSort] = useState<InviteSort>('-created_at')
   // Cursor of the current page (''=first); stack holds the cursors we paged
   // forward from; offsets tracks the real row offset so partial pages stay
-  // correct. Same pattern as UsersTab / JobsPage.
+  // correct. Same pattern as UsersTab / EnrollmentsTab.
   const [cursor, setCursor] = useState('')
   const [stack, setStack] = useState<string[]>([])
   const [startOffset, setStartOffset] = useState(0)
@@ -35,8 +41,8 @@ export function EnrollmentsTab() {
   // status pills stay correct and issues no request.
   const now = useNow(60_000)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useAgentEnrollments(sort, cursor)
-  const { create } = useAgentEnrollmentActions()
+  const { data, error, isLoading, isPlaceholderData, refetch } = useInvites(sort, cursor)
+  const { create } = useInviteActions()
 
   function resetPaging() {
     setCursor('')
@@ -45,7 +51,7 @@ export function EnrollmentsTab() {
     setOffsets([])
   }
 
-  function pickSort(field: EnrollmentSortField) {
+  function pickSort(field: InviteSortField) {
     setSort(toggleSort(field, sort))
     // The server rejects a cursor whose sort key does not match
     // (internal/api/pagination.go:272-286).
@@ -73,17 +79,20 @@ export function EnrollmentsTab() {
     setStartOffset(prevOffset)
   }
 
-  function onCreate(body: CreateEnrollmentBody) {
+  function onCreate(body: CreateInviteBody) {
     // The reveal dialog is driven by create.data, so closing the panel here is all
-    // that is needed on success; the hook's onSuccess does the invalidation.
+    // that is needed on success; the hook's onSuccess does the invalidation. This
+    // is a MUTATE-level callback (fired by MutationObserver after the success
+    // dispatch, query-core mutationObserver.js:85-95), not the hook-level one, so
+    // it cannot interfere with the success notification.
     create.mutate(body, { onSuccess: () => setCreating(false) })
   }
 
-  const enrollments = data?.items ?? []
+  const invites = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, enrollments.length)
+  const { x, y } = computePageRange(startOffset, invites.length)
   const rangeText =
-    enrollments.length === 0
+    invites.length === 0
       ? `0 of ${total.toLocaleString()}`
       : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}`
 
@@ -105,37 +114,26 @@ export function EnrollmentsTab() {
         </Button>
       </GlassPanel>
     )
-  } else if (enrollments.length === 0) {
-    // Unlike UsersTab, this list is active-only: a row can be consumed or expire
-    // between paging forward and the next fetch, so a non-first page landing on
-    // zero rows is reachable in normal use, not just a data-corruption edge case.
-    // Without a way back here, a reload is the admin's only exit.
+  } else if (invites.length === 0) {
+    // No prev escape hatch here, matching UsersTab rather than EnrollmentsTab.
+    // That hatch exists there because the enrollments list is FILTERED
+    // (consumed_at IS NULL AND expires_at > NOW()), so a row can vanish between
+    // paging forward and the next fetch. This list applies no filter and nothing
+    // deletes or reaps an invite, so a non-first page landing on zero rows is
+    // unreachable - the hatch would be untestable dead code.
     body = (
-      <>
-        <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
-          No active enrollments.
-        </GlassPanel>
-        {stack.length > 0 && (
-          <div className="flex justify-center">
-            <button
-              type="button"
-              onClick={prev}
-              className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute"
-            >
-              ← prev
-            </button>
-          </div>
-        )}
-      </>
+      <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
+        No invites yet.
+      </GlassPanel>
     )
   } else {
     body = (
       <>
-        <EnrollmentsTable enrollments={enrollments} sort={sort} onSort={pickSort} now={now} />
+        <InvitesTable invites={invites} sort={sort} onSort={pickSort} now={now} />
         <div className="flex items-center justify-between px-1 font-mono text-[10.5px] tracking-wider text-fg-mute">
           <span>
             SHOWING <span className="text-fg">{rangeText}</span>
-            {' · '}/v1/agent-enrollments (active only) · CURSOR PAGINATED
+            {' · '}/v1/invites (all states) · CURSOR PAGINATED
           </span>
           <div className="flex gap-2">
             <button
@@ -164,18 +162,18 @@ export function EnrollmentsTab() {
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-[11px] tracking-[0.06em] text-fg-mute">
-          GET /v1/agent-enrollments
+          GET /v1/invites
         </span>
         <PillButton
           variant="primary"
           className="ml-auto"
           // Disabled while pending for the same reason as the panel's own Cancel
-          // (CreateEnrollmentForm.tsx): this toggle's onClick also calls
+          // (CreateInviteForm.tsx): this toggle's onClick also calls
           // create.reset(), which only detaches the mutation observer and does
           // not cancel the in-flight request. Disabling it here additionally
           // closes a second-click accident: without this, a click mid-request
           // both reset() the live mutation and re-opened a fresh form, letting
-          // the admin fire a duplicate enroll in two clicks.
+          // the admin fire a duplicate create in two clicks.
           disabled={create.isPending}
           onClick={() => {
             // reset() clears a stale error AND, critically, a stale token: a
@@ -184,12 +182,12 @@ export function EnrollmentsTab() {
             setCreating((v) => !v)
           }}
         >
-          + Enroll agent
+          + Create invite
         </PillButton>
       </div>
 
       {creating && (
-        <CreateEnrollmentForm
+        <CreateInviteForm
           pending={create.isPending}
           error={create.error as Error | null}
           onSubmit={onCreate}
@@ -203,24 +201,27 @@ export function EnrollmentsTab() {
       {body}
 
       <div className="font-mono text-[10px] leading-relaxed tracking-[0.04em] text-fg-dim">
-        ▸ Enrollments bootstrap a <span className="text-fg-mute">relay-agent</span>: set the token
-        as <span className="text-fg-mute">RELAY_AGENT_ENROLLMENT_TOKEN</span> on first boot, and the
-        agent exchanges it for a long-lived agent token. Single use. This list shows{' '}
-        <span className="text-fg-mute">active only</span>, so a consumed or expired enrollment
-        disappears rather than changing state. There is no revoke endpoint in v1, so expiry or
-        consumption are the only terminal states - prefer a short TTL. A worker that already
-        enrolled can be cut off with DELETE /v1/workers/{'{id}'}/token.
+        ▸ Invites are <span className="text-fg-mute">one-time</span>. The server returns the raw
+        token only at creation, and there is no revoke endpoint in v1, so expiry or redemption are
+        the only terminal states - prefer a short TTL. Email binding pins the invite to one address;
+        an unbound invite can be redeemed by whoever holds the token. This list shows{' '}
+        <span className="text-fg-mute">all states</span>, and the STATUS pill is derived in the
+        browser from expires_at and used_at.
       </div>
 
       {/* Opens iff the mutation holds a result. The token is read straight from
           create.data and is never copied into state, so this is its only render
           site, and Done -> create.reset() both clears it and unmounts the dialog
-          in one step. */}
+          in one step: ending the generation IS releasing the resource, not a
+          separate step that could be skipped. reset() must never move into the
+          hook's onSuccess - query-core dispatches success only AFTER awaiting it
+          (mutation.js:123 vs :144), so the detached observer would never see the
+          success and this dialog would silently stop opening. */}
       {create.data && (
         <TokenRevealDialog
           token={create.data.token}
-          title="Agent enrollment created"
-          endpoint="POST /v1/agent-enrollments"
+          title="Invite created"
+          endpoint="POST /v1/invites"
           expiresAt={create.data.expires_at}
           onDone={() => create.reset()}
         />

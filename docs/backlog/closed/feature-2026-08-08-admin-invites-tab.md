@@ -1,8 +1,10 @@
 ---
-title: "Admin console: Invites tab (create now, list blocked on GET /v1/invites)"
+title: "Admin console: Invites tab"
 type: feature
-status: open
+status: closed
 created: 2026-08-08
+closed: 2026-08-13
+resolution: fixed
 priority: high
 source: carved from feature-2026-06-26-admin-console-pages during the 2026-08-08 admin-console-shell-users-tab slice
 ---
@@ -73,3 +75,43 @@ designed to supply them, so specify them there rather than in the UI:
 - **CREATED BY** as an email - `invites.created_by` is a user UUID with no join to `users`.
 The Holo footnote is accurate and can ship as written: invites are one-time, there is no revoke
 endpoint in v1, and expiry or redemption are the only terminal states.
+
+## Resolution
+Shipped 2026-08-13 (`2026-08-13-admin-invites-tab`). **The title was stale in two ways and is
+corrected above**: the list half stopped being blocked hours earlier when `GET /v1/invites` shipped,
+and the whole tab went in one slice rather than create-now-list-later.
+
+Create form with hour-denominated TTL presets, a token-revealed-once dialog, and a paginated
+sortable list with a four-state pill. `Chip` gained an `err` tone for EXPIRED. This is the **fifth
+and final admin tab to be built**; it sits second in the bar, between Users and Agent enrolls
+(`web/src/admin/tabs.ts:21-25`), so "last" means last built, not last displayed.
+
+**Two contract facts nobody had recorded, both found at spec time and both verified independently.**
+`time.ParseDuration` has no day unit, so a `7d` or `30d` TTL preset 400s every time - the presets go
+on the wire as `168h` and `720h`, pinned by a test that rejects `/[dwy]$/`. And `readJSON` runs
+unconditionally on `POST /v1/invites`, so a body is mandatory even though every field is optional.
+
+**Ships no revoke, delete or resend control**, because none of those endpoints exist and a
+guaranteed-failing button is a dead control - the same rule the enrollments tab set. The four states
+(active / expiring / expired / redeemed) derive client-side from `expires_at` and `used_at`, because
+the server deliberately returns no `status` field.
+
+**The review finding is the one worth remembering.** Cancelling an in-flight create destroyed an
+unrecoverable credential: only the submit button was pending-disabled, so Cancel and the
+`+ Create invite` toggle both called `create.reset()` while the mutation was live. `reset()` detaches
+the observer but does not cancel `Mutation.execute`, so the POST still landed, the server minted and
+persisted the invite, success dispatched to zero observers, `gcTime: 0` evicted the mutation, and the
+only plaintext copy of the token was destroyed before it was ever rendered - leaving a permanently
+unusable ACTIVE invite that nothing can revoke. Two lanes proved it independently with probes. It was
+**inherited verbatim from the shipped enrollments tab**, so the fix landed in both.
+
+Verified in a real browser: the token is absent from the DOM, `localStorage`, `sessionStorage` and the
+URL after dismissal and after navigating away and back; a 4-point hit test proved the dialog paints
+above the scrim; the TTL presets were observed on the wire as `168h`/`720h`.
+
+**Debt shipped deliberately:** this is the 7th consumer of the cursor-pager pattern against a rule
+that says extract before the third. A lens confirmed the copy is character-for-character faithful,
+which is the only thing that makes shipping it defensible. Filed as
+[[idea-2026-08-13-cursor-pager-hook]].
+
+Suite 973 -> 1049.

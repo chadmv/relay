@@ -109,6 +109,11 @@ Points to settle at spec time:
   `web/src/schedules/ScheduleDetailPage.tsx:30-66` (the third copy and the deviation comment)
 - Design record: `docs/superpowers/plans/2026-08-12-schedule-detail-page.md` ("THIRD-CONSUMER
   FLAG"), `docs/retros/2026-08-12-schedule-detail-page.md` (Problem 5)
+- Sibling extraction debt, filed 2026-08-13 and considerably worse: [[idea-2026-08-13-cursor-pager-hook]]
+  is the same "extract before the third consumer" rule at **seven** consumers rather than three.
+  Worth reading together - they share the byte-identical-test gate, and its `statusTone` warning
+  (a naive merge would flatten a deliberate per-module difference) is the same hazard this item
+  faces with the 404-versus-error branch.
 - Same shape, already done for a different primitive: the shared accessible-table component that
   landed earlier in this workstream is the precedent for how far to take an extraction and where to
   stop
