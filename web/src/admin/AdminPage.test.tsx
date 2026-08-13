@@ -50,6 +50,22 @@ function renderAt(path: string) {
         total: 1,
       }),
     ),
+    http.get('/v1/invites', () =>
+      HttpResponse.json({
+        items: [
+          {
+            id: 'i1',
+            created_at: '2026-08-01T09:00:00Z',
+            expires_at: '2026-08-10T09:00:00Z',
+            created_by: 'u1',
+            created_by_email: 'admin@studio.dev',
+            email: 'ada-invite@studio.dev',
+          },
+        ],
+        next_cursor: '',
+        total: 1,
+      }),
+    ),
     http.get('/v1/reservations', () =>
       HttpResponse.json({
         items: [
@@ -115,9 +131,18 @@ test('an unknown tab segment redirects to the users tab', async () => {
   expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument()
 })
 
-test('a not-yet-built tab segment redirects rather than rendering an empty shell', async () => {
+test('/admin/invites renders the invites panel inside the same shell', async () => {
   renderAt('/admin/invites')
+  expect(screen.getByText('SETTINGS · ADMIN ONLY')).toBeInTheDocument()
+  expect(screen.getByRole('heading', { level: 1, name: 'Admin' })).toBeInTheDocument()
+  expect(await screen.findByText('ada-invite@studio.dev')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Invites' })).toHaveAttribute('aria-current', 'page')
+})
+
+test('/admin/users still renders its own panel, not invites', async () => {
+  renderAt('/admin/users')
   expect(await screen.findByText('ada@studio.dev')).toBeInTheDocument()
+  expect(screen.queryByText('ada-invite@studio.dev')).not.toBeInTheDocument()
 })
 
 test('/admin/enrollments renders the enrollments panel inside the same shell', async () => {
