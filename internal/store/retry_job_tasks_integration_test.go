@@ -316,3 +316,71 @@ func TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected(t *
 	require.Equal(t, int32(0), got.RetryCount)
 	require.Equal(t, oldEpoch+1, got.AssignmentEpoch)
 }
+
+// TestRetryJobTasks_AllMode_WidensToTerminalSetAndNoFurther is the test that
+// stops a retry from evicting a live agent. It must exist even though the
+// handler's job-status gate makes a job with a running task hard to reach
+// through HTTP: the statement's guarantee must not depend on the caller.
+func TestRetryJobTasks_AllMode_WidensToTerminalSetAndNoFurther(t *testing.T) {
+	f := newRetryFixture(t)
+
+	pending := f.pending(t, "t-pending")
+	dispatched := f.dispatched(t, "t-dispatched")
+	running := f.inStatus(t, "t-running", "running")
+	done := f.inStatus(t, "t-done", "done")
+	failed := f.inStatus(t, "t-failed", "failed")
+	timedOut := f.inStatus(t, "t-timedout", "timed_out")
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: true,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []pgtype.UUID{done.ID, failed.ID, timedOut.ID}, reopened,
+		"task=all must reopen exactly the three terminal statuses")
+
+	for _, live := range []store.Task{pending, dispatched, running} {
+		got := f.get(t, live.ID)
+		require.Equal(t, live.Status, got.Status, "a non-terminal task must be untouched")
+		require.Equal(t, live.AssignmentEpoch, got.AssignmentEpoch,
+			"a non-terminal task's generation must not be ended - that would evict a live agent")
+		require.Equal(t, live.WorkerID, got.WorkerID)
+	}
+}
+
+// TestGetJobForUpdate_TakesARowLockThatBlocksASecondReader proves the statement
+// is not just GetJob with a longer name. Without the lock, handleCancelJob and
+// handleRetryJob interleave and a cancel can stamp `cancelled` over a retry's
+// freshly pending tasks - and GetEligibleTasks does not consult job status.
+func TestGetJobForUpdate_TakesARowLockThatBlocksASecondReader(t *testing.T) {
+	f := newRetryFixture(t)
+
+	txA, err := f.pool.Begin(f.ctx)
+	require.NoError(t, err)
+	defer txA.Rollback(f.ctx)
+	_, err = f.q.WithTx(txA).GetJobForUpdate(f.ctx, f.job.ID)
+	require.NoError(t, err)
+
+	txB, err := f.pool.Begin(f.ctx)
+	require.NoError(t, err)
+	defer txB.Rollback(f.ctx)
+
+	blocked := make(chan error, 1)
+	go func() {
+		_, err := f.q.WithTx(txB).GetJobForUpdate(f.ctx, f.job.ID)
+		blocked <- err
+	}()
+
+	select {
+	case err := <-blocked:
+		t.Fatalf("second GetJobForUpdate returned immediately (%v): the row lock is missing", err)
+	case <-time.After(750 * time.Millisecond):
+	}
+
+	require.NoError(t, txA.Commit(f.ctx))
+	select {
+	case err := <-blocked:
+		require.NoError(t, err, "B must succeed once A commits")
+	case <-time.After(10 * time.Second):
+		t.Fatal("B never unblocked after A committed")
+	}
+}
