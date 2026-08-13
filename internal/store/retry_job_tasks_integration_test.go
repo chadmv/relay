@@ -208,3 +208,111 @@ func TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpE
 		"exactly ONE epoch bump may result from two concurrent retries; a second "+
 			"bump would end a generation another operator's retry may already be running")
 }
+
+// TestRetryJobTasks_ReopenedRowFields_EpochIncrementsByExactlyOne is item
+// criterion 3: assert the increment per row, not merely that the epoch changed.
+// The two tasks start at DIFFERENT epochs so a statement that assigned a
+// constant would fail.
+//
+// The plan seeded the second task with RequeueTaskByID on an already-terminal
+// row; that statement carries `status IN ('dispatched','running')`, so it is a
+// no-op there and both tasks would have started at epoch 1, making the comment
+// above false. b is therefore driven running -> agent retry -> reclaimed ->
+// timed out, which really does land it at a higher epoch.
+//
+// That agent retry is also what makes `retry_count must reset to 0` mean
+// anything: seeded straight from CreateTask the column is already 0, so the
+// assertion passes against a statement that never writes it. b reaches the
+// operator retry with retry_count = 1.
+func TestRetryJobTasks_ReopenedRowFields_EpochIncrementsByExactlyOne(t *testing.T) {
+	f := newRetryFixture(t)
+
+	a := f.inStatus(t, "t-a", "failed")
+
+	// b: running at epoch 1, one agent retry burned (retry_count 1, epoch 2),
+	// reclaimed to epoch 3, then timed out - all through production statements.
+	b := f.inStatus(t, "t-b", "running")
+	burned, err := f.q.IncrementTaskRetryCount(f.ctx, store.IncrementTaskRetryCountParams{
+		ID: b.ID, AssignmentEpoch: b.AssignmentEpoch, WorkerID: b.WorkerID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), burned.RetryCount)
+	reclaimed, err := f.q.ClaimTaskForWorker(f.ctx, store.ClaimTaskForWorkerParams{
+		ID: b.ID, WorkerID: f.w.ID,
+	})
+	require.NoError(t, err)
+	b, err = f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: reclaimed.ID, Status: "timed_out", WorkerID: reclaimed.WorkerID,
+		AssignmentEpoch: reclaimed.AssignmentEpoch,
+		StartedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, a.AssignmentEpoch, b.AssignmentEpoch,
+		"the two rows must start at different epochs, or a constant-assigning "+
+			"statement would satisfy this test")
+	require.Equal(t, int32(1), b.RetryCount,
+		"b must reach the operator retry with a non-zero retry_count, or the "+
+			"reset assertion below is vacuous")
+
+	before := map[pgtype.UUID]int32{a.ID: a.AssignmentEpoch, b.ID: b.AssignmentEpoch}
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Len(t, reopened, 2)
+
+	for id, oldEpoch := range before {
+		got := f.get(t, id)
+		require.Equal(t, "pending", got.Status)
+		require.False(t, got.WorkerID.Valid, "worker_id must be cleared")
+		require.False(t, got.StartedAt.Valid, "started_at must be cleared")
+		require.False(t, got.FinishedAt.Valid, "finished_at must be cleared")
+		require.Equal(t, int32(0), got.RetryCount, "retry_count must reset to 0")
+		require.Equal(t, oldEpoch+1, got.AssignmentEpoch,
+			"assignment_epoch must be old+1 for every reopened row")
+	}
+}
+
+// TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected is the
+// second half of item criterion 3. A retried task's previous generation must be
+// unable to write status, logs or a retry. Note WHY each is rejected: the epoch
+// no longer matches AND worker_id is now NULL, so the plain `=` comparison fails
+// closed. Both are required; neither is decoration.
+func TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected(t *testing.T) {
+	f := newRetryFixture(t)
+	task := f.inStatus(t, "t-failed", "failed")
+	oldEpoch, oldWorker := task.AssignmentEpoch, task.WorkerID
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Len(t, reopened, 1)
+
+	_, err = f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "done", WorkerID: oldWorker, AssignmentEpoch: oldEpoch,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a late status update from the dead generation must be dropped")
+
+	_, err = f.q.AppendTaskLog(f.ctx, store.AppendTaskLogParams{
+		TaskID: task.ID, AssignmentEpoch: oldEpoch, WorkerID: oldWorker,
+		Stream: "stdout", Content: "zombie output",
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a trailing log chunk from the dead generation must be dropped")
+
+	_, err = f.q.IncrementTaskRetryCount(f.ctx, store.IncrementTaskRetryCountParams{
+		ID: task.ID, AssignmentEpoch: oldEpoch, WorkerID: oldWorker,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "an agent retry from the dead generation must be dropped")
+
+	logs, err := f.q.GetTaskLogs(f.ctx, task.ID)
+	require.NoError(t, err)
+	require.Empty(t, logs, "no output from the dead generation may reach task_logs")
+
+	got := f.get(t, task.ID)
+	require.Equal(t, "pending", got.Status)
+	require.Equal(t, int32(0), got.RetryCount)
+	require.Equal(t, oldEpoch+1, got.AssignmentEpoch)
+}
