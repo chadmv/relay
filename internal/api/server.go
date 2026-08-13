@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Invites (admin-only)
 	mux.Handle("POST /v1/invites", auth(admin(http.HandlerFunc(s.handleCreateInvite))))
+	mux.Handle("GET /v1/invites", auth(admin(http.HandlerFunc(s.handleListInvites))))
 
 	// Agent enrollments (admin-only)
 	mux.Handle("POST /v1/agent-enrollments", auth(admin(http.HandlerFunc(s.handleCreateAgentEnrollment))))
