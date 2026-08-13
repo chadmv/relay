@@ -37,11 +37,23 @@ interface AuthContextValue {
   // why logout() is NOT reused there: logout() would first fire
   // DELETE /v1/auth/token against a token that no longer exists.
   //
-  // The ORDER inside it is CLAUDE.md's "end the generation before releasing the
-  // resource": setStatus('anonymous') is what ends the generation, because
-  // ProtectedRoute re-renders to <Navigate to="/auth" replace/> in the same
-  // commit and unmounts every page and every active query observer, so nothing
-  // is left holding a continuation that could fire against the dead credential.
+  // What actually guards this teardown, verified by probe rather than assumed:
+  // setStatus('anonymous') does NOT take effect in the same commit as the
+  // calls before it just because they are written in sequence here - this
+  // function is typically invoked from a mutation's onSuccess, itself a
+  // promise continuation, so the eventual React commit is scheduled, not
+  // synchronous with this call. And queryClient.clear() does not stop
+  // anything already scheduled to refetch: it only evicts cached data, so a
+  // still-mounted observer with a refetch interval keeps issuing new requests
+  // against the now-empty cache until it is unmounted.
+  //
+  // What actually prevents an escaped request from doing anything is two
+  // things together: clearToken() runs FIRST, so any request that does fire
+  // after this point - whether it beats the render or not - carries no
+  // Authorization header and cannot act as this user; and setStatus('anonymous')
+  // eventually flips ProtectedRoute to <Navigate to="/auth" replace/>, which
+  // unmounts every page and every active query observer beneath it, which is
+  // what actually stops further requests from being scheduled at all.
   clearSession: () => void
 }
 
