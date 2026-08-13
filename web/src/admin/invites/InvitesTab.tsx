@@ -167,6 +167,14 @@ export function InvitesTab() {
         <PillButton
           variant="primary"
           className="ml-auto"
+          // Disabled while pending for the same reason as the panel's own Cancel
+          // (CreateInviteForm.tsx): this toggle's onClick also calls
+          // create.reset(), which only detaches the mutation observer and does
+          // not cancel the in-flight request. Disabling it here additionally
+          // closes a second-click accident: without this, a click mid-request
+          // both reset() the live mutation and re-opened a fresh form, letting
+          // the admin fire a duplicate create in two clicks.
+          disabled={create.isPending}
           onClick={() => {
             // reset() clears a stale error AND, critically, a stale token: a
             // previous create's data would otherwise re-open the reveal dialog.

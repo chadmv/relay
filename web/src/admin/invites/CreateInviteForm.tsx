@@ -92,7 +92,15 @@ export function CreateInviteForm({ pending, error, onSubmit, onCancel }: CreateI
       {error && <div className="mb-3 text-[11px] text-err">{error.message}</div>}
 
       <div className="flex justify-end gap-2">
-        <PillButton onClick={onCancel}>Cancel</PillButton>
+        {/* Disabled while pending: Cancel calls onCancel -> create.reset(), and
+            reset() only detaches the mutation observer (query-core
+            mutationObserver.js:50-54) - it does not cancel the in-flight
+            Mutation.execute. Letting Cancel fire mid-request would strand a
+            successful create with zero observers watching it, and gcTime: 0
+            would evict the only copy of the token before it is ever rendered. */}
+        <PillButton onClick={onCancel} disabled={pending}>
+          Cancel
+        </PillButton>
         <PillButton type="submit" variant="primary" disabled={pending}>
           Create invite
         </PillButton>

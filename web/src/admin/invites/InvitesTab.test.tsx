@@ -208,6 +208,53 @@ test('creating posts the exact body, opens the reveal dialog, and refreshes the 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 })
 
+test('the create toggle and Cancel are disabled while a create is pending, so an in-flight request cannot be abandoned', async () => {
+  const seen: URLSearchParams[] = []
+  let resolvePost!: (value: Response) => void
+  const postGate = new Promise<Response>((resolve) => {
+    resolvePost = resolve
+  })
+  let posts = 0
+  server.use(
+    listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })),
+    http.post('/v1/invites', async () => {
+      posts++
+      return postGate
+    }),
+  )
+  renderTab()
+  await screen.findByText('invitee@studio.dev')
+
+  await userEvent.click(screen.getByRole('button', { name: '+ Create invite' }))
+  await userEvent.type(screen.getByLabelText('Email'), 'new@studio.dev')
+  await userEvent.click(screen.getByRole('button', { name: 'Create invite' }))
+
+  // While the POST is in flight, both the panel's Cancel and the outer toggle
+  // must be disabled. Either one calling create.reset() here would detach the
+  // mutation observer before the response lands (MutationObserver.reset() only
+  // detaches; it does not cancel the in-flight Mutation.execute), so the eventual
+  // success would dispatch to zero observers and gcTime: 0 would evict the only
+  // copy of the token before it is ever rendered.
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '+ Create invite' })).toBeDisabled(),
+  )
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+  resolvePost(
+    HttpResponse.json(
+      { id: 'i9', token: TOKEN, expires_at: row().expires_at, email: 'new@studio.dev' },
+      { status: 201 },
+    ),
+  )
+
+  await screen.findByRole('dialog')
+  expect(posts).toBe(1)
+  expect(screen.getByLabelText('Token')).toHaveValue(TOKEN)
+
+  await userEvent.click(screen.getByRole('button', { name: /I have copied it/ }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
 test('a create error renders inside the panel and leaves the table mounted', async () => {
   const seen: URLSearchParams[] = []
   server.use(

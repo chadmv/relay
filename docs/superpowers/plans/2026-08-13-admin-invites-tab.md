@@ -2345,7 +2345,7 @@ git commit -m "feat(web): invites tab composition with cursor paging and reveal 
 
 ## Task 9: The token-secrecy suite (RED #2, integration level)
 
-Task 5 proved the retention rule at the hook boundary with a genuine first-write RED. **This task proves it again through the real components, and its RED comes from a different cause** - removing `create.reset()` from the dialog's `onDone`. Two independent mutations, two independent REDs, both recorded.
+Task 5 proved the retention rule at the hook boundary with a genuine first-write RED. **This task was believed to prove it again through the real components via a second, independent cause** - removing `create.reset()` from the dialog's `onDone` - **but that claim did not hold up under verification.** With `onDone={() => {}}`, this suite's run fails first at the dialog-dismissal assertion (`screen.queryByRole('dialog')).not.toBeInTheDocument()`), because the dialog is driven by `create.data` and nothing ever clears it; the cache-empty assertion below it is never reached. The cache-empty assertion's real independent counterpart was added later, at the hook boundary in `useInviteActions.test.tsx`: a case that omits `reset()` entirely and asserts the settled mutation stays in the cache. See the 2026-08-13 Phase 4 code review for the finding and the fix.
 
 Adapted from `enrollments/enrollmentTokenSecrecy.test.tsx`. **Drop the seven matcher self-tests** at `:84-155` - they are shipped in the enrollments suite and duplicating them buys nothing. Keep the real-flow tests, the URL instrument control and the detached-layer test.
 
@@ -2876,7 +2876,7 @@ Report to the conductor: the Task 0 baseline and the final suite totals; the two
 | 1. `/admin/invites` reachable, in the bar between Users and Agent enrolls, one registry entry, stale comment corrected | 10 |
 | 2. Create with optional email and four presets; body always sent; `expires_in` always `/^\d+h$/` and `<= 720h`; blank email omitted, not `""` | 2, 7 |
 | 3. Raw token displayed exactly once in `TokenRevealDialog` with copy plus clipboard fallback, shared dialog unmodified | 8, 9 |
-| 4. After dismissal: DOM, **mutation cache empty**, query cache, both storages, every request URL and every console method clean; cache-emptiness proven RED two independent ways | 5 (RED #1), 9 (RED #2 and #2b) |
+| 4. After dismissal: DOM, **mutation cache empty**, query cache, both storages, every request URL and every console method clean; cache-emptiness proven RED at the hook boundary (Task 5) and, independently, by a later `useInviteActions.test.tsx` case that omits `reset()` - Task 9's own "remove `create.reset()`" RED was found (2026-08-13 Phase 4 review) to land on the dialog-dismissal assertion instead, never reaching the cache-empty line | 5 (RED #1), later hook-boundary addition (RED #2) |
 | 5. Every state listed with cursor pagination, both sortable headers in both directions, footer range and total from the endpoint's own `total` | 6, 8 |
 | 6. Pill derives REDEEMED -> EXPIRED -> EXPIRING -> ACTIVE, 1h window, redeemed-and-expired reads REDEEMED | 3 |
 | 7. `CREATED BY` renders `created_by_email`; the raw UUID never rendered; no token-prefix column | 6 |

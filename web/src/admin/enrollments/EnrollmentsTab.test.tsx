@@ -199,6 +199,49 @@ test('creating posts the exact body, opens the reveal dialog, and refreshes the 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 })
 
+test('the create toggle and Cancel are disabled while a create is pending, so an in-flight request cannot be abandoned', async () => {
+  const seen: URLSearchParams[] = []
+  let resolvePost!: (value: Response) => void
+  const postGate = new Promise<Response>((resolve) => {
+    resolvePost = resolve
+  })
+  let posts = 0
+  server.use(
+    listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 1 })),
+    http.post('/v1/agent-enrollments', async () => {
+      posts++
+      return postGate
+    }),
+  )
+  renderTab()
+  await screen.findByText('farm-west-13')
+
+  await userEvent.click(screen.getByRole('button', { name: '+ Enroll agent' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Enroll' }))
+
+  // Same gap as the invites tab this pattern was copied from: neither the outer
+  // toggle nor the panel's Cancel was disabled while pending, so a click on
+  // either called create.reset() and detached the mutation observer before the
+  // response landed - MutationObserver.reset() only detaches, it does not cancel
+  // the in-flight Mutation.execute - stranding a permanently unusable enrollment
+  // token the admin never saw.
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '+ Enroll agent' })).toBeDisabled(),
+  )
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
+
+  resolvePost(
+    HttpResponse.json({ id: 'e9', token: TOKEN, expires_at: row().expires_at }, { status: 201 }),
+  )
+
+  await screen.findByRole('dialog')
+  expect(posts).toBe(1)
+  expect(screen.getByLabelText('Token')).toHaveValue(TOKEN)
+
+  await userEvent.click(screen.getByRole('button', { name: /I have copied it/ }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
 test('a create error renders inside the panel and leaves the table mounted', async () => {
   const seen: URLSearchParams[] = []
   server.use(

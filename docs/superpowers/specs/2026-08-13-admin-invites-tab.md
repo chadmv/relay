@@ -510,8 +510,14 @@ enrollments suite and are not duplicated.
 - The detached dialog layer holds no credential after teardown
   (`enrollmentTokenSecrecy.test.tsx:243-279` is the shape).
 - **Non-vacuity, performed and reported:** deleting `gcTime: 0` turns the cache-empty
-  assertion RED, and removing `create.reset()` from `onDone` turns it RED for a different
-  reason. Two independent mutations, two independent REDs.
+  assertion RED directly. Removing `create.reset()` from `onDone` also turns this test file
+  RED, but NOT at the cache-empty line: with `onDone={() => {}}` the run fails earlier, at
+  `expect(screen.queryByRole('dialog')).not.toBeInTheDocument()`, because the dialog is
+  driven by `create.data` and nothing ever clears it - the cache-empty assertion is never
+  reached. The cache-empty assertion's own independent counterpart lives in
+  `useInviteActions.test.tsx`: a case that skips `reset()` entirely and asserts the settled
+  mutation stays in the cache, proving the emptiness claim genuinely depends on `reset()`
+  running rather than on the dialog dismissing.
 
 ### `InvitesTable.test.tsx`
 
@@ -564,8 +570,10 @@ positive control in the representation the real failure would take.
    a clipboard fallback, and the shared dialog is used unmodified.
 4. After dismissal the token is absent from the DOM, **the mutation cache is empty**, the
    query cache, both web storages, every request URL, and every console method. The
-   cache-empty assertion is proven RED by deleting `gcTime: 0` and, independently, by
-   removing `create.reset()`.
+   cache-empty assertion is proven RED by deleting `gcTime: 0`. Removing `create.reset()`
+   from `onDone` also turns the suite RED, but at the dialog-dismissal assertion, not the
+   cache-empty one - the latter is never reached on that path. Its independent counterpart is
+   a `useInviteActions.test.tsx` case that omits `reset()` and asserts the mutation survives.
 5. The list renders every state with cursor pagination, sortable `CREATED` and `EXPIRES`
    headers in both directions, and a footer whose range and total come from the endpoint's
    own `total`.

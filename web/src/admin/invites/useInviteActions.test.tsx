@@ -124,6 +124,30 @@ test('after reset() the settled create mutation leaves the mutation cache entire
   await waitFor(() => expect(client.getMutationCache().getAll()).toHaveLength(0))
 })
 
+// Counterpart to the previous test's emptiness assertion. That test's own comment
+// once claimed removing create.reset() was an independent RED for "the mutation
+// cache is empty" - it is not: with onDone={() => {}} (InvitesTab's real call
+// site), the run fails earlier at
+// `expect(screen.queryByRole('dialog')).not.toBeInTheDocument()`
+// (InvitesTab.test.tsx / inviteTokenSecrecy.test.tsx), because the dialog is
+// driven by create.data and nothing ever clears it. The cache-empty line is never
+// reached, so that claim was never actually exercised. This test reaches the
+// cache assertion directly - reset() is never called at all - so it stands as the
+// real, independent counterpart: it proves a settled mutation with a live
+// observer stays in the cache absent reset(), which is exactly what the previous
+// test's emptiness claim depends on.
+test('without reset(), a settled create mutation stays in the mutation cache (proves the emptiness assertion above actually depends on reset())', async () => {
+  const client = newClient()
+  server.use(http.post('/v1/invites', () => created()))
+  const { result } = renderHook(() => useInviteActions(), { wrapper: makeWrapper(client) })
+  await result.current.create.mutateAsync({ email: EMAIL, expires_in: '72h' })
+
+  // No act(() => reset()) here, unlike the test above. gcTime: 0 alone cannot
+  // evict while this hook's observer is still attached
+  // (query-core mutation.js:47-55), so the entry must still be present.
+  expect(client.getMutationCache().getAll()).toHaveLength(1)
+})
+
 // Guard for the ordering trap, and it PASSES ON FIRST WRITE - its RED is produced
 // by the mutate-and-revert in Step 4b, not by the missing implementation.
 // Mutation.execute awaits the hook-level onSuccess at query-core mutation.js:123
