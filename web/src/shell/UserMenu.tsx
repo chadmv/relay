@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type FocusEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { GlassPanel } from '../components/holo'
 
@@ -67,8 +67,31 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // React maps onBlur to the native, BUBBLING focusout, so this fires for focus
+  // leaving any descendant of the container.
+  //
+  // Tab out is a DISMISS route for a disclosure, not something to intercept. Do not
+  // copy DialogShell's Tab trap here: a menu is not modal, and the page behind it
+  // stays fully interactive.
+  function onContainerBlur(e: FocusEvent<HTMLDivElement>) {
+    // A NULL relatedTarget means "blurred to nothing" - jsdom fires exactly that for
+    // a bare blur() (jsdom/living/nodes/HTMLOrSVGElement-impl.js:82-83), and in a
+    // real browser it is what pressing the mouse on this panel's own non-focusable
+    // email header produces. Closing on it would make the dropdown vanish under the
+    // user's cursor. The document mousedown handler already owns the "pressed
+    // somewhere else" case, so this branch has a correct owner and does not need a
+    // second one.
+    if (!e.relatedTarget) return
+    // Shift+Tab from the first item lands on the toggle, which is INSIDE this
+    // container, so the containment check is what keeps the menu open there.
+    //
+    // close(), not closeAndRestoreFocus(): by construction focus is already outside,
+    // so the restore would be a theft from the destination the user just Tabbed to.
+    if (ref.current && !ref.current.contains(e.relatedTarget)) close()
+  }
+
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative" onBlur={onContainerBlur}>
       <button
         ref={toggleRef}
         onClick={() => setOpen((v) => !v)}

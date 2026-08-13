@@ -214,3 +214,58 @@ test('an outside mousedown closes the menu and never touches the toggle focus', 
   expect(document.activeElement).toBe(after)
   toggleFocus.mockRestore()
 })
+
+test('Tab out of the last item closes the menu without stealing the destination', async () => {
+  renderMenuWithSibling()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  const after = screen.getByRole('button', { name: 'After' })
+  await userEvent.click(toggle)
+  await userEvent.tab() // Profile
+  await userEvent.tab() // Password
+  await userEvent.tab() // Sessions
+  await userEvent.tab() // Log out
+  // Positive control on the tab order itself: the panel follows the toggle in DOM
+  // order and every item is a natural tab stop, which is the entire reason this
+  // surface is not portalled and carries no roving tabindex.
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Log out' }))
+
+  await userEvent.tab()
+
+  expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
+  // The close must not also yank focus back: the user asked to go forward.
+  expect(document.activeElement).toBe(after)
+})
+
+test('Shift+Tab from the first item lands on the toggle and leaves the menu OPEN', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Profile' }))
+
+  await userEvent.tab({ shift: true })
+
+  // The toggle is INSIDE the container, so the containment check is what keeps the
+  // menu open here. Without this control, a rule that closed on EVERY focusout
+  // would pass the Tab-out test above.
+  expect(document.activeElement).toBe(toggle)
+  expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+})
+
+test('a blur with a null relatedTarget does NOT close the menu', async () => {
+  renderMenu()
+  await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
+  await userEvent.tab()
+  const first = screen.getByRole('link', { name: 'Profile' })
+  expect(document.activeElement).toBe(first)
+
+  first.blur()
+
+  // jsdom fires focusout with relatedTarget === null here
+  // (jsdom/living/nodes/HTMLOrSVGElement-impl.js:82-83). In a real browser that is
+  // what pressing the mouse on this panel's own non-focusable email header
+  // produces, and closing on it would make the dropdown vanish under the cursor.
+  // A naive onBlur={() => setOpen(false)} passes every other test in this file and
+  // fails exactly here.
+  expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+})
