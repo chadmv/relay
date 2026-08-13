@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { server } from '../../test/setup-helpers'
 import { AuthProvider } from '../../auth/AuthProvider'
 import { clearToken, setToken } from '../../lib/token'
@@ -50,6 +50,10 @@ function renderTab() {
 }
 
 afterEach(() => clearToken())
+// Belt-and-suspenders even when a test's own try/finally already restores real
+// timers: a thrown assertion before that finally would otherwise leak fake
+// timers into every later test in this file.
+afterEach(() => vi.useRealTimers())
 
 test('renders rows from the envelope and the endpoint hint', async () => {
   const seen: URLSearchParams[] = []
@@ -105,27 +109,44 @@ test('toggling include archived sets include_archived=true and resets the cursor
 })
 
 test('typing in the email filter issues exactly one ?email= request and hides the pager', async () => {
-  const seen: URLSearchParams[] = []
-  server.use(listHandler(seen, () => ({ items: [user()], next_cursor: 'c2', total: 9 })))
-  renderTab()
-  await screen.findByText('ada@studio.dev')
-  expect(screen.getByRole('button', { name: /next 50/ })).toBeInTheDocument()
+  // The debounce is a real setTimeout (web/src/lib/useDebouncedValue.ts) racing
+  // against userEvent.type's per-keystroke gaps. On a loaded machine those gaps
+  // can exceed the 10ms window and genuinely produce 2-3 requests, which is what
+  // destabilized this test under parallel test-worker load. Fake timers make the
+  // debounce window deterministic so the property - a keystroke burst collapses
+  // into exactly one request - can be asserted exactly instead of loosened.
+  // shouldAdvanceTime keeps React Testing Library's own polling (findBy*/waitFor,
+  // which run on setInterval) alive without manual pumping; advanceTimers wires
+  // userEvent's internal waits to the same fake clock so `.type()` doesn't hang.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    const typist = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const seen: URLSearchParams[] = []
+    server.use(listHandler(seen, () => ({ items: [user()], next_cursor: 'c2', total: 9 })))
+    renderTab()
+    await screen.findByText('ada@studio.dev')
+    expect(screen.getByRole('button', { name: /next 50/ })).toBeInTheDocument()
 
-  await userEvent.type(screen.getByLabelText('Filter by email'), 'ada@studio.dev')
-  // Wait on the full debounced value landing - that is the actual proof the
-  // debounce collapsed the keystroke burst into one request. Asserting the raw
-  // count with toBe(1) is timing-fragile on a loaded machine (a real 10ms
-  // debounce can occasionally observe 2), and since the count only grows,
-  // waitFor could never recover from an early over-count; toBeLessThanOrEqual
-  // keeps the count check honest without that flakiness.
-  await waitFor(() =>
-    expect(seen.some((p) => p.get('email') === 'ada@studio.dev')).toBe(true),
-  )
-  expect(seen.filter((p) => p.has('email')).length).toBeLessThanOrEqual(1)
+    await typist.type(screen.getByLabelText('Filter by email'), 'ada@studio.dev')
+    // Deterministically cross the 10ms debounce window in one jump, rather than
+    // relying on shouldAdvanceTime's real-time ticking to eventually get there -
+    // vi.advanceTimersByTimeAsync so the resulting setState is flushed inside act.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    await waitFor(() =>
+      expect(seen.some((p) => p.get('email') === 'ada@studio.dev')).toBe(true),
+    )
+    expect(seen.filter((p) => p.has('email')).length).toBe(1)
 
-  // The server returns before parsePage on the ?email= branch, so the pager would
-  // claim a page that does not exist.
-  await waitFor(() => expect(screen.queryByRole('button', { name: /next 50/ })).not.toBeInTheDocument())
+    // The server returns before parsePage on the ?email= branch, so the pager would
+    // claim a page that does not exist.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /next 50/ })).not.toBeInTheDocument(),
+    )
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('a filter with no match shows the filtered empty card', async () => {
