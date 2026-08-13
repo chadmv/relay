@@ -33,13 +33,25 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
     if (focusWasInside) toggleRef.current?.focus()
   }
 
+  // Close WITHOUT touching focus. Used by the two paths where the browser is
+  // already moving focus itself, so a restore here would fight the user.
+  function close() {
+    setOpen(false)
+  }
+
   useEffect(() => {
     if (!open) return
     function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+      // close(), NOT closeAndRestoreFocus(): mousedown fires BEFORE the browser
+      // moves focus to whatever was pressed, so at this instant activeElement is
+      // still inside the panel and a restore would steal focus away from the
+      // control the user just clicked. Identical rule to the Escape path below,
+      // opposite answer, purely because the event ordering differs. This is why the
+      // DialogShell reasoning had to be re-derived here rather than copied.
+      if (ref.current && !ref.current.contains(e.target as Node)) close()
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') closeAndRestoreFocus()
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -47,6 +59,12 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('keydown', onKey)
     }
+    // Both helpers are captured from the render that ran this effect and are
+    // deliberately not dependencies: they touch only refs and setOpen, all of which
+    // are stable for the component's life, so a stale closure cannot observe stale
+    // state. Listing them would re-subscribe both document listeners on every
+    // render for no behaviour gain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   return (

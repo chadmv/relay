@@ -125,3 +125,92 @@ test('Log out closes the menu, returns focus to the toggle, and still calls onLo
   expect(document.activeElement).toBe(toggle)
   expect(onLogout).toHaveBeenCalledOnce()
 })
+
+// A focusable sibling AFTER the component, for the tests that need somewhere for
+// focus to go. Deliberately a separate helper: renderMenu above is shipped and
+// stays byte-identical.
+function renderMenuWithSibling(onLogout = vi.fn()) {
+  render(
+    <MemoryRouter>
+      <UserMenu email="ada@studio.dev" onLogout={onLogout} />
+      <button>After</button>
+    </MemoryRouter>
+  )
+  return onLogout
+}
+
+test('Escape returns focus to the toggle when focus was inside the panel', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  await userEvent.click(toggle)
+  // Genuinely put focus INSIDE the panel, and assert that it landed, before
+  // pressing Escape. Without this the test passes against a component that
+  // focuses the toggle unconditionally - which is exactly the implementation its
+  // partner below exists to refute.
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Profile' }))
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  await userEvent.keyboard('{Escape}')
+
+  expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
+  expect(document.activeElement).toBe(toggle)
+  // Paired with the not.toHaveBeenCalled() in the mousedown test below: the two
+  // use the SAME instrument, so one cannot pass by measuring something the other
+  // does not.
+  expect(toggleFocus).toHaveBeenCalled()
+  toggleFocus.mockRestore()
+})
+
+test('Escape does not steal focus when focus was outside the container', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  await userEvent.click(toggle)
+  // SIMULATING Safari, which does not focus a <button> on click, so the menu can
+  // legitimately be open with document.activeElement === <body>. user-event always
+  // focuses the closest focusable on click (event/focus.js:14-25), so jsdom cannot
+  // reach that state naturally: this blur() STANDS IN for it and is not a
+  // reproduction of Safari's behaviour.
+  //
+  // blur() fires focusout with a NULL relatedTarget
+  // (jsdom/living/nodes/HTMLOrSVGElement-impl.js:82-83), which the focusout rule
+  // added in the next task deliberately ignores - so the menu is still open when
+  // Escape arrives, both now and after that task lands.
+  ;(document.activeElement as HTMLElement).blur()
+  expect(document.activeElement).toBe(document.body)
+  expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+
+  await userEvent.keyboard('{Escape}')
+
+  expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
+  expect(document.activeElement).toBe(document.body)
+})
+
+test('an outside mousedown closes the menu and never touches the toggle focus', async () => {
+  renderMenuWithSibling()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  const after = screen.getByRole('button', { name: 'After' })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Profile' }))
+
+  // Spying on the CALL rather than reading activeElement at the end, because the
+  // end state cannot tell the two implementations apart: user-event moves focus to
+  // the clicked control AFTER the mousedown listeners run (event/focus.js:14-25),
+  // so a focus-stealing close is overwritten a moment later and both versions
+  // finish with activeElement === after. The steal is only observable as the call.
+  // Same instrument DialogShell used for the equivalent problem
+  // (DialogShell.tsx:256-259), scoped to one element.
+  //
+  // The real-browser harm this pins: press on non-focusable page content while the
+  // menu is open. Nothing else takes focus, so the stolen focus is not overwritten
+  // and the toggle keeps it.
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  await userEvent.click(after)
+
+  expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
+  expect(toggleFocus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(after)
+  toggleFocus.mockRestore()
+})
