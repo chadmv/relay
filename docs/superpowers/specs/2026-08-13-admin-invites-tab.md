@@ -5,7 +5,7 @@ Status: Draft (autonomous cycle; conductor review)
 
 ## Overview
 
-The fifth and last admin-console tab: create an invite (optional email binding, choice of
+The fifth and final admin-console tab to be BUILT (it sits second in the bar, between Users and Agent enrolls: tabs.ts:21-25): create an invite (optional email binding, choice of
 TTL), reveal the raw token clear-text exactly once, and list every invite with a
 client-derived state pill.
 
