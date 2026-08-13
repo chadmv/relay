@@ -1,6 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
+import { MemoryRouter } from 'react-router-dom'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
@@ -27,7 +28,11 @@ const page = {
 
 test('renders schedules and the page-scoped summary', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json(page)))
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   expect(await screen.findByText('nightly-build')).toBeInTheDocument()
   expect(screen.getByText('weekly-clean')).toBeInTheDocument()
   expect(screen.getByText('2 schedules')).toBeInTheDocument()
@@ -35,7 +40,11 @@ test('renders schedules and the page-scoped summary', async () => {
 
 test('does not render the backend-blocked filter chips, search, or FAILED-24H stat', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json(page)))
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('nightly-build')
   // Omitted per spec: All/Enabled/Disabled filter chips, free-text search, FAILED-24H stat.
   expect(screen.queryByRole('button', { name: /^enabled$/i })).toBeNull()
@@ -46,13 +55,21 @@ test('does not render the backend-blocked filter chips, search, or FAILED-24H st
 
 test('shows the empty state when there are no schedules', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json({ items: [], next_cursor: '', total: 0 })))
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   expect(await screen.findByText('No schedules yet.')).toBeInTheDocument()
 })
 
 test('shows the error state with a Retry button', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   expect(await screen.findByText('Retry')).toBeInTheDocument()
 })
 
@@ -64,7 +81,11 @@ test('changing the sort re-requests with the new sort key', async () => {
       return HttpResponse.json(page)
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('nightly-build')
   await userEvent.selectOptions(screen.getByLabelText('Sort'), 'name')
   await waitFor(() => expect(sorts).toContain('name'))
@@ -80,7 +101,11 @@ test('next/prev pagination walks the cursor', async () => {
       return HttpResponse.json({ ...page, next_cursor: c ? '' : 'CUR2' })
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('nightly-build')
   await userEvent.click(screen.getByRole('button', { name: /next/i }))
   await waitFor(() => expect(cursors).toContain('CUR2'))
@@ -116,7 +141,11 @@ test('next and prev are disabled while a page fetch is in flight', async () => {
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
 
   // Page 1 loaded: prev disabled, next enabled.
   expect(await screen.findByText('sched-A')).toBeInTheDocument()
@@ -169,7 +198,11 @@ test('pagination footer shows 1-N of total on the first full page', async () => 
       HttpResponse.json({ items: makeSchedules(50), next_cursor: 'CUR1', total: 120 }),
     ),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('sched-0')
   expect(await screen.findByText(/1-50 of 120/i)).toBeInTheDocument()
 })
@@ -185,7 +218,11 @@ test('pagination footer shows correct absolute range on partial last page after 
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('sched-0')
   expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
 
@@ -205,7 +242,11 @@ test('pagination footer restores prior range when paging back', async () => {
       return HttpResponse.json(pages[cur])
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('sched-0')
   expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
 
@@ -227,7 +268,11 @@ test('clicking Disable PATCHes the schedule', async () => {
       return HttpResponse.json({ ...page.items[0], enabled: false })
     }),
   )
-  renderWithQuery(<SchedulesPage />)
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
   await screen.findByText('nightly-build')
   await userEvent.click(screen.getAllByRole('button', { name: 'Disable' })[0])
   await waitFor(() => expect(patched).toEqual({ enabled: false }))

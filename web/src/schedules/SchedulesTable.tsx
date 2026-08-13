@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import type { Schedule } from './api'
 import { formatRelativeTime, nextRunDisplay, shortId } from './format'
@@ -52,7 +53,12 @@ export function SchedulesTable({
             >
               <TableCell className="flex min-w-0 items-center gap-2">
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.enabled ? 'bg-ok' : 'bg-fg-dim'}`} />
-                <span className="truncate font-sans text-[13px] text-fg">{s.name}</span>
+                <Link
+                  to={`/schedules/${s.id}`}
+                  className="truncate font-sans text-[13px] text-fg hover:text-accent"
+                >
+                  {s.name}
+                </Link>
               </TableCell>
               <TableCell className="text-fg">{s.cron_expr}</TableCell>
               <TableCell className="truncate text-[10.5px] text-fg-mute">{s.timezone}</TableCell>
@@ -86,6 +92,17 @@ export function SchedulesTable({
                 >
                   {s.enabled ? 'Disable' : 'Enable'}
                 </button>
+                {/* A react-router <Link>, not a useNavigate handler on a button, so
+                    middle-click and open-in-new-tab work and no callback has to be
+                    threaded through this component's props. Row identity in the
+                    accessible name, matching UsersTable.tsx:169-199. */}
+                <Link
+                  to={`/schedules/${s.id}`}
+                  aria-label={`Edit ${s.name}`}
+                  className="rounded-md border border-border bg-white/5 px-2.5 py-1 text-[11px] text-fg-mute"
+                >
+                  Edit
+                </Link>
               </TableCell>
             </TableRow>
           )
