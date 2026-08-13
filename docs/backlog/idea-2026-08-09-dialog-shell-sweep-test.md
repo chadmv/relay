@@ -63,3 +63,5 @@ for any future sweep of the same shape.
 - Same lesson, different enforcement mechanism:
   [[idea-2026-06-05-shared-accessible-table-primitive]] (closed)
 - Shipped the shell this protects: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]]
+- **A second sweep of the identical shape**, and the place to settle the Vitest-versus-ESLint
+  question once for both: [[idea-2026-08-13-field-error-wiring-audit]]

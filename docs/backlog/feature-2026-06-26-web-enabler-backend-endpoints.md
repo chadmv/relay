@@ -22,9 +22,19 @@ the user's choice) rather than three. Each endpoint is also noted inline in its 
 - **`GET /v1/invites`** (admin) - list invites with active / expiring / expired / redeemed state.
   Needs a `ListInvites` store query; `invites.sql` today has only Create / GetByTokenHash / MarkUsed.
   Unblocks the Admin Invites tab.
-- **`GET /v1/auth/tokens`** - list the caller's active sessions (created_at, last_used_at,
-  current-session flag) WITHOUT leaking the token hash. Needs a `ListTokensForUser` query. Unblocks
-  the Profile Sessions tab (`DELETE /v1/auth/tokens` already exists).
+- **`GET /v1/auth/tokens`** - list the caller's active sessions WITHOUT leaking the token hash.
+  Unblocks the Profile Sessions tab (`DELETE /v1/auth/tokens` already exists).
+  **Corrected 2026-08-13 (2026-08-12-profile-pages):** this bullet previously said the work is
+  "a `ListTokensForUser` query" and listed `last_used_at` among the columns. That understates it.
+  `api_tokens` has exactly five columns - `id`, `user_id`, `token_hash`, `created_at`, `expires_at`
+  (`internal/store/migrations/000001_initial.up.sql:13-19`) - so there is **no** `last_used_at`, no
+  user-agent and no IP anywhere on the row. A useful session list is therefore a **migration plus a
+  write path plus a query**, not a query: something has to stamp last-use on every authenticated
+  request, which is a hot-path write on `BearerAuth` and needs its own throttling decision. Scope
+  the honest minimum first - `created_at`, `expires_at`, and a current-session flag derived by
+  comparing `tokenhash.Hash` of the caller's own bearer token - and treat last-active as a separate,
+  larger item. The shipped Sessions tab states this omission on the page, so a future implementer
+  reading only that tab does not have to rediscover it.
 - **`POST /v1/jobs/{id}/retry`** (`?task=failed|all`) - operator re-run of a terminal job's failed or
   all tasks (per-task retry already exists agent-internally). Must bump `assignment_epoch` and null
   `worker_id` per the epoch-fence invariant. Reopening terminal jobs reactivates the jobs-stats bug.
