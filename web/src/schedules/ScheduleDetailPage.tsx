@@ -65,8 +65,37 @@ export function ScheduleDetailPage() {
 
   if (!schedule) return null
 
-  const busy = runNow.isPending || setEnabled.isPending || remove.isPending
+  // keepPreviousData means a detail-to-detail route transition (no unmount, only
+  // useParams().id changing) renders the PREVIOUS schedule's row while the new one
+  // is in flight: isLoading is false and schedule is non-null throughout, so none
+  // of the checks above catch it. Every id-bearing control below - the action bar,
+  // the trigger form (which seeds its draft from `schedule` exactly once) and the
+  // delete confirm dialog (whose copy names `schedule.name`) - must not render
+  // against a schedule whose id does not match the route until the fresh row
+  // arrives, or a clean Save / Delete / Run now / Disable can act on the WRONG id.
+  if (schedule.id !== id) {
+    return <GlassPanel className="h-40" />
+  }
+
+  // Symmetric in both directions: a Save in flight disables the header actions and
+  // a header action in flight disables Save, since there is no version column and
+  // no 409 handling (api.ts:80-83) - a concurrent PATCH from either surface is
+  // last-writer-wins, so only one of these mutations should ever be in flight at a
+  // time.
+  const busy = runNow.isPending || setEnabled.isPending || remove.isPending || update.isPending
   const actionError = (runNow.error ?? setEnabled.error ?? remove.error) as Error | null
+
+  // A settled mutation error stays on its object until something resets it
+  // (react-query does not clear it on its own). The `??` chain above shows the
+  // FIRST non-null error, so a stale one from an earlier action can both keep the
+  // banner up after a later action succeeds and hide a later action's own failure.
+  // Reset the OTHER two action mutations before firing a new one, so the banner can
+  // only ever reflect the action that actually just ran.
+  function resetOtherActionErrors(current: 'runNow' | 'setEnabled' | 'remove') {
+    if (current !== 'runNow') runNow.reset()
+    if (current !== 'setEnabled') setEnabled.reset()
+    if (current !== 'remove') remove.reset()
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -82,13 +111,32 @@ export function ScheduleDetailPage() {
           {/* All three are owner-or-admin server-side, including run-now
               (internal/api/scheduled_jobs.go:642), contrary to the hi-fi's
               admin-only footnote. No client-side role gate. */}
-          <PillButton onClick={() => runNow.mutate(id)} disabled={busy}>
+          <PillButton
+            onClick={() => {
+              resetOtherActionErrors('runNow')
+              runNow.mutate(id)
+            }}
+            disabled={busy}
+          >
             Run now
           </PillButton>
-          <PillButton onClick={() => setEnabled.mutate({ id, enabled: !schedule.enabled })} disabled={busy}>
+          <PillButton
+            onClick={() => {
+              resetOtherActionErrors('setEnabled')
+              setEnabled.mutate({ id, enabled: !schedule.enabled })
+            }}
+            disabled={busy}
+          >
             {schedule.enabled ? 'Disable' : 'Enable'}
           </PillButton>
-          <PillButton variant="danger" onClick={() => setConfirmDelete(true)} disabled={busy}>
+          <PillButton
+            variant="danger"
+            onClick={() => {
+              resetOtherActionErrors('remove')
+              setConfirmDelete(true)
+            }}
+            disabled={busy}
+          >
             Delete
           </PillButton>
         </div>
@@ -139,8 +187,9 @@ export function ScheduleDetailPage() {
           <Panel title="Trigger" meta="PATCH /v1/scheduled-jobs">
             <ScheduleTriggerForm
               schedule={schedule}
-              pending={update.isPending}
+              pending={busy}
               error={(update.error as Error | null)?.message}
+              onDismissError={() => update.reset()}
               onSubmit={(patch: SchedulePatch) => {
                 // Clear a stale server error before re-submitting, matching the
                 // NewJobPage/JobActions convention.
@@ -210,6 +259,7 @@ export function ScheduleDetailPage() {
           onCancel={() => setConfirmDelete(false)}
           onConfirm={() => {
             setConfirmDelete(false)
+            resetOtherActionErrors('remove')
             remove.mutate(id, { onSuccess: () => navigate('/schedules') })
           }}
         />

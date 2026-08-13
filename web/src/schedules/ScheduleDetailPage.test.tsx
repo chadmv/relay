@@ -246,6 +246,46 @@ test('confirming Delete issues exactly one DELETE and navigates to /schedules', 
   expect(deletes).toBe(1)
 })
 
+test('a newer settled action is not masked by an older settled action error', async () => {
+  let current = sched()
+  let enabledCalls = 0
+  server.use(
+    http.get(`/v1/scheduled-jobs/${ID}`, () => HttpResponse.json(current)),
+    http.get('/v1/jobs', () => HttpResponse.json(EMPTY_RUNS)),
+    http.post(`/v1/scheduled-jobs/${ID}/run-now`, () =>
+      HttpResponse.json({ error: 'run now boom' }, { status: 500 }),
+    ),
+    http.patch(`/v1/scheduled-jobs/${ID}`, () => {
+      enabledCalls++
+      // First PATCH (Disable) succeeds; second PATCH (Enable) fails.
+      if (enabledCalls === 1) {
+        current = { ...current, enabled: false }
+        return HttpResponse.json(current)
+      }
+      return HttpResponse.json({ error: 'enable boom' }, { status: 500 })
+    }),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+
+  // 1. Run now fails: the banner shows its error.
+  await userEvent.click(screen.getByRole('button', { name: 'Run now' }))
+  const firstAlert = await screen.findByRole('alert')
+  expect(firstAlert).toHaveTextContent('run now boom')
+
+  // 2. Disable succeeds. The stale Run now error must not keep the banner up.
+  await userEvent.click(screen.getByRole('button', { name: 'Disable' }))
+  await waitFor(() => expect(enabledCalls).toBe(1))
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+
+  // 3. Enable then fails: its OWN error must be the one shown, not silently
+  // swallowed by the ?? chain picking up the old (never-reset) Run now error first.
+  await userEvent.click(await screen.findByRole('button', { name: 'Enable' }))
+  await waitFor(() => expect(enabledCalls).toBe(2))
+  const secondAlert = await screen.findByRole('alert')
+  expect(secondAlert).toHaveTextContent('enable boom')
+})
+
 test('a failed save renders the server message inside the form, not in a page banner', async () => {
   server.use(
     ...handlers(sched()),
@@ -268,6 +308,96 @@ test('a failed save renders the server message inside the form, not in a page ba
   // The message must sit beside the control that produced it. The form element is
   // the nearest ancestor form; assert containment rather than mere presence.
   expect(cron.closest('form')).toContainElement(alert)
+})
+
+test('after a 400 then Cancel, no alert remains in the DOM', async () => {
+  server.use(
+    ...handlers(sched()),
+    http.patch(`/v1/scheduled-jobs/${ID}`, () =>
+      HttpResponse.json({ error: 'schedule fires faster than minimum interval 30s' }, { status: 400 }),
+    ),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+  const cron = screen.getByLabelText('Cron expression')
+  await userEvent.clear(cron)
+  await userEvent.type(cron, '@every 1s')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await screen.findByRole('alert')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  // Cancel restores the fields, but the stale server error must not survive it. A
+  // subsequent unchanged Save hits the empty-patch early return BEFORE onSubmit
+  // (and therefore update.reset()) ever runs, so the banner would otherwise persist
+  // until the component unmounts.
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+test('after a 400, Cancel, then an unchanged Save, no alert remains in the DOM either', async () => {
+  server.use(
+    ...handlers(sched()),
+    http.patch(`/v1/scheduled-jobs/${ID}`, () =>
+      HttpResponse.json({ error: 'schedule fires faster than minimum interval 30s' }, { status: 400 }),
+    ),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+  const cron = screen.getByLabelText('Cron expression')
+  await userEvent.clear(cron)
+  await userEvent.type(cron, '@every 1s')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await screen.findByRole('alert')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  // The empty-patch early return in ScheduleTriggerForm.submit fires here, never
+  // reaching onSubmit / update.reset() - the dismissal must not depend on that path.
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+test('Save changes is disabled while a header action (Run now) is pending', async () => {
+  let resolveRunNow: (() => void) | undefined
+  server.use(
+    ...handlers(sched()),
+    http.post(
+      `/v1/scheduled-jobs/${ID}/run-now`,
+      () =>
+        new Promise((resolve) => {
+          resolveRunNow = () => resolve(HttpResponse.json({ id: 'job1' }, { status: 201 }))
+        }),
+    ),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+  await userEvent.click(screen.getByRole('button', { name: 'Run now' }))
+
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled())
+  resolveRunNow?.()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).not.toBeDisabled())
+})
+
+test('the header actions are disabled while Save is pending', async () => {
+  let resolvePatch: (() => void) | undefined
+  server.use(
+    ...handlers(sched()),
+    http.patch(
+      `/v1/scheduled-jobs/${ID}`,
+      () =>
+        new Promise((resolve) => {
+          resolvePatch = () => resolve(HttpResponse.json(sched({ overlap_policy: 'allow' })))
+        }),
+    ),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+  await userEvent.click(screen.getByRole('button', { name: 'allow' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled())
+  expect(screen.getByRole('button', { name: 'Disable' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
+  resolvePatch?.()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Run now' })).not.toBeDisabled())
 })
 
 // The schedule's next fire is soon; a recompute would push it out by a full hour.

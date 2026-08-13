@@ -32,6 +32,13 @@ interface ScheduleTriggerFormProps {
   pending: boolean
   error?: string
   onSubmit: (patch: SchedulePatch) => void
+  // Called whenever the form discards its own would-be submission without ever
+  // reaching onSubmit: Cancel, and the empty-patch early return below. Neither of
+  // those paths runs onSubmit, so a caller that only clears its error state inside
+  // onSubmit (as ScheduleDetailPage does, matching the NewJobPage/JobActions
+  // convention) never gets a chance to dismiss a stale `error` prop from an earlier
+  // failed save. Optional so existing standalone renders of this form are unaffected.
+  onDismissError?: () => void
 }
 
 // Inline edit surface for cron / timezone / overlap policy, on the page rather than
@@ -40,7 +47,13 @@ interface ScheduleTriggerFormProps {
 // (web/src/workers/WorkerEditForm.tsx). `name`, `enabled` and `job_spec` are also
 // PATCH-able and are deliberately NOT here: enabled has its own header button, and
 // the other two are out of scope for this slice.
-export function ScheduleTriggerForm({ schedule, pending, error, onSubmit }: ScheduleTriggerFormProps) {
+export function ScheduleTriggerForm({
+  schedule,
+  pending,
+  error,
+  onSubmit,
+  onDismissError,
+}: ScheduleTriggerFormProps) {
   // Seeded ONCE from the schedule and never re-derived on re-render. The page polls
   // every 10s; a refetch landing mid-edit must not overwrite what the user typed.
   // The draft is reset only by an explicit Cancel.
@@ -64,8 +77,14 @@ export function ScheduleTriggerForm({ schedule, pending, error, onSubmit }: Sche
     if (tz !== schedule.timezone) patch.timezone = tz
     if (overlap !== schedule.overlap_policy) patch.overlap_policy = overlap
 
-    // Nothing changed: issue no request at all rather than an empty PATCH.
-    if (Object.keys(patch).length === 0) return
+    // Nothing changed: issue no request at all rather than an empty PATCH. This
+    // path never reaches onSubmit, so it is also responsible for its own dismissal
+    // of a stale error - the parent's update.reset() (called from inside onSubmit)
+    // never runs here.
+    if (Object.keys(patch).length === 0) {
+      onDismissError?.()
+      return
+    }
 
     // No client-side cron or timezone validation, by design. A pre-check would be a
     // second implementation of robfig/cron/v3's grammar and IANA zone resolution
@@ -78,6 +97,7 @@ export function ScheduleTriggerForm({ schedule, pending, error, onSubmit }: Sche
     setCron(schedule.cron_expr)
     setTz(schedule.timezone)
     setOverlap(schedule.overlap_policy)
+    onDismissError?.()
   }
 
   return (
