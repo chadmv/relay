@@ -116,6 +116,40 @@ test('the other navigation items close the menu too, not just the first', async 
   }
 })
 
+// Regression vs main: React Router's Link calls the caller's onClick BEFORE it
+// decides whether to navigate (react-router/dist/development/chunk-QUQL4437.mjs
+// :10480, then shouldProcessLinkClick bails on isModifiedEvent at :7288-7292), so
+// an unconditional closeAndRestoreFocus on the three Links ran even for a
+// Ctrl/Cmd/Shift/Alt+click. That opens the destination in a new tab or window and
+// ALSO collapses the dropdown and yanks focus to the toggle in the tab the user is
+// still looking at - on main the menu stayed open for a modified click. This test
+// pins the fix with the same predicate react-router itself uses.
+test('a modifier-clicked navigation item leaves the menu open and does not touch focus', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  await userEvent.click(toggle)
+  const link = screen.getByRole('link', { name: 'Profile' })
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  // Each bare userEvent.X() call spins up a fresh input-device System
+  // (setup/setup.js:63-73) unless one is threaded through explicitly, so a held
+  // modifier from one call is invisible to the next call by default. Passing the
+  // System back in as keyboardState is what makes Control still be down for the
+  // click below.
+  const heldControl = await userEvent.keyboard('{Control>}')
+  await userEvent.click(link, { keyboardState: heldControl })
+  await userEvent.keyboard('{/Control}', { keyboardState: heldControl })
+
+  expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+  expect(toggleFocus).not.toHaveBeenCalled()
+  toggleFocus.mockRestore()
+  // Expected stderr noise from this test: jsdom logs "Not implemented: navigation
+  // to another Document" because react-router's shouldProcessLinkClick also sees
+  // isModifiedEvent and skips preventDefault, letting the anchor's native default
+  // action run - the same route a real browser takes to open a new tab. That
+  // warning is proof the click was NOT intercepted, not a bug.
+})
+
 test('Log out closes the menu, returns focus to the toggle, and still calls onLogout once', async () => {
   const onLogout = renderMenu()
   const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })

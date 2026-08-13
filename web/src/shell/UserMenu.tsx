@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type FocusEvent } from 'react'
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FocusEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
 import { Link } from 'react-router-dom'
 import { GlassPanel } from '../components/holo'
 
@@ -76,6 +83,20 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
   // already moving focus itself, so a restore here would fight the user.
   function close() {
     setOpen(false)
+  }
+
+  // Guard for the three nav Links' onClick, in one place rather than three
+  // copies. React Router's Link calls the caller's onClick BEFORE it decides
+  // whether to navigate, so an unconditional close here ran even for a
+  // Ctrl/Cmd/Shift/Alt+click or a non-primary button - collapsing the dropdown
+  // and stealing focus back to the toggle in the tab the user is still looking
+  // at, while the click opens a new tab or window. Same predicate react-router
+  // itself uses to decide whether IT will handle the click
+  // (shouldProcessLinkClick, react-router chunk-QUQL4437.mjs:7288-7292): only a
+  // plain left click closes the menu.
+  function onNavItemClick(e: ReactMouseEvent<HTMLAnchorElement>) {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+    closeAndRestoreFocus()
   }
 
   useEffect(() => {
@@ -166,21 +187,21 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
           </div>
           <Link
             to="/profile"
-            onClick={closeAndRestoreFocus}
+            onClick={onNavItemClick}
             className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
           >
             Profile
           </Link>
           <Link
             to="/profile/password"
-            onClick={closeAndRestoreFocus}
+            onClick={onNavItemClick}
             className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
           >
             Password
           </Link>
           <Link
             to="/profile/sessions"
-            onClick={closeAndRestoreFocus}
+            onClick={onNavItemClick}
             className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
           >
             Sessions
