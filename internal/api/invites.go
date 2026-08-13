@@ -111,9 +111,14 @@ var InvitesSortSpec = SortSpec{
 //
 // token_hash is not a parameter and must never become one. No status field is
 // returned either: the client derives ACTIVE/EXPIRING/EXPIRED/REDEEMED from
-// expires_at and used_at, exactly as web/src/admin/enrollments/enrollmentStatus.ts:7-26
-// already does, because a server-asserted "expired" is stale the moment the row
-// is on screen and "expiring" needs an invented threshold.
+// expires_at and used_at. That follows the rule
+// web/src/admin/enrollments/enrollmentStatus.ts:7-20 writes down - the server
+// ships facts and the client does the arithmetic, because a server-asserted
+// "expired" is stale the moment the row is on screen and "expiring" needs an
+// invented threshold. The state SET differs: that file derives three states and
+// deliberately has no consumed one, since a consumed enrollment vanishes from
+// its list, whereas a redeemed invite stays in this one and REDEEMED is
+// derivable from used_at.
 //
 // Optional keys are OMITTED, never nulled: an absent email means the invite is
 // not bound to an address, and an absent used_at means it has not been redeemed.
