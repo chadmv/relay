@@ -18,6 +18,17 @@ import (
 // This test turns that structural property into an assertion. Adding
 // `i.token_hash` to any of these queries changes the generated struct and turns
 // this red at the next `go test ./...`, with no Docker required.
+//
+// This is the FIRST of two layers, and it catches the PROJECTION only. Measured,
+// not reasoned: adding `i.token_hash` to ListInvitesPage turns this test red
+// while the behavioural sweep in list_endpoint_leak_integration_test.go stays
+// green, because the handler never emits a field it does not map. That sweep
+// catches EMISSION - it fired only once the handler also wrote the value out,
+// and it caught it under a disguised key name because it asserts on the
+// serialized bytes. Neither layer substitutes for the other: this one fails
+// early and without Docker on a widened query no handler reads yet; the sweep is
+// the only one that sees a hash reaching the wire from a projection that already
+// existed.
 func TestListEndpointRowTypesHaveExactProjections(t *testing.T) {
 	cases := []struct {
 		name   string

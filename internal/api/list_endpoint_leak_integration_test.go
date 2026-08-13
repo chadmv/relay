@@ -18,6 +18,15 @@ import (
 // assertNoSecretInBody sweeps the SERIALIZED response bytes. Asserting on the
 // parsed items would be weaker: it passes against a handler that returns the
 // hash under a different key name, or nests it, or puts it in the envelope.
+//
+// This is the SECOND of two layers and it catches EMISSION, not the projection.
+// Measured: widening ListInvitesPage to select `i.token_hash` leaves these tests
+// green - the handler emits only what it maps - and turns
+// TestListEndpointRowTypesHaveExactProjections
+// (list_endpoint_projection_test.go) red instead. These fire only once a handler
+// actually writes the value out, which they then catch on the first page, on a
+// cursor page and on every sort arm, under any key name. Neither layer
+// substitutes for the other.
 func assertNoSecretInBody(t *testing.T, body string, secrets map[string]string) {
 	t.Helper()
 	require.NotEmpty(t, body, "an empty body would satisfy every assertion below")
