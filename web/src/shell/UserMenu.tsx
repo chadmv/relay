@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { GlassPanel } from '../components/holo'
 
@@ -10,6 +10,7 @@ interface UserMenuProps {
 export function UserMenu({ email, onLogout }: UserMenuProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const panelId = useId()
 
   useEffect(() => {
     if (!open) return
@@ -31,8 +32,11 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
         aria-expanded={open}
+        // Only while the panel is actually rendered: it is conditionally mounted
+        // below, and an IDREF pointing at a node that does not exist is an
+        // authoring error. aria-expanded, by contrast, is present in BOTH states.
+        aria-controls={open ? panelId : undefined}
         className={`flex items-center gap-2 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors ${open ? 'border-accent/45 bg-accent/[0.14]' : 'border-border bg-accent/[0.08]'}`}
       >
         <span className="text-fg normal-case tracking-normal">{email}</span>
@@ -51,6 +55,7 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
           dropdown above anything later added to the header. */}
       {open && (
         <GlassPanel
+          id={panelId}
           data-testid="user-menu-panel"
           className="absolute right-0 z-50 mt-2 w-56 bg-popover p-1.5 text-[12px]"
         >

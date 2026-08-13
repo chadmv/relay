@@ -28,10 +28,10 @@ test('closes on Escape', async () => {
   expect(screen.queryByText('Log out')).not.toBeInTheDocument()
 })
 
-test('exposes menu semantics and reflects open state via aria attributes', async () => {
+test('exposes disclosure semantics and reflects open state via aria attributes', async () => {
   renderMenu()
   const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
-  expect(toggle).toHaveAttribute('aria-haspopup', 'menu')
+  expect(toggle).not.toHaveAttribute('aria-haspopup')
   expect(toggle).toHaveAttribute('aria-expanded', 'false')
   await userEvent.click(toggle)
   expect(toggle).toHaveAttribute('aria-expanded', 'true')
@@ -55,4 +55,32 @@ test('calls onLogout when Log out is clicked', async () => {
   await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
   await userEvent.click(screen.getByText('Log out'))
   expect(onLogout).toHaveBeenCalledOnce()
+})
+
+// The disclosure half of the contract that replaced aria-haspopup="menu". See
+// docs/superpowers/specs/2026-08-13-usermenu-menu-roles.md for why this surface is
+// a disclosure and not a menu.
+//
+// aria-controls is set ONLY while the panel is rendered, because the panel is
+// conditionally mounted and an IDREF pointing at a node that does not exist is an
+// authoring error. The aria-expanded assertions interleaved below are the positive
+// control: an absence assertion alone would also pass against a component that
+// stopped rendering the toggle, or against a query that found the wrong element.
+test('aria-controls names the panel while open and is absent while closed', async () => {
+  renderMenu()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  expect(toggle).not.toHaveAttribute('aria-controls')
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+  await userEvent.click(toggle)
+
+  const panelId = toggle.getAttribute('aria-controls')
+  expect(panelId).toBeTruthy()
+  expect(screen.getByTestId('user-menu-panel')).toHaveAttribute('id', panelId as string)
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+  await userEvent.click(toggle)
+
+  expect(toggle).not.toHaveAttribute('aria-controls')
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
 })
