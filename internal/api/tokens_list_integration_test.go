@@ -174,3 +174,100 @@ func TestListTokens_ItemShapeIsExactly(t *testing.T) {
 		keysOf(p.Items[0]))
 	assert.Equal(t, true, p.Items[0]["is_current"])
 }
+
+// A token whose expires_at is NULL never expires and authenticates forever
+// (internal/api/middleware.go:32-35 only rejects on Valid && Before(now)). It
+// MUST appear in the list, with expires_at absent from the item.
+//
+// This is the discriminating test for the `expires_at > NOW()` trap. An
+// implementation whose predicate omits the `expires_at IS NULL OR` arm passes
+// every other test in this file and fails only this one - which is why every
+// other test in this file mints tokens with an explicit expiry via mintToken
+// rather than through createTestToken (api_test.go:48-61, which mints
+// NULL-expiry tokens).
+func TestListTokens_NeverExpiringTokenIsListed(t *testing.T) {
+	srv, q := newTestServer(t)
+	me := createTestUser(t, q, "Null Exp", "tok-nullexp@example.com", false)
+
+	// The caller authenticates with an explicitly-expiring token so this test
+	// fails for the NULL row's absence, never for its own 401.
+	callerToken := mintToken(t, q, me.ID, future(30*24*time.Hour))
+	neverExpires := mintToken(t, q, me.ID, pgtype.Timestamptz{})
+
+	neverRow, err := q.GetTokenWithUser(t.Context(), tokenhash.Hash(neverExpires))
+	require.NoError(t, err)
+	require.False(t, neverRow.ExpiresAt.Valid, "fixture: the seeded token must have a NULL expires_at")
+
+	code, p, body := getTokensPage(t, srv, callerToken, "limit=200")
+	require.Equal(t, http.StatusOK, code)
+
+	var found map[string]any
+	for _, it := range p.Items {
+		if it["id"] == fmtUUID(neverRow.TokenID) {
+			found = it
+		}
+	}
+	require.NotNil(t, found,
+		"a NULL-expires_at token never expires and MUST be listed; a bare `expires_at > NOW()` predicate hides exactly the most powerful credentials in the system. body: %s", body)
+
+	_, hasExpires := found["expires_at"]
+	assert.False(t, hasExpires,
+		"a never-expiring token must OMIT expires_at, so the client can render 'never' rather than a date")
+	assert.Equal(t, int64(2), p.Total, "total must count the never-expiring row too")
+}
+
+// The mirror of the test above. Paired with it deliberately: neither
+// "return everything" nor "return nothing" satisfies both.
+func TestListTokens_ExpiredTokenIsNotListed(t *testing.T) {
+	srv, q := newTestServer(t)
+	me := createTestUser(t, q, "Exp", "tok-expired@example.com", false)
+
+	callerToken := mintToken(t, q, me.ID, future(30*24*time.Hour))
+	expired := mintToken(t, q, me.ID, pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true})
+
+	expiredRow, err := q.GetTokenWithUser(t.Context(), tokenhash.Hash(expired))
+	require.NoError(t, err)
+	require.True(t, expiredRow.ExpiresAt.Valid, "fixture: the seeded token must have an expiry")
+	require.True(t, expiredRow.ExpiresAt.Time.Before(time.Now()), "fixture: it must be in the past")
+
+	code, p, body := getTokensPage(t, srv, callerToken, "limit=200")
+	require.Equal(t, http.StatusOK, code)
+
+	assert.NotContains(t, body, fmtUUID(expiredRow.TokenID),
+		"an expired token cannot authenticate (middleware.go:32-35) and must not be listed")
+	assert.Len(t, p.Items, 1, "only the caller's live token")
+	assert.Equal(t, int64(1), p.Total,
+		"total must exclude the expired row too, or the footer states a number the caller cannot page to")
+}
+
+// After PUT /v1/users/me/password, DeleteOtherTokensForUser (auth.go:325-328)
+// has run, so the list must contain exactly one row and it must be the caller's.
+// This exercises the new read path against an existing write path end to end.
+func TestListTokens_AfterPasswordChangeExactlyOneCurrentRowRemains(t *testing.T) {
+	api.SetBcryptCostForTest()
+	srv, q := newTestServer(t)
+	me := createTestUser(t, q, "Pwd", "tok-pwd@example.com", false)
+
+	callerToken := mintToken(t, q, me.ID, future(30*24*time.Hour))
+	mintToken(t, q, me.ID, future(30*24*time.Hour))
+	mintToken(t, q, me.ID, future(30*24*time.Hour))
+
+	code, before, _ := getTokensPage(t, srv, callerToken, "limit=200")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, before.Items, 3, "fixture: three live sessions before the password change")
+
+	req := httptest.NewRequest("PUT", "/v1/users/me/password",
+		strings.NewReader(`{"current_password":"testpassword1","new_password":"newpassword1"}`))
+	req.Header.Set("Authorization", "Bearer "+callerToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code, "password change: %s", rec.Body.String())
+
+	code, after, _ := getTokensPage(t, srv, callerToken, "limit=200")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, after.Items, 1, "a password change revokes every OTHER session")
+	assert.Equal(t, int64(1), after.Total)
+	assert.Equal(t, true, after.Items[0]["is_current"],
+		"the surviving row is the caller's own session")
+}

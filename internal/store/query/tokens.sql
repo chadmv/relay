@@ -41,9 +41,25 @@ DELETE FROM api_tokens WHERE user_id = $1 AND id <> $2;
 --
 -- user_id comes from the request context, never from the query string. There is
 -- no user_id parameter on the endpoint and there must never be one.
+--
+-- The `expires_at IS NULL OR` arm is MANDATORY, not defensive noise. The column
+-- is nullable (000001_initial.up.sql:18) and a NULL means "never expires":
+-- BearerAuth rejects only on `Valid && Before(now)` (internal/api/middleware.go:32-35),
+-- so a NULL-expiry token authenticates forever. A bare `expires_at > NOW()`
+-- would hide exactly the most powerful credentials in the system from the one
+-- screen a user goes to in order to find them. Keep this predicate identical in
+-- all three statements here, including the count, or the pagination footer
+-- states a number the caller cannot page to. See
+-- TestListTokens_NeverExpiringTokenIsListed.
+--
+-- Expired rows are excluded because they cannot authenticate, nothing reaps
+-- them (there is no janitor for api_tokens the way cmd/relay-server/main.go:253
+-- reaps agent_enrollments), and there is no per-row revoke endpoint, so listing
+-- them would render rows with no available action.
 SELECT id, created_at, expires_at
 FROM api_tokens
 WHERE user_id = sqlc.arg(user_id)
+  AND (expires_at IS NULL OR expires_at > NOW())
   AND (sqlc.arg(cursor_set)::bool = FALSE
        OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
 ORDER BY created_at DESC, id DESC
@@ -58,9 +74,12 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- would need the NULLS LAST / NULLS FIRST index pair and the cursor-null
 -- handling that 000013_paginated_sort_indexes.up.sql:15-16 needed for
 -- workers.last_seen_at, for a list whose realistic length is single digits.
+--
+-- Same expiry predicate as ListActiveTokensForUserPage; see the note there.
 SELECT id, created_at, expires_at
 FROM api_tokens
 WHERE user_id = sqlc.arg(user_id)
+  AND (expires_at IS NULL OR expires_at > NOW())
   AND (sqlc.arg(cursor_set)::bool = FALSE
        OR (created_at, id) > (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
 ORDER BY created_at ASC, id ASC
@@ -70,4 +89,7 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- The `total` for the sessions list, over the SAME predicate as the list
 -- statements, so the pagination footer cannot state a number the caller cannot
 -- page to.
-SELECT COUNT(*) FROM api_tokens WHERE user_id = $1;
+--
+-- Same expiry predicate as ListActiveTokensForUserPage; see the note there.
+SELECT COUNT(*) FROM api_tokens
+WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > NOW());
