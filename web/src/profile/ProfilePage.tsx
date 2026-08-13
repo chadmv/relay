@@ -4,13 +4,15 @@ import { Eyebrow } from '../components/holo'
 import { ProfileTabs } from './ProfileTabs'
 import { DEFAULT_PROFILE_TAB, findProfileTab } from './tabs'
 
-// Up to two initials from the display name. Splits on runs of whitespace and
-// drops empties, so an interior double space (which the server preserves - it
-// only trims the ends, internal/api/users.go:61) cannot produce `undefined`.
+// Up to two initials from the display name. Splits on runs of whitespace,
+// which can yield leading/trailing empty parts for a name with surrounding
+// whitespace (the server only trims the ends, internal/api/users.go:61, but
+// an interior double space survives). No .filter(Boolean) is needed for
+// that: part[0] on an empty string is undefined, and Array.prototype.join
+// stringifies undefined as '', so an empty part simply contributes nothing.
 function initialsOf(name: string): string {
   return name
     .split(/\s+/)
-    .filter(Boolean)
     .map((part) => part[0])
     .join('')
     .slice(0, 2)
@@ -34,10 +36,12 @@ export function ProfilePage() {
   const { tab } = useParams()
   const { user } = useAuth()
 
-  // No :tab segment means "use the default" - render it directly rather than
-  // redirecting to the same path, which would be a Navigate that renders nothing
-  // forever. Anything unknown redirects, so the surface can never show a dead tab.
-  const active = tab === undefined ? findProfileTab(DEFAULT_PROFILE_TAB) : findProfileTab(tab)
+  // tab is never undefined here: this component is only ever mounted at
+  // /profile/:tab (router.tsx:47), and /profile alone is a separate route that
+  // redirects to /profile/identity (router.tsx:46) before ProfilePage ever
+  // renders. Anything unrecognized redirects, so the surface can never show a
+  // dead tab.
+  const active = findProfileTab(tab)
   if (!active) return <Navigate to={`/profile/${DEFAULT_PROFILE_TAB}`} replace />
   // ProtectedRoute blanks the page while status is 'loading', so in the app this
   // is never null by the time the route renders. The guard keeps the component

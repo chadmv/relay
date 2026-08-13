@@ -82,10 +82,19 @@ test('renders NO unbacked activity facts', async () => {
   }
 })
 
-test('initials handle a one-word name and collapse extra whitespace', async () => {
+test('initials handle a one-word name', async () => {
   renderAt('/profile/identity', { ...ME, name: 'Ada' })
   await screen.findByRole('heading', { level: 1, name: /Ada/ })
   expect(screen.getByTestId('profile-initials')).toHaveTextContent('A')
+})
+
+test('initials collapse extra whitespace, including a leading/trailing run', async () => {
+  // Exercises the split-on-\s+ path that a bare .filter(Boolean) removal could
+  // regress: leading/trailing whitespace produces empty parts from split(),
+  // and those must still contribute nothing to the two-letter result.
+  renderAt('/profile/identity', { ...ME, name: '  Mira   Sato  ' })
+  await screen.findByRole('heading', { level: 1 })
+  expect(screen.getByTestId('profile-initials')).toHaveTextContent('MS')
 })
 
 test('an unknown tab segment redirects to identity', async () => {
