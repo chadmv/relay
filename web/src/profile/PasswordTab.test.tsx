@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
@@ -44,6 +44,15 @@ async function fill(current: string, next: string, confirm: string) {
   await userEvent.type(screen.getByLabelText('Confirm new password'), confirm)
 }
 
+// The nearest ancestor <div> of a labelled control is that control's Field
+// wrapper (Field.tsx renders label + control + hint + error inside one
+// "mb-3" div, and Input renders a bare <input> with no wrapping div of its
+// own), so this scopes an assertion to "this field's group" without adding a
+// testid that does not exist in the shipped markup.
+function fieldGroup(labelText: string): HTMLElement {
+  return screen.getByLabelText(labelText).closest('div') as HTMLElement
+}
+
 function countingHandler(counter: { n: number; body?: Record<string, unknown> }) {
   return http.put('/v1/users/me/password', async ({ request }) => {
     counter.n++
@@ -81,18 +90,32 @@ test('a 204 clears all three inputs and shows a success line', async () => {
   )
 })
 
-test('a confirm mismatch blocks the request', async () => {
+test('a confirm mismatch blocks the request and is announced on the Confirm field', async () => {
   const c = { n: 0 } as { n: number; body?: Record<string, unknown> }
   server.use(countingHandler(c))
   renderTab()
   await fill('old-secret', 'new-secret-123', 'new-secret-124')
   await userEvent.click(screen.getByRole('button', { name: 'Update password' }))
 
-  expect(screen.getByText('The two passwords do not match.')).toBeInTheDocument()
+  // The mismatch is genuinely about Confirm, so it belongs there - pinned with
+  // within() so a future regression that moves it to New password fails here
+  // instead of passing a bare getByText.
+  expect(
+    within(fieldGroup('Confirm new password')).getByText('The two passwords do not match.'),
+  ).toBeInTheDocument()
+  expect(
+    within(fieldGroup('New password')).queryByText('The two passwords do not match.'),
+  ).toBeNull()
+  const alert = screen.getByRole('alert')
+  expect(alert).toHaveTextContent('The two passwords do not match.')
+  expect(screen.getByLabelText('Confirm new password')).toHaveAttribute(
+    'aria-describedby',
+    alert.id,
+  )
   expect(c.n).toBe(0)
 })
 
-test('a 7-character new password blocks the request with the shipped literal', async () => {
+test('a 7-character new password blocks the request, announced on New password (not Confirm)', async () => {
   const c = { n: 0 } as { n: number; body?: Record<string, unknown> }
   server.use(countingHandler(c))
   renderTab()
@@ -101,7 +124,19 @@ test('a 7-character new password blocks the request with the shipped literal', a
 
   // The exact string already at RegisterScreen.tsx:31-32, ResetPasswordDialog.tsx:36
   // and CreateUserForm.tsx:40. Copied to a fourth site by design (spec decision 11).
-  expect(screen.getByText('Password must be at least 8 characters.')).toBeInTheDocument()
+  // This message is about the NEW password, so it must render on that field's
+  // group, not Confirm's - within() pins the placement, not just the text.
+  expect(
+    within(fieldGroup('New password')).getByText('Password must be at least 8 characters.'),
+  ).toBeInTheDocument()
+  expect(
+    within(fieldGroup('Confirm new password')).queryByText(
+      'Password must be at least 8 characters.',
+    ),
+  ).toBeNull()
+  const alert = screen.getByRole('alert')
+  expect(alert).toHaveTextContent('Password must be at least 8 characters.')
+  expect(screen.getByLabelText('New password')).toHaveAttribute('aria-describedby', alert.id)
   expect(c.n).toBe(0)
 })
 
@@ -114,7 +149,7 @@ test('an 8-character new password IS sent (positive control on the min-8 guard)'
   await waitFor(() => expect(c.n).toBe(1))
 })
 
-test('a 73-byte new password blocks the request - BYTE length, not character length', async () => {
+test('a 73-byte new password blocks the request - BYTE length, announced on New password', async () => {
   const c = { n: 0 } as { n: number; body?: Record<string, unknown> }
   server.use(countingHandler(c))
   renderTab()
@@ -122,13 +157,20 @@ test('a 73-byte new password blocks the request - BYTE length, not character len
   // ASCII the test cannot distinguish TextEncoder().encode(x).length from
   // x.length, and a .length guard would pass it. bcrypt rejects over 72 bytes and
   // handleChangePassword turns that into an opaque 500 (internal/api/auth.go:303-307).
-  const pw = 'é'.length ? 'é'.repeat(37) : ''
+  const pw = 'é'.repeat(37)
   expect(pw).toHaveLength(37)
   expect(new TextEncoder().encode(pw).length).toBe(74)
   await fill('old-secret', pw, pw)
   await userEvent.click(screen.getByRole('button', { name: 'Update password' }))
 
-  expect(screen.getByText('Password must be 72 bytes or fewer.')).toBeInTheDocument()
+  // Byte-length is also a New-password fact, so it belongs on that field's
+  // group, not Confirm's.
+  expect(
+    within(fieldGroup('New password')).getByText('Password must be 72 bytes or fewer.'),
+  ).toBeInTheDocument()
+  expect(
+    within(fieldGroup('Confirm new password')).queryByText('Password must be 72 bytes or fewer.'),
+  ).toBeNull()
   expect(c.n).toBe(0)
 })
 

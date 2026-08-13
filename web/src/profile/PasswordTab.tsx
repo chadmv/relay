@@ -17,7 +17,17 @@ export function PasswordTab() {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
-  const [guardError, setGuardError] = useState<string | undefined>()
+  // Two separate error slots, not one shared `guardError`. The mismatch is a
+  // fact about Confirm; the min-8 and byte-length guards are facts about New
+  // password. Routing all three through one string forced every guard onto
+  // whichever Field happened to hold the shared state, which put min-8 and
+  // byte-length messages on the wrong control (review finding #3).
+  const [newError, setNewError] = useState<string | undefined>()
+  const [confirmError, setConfirmError] = useState<string | undefined>()
+  // The success banner is sourced from THIS, not from change.isSuccess - see
+  // the gcTime/reset() comment below for why the mutation's own success state
+  // cannot be trusted to still be readable by the time this renders.
+  const [succeeded, setSucceeded] = useState(false)
 
   const change = useMutation({
     // NO mutation VARIABLES, on purpose. mutate() is called with no argument and
@@ -28,23 +38,49 @@ export function PasswordTab() {
     // mutation in the MutationCache for the 5-minute default gcTime, so passing
     // the plaintext password as a variable would leave it readable from
     // queryClient.getMutationCache().getAll() long after this form cleared its
-    // inputs. reset() does not help - it removes only this observer and
-    // reschedules the same GC (mutationObserver.js:50-55, mutation.js:38-46).
+    // inputs. reset() does not help by itself - it only removes this observer
+    // and reschedules the same GC (mutationObserver.js:50-55,
+    // mutation.js:38-46) - which is why it is paired with gcTime: 0 below.
     // Clearing the inputs is not evidence; PasswordTab.auth.test.tsx asserts
     // absence from the store the library actually keeps.
+    //
+    // gcTime: 0 plus a synchronous change.reset() in onSuccess, matching
+    // useAgentEnrollmentActions.ts's identical precedent: reset() detaches
+    // this observer, and gcTime: 0 makes the now-observer-less mutation
+    // eligible for cache removal on the very next tick instead of sitting in
+    // queryClient.getMutationCache().getAll() - live in the heap, visible in a
+    // devtools snapshot or crash dump - for the default 5-minute gcTime.
+    //
+    // The reset() has to be synchronous, which is exactly why the success
+    // banner below reads `succeeded`, a plain local flag, rather than
+    // `change.isSuccess`. @tanstack/query-core's Mutation#execute AWAITS this
+    // hook-level onSuccess before it ever dispatches the "success" action that
+    // would flip change.isSuccess (mutation.js: `await this.options.onSuccess`
+    // runs before `this.#dispatch({ type: "success", data })`). A synchronous
+    // reset() here detaches the observer before that dispatch can reach it, so
+    // change.isSuccess would never become true and a banner keyed on it would
+    // never render. Setting `succeeded` here instead sidesteps that ordering
+    // entirely - it does not depend on the mutation's own state machine.
     mutationFn: () => changePassword(current, next),
+    gcTime: 0,
     onSuccess: () => {
       setCurrent('')
       setNext('')
       setConfirm('')
+      setSucceeded(true)
+      change.reset()
     },
   })
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    // Three guards, in this order, each blocking the request.
+    // Three guards, in this order, each blocking the request. Each sets only
+    // its own field's error slot and clears the other, so a message never
+    // lingers on the field it does not describe.
+    setSucceeded(false)
     if (next !== confirm) {
-      setGuardError('The two passwords do not match.')
+      setConfirmError('The two passwords do not match.')
+      setNewError(undefined)
       return
     }
     // The shipped literal, copied verbatim from RegisterScreen.tsx:31-32,
@@ -52,7 +88,8 @@ export function PasswordTab() {
     // rather than extracted: two lines with no decision inside them become
     // indirection when hidden behind a helper.
     if (next.length < 8) {
-      setGuardError('Password must be at least 8 characters.')
+      setNewError('Password must be at least 8 characters.')
+      setConfirmError(undefined)
       return
     }
     // BYTE length, not .length. bcrypt.GenerateFromPassword rejects over 72 bytes
@@ -62,10 +99,12 @@ export function PasswordTab() {
     // with accents or emoji can exceed 72 bytes while passing a .length check.
     // Same guard as ResetPasswordDialog.tsx:43-46.
     if (new TextEncoder().encode(next).length > 72) {
-      setGuardError('Password must be 72 bytes or fewer.')
+      setNewError('Password must be 72 bytes or fewer.')
+      setConfirmError(undefined)
       return
     }
-    setGuardError(undefined)
+    setNewError(undefined)
+    setConfirmError(undefined)
     change.reset()
     change.mutate()
   }
@@ -88,7 +127,7 @@ export function PasswordTab() {
           onChange={(e) => setCurrent(e.target.value)}
         />
       </Field>
-      <Field label="New password" htmlFor="pw-new" hint="min 8 characters">
+      <Field label="New password" htmlFor="pw-new" hint="min 8 characters" error={newError}>
         <Input
           id="pw-new"
           type="password"
@@ -97,7 +136,7 @@ export function PasswordTab() {
           onChange={(e) => setNext(e.target.value)}
         />
       </Field>
-      <Field label="Confirm new password" htmlFor="pw-confirm" error={guardError}>
+      <Field label="Confirm new password" htmlFor="pw-confirm" error={confirmError}>
         <Input
           id="pw-confirm"
           type="password"
@@ -126,7 +165,7 @@ export function PasswordTab() {
           {change.error.message}
         </div>
       )}
-      {change.isSuccess && (
+      {succeeded && (
         <div role="status" className="mb-3 text-[11px] text-ok">
           Password updated. Your other sessions have been signed out.
         </div>
@@ -141,7 +180,9 @@ export function PasswordTab() {
             setCurrent('')
             setNext('')
             setConfirm('')
-            setGuardError(undefined)
+            setNewError(undefined)
+            setConfirmError(undefined)
+            setSucceeded(false)
             change.reset()
           }}
         >
