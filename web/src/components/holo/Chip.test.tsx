@@ -19,6 +19,11 @@ test('warn tone uses the warn palette', () => {
   expect(screen.getByText('draining')).toHaveClass('border-warn/40', 'bg-warn/10', 'text-warn')
 })
 
+test('err tone uses the err palette', () => {
+  render(<Chip tone="err">EXPIRED</Chip>)
+  expect(screen.getByText('EXPIRED')).toHaveClass('border-err/40', 'bg-err/10', 'text-err')
+})
+
 test('dashed renders a dashed transparent affordance', () => {
   render(<Chip dashed>+ add label</Chip>)
   expect(screen.getByText('+ add label')).toHaveClass('border-dashed', 'bg-transparent', 'cursor-pointer')
