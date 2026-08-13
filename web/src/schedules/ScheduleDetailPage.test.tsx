@@ -7,6 +7,7 @@ import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { ScheduleDetailPage } from './ScheduleDetailPage'
 import type { Schedule } from './api'
+import { formatStarted } from '../jobs/status'
 
 const ID = 's1'
 
@@ -267,4 +268,108 @@ test('a failed save renders the server message inside the form, not in a page ba
   // The message must sit beside the control that produced it. The form element is
   // the nearest ancestor form; assert containment rather than mere presence.
   expect(cron.closest('form')).toContainElement(alert)
+})
+
+// The schedule's next fire is soon; a recompute would push it out by a full hour.
+const NEXT_SOON = '2099-01-01T00:05:00Z'
+const NEXT_DRIFTED = '2099-01-01T01:00:00Z'
+
+// Transcription of internal/api/scheduled_jobs.go:585-596: next_run_at is recomputed
+// from time.Now() whenever the request CARRIES a cron_expr or timezone key, changed
+// or not. `current` is mutated so the invalidated GET refetch serves the same row the
+// PATCH produced, exactly as the real server does.
+function driftServer(initial: Schedule) {
+  let current = initial
+  const bodies: Record<string, unknown>[] = []
+  server.use(
+    http.get(`/v1/scheduled-jobs/${ID}`, () => HttpResponse.json(current)),
+    http.get('/v1/jobs', () => HttpResponse.json(EMPTY_RUNS)),
+    http.patch(`/v1/scheduled-jobs/${ID}`, async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>
+      bodies.push(body)
+      const recomputes = 'cron_expr' in body || 'timezone' in body
+      current = {
+        ...current,
+        ...(body as Partial<Schedule>),
+        next_run_at: recomputes ? NEXT_DRIFTED : current.next_run_at,
+      }
+      return HttpResponse.json(current)
+    }),
+  )
+  return { bodies }
+}
+
+test('the two next-fire fixtures render differently, so the panel assertions below can discriminate', () => {
+  // Guards the instrument itself: if formatStarted collapsed these two instants to
+  // the same string in the runner's timezone, both drift tests would be vacuous.
+  expect(formatStarted(NEXT_SOON)).not.toBe(formatStarted(NEXT_DRIFTED))
+})
+
+test('DRIFT REGRESSION: saving only the overlap policy does NOT move the next fire time', async () => {
+  const { bodies } = driftServer(sched({ next_run_at: NEXT_SOON }))
+  renderPage()
+  await screen.findByText('nightly-build')
+  expect(screen.getByTestId('next-fire-abs')).toHaveTextContent(formatStarted(NEXT_SOON))
+
+  await userEvent.click(screen.getByRole('button', { name: 'allow' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(bodies).toHaveLength(1))
+  // The body must not carry cron_expr or timezone. This is the cause...
+  expect(bodies[0]).toEqual({ overlap_policy: 'allow' })
+  // ...and this is the user-visible effect, which is what actually matters: an
+  // implementation that posts the whole form pushes the next fire out by 55 minutes
+  // and nothing else in the app complains.
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'allow' })).toHaveAttribute('aria-pressed', 'true'),
+  )
+  expect(screen.getByTestId('next-fire-abs')).toHaveTextContent(formatStarted(NEXT_SOON))
+  expect(screen.getByTestId('next-fire-abs')).not.toHaveTextContent(formatStarted(NEXT_DRIFTED))
+})
+
+test('POSITIVE CONTROL: saving a changed cron DOES move the next fire time', async () => {
+  // Without this, the test above passes against a page whose next-fire panel is
+  // static and never reflects a save at all.
+  const { bodies } = driftServer(sched({ next_run_at: NEXT_SOON }))
+  renderPage()
+  await screen.findByText('nightly-build')
+  expect(screen.getByTestId('next-fire-abs')).toHaveTextContent(formatStarted(NEXT_SOON))
+
+  const cron = screen.getByLabelText('Cron expression')
+  await userEvent.clear(cron)
+  await userEvent.type(cron, '@every 1h')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(bodies).toEqual([{ cron_expr: '@every 1h' }]))
+  await waitFor(() =>
+    expect(screen.getByTestId('next-fire-abs')).toHaveTextContent(formatStarted(NEXT_DRIFTED)),
+  )
+})
+
+test('a clean Save issues ZERO requests', async () => {
+  const { bodies } = driftServer(sched({ next_run_at: NEXT_SOON }))
+  renderPage()
+  await screen.findByText('nightly-build')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  // No PATCH at all - not an empty one. An empty PATCH is harmless server-side today,
+  // but "no change means no request" is the property being pinned.
+  await new Promise((r) => setTimeout(r, 50))
+  expect(bodies).toEqual([])
+})
+
+test('saving twice in a row issues exactly one request: after a save the draft is clean again', async () => {
+  const { bodies } = driftServer(sched({ next_run_at: NEXT_SOON }))
+  renderPage()
+  await screen.findByText('nightly-build')
+  await userEvent.click(screen.getByRole('button', { name: 'allow' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await waitFor(() => expect(bodies).toHaveLength(1))
+
+  // The refetched row now says overlap_policy: 'allow', so the draft matches it and a
+  // second Save must be a no-op. An implementation that re-armed the form from the
+  // mutation response, or that tracked dirtiness with a flag, would fire again here -
+  // and if it re-sent cron_expr, that second request would drift next_run_at.
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await new Promise((r) => setTimeout(r, 50))
+  expect(bodies).toHaveLength(1)
 })
