@@ -61,6 +61,8 @@ anything the CLI or MCP server uses should not disagree with each other about or
   `internal/api/`
 - If a `position` column is added, it must be written through `CreateJobFromSpec` per the single
   job-spec pipeline invariant
+- A separate correctness defect in the shared pagination machinery, found 2026-08-13 and affecting
+  every paginated list identically: [[bug-2026-08-13-cursor-value-kind-not-validated]]
 
 ## Notes
 The cheap tiebreaker and the meaningful-order fix are different sizes of work; they can ship

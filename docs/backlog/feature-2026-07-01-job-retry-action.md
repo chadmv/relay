@@ -21,8 +21,10 @@ not.
 
 ## Blocked
 **BLOCKED** on backend and correctness prerequisites:
-- The `POST /v1/jobs/{id}/retry` route **does not exist yet** - tracked in
-  [[feature-2026-06-26-web-enabler-backend-endpoints]].
+- The `POST /v1/jobs/{id}/retry` route **does not exist yet**. As of 2026-08-13 it is tracked in its
+  own item, [[feature-2026-08-13-job-retry-endpoint]], split out of
+  [[feature-2026-06-26-web-enabler-backend-endpoints]] when that item's other two endpoints shipped.
+  The full constraint block for the statement lives in the new item.
 - Retry re-opens terminal jobs, which reactivates the latent
   [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] (the `done_24h`/`failed_24h` buckets window on
   `updated_at` as a finish proxy, which breaks once terminal jobs re-open).
@@ -35,7 +37,7 @@ not.
   preconditions - a retry endpoint reopens tasks that ARE terminal and has no worker identity to
   bind, so every predicate would reject every call. The backend work must add its own statement
   (`status IN ('failed','timed_out')` allow-list, its own epoch bump); see
-  [[feature-2026-06-26-web-enabler-backend-endpoints]], where that constraint is recorded.
+  [[feature-2026-08-13-job-retry-endpoint]], where that constraint is now recorded in full.
 
 ## Proposal
 Once the backend route lands and the two bugs above are addressed, the frontend wiring mirrors the
@@ -55,7 +57,8 @@ cancel action:
 ## Related
 - Carved from [[feature-2026-06-26-job-actions-submit-cancel-retry]] during the 2026-07-01
   job-cancel-actions slice.
-- Backend route tracked in [[feature-2026-06-26-web-enabler-backend-endpoints]].
+- Backend route tracked in [[feature-2026-08-13-job-retry-endpoint]] (previously in
+  [[feature-2026-06-26-web-enabler-backend-endpoints]], split 2026-08-13).
 - Correctness deps: [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] (still open);
   `bug-2026-06-26-retry-resurrects-cancelled-task` (closed 2026-08-12, now a constraint on the
   backend statement rather than a blocker - see Blocked above).

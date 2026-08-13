@@ -18,3 +18,7 @@ Decision recorded in the jobs-list design spec and verified during the session. 
 ## Related
 - `internal/store/query/jobs.sql` (`JobStatusCounts`)
 - `docs/superpowers/specs/2026-06-05-web-jobs-list-design.md`
+- The "if retry lands" trigger in Context now has a tracked owner:
+  [[feature-2026-08-13-job-retry-endpoint]], split out of
+  [[feature-2026-06-26-web-enabler-backend-endpoints]] on 2026-08-13. That item's acceptance
+  requires this bug to be either fixed alongside it or explicitly accepted in writing.

@@ -1093,6 +1093,8 @@ Each list endpoint accepts an optional `?sort=<key>` query parameter to override
 | `GET /v1/scheduled-jobs` | `-created_at` | `created_at`, `name`, `next_run_at`, `updated_at` |
 | `GET /v1/reservations` | `-created_at` | `created_at`, `name`, `starts_at`, `ends_at` |
 | `GET /v1/agent-enrollments` | `-created_at` | `created_at`, `expires_at` |
+| `GET /v1/invites` | `-created_at` | `created_at`, `expires_at` |
+| `GET /v1/auth/tokens` | `-created_at` | `created_at` |
 
 Each key supports both directions, e.g. `?sort=name` (ascending) and `?sort=-name` (descending).
 
@@ -1149,8 +1151,30 @@ Tokens are valid for 30 days.
 | Method | Path | Description |
 |--------|------|-------------|
 | `PUT` | `/v1/users/me/password` | Change own password (body: `current_password`, `new_password`) |
+| `GET` | `/v1/auth/tokens` | List the calling user's own live sessions. Paginated. |
 | `DELETE` | `/v1/auth/token` | Revoke the bearer token used on this request |
 | `DELETE` | `/v1/auth/tokens` | Revoke every active bearer token for the calling user |
+
+**GET `/v1/auth/tokens`** returns the caller's own tokens only. There is no `user_id`
+parameter; the identity is the bearer token, and a `?user_id=` in the query string is
+ignored. Items:
+
+```json
+{ "id": "<uuid>", "created_at": "2026-08-01T10:00:00Z", "expires_at": "2026-08-31T10:00:00Z", "is_current": true }
+```
+
+- `expires_at` is **omitted when the token never expires** (a NULL column). Render the
+  absence as `never`, not as a missing value.
+- `is_current` is always present on every item. Exactly one row **across the caller's whole
+  list** is `true` - the token presented on this request - which means a single page may
+  contain none: at `?limit=1` every page but one has zero `true` rows. Do not treat "no
+  current row on this page" as an error.
+- Only tokens that can currently authenticate are listed. Expired tokens are excluded and
+  are not counted in `total`.
+- There is no per-session revoke endpoint. `DELETE /v1/auth/tokens` revokes every session
+  including the caller's; `PUT /v1/users/me/password` revokes every session except the
+  caller's, after which this list contains exactly one row.
+- No `last_used_at`, IP, user agent or device is available: no such column exists.
 
 ### Users
 
@@ -1239,6 +1263,7 @@ All invite endpoints are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/invites` | Create a one-time invite token |
+| `GET` | `/v1/invites` | List every invite in every state (active, expired, redeemed). Paginated. |
 
 **POST `/v1/invites`** body:
 
@@ -1253,6 +1278,31 @@ Returns the raw token once:
 ```json
 { "id": "<uuid>", "token": "<raw token>", "expires_at": "2026-04-19T12:00:00Z" }
 ```
+
+**GET `/v1/invites`** returns every invite with no status filter, because redeemed and
+expired invites are what the admin view exists to show. Items:
+
+```json
+{
+  "id": "<uuid>",
+  "created_at": "2026-08-01T10:00:00Z",
+  "expires_at": "2026-08-04T10:00:00Z",
+  "created_by": "<uuid>",
+  "created_by_email": "admin@example.com",
+  "email": "invitee@example.com",
+  "used_at": "2026-08-02T09:00:00Z"
+}
+```
+
+- `email` is **omitted** when the invite is not bound to an address.
+- `used_at` is **omitted** when the invite has not been redeemed. Its presence is the
+  complete and terminal test for "redeemed".
+- No `status` field is returned. Derive the pill client-side: redeemed (`used_at`
+  present, checked first), expired (`expires_at <= now`), expiring (`expires_at - now`
+  under one hour), otherwise active. A server-asserted status would be stale the moment
+  the row is on screen.
+- No token, token hash, or token prefix is returned. The raw token exists exactly once,
+  in the `POST` response; only its SHA-256 is stored, and the list query never selects it.
 
 ### Scheduled Jobs
 
