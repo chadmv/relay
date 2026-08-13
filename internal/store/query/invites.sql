@@ -59,3 +59,28 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- against today's FK, and it is kept anyway so "total uses the list's own
 -- predicate" is literally true rather than true by argument.
 SELECT COUNT(*) FROM invites i JOIN users u ON u.id = i.created_by;
+
+-- name: ListInvitesPageByExpiresDesc :many
+-- The expires_at descending arm. invites.expires_at is NOT NULL
+-- (000002_invites.up.sql:7), so unlike workers.last_seen_at this needs no
+-- NULLS FIRST/LAST index pair and no cursor-null handling.
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (i.expires_at, i.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY i.expires_at DESC, i.id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: ListInvitesPageByExpiresAsc :many
+-- The expires_at ascending arm. See ListInvitesPageByCreatedAsc for why both
+-- directions of every allowlisted key need their own statement.
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE (sqlc.arg(cursor_set)::bool = FALSE
+       OR (i.expires_at, i.id) > (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY i.expires_at ASC, i.id ASC
+LIMIT sqlc.arg(page_limit)::int + 1;

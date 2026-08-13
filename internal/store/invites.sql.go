@@ -252,6 +252,151 @@ func (q *Queries) ListInvitesPageByCreatedAsc(ctx context.Context, arg ListInvit
 	return items, nil
 }
 
+const listInvitesPageByExpiresAsc = `-- name: ListInvitesPageByExpiresAsc :many
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE ($1::bool = FALSE
+       OR (i.expires_at, i.id) > ($2::timestamptz, $3::uuid))
+ORDER BY i.expires_at ASC, i.id ASC
+LIMIT $4::int + 1
+`
+
+type ListInvitesPageByExpiresAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListInvitesPageByExpiresAscRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	Email          *string            `json:"email"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	UsedAt         pgtype.Timestamptz `json:"used_at"`
+	CreatedByEmail string             `json:"created_by_email"`
+}
+
+// The expires_at ascending arm. See ListInvitesPageByCreatedAsc for why both
+// directions of every allowlisted key need their own statement.
+//
+//	SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+//	       u.email AS created_by_email
+//	FROM invites i
+//	JOIN users u ON u.id = i.created_by
+//	WHERE ($1::bool = FALSE
+//	       OR (i.expires_at, i.id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY i.expires_at ASC, i.id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListInvitesPageByExpiresAsc(ctx context.Context, arg ListInvitesPageByExpiresAscParams) ([]ListInvitesPageByExpiresAscRow, error) {
+	rows, err := q.db.Query(ctx, listInvitesPageByExpiresAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInvitesPageByExpiresAscRow
+	for rows.Next() {
+		var i ListInvitesPageByExpiresAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.CreatedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInvitesPageByExpiresDesc = `-- name: ListInvitesPageByExpiresDesc :many
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE ($1::bool = FALSE
+       OR (i.expires_at, i.id) < ($2::timestamptz, $3::uuid))
+ORDER BY i.expires_at DESC, i.id DESC
+LIMIT $4::int + 1
+`
+
+type ListInvitesPageByExpiresDescParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListInvitesPageByExpiresDescRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	Email          *string            `json:"email"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	UsedAt         pgtype.Timestamptz `json:"used_at"`
+	CreatedByEmail string             `json:"created_by_email"`
+}
+
+// The expires_at descending arm. invites.expires_at is NOT NULL
+// (000002_invites.up.sql:7), so unlike workers.last_seen_at this needs no
+// NULLS FIRST/LAST index pair and no cursor-null handling.
+//
+//	SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+//	       u.email AS created_by_email
+//	FROM invites i
+//	JOIN users u ON u.id = i.created_by
+//	WHERE ($1::bool = FALSE
+//	       OR (i.expires_at, i.id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY i.expires_at DESC, i.id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListInvitesPageByExpiresDesc(ctx context.Context, arg ListInvitesPageByExpiresDescParams) ([]ListInvitesPageByExpiresDescRow, error) {
+	rows, err := q.db.Query(ctx, listInvitesPageByExpiresDesc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInvitesPageByExpiresDescRow
+	for rows.Next() {
+		var i ListInvitesPageByExpiresDescRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.CreatedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markInviteUsed = `-- name: MarkInviteUsed :execrows
 UPDATE invites
 SET used_at = NOW(), used_by = $2

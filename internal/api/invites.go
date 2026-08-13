@@ -98,6 +98,7 @@ var InvitesSortSpec = SortSpec{
 	Default: "-created_at",
 	Keys: map[string]SortKeyKind{
 		"created_at": SortKeyTimestamp,
+		"expires_at": SortKeyTimestamp,
 	},
 }
 
@@ -189,6 +190,46 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 			},
 			func(row store.ListInvitesPageByCreatedAscRow) (anySortVal, pgtype.UUID) {
 				return row.CreatedAt.Time, row.ID
+			})
+
+	case "-expires_at":
+		rows, err := s.q.ListInvitesPageByExpiresDesc(ctx, store.ListInvitesPageByExpiresDescParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list invites")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort,
+			func(row store.ListInvitesPageByExpiresDescRow) map[string]any {
+				return inviteEntry(row.ID, row.Email, row.CreatedBy, row.CreatedByEmail,
+					row.CreatedAt, row.ExpiresAt, row.UsedAt)
+			},
+			func(row store.ListInvitesPageByExpiresDescRow) (anySortVal, pgtype.UUID) {
+				return row.ExpiresAt.Time, row.ID
+			})
+
+	case "expires_at":
+		rows, err := s.q.ListInvitesPageByExpiresAsc(ctx, store.ListInvitesPageByExpiresAscParams{
+			CursorSet: pp.Cursor.Set,
+			CursorTs:  pp.CursorTs(),
+			CursorID:  pp.Cursor.ID,
+			PageLimit: pp.Limit,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list invites")
+			return
+		}
+		items, next = buildPage(rows, pp.Limit, pp.Sort,
+			func(row store.ListInvitesPageByExpiresAscRow) map[string]any {
+				return inviteEntry(row.ID, row.Email, row.CreatedBy, row.CreatedByEmail,
+					row.CreatedAt, row.ExpiresAt, row.UsedAt)
+			},
+			func(row store.ListInvitesPageByExpiresAscRow) (anySortVal, pgtype.UUID) {
+				return row.ExpiresAt.Time, row.ID
 			})
 
 	default:
