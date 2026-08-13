@@ -79,14 +79,33 @@ func (q *Queries) DeleteOtherTokensForUser(ctx context.Context, arg DeleteOtherT
 }
 
 const deleteToken = `-- name: DeleteToken :exec
-DELETE FROM api_tokens WHERE id = $1
+DELETE FROM api_tokens WHERE id = $1 AND user_id = $2
 `
 
-// DeleteToken
+type DeleteTokenParams struct {
+	ID     pgtype.UUID `json:"id"`
+	UserID pgtype.UUID `json:"user_id"`
+}
+
+// Revoke ONE session, scoped to its owner.
 //
-//	DELETE FROM api_tokens WHERE id = $1
-func (q *Queries) DeleteToken(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteToken, id)
+// The user_id predicate is not redundant with the primary key. The id proves
+// WHICH row, never WHOSE - the same distinction the epoch fence draws on tasks,
+// where a matching epoch establishes currency but not identity (CLAUDE.md,
+// "Invariants"). Both sibling deletes carry the predicate; this statement is the
+// one whose id can plausibly arrive from the wire.
+//
+// The only caller today passes the token id BearerAuth resolved from the
+// presented credential (internal/api/auth.go:341-351), so an id-only statement
+// would not be exploitable through it. But GET /v1/auth/tokens returns every
+// caller the UUIDs of their own sessions, and the per-session revoke endpoint
+// that list exists to enable would take its id from the path - at which point
+// an id-only DELETE is an IDOR that force-logs-out any user, admins included.
+// See TestDeleteToken_IsScopedToTheOwningUser.
+//
+//	DELETE FROM api_tokens WHERE id = $1 AND user_id = $2
+func (q *Queries) DeleteToken(ctx context.Context, arg DeleteTokenParams) error {
+	_, err := q.db.Exec(ctx, deleteToken, arg.ID, arg.UserID)
 	return err
 }
 
