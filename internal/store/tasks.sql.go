@@ -1054,8 +1054,11 @@ type UpdateTaskStatusParams struct {
 // cover every production writer. The Go identity gate in handleTaskStatus stays
 // as well: after the retry statement was fenced it is no longer the correctness
 // control, but it still answers a different question ("may this sender drive
-// this task's status machine at all") one round trip and one log line earlier.
-// Do not delete either as redundant with the other.
+// this task's status machine at all") one round trip earlier. It does NOT save
+// a log line - handleTaskStatus drops pgx.ErrNoRows from both write sites
+// silently - and the round-trip saving is one statement instead of two, since
+// GetTask has already run before the gate. Do not delete either as redundant
+// with the other, but do not oversell the Go one either.
 //
 //	UPDATE tasks
 //	SET status = $1,

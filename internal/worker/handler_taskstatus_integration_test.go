@@ -323,8 +323,10 @@ func TestHandleTaskStatus_RejectsRunningForANeverClaimedTask(t *testing.T) {
 // did not become worthless, it changed what it proves. That no test now
 // discriminates the Go gate is recorded as a Known Limitation in
 // docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md; the gate's
-// remaining value is non-functional (zero round trips, zero attacker-keyed log
-// lines), which is why it is written down rather than pinned.
+// remaining value is non-functional - one database round trip instead of two per
+// forged message, since GetTask has already run before the gate - which is why it
+// is written down rather than pinned. It saves no log lines: both write sites
+// drop pgx.ErrNoRows silently.
 //
 // What the construction below still buys, unchanged:
 //

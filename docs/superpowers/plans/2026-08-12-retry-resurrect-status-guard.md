@@ -1,5 +1,23 @@
 # Retry and Status-Writer Terminality Guard Implementation Plan
 
+> **Corrections (2026-08-12, Phase 4 review - this plan was executed, then two of its
+> prescriptions were overturned).** Read these before following any task text verbatim.
+>
+> 1. **The status predicates shipped as allow-lists, not deny-lists.** Every task below writes
+>    `status NOT IN ('done','failed','timed_out')`. Two review lenses independently argued for
+>    `status IN ('pending','dispatched','running')` instead: the forms are exactly equivalent
+>    under migration 000019's vocabulary, but they fail in opposite directions, and a plausible
+>    near-term task-level `cancelled` status would make the deny-list silently accept writes it
+>    was never reviewed against. The allow-list shipped, plus a `pg_get_constraintdef` guard
+>    test (`internal/store/tasks_status_vocabulary_lockstep_test.go`) so the lockstep is
+>    enforced rather than asserted.
+> 2. **The Go gate's justification, prescribed at lines ~840 and ~1410, is false.** This plan
+>    tells the engineer to write that the gate saves "one round trip and one log line" / "zero
+>    round trips, zero attacker-keyed log lines". The same change wraps both write sites in
+>    `!errors.Is(err, pgx.ErrNoRows)`, so it saves *no* log lines; and `GetTask` runs ahead of
+>    the gate either way, so the saving is *one* round trip instead of two. The gate still
+>    stays - it just does not stay for these reasons. See the spec's sections 3.2 and 8.5.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make an already-finished task unwritable and make the agent-driven retry atomic with respect to the row it decided from, so a cancel landing in the retry window wins, and a task's own assignee cannot resurrect a task it already completed or cascade `FailDependentTasks` across a completed task's downstream.

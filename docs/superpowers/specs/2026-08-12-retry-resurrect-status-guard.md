@@ -693,9 +693,16 @@ to fix Problem 1. Required response:
   the SQL predicate on `IncrementTaskRetryCount`, and that it is no longer evidence about the
   Go gate.
 - **Record in Known Limitations** that after this change no test in the tree discriminates the
-  Go gate's presence, because its remaining value (zero round trips, zero attacker-keyed log
-  lines) is non-functional. That is honest and it is the correct outcome given 3.2, but it
-  must be written down or the next reviewer will delete the gate and see a green suite.
+  Go gate's presence, because its remaining value is non-functional. That is honest and it is
+  the correct outcome, but it must be written down or the next reviewer will delete the gate
+  and see a green suite.
+
+  > **Correction (2026-08-12, Phase 4).** This bullet originally described that remaining
+  > value as "zero round trips, zero attacker-keyed log lines". Both halves are wrong, and
+  > section 3.2's Correction has the full account: the saving is *one* round trip instead of
+  > two (`GetTask` runs ahead of the gate either way), and it is *zero* log lines saved, since
+  > this same change wraps both write sites in `!errors.Is(err, pgx.ErrNoRows)`. The gate
+  > still earns its place; it just does not earn it for these reasons.
 
 ### 8.6 `Connect` wiring
 
