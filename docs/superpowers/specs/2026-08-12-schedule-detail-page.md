@@ -9,7 +9,7 @@ Status: Draft (autonomous cycle; conductor review)
 way to open one, read its job spec, or change its cron. This slice adds a
 `/schedules/:id` detail page and the list entry point that reaches it.
 
-Backlog item: `docs/backlog/idea-2026-06-05-schedule-detail-page.md`.
+Backlog item: `docs/backlog/closed/idea-2026-06-05-schedule-detail-page.md` (closed by this slice).
 Design source of truth: the hi-fi `HoloScheduleDetail`
 (`design_handoff_relay_holo/hifi3-holo-pages.jsx:1652-1871`). The `reference/`
 sketch is structure-only.
@@ -262,7 +262,7 @@ action bar: `Run now`, `Enable`/`Disable`, `Delete`. Matches
 `hifi3-holo-pages.jsx:1707-1739` minus the owner field (decision 8).
 
 Sub-line (mono, `text-fg-mute`): `created <abs>`, `updated <rel>`,
-`next fire <rel>` (`—` when disabled), `last run <rel>` and a `last job` link when
+`next fire <rel>` (`-` when disabled), `last run <rel>` and a `last job` link when
 `last_job_id` is present. All from the GET payload.
 
 ### Trigger panel (editable) - left column, top
