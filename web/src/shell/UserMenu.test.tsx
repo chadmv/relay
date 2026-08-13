@@ -269,3 +269,51 @@ test('a blur with a null relatedTarget does NOT close the menu', async () => {
   // fails exactly here.
   expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
 })
+
+// The durable guard against someone "restoring" role="menu" / role="menuitem" from
+// the backlog item's Proposal without reading
+// docs/superpowers/specs/2026-08-13-usermenu-menu-roles.md, which deliberately
+// INVERTED it. Three of the four entries are site navigation links - the case the
+// menu role's own specification excludes - and role="menuitem" on an <a href>
+// replaces the link role rather than adding to it.
+test('the panel is a plain disclosure - no menu roles, no negative tabindex', async () => {
+  renderMenu()
+  await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
+  const panel = screen.getByTestId('user-menu-panel')
+
+  expect(panel).not.toHaveAttribute('role')
+  expect(panel.querySelectorAll('[role="menu"]')).toHaveLength(0)
+  expect(panel.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  // No tabindex AT ALL, not merely no negative one: a roving tabindex is exactly
+  // tabindex="0" on one item and tabindex="-1" on the rest, so asserting the
+  // attribute is absent catches a half-built one too.
+  expect(panel.querySelectorAll('[tabindex]')).toHaveLength(0)
+
+  // Positive control: the sweep is looking at a POPULATED panel, so it cannot pass
+  // against an empty or unmounted one. Three elements whose computed role is LINK,
+  // and the same three as real anchors with an href - which is the semantic the
+  // menu contract would have destroyed.
+  expect(screen.getAllByRole('link')).toHaveLength(3)
+  expect(panel.querySelectorAll('a[href]')).toHaveLength(3)
+  expect(panel.querySelectorAll('button')).toHaveLength(1)
+})
+
+test('arrow keys do nothing - this is a disclosure, not a menu', async () => {
+  renderMenu()
+  await userEvent.click(screen.getByRole('button', { name: /ada@studio.dev/i }))
+  await userEvent.tab()
+  const first = screen.getByRole('link', { name: 'Profile' })
+  expect(document.activeElement).toBe(first)
+
+  await userEvent.keyboard('{ArrowDown}{ArrowUp}{Home}{End}')
+
+  // user-event DOES dispatch these as real keydowns (keyboard/keyMap.js:126-150,
+  // system/keyboard.js:58,64-67) and jsdom's only built-in defaults for them are
+  // radio-group walking and text-caret movement (event/behavior/keydown.js:24-54,
+  // 69-91), neither of which applies to an <a>. So an unchanged activeElement here
+  // is evidence that NO roving-tabindex handler exists - not evidence that the
+  // harness cannot deliver the key. Arrow navigation would have been fully testable
+  // here; it is rejected on the merits, not for lack of a harness.
+  expect(document.activeElement).toBe(first)
+  expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
+})
