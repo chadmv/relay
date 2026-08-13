@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countInvites = `-- name: CountInvites :one
+SELECT COUNT(*) FROM invites i JOIN users u ON u.id = i.created_by
+`
+
+// The `total` for the invites list. It carries the SAME join as the list
+// statements and the same (empty) filter predicate, so the pagination footer
+// can never state a number the client cannot page to. The join is redundant
+// against today's FK, and it is kept anyway so "total uses the list's own
+// predicate" is literally true rather than true by argument.
+//
+//	SELECT COUNT(*) FROM invites i JOIN users u ON u.id = i.created_by
+func (q *Queries) CountInvites(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countInvites)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createInvite = `-- name: CreateInvite :one
 INSERT INTO invites (token_hash, email, created_by, expires_at)
 VALUES ($1, $2, $3, $4)
@@ -71,6 +89,167 @@ func (q *Queries) GetInviteByTokenHash(ctx context.Context, tokenHash string) (I
 		&i.UsedBy,
 	)
 	return i, err
+}
+
+const listInvitesPage = `-- name: ListInvitesPage :many
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE ($1::bool = FALSE
+       OR (i.created_at, i.id) < ($2::timestamptz, $3::uuid))
+ORDER BY i.created_at DESC, i.id DESC
+LIMIT $4::int + 1
+`
+
+type ListInvitesPageParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListInvitesPageRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	Email          *string            `json:"email"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	UsedAt         pgtype.Timestamptz `json:"used_at"`
+	CreatedByEmail string             `json:"created_by_email"`
+}
+
+// One page of the admin invite list, newest first. Every state is included -
+// active, expired and redeemed - because those are exactly what the Admin
+// Invites tab exists to show. There is no WHERE filter and no filter parameter;
+// if one is ever added, the sort+filter 400 rule at internal/api/jobs.go:417-422
+// becomes live for this endpoint.
+//
+// The projection is EXPLICIT and deliberately omits i.token_hash. That omission
+// is the endpoint's entire security control: with the column absent from the
+// SELECT, the generated row type has no field for it, so returning it is a
+// compile error rather than a review miss. Never change this to SELECT *, and
+// never add token_hash "for debugging".
+//
+// The JOIN to users is INNER, which is safe because users are archived, never
+// hard-deleted: no DELETE FROM users statement exists anywhere in
+// internal/store/query/. Precedent for the email projection is submitted_by_email
+// in jobs.sql:16,20.
+//
+//	SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+//	       u.email AS created_by_email
+//	FROM invites i
+//	JOIN users u ON u.id = i.created_by
+//	WHERE ($1::bool = FALSE
+//	       OR (i.created_at, i.id) < ($2::timestamptz, $3::uuid))
+//	ORDER BY i.created_at DESC, i.id DESC
+//	LIMIT $4::int + 1
+func (q *Queries) ListInvitesPage(ctx context.Context, arg ListInvitesPageParams) ([]ListInvitesPageRow, error) {
+	rows, err := q.db.Query(ctx, listInvitesPage,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInvitesPageRow
+	for rows.Next() {
+		var i ListInvitesPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.CreatedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInvitesPageByCreatedAsc = `-- name: ListInvitesPageByCreatedAsc :many
+SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+       u.email AS created_by_email
+FROM invites i
+JOIN users u ON u.id = i.created_by
+WHERE ($1::bool = FALSE
+       OR (i.created_at, i.id) > ($2::timestamptz, $3::uuid))
+ORDER BY i.created_at ASC, i.id ASC
+LIMIT $4::int + 1
+`
+
+type ListInvitesPageByCreatedAscParams struct {
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListInvitesPageByCreatedAscRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	Email          *string            `json:"email"`
+	CreatedBy      pgtype.UUID        `json:"created_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	UsedAt         pgtype.Timestamptz `json:"used_at"`
+	CreatedByEmail string             `json:"created_by_email"`
+}
+
+// The ascending arm of created_at. parseSort strips a leading '-' before
+// checking the allowlist (internal/api/pagination.go:178-181), so every key in
+// InvitesSortSpec.Keys is reachable in BOTH directions and each direction needs
+// its own statement and its own dispatch arm. A missing arm is a
+// client-triggerable panic, not a 400.
+//
+//	SELECT i.id, i.email, i.created_by, i.created_at, i.expires_at, i.used_at,
+//	       u.email AS created_by_email
+//	FROM invites i
+//	JOIN users u ON u.id = i.created_by
+//	WHERE ($1::bool = FALSE
+//	       OR (i.created_at, i.id) > ($2::timestamptz, $3::uuid))
+//	ORDER BY i.created_at ASC, i.id ASC
+//	LIMIT $4::int + 1
+func (q *Queries) ListInvitesPageByCreatedAsc(ctx context.Context, arg ListInvitesPageByCreatedAscParams) ([]ListInvitesPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listInvitesPageByCreatedAsc,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListInvitesPageByCreatedAscRow
+	for rows.Next() {
+		var i ListInvitesPageByCreatedAscRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.CreatedByEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markInviteUsed = `-- name: MarkInviteUsed :execrows
