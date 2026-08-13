@@ -92,8 +92,7 @@ func TestListTokens_ScopedToCallerAndIgnoresUserIDParam(t *testing.T) {
 	other := createTestUser(t, q, "Other", "tok-scope-other@example.com", false)
 
 	myToken := mintToken(t, q, me.ID, future(30*24*time.Hour))
-	mySecond := mintToken(t, q, me.ID, future(30*24*time.Hour))
-	_ = mySecond
+	mintToken(t, q, me.ID, future(30*24*time.Hour))
 	mintToken(t, q, other.ID, future(30*24*time.Hour))
 	mintToken(t, q, other.ID, future(30*24*time.Hour))
 
@@ -128,8 +127,7 @@ func TestListTokens_IsCurrentIdentifiesThePresentedToken(t *testing.T) {
 
 	older := mintToken(t, q, me.ID, future(30*24*time.Hour))
 	time.Sleep(2 * time.Millisecond) // distinct created_at so the order is stable
-	newer := mintToken(t, q, me.ID, future(30*24*time.Hour))
-	_ = newer
+	mintToken(t, q, me.ID, future(30*24*time.Hour))
 
 	// Authenticate with the OLDER token, which under the default -created_at
 	// sort is the LAST row. A handler that flagged items[0] would fail here.

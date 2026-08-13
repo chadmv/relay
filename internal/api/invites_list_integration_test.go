@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"relay/internal/api"
-	"relay/internal/store"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,8 +134,6 @@ func keysOf(m map[string]any) []string {
 	}
 	return out
 }
-
-var _ = store.Invite{} // keep the store import honest for later tests in this file
 
 // The invites list applies NO filter: redeemed and expired invites are exactly
 // what the tab exists to show, unlike GET /v1/agent-enrollments where a
