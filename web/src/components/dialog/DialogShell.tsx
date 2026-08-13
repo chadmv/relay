@@ -359,15 +359,24 @@ export function DialogShell({
       // on document, the first calling stopPropagation, and the second still
       // ran). Only stopImmediatePropagation blocks a sibling listener on this
       // node from firing. In THIS app that sibling is UserMenu's own Escape
-      // handler, and the two are structurally prevented from overlapping
-      // anyway - UserMenu's listener only exists while its dropdown is open,
-      // and its toggle button is itself a background control that goes inert
-      // while any dialog is open, so the dropdown cannot be opened in the
-      // first place while this fires. This is defence in depth on top of that
-      // structural guarantee, not the only thing preventing an overlap, and it
-      // only ever blocks a listener registered AFTER this one for the same
-      // dispatch - it cannot un-ring a bell a listener registered EARLIER
-      // already rang.
+      // handler.
+      //
+      // CORRECTED 2026-08-13 (2026-08-13-usermenu-menu-roles): this comment used
+      // to claim the two are "structurally prevented from overlapping anyway",
+      // because the toggle goes inert while a dialog is open so the dropdown
+      // cannot be opened. That is only true in ONE order. Open the dropdown
+      // FIRST - by mouse, so focus never lands inside it, which is the Safari
+      // case UserMenu documents - then keyboard-focus a page control and open a
+      // dialog: nothing closes the dropdown, and both are now open. Measured
+      // directly. In that ordering UserMenu registered its listener EARLIER, so
+      // the suppression below cannot reach it and one Escape dismisses both
+      // surfaces. That is acceptable behaviour, but it is not a guarantee, and
+      // it must not be written as one.
+      //
+      // So: this only ever blocks a listener registered AFTER this one for the
+      // same dispatch - it cannot un-ring a bell a listener registered EARLIER
+      // already rang. Registration order decides, and nothing structural pins
+      // that order.
       e.stopImmediatePropagation()
       onDismissRef.current()
     }

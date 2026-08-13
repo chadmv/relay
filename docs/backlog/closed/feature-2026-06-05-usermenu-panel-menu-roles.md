@@ -1,8 +1,10 @@
 ---
 title: UserMenu dropdown panel lacks menu/menuitem roles and keyboard navigation
 type: feature
-status: open
+status: closed
 created: 2026-06-05
+closed: 2026-08-13
+resolution: fixed
 priority: medium
 source: follow-up from closing bug-2026-06-03-usermenu-aria-attributes
 ---
@@ -51,3 +53,45 @@ implies.
   DialogShell already solved, and the reasons it could NOT use `inert` or a focus-trap
   library under this test suite apply here too. Reuse that reasoning rather than
   rediscovering it.
+
+## Resolution
+Closed 2026-08-13 (`2026-08-13-usermenu-menu-roles`) by **inverting this item's Proposal**. The
+problem it names is real and is fixed; the fix it proposed is not the one that shipped, and would
+have made things worse.
+
+**What this item got right.** The contract was unfulfilled: the toggle advertised
+`aria-haspopup="menu"` to assistive tech since 2026-06-05 against a panel that was a plain `<div>`.
+A screen-reader user really was promised a menu and handed something else.
+
+**Why the fix went the other way.** A contract mismatch has two repairs - build the thing, or stop
+advertising it - and this item assumed the first without arguing for it. Three of the four entries
+are site-navigation links, and for that case:
+
+- WAI-ARIA 1.2 defines `menu` as a list of choices, "often a list of common actions or functions",
+  and the APG's **Disclosure Navigation Menu** pattern exists for precisely this case and states
+  `menu`/`menuitem` are deliberately not used when the entries are links.
+- `role="menuitem"` on an `<a href>` **replaces** the link role in the platform accessibility tree,
+  so the item leaves a screen reader's links list and browse-mode "next link".
+- A conforming roving tabindex would make those three links unreachable by Tab.
+- `aria-haspopup="true"` was not an escape hatch: ARIA 1.2 treats it as equivalent to `menu`.
+
+So the toggle now carries `aria-expanded` plus `aria-controls`, the panel is an ordinary disclosure,
+the items stay three links and one button, and Tab reaches them natively.
+
+**The proof is mechanical, not rhetorical.** A mutation adding `role="menuitem"` broke **seven other
+tests**, because `getByRole('link', {name:'Profile'})` stopped resolving. This item's own Proposal,
+implemented literally, destroys the semantics it was trying to add.
+
+**Trigger to revisit, recorded so it is re-evaluated rather than re-argued:** if this dropdown ever
+stops containing navigation links and becomes actions-only, the calculus flips and `role="menu"`
+becomes correct. Nothing short of that.
+
+**Two defects this item never mentioned were also fixed:** the items had no `onClick`, so the
+dropdown stayed open over the page it had just navigated to (newly visible once `/profile/*`
+shipped), and Escape dropped focus to `<body>` instead of the toggle. Review then caught a
+regression introduced by that first fix - the handlers also fired on modifier-clicks, so Ctrl+click
+opened a background tab *and* collapsed the dropdown - now guarded with react-router's own
+`isModifiedEvent` predicate.
+
+Follow-ups filed: [[idea-2026-08-13-post-logout-focus-lands-on-body]] and
+[[idea-2026-08-13-usermenu-outside-mousedown-drops-focus]].
