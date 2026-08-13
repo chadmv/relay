@@ -19,6 +19,30 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>
   register: (input: RegisterInput) => Promise<void>
   logout: () => Promise<void>
+  // Replaces the in-memory user row with an authoritative server response.
+  // PATCH /v1/users/me returns the same userResponse struct GET /v1/users/me
+  // returns (internal/api/users.go:429 and :410 both call toUserResponse), so
+  // there is nothing to confirm with a second round trip. This exists so the
+  // profile page does NOT introduce a second ['me'] query: one owner of
+  // identity, not two caches that can disagree.
+  applyUser: (u: User) => void
+  // Local-only session teardown: forget the token, forget the user, go anonymous,
+  // drop the query cache. Issues NO request, on purpose.
+  //
+  // Its one caller is the Sessions tab, and by the time it runs the server has
+  // already destroyed EVERY bearer token for this user - DELETE /v1/auth/tokens
+  // is DeleteTokensForUser, `DELETE FROM api_tokens WHERE user_id = $1`
+  // (internal/store/query/tokens.sql:25-26), with no `id <> $2`. Any request made
+  // after that point is a guaranteed 401 racing this teardown, which is exactly
+  // why logout() is NOT reused there: logout() would first fire
+  // DELETE /v1/auth/token against a token that no longer exists.
+  //
+  // The ORDER inside it is CLAUDE.md's "end the generation before releasing the
+  // resource": setStatus('anonymous') is what ends the generation, because
+  // ProtectedRoute re-renders to <Navigate to="/auth" replace/> in the same
+  // commit and unmounts every page and every active query observer, so nothing
+  // is left holding a continuation that could fire against the dead credential.
+  clearSession: () => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -88,16 +112,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await applyAuth(res)
   }
 
-  async function logout() {
-    await apiFetch('/auth/token', { method: 'DELETE' }).catch(() => {})
+  function clearSession() {
     clearToken()
     setUser(null)
     setStatus('anonymous')
     queryClient.clear()
   }
 
+  function applyUser(u: User) {
+    setUser(u)
+  }
+
+  async function logout() {
+    await apiFetch('/auth/token', { method: 'DELETE' }).catch(() => {})
+    clearSession()
+  }
+
   return (
-    <AuthContext.Provider value={{ status, user, login, register, logout }}>
+    <AuthContext.Provider
+      value={{ status, user, login, register, logout, applyUser, clearSession }}
+    >
       {children}
     </AuthContext.Provider>
   )
