@@ -1165,8 +1165,10 @@ ignored. Items:
 
 - `expires_at` is **omitted when the token never expires** (a NULL column). Render the
   absence as `never`, not as a missing value.
-- `is_current` is always present and is true for exactly one row: the token presented on
-  this request.
+- `is_current` is always present on every item. Exactly one row **across the caller's whole
+  list** is `true` - the token presented on this request - which means a single page may
+  contain none: at `?limit=1` every page but one has zero `true` rows. Do not treat "no
+  current row on this page" as an error.
 - Only tokens that can currently authenticate are listed. Expired tokens are excluded and
   are not counted in `total`.
 - There is no per-session revoke endpoint. `DELETE /v1/auth/tokens` revokes every session
