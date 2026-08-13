@@ -210,6 +210,68 @@ test('deleteSchedule DELETEs the id path and tolerates the empty 204', async () 
   expect(path).toBe('/v1/scheduled-jobs/s1')
 })
 
+// fetch() normalizes ".." path segments before the request is dispatched, so an
+// unencoded id like "../jobs/<uuid>" turns e.g. the Delete call into a request
+// against a DIFFERENT resource entirely - DELETE /v1/jobs/<uuid> instead of
+// /v1/scheduled-jobs/<id>. encodeURIComponent turns the traversal segment's
+// slashes into %2F, which a URL parser does NOT treat as path separators, so the
+// request stays scoped under /v1/scheduled-jobs/ no matter what the id contains.
+const TRAVERSAL_ID = '../jobs/deadbeef-0000-0000-0000-000000000000'
+const TRAVERSAL_TARGET = '/v1/jobs/deadbeef-0000-0000-0000-000000000000'
+const TRAVERSAL_ENCODED = `/v1/scheduled-jobs/${encodeURIComponent(TRAVERSAL_ID)}`
+
+test('runScheduleNow encodes the id so a path-traversal id cannot escape /scheduled-jobs', async () => {
+  let capturedPath: string | undefined
+  server.use(
+    http.post('*', ({ request }) => {
+      capturedPath = new URL(request.url).pathname
+      return HttpResponse.json({ id: 'job1' }, { status: 201 })
+    }),
+  )
+  await runScheduleNow(TRAVERSAL_ID)
+  expect(capturedPath).not.toBe(TRAVERSAL_TARGET + '/run-now')
+  expect(capturedPath).toBe(TRAVERSAL_ENCODED + '/run-now')
+})
+
+test('getSchedule encodes the id so a path-traversal id cannot escape /scheduled-jobs', async () => {
+  let capturedPath: string | undefined
+  server.use(
+    http.get('*', ({ request }) => {
+      capturedPath = new URL(request.url).pathname
+      return HttpResponse.json(ROW)
+    }),
+  )
+  await getSchedule(TRAVERSAL_ID)
+  expect(capturedPath).not.toBe(TRAVERSAL_TARGET)
+  expect(capturedPath).toBe(TRAVERSAL_ENCODED)
+})
+
+test('updateSchedule encodes the id so a path-traversal id cannot escape /scheduled-jobs', async () => {
+  let capturedPath: string | undefined
+  server.use(
+    http.patch('*', ({ request }) => {
+      capturedPath = new URL(request.url).pathname
+      return HttpResponse.json(ROW)
+    }),
+  )
+  await updateSchedule(TRAVERSAL_ID, { overlap_policy: 'allow' })
+  expect(capturedPath).not.toBe(TRAVERSAL_TARGET)
+  expect(capturedPath).toBe(TRAVERSAL_ENCODED)
+})
+
+test('deleteSchedule encodes the id so a path-traversal id cannot escape /scheduled-jobs', async () => {
+  let capturedPath: string | undefined
+  server.use(
+    http.delete('*', ({ request }) => {
+      capturedPath = new URL(request.url).pathname
+      return new HttpResponse(null, { status: 204 })
+    }),
+  )
+  await deleteSchedule(TRAVERSAL_ID)
+  expect(capturedPath).not.toBe(TRAVERSAL_TARGET)
+  expect(capturedPath).toBe(TRAVERSAL_ENCODED)
+})
+
 test('setScheduleEnabled still sends EXACTLY { enabled } after the re-expression', async () => {
   let body: Record<string, unknown> | undefined
   server.use(

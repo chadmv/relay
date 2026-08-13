@@ -43,8 +43,14 @@ export function listSchedules(sort: ScheduleSort, cursor?: string): Promise<Sche
 }
 
 // Submits a fresh job from the stored job_spec. Allowed for the owner or an admin.
+//
+// The id is encoded: fetch() normalizes ".." path segments before dispatch, so an
+// unencoded id like "../jobs/<uuid>" would turn this into a request against a
+// DIFFERENT resource, e.g. POST /v1/jobs/<uuid>/run-now. encodeURIComponent turns
+// the traversal segment's slashes into %2F, which a URL parser does not treat as
+// path separators, keeping the request scoped under /v1/scheduled-jobs/.
 export function runScheduleNow(id: string): Promise<unknown> {
-  return apiFetch(`/scheduled-jobs/${id}/run-now`, { method: 'POST' })
+  return apiFetch(`/scheduled-jobs/${encodeURIComponent(id)}/run-now`, { method: 'POST' })
 }
 
 // One scheduled job. NOTE the asymmetry with the list endpoint: handleGetScheduledJob
@@ -56,8 +62,10 @@ export function runScheduleNow(id: string): Promise<unknown> {
 // Rejects with ApiError(404) both for a missing row and for a non-owner non-admin:
 // ownedScheduledJob hides rather than refuses (:147-169). The two are indistinguishable
 // on the wire by design; do not try to tell them apart.
+// The id is encoded; see the note on runScheduleNow above - the same traversal
+// risk applies to every call site in this file.
 export function getSchedule(id: string): Promise<Schedule> {
-  return apiFetch<Schedule>(`/scheduled-jobs/${id}`)
+  return apiFetch<Schedule>(`/scheduled-jobs/${encodeURIComponent(id)}`)
 }
 
 // Every field optional. An OMITTED key means "leave alone" server-side, because
@@ -82,7 +90,7 @@ export interface SchedulePatch {
 // (internal/store/query/scheduled_jobs.sql:32-43) with no version column and there is
 // no 409. The changed-fields-only body narrows the overlap to fields actually touched.
 export function updateSchedule(id: string, patch: SchedulePatch): Promise<Schedule> {
-  return apiFetch<Schedule>(`/scheduled-jobs/${id}`, { method: 'PATCH', json: patch })
+  return apiFetch<Schedule>(`/scheduled-jobs/${encodeURIComponent(id)}`, { method: 'PATCH', json: patch })
 }
 
 // 204 with no body (internal/api/scheduled_jobs.go:633); apiFetch returns undefined for
@@ -93,7 +101,7 @@ export function updateSchedule(id: string, patch: SchedulePatch): Promise<Schedu
 // already produced SURVIVE but are unlinked from it - the run history becomes
 // unreachable. A run already in flight is not cancelled. That is the confirm copy.
 export function deleteSchedule(id: string): Promise<void> {
-  return apiFetch<void>(`/scheduled-jobs/${id}`, { method: 'DELETE' })
+  return apiFetch<void>(`/scheduled-jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 // Toggles the enabled flag via PATCH. Expressed through updateSchedule so there is one
