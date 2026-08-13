@@ -39,7 +39,20 @@ export function useScheduleActions() {
 
   const remove = useMutation({
     mutationFn: (id: string) => deleteSchedule(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
+    // Invariant 1 (end the generation before releasing the resource): the row is
+    // already gone server-side, so its own detail and runs queries must never be
+    // refetched - both are guaranteed 404s. Removing them from the cache FIRST means
+    // the broad ['schedules'] invalidate below has nothing left to match for this id,
+    // so it can only refresh the list query. Order matters: an invalidate that ran
+    // first would refetch the still-active detail/runs queries (the page has not
+    // necessarily unmounted yet - the mutate-level onSuccess that navigates away runs
+    // strictly AFTER this hook-level onSuccess resolves) before this cleanup got a
+    // chance to run.
+    onSuccess: (_data, id) => {
+      qc.removeQueries({ queryKey: ['schedules', 'detail', id] })
+      qc.removeQueries({ queryKey: ['schedules', 'runs', id] })
+      return qc.invalidateQueries({ queryKey: ['schedules'] })
+    },
   })
 
   return { runNow, setEnabled, update, remove }
