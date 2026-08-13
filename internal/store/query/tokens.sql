@@ -27,3 +27,47 @@ DELETE FROM api_tokens WHERE user_id = $1;
 
 -- name: DeleteOtherTokensForUser :exec
 DELETE FROM api_tokens WHERE user_id = $1 AND id <> $2;
+
+-- name: ListActiveTokensForUserPage :many
+-- One page of the caller's own API tokens, newest first.
+--
+-- The projection is EXPLICIT and omits token_hash. That is the endpoint's
+-- security control: with the column absent from the SELECT, the generated row
+-- type has no field for it, so returning it is a compile error rather than a
+-- review miss. The handler has no reason to hold a hash at all - the
+-- current-session flag is a UUID comparison against the token id BearerAuth
+-- already resolved (internal/api/middleware.go:36-42), not a re-hash of the
+-- presented credential.
+--
+-- user_id comes from the request context, never from the query string. There is
+-- no user_id parameter on the endpoint and there must never be one.
+SELECT id, created_at, expires_at
+FROM api_tokens
+WHERE user_id = sqlc.arg(user_id)
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: ListActiveTokensForUserPageByCreatedAsc :many
+-- The ascending arm. parseSort strips a leading '-' before the allowlist check
+-- (internal/api/pagination.go:178-181), so both directions of created_at are
+-- reachable and each needs its own statement and dispatch arm.
+--
+-- expires_at is deliberately NOT a sort key: the column is nullable, so it
+-- would need the NULLS LAST / NULLS FIRST index pair and the cursor-null
+-- handling that 000013_paginated_sort_indexes.up.sql:15-16 needed for
+-- workers.last_seen_at, for a list whose realistic length is single digits.
+SELECT id, created_at, expires_at
+FROM api_tokens
+WHERE user_id = sqlc.arg(user_id)
+  AND (sqlc.arg(cursor_set)::bool = FALSE
+       OR (created_at, id) > (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountActiveTokensForUser :one
+-- The `total` for the sessions list, over the SAME predicate as the list
+-- statements, so the pagination footer cannot state a number the caller cannot
+-- page to.
+SELECT COUNT(*) FROM api_tokens WHERE user_id = $1;

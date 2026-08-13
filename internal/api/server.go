@@ -98,6 +98,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /v1/users/me/password", auth(http.HandlerFunc(s.handleChangePassword)))
 	mux.Handle("DELETE /v1/auth/token", auth(http.HandlerFunc(s.handleLogoutCurrent)))
 	mux.Handle("DELETE /v1/auth/tokens", auth(http.HandlerFunc(s.handleLogoutAll)))
+	// auth(...) only, NOT admin(...): this is the self-service block. Rows are
+	// scoped to authUser.ID from the context, never to a query parameter.
+	mux.Handle("GET /v1/auth/tokens", auth(http.HandlerFunc(s.handleListTokens)))
 
 	// Jobs
 	//

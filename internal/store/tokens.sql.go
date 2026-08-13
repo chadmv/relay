@@ -11,6 +11,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveTokensForUser = `-- name: CountActiveTokensForUser :one
+SELECT COUNT(*) FROM api_tokens WHERE user_id = $1
+`
+
+// The `total` for the sessions list, over the SAME predicate as the list
+// statements, so the pagination footer cannot state a number the caller cannot
+// page to.
+//
+//	SELECT COUNT(*) FROM api_tokens WHERE user_id = $1
+func (q *Queries) CountActiveTokensForUser(ctx context.Context, userID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTokensForUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createToken = `-- name: CreateToken :one
 INSERT INTO api_tokens (user_id, token_hash, expires_at)
 VALUES ($1, $2, $3)
@@ -142,4 +158,140 @@ func (q *Queries) GetTokenWithUser(ctx context.Context, tokenHash string) (GetTo
 		&i.UserIsAdmin,
 	)
 	return i, err
+}
+
+const listActiveTokensForUserPage = `-- name: ListActiveTokensForUserPage :many
+SELECT id, created_at, expires_at
+FROM api_tokens
+WHERE user_id = $1
+  AND ($2::bool = FALSE
+       OR (created_at, id) < ($3::timestamptz, $4::uuid))
+ORDER BY created_at DESC, id DESC
+LIMIT $5::int + 1
+`
+
+type ListActiveTokensForUserPageParams struct {
+	UserID    pgtype.UUID        `json:"user_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveTokensForUserPageRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// One page of the caller's own API tokens, newest first.
+//
+// The projection is EXPLICIT and omits token_hash. That is the endpoint's
+// security control: with the column absent from the SELECT, the generated row
+// type has no field for it, so returning it is a compile error rather than a
+// review miss. The handler has no reason to hold a hash at all - the
+// current-session flag is a UUID comparison against the token id BearerAuth
+// already resolved (internal/api/middleware.go:36-42), not a re-hash of the
+// presented credential.
+//
+// user_id comes from the request context, never from the query string. There is
+// no user_id parameter on the endpoint and there must never be one.
+//
+//	SELECT id, created_at, expires_at
+//	FROM api_tokens
+//	WHERE user_id = $1
+//	  AND ($2::bool = FALSE
+//	       OR (created_at, id) < ($3::timestamptz, $4::uuid))
+//	ORDER BY created_at DESC, id DESC
+//	LIMIT $5::int + 1
+func (q *Queries) ListActiveTokensForUserPage(ctx context.Context, arg ListActiveTokensForUserPageParams) ([]ListActiveTokensForUserPageRow, error) {
+	rows, err := q.db.Query(ctx, listActiveTokensForUserPage,
+		arg.UserID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveTokensForUserPageRow
+	for rows.Next() {
+		var i ListActiveTokensForUserPageRow
+		if err := rows.Scan(&i.ID, &i.CreatedAt, &i.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveTokensForUserPageByCreatedAsc = `-- name: ListActiveTokensForUserPageByCreatedAsc :many
+SELECT id, created_at, expires_at
+FROM api_tokens
+WHERE user_id = $1
+  AND ($2::bool = FALSE
+       OR (created_at, id) > ($3::timestamptz, $4::uuid))
+ORDER BY created_at ASC, id ASC
+LIMIT $5::int + 1
+`
+
+type ListActiveTokensForUserPageByCreatedAscParams struct {
+	UserID    pgtype.UUID        `json:"user_id"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	PageLimit int32              `json:"page_limit"`
+}
+
+type ListActiveTokensForUserPageByCreatedAscRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// The ascending arm. parseSort strips a leading '-' before the allowlist check
+// (internal/api/pagination.go:178-181), so both directions of created_at are
+// reachable and each needs its own statement and dispatch arm.
+//
+// expires_at is deliberately NOT a sort key: the column is nullable, so it
+// would need the NULLS LAST / NULLS FIRST index pair and the cursor-null
+// handling that 000013_paginated_sort_indexes.up.sql:15-16 needed for
+// workers.last_seen_at, for a list whose realistic length is single digits.
+//
+//	SELECT id, created_at, expires_at
+//	FROM api_tokens
+//	WHERE user_id = $1
+//	  AND ($2::bool = FALSE
+//	       OR (created_at, id) > ($3::timestamptz, $4::uuid))
+//	ORDER BY created_at ASC, id ASC
+//	LIMIT $5::int + 1
+func (q *Queries) ListActiveTokensForUserPageByCreatedAsc(ctx context.Context, arg ListActiveTokensForUserPageByCreatedAscParams) ([]ListActiveTokensForUserPageByCreatedAscRow, error) {
+	rows, err := q.db.Query(ctx, listActiveTokensForUserPageByCreatedAsc,
+		arg.UserID,
+		arg.CursorSet,
+		arg.CursorTs,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActiveTokensForUserPageByCreatedAscRow
+	for rows.Next() {
+		var i ListActiveTokensForUserPageByCreatedAscRow
+		if err := rows.Scan(&i.ID, &i.CreatedAt, &i.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
