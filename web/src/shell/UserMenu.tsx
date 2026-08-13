@@ -10,7 +10,28 @@ interface UserMenuProps {
 export function UserMenu({ email, onLogout }: UserMenuProps) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const toggleRef = useRef<HTMLButtonElement>(null)
   const panelId = useId()
+
+  // Close AND return focus to the toggle, but ONLY if focus was inside the
+  // container. Used by Escape and by all four items.
+  //
+  // The containment check is read BEFORE setOpen, which is CLAUDE.md's "end the
+  // generation before releasing the resource" in its smallest form: setOpen(false)
+  // unmounts the panel and detaches whatever was focused, after which
+  // document.activeElement is <body> and the check can no longer tell "focus was
+  // on an item" from "focus was never in here at all".
+  //
+  // The guard is what separates a restore from focus theft: a mouse user in Safari
+  // (which does not focus a <button> on click, so the menu can legitimately be open
+  // with activeElement === <body>) must not have focus yanked onto a toggle it was
+  // never on. Same reasoning as DialogShell.tsx:234-239,276-282, reused as REASONING
+  // ONLY - none of its modal machinery applies to a dropdown.
+  function closeAndRestoreFocus() {
+    const focusWasInside = !!ref.current && ref.current.contains(document.activeElement)
+    setOpen(false)
+    if (focusWasInside) toggleRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!open) return
@@ -31,6 +52,7 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
   return (
     <div ref={ref} className="relative">
       <button
+        ref={toggleRef}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         // Only while the panel is actually rendered: it is conditionally mounted
@@ -62,24 +84,37 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
           <div className="mb-1.5 flex items-center gap-2.5 border-b border-border px-2.5 pb-2.5 pt-2">
             <span className="truncate text-[12.5px] text-fg">{email}</span>
           </div>
-          <Link to="/profile" className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5">
+          <Link
+            to="/profile"
+            onClick={closeAndRestoreFocus}
+            className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
+          >
             Profile
           </Link>
           <Link
             to="/profile/password"
+            onClick={closeAndRestoreFocus}
             className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
           >
             Password
           </Link>
           <Link
             to="/profile/sessions"
+            onClick={closeAndRestoreFocus}
             className="block rounded-md px-2.5 py-2 text-fg hover:bg-white/5"
           >
             Sessions
           </Link>
           <div className="my-1.5 h-px bg-border" />
           <button
-            onClick={onLogout}
+            onClick={() => {
+              // Close first, then hand off. onLogout tears the session down and
+              // unmounts this whole shell; doing it in this order means the
+              // containment check above runs while the panel is unambiguously
+              // still mounted.
+              closeAndRestoreFocus()
+              onLogout()
+            }}
             className="block w-full rounded-md px-2.5 py-2 text-left text-err hover:bg-white/5"
           >
             Log out
