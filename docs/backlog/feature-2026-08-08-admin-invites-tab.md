@@ -27,10 +27,16 @@ plus the Users tab. Design source of truth is `AdminInvites` in
   `expires_in exceeds maximum of 720h`. A non-empty `email` is validated with `mail.ParseAddress` and
   pins the invite to that address. Response is 201 `{ id, token, expires_at, email? }`; `token` is the
   raw hex and is never retrievable again.
-- **List: BLOCKED** on `GET /v1/invites`, tracked in
-  [[feature-2026-06-26-web-enabler-backend-endpoints]]. `internal/store/query/invites.sql` has only
-  Create / GetByTokenHash / MarkUsed, so a `ListInvites` query plus active / expiring / expired /
-  redeemed state derivation is needed first.
+- **List: UNBLOCKED as of 2026-08-13.** `GET /v1/invites` shipped in
+  `2026-08-13-web-enabler-list-endpoints` (closed item:
+  [[feature-2026-06-26-web-enabler-backend-endpoints]]). It is admin-only, paginated with the house
+  cursor shape, sortable on `created_at` and `expires_at` in both directions, and returns
+  `id, created_at, expires_at, created_by, created_by_email` plus optional `email` and `used_at`.
+  It deliberately returns **no `status` field**: the server ships facts and the four states
+  (active / expiring / expired / redeemed) are derived client-side from `expires_at` and `used_at`,
+  the same rule `enrollmentStatus.ts` already follows. The response cannot carry a token hash - the
+  query does not select the column, so the generated row type has no field for it. **This item is
+  now fully unblocked**; the whole tab is buildable.
 
 ## Proposal
 Ship in two steps rather than waiting for the backend:
@@ -53,7 +59,7 @@ Ship in two steps rather than waiting for the backend:
 
 ## Related
 - Carved from [[feature-2026-06-26-admin-console-pages]]
-- List blocked on [[feature-2026-06-26-web-enabler-backend-endpoints]] (`GET /v1/invites`)
+- List enabler SHIPPED 2026-08-13: [[feature-2026-06-26-web-enabler-backend-endpoints]] (`GET /v1/invites`); this item has no remaining backend dependency
 - Shell + patterns: `docs/superpowers/specs/2026-08-08-admin-console-shell-users-tab.md`
 - Sibling tabs: [[feature-2026-08-08-admin-enrollments-tab]],
   [[feature-2026-08-08-admin-reservations-tab]], [[feature-2026-08-08-admin-server-overview-tab]]
