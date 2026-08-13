@@ -209,3 +209,74 @@ test('the role note shows USER for a non-admin (paired control)', async () => {
   expect(screen.getByText('USER')).toBeInTheDocument()
   expect(screen.queryByText('ADMIN')).toBeNull()
 })
+
+test('a no-op Save after a failed save clears the stale error banner', async () => {
+  server.use(
+    http.patch('/v1/users/me', () =>
+      HttpResponse.json({ error: 'name is required' }, { status: 400 }),
+    ),
+  )
+  await renderTab()
+  const input = screen.getByLabelText('Display name')
+  await userEvent.clear(input)
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('400 name is required')
+
+  // Retype the original name: this is a no-op save (the early return fires, no
+  // request is sent) but the form is valid again, so the stale error must go.
+  await userEvent.type(input, 'Mira Sato')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+test('a no-op Save after a successful save clears the stale success banner', async () => {
+  server.use(
+    http.patch('/v1/users/me', () => HttpResponse.json({ ...ME, name: 'Mira Renamed' })),
+  )
+  await renderTab()
+  const input = screen.getByLabelText('Display name')
+  await userEvent.clear(input)
+  await userEvent.type(input, 'Mira Renamed')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(await screen.findByRole('status')).toHaveTextContent('Display name updated.')
+
+  // A following no-op save (retyping the now-current name) must clear the
+  // success banner rather than leaving it displayed against a fresh submit.
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
+test('an edit typed while a save is in flight survives the save settling', async () => {
+  // Reproduces the review probe: Save "Alpha" while the PATCH is still pending,
+  // type "Beta" into the field, then let the PATCH resolve. The settled
+  // mutation's onSuccess must not clobber the newer, unsent edit by re-deriving
+  // the draft from the (now stale) server response.
+  let releaseResponse: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    releaseResponse = resolve
+  })
+  server.use(
+    http.patch('/v1/users/me', async () => {
+      await gate
+      return HttpResponse.json({ ...ME, name: 'Alpha' })
+    }),
+  )
+  await renderTab()
+  const input = screen.getByLabelText('Display name')
+  await userEvent.clear(input)
+  await userEvent.type(input, 'Alpha')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  // The PATCH is now pending. Type a newer edit before it settles.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled())
+  await userEvent.clear(input)
+  await userEvent.type(input, 'Beta')
+  expect(input).toHaveValue('Beta')
+
+  // Let the in-flight save resolve.
+  releaseResponse!()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).not.toBeDisabled())
+
+  // The newer, unsent edit must survive - not be clobbered by the settled save.
+  expect(input).toHaveValue('Beta')
+})

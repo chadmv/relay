@@ -21,22 +21,27 @@ export function IdentityTab() {
   // shows the live user row, which is correct because nothing polls here and the
   // only writer of that row is this form. Once it is a string it is NEVER
   // re-derived from `user`, so a save landing (which changes `user`) cannot reset
-  // a field mid-edit. Note the null-versus-empty distinction: clearing the input
-  // gives '', which is a real edit, not a fall-through to user.name.
+  // a field mid-edit UNLESS the field still holds exactly what that save sent -
+  // see the onSuccess guard below. Note the null-versus-empty distinction:
+  // clearing the input gives '', which is a real edit, not a fall-through to
+  // user.name.
   const [draft, setDraft] = useState<string | null>(null)
 
   const save = useMutation({
     mutationFn: (nextName: string) => updateMe(nextName),
-    onSuccess: (updated) => {
+    onSuccess: (updated, submittedName) => {
       // ONE owner of identity. The PATCH response is the same userResponse struct
       // GET /v1/users/me returns (internal/api/users.go:429, :410), so it is
       // authoritative and needs no confirming round trip - and pushing it here
       // avoids a second ['me'] query that could disagree with the provider.
       applyUser(updated)
-      // Releasing the draft, not writing a value into it: the form is clean again
-      // and follows the new authoritative row. A settled mutation must never push
-      // a value back into draft state.
-      setDraft(null)
+      // Releasing the draft ONLY if it still equals what THIS save submitted.
+      // The mutation's onSuccess is a promise continuation, not part of the
+      // submit's own commit, so a newer keystroke can land in `draft` before a
+      // slow PATCH settles. Clearing unconditionally here is CLAUDE.md's
+      // "dying generation clobbers state a later action already set" shape:
+      // the settled save must never overwrite an edit typed after it was sent.
+      setDraft((current) => (current === submittedName ? null : current))
     },
   })
 
@@ -47,6 +52,12 @@ export function IdentityTab() {
     e.preventDefault()
     if (!user) return
     const trimmed = name.trim()
+    // Reset BEFORE the no-op early return, not just before mutate(). A stale
+    // alert or success banner from a previous submit must not survive a Save
+    // that the form now considers a no-op: retyping the original name after a
+    // 400, or clicking Save again after a success, both clear the banner even
+    // though neither sends a request.
+    save.reset()
     // Changed-fields-only, degenerating to "send nothing when unchanged" because
     // PATCH takes exactly one field. Same construction as WorkerEditForm.tsx:42-45.
     // Compared against the TRIMMED draft because the server trims before storing
@@ -57,7 +68,6 @@ export function IdentityTab() {
     // `name is required` 400 (users.go:63) is the message we would otherwise
     // duplicate, and there is no second field here to protect from a wasted round
     // trip. One error-rendering path, not two.
-    save.reset()
     save.mutate(trimmed)
   }
 
