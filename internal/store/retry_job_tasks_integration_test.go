@@ -4,12 +4,15 @@ package store_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,15 +22,17 @@ import (
 // carries a real assignee and a real epoch. That is what makes the "previous
 // generation is dead" assertions mean anything.
 type retryFixture struct {
-	q   *store.Queries
-	ctx context.Context
-	job store.Job
-	w   store.Worker
+	q    *store.Queries
+	pool *pgxpool.Pool
+	ctx  context.Context
+	job  store.Job
+	w    store.Worker
 }
 
 func newRetryFixture(t *testing.T) *retryFixture {
 	t.Helper()
-	q := newTestQueries(t)
+	pool := newTestPool(t)
+	q := store.New(pool)
 	ctx := context.Background()
 	user := newTestUser(t, q, false)
 	w := newTestWorker(t, q)
@@ -35,7 +40,7 @@ func newRetryFixture(t *testing.T) *retryFixture {
 		Name: "retry-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte("{}"),
 	})
 	require.NoError(t, err)
-	return &retryFixture{q: q, ctx: ctx, job: job, w: w}
+	return &retryFixture{q: q, pool: pool, ctx: ctx, job: job, w: w}
 }
 
 // pending creates a task and leaves it at epoch 0 with worker_id NULL.
@@ -130,4 +135,76 @@ func TestRetryJobTasks_StatusAllowList_DoneTaskIsNotReopenedByFailedMode(t *test
 	require.True(t, gotDone.FinishedAt.Valid, "an unmatched row must keep finished_at")
 
 	require.Equal(t, "pending", f.get(t, failedTask.ID).Status)
+}
+
+// TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpEpoch
+// pins spec decision 9: the status allow-list must live in the UPDATE's own
+// row-level WHERE, not only in the `selected` CTE.
+//
+// Under READ COMMITTED a blocked UPDATE re-evaluates its ROW-LEVEL qual against
+// the updated tuple (EvalPlanQual); it does not re-execute CTEs, which were
+// materialized from the statement's original snapshot. So the interleave has to
+// be real: B's statement must START (materializing `selected` from a snapshot in
+// which the tasks are still terminal) and then BLOCK on A's row locks, and A
+// must commit while B is blocked.
+//
+// A sequential second call proves nothing here: it recomputes `selected` from a
+// fresh snapshot in which the task is already `pending`, so the mutated
+// statement also returns zero rows.
+func TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpEpoch(t *testing.T) {
+	f := newRetryFixture(t)
+	task := f.inStatus(t, "t-failed", "failed")
+	require.Equal(t, int32(1), task.AssignmentEpoch)
+
+	args := store.RetryJobTasksParams{JobID: f.job.ID, IncludeDone: false}
+
+	txA, err := f.pool.Begin(f.ctx)
+	require.NoError(t, err)
+	defer txA.Rollback(f.ctx)
+	idsA, err := f.q.WithTx(txA).RetryJobTasks(f.ctx, args)
+	require.NoError(t, err)
+	require.Len(t, idsA, 1, "A must reopen the failed task")
+
+	var (
+		wg   sync.WaitGroup
+		idsB []pgtype.UUID
+		errB error
+		txB  pgx.Tx
+	)
+	txB, err = f.pool.Begin(f.ctx)
+	require.NoError(t, err)
+	defer txB.Rollback(f.ctx)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		idsB, errB = f.q.WithTx(txB).RetryJobTasks(f.ctx, args)
+	}()
+
+	// Wait until B is genuinely blocked on a row lock. This replaces a sleep:
+	// if B has not reached the lock, committing A would let B run against a
+	// post-A snapshot and the test would prove nothing.
+	require.Eventually(t, func() bool {
+		var n int
+		require.NoError(t, f.pool.QueryRow(f.ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database()
+			    AND wait_event_type = 'Lock' AND state = 'active'`).Scan(&n))
+		return n > 0
+	}, 10*time.Second, 50*time.Millisecond, "B never blocked on A's row lock")
+
+	require.NoError(t, txA.Commit(f.ctx))
+	wg.Wait()
+	require.NoError(t, errB)
+	require.NoError(t, txB.Commit(f.ctx))
+
+	require.Empty(t, idsB,
+		"B must reopen nothing: EvalPlanQual re-checks the row-level status "+
+			"predicate against the updated tuple, which is now 'pending'")
+
+	got := f.get(t, task.ID)
+	require.Equal(t, "pending", got.Status)
+	require.Equal(t, int32(2), got.AssignmentEpoch,
+		"exactly ONE epoch bump may result from two concurrent retries; a second "+
+			"bump would end a generation another operator's retry may already be running")
 }
