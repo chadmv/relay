@@ -60,6 +60,24 @@ export function getJobStats(): Promise<JobStats> {
   return apiFetch<JobStats>('/jobs/stats')
 }
 
+// Runs produced by one schedule, newest first. Ordering is the server's:
+// ListJobsByScheduledJobWithEmailPage orders `j.created_at DESC, j.id DESC`
+// (internal/store/query/jobs.sql:77) over idx_jobs_sched_created_id.
+//
+// Deliberately NOT expressed through listJobs. ?sort= combined with ANY filter is a
+// hard 400 - 'sort not supported on filtered list variant; remove the filter or
+// remove the sort' (internal/api/jobs.go:417-422) - and listJobs sets sort by default
+// on its unfiltered branch (:50-56). This function must never send sort. Do not
+// "unify" the two.
+//
+// Auth runs BEFORE pagination (jobs.go:431-434): a non-owner non-admin gets a 404
+// from ownedScheduledJob, not a paginated empty page, so a schedule's job ids cannot
+// be enumerated by paging.
+export function listJobsBySchedule(scheduledJobId: string, limit: number): Promise<JobsPage> {
+  const q = new URLSearchParams({ scheduled_job_id: scheduledJobId, limit: String(limit) })
+  return apiFetch<JobsPage>(`/jobs?${q}`)
+}
+
 // Task-status vocabulary (migration 000019). Distinct from JobStatus: tasks add
 // `dispatched` and `timed_out` and never use `cancelled` (a cancelled job's
 // tasks are marked `failed` server-side).

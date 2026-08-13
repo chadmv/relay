@@ -10,6 +10,7 @@ import {
   getJobStats,
   getTaskLogs,
   listJobs,
+  listJobsBySchedule,
   streamTaskLog,
   type JobsPage,
   type TaskLogEvent,
@@ -179,4 +180,25 @@ test('streamTaskLog routes task_log frames to onLine and dropped frames to onDro
 
   conn.close()
   await p
+})
+
+test('listJobsBySchedule sends scheduled_job_id and limit and NEVER sends sort', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listJobsBySchedule('sched-1', 20)
+  // Presence controls FIRST: without them the absence assertion below passes
+  // against a function that sends no parameters at all.
+  expect(captured?.get('scheduled_job_id')).toBe('sched-1')
+  expect(captured?.get('limit')).toBe('20')
+  // The real failure this guards: ?sort= combined with ANY filter is a hard 400,
+  // 'sort not supported on filtered list variant' (internal/api/jobs.go:417-422),
+  // which the runs panel would render as a generic error box. listJobs sets sort by
+  // default (api.ts:50-56), so a copy-paste reintroduces it.
+  expect(captured?.has('sort')).toBe(false)
+  expect(captured?.has('status')).toBe(false)
 })

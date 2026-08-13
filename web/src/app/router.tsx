@@ -9,6 +9,7 @@ import { NewJobPage } from '../jobs/NewJobPage'
 import { WorkersPage } from '../workers/WorkersPage'
 import { WorkerDetailPage } from '../workers/WorkerDetailPage'
 import { SchedulesPage } from '../schedules/SchedulesPage'
+import { ScheduleDetailPage } from '../schedules/ScheduleDetailPage'
 import { AdminPage } from '../admin/AdminPage'
 import { AdminRoute } from './AdminRoute'
 import { ProtectedRoute } from './ProtectedRoute'
@@ -29,6 +30,10 @@ export function AppRoutes() {
         <Route path="/workers" element={<WorkersPage />} />
         <Route path="/workers/:id" element={<WorkerDetailPage />} />
         <Route path="/schedules" element={<SchedulesPage />} />
+        {/* No AdminRoute: every /v1/scheduled-jobs/{id} route is auth(...) and
+            owner-or-admin, 404-on-deny (internal/api/server.go:163-168,
+            internal/api/scheduled_jobs.go:147-169). */}
+        <Route path="/schedules/:id" element={<ScheduleDetailPage />} />
         <Route element={<AdminRoute />}>
           <Route path="/admin" element={<Navigate to="/admin/users" replace />} />
           <Route path="/admin/:tab" element={<AdminPage />} />
