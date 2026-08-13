@@ -115,21 +115,37 @@ test('a 204 leaves the user SIGNED IN - this endpoint spares the caller token', 
   expect(screen.getByTestId('status')).toHaveTextContent('authenticated')
 })
 
-test('the settled mutation does not retain the plaintext password anywhere', async () => {
-  server.use(http.put('/v1/users/me/password', () => new HttpResponse(null, { status: 204 })))
+test('the settled mutation does not retain the plaintext password anywhere, and is evicted promptly', async () => {
+  // The PUT is held open so there is a stable window to inspect the mutation
+  // cache WHILE PENDING - this is the positive control, moved earlier because
+  // the eviction fix below (gcTime: 0 + reset() in onSuccess) means the old
+  // after-settle window can no longer be relied on to still hold an entry.
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http.put('/v1/users/me/password', async () => {
+      await gate
+      return new HttpResponse(null, { status: 204 })
+    }),
+  )
   const { client } = renderTab()
   await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('mira@studio.dev'))
 
   const secret = 'correct-horse-battery-staple'
-  await submit('old-secret', secret)
-  await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument())
+  await userEvent.type(screen.getByLabelText('Current password'), 'old-secret')
+  await userEvent.type(screen.getByLabelText('New password'), secret)
+  await userEvent.type(screen.getByLabelText('Confirm new password'), secret)
+  await userEvent.click(screen.getByRole('button', { name: 'Update password' }))
 
-  const mutations = client.getMutationCache().getAll()
-  // POSITIVE CONTROL FIRST. TanStack keeps a settled mutation in the cache for
-  // the 5-minute default gcTime, so this list must be non-empty - otherwise the
-  // absence assertion below is about an empty array and proves nothing.
-  expect(mutations.length).toBeGreaterThan(0)
-  for (const m of mutations) {
+  // POSITIVE CONTROL FIRST. While the PUT is still in flight the mutation IS
+  // in the cache, so this list must be non-empty here - otherwise the absence
+  // assertions below (and the eventual-eviction assertion further down) would
+  // be about an empty array and prove nothing.
+  await waitFor(() => expect(client.getMutationCache().getAll().length).toBeGreaterThan(0))
+  const pending = client.getMutationCache().getAll()
+  for (const m of pending) {
     // state.variables is where mutate(x) puts x (query-core mutation.js:94).
     // Passing the password as a variable is the plausible implementation and is
     // exactly what this forbids. Stringify the whole state so `data`, `context`
@@ -137,7 +153,19 @@ test('the settled mutation does not retain the plaintext password anywhere', asy
     expect(JSON.stringify(m.state)).not.toContain(secret)
     expect(m.state.variables).toBeUndefined()
   }
+
+  release!()
+  await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument())
+
+  // gcTime: 0 on this mutation plus change.reset() in onSuccess: the settled,
+  // now-observer-less mutation becomes eligible for cache removal on the very
+  // next tick (same precedent as useAgentEnrollmentActions.ts's create
+  // mutation). The plaintext must not merely be absent from what remains - the
+  // cache itself must go empty, or it would still be reachable from a devtools
+  // heap snapshot for the default 5-minute gcTime.
+  await waitFor(() => expect(client.getMutationCache().getAll()).toHaveLength(0))
+
   // Second store: the cleared inputs. Necessary but NOT sufficient - calling a
-  // clear function is not evidence, which is why the cache assertion comes first.
+  // clear function is not evidence, which is why the cache assertions come first.
   expect(screen.getByLabelText('New password')).toHaveValue('')
 })
