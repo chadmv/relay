@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"relay/internal/api"
 	"relay/internal/store"
@@ -136,3 +137,110 @@ func keysOf(m map[string]any) []string {
 }
 
 var _ = store.Invite{} // keep the store import honest for later tests in this file
+
+// The invites list applies NO filter: redeemed and expired invites are exactly
+// what the tab exists to show, unlike GET /v1/agent-enrollments where a
+// consumed row simply vanishes. All four client-side pill states must be
+// derivable from the rows this returns.
+func TestListInvites_ReturnsEveryStateUnfiltered(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	admin := createTestUser(t, q, "State Admin", "inv-state-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	now := time.Now()
+	past := now.Add(-48 * time.Hour)
+	redeemedAt := now.Add(-time.Hour)
+
+	activeID := seedInvite(t, pool, admin.ID, "hash-inv-active",
+		now.Add(-time.Hour), now.Add(72*time.Hour), nil)
+	expiringID := seedInvite(t, pool, admin.ID, "hash-inv-expiring",
+		now.Add(-time.Hour), now.Add(30*time.Minute), nil)
+	expiredID := seedInvite(t, pool, admin.ID, "hash-inv-expired",
+		past, now.Add(-time.Hour), nil)
+	redeemedID := seedInvite(t, pool, admin.ID, "hash-inv-redeemed",
+		past, now.Add(72*time.Hour), &redeemedAt)
+	// Redeemed AND past its expiry: the client's precedence rule checks used_at
+	// FIRST, so this row must still carry used_at and must still be returned.
+	redeemedExpiredID := seedInvite(t, pool, admin.ID, "hash-inv-redeemed-expired",
+		past, now.Add(-time.Hour), &redeemedAt)
+
+	code, p, _ := getInvitesPage(t, srv, adminToken, "limit=200")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, int64(5), p.Total, "total is the unfiltered row count")
+	require.Len(t, p.Items, 5)
+
+	byID := map[string]map[string]any{}
+	for _, it := range p.Items {
+		byID[it["id"].(string)] = it
+	}
+	for _, id := range []string{activeID, expiringID, expiredID, redeemedID, redeemedExpiredID} {
+		require.Contains(t, byID, id, "every invite in every state must be listed")
+	}
+
+	// used_at presence discriminates redeemed from unredeemed at the data level.
+	for _, id := range []string{activeID, expiringID, expiredID} {
+		_, has := byID[id]["used_at"]
+		assert.False(t, has, "unredeemed invite %s must omit used_at", id)
+	}
+	for _, id := range []string{redeemedID, redeemedExpiredID} {
+		_, has := byID[id]["used_at"]
+		assert.True(t, has, "redeemed invite %s must carry used_at", id)
+	}
+
+	// Every row carries the creator's email from the inner JOIN.
+	for id, it := range byID {
+		assert.Equal(t, "inv-state-admin@example.com", it["created_by_email"],
+			"created_by_email missing or wrong on %s", id)
+	}
+}
+
+func TestListInvites_CursorWalkVisitsEveryRowExactlyOnce(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	admin := createTestUser(t, q, "Walk Admin", "inv-walk-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	seedInvitesForSort(t, pool, admin.ID)
+
+	code, single, _ := getInvitesPage(t, srv, adminToken, "limit=50")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, single.Items, 3)
+	require.Equal(t, int64(3), single.Total)
+
+	var walked []string
+	cursor := ""
+	for i := 0; i < 5; i++ { // safety bound; 3 rows at limit=1 needs 3 pages
+		qs := "limit=1"
+		if cursor != "" {
+			qs += "&cursor=" + cursor
+		}
+		code, p, _ := getInvitesPage(t, srv, adminToken, qs)
+		require.Equal(t, http.StatusOK, code, "page %d", i)
+		require.Equal(t, int64(3), p.Total,
+			"total must be the full row count on every page, not the page size")
+		for _, it := range p.Items {
+			walked = append(walked, it["id"].(string))
+		}
+		if p.NextCursor == "" {
+			break
+		}
+		cursor = p.NextCursor
+	}
+
+	require.Len(t, walked, 3, "the walk must visit every row with no duplicate and no omission")
+	for i, it := range single.Items {
+		assert.Equal(t, it["id"], walked[i], "row %d differs between single-page and paged walk", i)
+	}
+	assert.NotEqual(t, walked[0], walked[1])
+	assert.NotEqual(t, walked[1], walked[2])
+}
+
+func TestListInvites_LimitOutOfRangeIs400(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "Limit Admin", "inv-limit-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	for _, bad := range []string{"0", "201", "-1", "abc"} {
+		code, _, body := getInvitesPage(t, srv, adminToken, "limit="+bad)
+		assert.Equal(t, http.StatusBadRequest, code, "limit=%s must be rejected", bad)
+		assert.Contains(t, body, "invalid limit")
+	}
+}
