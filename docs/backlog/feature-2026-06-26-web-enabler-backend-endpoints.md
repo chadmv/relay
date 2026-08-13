@@ -29,6 +29,22 @@ the user's choice) rather than three. Each endpoint is also noted inline in its 
   all tasks (per-task retry already exists agent-internally). Must bump `assignment_epoch` and null
   `worker_id` per the epoch-fence invariant. Reopening terminal jobs reactivates the jobs-stats bug.
 
+  **It must NOT call `IncrementTaskRetryCount`** (constraint added 2026-08-12, when
+  `bug-2026-06-26-retry-resurrects-cancelled-task` was fixed). That statement now fences on
+  `assignment_epoch`, `worker_id` and `status IN ('pending','dispatched','running')`, which are the
+  exact inverse of this endpoint's preconditions: it reopens tasks that ARE terminal and has no
+  worker identity to supply, so the status and worker predicates would reject every call. That is
+  the correct outcome, not an obstacle - the two operations were only ever conflatable because
+  neither had a stated precondition. This endpoint needs **its own statement**: an explicit
+  `status IN ('failed','timed_out')` allow-list (widened for `?task=all`), setting `status='pending'`,
+  nulling `worker_id`, clearing `started_at`/`finished_at`, and bumping `assignment_epoch` - the
+  operator analogue of `RequeueTaskByID`, not of `IncrementTaskRetryCount`. It must also decide
+  explicitly what happens to `retry_count` (leaving it exhausted gives the task zero agent-side
+  retries on the new generation), and what happens to a `cancelled` job's status, since
+  `RecomputeJobStatus` is `cancelled`-blind. See the query comment on `IncrementTaskRetryCount` in
+  `internal/store/query/tasks.sql` and
+  `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md` section 11.
+
 ## Acceptance / Done When
 - All three endpoints exist with auth gating, tests, and response shapes that never leak token hashes.
 - The retry path respects the epoch fence and is scheduled together with the jobs-stats-24h fix.

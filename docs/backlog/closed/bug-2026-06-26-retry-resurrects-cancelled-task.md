@@ -1,10 +1,12 @@
 ---
 title: IncrementTaskRetryCount can resurrect a cancelled task (no epoch/status guard)
 type: bug
-status: open
+status: closed
 created: 2026-06-26
+closed: 2026-08-12
 priority: high
 source: ROADMAP deep-refresh gaps sweep (2026-06-26)
+resolution: fixed
 ---
 
 # IncrementTaskRetryCount can resurrect a cancelled task (no epoch/status guard)
@@ -92,3 +94,40 @@ epoch bump on terminal transitions, which would break the trailing-log flush tha
 
 The query itself still has a bare `WHERE id = $1` and no status guard, so this item stays open and
 its acceptance criteria are unchanged, except that they should now also cover route 2.
+
+## Resolution
+
+Fixed by giving `IncrementTaskRetryCount` all three predicates - `assignment_epoch`,
+`worker_id` and `status NOT IN ('done','failed','timed_out')` - and giving `UpdateTaskStatus`
+the same status predicate. The Proposal's "either/or" was wrong: it had to be "and", and the
+third predicate the item never mentions - `worker_id` - was also required. Each buys a case
+the others do not, pinned case by case in
+`TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded` and mutation-proved row by row.
+
+Three routes are closed, not the one filed. Route A, the cancel-during-retry interleaving:
+`CancelJobTasks` makes the task terminal, NULLs `worker_id` and bumps the epoch, so all three
+predicates reject the stale retry and the cancel wins. Route A's requeue variant, which this
+item did not name: a requeue leaves the task `pending` or, once re-claimed, `dispatched` -
+neither terminal - so only the epoch predicate closes it, and without it a stale retry evicts
+a live agent. Route B, the single-actor race-free resurrection added to this item on
+2026-08-12: with retries left it goes through `IncrementTaskRetryCount` (status predicate),
+and with retries exhausted through `UpdateTaskStatus` (same predicate), where it would
+otherwise flip a `done` task to `failed` and cascade `FailDependentTasks` across its
+still-pending downstream. The epoch predicate also converts PR #120's stated residual - the
+retry branch was unforgeable but not atomic - into an actual guarantee, and makes the retry
+exactly-once per generation without a transaction.
+
+The item's "plus a job-not-cancelled check" was unnecessary: `CancelJobTasks` makes the task
+terminal and bumps its epoch in the same statement, so the task row already carries the state.
+The fix is a status predicate and explicitly **not** an epoch bump on terminal transitions,
+which would break the trailing-log flush that
+`TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist`
+pins.
+
+One honest deviation from acceptance criterion 2: there is no interleaving *test*. The window
+is inside one function holding a concrete `*store.Queries`, so reaching it would need either
+an injectable seam in production code or a timing-based interleave, and neither is acceptable.
+The cancel race is proven instead at the store layer, calling the statement with exactly the
+two values `handleTaskStatus` captures at T0 against exactly the post-cancel row state, and
+the handler wiring is proven separately through route B and through a real `Connect` message
+loop. See `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`.

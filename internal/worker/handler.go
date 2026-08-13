@@ -438,21 +438,42 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// registration and never read off the wire, so a sender cannot claim to be
 	// somebody else.
 	//
-	// This lives in Go, and not only in UpdateTaskStatus's WHERE clause, because
-	// the retry branch below calls IncrementTaskRetryCount - a bare
-	// `WHERE id = $1`, no epoch fence, no worker fence - and returns before the
-	// fenced statement is ever reached. An SQL-only fence would leave a forged
-	// FAILED on a task with retries free to burn a retry, NULL the worker_id and
-	// bump the epoch, evicting the agent legitimately running it. The gate must
-	// therefore stay AHEAD of every side effect in this function.
+	// This gate is NOT the correctness control any more, and the honest form of
+	// that is uncomfortable, so it is written down rather than implied. Delete
+	// it and the observable state is unchanged: a forged terminal from a
+	// non-assignee reaches IncrementTaskRetryCount, which rejects on its own
+	// worker_id predicate, or UpdateTaskStatus, which rejects on its own. Both
+	// statements also fence on assignment_epoch and on the task not already
+	// being terminal, so the retry branch is atomic with respect to the GetTask
+	// above and cannot resurrect a finished, cancelled or requeued task.
 	//
-	// Note what that placement does and does not buy. It makes the retry branch
-	// UNFORGEABLE - only the assignee can reach it - but not ATOMIC: the GetTask
-	// above and IncrementTaskRetryCount below are separate statements with no
-	// re-check in between, so a concurrent writer can still move the row after
-	// the gate passed. That residual race is
-	// docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md, which stays
-	// open; do not read this gate as having closed it.
+	// What the gate still buys, stated at its true size rather than its
+	// flattering one. An earlier draft of this comment claimed "zero round trips
+	// and zero log lines", and BOTH halves were wrong - measure before you
+	// justify:
+	//
+	// First, cost: ONE FEWER round trip per forged message, not zero. GetTask
+	// above has already run by the time control reaches here, so the saving is
+	// one statement instead of two, not two instead of none. Real on a recv
+	// goroutine that a single sender can drive as fast as it likes, but bounded.
+	//
+	// It does NOT save a log line. Both write-error branches below are wrapped
+	// in `if !errors.Is(err, pgx.ErrNoRows)`, so a forged message rejected by
+	// either fence logs nothing at all - delete this gate and the log volume is
+	// unchanged. Nor did this function ever have a "zero attacker-keyed log
+	// lines" property to protect: the bad-task-id and GetTask branches at the
+	// top of this function both log unconditionally, keyed on upd.TaskId, AHEAD
+	// of this gate. That is bug-2026-08-12-tasklog-err-limiter-attacker-keyed's
+	// shape, it is still live on this path, and this gate does not address it.
+	//
+	// Second, and this is the load-bearing reason: it answers a different
+	// question. This gate asks "may this sender drive this task's status machine
+	// at all", the predicates ask "is the row still in the state the branch
+	// decision was made from". Merging them loses the first question, and the
+	// first question is the one this function's branch structure actually asks.
+	// Third, defense in depth against a future edit to either half. Keep BOTH;
+	// do not delete this as redundant with the SQL, and do not delete the SQL
+	// predicates as redundant with this.
 	//
 	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
 	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
@@ -463,9 +484,15 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// never-claimed task's NULL worker_id - the Go form of SQL's
 	// IS NOT DISTINCT FROM - and the gate fails OPEN. Removing either one alone
 	// leaves the hole closed; removing both opens it. That is defense in depth
-	// against a future caller, and it is pinned by
-	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask,
-	// which goes red under both mutations. Same rule the SQL states as "a plain =,
+	// against a future caller. Note honestly that NO test in the tree
+	// discriminates it any more:
+	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
+	// was written as its permanent guard, but once IncrementTaskRetryCount gained
+	// its own worker_id predicate that test stays green with this whole gate
+	// deleted - measured, not assumed. Its discriminating power moved to the SQL
+	// layer, and what remains here is non-functional (one round trip), which is
+	// why it is recorded as a Known Limitation rather than pinned by a new test.
+	// Same rule the SQL states as "a plain =,
 	// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.
 	//
 	// Silent return, exactly like the currency gate below. A log line here would
@@ -511,11 +538,36 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 
 	terminal := statusStr == "failed" || statusStr == "timed_out"
 
-	// Retry if applicable. Epoch guard above ensures we don't double-retry.
+	// Retry if applicable. The branch decision is made from the T0 row read by
+	// GetTask above, so the statement re-checks that row: AssignmentEpoch is the
+	// generation the currency gate already proved current (int32 is safe for the
+	// same reason it is at the UpdateTaskStatus call below - the gate compared it
+	// against an int32 column), and WorkerID is this connection's own identity,
+	// not the task.WorkerID we just read, for the reason written at the
+	// UpdateTaskStatus call site. If a cancel or a requeue landed in between, or
+	// the task is already finished, the statement affects zero rows and the
+	// retry is dropped.
 	if terminal && task.RetryCount < task.Retries {
-		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err != nil {
-			log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+		if _, err := h.q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+			ID:              taskID,
+			AssignmentEpoch: int32(upd.Epoch),
+			WorkerID:        workerID,
+		}); err != nil {
+			// pgx.ErrNoRows is the fence rejecting, not a failure: the task
+			// finished, was cancelled, or the generation ended between the
+			// GetTask above and here. Drop silently, exactly like the two gates.
+			// In the genuine case the cancel or the requeue won, which is the
+			// correct outcome, so there is nothing to diagnose. Any other error
+			// is real.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+			}
 		} else {
+			// Both of these are already correctly gated on the write having
+			// happened, and must stay that way: a rejected retry must not
+			// recompute the job status (which would drag a cancelled job back to
+			// running - RecomputeJobStatus has no notion of `cancelled`) and must
+			// not wake the dispatcher.
 			updateJobStatusFromTasks(ctx, h.q, task.JobID)
 			_ = h.q.NotifyTaskSubmitted(ctx)
 		}
@@ -546,7 +598,15 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
-		log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		// pgx.ErrNoRows is the fence rejecting, not a failure: the row is
+		// already terminal (a duplicate terminal message), or the generation
+		// ended between the GetTask above and here. Drop silently, exactly like
+		// the two gates - a log line here would be caller-controlled volume on
+		// the recv goroutine with no sink to send it to, and detection belongs
+		// with the audit-log work. Any other error is real.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		}
 		return
 	}
 

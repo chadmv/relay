@@ -34,7 +34,11 @@ behavioral change (the reachable states remain covered).
 - `make generate` run; the diff is query-only and behavior is unchanged.
 
 ## Related
-- Found in the same sweep as [[bug-2026-06-26-retry-resurrects-cancelled-task]].
+- Found in the same sweep as `bug-2026-06-26-retry-resurrects-cancelled-task`, closed 2026-08-12
+  (`docs/backlog/closed/`). That work added `TestTasksStatusVocabularyIsExactly`, which asserts the
+  `tasks_status_check` vocabulary is exactly the six live values and names every query that
+  partitions it - useful leverage for this cleanup, and the test that will go RED if this idea is
+  implemented by widening or narrowing the vocabulary rather than only removing dead filters.
 - Source: `internal/store/query/tasks.sql:181`, `internal/store/query/scheduled_jobs.sql:75-78`, `internal/store/migrations/000019_status_vocabulary_checks.up.sql`.
 
 ## Notes

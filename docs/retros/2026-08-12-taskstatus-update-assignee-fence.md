@@ -191,6 +191,12 @@ both times.
   chased through every artifact that repeated the claim, not just the one where it was raised** -
   and the artifact where a claim is *written down as settled* is usually not the one where the
   reviewer found it.
+  - **Closed (2026-08-12).** Both artifacts now carry dated Correction blocks, applied by the
+    retry-resurrect status-guard iteration
+    (`docs/superpowers/plans/2026-08-12-retry-resurrect-status-guard.md`, Task 10): section 9
+    item 6 of the spec, and Task 11 of the plan. The closed backlog item had already been
+    corrected in-branch before it shipped. The `06-26` item that all of them undersize is
+    itself closed by that iteration.
 
 ## Deferred Findings
 
@@ -279,6 +285,8 @@ New from this iteration:
   argument lived only in a spec.
 - **Chase a refutation through every artifact that repeated the claim.** See Findings Triage; two
   shipped docs still carry the "cancel race alone" wording after the item itself was corrected.
+  (Corrected 2026-08-12 by the retry-resurrect status-guard iteration; the lesson stands, the
+  open defect does not.)
 
 ## Files Most Touched
 

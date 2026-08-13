@@ -1,0 +1,1872 @@
+# Retry and Status-Writer Terminality Guard Implementation Plan
+
+> **Corrections (2026-08-12, Phase 4 review - this plan was executed, then two of its
+> prescriptions were overturned).** Read these before following any task text verbatim.
+>
+> 1. **The status predicates shipped as allow-lists, not deny-lists.** Every task below writes
+>    `status NOT IN ('done','failed','timed_out')`. Two review lenses independently argued for
+>    `status IN ('pending','dispatched','running')` instead: the forms are exactly equivalent
+>    under migration 000019's vocabulary, but they fail in opposite directions, and a plausible
+>    near-term task-level `cancelled` status would make the deny-list silently accept writes it
+>    was never reviewed against. The allow-list shipped, plus a `pg_get_constraintdef` guard
+>    test (`internal/store/tasks_status_vocabulary_lockstep_test.go`) so the lockstep is
+>    enforced rather than asserted.
+> 2. **The Go gate's justification, prescribed at lines ~840 and ~1410, is false.** This plan
+>    tells the engineer to write that the gate saves "one round trip and one log line" / "zero
+>    round trips, zero attacker-keyed log lines". The same change wraps both write sites in
+>    `!errors.Is(err, pgx.ErrNoRows)`, so it saves *no* log lines; and `GetTask` runs ahead of
+>    the gate either way, so the saving is *one* round trip instead of two. The gate still
+>    stays - it just does not stay for these reasons. See the spec's sections 3.2 and 8.5.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make an already-finished task unwritable and make the agent-driven retry atomic with respect to the row it decided from, so a cancel landing in the retry window wins, and a task's own assignee cannot resurrect a task it already completed or cascade `FailDependentTasks` across a completed task's downstream.
+
+**Architecture:** Two SQL statements gain predicates, and nothing else changes shape. (1) `UpdateTaskStatus` gains `AND status NOT IN ('done','failed','timed_out')` - one line, no signature change. (2) `IncrementTaskRetryCount`, today the last writer to `tasks.status` with a bare `WHERE id = $1`, gains all three predicates - `assignment_epoch`, `worker_id` and the same status deny-list - which turns it into a params-struct call. `handleTaskStatus` passes the connection's own authenticated worker and the epoch it already proved current, and treats `pgx.ErrNoRows` from either statement as a silent drop. No new query, no new round trip, no transaction, no proto change, no migration.
+
+**Tech Stack:** Go, PostgreSQL, sqlc v1.30.0, pgx/v5, gRPC, testcontainers-go (integration tests), testify.
+
+**Slice independence:** This is **backend-only**. Every file touched is Go, SQL or Markdown. **Zero files under `web/`.** The conductor should dispatch `relay-backend-engineer` only and must NOT allocate a frontend slice for Phase 3. The tasks below are strictly sequential (each depends on the previous one's tree state); do not parallelize them.
+
+---
+
+## Spec
+
+Approved spec: `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`
+
+Third iteration of one hardening family. The two predecessors, whose reasoning the spec cites rather than repeats:
+
+- `docs/superpowers/specs/2026-08-12-tasklog-append-assignee-fence.md` + `docs/superpowers/plans/2026-08-12-tasklog-append-assignee-fence.md` (PR #119)
+- `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md` + `docs/superpowers/plans/2026-08-12-taskstatus-update-assignee-fence.md` + `docs/retros/2026-08-12-taskstatus-update-assignee-fence.md` (PR #120)
+
+Backlog item being closed: `docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md` (Task 11; the spec's section 11 concludes it closes **fully**, including the requeue variant of route A that the item does not document).
+
+Out of scope, do not touch:
+
+- **`POST /v1/jobs/{id}/retry`.** Tracked in `docs/backlog/feature-2026-06-26-web-enabler-backend-endpoints.md`. Its precondition is the exact inverse of `IncrementTaskRetryCount`'s, and the constraint that it must not reuse this statement is written into the query comment in Task 4, not built here.
+- **`UpdateTaskStatusEpoch`** (`internal/store/query/tasks.sql:211-222`). Test-only, already carries a `TEST-ONLY ... must not gain a production caller` warning. Adding predicates would only break the fixture writes in `TestRecomputeJobStatus` and `TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry` for no security gain.
+- **Making `RecomputeJobStatus` aware of `cancelled`.** Unreachable through this path once the predicates land. Propose as a backlog item; do not build it.
+- The dead `'queued'` arm in `CancelJobTasks`.
+- Any `.proto` file. Any change to `internal/agent`, `Sender`, `Registry`, `workerSender`, `sendCh`. Deduplicating dispatch on the agent side.
+- Renaming `IncrementTaskRetryCount`. Considered and rejected in spec 3.2 (comment instead of churn inside a security fix). Do not re-propose it as an oversight.
+
+---
+
+## Critical files
+
+Read these before starting. They are the entire blast radius.
+
+- `internal/store/query/tasks.sql:12-51` - `UpdateTaskStatus`. One predicate and one comment paragraph added in Task 2.
+- `internal/store/query/tasks.sql:53-58` - the whole of `IncrementTaskRetryCount` today: no comment, no epoch predicate, no worker predicate, no status predicate. Replaced in Task 4.
+- `internal/store/query/tasks.sql:235-246` - `CancelJobTasks`, deliberately un-fenced. It is what route A races.
+- `internal/store/tasks.sql.go:621-660` (`incrementTaskRetryCount`) and `:909-1010` (`updateTaskStatus`) - GENERATED by sqlc. **Never hand-edit.** Regenerated in Tasks 2 and 4.
+- `internal/worker/handler.go:417-579` - `handleTaskStatus`. The `GetTask` at `:430`, the identity gate at `:436-476` (its comment paragraphs at `:441-455` and the sentence at `:466-468` are rewritten in Task 4), the currency gate at `:478-489`, the retry branch at `:514-523`, the `UpdateTaskStatus` call at `:540-551`.
+- `internal/worker/handler.go:88-144` - `Connect`. `workerUUID` is resolved and hard-checked at `:115-119` and already passed to `handleTaskStatus` at `:133`. **No change to `Connect` in this plan.**
+- `internal/worker/export_test.go:16-29` - the `HandleTaskStatus` and `HandleTaskLog` shims. Already take `workerID`. **No change.**
+- `internal/worker/handler_taskstatus_integration_test.go` - `seedTaskAndTwoWorkers` at `:29-55` (creates w1 with `Name`/`Hostname` = `<prefix>-w1`, leaves the task unclaimed, takes a `retries` argument), five tests, and `TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker` at `:407-466` (the model for Task 6).
+- `internal/worker/handler_taskstatus_integration_test.go:313-388` - `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask`. This change silently stops it discriminating the Go gate. Task 7 is entirely about that.
+- `internal/worker/handler_tasklog_integration_test.go:33-62` - `seedClaimedTask` (returns `jobID, taskID, workerID, epoch`). Used by the existing Connect test. **Do not change its signature**; two other test files call it.
+- `internal/worker/handler_auth_test.go:27-135` - `mockConnectStream` (`SendToServer` / `RecvFromServer` / `CloseSend`) and `newWorkerTestFixture`. Needed by Task 6. Note `CloseSend` closes a channel that `Recv` selects on alongside the message queue, so **closing the stream does not drain queued messages** - Task 6 uses an ordering barrier instead.
+- `internal/store/store_test.go:206-254` - `TestUpdateTaskStatus_EpochGuarded`; `:401-449` - `TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist` (**must stay byte-identical**; it is the evidence that a status predicate and not an epoch bump is the right fix); `:716-759` - `TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry` (one mechanical call-site repair in Task 4, every assertion byte-identical); `:1044-1144` - `TestUpdateTaskStatus_AssigneeGuarded` (cases 5 and 6 appended in Task 1).
+- `internal/scheduler/dispatch.go:342-386` - `failClaimedTask`, the second `UpdateTaskStatus` caller. **No Go change.** Its target is `dispatched` by construction, so the new predicate is tautological there.
+- `CLAUDE.md:70` - the Epoch fence invariant bullet. Amended in Task 9.
+
+---
+
+## Conventions and gotchas (read once, apply everywhere)
+
+1. **SQL is the source of truth.** Edit `internal/store/query/tasks.sql`, then regenerate. Never hand-edit `internal/store/tasks.sql.go` or `internal/store/models.go`.
+
+2. **`make` is NOT on PATH on this machine.** Every command below is the Makefile's literal recipe, already expanded. For reference: `make test` = `go test ./... -timeout 120s`; `make vet-integration` = `go vet -tags integration ./...`; `make test-integration` = `go test -tags integration -p 1 ./... -timeout 900s`; `make generate` = `sqlc generate` then `buf generate`.
+
+3. **`sqlc generate` CRLF hazard.** sqlc emits LF; this repo is checked out CRLF, so it rewrites line endings across every file it emits, not just the one whose content changed. Procedure after generating, every time:
+   ```
+   git status --short
+   git diff --ignore-all-space
+   ```
+   - The **only** file expected to show a real content change is `internal/store/tasks.sql.go`.
+   - `internal/store/models.go` must show **no** content change: this adds no column, no table, no type. If `git diff --ignore-all-space internal/store/models.go` is empty but `git status` lists it, that is pure line-ending churn - `git checkout -- internal/store/models.go`.
+   - Same for every other `internal/store/*.sql.go`: if `git diff --ignore-all-space <file>` is empty, `git checkout -- <file>`.
+   - Run `sqlc generate` **alone**, not `make generate`/`buf generate`. No `.proto` changes in this plan, and `buf generate` would churn `internal/proto/` for nothing.
+
+4. **Everything new here is integration-test-only.** Every test file touched carries `//go:build integration`. `go test ./... -count=1 -timeout 120s` compiles and runs **none** of it and stays green even if every new test is broken. It is a no-regression gate, never evidence. Docker Desktop must be running (this machine uses the `desktop-linux` context automatically); `-p 1` is mandatory. Every integration test in these packages spins up its own Postgres container, so budget generously.
+
+5. **`go vet -tags integration ./...` is the compile gate for integration-tagged code.** Run it after the Task 4 signature change; `go build ./...` alone does not compile `//go:build integration` files.
+
+6. **`./internal/scheduler/...` is in the gate.** `Dispatcher.failClaimedTask` calls `UpdateTaskStatus`, so the status predicate touches that package even though no Go code there changes. Its two tests passing **with no edit** is the evidence for the "tautological on the dispatcher path" claim: `TestDispatcher_BadCommandsJSON_FailsTaskNoRequeue` and `TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal` in `internal/scheduler/dispatch_test.go`.
+
+7. **Hard gate - existing tests may gain an argument, never an assertion change.** Exactly one existing-test repair is predicted: the call at `store_test.go:742` gains a params struct. **Every assertion in that test must stay byte-identical.** Beyond it, nothing existing may be edited except the two comment repairs this plan names explicitly (Task 4's `handler.go` paragraphs, Task 7's test comment). **If any assertion in any existing test needs to change to go green, STOP and report it as a finding.** Two special cases worth naming:
+   - If either `internal/scheduler` `failClaimedTask` test needs an edit, the "tautological on the dispatcher path" argument in spec 3.1 is wrong and must be re-opened, not patched.
+   - If an `internal/api` cancel-job test asserts that a cancelled job comes back to `running`, it was pinning the bug. Report it as a finding; do not "fix" it in either direction without saying so.
+
+8. **No flaky tests. Explicitly forbidden:** any test that races two goroutines to hit the window between `GetTask` (`handler.go:430`) and `IncrementTaskRetryCount` (`:516`); any `time.Sleep` used to order a cancel against a retry; any injectable seam, interface or fake over `h.q` added to production code so the interleaving can be driven. Route A is proven at the **store layer** by case 2, which calls the statement with exactly the values the handler captures at T0 against exactly the post-cancel row state, and the **wiring** is pinned by route B (Task 3) and by Task 6. That combination covers what an interleaving test would have covered, without the flake. Note also that applying the cancel *before* the handler runs proves nothing: `GetTask` then reads the post-cancel row, `worker_id` is NULL, and the Go identity gate rejects before any new predicate is reached.
+
+9. **Commit cadence.** Commit at each task boundary except Tasks 1 and 3, which deliberately end RED and uncommitted, and Task 8, which mutates and reverts. Every commit must leave the tree compiling and green.
+
+10. **No em dashes or en dashes** anywhere, including code comments, test messages and commit messages. Use regular hyphens.
+
+---
+
+## Two evidence regimes, and which task produces which
+
+This change adds three predicates to one statement and one predicate to another. **They cannot all be evidenced the same way, and collapsing the two regimes is a plan violation.**
+
+| Predicate | Statement | Evidence regime | Where |
+| --- | --- | --- | --- |
+| `status NOT IN ('done','failed','timed_out')` | `UpdateTaskStatus` | **Behavioral RED**, captured verbatim | Task 1 (red) -> Task 2 (green) |
+| `status NOT IN ('done','failed','timed_out')` | `IncrementTaskRetryCount` | **Behavioral RED**, captured verbatim | Task 3 (red) -> Task 4 (green) |
+| `assignment_epoch = $` | `IncrementTaskRetryCount` | **Mutation matrix row M2 (+ M6)**. No behavioral RED is possible. | Task 5 (test) -> Task 8 (proof) |
+| `worker_id = $` | `IncrementTaskRetryCount` | **Mutation matrix rows M3, M4 (+ M6)**. No behavioral RED is possible. | Task 5 (test) -> Task 8 (proof) |
+
+Why the asymmetry is real and not laziness: the status predicate needs no new argument, so a test that exercises it compiles against today's code and fails *behaviorally*. The epoch and worker predicates take arguments that **do not exist** before the change - `IncrementTaskRetryCount(ctx, id pgtype.UUID)` becomes `IncrementTaskRetryCount(ctx, arg IncrementTaskRetryCountParams)` - so any test for them can only ever produce a compile-error RED, which proves nothing about behavior. They are evidenced by mutation instead, and **every mutation's discriminating input is a permanent committed test** with no test edit required to observe it. That is the previous iteration's Problem 1 requirement, met by construction.
+
+**Do not claim behavioral RED for the epoch or worker predicate.** **Do not skip Task 8**; without it those two predicates have no evidence at all.
+
+**If Tasks 1 and 2 are collapsed, or Tasks 3 and 4 are collapsed, the acceptance evidence for this change is destroyed.** Spec criteria 1, 2 and 3 ask specifically for captured stage-1 RED output - the cancelled task resurrected, the `done` task resurrected with `retry_count 1`, the `done` task flipped to `failed` with its dependent cascaded - and none of it can be produced after the fix lands without reverting.
+
+---
+
+## Task 1: Route-B2 exposure evidence - a second terminal overwrites a completed task and cascades
+
+`UpdateTaskStatus` today accepts a terminal status written onto an already-terminal row, because a terminal transition deliberately neither bumps `assignment_epoch` nor clears `worker_id`. So a task's own assignee, at the same epoch, can flip its own completed task from `done` to `failed` and take out its whole downstream via `FailDependentTasks`. This task adds the handler test and the two store cases that expose it, captures the RED, and stops.
+
+**This task ends RED and uncommitted.** Task 2 commits the tests together with the predicate so no commit on this branch is red.
+
+**Files:**
+- Modify (append one function): `internal/worker/handler_taskstatus_integration_test.go`
+- Modify (append two cases before the closing brace of `TestUpdateTaskStatus_AssigneeGuarded`): `internal/store/store_test.go:1144`
+
+- [ ] **Step 1: Append the B2 handler test**
+
+Append to the end of `internal/worker/handler_taskstatus_integration_test.go`:
+
+```go
+// ROUTE B2: a second terminal message from the task's OWN assignee, at the
+// CURRENT epoch, on a task with no retries left. Both of handleTaskStatus's
+// gates legitimately pass - it really is the assignee and the epoch really is
+// current - because a terminal transition deliberately does not bump
+// assignment_epoch and does not clear worker_id (that is what lets a trailing
+// log chunk still pass AppendTaskLog's fence). With retries exhausted the retry
+// branch is skipped, so this message goes straight to UpdateTaskStatus and
+// flips a `done` task to `failed`.
+//
+// The load-bearing assertion is the one on task B. "A's status did not change"
+// is a string comparison; "B is still pending" is the absence of the
+// FailDependentTasks cascade, which is the actual harm: a completed task's
+// entire still-pending downstream destroyed by a duplicate message.
+//
+// A correct agent never produces this - Runner.Run sends exactly one terminal
+// status per invocation and gRPC does not redeliver - but a crash-looping or
+// double-dispatching agent does, with no attacker and no concurrency.
+//
+// This test can only be red for UpdateTaskStatus's status predicate: its FAILED
+// skips the retry branch entirely, so IncrementTaskRetryCount is never reached.
+// Its sibling
+// TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry is the
+// mirror image and can only be red for the retry statement's predicate.
+func TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	jobID, taskAID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "status8", 0)
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskB.ID, DependsOnTaskID: taskAID,
+	}))
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskAID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	taskAStr := h.UUIDStringForTest(taskAID)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+	afterDone, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	require.Equal(t, "done", afterDone.Status, "fixture: the assignee's own DONE must land")
+	require.True(t, afterDone.FinishedAt.Valid, "fixture: DONE must stamp finished_at")
+
+	// The duplicate. Same worker, same epoch, terminal status.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+
+	afterFailed, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	afterB, err := q.GetTask(ctx, taskB.ID)
+	require.NoError(t, err)
+	// Non-fatal asserts so a RED run reports every part of the exposure rather
+	// than stopping at the first one.
+	assert.Equal(t, "done", afterFailed.Status, "a finished task must not be overwritten by a second terminal status")
+	assert.True(t, afterFailed.FinishedAt.Time.Equal(afterDone.FinishedAt.Time),
+		"a rejected update must not restamp finished_at")
+	assert.Equal(t, "pending", afterB.Status,
+		"a duplicate terminal must not cascade FailDependentTasks across a completed task's downstream")
+	if t.Failed() {
+		t.FailNow() // the overwrite got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path: a task that is genuinely running
+	// still fails and still cascades to its dependent. Without it, a
+	// handleTaskStatus that had stopped accepting anything at all would pass
+	// every assertion above.
+	taskC, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-c", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	taskD, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-d", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskD.ID, DependsOnTaskID: taskC.ID,
+	}))
+	claimedC, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskC.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(taskC.ID),
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimedC.AssignmentEpoch),
+	})
+	realC, err := q.GetTask(ctx, taskC.ID)
+	require.NoError(t, err)
+	realD, err := q.GetTask(ctx, taskD.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", realC.Status, "positive control: a live task's FAILED must still land")
+	assert.Equal(t, "failed", realD.Status, "positive control: the dependent cascade must still fire")
+}
+```
+
+- [ ] **Step 2: Append store cases 5 and 6 to TestUpdateTaskStatus_AssigneeGuarded**
+
+In `internal/store/store_test.go`, insert immediately before the closing brace of `TestUpdateTaskStatus_AssigneeGuarded` (after the `afterCase4` assertion at `:1143`):
+
+```go
+
+	// Case 5: TERMINAL ONTO TERMINAL. A task's status machine is one-way into a
+	// terminal state; this predicate makes that structural. w1 completed this
+	// task at epoch 1, and a second terminal from the same worker at the same
+	// epoch passes the epoch and worker predicates legitimately - a terminal
+	// transition neither bumps the epoch nor clears worker_id - so the status
+	// predicate is the ONLY thing that can reject it. Without it a `done` task
+	// flips to `failed` and FailDependentTasks cascades across its still-pending
+	// downstream. The terminal set is the one RecomputeJobStatus uses
+	// (query/jobs.sql:98); keep the two in lockstep.
+	terminalTask, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-terminal", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedTerminal, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: terminalTask.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	doneRow, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: terminalTask.ID, Status: "done", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTerminal.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.True(t, doneRow.FinishedAt.Valid)
+
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: terminalTask.ID, Status: "failed", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTerminal.AssignmentEpoch,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "an already-finished task must not accept a second terminal status")
+	afterCase5, err := q.GetTask(ctx, terminalTask.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", afterCase5.Status, "a rejected update must not flip a done task to failed")
+	assert.True(t, afterCase5.FinishedAt.Time.Equal(doneRow.FinishedAt.Time),
+		"a rejected update must not restamp finished_at")
+
+	// Case 6: the same shape with timed_out over failed, because that is the
+	// ordering a reviewer will ask about. There is no server-side timeout writer
+	// in the tree at all - the agent picks one finalStatus and sends it once - so
+	// this pins the vocabulary rather than a live path.
+	timedOutTask, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t-timed-out", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedTimedOut, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: timedOutTask.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: timedOutTask.ID, Status: "failed", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTimedOut.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: timedOutTask.ID, Status: "timed_out", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: claimedTimedOut.AssignmentEpoch,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "timed_out must not be writable over an already-failed task")
+	afterCase6, err := q.GetTask(ctx, timedOutTask.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", afterCase6.Status, "a rejected update must not move a terminal row")
+```
+
+`pgx`, `pgtype`, `time`, `store`, `assert` and `require` are all already imported in `store_test.go`.
+
+- [ ] **Step 3: Run the three new cases and capture the RED output verbatim**
+
+Docker Desktop must be running.
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade" -v -timeout 600s
+go test -tags integration -p 1 ./internal/store/... -run "TestUpdateTaskStatus_AssigneeGuarded" -v -timeout 300s
+```
+
+Expected: **both FAIL**, on the exposure assertions and not on a compile or setup error. The handler output must contain all three of:
+```
+    Error:      Not equal: expected: "done" actual: "failed"
+    Messages:   a finished task must not be overwritten by a second terminal status
+```
+```
+    Messages:   a rejected update must not restamp finished_at
+```
+```
+    Error:      Not equal: expected: "pending" actual: "failed"
+    Messages:   a duplicate terminal must not cascade FailDependentTasks across a completed task's downstream
+```
+and the store output must contain `an already-finished task must not accept a second terminal status` (an `assert.ErrorIs` reporting a `<nil>` error against `pgx.ErrNoRows`) plus `a rejected update must not flip a done task to failed` and the `timed_out` pair.
+
+**Copy the full `go test` output into the task report / PR description verbatim.** This is acceptance criterion 3 and it cannot be reproduced after Task 2.
+
+- [ ] **Step 4: Do NOT commit**
+
+The tree is intentionally RED. Proceed to Task 2.
+
+---
+
+## Task 2: Add the status predicate to UpdateTaskStatus
+
+**Files:**
+- Modify: `internal/store/query/tasks.sql:12-51`
+- Regenerate: `internal/store/tasks.sql.go`
+- Modify: `internal/worker/handler.go:548-551`
+
+- [ ] **Step 1: Add the predicate and the comment paragraph**
+
+In `internal/store/query/tasks.sql`, the statement body at lines 44-51 currently reads:
+
+```sql
+UPDATE tasks
+SET status = sqlc.arg(status),
+    started_at = sqlc.arg(started_at),
+    finished_at = sqlc.arg(finished_at)
+WHERE id = sqlc.arg(id)
+  AND assignment_epoch = sqlc.arg(assignment_epoch)
+  AND worker_id = sqlc.arg(worker_id)
+RETURNING *;
+```
+
+Replace with:
+
+```sql
+UPDATE tasks
+SET status = sqlc.arg(status),
+    started_at = sqlc.arg(started_at),
+    finished_at = sqlc.arg(finished_at)
+WHERE id = sqlc.arg(id)
+  AND assignment_epoch = sqlc.arg(assignment_epoch)
+  AND worker_id = sqlc.arg(worker_id)
+  AND status NOT IN ('done', 'failed', 'timed_out')
+RETURNING *;
+```
+
+Then, in the comment block above it, insert the following paragraph immediately **after** the existing paragraph that ends `...Do not "fix the NULL bug" here.` (currently line 30) and before the line beginning `-- Both callers are fenced by the same statement deliberately;`:
+
+```
+-- A task's status machine is one-way into a terminal state. The status
+-- predicate makes that structural: an already-finished task cannot be written
+-- again, so a second terminal message from its own assignee at the same epoch -
+-- which both other predicates legitimately accept, because a terminal
+-- transition neither bumps the epoch nor clears worker_id - cannot flip a `done`
+-- task to `failed` and cascade FailDependentTasks across its still-pending
+-- downstream. The terminal set is the one RecomputeJobStatus uses
+-- (internal/store/query/jobs.sql:98); keep the two in lockstep.
+-- The fix for that case is this predicate and NOT an epoch bump on terminal
+-- transitions: the assignment must survive completion so a trailing log chunk
+-- from the agent that just finished still passes AppendTaskLog's fence. See
+-- TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+-- Dispatcher.failClaimedTask's target is `dispatched` by construction
+-- (ClaimTaskForWorker requires `status='pending'`), so this predicate is
+-- tautological there, exactly like the worker predicate above and for the same
+-- reason: one statement with no exceptions to remember.
+```
+
+Leave every other line of the comment block alone. In particular do **not** touch the paragraph at lines 40-43 asserting that this predicate is not sufficient on its own - that paragraph is rewritten in Task 4, after `IncrementTaskRetryCount` actually changes.
+
+- [ ] **Step 2: Regenerate and clean up the line-ending churn**
+
+```
+sqlc generate
+git status --short
+git diff --ignore-all-space
+```
+
+Expected real content change in exactly one file, `internal/store/tasks.sql.go`: the `updateTaskStatus` const gains `AND status NOT IN ('done', 'failed', 'timed_out')` and the doc comment above the method picks up the new SQL comment text. **No params-struct change** - the predicate takes no argument.
+
+Revert every generated file whose `git diff --ignore-all-space` is empty:
+```
+git checkout -- internal/store/models.go
+```
+and likewise for any other `internal/store/*.sql.go` that `git status` lists but `git diff --ignore-all-space` shows as unchanged.
+
+- [ ] **Step 3: Make handleTaskStatus's UpdateTaskStatus rejection a silent drop**
+
+`pgx.ErrNoRows` from this statement is now an expected outcome (a duplicate terminal from a misbehaving agent), attacker- or bug-driven, on the recv goroutine. Keep the log line for every other error.
+
+In `internal/worker/handler.go`, lines 548-551 currently read:
+
+```go
+	if err != nil {
+		log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		return
+	}
+```
+
+Replace with:
+
+```go
+	if err != nil {
+		// pgx.ErrNoRows is the fence rejecting, not a failure: the row is
+		// already terminal (a duplicate terminal message), or the generation
+		// ended between the GetTask above and here. Drop silently, exactly like
+		// the two gates - a log line here would be caller-controlled volume on
+		// the recv goroutine with no sink to send it to, and detection belongs
+		// with the audit-log work. Any other error is real.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+		}
+		return
+	}
+```
+
+`errors` and `pgx` are already imported in this file (`handler.go:8` and `:22`). **`internal/scheduler/dispatch.go:363-366` is deliberately left loud** - that path is server-internal, its volume is bounded by dispatch cycles, and PR #120 cited its loudness as a virtue. Do not touch it.
+
+- [ ] **Step 4: Compile both tag sets**
+
+```
+go build ./...
+go vet -tags integration ./...
+```
+Expected: both succeed with no output.
+
+- [ ] **Step 5: Run Task 1's tests - they must now be GREEN**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade" -v -timeout 600s
+go test -tags integration -p 1 ./internal/store/... -run "TestUpdateTaskStatus_AssigneeGuarded" -v -timeout 300s
+```
+Expected: both PASS, including the positive control (which proves a live task still fails and still cascades).
+
+- [ ] **Step 6: Run the three affected packages in full**
+
+```
+go test -tags integration -p 1 ./internal/store/... -timeout 600s
+go test -tags integration -p 1 ./internal/scheduler/... -timeout 600s
+go test -tags integration -p 1 ./internal/worker/... -timeout 900s
+```
+Expected: PASS. Specifically green **and unedited**: `TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist`, `TestUpdateTaskStatus_EpochGuarded`, `TestTaskDependencyAndEligibility`, `TestDispatcher_BadCommandsJSON_FailsTaskNoRequeue`, `TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal`. If any of them needs an assertion changed, STOP and report a finding (gotcha 7).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add internal/store/query/tasks.sql internal/store/tasks.sql.go internal/worker/handler.go internal/store/store_test.go internal/worker/handler_taskstatus_integration_test.go
+git commit -m "fix(store): reject a status write onto an already-terminal task"
+```
+
+---
+
+## Task 3: Route-A and route-B1 exposure evidence on IncrementTaskRetryCount
+
+The two cases that compile against today's single-argument signature, so their RED is behavioral. Route A is the filed bug (a cancel landing in the retry TOCTOU window is clobbered); route B1 is the single-actor resurrection the item does not document (the assignee sends `DONE` then `FAILED` at the same epoch and its completed task goes back to `pending` while its dependents are already running).
+
+**This task ends RED and uncommitted.** Task 4 commits the tests together with the predicates.
+
+**Files:**
+- Modify (append one function): `internal/worker/handler_taskstatus_integration_test.go`
+- Modify (append one function): `internal/store/store_test.go`
+
+- [ ] **Step 1: Append the `dispatchable` helper and the B1 handler test**
+
+Append to the end of `internal/worker/handler_taskstatus_integration_test.go`:
+
+```go
+// dispatchable reports whether GetEligibleTasks currently returns taskID, i.e.
+// whether the dispatcher would pick it up right now. Asserting on this rather
+// than on a status string is what makes the resurrection tests express the harm
+// instead of the symptom.
+func dispatchable(t *testing.T, ctx context.Context, q *store.Queries, taskID pgtype.UUID) bool {
+	t.Helper()
+	eligible, err := q.GetEligibleTasks(ctx)
+	require.NoError(t, err)
+	for _, e := range eligible {
+		if e.ID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+// ROUTE B1: the task's OWN assignee, at the CURRENT epoch, resurrecting a task
+// it already completed - on a task that still has a retry budget, so the second
+// terminal takes the RETRY branch and never reaches UpdateTaskStatus.
+//
+// Both gates pass legitimately. A terminal transition does not bump
+// assignment_epoch and does not clear worker_id (that is what lets a trailing
+// log chunk still pass AppendTaskLog's fence), so after a DONE the row still
+// satisfies identity and currency for that worker at that epoch. `terminal`
+// (handler.go:512) and the retry condition (:515) read only the wire status and
+// the T0 row's RetryCount/Retries - never the T0 row's status - so
+// IncrementTaskRetryCount moves a COMPLETED task back to pending.
+//
+// The load-bearing assertion is the one on the dependent: "A is still done" is a
+// string comparison, "B is STILL dispatchable" is the harm - a task resurrected
+// and re-dispatched while its dependents are already running.
+//
+// This test can only be red for IncrementTaskRetryCount's status predicate: its
+// FAILED takes the retry branch and returns, so UpdateTaskStatus is never
+// reached. Its sibling
+// TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade
+// is the mirror image. Removing either predicate reddens exactly one of them.
+func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	jobID, taskAID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "status7", 1)
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskB.ID, DependsOnTaskID: taskAID,
+	}))
+
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskAID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	require.Equal(t, int32(1), claimed.Retries)
+	taskAStr := h.UUIDStringForTest(taskAID)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+	afterDone, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	require.Equal(t, "done", afterDone.Status, "fixture: the assignee's own DONE must land")
+	require.True(t, dispatchable(t, ctx, q, taskB.ID),
+		"fixture: B must become eligible once A is done, or the assertion below proves nothing")
+
+	// The duplicate. Same worker, same epoch, terminal status, retry budget left.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskAStr,
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimed.AssignmentEpoch),
+	})
+
+	afterFailed, err := q.GetTask(ctx, taskAID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", afterFailed.Status, "a completed task must not be resurrected by a second terminal")
+	assert.Equal(t, int32(0), afterFailed.RetryCount, "a completed task has no generation to fail - no retry may be burned")
+	assert.Equal(t, int32(1), afterFailed.AssignmentEpoch, "a rejected retry must not end the assignment")
+	assert.Equal(t, w1, afterFailed.WorkerID, "a rejected retry must not clear the assignee")
+	assert.True(t, dispatchable(t, ctx, q, taskB.ID),
+		"the dependent must stay dispatchable - resurrecting A drops B out of GetEligibleTasks")
+	if t.Failed() {
+		t.FailNow() // the resurrection got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path: a task that is genuinely running
+	// still burns its retry when its assignee reports FAILED. Without it, a
+	// handleTaskStatus that had stopped accepting anything at all would pass
+	// every assertion above.
+	live, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-live", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	claimedLive, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: live.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(live.ID),
+		Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		Epoch:  int64(claimedLive.AssignmentEpoch),
+	})
+	retried, err := q.GetTask(ctx, live.ID)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), retried.RetryCount, "positive control: a live task's FAILED must still burn a retry")
+	assert.Equal(t, "pending", retried.Status, "positive control: the retry must requeue the task")
+	assert.Equal(t, int32(2), retried.AssignmentEpoch, "positive control: the requeue must bump the epoch")
+}
+```
+
+- [ ] **Step 2: Append the store test with cases 2 and 3 only**
+
+Append to the end of `internal/store/store_test.go`:
+
+```go
+// IncrementTaskRetryCount burns one retry on a task whose CURRENT generation
+// just failed, and returns it to the queue. Three predicates guard it - epoch
+// (currency), worker_id (identity) and status (terminality) - and every case
+// below names the one that rejects it, because a case that could be rejected by
+// two predicates isolates neither.
+//
+// Cases 2 and 3 land first and alone: they are the only two that compile
+// against the pre-change single-argument signature, which is what makes their
+// RED behavioral rather than a compile error. Cases 1, 4, 5, 6 and 7 need the
+// params struct and therefore arrive with the fix; their evidence is the
+// mutation matrix in the plan (rows M2, M3, M4, M6), not a RED run.
+func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
+	q := newTestQueries(t)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Kim", "kim@example.com")
+	w1, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w1", Hostname: "w1-retry-guard", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	newJob := func(name string) store.Job {
+		t.Helper()
+		job, err := q.CreateJob(ctx, store.CreateJobParams{
+			Name: name, Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+			ScheduledJobID: pgtype.UUID{},
+		})
+		require.NoError(t, err)
+		return job
+	}
+	// Every case gets its own task so a rejection in one cannot mask another.
+	newClaimedTask := func(jobID pgtype.UUID, name string) store.Task {
+		t.Helper()
+		task, err := q.CreateTask(ctx, store.CreateTaskParams{
+			JobID: jobID, Name: name, Commands: []byte(`[["true"]]`),
+			Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+		})
+		require.NoError(t, err)
+		claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+			ID: task.ID, WorkerID: w1.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, int32(1), claimed.AssignmentEpoch)
+		require.Equal(t, "dispatched", claimed.Status)
+		return claimed
+	}
+
+	// Case 2: ROUTE A, the filed bug, and the honest test for it. A cancel lands
+	// in the handler's TOCTOU window - CancelJobTasks makes the task terminal,
+	// NULLs worker_id and bumps the epoch - and the retry then runs with exactly
+	// the two values handleTaskStatus captured at T0: epoch 1 and w1. There is no
+	// seam to interleave on inside the handler and a timing-based test would be
+	// flaky, so the interleaving is proven here, at the statement, in the state
+	// that is the bug, with the handler's own arguments. Rejected by all three
+	// predicates. Its own job, because CancelJobTasks is job-wide.
+	cancelJob := newJob("j-cancelled")
+	cancelled := newClaimedTask(cancelJob.ID, "t-cancelled")
+	require.NoError(t, q.CancelJobTasks(ctx, cancelJob.ID))
+	afterCancel, err := q.GetTask(ctx, cancelled.ID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", afterCancel.Status, "fixture: the cancel must have landed")
+	require.Equal(t, int32(2), afterCancel.AssignmentEpoch, "fixture: the cancel ends the generation")
+	require.False(t, afterCancel.WorkerID.Valid, "fixture: the cancel clears the assignee")
+
+	_, err = q.IncrementTaskRetryCount(ctx, cancelled.ID)
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a stale retry must not resurrect a cancelled task")
+	stillCancelled, err := q.GetTask(ctx, cancelled.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", stillCancelled.Status, "the cancel must win the race, not be clobbered by the retry")
+	assert.Equal(t, int32(0), stillCancelled.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(2), stillCancelled.AssignmentEpoch, "a rejected retry must not bump the epoch")
+
+	// Case 3: ROUTE B1. The assignee completed this task at epoch 1 and then
+	// retries at the same epoch. Epoch matches, worker matches: the status
+	// predicate is the ONLY thing that can reject it, which is what makes this
+	// case discriminating (matrix row M1).
+	bJob := newJob("j-route-b")
+	completed := newClaimedTask(bJob.ID, "t-completed")
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: completed.ID, Status: "done", WorkerID: w1.ID,
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		AssignmentEpoch: completed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+
+	_, err = q.IncrementTaskRetryCount(ctx, completed.ID)
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a completed task has no generation to fail and must not be retried")
+	stillDone, err := q.GetTask(ctx, completed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", stillDone.Status, "a finished task must not be resurrected")
+	assert.Equal(t, int32(0), stillDone.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(1), stillDone.AssignmentEpoch, "a rejected retry must not bump the epoch")
+	assert.Equal(t, w1.ID, stillDone.WorkerID, "a rejected retry must not clear the assignee")
+}
+```
+
+Note the two `q.IncrementTaskRetryCount(ctx, <id>)` calls: that is **today's** signature. Task 4 changes only those two call expressions. **Every assertion in this function must survive Task 4 byte-identical**; if one needs adjusting, that is a finding.
+
+- [ ] **Step 3: Run the two new tests and capture the RED output verbatim**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry" -v -timeout 600s
+go test -tags integration -p 1 ./internal/store/... -run "TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded" -v -timeout 300s
+```
+
+Expected: **both FAIL**, on the exposure assertions. The handler output must contain:
+```
+    Error:      Not equal: expected: "done" actual: "pending"
+    Messages:   a completed task must not be resurrected by a second terminal
+```
+```
+    Messages:   a completed task has no generation to fail - no retry may be burned
+```
+```
+    Messages:   the dependent must stay dispatchable - resurrecting A drops B out of GetEligibleTasks
+```
+and the store output must contain both `a stale retry must not resurrect a cancelled task` and `a completed task has no generation to fail and must not be retried` (each an `assert.ErrorIs` reporting `<nil>` against `pgx.ErrNoRows`), followed by `the cancel must win the race, not be clobbered by the retry` and `a finished task must not be resurrected`, and the `retry_count` assertions showing `1` where `0` was expected.
+
+**Copy the full output into the task report / PR description verbatim.** This is acceptance criteria 1 and 2 and it cannot be reproduced after Task 4.
+
+- [ ] **Step 4: Do NOT commit**
+
+Proceed to Task 4.
+
+---
+
+## Task 4: Give IncrementTaskRetryCount all three predicates
+
+The signature change. SQL, regenerate, both call sites, the error-branch split, and the three now-false comment claims in `handler.go`.
+
+**Files:**
+- Modify: `internal/store/query/tasks.sql:53-58`
+- Regenerate: `internal/store/tasks.sql.go`
+- Modify: `internal/worker/handler.go:441-455`, `:466-468`, `:514-523`
+- Modify: `internal/store/store_test.go:742` and the two calls added in Task 3
+- Modify: `internal/store/query/tasks.sql:40-43` (the now-false paragraph in `UpdateTaskStatus`'s comment)
+
+- [ ] **Step 1: Replace the statement and give it a comment block**
+
+In `internal/store/query/tasks.sql`, replace lines 53-58 in their entirety with:
+
+```sql
+-- name: IncrementTaskRetryCount :one
+-- Burns one retry on a task whose CURRENT generation just failed, and returns it
+-- to the queue. Three predicates, each answering a different question; none is
+-- redundant with the others and none may be deleted:
+--   assignment_epoch - CURRENCY. The caller decided to retry from a row it read
+--     earlier; this proves that generation is still the current one. It is what
+--     makes the retry atomic with respect to that read, so a cancel or a requeue
+--     landing in the caller's TOCTOU window wins instead of being clobbered, and
+--     what makes the retry exactly-once per generation when two callers race:
+--     under READ COMMITTED the second UPDATE re-evaluates its WHERE against the
+--     already-updated row, sees epoch N+1 and a NULL worker_id, and affects zero
+--     rows.
+--   worker_id      - IDENTITY. The task must still be assigned to the caller's
+--     worker. Must stay a plain `=`: tasks.worker_id is NULLABLE, so `=` makes a
+--     never-claimed task (worker_id NULL, epoch 0 - a free guess) reject every
+--     retry, and makes a caller that lost its identity (a zero-value pgtype.UUID
+--     binds SQL NULL) fail closed. `IS NOT DISTINCT FROM` would re-open exactly
+--     that. Do not "fix the NULL bug" here. Same rule as UpdateTaskStatus and
+--     AppendTaskLog.
+--   status         - TERMINALITY. A finished task has no generation to fail.
+--     Without this, a task's own assignee can send DONE at epoch N and then
+--     FAILED at epoch N - both gates legitimately pass, because a terminal
+--     transition deliberately does NOT bump the epoch and does not clear
+--     worker_id - and resurrect a completed task while its dependents are
+--     already running. The terminal set is the one RecomputeJobStatus uses
+--     (internal/store/query/jobs.sql:98); keep the two in lockstep.
+-- The fix for that last case is this predicate and NOT an epoch bump on terminal
+-- transitions: the assignment must survive completion so a trailing log chunk
+-- from the agent that just finished still passes AppendTaskLog's fence. See
+-- TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist.
+-- pgx.ErrNoRows means "one of the three failed": drop, do not recompute the job
+-- status, do not wake the dispatcher.
+-- This statement is for the AGENT-DRIVEN retry only, and its preconditions are
+-- the exact opposite of an operator re-run. POST /v1/jobs/{id}/retry must NOT
+-- call it: that endpoint reopens tasks that ARE terminal and has no worker
+-- identity to supply, so both the status and the worker predicate would reject
+-- every call. It needs its own statement with an explicit
+-- `status IN ('failed','timed_out')` allow-list and its own epoch bump - the
+-- operator analogue of RequeueTaskByID, not of this. See
+-- docs/backlog/feature-2026-06-26-web-enabler-backend-endpoints.md.
+UPDATE tasks
+SET retry_count = retry_count + 1,
+    status = 'pending',
+    worker_id = NULL,
+    started_at = NULL,
+    finished_at = NULL,
+    assignment_epoch = assignment_epoch + 1
+WHERE id = sqlc.arg(id)
+  AND assignment_epoch = sqlc.arg(assignment_epoch)
+  AND worker_id = sqlc.arg(worker_id)
+  AND status NOT IN ('done', 'failed', 'timed_out')
+RETURNING *;
+```
+
+- [ ] **Step 2: Correct the now-false paragraph in UpdateTaskStatus's comment**
+
+In the same file, lines 40-43 currently read:
+
+```
+-- This predicate is NOT sufficient on its own: handleTaskStatus's retry branch
+-- calls IncrementTaskRetryCount (bare `WHERE id = $1`) and returns before ever
+-- reaching this statement, so the identity check also lives in Go, ahead of
+-- every side effect. Do not delete that one as redundant with this one.
+```
+
+That is no longer true. Replace those four lines with:
+
+```
+-- handleTaskStatus's retry branch calls IncrementTaskRetryCount and returns
+-- before ever reaching this statement, so this predicate never sees that path.
+-- That statement now carries the same three predicates, so the two together
+-- cover every production writer. The Go identity gate in handleTaskStatus stays
+-- as well: after the retry statement was fenced it is no longer the correctness
+-- control, but it still answers a different question ("may this sender drive
+-- this task's status machine at all") one round trip and one log line earlier.
+-- Do not delete either as redundant with the other.
+```
+
+- [ ] **Step 3: Regenerate and clean up the line-ending churn**
+
+```
+sqlc generate
+git status --short
+git diff --ignore-all-space
+```
+
+Expected real content change in exactly one file, `internal/store/tasks.sql.go`:
+- the `incrementTaskRetryCount` const gains the three predicates and `$1/$2/$3`,
+- a new `IncrementTaskRetryCountParams` struct appears with fields `ID pgtype.UUID`, `AssignmentEpoch int32`, `WorkerID pgtype.UUID` (order follows parameter order; it does not matter, every call site uses field names),
+- the method becomes `func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTaskRetryCountParams) (Task, error)` and the `QueryRow` call passes `arg.ID, arg.AssignmentEpoch, arg.WorkerID`,
+- the `updateTaskStatus` doc comment picks up the Step 2 text.
+
+`internal/store/models.go` must show **no** content change. Revert every generated file whose `git diff --ignore-all-space` is empty.
+
+At this point `go build ./...` fails at `handler.go:516`. That is expected; fix it in the next step.
+
+- [ ] **Step 4: Pass the params struct and split the retry error branch**
+
+In `internal/worker/handler.go`, lines 514-523 currently read:
+
+```go
+	// Retry if applicable. Epoch guard above ensures we don't double-retry.
+	if terminal && task.RetryCount < task.Retries {
+		if _, err := h.q.IncrementTaskRetryCount(ctx, taskID); err != nil {
+			log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+		} else {
+			updateJobStatusFromTasks(ctx, h.q, task.JobID)
+			_ = h.q.NotifyTaskSubmitted(ctx)
+		}
+		return
+	}
+```
+
+Replace with:
+
+```go
+	// Retry if applicable. The branch decision is made from the T0 row read by
+	// GetTask above, so the statement re-checks that row: AssignmentEpoch is the
+	// generation the currency gate already proved current (int32 is safe for the
+	// same reason it is at the UpdateTaskStatus call below - the gate compared it
+	// against an int32 column), and WorkerID is this connection's own identity,
+	// not the task.WorkerID we just read, for the reason written at the
+	// UpdateTaskStatus call site. If a cancel or a requeue landed in between, or
+	// the task is already finished, the statement affects zero rows and the
+	// retry is dropped.
+	if terminal && task.RetryCount < task.Retries {
+		if _, err := h.q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+			ID:              taskID,
+			AssignmentEpoch: int32(upd.Epoch),
+			WorkerID:        workerID,
+		}); err != nil {
+			// pgx.ErrNoRows is the fence rejecting, not a failure: the task
+			// finished, was cancelled, or the generation ended between the
+			// GetTask above and here. Drop silently, exactly like the two gates.
+			// In the genuine case the cancel or the requeue won, which is the
+			// correct outcome, so there is nothing to diagnose. Any other error
+			// is real.
+			if !errors.Is(err, pgx.ErrNoRows) {
+				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+			}
+		} else {
+			// Both of these are already correctly gated on the write having
+			// happened, and must stay that way: a rejected retry must not
+			// recompute the job status (which would drag a cancelled job back to
+			// running - RecomputeJobStatus has no notion of `cancelled`) and must
+			// not wake the dispatcher.
+			updateJobStatusFromTasks(ctx, h.q, task.JobID)
+			_ = h.q.NotifyTaskSubmitted(ctx)
+		}
+		return
+	}
+```
+
+The `return` stays unconditional: falling through would buy nothing but a round trip, since `UpdateTaskStatus` would reject on the same status predicate (terminal row) or the same epoch predicate (cancelled or requeued row).
+
+- [ ] **Step 5: Rewrite the two stale rationale paragraphs in the Go gate**
+
+Still in `internal/worker/handler.go`, lines 441-455 currently read:
+
+```go
+	// This lives in Go, and not only in UpdateTaskStatus's WHERE clause, because
+	// the retry branch below calls IncrementTaskRetryCount - a bare
+	// `WHERE id = $1`, no epoch fence, no worker fence - and returns before the
+	// fenced statement is ever reached. An SQL-only fence would leave a forged
+	// FAILED on a task with retries free to burn a retry, NULL the worker_id and
+	// bump the epoch, evicting the agent legitimately running it. The gate must
+	// therefore stay AHEAD of every side effect in this function.
+	//
+	// Note what that placement does and does not buy. It makes the retry branch
+	// UNFORGEABLE - only the assignee can reach it - but not ATOMIC: the GetTask
+	// above and IncrementTaskRetryCount below are separate statements with no
+	// re-check in between, so a concurrent writer can still move the row after
+	// the gate passed. That residual race is
+	// docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md, which stays
+	// open; do not read this gate as having closed it.
+```
+
+Both paragraphs are now false: `IncrementTaskRetryCount` carries all three predicates, so an SQL-only fence would NOT leave the retry burnable, and the branch is now atomic with respect to the T0 read. Replace both paragraphs with:
+
+```go
+	// This gate is NOT the correctness control any more, and the honest form of
+	// that is uncomfortable, so it is written down rather than implied. Delete
+	// it and the observable state is unchanged: a forged terminal from a
+	// non-assignee reaches IncrementTaskRetryCount, which rejects on its own
+	// worker_id predicate, or UpdateTaskStatus, which rejects on its own. Both
+	// statements also fence on assignment_epoch and on the task not already
+	// being terminal, so the retry branch is atomic with respect to the GetTask
+	// above and cannot resurrect a finished, cancelled or requeued task.
+	//
+	// What the gate still buys is real, and it is why it stays. First, cost:
+	// zero database round trips and zero log lines per forged message. Without
+	// it every forged message costs one write attempt plus one log.Printf on
+	// this recv goroutine keyed on upd.TaskId, which the sender fully controls -
+	// the shape of bug-2026-08-12-tasklog-err-limiter-attacker-keyed, contending
+	// on log's global mutex ahead of a legitimate worker's ingest. Second, it
+	// answers a different question: this gate asks "may this sender drive this
+	// task's status machine at all", the predicates ask "is the row still in the
+	// state the branch decision was made from". Merging them loses the first
+	// question, and the first question is the one this function's branch
+	// structure actually asks. Third, defense in depth against a future edit to
+	// either half. Keep BOTH; do not delete this as redundant with the SQL, and
+	// do not delete the SQL predicates as redundant with this.
+```
+
+Then lines 466-468 currently read:
+
+```go
+	// against a future caller, and it is pinned by
+	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask,
+	// which goes red under both mutations. Same rule the SQL states as "a plain =,
+```
+
+That claim is also now false - with `IncrementTaskRetryCount` fenced on `worker_id`, that test stays green even with this gate deleted outright. Replace those three lines with:
+
+```go
+	// against a future caller. Note honestly that NO test in the tree
+	// discriminates it any more:
+	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
+	// was written as its permanent guard, but once IncrementTaskRetryCount gained
+	// its own worker_id predicate that test stays green with this whole gate
+	// deleted. Its discriminating power moved to the SQL layer, and what remains
+	// here is non-functional (round trips and log lines), which is why it is
+	// recorded as a Known Limitation rather than pinned by a new test. Same rule
+	// the SQL states as "a plain =,
+```
+
+Leave the rest of that paragraph (`// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.`) and the silent-return paragraph untouched.
+
+- [ ] **Step 6: Repair the one existing store call site**
+
+In `internal/store/store_test.go`, line 742 currently reads:
+
+```go
+	retried, err := q.IncrementTaskRetryCount(ctx, task.ID)
+```
+
+Replace with:
+
+```go
+	retried, err := q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: claimed.WorkerID,
+	})
+```
+
+All three predicates hold here (the task is `dispatched`, claimed by `w` at epoch 1), so **every assertion in `TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry` must stay byte-identical**. If any needs adjusting, STOP and report it as a finding. This test is also the positive control for the statement until Task 5 adds case 1.
+
+- [ ] **Step 7: Repair the two call sites added in Task 3**
+
+In `TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded`, change **only the two call expressions**. Case 2:
+
+```go
+	_, err = q.IncrementTaskRetryCount(ctx, cancelled.ID)
+```
+becomes
+```go
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: cancelled.ID, AssignmentEpoch: cancelled.AssignmentEpoch, WorkerID: cancelled.WorkerID,
+	})
+```
+
+Case 3:
+
+```go
+	_, err = q.IncrementTaskRetryCount(ctx, completed.ID)
+```
+becomes
+```go
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: completed.ID, AssignmentEpoch: completed.AssignmentEpoch, WorkerID: completed.WorkerID,
+	})
+```
+
+`cancelled` and `completed` are the rows returned by `ClaimTaskForWorker` inside `newClaimedTask`, so `.AssignmentEpoch` is 1 and `.WorkerID` is w1 - exactly the pair `handleTaskStatus` holds at T0. **Do not touch a single assertion.**
+
+- [ ] **Step 8: Compile both tag sets**
+
+```
+go build ./...
+go vet -tags integration ./...
+```
+Expected: both succeed. If `go vet -tags integration` reports an `IncrementTaskRetryCount` arity error, a call site was missed:
+```
+git grep -n "IncrementTaskRetryCount(ctx" -- "*.go"
+```
+Every hit must pass a `store.IncrementTaskRetryCountParams` (or `IncrementTaskRetryCountParams` inside package `store`). There are exactly three: `handler.go:516`, `store_test.go:742`, and the two in the new store test.
+
+- [ ] **Step 9: Run Task 3's tests - they must now be GREEN**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry" -v -timeout 600s
+go test -tags integration -p 1 ./internal/store/... -run "TestIncrementTaskRetryCount" -v -timeout 300s
+```
+Expected: PASS, including `TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry` unedited apart from Step 6, and including the B1 positive control.
+
+- [ ] **Step 10: Run the three affected packages in full**
+
+```
+go test -tags integration -p 1 ./internal/store/... -timeout 600s
+go test -tags integration -p 1 ./internal/scheduler/... -timeout 600s
+go test -tags integration -p 1 ./internal/worker/... -timeout 900s
+```
+Expected: PASS with no assertion edited anywhere. `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask` will still pass - see Task 7, that is expected and is precisely the problem Task 7 records.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add internal/store/query/tasks.sql internal/store/tasks.sql.go internal/worker/handler.go internal/store/store_test.go internal/worker/handler_taskstatus_integration_test.go
+git commit -m "fix(store): fence IncrementTaskRetryCount on epoch, assignee and terminality"
+```
+
+---
+
+## Task 5: The five store cases that need the params struct
+
+Cases 1, 4, 5, 6 and 7 of `TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded`. These could not be written earlier - their arguments did not exist - so they are **not** RED evidence. They are the permanent discriminating inputs that Task 8's mutation matrix observes, and they must be committed before Task 8 runs, or the mutation proof leaves nothing behind (the previous iteration's Problem 1).
+
+**Files:**
+- Modify: `internal/store/store_test.go` (`TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded`)
+
+- [ ] **Step 1: Insert cases 1 and 5 before case 2**
+
+Insert immediately after the `newClaimedTask` helper closure and **before** the `// Case 2: ROUTE A` comment:
+
+```go
+	// Case 1: POSITIVE CONTROL, first, so a suite where the statement stopped
+	// working at all cannot look like a suite of successful rejections. The
+	// legitimate retry: the assignee's current generation really did fail.
+	liveJob := newJob("j-live")
+	live := newClaimedTask(liveJob.ID, "t-live")
+	retried, err := q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: live.ID, AssignmentEpoch: live.AssignmentEpoch, WorkerID: live.WorkerID,
+	})
+	require.NoError(t, err, "the assignee's own retry at the current epoch must succeed")
+	assert.Equal(t, "pending", retried.Status, "the retry returns the task to the queue")
+	assert.Equal(t, int32(1), retried.RetryCount, "the retry burns exactly one retry")
+	assert.Equal(t, int32(2), retried.AssignmentEpoch, "the retry ends the generation")
+	assert.False(t, retried.WorkerID.Valid, "the retry releases the assignee")
+
+	// Case 5: EXACTLY-ONCE PER GENERATION. The same T0 arguments a second time
+	// affect zero rows. This is the deterministic proxy for the concurrent
+	// double-retry property - two callers reading at epoch 1 serialize on the row
+	// lock and the second re-evaluates its WHERE against the already-updated row
+	// - with no goroutines and no sleeps.
+	//
+	// Read this case honestly: it does NOT isolate one predicate. The first retry
+	// both bumped the epoch and NULLed worker_id, so epoch and worker each reject
+	// it independently, and it goes red only if BOTH are removed (matrix row M6).
+	// That is the same defense-in-depth shape as the two .Valid checks in
+	// handleTaskStatus's Go gate. Do not read it as an epoch test.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: live.ID, AssignmentEpoch: live.AssignmentEpoch, WorkerID: live.WorkerID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "one generation must not be able to burn two retries")
+	once, err := q.GetTask(ctx, live.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), once.RetryCount, "the second call must not have incremented retry_count")
+	assert.Equal(t, int32(2), once.AssignmentEpoch, "the second call must not have bumped the epoch again")
+```
+
+- [ ] **Step 2: Append cases 4, 6 and 7 at the end of the function**
+
+Insert immediately before the closing brace of `TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded`:
+
+```go
+
+	// Case 4: STALE EPOCH, same worker, non-terminal row - the requeue variant of
+	// route A, which the backlog item does not name and which the status
+	// predicate does NOT close. Claim to w1 (epoch 1), requeue (epoch 2,
+	// pending), claim to w1 AGAIN (epoch 3, dispatched). A caller holding the T0
+	// pair (epoch 1, w1) is rejected by the EPOCH predicate alone: the status is
+	// not terminal and the worker matches. Re-claiming to the SAME worker is what
+	// makes this discriminating - re-claiming to a second worker would let the
+	// worker predicate reject it too and the case would stop isolating anything.
+	// Without this predicate the stale retry knocks a re-dispatched task back to
+	// pending and evicts the agent that is genuinely running it. Matrix row M2.
+	staleJob := newJob("j-stale-epoch")
+	stale := newClaimedTask(staleJob.ID, "t-stale-epoch")
+	require.NoError(t, q.RequeueTask(ctx, stale.ID))
+	reclaimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: stale.ID, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(3), reclaimed.AssignmentEpoch, "fixture: claim, requeue, claim moves the epoch 1 -> 2 -> 3")
+	require.Equal(t, "dispatched", reclaimed.Status, "fixture: the row must be non-terminal, or the status predicate would reject too")
+
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: stale.ID, AssignmentEpoch: stale.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a retry from an ended generation must not touch the live one")
+	afterStale, err := q.GetTask(ctx, stale.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", afterStale.Status, "the live agent must keep the task it was just dispatched")
+	assert.Equal(t, int32(3), afterStale.AssignmentEpoch, "a stale retry must not bump the current generation")
+	assert.Equal(t, w1.ID, afterStale.WorkerID, "a stale retry must not evict the current assignee")
+	assert.Equal(t, int32(0), afterStale.RetryCount, "a stale retry must not burn a retry")
+
+	// Two separate never-claimed tasks so cases 6 and 7 stay independent: each
+	// sits at assignment_epoch 0 with worker_id NULL, the state both prior bugs
+	// targeted because epoch 0 is a free guess.
+	unclaimedJob := newJob("j-unclaimed")
+	unclaimedA, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: unclaimedJob.ID, Name: "t-unclaimed-a", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	unclaimedB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: unclaimedJob.ID, Name: "t-unclaimed-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), unclaimedA.AssignmentEpoch, "fixture: a never-claimed task sits at epoch 0")
+	require.False(t, unclaimedA.WorkerID.Valid, "fixture: a never-claimed task has a NULL worker_id")
+
+	// Case 6: NEVER-CLAIMED task, matching epoch 0, real worker. Rejected by the
+	// WORKER predicate alone - `pending` is not terminal and epoch 0 matches, so
+	// nothing else can reject it. Matrix row M3.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: unclaimedA.ID, AssignmentEpoch: 0, WorkerID: w1.ID,
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject a retry from every worker")
+	afterCase6, err := q.GetTask(ctx, unclaimedA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase6.Status, "a rejected retry must not move the row")
+	assert.Equal(t, int32(0), afterCase6.RetryCount, "a rejected retry must not burn a retry")
+	assert.Equal(t, int32(0), afterCase6.AssignmentEpoch, "a rejected retry must not bump the epoch")
+
+	// Case 7: NEVER-CLAIMED task, matching epoch 0, ZERO-VALUE worker id - NULL
+	// on both sides. This is THE regression test for the comparison staying a
+	// plain `=`: under `IS NOT DISTINCT FROM` two NULLs compare equal, the fence
+	// matches and the hole is wide open again. Case 6 does not catch that
+	// rewrite, because there the argument is non-NULL. Matrix row M4, where this
+	// case must be the ONLY one that goes red.
+	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: unclaimedB.ID, AssignmentEpoch: 0, WorkerID: pgtype.UUID{},
+	})
+	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
+	afterCase7, err := q.GetTask(ctx, unclaimedB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", afterCase7.Status, "a caller that lost its identity must fail closed")
+	assert.Equal(t, int32(0), afterCase7.RetryCount, "a caller that lost its identity must not burn a retry")
+```
+
+- [ ] **Step 3: Run the test**
+
+```
+go test -tags integration -p 1 ./internal/store/... -run "TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded" -v -timeout 300s
+```
+Expected: PASS, all seven cases.
+
+- [ ] **Step 4: Run the whole store package**
+
+```
+go test -tags integration -p 1 ./internal/store/... -timeout 600s
+```
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/store/store_test.go
+git commit -m "test(store): pin all three IncrementTaskRetryCount predicates case by case"
+```
+
+---
+
+## Task 6: Pin route B over the real Connect message loop
+
+The shim-driven tests leave `Connect`'s own call site unpinned. This change threads no *new* parameter down from `Connect`, so the gap is narrower than in the two predecessors - be honest about that in the report. What this test does pin is the **scenario**: two terminal messages in sequence on one real stream, which is exactly how a crash-looping agent produces route B, proven unreachable through the real recv loop rather than through the exported shim.
+
+**Files:**
+- Modify (append one function): `internal/worker/handler_taskstatus_integration_test.go`
+
+- [ ] **Step 1: Append the Connect test**
+
+```go
+// Route B over the REAL message loop rather than the exported shim. Three
+// fixture details are load-bearing:
+//   - Auto-enroll upserts by hostname and returns the EXISTING row's id, so
+//     seeding the task against seedTaskAndTwoWorkers' w1 hostname (<prefix>-w1)
+//     makes this connection resolve to the very worker the task is assigned to.
+//     The assertion on the register response's worker_id is what proves that
+//     happened; drop it and the test proves nothing.
+//   - Both tasks must be reported in RunningTasks. finishRegister runs
+//     reconcileRunningTasks, which requeues any task the coordinator has
+//     assigned to this worker but the agent did not report, and a requeue bumps
+//     assignment_epoch - which would make the messages below stale for a reason
+//     that has nothing to do with what is under test.
+//   - The barrier task exists because CloseSend does not drain queued messages
+//     (mockConnectStream.Recv selects on the close channel alongside the queue),
+//     so the test cannot wait for the stream to end. The recv loop handles
+//     messages strictly in order, so once the barrier chunk is stored the FAILED
+//     ahead of it has already been processed. The barrier is on a SEPARATE task
+//     so it stays observable whether or not the FAILED was rejected.
+func TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+	q := fx.Q
+
+	const prefix = "status9"
+	const hostname = prefix + "-w1"
+	jobID, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, prefix, 1)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: taskID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+
+	barrier, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-barrier", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	claimedBarrier, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: barrier.ID, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	barrierStr := fx.Handler.UUIDStringForTest(barrier.ID)
+
+	stream := newMockConnectStream(t)
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: hostname,
+				CpuCores: 1, RamGb: 1, Os: "linux",
+				RunningTasks: []*relayv1.RunningTask{
+					{TaskId: taskIDStr, Epoch: int64(claimed.AssignmentEpoch)},
+					{TaskId: barrierStr, Epoch: int64(claimedBarrier.AssignmentEpoch)},
+				},
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: taskIDStr,
+				Status: relayv1.TaskStatus_TASK_STATUS_DONE,
+				Epoch:  int64(claimed.AssignmentEpoch),
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskStatus{
+			TaskStatus: &relayv1.TaskStatusUpdate{
+				TaskId: taskIDStr,
+				Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+				Epoch:  int64(claimed.AssignmentEpoch),
+			},
+		},
+	})
+	stream.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId: barrierStr, Content: []byte("barrier\n"),
+				Epoch: int64(claimedBarrier.AssignmentEpoch),
+			},
+		},
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- fx.Handler.Connect(stream) }()
+
+	resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp)
+	require.Equal(t, fx.Handler.UUIDStringForTest(w1), resp.WorkerId,
+		"the connection must resolve to the task's assignee, or this test proves nothing")
+
+	require.Eventually(t, func() bool {
+		rows, err := q.GetTaskLogs(ctx, barrier.ID)
+		return err == nil && len(rows) == 1
+	}, 10*time.Second, 20*time.Millisecond,
+		"the barrier chunk must be stored, which proves the FAILED ahead of it was processed")
+
+	fresh, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", fresh.Status, "a second terminal over the real loop must not resurrect the task")
+	assert.Equal(t, int32(0), fresh.RetryCount, "a second terminal over the real loop must not burn a retry")
+	assert.Equal(t, int32(1), fresh.AssignmentEpoch, "a rejected retry must not end the assignment")
+	assert.Equal(t, w1, fresh.WorkerID, "a terminal transition must not release the assignee")
+
+	stream.CloseSend()
+	<-done
+}
+```
+
+- [ ] **Step 2: Run it**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask" -v -timeout 600s
+```
+Expected: PASS.
+
+- [ ] **Step 3: Run the whole worker package**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -timeout 900s
+```
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/worker/handler_taskstatus_integration_test.go
+git commit -m "test(worker): drive two terminal messages over the real Connect loop"
+```
+
+---
+
+## Task 7: Record that an existing test stopped discriminating the Go gate
+
+**This is the same failure mode as the previous iteration's Problem 3, recurring one iteration later on the very test that was written to fix its Problem 1.** `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask` was added by PR #120 as the permanent guard for its mutation proof. It sends `FAILED` at epoch 0 with a zero-value worker id to a never-claimed task carrying `Retries: 1`, and it was discriminating **only because the retry branch escaped the SQL fence**. After Task 4, `IncrementTaskRetryCount` rejects that call on its own worker predicate, so the test stays green even with the Go gate deleted entirely.
+
+Required response, all three parts. Do not delete the test, do not "reinforce" it with a log-capture assertion (that would pin a non-functional property with a globally-scoped mechanism), and do not leave the situation unrecorded.
+
+**Files:**
+- Modify: `internal/worker/handler_taskstatus_integration_test.go:313-336` (the comment block only)
+- Modify: `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md` (append a Known Limitations section)
+
+- [ ] **Step 1: Amend the test's comment block**
+
+In `internal/worker/handler_taskstatus_integration_test.go`, the comment block at lines 313-336 opens with:
+
+```go
+// The ONE construction that discriminates the Go gate's NULL rejection, and the
+// reason both .Valid checks are in it rather than a bare struct comparison.
+```
+
+Replace that opening sentence with:
+
+```go
+// NOTE (2026-08-12, retry-resurrect status guard): this test no longer
+// discriminates the GO gate. It was written as the permanent guard for that
+// gate's NULL rejection, and it was discriminating only because the retry branch
+// escaped the SQL fence. IncrementTaskRetryCount now carries its own
+// `worker_id = $` predicate, so a zero-value caller is rejected in SQL and this
+// test stays green even with the Go gate deleted outright. It is kept because it
+// is still a valid guard - at the SQL layer, on the `=`-not-`IS NOT DISTINCT
+// FROM` rule, reached through the real handler rather than through a store-level
+// call - and because the construction below is still the only one in this
+// package that is NULL on both sides. Its discriminating power moved; the test
+// did not become worthless, it changed what it proves. That no test now
+// discriminates the Go gate is recorded as a Known Limitation in
+// docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md; the gate's
+// remaining value is non-functional (zero round trips, zero attacker-keyed log
+// lines), which is why it is written down rather than pinned.
+//
+// What the construction below still buys, unchanged:
+```
+
+Then, further down the same block, the paragraph currently reading:
+
+```go
+// So this test goes RED under both mutations a reviewer might try: dropping the
+// two .Valid checks, and deleting the Go gate entirely. epoch 0 on a
+// never-claimed task also means the currency gate matches, leaving identity as
+// the only thing that can reject.
+```
+
+becomes:
+
+```go
+// Epoch 0 on a never-claimed task means the currency gate matches, leaving
+// identity as the only thing that can reject - in Go, in SQL, or both. Before
+// the SQL fence landed this test went RED under either mutation a reviewer might
+// try (dropping the two .Valid checks, or deleting the Go gate); now it goes red
+// under neither, and it goes red instead if IncrementTaskRetryCount's worker
+// predicate is dropped or rewritten as IS NOT DISTINCT FROM. That is the same
+// property, guarded one layer down.
+```
+
+Also fix the two internal cross-references in the middle of the block that still describe the old world: the sentence beginning `//     independent of the SQL fence: IncrementTaskRetryCount has a bare` through `//     `WHERE id = $1` and the branch returns before UpdateTaskStatus is ever` must be replaced with:
+
+```go
+//     routed through the RETRY branch, so the task carries Retries: 1 and the
+//     status is FAILED. That branch returns before UpdateTaskStatus is ever
+```
+
+**Change no assertion and no line of code in this test.** Only the comment.
+
+- [ ] **Step 2: Record the Known Limitation in the spec**
+
+Append to the end of `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`:
+
+```markdown
+
+## 12. Known Limitations (recorded during implementation, 2026-08-12)
+
+1. **No test in the tree discriminates the Go identity gate in `handleTaskStatus`
+   (`handler.go:436-476`).** After this change, deleting that gate outright leaves every
+   test green: a forged terminal from a non-assignee is rejected by
+   `IncrementTaskRetryCount`'s or `UpdateTaskStatus`'s own `worker_id` predicate, and the
+   observable state is identical. `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask`
+   was PR #120's permanent guard for it and stopped discriminating it here (spec 8.5); its
+   comment now says so. The gate's remaining value is non-functional - zero database round
+   trips and zero attacker-keyed `log.Printf` calls on the recv goroutine per forged message,
+   plus a different question ("may this sender drive this task's status machine at all") -
+   and a log-capture assertion would pin that with a globally-scoped mechanism for a property
+   that is a cost control, not a behavior. This is written down instead, because otherwise the
+   next reviewer deletes the gate and sees a green suite. The rationale comment at the gate
+   says the same thing.
+2. **The fence binds a worker, not a connection.** Two concurrent streams registered for the
+   same worker row both satisfy every predicate. Deliberate, unchanged from PR #120, and what
+   keeps reconnect-within-the-grace-window working.
+3. **An attacker holding worker W's own token can still drive W's own tasks through their
+   legal state machine** (`RUNNING`, then one terminal). No server-side check on this path can
+   do better, as the tasklog spec's section 5 established.
+```
+
+- [ ] **Step 3: Verify the test still passes and nothing else moved**
+
+```
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask" -v -timeout 600s
+```
+Expected: PASS (it passed before this task too; the change is comment-only).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add internal/worker/handler_taskstatus_integration_test.go docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md
+git commit -m "docs(worker): record that the zero-value-worker test no longer guards the Go gate"
+```
+
+---
+
+## Task 8: Mutation matrix - the only evidence the epoch and worker predicates have
+
+Six mutations. Apply, regenerate, run the named tests, confirm the predicted red set **exactly**, revert. **Every discriminating input is already committed** (Tasks 1, 3, 5), so no test edit is required to observe any row - that is the requirement from the previous iteration's Problem 1 and it must stay true.
+
+**CRITICAL - how to mutate.** Do **not** delete a predicate line that carries a `sqlc.arg`. Deleting it changes the generated params struct, breaks every call site, and turns the run into a compile error, which proves nothing. Neuter the predicate in place instead, keeping the argument referenced:
+
+| Instead of deleting | Write |
+| --- | --- |
+| `AND assignment_epoch = sqlc.arg(assignment_epoch)` | `AND (assignment_epoch = sqlc.arg(assignment_epoch) OR TRUE)` |
+| `AND worker_id = sqlc.arg(worker_id)` | `AND (worker_id = sqlc.arg(worker_id) OR TRUE)` |
+| `AND status NOT IN ('done', 'failed', 'timed_out')` | `AND (status NOT IN ('done', 'failed', 'timed_out') OR TRUE)` |
+
+`OR TRUE` makes the predicate unconditionally satisfied - behaviorally identical to deletion - while leaving the parameter in the statement so the generated signature is unchanged and the tree still compiles.
+
+**Files:** none permanently. `internal/store/query/tasks.sql` and `internal/store/tasks.sql.go` are edited and reverted each time.
+
+- [ ] **Step 1: Confirm the tree is clean**
+
+```
+git status --short
+```
+Expected: empty. If not, commit or stash first - the revert in each row is a `git checkout` and would discard uncommitted work.
+
+- [ ] **Step 2: Run each row**
+
+For each row: apply the mutation to `internal/store/query/tasks.sql`, run `sqlc generate` (no line-ending cleanup needed, it is all being reverted), run the commands, record the result, then
+```
+git checkout -- internal/store/query/tasks.sql internal/store/tasks.sql.go
+```
+and confirm `git status --short` is empty again before the next row.
+
+| # | Mutation | Must go RED | Must stay GREEN |
+| --- | --- | --- | --- |
+| M1 | `IncrementTaskRetryCount`: neuter `status NOT IN (...)` | store case 3, handler B1 (`TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry`) | store cases 1, 2, 4, 5, 6, 7; handler B2 |
+| M2 | `IncrementTaskRetryCount`: neuter `assignment_epoch = $` | store case 4 | store cases 1, 2, 3, 5, 6, 7; both handler tests |
+| M3 | `IncrementTaskRetryCount`: neuter `worker_id = $` | store cases 6 and 7 | store cases 1, 2, 3, 4, 5; both handler tests |
+| M4 | `IncrementTaskRetryCount`: rewrite the worker predicate as `AND worker_id IS NOT DISTINCT FROM sqlc.arg(worker_id)` | store case 7 **only** | store cases 1-6; both handler tests |
+| M5 | `UpdateTaskStatus`: neuter `status NOT IN (...)` | `TestUpdateTaskStatus_AssigneeGuarded` cases 5 and 6, handler B2 (`TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade`) | `TestUpdateTaskStatus_AssigneeGuarded` cases 1-4, `TestUpdateTaskStatus_EpochGuarded`, `TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist`, both `internal/scheduler` `failClaimedTask` tests, handler B1 |
+| M6 | `IncrementTaskRetryCount`: neuter **both** the epoch and the worker predicate | store case 5 (in addition to 4, 6 and 7) | - |
+
+Commands for every row (M5 additionally needs the scheduler package):
+
+```
+go test -tags integration -p 1 ./internal/store/... -run "TestIncrementTaskRetryCount|TestUpdateTaskStatus" -v -timeout 600s
+go test -tags integration -p 1 ./internal/worker/... -run "TestHandleTaskStatus" -v -timeout 900s
+```
+and for M5 also:
+```
+go test -tags integration -p 1 ./internal/scheduler/... -timeout 600s
+```
+
+Note case 2 stays green under every single mutation: the post-cancel row fails all three predicates at once, so no one-predicate mutation can revive it. That is expected, and it is why case 3 and not case 2 is the discriminating case for M1.
+
+- [ ] **Step 3: Two rows carry most of the weight - do not relax them**
+
+- **M4's "only".** If any case other than 7 also goes red, the suite is not isolating the NULL semantics; the cases need re-arranging, not the assertion relaxing. STOP and report.
+- **M6.** Case 5 is green under M2 and under M3 individually and red only under both. Do not "simplify" the matrix by folding M6 into M2, and do not re-attribute case 5 to a single predicate.
+
+If any row produces a red set that differs from the table - anything extra, anything missing - **STOP and report it as a finding.** A mutation that reddens nothing means the predicate has no evidence; a mutation that reddens more than predicted means the cases are not isolating.
+
+- [ ] **Step 4: Restore and re-run clean**
+
+```
+git checkout -- internal/store/query/tasks.sql internal/store/tasks.sql.go
+git status --short
+go test -tags integration -p 1 ./internal/store/... -timeout 600s
+go test -tags integration -p 1 ./internal/worker/... -timeout 900s
+```
+Expected: `git status --short` empty, both packages PASS. Nothing to commit in this task; record the full matrix result in the task report.
+
+---
+
+## Task 9: Amend the Epoch fence invariant in CLAUDE.md
+
+The bullet currently names `IncrementTaskRetryCount` as the live example of a writer that satisfies the invariant *vacuously* via an unconditional bump, and cites the `06-26` item as open. Both stop being true here. Three precise substring replacements inside `CLAUDE.md:70` - it is one very long line, so edit by substring, not by rewriting the line.
+
+**Files:**
+- Modify: `CLAUDE.md:70`
+
+- [ ] **Step 1: Replace the vacuous-bump counter-example**
+
+Find:
+```
+the bump must be predicated on the generation actually being ended, not unconditional, or the rule is satisfied vacuously, which is exactly how `IncrementTaskRetryCount` passes it while remaining a known-open bug (`docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md`)
+```
+Replace with:
+```
+the bump must be predicated on the generation actually being ended, not unconditional, or the rule is satisfied vacuously; `IncrementTaskRetryCount` was the live counter-example and now fences on epoch, `worker_id` and terminality before it bumps, so the branch has no known exception left
+```
+
+- [ ] **Step 2: Add the third statement to the identity list**
+
+Find:
+```
+`AppendTaskLog` and `UpdateTaskStatus` both do this.
+```
+Replace with:
+```
+`AppendTaskLog`, `UpdateTaskStatus` and `IncrementTaskRetryCount` all do this.
+```
+
+- [ ] **Step 3: Replace the "a SQL predicate alone is not always enough" sentence**
+
+Find:
+```
+And a SQL predicate alone is not always enough: `handleTaskStatus` checks identity in Go, *before* the retry branch, because `IncrementTaskRetryCount` has a bare `WHERE id = $1` and the branch returns before the fenced statement is ever reached. When you add a fence, enumerate what runs before it.
+```
+Replace with:
+```
+A terminal status is not writable at all: `UpdateTaskStatus` and `IncrementTaskRetryCount` both carry `AND status NOT IN ('done','failed','timed_out')`, keyed to the terminal set `RecomputeJobStatus` uses, so an already-finished task cannot be flipped or resurrected by a second terminal message from its own assignee at the same epoch - and the fix for that is a status predicate, never an epoch bump on terminal transitions, which would break the trailing-log flush. `handleTaskStatus` additionally checks identity in Go ahead of the retry branch; that gate is now a cost control (no round trip, no attacker-keyed log line per forged message) and a second question, not the correctness control it was when `IncrementTaskRetryCount` had a bare `WHERE id = $1`. Keep both. When you add a fence, enumerate what runs before it.
+```
+
+Leave every other bullet, and the rest of this one, untouched.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add CLAUDE.md
+git commit -m "docs: retire the vacuous-bump counter-example from the epoch-fence invariant"
+```
+
+---
+
+## Task 10: Dated correction notes on three shipped artifacts
+
+The previous retro's Findings Triage logged this as an **open doc defect**: a refutation was applied to the `06-26` backlog item but the refuted "cancel race alone" wording survived verbatim elsewhere. This is the iteration that reads those artifacts, so it is the iteration that fixes them.
+
+**Append dated correction notes. Do NOT rewrite the documents.** A correction block is the convention here (see `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md:246-253` for the format already in the tree).
+
+**Note before you start:** `docs/backlog/closed/bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero.md` is named in the spec's scope section but **already carries its correction** at lines 187-195. Verify that (`git grep -n "cancel-during-retry race alone" docs/backlog/`) and leave it alone. Its `06-26 stays open` sentence becomes stale when Task 11 runs, which the Task 11 resolution note covers.
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md:619`
+- Modify: `docs/superpowers/plans/2026-08-12-taskstatus-update-assignee-fence.md:1530`
+- Modify: `docs/retros/2026-08-12-taskstatus-update-assignee-fence.md:182-193` and `:280-281`
+
+- [ ] **Step 1: The spec's section 9, item 6**
+
+Line 619 ends the numbered item `6. **bug-2026-06-26-retry-resurrects-cancelled-task stays open** (3.4), with a note that this change narrows its remaining exposure to the cancel race alone.` Insert immediately after that line, indented to match the list item:
+
+```markdown
+
+   > **Correction (2026-08-12, retry-resurrect status-guard iteration).** "The cancel race
+   > alone" is wrong; section 3.4 of this same spec already carries the fuller correction and
+   > this decision entry was never updated to match. Two routes remained after that change,
+   > not one: the cancel-during-retry interleaving, and a single-actor race-free resurrection
+   > by the task's own assignee (`DONE` then `FAILED` at the same epoch, which a terminal
+   > transition permits because it neither bumps the epoch nor clears `worker_id`). A third,
+   > which neither document named, was the requeue variant of the cancel race. All three are
+   > closed by `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`, and the
+   > `06-26` item is closed by that work.
+```
+
+- [ ] **Step 2: The plan's Task 11 resolution text**
+
+In `docs/superpowers/plans/2026-08-12-taskstatus-update-assignee-fence.md`, the ```` ```markdown ```` block that ends at line 1530 contains the sentence `bug-2026-06-26-retry-resurrects-cancelled-task stays open; this change narrows its remaining exposure to the cancel-during-retry race alone.` **Do not edit inside the fenced block** - it is a verbatim record of text that was committed elsewhere. Insert this immediately **after** the closing ` ``` ` on line 1530 and **before** the `Then:` line:
+
+```markdown
+
+> **Correction (2026-08-12, retry-resurrect status-guard iteration).** The resolution text
+> above says the remaining exposure is "the cancel-during-retry race alone". That was refuted
+> by PR #120's own Phase 4 invariants lens: a second route remained, needing one actor and no
+> race - the task's own assignee sending `DONE` and then `FAILED` at the same epoch - plus a
+> requeue variant of the cancel race that neither document named. The as-shipped file
+> `docs/backlog/closed/bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero.md` was
+> corrected before it landed; this plan text was not, and is corrected here rather than
+> rewritten. All three routes are closed by
+> `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`.
+```
+
+- [ ] **Step 3: The retro's Findings Triage bullet**
+
+In `docs/retros/2026-08-12-taskstatus-update-assignee-fence.md`, the bullet beginning `- **Open doc defect, found while writing this retro and not yet corrected.**` ends with `...the artifact where a claim is *written down as settled* is usually not the one where the reviewer found it.` Append immediately after that bullet, as a nested item:
+
+```markdown
+  - **Closed (2026-08-12).** Both artifacts now carry dated Correction blocks, applied by the
+    retry-resurrect status-guard iteration
+    (`docs/superpowers/plans/2026-08-12-retry-resurrect-status-guard.md`, Task 10): section 9
+    item 6 of the spec, and Task 11 of the plan. The closed backlog item had already been
+    corrected in-branch before it shipped. The `06-26` item that all of them undersize is
+    itself closed by that iteration.
+```
+
+- [ ] **Step 4: The retro's lessons bullet**
+
+The bullet at the end of "New from this iteration" reads `- **Chase a refutation through every artifact that repeated the claim.** See Findings Triage; two shipped docs still carry the "cancel race alone" wording after the item itself was corrected.` Append one sentence to it so it ends:
+
+```markdown
+... after the item itself was corrected. (Corrected 2026-08-12 by the retry-resurrect status-guard iteration; the lesson stands, the open defect does not.)
+```
+
+- [ ] **Step 5: Verify no refuted wording is left uncorrected**
+
+```
+git grep -n "cancel race alone\|cancel-during-retry race alone" -- docs/
+```
+Expected: every remaining hit is either inside a Correction block, inside a verbatim quotation of one, or in the retro line that now carries the dated parenthetical.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md docs/superpowers/plans/2026-08-12-taskstatus-update-assignee-fence.md docs/retros/2026-08-12-taskstatus-update-assignee-fence.md
+git commit -m "docs: correct the refuted 'cancel race alone' wording in three shipped artifacts"
+```
+
+---
+
+## Task 11: Close the backlog item
+
+Required scope, not optional cleanup. The spec's section 11 concludes this closes `bug-2026-06-26-retry-resurrects-cancelled-task` **fully**, and the plan author confirmed it against the item's own acceptance criteria.
+
+**Before running the close**, confirm all four routes are actually green in the tree - if any is not, do not close:
+
+- Route A, cancel: store case 2 (`internal/store/store_test.go`, `TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded`).
+- Route A, requeue variant (undocumented in the item): store case 4.
+- Route B1: `TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry` and store case 3.
+- Route B2: `TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade` and `TestUpdateTaskStatus_AssigneeGuarded` cases 5 and 6.
+
+The item's acceptance criterion 2 ("a regression test covers the cancel-during-retry interleaving") is met with the one honest deviation the spec records in 7.5 and 8.3: the interleaving is proven at the store layer with the handler's own T0 arguments rather than by a timing-based interleave, and the wiring is proven through route B. Say so in the resolution note; do not claim an interleaving test exists.
+
+**Files:**
+- Move: `docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md` -> `docs/backlog/closed/`
+
+- [ ] **Step 1: Run the close command**
+
+The canonical route is the slash command, which does the `git mv`, the frontmatter stamp, the `## Resolution` note and the commit in one sequence:
+```
+/backlog close retry-resurrects-cancelled-task
+```
+Slash commands are conductor-run; an engineer subagent cannot invoke one. If you are the engineer and have no slash-command access, do the equivalent by hand in Step 2 and hand back; otherwise skip Step 2.
+
+- [ ] **Step 2: Manual equivalent, only if Step 1 was not available**
+
+```bash
+git mv docs/backlog/bug-2026-06-26-retry-resurrects-cancelled-task.md docs/backlog/closed/bug-2026-06-26-retry-resurrects-cancelled-task.md
+```
+
+Then set the frontmatter of the moved file (lines 1-8) to:
+
+```
+---
+title: IncrementTaskRetryCount can resurrect a cancelled task (no epoch/status guard)
+type: bug
+status: closed
+created: 2026-06-26
+closed: 2026-08-12
+priority: high
+source: ROADMAP deep-refresh gaps sweep (2026-06-26)
+resolution: fixed
+---
+```
+
+And append at the end of the file:
+
+```markdown
+
+## Resolution
+
+Fixed by giving `IncrementTaskRetryCount` all three predicates - `assignment_epoch`,
+`worker_id` and `status NOT IN ('done','failed','timed_out')` - and giving `UpdateTaskStatus`
+the same status predicate. The Proposal's "either/or" was wrong: it had to be "and", and the
+third predicate the item never mentions - `worker_id` - was also required. Each buys a case
+the others do not, pinned case by case in
+`TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded` and mutation-proved row by row.
+
+Three routes are closed, not the one filed. Route A, the cancel-during-retry interleaving:
+`CancelJobTasks` makes the task terminal, NULLs `worker_id` and bumps the epoch, so all three
+predicates reject the stale retry and the cancel wins. Route A's requeue variant, which this
+item did not name: a requeue leaves the task `pending` or, once re-claimed, `dispatched` -
+neither terminal - so only the epoch predicate closes it, and without it a stale retry evicts
+a live agent. Route B, the single-actor race-free resurrection added to this item on
+2026-08-12: with retries left it goes through `IncrementTaskRetryCount` (status predicate),
+and with retries exhausted through `UpdateTaskStatus` (same predicate), where it would
+otherwise flip a `done` task to `failed` and cascade `FailDependentTasks` across its
+still-pending downstream. The epoch predicate also converts PR #120's stated residual - the
+retry branch was unforgeable but not atomic - into an actual guarantee, and makes the retry
+exactly-once per generation without a transaction.
+
+The item's "plus a job-not-cancelled check" was unnecessary: `CancelJobTasks` makes the task
+terminal and bumps its epoch in the same statement, so the task row already carries the state.
+The fix is a status predicate and explicitly **not** an epoch bump on terminal transitions,
+which would break the trailing-log flush that
+`TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist`
+pins.
+
+One honest deviation from acceptance criterion 2: there is no interleaving *test*. The window
+is inside one function holding a concrete `*store.Queries`, so reaching it would need either
+an injectable seam in production code or a timing-based interleave, and neither is acceptable.
+The cancel race is proven instead at the store layer, calling the statement with exactly the
+two values `handleTaskStatus` captures at T0 against exactly the post-cancel row state, and
+the handler wiring is proven separately through route B and through a real `Connect` message
+loop. See `docs/superpowers/specs/2026-08-12-retry-resurrect-status-guard.md`.
+```
+
+Then:
+```bash
+git add docs/backlog/closed/bug-2026-06-26-retry-resurrects-cancelled-task.md
+git commit -m "backlog: close bug-2026-06-26-retry-resurrects-cancelled-task"
+```
+
+---
+
+## Final verification
+
+Run after all eleven tasks. Docker Desktop must be running. `make` is not on PATH, so these are the expanded recipes.
+
+1. Unit gate (no Docker, exercises none of the new behavior - a no-regression gate, never evidence):
+   ```
+   go test ./... -count=1 -timeout 120s
+   ```
+   Expected: PASS.
+
+2. Integration-tag compile gate (the real compile gate after the signature change):
+   ```
+   go vet -tags integration ./...
+   ```
+   Expected: PASS, no output.
+
+3. The three packages that carry all the behavior:
+   ```
+   go test -tags integration -p 1 ./internal/store/... -timeout 600s
+   go test -tags integration -p 1 ./internal/scheduler/... -timeout 600s
+   go test -tags integration -p 1 ./internal/worker/... -timeout 900s
+   ```
+   Expected: PASS. Specifically green: the new `TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded` (7 cases), `TestUpdateTaskStatus_AssigneeGuarded` (now 6 cases), `TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry`, `TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascade`, `TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask`. Specifically green **and unedited**: `TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist`, `TestUpdateTaskStatus_EpochGuarded`, `TestIncrementTaskRetryCount_BumpsEpochAndFencesStaleRetry` (call site only), `TestTaskDependencyAndEligibility`, `TestRecomputeJobStatus`, `TestAppendTaskLog_EpochGuarded`, the five pre-existing `TestHandleTaskStatus_*` tests, `TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker`, `TestDispatcher_BadCommandsJSON_FailsTaskNoRequeue`, `TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal`.
+
+4. Full integration suite:
+   ```
+   go test -tags integration -p 1 ./... -timeout 900s
+   ```
+   Expected: PASS. Budget roughly 20 minutes; `internal/api` alone runs 320-500s. Watch `internal/api`'s cancel-job tests specifically: a cancelled job now stays `cancelled` where the resurrected task used to drag it back to `running`. If a test asserted the old behavior it was pinning the bug - report it as a finding, do not silently flip it.
+
+5. Generated-file hygiene:
+   ```
+   git diff --ignore-all-space origin/main -- internal/store/ internal/proto/
+   ```
+   Expected: real content changes only in `internal/store/query/tasks.sql`, `internal/store/tasks.sql.go` and `internal/store/store_test.go`. No line-ending-only churn anywhere, no change at all in `internal/store/models.go` or under `internal/proto/`.
+
+6. Invariant spot checks for the reviewer:
+   - `handleTaskStatus` performs no additional DB round trip: `GetTask` plus exactly one of `IncrementTaskRetryCount` / `UpdateTaskStatus`, same as before.
+   - A rejected retry produces no log line, no `RecomputeJobStatus`, no `NotifyTaskSubmitted`, no publish - the `else` branch is skipped and the `return` is unconditional.
+   - No `Sender`, `Registry`, `workerSender` or `sendCh` code was touched; `.proto` files unchanged; the identity still comes from registration, never from the wire.
+   - `internal/store/tasks.sql.go` and `internal/store/models.go` were not hand-edited.
+   - No test in the branch uses `time.Sleep` or a goroutine to order a cancel against a retry.
+
+---
+
+## Self-review notes (author)
+
+**Spec coverage.** 3.1 status predicate on both statements, deny-list keyed to `jobs.sql:98` -> Task 2 Step 1, Task 4 Step 1. 3.2 all three predicates on `IncrementTaskRetryCount`, Go gate kept and its comment rewritten -> Task 4 Steps 1, 5. 3.3 silent drop on `ErrNoRows` in both handler branches, loud in `dispatch.go` -> Task 2 Step 3, Task 4 Step 4. 4.1 the query comment including the `POST /v1/jobs/{id}/retry` constraint (spec section 11.1) -> Task 4 Step 1. 4.2 `UpdateTaskStatus` comment addition -> Task 2 Step 1. 4.3 call site, error branches, comment rewrites -> Task 4. 5 CLAUDE.md amendment -> Task 9. 6 scope, including the correction blocks -> Task 10, and `/backlog close` -> Task 11. 8.1 staging -> the two-regimes table plus Tasks 1-5 and the explicit non-collapse warning. 8.2 store cases 1-8 -> Tasks 1 (case 8 as cases 5/6), 3 (cases 2, 3), 5 (cases 1, 4, 5, 6, 7). 8.3 no interleaving test -> gotcha 8, Task 3's case-2 comment. 8.4 handler tests with positive controls -> Tasks 1 and 3. 8.5 the test that stopped discriminating -> Task 7, all three required responses. 8.6 `Connect` wiring -> Task 6. 8.7 mutation matrix -> Task 8. 8.8 byte-identical existing tests -> gotcha 7 and the Task 2/4/Final gates. 10.1-10.16 acceptance criteria all land in a named task.
+
+**Under-specified points in the spec that this plan resolves.**
+
+1. *Spec 8.1 stage 3 says to "rewrite cases 2 and 3 from exposure assertions into rejection assertions", which would leave those assertions unproved.* Resolved the other way: the cases are written in Task 3 with their **final** rejection assertions and today's one-argument call, so they are behaviorally RED, and Task 4 changes **only the two call expressions**. Every assertion is therefore byte-identical across the RED and GREEN runs, which is the project's standing discipline and strictly stronger than rewriting them.
+2. *Spec 8.7 says to "drop" a predicate, which for the two argument-bearing predicates is a compile error, not a mutation.* Resolved by neutering in place with `OR TRUE`, which keeps the generated params struct identical so the tree still compiles and the mutation is observed behaviorally. Stated as a CRITICAL note in Task 8 because getting this wrong silently converts three matrix rows into "it did not build".
+3. *The spec names `handler.go:441-447` and `:449-455` as the false comments, but a third claim also becomes false:* `:466-468` asserts that `TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask` "goes red under both mutations", which stops being true for exactly the reason spec 8.5 gives. Added to Task 4 Step 5.
+4. *Spec 8.6 says to seed the Connect test with `seedClaimedTask` and `Retries: 1`, but that helper takes no retries argument* and changing its signature would ripple into two other test files. Resolved by using `seedTaskAndTwoWorkers` (which does take retries and names w1's hostname `<prefix>-w1`, so auto-enroll still resolves to the task's assignee) and claiming explicitly.
+5. *Spec 8.6 does not say how the test waits for the second message.* `mockConnectStream.CloseSend` does not drain queued messages, and polling for `done` would be satisfied by the first message. Resolved with an ordering barrier on a **separate** task - a log chunk whose storage is independent of whether the FAILED was rejected - so the test fails by assertion rather than by timeout in both worlds.
+6. *Spec section 6 asks for a Correction block on the closed `bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero.md`, which already has one* (lines 187-195, added before it shipped). Task 10 says to verify and skip rather than double-correct, and adds the retro's own two spots, which the spec does not name but the conductor requires.
+7. *Spec 8.5 says "record in Known Limitations" but this spec has no such section.* Resolved by appending section 12 to the spec doc in Task 7, with the conductor to carry it into the retro.
+
+**Placeholder scan.** No TBD, no "add error handling", no "similar to Task N". Every code step carries the literal replacement text and every verification step carries a runnable command with an expected result.
+
+**Type consistency.** `store.IncrementTaskRetryCountParams{ID pgtype.UUID, AssignmentEpoch int32, WorkerID pgtype.UUID}` is used identically at all four call sites (`handler.go`, `store_test.go:742`, cases 2/3, cases 1/4/5/6/7). `handleTaskStatus(ctx, workerID pgtype.UUID, upd)` and the `HandleTaskStatus` shim are unchanged. `dispatchable(t, ctx, q, taskID)` is defined once in Task 3 and used in Task 3 only. `seedTaskAndTwoWorkers(t, ctx, q, prefix, retries) (jobID, taskID, w1, w2 pgtype.UUID)` is used with the existing signature in Tasks 1, 3 and 6. `newClaimedTask(jobID, name) store.Task` and `newJob(name) store.Job` are defined in Task 3 and reused in Task 5.
