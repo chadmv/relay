@@ -48,8 +48,16 @@ cell, so `listbox` may be the honest match and would not require the `Table` cha
 - `web/src/jobs/TasksTable.tsx`, `web/src/components/holo/Table.tsx`
 - Shipped the primitive this now depends on:
   [[idea-2026-06-05-shared-accessible-table-primitive]]
-- Adjacent a11y debt: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]],
-  [[feature-2026-06-05-usermenu-panel-menu-roles]]
+- Adjacent a11y debt: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]]
+- **Direct precedent, closed 2026-08-13:** [[feature-2026-06-05-usermenu-panel-menu-roles]] asked the
+  same shape of question - should this surface adopt an interactive ARIA role? - and was closed by
+  answering **no** and correcting the advertised contract instead, because `role="menuitem"` would
+  have replaced the link role on entries that are really links. Read its Resolution before starting
+  here. The parallel is exact and cuts both ways: `role="grid"` likewise **replaces** `role="table"`
+  and obliges a full keyboard model (arrow navigation, one tab stop), so the honest question is not
+  "add `aria-selected`" but "is this a grid, and are we implementing one?" If the answer is no, the
+  correct fix may be to stop implying selection semantics rather than to complete them. That is the
+  decision this item must actually make.
 
 ## Notes
 Low priority because the visual selection cue (`border-l-2 border-accent bg-accent/[0.08]`) is

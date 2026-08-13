@@ -306,7 +306,7 @@ test('a blur with a null relatedTarget does NOT close the menu', async () => {
   expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
 })
 
-// Guards the effect's open-only lifetime (UserMenu.tsx:82,107), which
+// Guards the effect's open-only lifetime (UserMenu.tsx:122,147), which
 // DialogShell.tsx:361-363 depends on: it argues UserMenu's document keydown
 // listener cannot overlap DialogShell's own because the toggle is a background
 // control that only exists to be pressed while no dialog is open. If this

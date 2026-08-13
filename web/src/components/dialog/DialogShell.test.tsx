@@ -416,8 +416,12 @@ test('a contenteditable element is reachable in the tab order', async () => {
 // listener on the SAME node (document) from also running - only
 // stopImmediatePropagation does. Registered AFTER the shell's own listener, to
 // model any other document-level keydown consumer that might exist (UserMenu's
-// Escape handler in this app, though it is also structurally prevented from
-// overlapping - see the comment in DialogShell.tsx).
+// Escape handler in this app). NOTE the registration order is the whole point
+// and is NOT guaranteed in production: this comment used to add that the two are
+// "structurally prevented from overlapping", which was refuted on 2026-08-13 -
+// mouse-opening the dropdown and then keyboard-opening a dialog leaves both open
+// with UserMenu's listener registered FIRST, where this suppression cannot reach
+// it. See the corrected comment in DialogShell.tsx.
 test('a handled Escape stops a sibling document keydown listener from also seeing it', async () => {
   const onDismiss = vi.fn()
   const sibling = vi.fn()
