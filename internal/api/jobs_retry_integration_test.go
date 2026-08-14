@@ -165,6 +165,71 @@ func TestRetryJob_NonOwner_404_NoSideEffects(t *testing.T) {
 	assert.Equal(t, "failed", e.getJob(t, job.ID).Status)
 }
 
+// The owner gate must run BEFORE the exclusive job row lock, on both destructive
+// job-scoped writes. Lock-then-gate is a correct 404 with a denial-of-service
+// property attached: any authenticated stranger can queue up behind the owner's
+// in-flight cancel or retry, pinning a pool connection for the whole duration of
+// somebody else's transaction, and neither route is rate limited (server.go wraps
+// only register and login).
+//
+// The lock is held for the whole request here, so a handler that takes it first
+// cannot answer at all until the test gives up.
+func TestJobWrites_NonOwner_404_WithoutQueueingForTheJobRowLock(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, email string
+	}{
+		{"retry", http.MethodPost, "/retry", "lockgate-retry@example.com"},
+		{"cancel", http.MethodDelete, "", "lockgate-cancel@example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRetryEnv(t)
+			owner := createTestUser(t, e.q, "Owner", "owner-"+tc.email, false)
+			attacker := createTestUser(t, e.q, "Attacker", tc.email, false)
+			token := createTestToken(t, e.q, attacker.ID)
+			job := e.job(t, owner.ID)
+			task := e.task(t, job, "t", "failed")
+			e.recompute(t, job)
+
+			// Stand in for an owner's in-flight cancel or retry: hold the exact
+			// lock GetJobForUpdate takes, for longer than the request may wait.
+			ctx := context.Background()
+			holder, err := e.pool.Begin(ctx)
+			require.NoError(t, err)
+			defer holder.Rollback(ctx)
+			_, err = holder.Exec(ctx, "SELECT id FROM jobs WHERE id = $1 FOR UPDATE", job.ID)
+			require.NoError(t, err)
+
+			url := "/v1/jobs/" + uuidString(job.ID) + tc.path
+			if tc.method == http.MethodPost {
+				url += "?task=failed"
+			}
+			req := httptest.NewRequest(tc.method, url, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				rec := httptest.NewRecorder()
+				e.srv.Handler().ServeHTTP(rec, req)
+				done <- rec
+			}()
+
+			select {
+			case rec := <-done:
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				assert.Equal(t, "job not found", errBody(t, rec))
+			case <-time.After(5 * time.Second):
+				t.Fatalf("a non-owner's %s blocked on the job row lock: the owner gate "+
+					"must be decided from an UNLOCKED read, before GetJobForUpdate", tc.name)
+			}
+
+			// The reordering must not weaken the gate itself.
+			got := e.getTask(t, task.ID)
+			assert.Equal(t, "failed", got.Status)
+			assert.Equal(t, task.AssignmentEpoch, got.AssignmentEpoch)
+		})
+	}
+}
+
 func TestRetryJob_TaskParam_Rejects(t *testing.T) {
 	cases := []struct{ name, query string }{
 		{"absent", ""},

@@ -150,6 +150,10 @@ SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at,
 // No other path holds locks across statements: handleTaskStatus and the
 // dispatcher write autocommit.
 // Do not "optimize" either handler back to GetJob.
+// Both handlers do still call plain GetJob first, unlocked and before opening
+// their transaction, purely to run the owner-or-admin gate: a stranger must not
+// be able to queue for this lock. That read decides nothing else. Every gate on
+// a mutable column reads the row returned HERE, and so does every write.
 //
 //	SELECT id, name, priority, status, submitted_by, labels, created_at, updated_at, scheduled_job_id FROM jobs WHERE id = $1 FOR UPDATE
 func (q *Queries) GetJobForUpdate(ctx context.Context, id pgtype.UUID) (Job, error) {

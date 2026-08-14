@@ -323,4 +323,8 @@ FROM jobs;
 -- No other path holds locks across statements: handleTaskStatus and the
 -- dispatcher write autocommit.
 -- Do not "optimize" either handler back to GetJob.
+-- Both handlers do still call plain GetJob first, unlocked and before opening
+-- their transaction, purely to run the owner-or-admin gate: a stranger must not
+-- be able to queue for this lock. That read decides nothing else. Every gate on
+-- a mutable column reads the row returned HERE, and so does every write.
 SELECT * FROM jobs WHERE id = $1 FOR UPDATE;

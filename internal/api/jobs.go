@@ -675,13 +675,30 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // jobOwnerOr404 is the shared owner-or-admin gate for the two destructive
-// job-scoped writes, cancel and retry. It takes a job row the caller has already
-// read INSIDE its own transaction, so the decision is made against the same
-// snapshot the write will use.
+// job-scoped writes, cancel and retry. Both callers run it BEFORE opening their
+// transaction, against an UNLOCKED GetJob read, and only then take
+// GetJobForUpdate. The lock still precedes every write; what it no longer
+// precedes is the authorization decision.
+//
+// That ordering is load-bearing. Gating after GetJobForUpdate answers a stranger
+// correctly but makes them wait first: any authenticated caller could park in the
+// Postgres lock queue behind the owner's in-flight cancel or retry, holding a
+// pool connection for the duration of somebody else's transaction, and neither
+// route is rate limited. TestJobWrites_NonOwner_404_WithoutQueueingForTheJobRowLock
+// pins it.
+//
+// Reading unlocked is safe for THIS question only because jobs.submitted_by is
+// immutable: it is set once by CreateJob and no statement in the repo ever
+// updates it (the only UPDATEs on jobs write status and updated_at). Every gate
+// that reads a mutable column - the status checks in both handlers - stays on the
+// LOCKED row, so it is still decided against the snapshot the write uses. If
+// submitted_by ever becomes writable, this ordering becomes a TOCTOU and the gate
+// has to be re-evaluated on the locked row.
 //
 // It writes the response and returns false when the caller may not act; callers
-// simply return, which rolls back their open transaction and leaves nothing
-// written. A non-owner non-admin gets 404, not 403, matching ownedScheduledJob.
+// simply return, before any transaction is open, so nothing is written and no
+// agent signal is sent. A non-owner non-admin gets 404, not 403, matching
+// ownedScheduledJob.
 // See the Jobs block comment in server.go for why that is defense-in-depth
 // rather than a true existence secret: the GET routes are global.
 //
@@ -708,6 +725,21 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	}
 	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
 
+	// Owner-or-admin gate FIRST, decided from an UNLOCKED read and before any
+	// transaction is open. handleRetryJob does the same; see jobOwnerOr404.
+	job, err := s.q.GetJob(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+	if !s.jobOwnerOr404(ctx, w, job) {
+		return
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -716,14 +748,12 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 	q := s.q.WithTx(tx)
 
-	// Check current job status before cancelling.
-	//
 	// Lock the job row FIRST, before touching any task row. handleRetryJob does
 	// the same. The single lock order (job, then tasks) is what keeps the two
 	// handlers from being an ABBA deadlock pair, and what makes a retry landing
 	// in this request's window serialize instead of interleave. See
 	// GetJobForUpdate.
-	job, err := q.GetJobForUpdate(ctx, id)
+	job, err = q.GetJobForUpdate(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "job not found")
@@ -733,12 +763,9 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner-or-admin gate. Returning here rolls back the open tx, so no task is
-	// cancelled and no agent signal is sent.
-	if !s.jobOwnerOr404(ctx, w, job) {
-		return
-	}
-
+	// The status gate reads the LOCKED row, so it is decided against the same
+	// snapshot the writes below use. Returning here rolls back the open tx, so no
+	// task is cancelled and no agent signal is sent.
 	if job.Status == "cancelled" || job.Status == "done" {
 		writeError(w, http.StatusConflict, "job is already in a terminal state")
 		return
@@ -859,6 +886,22 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	mode := vals[0]
 	includeDone := mode == "all"
 
+	// Owner-or-admin gate FIRST, decided from an UNLOCKED read and before any
+	// transaction is open. handleCancelJob does the same; see jobOwnerOr404 for
+	// why the gate must not sit behind the row lock.
+	job, err := s.q.GetJob(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+	if !s.jobOwnerOr404(ctx, w, job) {
+		return
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
@@ -869,7 +912,7 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 
 	// Lock the job row FIRST, before touching any task row. handleCancelJob does
 	// the same; see GetJobForUpdate for the two properties that depend on it.
-	job, err := q.GetJobForUpdate(ctx, id)
+	job, err = q.GetJobForUpdate(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "job not found")
@@ -879,11 +922,8 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.jobOwnerOr404(ctx, w, job) {
-		return
-	}
-
-	// Retry requires a finished job. Because this gate admits only done and
+	// Retry requires a finished job. This gate reads the LOCKED row, so it is
+	// decided against the same snapshot the writes below use. Because this gate admits only done and
 	// failed, the ONLY job-status transition this endpoint can cause is
 	// done|failed -> running, so RecomputeJobStatus - which has no notion of
 	// `cancelled` - is unreachable from a cancelled job through this path. That
