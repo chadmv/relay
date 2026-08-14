@@ -22,8 +22,8 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // It reads the live tasks_status_check constraint and fails if the vocabulary is
 // anything other than the six values migration 000019 pinned.
 //
-// It exists because three places in this repo hard-code a partition of that
-// vocabulary, and adding a seventh status silently desynchronizes all three at
+// It exists because six statements in this repo hard-code a slice of that
+// vocabulary, and adding a seventh status silently desynchronizes all of them at
 // once. A task-level `cancelled` is the concrete near-term candidate:
 // CancelJobTasks squashes cancellation onto `failed` today, so somebody will
 // eventually want the real thing.
@@ -60,6 +60,22 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     selection, used only to classify the endpoint's three 409s. Its status
 //     predicate must stay byte-identical to RetryJobTasks's; change both or
 //     neither.
+//   - AppendTaskLog (query/tasks.sql) - `status IN ('pending','dispatched',
+//     'running')` as the FIRST ARM of a disjunction with a finished_at window.
+//     READ THIS SITE BACKWARDS FROM THE FIVE ABOVE. There, a new status must
+//     usually stay OUT and the omission fails closed harmlessly - an unwritable
+//     status, an unretryable task. HERE THE OMISSION IS CATASTROPHIC AND SILENT:
+//     a new NON-TERMINAL status left out of this arm drops 100% of that state's
+//     log output, because a non-terminal row has finished_at IS NULL and so
+//     fails the second arm too, and the drop produces no error and no log line
+//     anywhere. A new NON-TERMINAL status MUST BE ADDED here.
+//     TASK_STATUS_PREPARING already exists in proto/relayv1/relay.proto and the
+//     agent already streams prepare progress as LOG_STREAM_PREPARE chunks
+//     (internal/agent/runner.go), so it is the concrete candidate - and its twin
+//     TASK_STATUS_PREPARE_FAILED needs the OPPOSITE call. A new TERMINAL status
+//     must stay OUT and is then bounded by finished_at like done/failed/
+//     timed_out. Never conjoin this arm with the rest of the fence: that closes
+//     the trailing flush.
 //
 // The allow-list form of the two predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
