@@ -742,3 +742,84 @@ func TestHandleTaskLog_LiveTaskWithNoFinishedAtIsStillStoredAndPublished(t *test
 	require.Len(t, rows, 1, "a chunk from a live task must be stored")
 	require.Equal(t, "from a live task\n", rows[0].Content)
 }
+
+// The only test that proves TrailingLogWindow is wired to the predicate rather
+// than merely existing. Asserting the exported constant would prove nothing
+// about the code consuming it; the mutation this catches is a call site that
+// hard-codes DefaultTrailingLogWindow and ignores the field.
+//
+// No sleep. The two legs run the SAME chunk through the SAME handler against the
+// SAME task, and differ in NOTHING but the field's value. If the window were read
+// from anywhere else, both legs would agree.
+func TestHandleTaskLog_TheWindowIsReadFromTheHandlerFieldAtEveryCall(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win4@example.com", "w-logs-win4")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// Finished two seconds ago on this process's clock - the same clock the
+	// cutoff is computed from.
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-2 * time.Second), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	// Leg A: a one-second window. Two seconds have passed, so the window is shut.
+	// A call site that ignored the field and used DefaultTrailingLogWindow (15m)
+	// would store this chunk.
+	h.TrailingLogWindow = 1 * time.Second
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("outside\n"), Epoch: int64(epoch),
+	})
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Empty(t, rows, "with a 1s window, a task that finished 2s ago must reject the chunk")
+
+	// Leg B: same handler, same task, same epoch, same assignee - only the field
+	// moved.
+	h.TrailingLogWindow = 1 * time.Hour
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("inside\n"), Epoch: int64(epoch),
+	})
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "with a 1h window the very same chunk must land")
+	require.Equal(t, "inside\n", rows[0].Content)
+}
+
+// Non-positive means the default, NOT a zero-length window. That rule is what
+// keeps every existing NewHandler and NewHandlerWithGrace call site correct with
+// no edit - and every one of them leaves this field at its zero value. Without
+// it, a zero field would set the cutoff to time.Now() and every terminal append
+// in the system, including the trailing flush, would be rejected.
+func TestHandleTaskLog_AZeroWindowMeansTheDefaultNotAZeroLengthWindow(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+	require.Zero(t, h.TrailingLogWindow,
+		"fixture: this test is about the field's ZERO value, so it must not be set")
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win5@example.com", "w-logs-win5")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// A minute ago: comfortably inside the 15m default, comfortably outside a
+	// zero-length window.
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Minute), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("inside the default\n"), Epoch: int64(epoch),
+	})
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "an unset window must behave as DefaultTrailingLogWindow, not as zero")
+	require.Equal(t, "inside the default\n", rows[0].Content)
+}
