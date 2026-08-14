@@ -50,7 +50,7 @@ export function updateMe(name: string): Promise<User> {
 //
 // SESSION EFFECT: on success the server revokes every OTHER token for the user
 // and KEEPS this one (DeleteOtherTokensForUser, auth.go:325-328 ->
-// internal/store/query/tokens.sql:28-29 `AND id <> $2`). The caller stays signed
+// internal/store/query/tokens.sql:43-44 `AND id <> $2`). The caller stays signed
 // in. The whole thing is one transaction (auth.go:309-336), so there is no window
 // where the password changed but stale sessions survived. Contrast
 // signOutEverywhere below, which is the exact opposite.
@@ -68,7 +68,7 @@ export function changePassword(currentPassword: string, newPassword: string): Pr
 // `DELETE FROM api_tokens WHERE user_id = $1` (internal/store/query/tokens.sql:40-41)
 // with NO `id <> $2`. The hi-fi calls this "Sign out everywhere ELSE"
 // (design_handoff_relay_holo/hifi3-holo-pages.jsx:2796, :3049) and there is no such
-// endpoint: the all-but-current query exists (tokens.sql:28-29) but only the
+// endpoint: the all-but-current query exists (tokens.sql:43-44) but only the
 // password path routes to it. Labelling this control "else" would understate its
 // blast radius, which is a defect and not a copy nit.
 //

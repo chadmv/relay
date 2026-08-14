@@ -261,7 +261,7 @@ test('a stream 401 from a DEAD session does not clear the session that replaced 
 
 test('POSITIVE CONTROL: a stream 401 for the CURRENT token still tears the session down', async () => {
   // Without this, the test above is also satisfied by an apiStream that stopped
-  // notifying anybody at all - which is exactly what reverting api.ts:128 to a bare
+  // notifying anybody at all - which is exactly what reverting the stream fire site in lib/api.ts to a bare
   // fn() produces, since the listener would then compare undefined against a live
   // token and reject every stream 401 forever.
   server.use(http.get('/v1/users/me', () => HttpResponse.json(ME)))

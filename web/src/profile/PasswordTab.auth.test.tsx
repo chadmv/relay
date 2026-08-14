@@ -103,7 +103,7 @@ test('a 204 leaves the user SIGNED IN - this endpoint spares the caller token', 
   // opposite for DELETE /v1/auth/tokens. These two tests are each other's control
   // and the difference between them is the whole session story of this slice:
   // DeleteOtherTokensForUser has `AND id <> $2`
-  // (internal/store/query/tokens.sql:28-29); DeleteTokensForUser does not (:25-26).
+  // (internal/store/query/tokens.sql:43-44); DeleteTokensForUser does not (:40-41).
   server.use(http.put('/v1/users/me/password', () => new HttpResponse(null, { status: 204 })))
   renderTab()
   await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('mira@studio.dev'))
