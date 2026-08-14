@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -186,25 +187,42 @@ func TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpE
 	// post-A snapshot and the test would prove nothing.
 	//
 	// The condition func runs on testify's own goroutine, not the test
-	// goroutine, so require.NoError (which calls t.FailNow) is documented
-	// misuse here: a transient poll error would Goexit the wrong goroutine
-	// and the test would instead time out 10s later reporting the unrelated
-	// "B never blocked" message. Capture the error and assert it on the test
-	// goroutine after Eventually returns.
-	var pollErr error
-	require.Eventually(t, func() bool {
+	// goroutine, so require.NoError (which calls t.FailNow) is documented misuse
+	// inside it: a poll error would Goexit the wrong goroutine and the test would
+	// instead time out 10s later reporting the unrelated "B never blocked"
+	// message. The error is captured and re-asserted on the test goroutine
+	// below.
+	//
+	// That re-assertion is why this is assert.Eventually and not
+	// require.Eventually: require would FailNow on timeout and the poll error
+	// would never be reported, which is the exact misdiagnosis this is here to
+	// prevent. The last error is kept, not cleared on a later success, so a
+	// timeout preceded by real errors names them. The mutex is not decoration -
+	// the two goroutines genuinely share this variable.
+	var (
+		pollMu  sync.Mutex
+		pollErr error
+	)
+	blocked := assert.Eventually(t, func() bool {
 		var n int
 		if err := f.pool.QueryRow(f.ctx,
 			`SELECT count(*) FROM pg_stat_activity
 			  WHERE datname = current_database()
 			    AND wait_event_type = 'Lock' AND state = 'active'`).Scan(&n); err != nil {
+			pollMu.Lock()
 			pollErr = err
+			pollMu.Unlock()
 			return false
 		}
-		pollErr = nil
 		return n > 0
 	}, 10*time.Second, 50*time.Millisecond, "B never blocked on A's row lock")
-	require.NoError(t, pollErr, "pg_stat_activity poll failed")
+	pollMu.Lock()
+	lastPollErr := pollErr
+	pollMu.Unlock()
+	if !blocked {
+		require.NoError(t, lastPollErr,
+			"B never appeared blocked because the pg_stat_activity poll kept failing")
+	}
 
 	require.NoError(t, txA.Commit(f.ctx))
 	wg.Wait()

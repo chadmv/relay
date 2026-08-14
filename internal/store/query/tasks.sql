@@ -409,16 +409,25 @@ ORDER BY created_at;
 -- either mode.
 --
 -- THAT ARGUMENT HAS A DEPENDENCY, and it is not visible from this WHERE clause:
--- it holds because nothing in the repo ever WRITES `timed_out`. The status
--- exists in the CHECK constraint and in read-side predicates only, so today
--- every row this statement can match reached its status through a terminal
--- transition that had already released the assignment. The day something -
--- a server-side watchdog is the obvious candidate - stamps `timed_out` on a
--- task whose agent is still running it, "terminal implies no live assignment"
--- becomes false and this statement becomes a duplicate-execution primitive: the
--- retry reopens the row, the dispatcher hands it to a second worker, and the
--- first agent's completion is fenced out by the epoch bump. Whoever adds that
--- writer must revisit this clause, not just the status vocabulary test.
+-- it holds because of WHO writes each terminal status, not because the statuses
+-- are terminal. `timed_out` has exactly one writer, and it is the assignee
+-- itself: the agent gives each task's subprocess a context deadline built from
+-- timeout_sec (internal/agent/runner.go, newRunner), and when cmd.Wait returns
+-- with ctx.Err() == context.DeadlineExceeded - so the process is already dead
+-- and its proctree already cleaned up - the runner reports TASK_STATUS_TIMED_OUT
+-- as its final status. internal/worker/handler.go maps that to 'timed_out' and
+-- writes it through UpdateTaskStatus, fenced on the sender's epoch and worker
+-- id. So a `timed_out` row, like a `failed` or `done` one, records an agent
+-- saying "I am finished with this", after it stopped executing. There is nothing
+-- left to evict.
+-- What would break this is a SERVER-SIDE watchdog: something that stamps
+-- `timed_out` on a task the agent is still happily running, because the row
+-- looks stale from the coordinator's side. That row would be terminal AND still
+-- executing, and this statement would become a duplicate-execution primitive -
+-- the retry reopens it, the dispatcher hands it to a second worker, and the
+-- first agent's eventual completion is fenced out by the epoch bump, so nothing
+-- reports the collision. Whoever adds a coordinator-side terminal writer must
+-- revisit this clause, not just the status vocabulary test.
 --
 -- THE STATUS ALLOW-LIST MUST STAY IN THIS WHERE CLAUSE, on tasks' own columns.
 -- Do not "simplify" it to `t.id IN (SELECT id FROM selected)`. Under READ
