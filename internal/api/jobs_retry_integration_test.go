@@ -208,3 +208,117 @@ func TestRetryJob_TaskParam_400_BeforeAnyDatabaseWork(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "invalid job id", errBody(t, rec))
 }
+
+func TestRetryJob_Owner_200(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-owner@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	task := e.task(t, job, "t", "failed")
+	require.Equal(t, "failed", e.recompute(t, job))
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	got := e.getTask(t, task.ID)
+	assert.Equal(t, "pending", got.Status)
+	assert.Equal(t, task.AssignmentEpoch+1, got.AssignmentEpoch)
+	assert.False(t, got.WorkerID.Valid)
+}
+
+func TestRetryJob_Admin_200_OnAnotherUsersJob(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-admin-owner@example.com", false)
+	admin := createTestUser(t, e.q, "Admin", "retry-admin@example.com", true)
+	token := createTestToken(t, e.q, admin.ID)
+	job := e.job(t, owner.ID)
+	e.task(t, job, "t", "failed")
+	e.recompute(t, job)
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "running", e.getJob(t, job.ID).Status)
+}
+
+// Item criterion 1: the two modes select demonstrably different sets. Two
+// identically seeded jobs, so the difference cannot come from ordering.
+func TestRetryJob_FailedVersusAll_SelectDifferentSets(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-modes@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+
+	seed := func(name string) (store.Job, store.Task, store.Task) {
+		job := e.job(t, owner.ID)
+		done := e.task(t, job, name+"-done", "done")
+		failed := e.task(t, job, name+"-failed", "failed")
+		require.Equal(t, "failed", e.recompute(t, job))
+		return job, done, failed
+	}
+	jobA, doneA, _ := seed("a")
+	jobB, doneB, _ := seed("b")
+
+	recA := e.do(t, token, uuidString(jobA.ID), "task=failed")
+	require.Equal(t, http.StatusOK, recA.Code)
+	var bodyA map[string]any
+	require.NoError(t, json.NewDecoder(recA.Body).Decode(&bodyA))
+	assert.Equal(t, float64(1), bodyA["tasks_retried"])
+	assert.Equal(t, "done", e.getTask(t, doneA.ID).Status, "task=failed must leave a done task terminal")
+
+	recB := e.do(t, token, uuidString(jobB.ID), "task=all")
+	require.Equal(t, http.StatusOK, recB.Code)
+	var bodyB map[string]any
+	require.NoError(t, json.NewDecoder(recB.Body).Decode(&bodyB))
+	assert.Equal(t, float64(2), bodyB["tasks_retried"])
+	assert.Equal(t, "pending", e.getTask(t, doneB.ID).Status, "task=all must reopen the done task too")
+}
+
+// Key-set equality, so an accidentally added or renamed field fails. The absent
+// keys are jobResponse's omitempty fields, which toJobResponse(job, "", nil, nil)
+// leaves unset - exactly as handleCancelJob does.
+func TestRetryJob_ResponseShape_JobPlusTasksRetried(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-shape@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	e.task(t, job, "t", "failed")
+	e.recompute(t, job)
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+
+	keys := make([]string, 0, len(body))
+	for k := range body {
+		keys = append(keys, k)
+	}
+	require.ElementsMatch(t, []string{
+		"id", "name", "priority", "status", "submitted_by", "labels",
+		"created_at", "updated_at", "total_tasks", "done_tasks", "tasks_retried",
+	}, keys, "the 200 body is jobResponse plus exactly one key")
+
+	assert.Equal(t, "running", body["status"])
+	assert.GreaterOrEqual(t, body["tasks_retried"], float64(1),
+		"tasks_retried is never 0 on a 200: a zero match is a 409")
+	assert.Equal(t, uuidString(job.ID), body["id"])
+}
+
+func TestRetryJob_JobStatusRecomputedToRunningInsideTheTransaction(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-recompute@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	e.task(t, job, "t", "failed")
+	require.Equal(t, "failed", e.recompute(t, job))
+	before := e.getJob(t, job.ID)
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	after := e.getJob(t, job.ID)
+	assert.Equal(t, "running", after.Status,
+		"a job whose task is pending again cannot still be failed")
+	assert.True(t, after.UpdatedAt.Time.After(before.UpdatedAt.Time),
+		"RecomputeJobStatus stamps updated_at, and it ran in the same transaction as the reopen")
+}
