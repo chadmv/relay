@@ -28,6 +28,11 @@ import (
 // RetryJobTasks (the operator analogue of RequeueTaskByID), or it genuinely
 // drives the agent-side retry budget and belongs in internal/worker/handler.go.
 //
+// The walk covers the whole module, not just internal/. cmd/relay-server/main.go
+// wires the store layer up by hand and can reach *store.Queries as directly as
+// any package under internal/, so a guard scoped to internal/ would not see a
+// call site there at all.
+//
 // Known weakness, accepted: a rename defeats it. Same weakness and same trade as
 // TestUpdateTaskStatusEpochHasNoProductionCaller.
 //
@@ -49,11 +54,21 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 	storeDir := filepath.Join(root, "internal", "store")
 
 	var offenders []string
-	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if d.IsDir() {
+			// Prune trees that hold no module source. .claude is where this
+			// repo's git worktrees live, so walking it would rediscover a second
+			// copy of every allowed file under a path no allow-list can name.
+			switch d.Name() {
+			case ".git", ".claude", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		if allowed[path] {
@@ -74,7 +89,7 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walking internal/: %v", err)
+		t.Fatalf("walking %s: %v", root, err)
 	}
 
 	if len(offenders) > 0 {
