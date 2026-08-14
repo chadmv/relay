@@ -106,7 +106,7 @@ function isAbortSignalRealmMismatch(err: unknown): boolean {
  *
  * It lives HERE, next to apiFetch, on purpose: the bearer token (token.ts:3-5) is
  * attached in exactly one place, and a streaming 401 fires the same
- * onUnauthorized notifier AuthProvider subscribes to (AuthProvider.tsx:39-49).
+ * onUnauthorized notifier AuthProvider subscribes to (its onUnauthorized effect).
  * Otherwise a revoked token would turn into a silently empty log instead of a
  * redirect to sign-in. sse.ts holds framing only and knows nothing about auth.
  *

@@ -32,7 +32,7 @@ interface AuthContextValue {
   // Its one caller is the Sessions tab, and by the time it runs the server has
   // already destroyed EVERY bearer token for this user - DELETE /v1/auth/tokens
   // is DeleteTokensForUser, `DELETE FROM api_tokens WHERE user_id = $1`
-  // (internal/store/query/tokens.sql:25-26), with no `id <> $2`. Any request made
+  // (internal/store/query/tokens.sql:40-41), with no `id <> $2`. Any request made
   // after that point is a guaranteed 401 racing this teardown, which is exactly
   // why logout() is NOT reused there: logout() would first fire
   // DELETE /v1/auth/token against a token that no longer exists.

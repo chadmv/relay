@@ -43,7 +43,7 @@ test('a 401 fires the onUnauthorized listeners and does not retry', async () => 
     }),
   ).rejects.toBeInstanceOf(ApiError)
   // Without this, a revoked token becomes a silently empty log instead of a
-  // redirect to sign-in (AuthProvider.tsx:39-49 is the subscriber).
+  // redirect to sign-in (AuthProvider's onUnauthorized effect is the subscriber).
   expect(seen).toHaveBeenCalledTimes(1)
   // apiStream never retries: recovery policy belongs to the hook.
   expect(fake.connections).toHaveLength(1)
