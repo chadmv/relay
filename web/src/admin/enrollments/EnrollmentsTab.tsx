@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from '../../components/Button'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { TokenRevealDialog } from '../TokenRevealDialog'
 import { CreateEnrollmentForm } from './CreateEnrollmentForm'
@@ -22,55 +23,21 @@ function toggleSort(field: EnrollmentSortField, current: EnrollmentSort): Enroll
 
 export function EnrollmentsTab() {
   const [sort, setSort] = useState<EnrollmentSort>('-created_at')
-  // Cursor of the current page (''=first); stack holds the cursors we paged
-  // forward from; offsets tracks the real row offset so partial pages stay
-  // correct. Same pattern as UsersTab / JobsPage.
-  const [cursor, setCursor] = useState('')
-  const [stack, setStack] = useState<string[]>([])
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
   const [creating, setCreating] = useState(false)
 
   // A local 60s clock tick, NOT a poll: it re-renders so relative labels and
   // status pills stay correct and issues no request.
   const now = useNow(60_000)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useAgentEnrollments(sort, cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useAgentEnrollments(sort, pager.cursor)
   const { create } = useAgentEnrollmentActions()
-
-  function resetPaging() {
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
-  }
 
   function pickSort(field: EnrollmentSortField) {
     setSort(toggleSort(field, sort))
     // The server rejects a cursor whose sort key does not match
     // (internal/api/pagination.go:272-286).
-    resetPaging()
-  }
-
-  function next() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setStack([...stack, cursor])
-    setCursor(data.next_cursor)
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function prev() {
-    if (stack.length === 0) return
-    const copy = [...stack]
-    const back = copy.pop() ?? ''
-    setStack(copy)
-    setCursor(back)
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging()
   }
 
   function onCreate(body: CreateEnrollmentBody) {
@@ -81,7 +48,7 @@ export function EnrollmentsTab() {
 
   const enrollments = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, enrollments.length)
+  const { x, y } = computePageRange(pager.startOffset, enrollments.length)
   const rangeText =
     enrollments.length === 0
       ? `0 of ${total.toLocaleString()}`
@@ -115,11 +82,11 @@ export function EnrollmentsTab() {
         <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
           No active enrollments.
         </GlassPanel>
-        {stack.length > 0 && (
+        {pager.canPrev && (
           <div className="flex justify-center">
             <button
               type="button"
-              onClick={prev}
+              onClick={pager.prev}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute"
             >
               ← prev
@@ -140,15 +107,15 @@ export function EnrollmentsTab() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={prev}
-              disabled={stack.length === 0 || isPlaceholderData}
+              onClick={pager.prev}
+              disabled={!pager.canPrev || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
               ← prev
             </button>
             <button
               type="button"
-              onClick={next}
+              onClick={() => pager.next(data?.next_cursor, enrollments.length)}
               disabled={!data?.next_cursor || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
