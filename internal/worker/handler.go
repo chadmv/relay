@@ -741,6 +741,11 @@ func (l *taskLogErrLimiter) reset() {
 // it cannot claim to be somebody else. It is threaded here in the same way
 // applyInventoryUpdate already receives it.
 //
+// The trailing window is resolved per call and passed to the fence as an
+// absolute cutoff. It costs one time.Now() and one bound parameter - still one
+// round trip, still no allocation on the quiet path. See AppendTaskLog's comment
+// for why the cutoff is computed here rather than as NOW() - interval in SQL.
+//
 // This runs synchronously on the Connect recv goroutine, which also carries that
 // worker's status, inventory and telemetry messages, so everything below is
 // deliberately cheap: exactly one DB round trip (the insert itself returns the
@@ -757,12 +762,22 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 		stream = "stderr"
 	}
 
+	// Resolved per call, never cached: a test moves the field between two calls
+	// on the same handler to prove this call site actually reads it. Non-positive
+	// means the default, which is what keeps every existing NewHandler call site
+	// correct with no edit.
+	window := h.TrailingLogWindow
+	if window <= 0 {
+		window = DefaultTrailingLogWindow
+	}
+
 	row, err := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID:          taskID,
 		Stream:          stream,
 		Content:         string(chunk.Content),
 		AssignmentEpoch: int32(chunk.Epoch),
 		WorkerID:        workerID,
+		MinFinishedAt:   pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true},
 	})
 	if err != nil {
 		// pgx.ErrNoRows means the fence rejected the chunk, for either of two

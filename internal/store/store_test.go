@@ -439,6 +439,9 @@ func TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLog
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "trailing after done\n",
 		AssignmentEpoch: done.AssignmentEpoch, WorkerID: done.WorkerID,
+		// The trailing-window arm. A caller that omits this binds SQL NULL and
+		// every terminal append is rejected, which is the fence failing closed.
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	require.NoError(t, err, "a trailing chunk from the assignee must still persist after a terminal status")
 
