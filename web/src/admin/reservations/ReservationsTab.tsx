@@ -3,6 +3,7 @@ import { Button } from '../../components/Button'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { CreateReservationForm } from './CreateReservationForm'
 import { deriveStatus } from './reservationStatus'
@@ -47,13 +48,7 @@ function confirmDeleteBody(r: Reservation, now: Date): string {
 
 export function ReservationsTab() {
   const [sort, setSort] = useState<ReservationSort>('-created_at')
-  // Cursor of the current page (''=first); stack holds the cursors we paged forward
-  // from; offsets tracks the real row offset so partial pages stay correct. Same
-  // pattern as EnrollmentsTab / UsersTab / JobsPage.
-  const [cursor, setCursor] = useState('')
-  const [stack, setStack] = useState<string[]>([])
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
   const [creating, setCreating] = useState(false)
   const [confirm, setConfirm] = useState<Reservation | null>(null)
 
@@ -61,46 +56,18 @@ export function ReservationsTab() {
   // stays correct as a window opens or closes, and issues no request.
   const now = useNow(60_000)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useReservations(sort, cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useReservations(sort, pager.cursor)
   const { create, remove } = useReservationActions()
 
   // create.error is routed into the panel (it owns that copy); delete errors land in
   // the shared box, matching UsersTab.tsx:53-60.
   const actionError = remove.error as Error | null
 
-  function resetPaging() {
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
-  }
-
   function pickSort(field: ReservationSortField) {
     setSort(toggleSort(field, sort))
     // The server rejects a cursor whose sort key does not match
     // (internal/api/pagination.go:272-286).
-    resetPaging()
-  }
-
-  function next() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setStack([...stack, cursor])
-    setCursor(data.next_cursor)
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function prev() {
-    if (stack.length === 0) return
-    const copy = [...stack]
-    const back = copy.pop() ?? ''
-    setStack(copy)
-    setCursor(back)
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging()
   }
 
   function onCreate(body: CreateReservationBody) {
@@ -115,7 +82,7 @@ export function ReservationsTab() {
 
   const reservations = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, reservations.length)
+  const { x, y } = computePageRange(pager.startOffset, reservations.length)
   const rangeText =
     reservations.length === 0
       ? `0 of ${total.toLocaleString()}`
@@ -147,11 +114,11 @@ export function ReservationsTab() {
         <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
           No reservations.
         </GlassPanel>
-        {stack.length > 0 && (
+        {pager.canPrev && (
           <div className="flex justify-center">
             <button
               type="button"
-              onClick={prev}
+              onClick={pager.prev}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute"
             >
               ← prev
@@ -184,15 +151,15 @@ export function ReservationsTab() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={prev}
-              disabled={stack.length === 0 || isPlaceholderData}
+              onClick={pager.prev}
+              disabled={!pager.canPrev || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
               ← prev
             </button>
             <button
               type="button"
-              onClick={next}
+              onClick={() => pager.next(data?.next_cursor, reservations.length)}
               disabled={!data?.next_cursor || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
