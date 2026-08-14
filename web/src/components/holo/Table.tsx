@@ -11,6 +11,31 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 // footers, error banners and dialogs inside the visual surface but OUTSIDE the
 // role="table" subtree, where they would be invalid children.
 //
+// THE NARROW-VIEWPORT CONVENTION FOR TABLES (2026-08-13). A consumer whose template
+// has fixed px tracks passes `minWidth` (a Tailwind min-w-[NNNpx] literal, sized at
+// or above the sum of its own fixed tracks). That does two things, and both are
+// required: it publishes ONE min-width onto the header row and every body row, and
+// it wraps the role="table" subtree in an overflow-x-auto div so the table scrolls
+// inside the caller's frame instead of widening the document.
+//
+// Why both. With negative free space an `fr` track falls back to its CONTENT
+// minimum; the header row and the body rows are separate grid containers with
+// different content, so they desynchronize. The min-width keeps free space
+// non-negative so `fr` resolves identically in both - the same agreement guarantee
+// this component already gives for `columns`.
+//
+// The wrapper is not the frame this primitive refuses to be: overflow only, no
+// border, background, padding or radius, and it wraps ONLY the role="table"
+// subtree, so the footers, error banners and dialogs that every consumer renders as
+// SIBLINGS of <Table> stay outside the scroll region. The standing risk is the
+// other direction: a scroll container clips anything inside it that used to escape
+// the table box. Audited across all ten consumers as of 2026-08-13 - no row cell
+// renders an absolutely-positioned popover; WorkspacesPanel's ConfirmDialog is a
+// sibling AND portals. If a future row needs a popover, it must portal.
+//
+// Enforced by web/src/components/holo/responsive.guard.test.ts, which fails if any
+// <Table> call site omits minWidth.
+//
 // The base strings below contain ONLY utilities that are byte-identical across all
 // eight consumers. Two competing Tailwind utilities on one element resolve by
 // stylesheet order, not by class-attribute order, so a caller className cannot
@@ -60,6 +85,10 @@ interface TableProps<F extends string> {
   // consumer file for Tailwind v4's static scan, but it is declared once there
   // instead of being applied to two elements by hand.
   columns: string
+  // Optional Tailwind min-width utility (a literal, for Tailwind v4's static scan),
+  // applied to the header row AND every TableRow, and the trigger for the
+  // overflow-x-auto wrapper. Omit it only for a table with no fixed px tracks.
+  minWidth?: string
   headers: TableColumn<F>[]
   sort?: string
   onSort?: (field: F) => void
@@ -68,23 +97,31 @@ interface TableProps<F extends string> {
   children?: ReactNode
 }
 
-// The value is the raw columns string, never a fresh object literal, so it is
-// referentially stable across renders.
+// The value is the grid class string - never a fresh object literal, so it stays
+// referentially stable across renders. When minWidth is set the value is a template
+// string, which is still stable in the sense React cares about: context change
+// detection is Object.is, and Object.is compares equal strings as equal.
 const ColumnsContext = createContext<string | null>(null)
 
 export function Table<F extends string = string>({
   label,
   columns,
+  minWidth,
   headers,
   sort = '',
   onSort,
   headerClassName,
   children,
 }: TableProps<F>) {
-  return (
-    <ColumnsContext.Provider value={columns}>
+  // ONE string for the header row and the body rows. The whole point of the context
+  // is that these two cannot be put out of agreement by hand, and a min-width that
+  // applied to only one of them would desynchronize the columns at exactly the
+  // widths this exists to fix.
+  const grid = minWidth ? `${columns} ${minWidth}` : columns
+  const table = (
+    <ColumnsContext.Provider value={grid}>
       <div role="table" aria-label={label}>
-        <div role="row" className={`grid ${columns} ${HEADER_BASE} ${headerClassName ?? ''}`}>
+        <div role="row" className={`grid ${grid} ${HEADER_BASE} ${headerClassName ?? ''}`}>
           {headers.map((h, i) => {
             const field = h.field
             if (field === undefined) {
@@ -125,6 +162,11 @@ export function Table<F extends string = string>({
       </div>
     </ColumnsContext.Provider>
   )
+  // Opt-in: with no minWidth the DOM is byte-identical to what eight consumers
+  // shipped against, and a wrapper with no min-width would only scroll a misaligned
+  // table anyway.
+  if (!minWidth) return table
+  return <div className="overflow-x-auto">{table}</div>
 }
 
 type TableRowProps = Omit<ComponentPropsWithoutRef<'div'>, 'role' | 'dangerouslySetInnerHTML'> & {

@@ -201,3 +201,71 @@ test('TableRow rendered outside a Table throws, naming both components', () => {
   expect(() => render(<TableRow>orphan</TableRow>)).toThrow(/TableRow must be rendered inside a Table/)
   spy.mockRestore()
 })
+
+// Cause 2 of docs/backlog/bug-2026-08-12-web-narrow-viewport-horizontal-overflow.md.
+// Every consumer's template has fixed px tracks that sum past a narrow viewport
+// (SchedulesTable's nine columns total 580px of fixed track before any `fr` gets a
+// pixel), and nothing wrapped them in a scroll region.
+//
+// The min-width is NOT decoration and it is not a substitute for the wrapper. With
+// negative free space an `fr` track falls back to its CONTENT minimum, and the
+// header row and the body rows are SEPARATE grid containers whose content minimums
+// differ ("NAME" versus a truncating link, whose min-content is 0) - so the columns
+// visibly desynchronize. A shared min-width keeps free space non-negative, at which
+// point `fr` resolves identically in both. That agreement is the property this
+// primitive exists to own, which is why minWidth travels on the same context string
+// as columns rather than being applied by hand in each consumer.
+test('minWidth lands on the header row and on every body row as ONE identical class string', () => {
+  render(
+    <Table label="W" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }, { label: 'B' }]}>
+      <TableRow data-testid="r1">
+        <TableCell>x</TableCell>
+        <TableCell>y</TableCell>
+      </TableRow>
+    </Table>,
+  )
+  const header = screen.getAllByRole('row')[0]
+  const row = screen.getByTestId('r1')
+  expect(header).toHaveClass('grid', 'grid-cols-[1fr_80px]', 'min-w-[640px]')
+  expect(row).toHaveClass('grid', 'grid-cols-[1fr_80px]', 'min-w-[640px]', 'items-center')
+  // The load-bearing assertion: not "both have a min-width" but "both have the
+  // SAME one". A per-element implementation can satisfy the two lines above and
+  // still put the two grids out of agreement.
+  const gridOf = (el: HTMLElement) =>
+    el.className.split(/\s+/).filter((c) => c.startsWith('grid-cols-') || c.startsWith('min-w-')).sort().join(' ')
+  expect(gridOf(row)).toBe(gridOf(header))
+})
+
+test('minWidth wraps the table subtree in a scroll container, and nothing else moves', () => {
+  render(
+    <div data-testid="frame">
+      <Table label="W" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }]} />
+      <div data-testid="footer">page 1 of 3</div>
+    </div>,
+  )
+  const table = screen.getByRole('table', { name: 'W' })
+  expect(table.parentElement).toHaveClass('overflow-x-auto')
+  // The scroll container wraps the role="table" subtree ONLY. Footers, error
+  // banners and dialogs are siblings of <Table> in every consumer, and they must
+  // stay outside the scroll region or a paginator would scroll away with the rows.
+  expect(screen.getByTestId('footer').parentElement).toBe(screen.getByTestId('frame'))
+  expect(screen.getByTestId('footer').closest('.overflow-x-auto')).toBeNull()
+  // And the wrapper is not a frame: overflow only, no border/background/padding,
+  // per the no-frame contract in Table.tsx's header comment.
+  expect(table.parentElement?.className).toBe('overflow-x-auto')
+})
+
+test('without minWidth the DOM is exactly what it was before: no wrapper, no min-width', () => {
+  render(
+    <div data-testid="frame">
+      <Table label="W" columns="grid-cols-[1fr_80px]" headers={[{ label: 'A' }]} />
+    </div>,
+  )
+  const table = screen.getByRole('table', { name: 'W' })
+  // Opt-in, not unconditional: the min-width is a function of each table's own
+  // fixed tracks, so it cannot be a constant in here, and a scroll wrapper with no
+  // min-width would scroll a MISALIGNED table. It also keeps every render in this
+  // file's shipped tests structurally byte-identical.
+  expect(table.parentElement).toBe(screen.getByTestId('frame'))
+  expect(screen.getAllByRole('row')[0].className).not.toMatch(/\bmin-w-/)
+})
