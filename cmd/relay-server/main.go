@@ -142,6 +142,13 @@ func main() {
 	agentHandler := worker.NewHandlerWithGrace(q, pool, registry, broker, dispatcher.Trigger, grace)
 	agentHandler.Metrics = metricsStore
 
+	trailingLogWindow, trailingLogWindowOK := parseTrailingLogWindow(os.Getenv("RELAY_TASKLOG_TRAILING_WINDOW"))
+	if !trailingLogWindowOK {
+		log.Printf("WARNING: RELAY_TASKLOG_TRAILING_WINDOW=%q is not a positive Go duration; using %s",
+			os.Getenv("RELAY_TASKLOG_TRAILING_WINDOW"), trailingLogWindow)
+	}
+	agentHandler.TrailingLogWindow = trailingLogWindow
+
 	if v := os.Getenv("RELAY_ALLOW_AUTO_ENROLL"); v != "" {
 		allow, err := strconv.ParseBool(v)
 		if err != nil {
@@ -301,4 +308,27 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseTrailingLogWindow resolves RELAY_TASKLOG_TRAILING_WINDOW's raw value into
+// the window handed to worker.Handler. An unset variable is the ordinary case
+// and resolves to the default silently. A set-but-unusable value - unparseable,
+// zero or negative - ALSO resolves to the default, but reports ok=false so the
+// caller can log exactly one startup warning. That warning is the point: this is
+// a security-relevant knob, and a silently-ignored typo would leave an operator
+// believing they had tightened something they had not.
+//
+// Deliberately not a log.Fatalf, unlike RELAY_ALLOW_AUTO_ENROLL: an unparseable
+// duration must not stop a server booting when a safe default exists. Follows
+// the `d > 0 or keep the default` idiom of RELAY_TELEMETRY_WINDOW above, plus
+// the warning.
+func parseTrailingLogWindow(raw string) (time.Duration, bool) {
+	if raw == "" {
+		return worker.DefaultTrailingLogWindow, true
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return worker.DefaultTrailingLogWindow, false
+	}
+	return d, true
 }
