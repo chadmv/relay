@@ -41,7 +41,8 @@ export function updateMe(name: string): Promise<User> {
 //   400 `password must be at least 8 characters` - the ONLY server-side rule on
 //       the new password (:284-287). There is NO complexity policy anywhere.
 //   403 `current password is incorrect` (:298-301) - a 403, NOT a 401, so it does
-//       not fire onUnauthorized (lib/api.ts:44-46) and must never sign anyone out.
+//       not fire the onUnauthorized notifier in lib/api.ts and must never sign
+//       anyone out.
 //   500 `failed to hash password` (:303-307) - where a password over 72 BYTES
 //       lands, because bcrypt rejects it. Guarded client-side by the caller.
 // There is no check that the new password differs from the old one, and no
@@ -64,18 +65,18 @@ export function changePassword(currentPassword: string, newPassword: string): Pr
 // (handleLogoutAll, internal/api/auth.go:350-357).
 //
 // IT DESTROYS THE CALLER'S OWN TOKEN. DeleteTokensForUser is
-// `DELETE FROM api_tokens WHERE user_id = $1` (internal/store/query/tokens.sql:25-26)
+// `DELETE FROM api_tokens WHERE user_id = $1` (internal/store/query/tokens.sql:40-41)
 // with NO `id <> $2`. The hi-fi calls this "Sign out everywhere ELSE"
 // (design_handoff_relay_holo/hifi3-holo-pages.jsx:2796, :3049) and there is no such
 // endpoint: the all-but-current query exists (tokens.sql:28-29) but only the
 // password path routes to it. Labelling this control "else" would understate its
 // blast radius, which is a defect and not a copy nit.
 //
-// A 204 fires NO listener - onUnauthorized is 401-only (lib/api.ts:44-46) - so
-// after this resolves the SPA still holds a token in localStorage against a
-// credential the server has already destroyed, and still believes it is
-// authenticated. The caller MUST tear its own session down immediately; see
-// SessionsTab and AuthProvider.clearSession.
+// A 204 fires NO listener - onUnauthorized is 401-only (the onUnauthorized
+// notifier in lib/api.ts) - so after this resolves the SPA still holds a token
+// in localStorage against a credential the server has already destroyed, and
+// still believes it is authenticated. The caller MUST tear its own session
+// down immediately; see SessionsTab and AuthProvider.clearSession.
 //
 // Note the PLURAL path. DELETE /v1/auth/token (singular) is a different endpoint
 // that revokes only the caller's current token (auth.go:341-348).

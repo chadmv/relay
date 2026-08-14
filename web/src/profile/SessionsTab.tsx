@@ -36,11 +36,11 @@ export function SessionsTab() {
     // CLAUDE.md Invariant 1 - "end the generation before releasing the resource" -
     // read forwards. The resource is ALREADY gone by the time this runs: the
     // server has deleted every bearer token for this user (DeleteTokensForUser,
-    // internal/store/query/tokens.sql:25-26). A 204 fires NO listener -
-    // onUnauthorized is 401-only (lib/api.ts:44-46) - so until we act, the SPA
-    // still holds a token in localStorage and still renders as authenticated
-    // against a credential that no longer exists. So end the generation that
-    // still believes in it before anything can observe it.
+    // internal/store/query/tokens.sql:40-41). A 204 fires NO listener -
+    // onUnauthorized is 401-only (the onUnauthorized notifier in lib/api.ts) - so
+    // until we act, the SPA still holds a token in localStorage and still renders
+    // as authenticated against a credential that no longer exists. So end the
+    // generation that still believes in it before anything can observe it.
     //
     // THERE IS DELIBERATELY NO invalidateQueries HERE, and the omission is the
     // point. The house pattern for a mutation is
@@ -81,7 +81,7 @@ export function SessionsTab() {
 
         {/* The verified blast radius. DeleteTokensForUser is
             `DELETE FROM api_tokens WHERE user_id = $1` with no `id <> $2`
-            (internal/store/query/tokens.sql:25-26), so this browser goes too. A
+            (internal/store/query/tokens.sql:40-41), so this browser goes too. A
             control that understates its own blast radius is worse than a missing
             one. */}
         <p

@@ -58,9 +58,9 @@ async function submit(current: string, next: string) {
 
 test('a 403 renders inline and leaves the user SIGNED IN', async () => {
   // 403, not 401, is the server's own choice (internal/api/auth.go:298-301), and
-  // onUnauthorized is 401-only (web/src/lib/api.ts:44-46). Asserting a specific
-  // 403 is the discriminating input: a test using a generic error mock would pass
-  // against a component that signs the user out on ANY failure.
+  // onUnauthorized is 401-only (the onUnauthorized notifier in lib/api.ts).
+  // Asserting a specific 403 is the discriminating input: a test using a generic
+  // error mock would pass against a component that signs the user out on ANY failure.
   server.use(
     http.put('/v1/users/me/password', () =>
       HttpResponse.json({ error: 'current password is incorrect' }, { status: 403 }),
