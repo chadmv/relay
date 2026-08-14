@@ -78,7 +78,12 @@ test('a 404 reads as absent-or-not-yours, never as a server fault', () => {
 test('an unrecognized error falls back to the server text, never to a generic string', () => {
   const f = classifyRetryFailure(new ApiError(500, 'db error', '500 db error'), 'failed')
   expect(f.kind).toBe('unknown')
-  expect(f.message).toBe('500 db error')
+  // The server's own text is `code` ("db error"), not `message` ("500 db error"):
+  // apiFetch builds message as `${status} ${code}`, and every OTHER classified
+  // branch below renders the clean code (err.code), not the status-prefixed
+  // message. This fallback must match its siblings or a raw HTTP status leaks
+  // into a banner whose neighbors never show one.
+  expect(f.message).toBe('db error')
 })
 
 test('a non-ApiError still renders its own message', () => {

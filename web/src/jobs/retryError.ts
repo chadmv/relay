@@ -16,10 +16,16 @@ import type { RetryMode } from './api'
 // Unrecognized input NEVER collapses to a generic string: it falls through to the
 // server's own text, so the reasons stay distinguishable even if the prose drifts
 // ahead of this file.
+// `raced` is deliberately the longer phrase "...while the retry was in flight",
+// not the shorter "the job changed": the blocked sentence below ALSO contains
+// "the job changed" ("...or the job changed while the REQUEST was in flight..."),
+// so the short form is not branch-unique and retryErrorContract.test.ts could not
+// tell a reworded raced sentence from an unrelated hit on the blocked sentence.
+// "...while the retry was in flight" appears only in the raced sentence.
 export const RETRY_ERROR_PREFIXES = {
   noneMatched: 'no tasks matched',
   blocked: 'no tasks were reopened',
-  raced: 'the job changed',
+  raced: 'the job changed while the retry was in flight',
   cancelled: 'job was cancelled',
   notFinished: 'job is not finished',
 } as const
@@ -85,5 +91,10 @@ export function classifyRetryFailure(err: unknown, mode?: RetryMode): RetryFailu
     }
   }
 
-  return { kind: 'unknown', message: err.message, hint: '' }
+  // err.code, not err.message: every classified branch above renders the
+  // server's clean sentence (ApiError.code), never the status-prefixed
+  // "<status> <code>" (ApiError.message). This fallback must match its siblings
+  // or an unclassified 4xx/5xx would show a raw HTTP status in a banner whose
+  // neighbors never show one.
+  return { kind: 'unknown', message: err.code, hint: '' }
 }
