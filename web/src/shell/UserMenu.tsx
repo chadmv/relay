@@ -179,7 +179,7 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
         // below, and an IDREF pointing at a node that does not exist is an
         // authoring error. aria-expanded, by contrast, is present in BOTH states.
         aria-controls={open ? panelId : undefined}
-        className={`flex min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors ${open ? 'border-accent/45 bg-accent/[0.14]' : 'border-border bg-accent/[0.08]'}`}
+        className={`flex w-full min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors ${open ? 'border-accent/45 bg-accent/[0.14]' : 'border-border bg-accent/[0.08]'}`}
       >
         <span className="truncate text-fg normal-case tracking-normal">{email}</span>
       </button>

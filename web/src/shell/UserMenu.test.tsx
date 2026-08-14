@@ -380,6 +380,22 @@ test('arrow keys do nothing - this is a disclosure, not a menu', async () => {
 // truncate carries overflow:hidden, which is also what drops the SPAN's automatic
 // minimum size to 0; the button needs min-w-0 explicitly because it has no
 // overflow of its own.
+//
+// w-full: found by Task 7's real-browser pass (docs/superpowers/plans/2026-08-13-
+// narrow-viewport-overflow.md), not by any test in this file - jsdom cannot see
+// it. A <button> with display:flex is still a block-level box, but Chrome sizes
+// it via shrink-to-fit against its OWN content rather than filling its (already
+// shrunk) containing block, the way a plain <div> would. min-w-0 alone left the
+// toggle rendering at its full 124px content width even though its parent div had
+// correctly shrunk to 79px, overflowing the viewport by 24px with a real logged-in
+// email ("admin@example.com") - long before the 55-character address this test
+// uses. w-full makes the button's width track its parent's resolved width instead
+// of its own content, which is what lets min-w-0 on the parent actually take
+// effect. Confirmed live in Chrome at 1280px that w-full causes no regression:
+// with no shrink pressure the button still renders at its natural content width,
+// because a percentage-width descendant does not force its shrink-to-fit ancestor
+// to grow to accommodate it - browsers use the descendant's own intrinsic size for
+// that calculation, not its resolved percentage.
 test('the toggle can shrink and truncates a long email rather than setting a header floor', () => {
   render(
     <MemoryRouter>
@@ -387,7 +403,7 @@ test('the toggle can shrink and truncates a long email rather than setting a hea
     </MemoryRouter>,
   )
   const toggle = screen.getByRole('button', { name: /studio\.dev/i })
-  expect(toggle).toHaveClass('min-w-0')
+  expect(toggle).toHaveClass('min-w-0', 'w-full')
   expect(toggle.parentElement).toHaveClass('min-w-0')
   // Positive control: the email is still rendered in full as text, so this is a
   // truncation, not a substring the component silently dropped.
