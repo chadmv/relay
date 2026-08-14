@@ -5,7 +5,7 @@ import { http, HttpResponse } from 'msw'
 import { useState } from 'react'
 import { afterEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
-import { apiFetch } from '../lib/api'
+import { ApiError, apiFetch, apiStream } from '../lib/api'
 import { clearToken, getToken, setToken } from '../lib/token'
 import { AuthProvider, useAuth } from './AuthProvider'
 
@@ -176,4 +176,89 @@ test('a 401 landing DURING teardown still leaves everything torn down', async ()
   expect(screen.getByTestId('status')).toHaveTextContent('anonymous')
   expect(screen.getByTestId('who')).toHaveTextContent('none')
   expect(client.getQueryCache().getAll()).toHaveLength(0)
+})
+
+/**
+ * A 401 SSE response that does not resolve until release() is called. Written
+ * inline rather than through fakeSseServer() because that helper answers
+ * immediately and this test's whole subject is WHEN the 401 lands. The signal is
+ * never consulted: apiStream throws on the 401 before it reaches the read loop.
+ */
+function gatedStream401() {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tokensSeen: (string | null)[] = []
+  const fetchImpl = (async (_url: string, init?: RequestInit) => {
+    tokensSeen.push(new Headers(init?.headers).get('Authorization'))
+    await gate
+    return new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }) as unknown as typeof fetch
+  return { release: () => release(), tokensSeen, fetchImpl }
+}
+
+test('a stream 401 from a DEAD session does not clear the session that replaced it', async () => {
+  // The streaming half of the discriminating case. An SSE connection is long-lived
+  // by construction, so it outlives its own session more readily than any polled
+  // request does - it is the single most likely source of a cross-generation 401.
+  server.use(
+    http.get('/v1/users/me', () => HttpResponse.json(ME)),
+    http.post('/v1/auth/login', () => HttpResponse.json({ token: 'tok_B', expires_at: '' })),
+  )
+  setToken('tok_A')
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('mira@studio.dev'))
+
+  const { release, tokensSeen, fetchImpl } = gatedStream401()
+  const streamed = apiStream('/events?task_id=t1', {
+    signal: new AbortController().signal,
+    onEvent: () => {},
+    fetchImpl,
+  }).catch((e) => e)
+  // Positive control on the setup: the stream really opened, carrying token A.
+  await waitFor(() => expect(tokensSeen).toEqual(['Bearer tok_A']))
+
+  await userEvent.click(screen.getByText('clear'))
+  await waitFor(() => expect(getToken()).toBeNull())
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(getToken()).toBe('tok_B'))
+
+  release()
+  await act(async () => {
+    expect(await streamed).toBeInstanceOf(ApiError)
+  })
+
+  expect(getToken()).toBe('tok_B')
+  expect(screen.getByTestId('status')).toHaveTextContent('authenticated')
+})
+
+test('POSITIVE CONTROL: a stream 401 for the CURRENT token still tears the session down', async () => {
+  // Without this, the test above is also satisfied by an apiStream that stopped
+  // notifying anybody at all - which is exactly what reverting api.ts:128 to a bare
+  // fn() produces, since the listener would then compare undefined against a live
+  // token and reject every stream 401 forever.
+  server.use(http.get('/v1/users/me', () => HttpResponse.json(ME)))
+  setToken('tok_A')
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('mira@studio.dev'))
+
+  const { release, tokensSeen, fetchImpl } = gatedStream401()
+  const streamed = apiStream('/events?task_id=t1', {
+    signal: new AbortController().signal,
+    onEvent: () => {},
+    fetchImpl,
+  }).catch((e) => e)
+  await waitFor(() => expect(tokensSeen).toEqual(['Bearer tok_A']))
+
+  release()
+  await act(async () => {
+    expect(await streamed).toBeInstanceOf(ApiError)
+  })
+
+  expect(getToken()).toBeNull()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
 })
