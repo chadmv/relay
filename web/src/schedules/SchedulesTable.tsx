@@ -5,6 +5,9 @@ import type { Schedule } from './api'
 import { formatRelativeTime, nextRunDisplay, shortId } from './format'
 
 const COLS = 'grid-cols-[1.4fr_120px_110px_90px_1fr_1fr_110px_1.3fr_150px]'
+// Nine columns, 580px of fixed track before any fr gets a pixel - the worst case in
+// the app. 1040 gives the 4.7fr of flexible tracks about 100px each.
+const MIN_W = 'min-w-[1040px]'
 
 const HEADERS: TableColumn[] = [
   { label: 'NAME' },
@@ -43,7 +46,7 @@ export function SchedulesTable({
   }
   return (
     <GlassPanel data-testid="schedules-table">
-      <Table label="Schedules" columns={COLS} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
+      <Table label="Schedules" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
         {schedules.map((s) => {
           const pending = pendingId === s.id
           return (

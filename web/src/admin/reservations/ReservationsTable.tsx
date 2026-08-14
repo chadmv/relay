@@ -17,6 +17,8 @@ import type { Reservation, ReservationSort, ReservationSortField } from './api'
 // dispatch for everyone, so any possessive header would be a claim the scheduler does
 // not implement (internal/scheduler/dispatch.go:185-223).
 const COLS = 'grid-cols-[1.3fr_110px_1.5fr_130px_130px_110px_110px_100px]'
+// Eight columns, 690px of fixed track - second only to SchedulesTable.
+const MIN_W = 'min-w-[980px]'
 
 const HEADERS: TableColumn<ReservationSortField>[] = [
   { label: 'NAME', field: 'name' },
@@ -60,6 +62,7 @@ export function ReservationsTable({
       <Table
         label="Reservations"
         columns={COLS}
+        minWidth={MIN_W}
         headers={HEADERS}
         sort={sort}
         onSort={onSort}

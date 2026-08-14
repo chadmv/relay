@@ -58,9 +58,20 @@ export function StatSection({
               stale · last update failed · {formatRelativeTime(new Date(dataUpdatedAt).toISOString())}
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Stacks below `md`, matching the ServerTab grid that lays these out. */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {cells.map((c) => (
-              <div key={c.label} className={c.wide ? 'col-span-2' : undefined}>
+              /* The wide cell's two-column span is gated behind the SAME
+                 breakpoint as the container, not applied unconditionally: below
+                 md the explicit grid has only ONE track, so an unconditional
+                 span would force an implicit second track plus a gap-3 gutter,
+                 rendering this card ~12px wider than its siblings - the ragged
+                 layout Task 2 of
+                 docs/superpowers/plans/2026-08-13-narrow-viewport-overflow.md
+                 was meant to remove. From md up there are two tracks, where the
+                 gated span correctly covers both, matching the original
+                 desktop-only layout. Enforced by responsive.guard.test.ts. */
+              <div key={c.label} className={c.wide ? 'md:col-span-2' : undefined}>
                 <KpiStat
                   label={c.label}
                   value={c.value === null ? '—' : c.value.toLocaleString()}

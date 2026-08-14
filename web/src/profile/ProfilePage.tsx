@@ -53,17 +53,24 @@ export function ProfilePage() {
   return (
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-end gap-6">
-        <div>
+        {/* min-w-0 here and on the H1: a bootstrap admin with no separate display
+            name renders its email as this 32px heading, which sets a floor at
+            320px the same way UserMenu.tsx's toggle did before its own min-w-0 +
+            truncate fix. */}
+        <div className="min-w-0">
           <Eyebrow>YOUR ACCOUNT</Eyebrow>
-          <h1 className="flex items-center gap-3.5 text-[32px] font-normal tracking-tight">
+          <h1 className="flex min-w-0 items-center gap-3.5 text-[32px] font-normal tracking-tight">
+            {/* shrink-0: a fixed-size tile, not merely one that happens not to
+                shrink today because the truncating name span next to it reaches
+                its own floor first. */}
             <span
               data-testid="profile-initials"
               aria-hidden="true"
-              className="grid h-10 w-10 place-items-center rounded-[10px] bg-gradient-to-br from-accent to-accent-b text-[15px] font-bold tracking-[0.04em] text-bg"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-[10px] bg-gradient-to-br from-accent to-accent-b text-[15px] font-bold tracking-[0.04em] text-bg"
             >
               {initialsOf(user.name)}
             </span>
-            <span>{user.name}</span>
+            <span className="truncate">{user.name}</span>
           </h1>
         </div>
         <div className="ml-auto flex gap-3.5 font-mono text-[11px] tracking-[0.06em] text-fg-mute">

@@ -50,6 +50,43 @@ test('renders the eyebrow, the initials avatar, the name heading and the tab bar
   )
 })
 
+// Found by Task 7's real-browser pass of
+// docs/superpowers/plans/2026-08-13-narrow-viewport-overflow.md, at 320px, not
+// 375: a bootstrap admin with no separate display name renders its email
+// ("admin@example.com") as the 32px H1, which the plan's baseline table never
+// measured because it only recorded MAIN's total width, not this heading's own.
+// REGRESSION PIN (jsdom does no layout) - the overflow (docSW 367 vs clientW 320)
+// was measured in Chrome. min-w-0 has to chain from the flex-wrap row down through
+// the H1 (itself a flex container) to the name span for truncate's overflow:hidden
+// to have anything to constrain against, same shape as UserMenu.tsx.
+test('the name heading can shrink and truncates a long name instead of setting a floor', async () => {
+  renderAt('/profile/identity', {
+    ...ME,
+    name: 'admin@example.com',
+  })
+  const heading = await screen.findByRole('heading', { level: 1 })
+  expect(heading).toHaveClass('min-w-0')
+  expect(heading.parentElement).toHaveClass('min-w-0')
+  const nameSpan = heading.lastElementChild as HTMLElement
+  expect(nameSpan).toHaveClass('truncate')
+  expect(nameSpan).toHaveTextContent('admin@example.com')
+})
+
+// REGRESSION PIN (jsdom does no layout). The avatar tile is a fixed h-10 w-10
+// square and a flex item of the H1 alongside the truncating name span. Today the
+// truncating name reaches its own floor (min-content 0, from `truncate`'s
+// overflow:hidden) before the avatar's automatic minimum would ever bite, so the
+// avatar happens not to shrink in practice - but shrink-0 is the actual
+// guarantee a fixed-size tile needs, not an accident of which sibling floors
+// first. Without it, a future change to the name span (or a shorter name that
+// keeps more of its own natural width) could let the avatar itself absorb the
+// squeeze and render non-square.
+test('the initials avatar does not shrink', async () => {
+  renderAt('/profile/identity')
+  const avatar = await screen.findByTestId('profile-initials')
+  expect(avatar).toHaveClass('shrink-0')
+})
+
 test('the meta strip shows EMAIL, ROLE and MEMBER SINCE with real values', async () => {
   renderAt('/profile/identity')
   await screen.findByRole('heading', { level: 1, name: /Mira Sato/ })

@@ -3,6 +3,9 @@ import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
 const COLS = 'grid-cols-[1fr_110px_80px_120px_1fr]'
+// Fixed tracks total 310px; lives in JobDetailPage's lg:w-[55%] column (~682px at
+// 1280). Rows are as="button", so the whole scrolled width stays clickable.
+const MIN_W = 'min-w-[560px]'
 
 const HEADERS: TableColumn[] = [
   { label: 'NAME' },
@@ -32,7 +35,7 @@ export function TasksTable({
   }
   return (
     <GlassPanel>
-      <Table label="Tasks" columns={COLS} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+      <Table label="Tasks" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
         {tasks.map((t) => {
           const c = taskStatusColor(t.status)
           const selected = t.id === selectedTaskId

@@ -100,7 +100,7 @@ export function ScheduleDetailPage() {
   return (
     <div className="flex flex-col gap-4">
       {/* Breadcrumb + name + state pill + right-aligned action bar. */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex flex-wrap items-center gap-2.5">
         <Link to="/schedules" className="text-[12px] text-fg-mute hover:text-fg">
           &larr; Schedules
         </Link>
@@ -182,7 +182,10 @@ export function ScheduleDetailPage() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-3">
+      {/* Narrow-viewport convention: multi-column bodies stack below `md`, matching
+          admin/server/ServerTab.tsx. See
+          docs/superpowers/plans/2026-08-13-narrow-viewport-overflow.md. */}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="flex flex-col gap-3">
           <Panel title="Trigger" meta="PATCH /v1/scheduled-jobs">
             <ScheduleTriggerForm

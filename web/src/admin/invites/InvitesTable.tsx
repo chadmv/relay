@@ -23,6 +23,8 @@ import type { Invite, InviteSort, InviteSortField } from './api'
 // the endpoint supports both keys in both directions, Table makes the headers
 // free, and the sketch's omission is a fidelity gap rather than a constraint.
 const COLS = 'grid-cols-[1.5fr_110px_110px_1.4fr_110px_1fr]'
+// Fixed tracks total 330px; 740 gives the 3.9fr of flexible tracks about 105px each.
+const MIN_W = 'min-w-[740px]'
 
 const HEADERS: TableColumn<InviteSortField>[] = [
   { label: 'BINDS TO' },
@@ -48,6 +50,7 @@ export function InvitesTable({ invites, sort, onSort, now }: InvitesTableProps) 
       <Table
         label="Invites"
         columns={COLS}
+        minWidth={MIN_W}
         headers={HEADERS}
         sort={sort}
         onSort={onSort}

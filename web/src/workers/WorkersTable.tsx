@@ -6,6 +6,8 @@ import type { Worker, WorkerSort } from './api'
 export type SortField = 'name' | 'status' | 'last_seen_at'
 
 const COLS = 'grid-cols-[1fr_120px_70px_140px_1.2fr_120px]'
+// Fixed tracks total 450px; 680 gives NAME and LABELS about 100px each.
+const MIN_W = 'min-w-[680px]'
 
 const HEADERS: TableColumn<SortField>[] = [
   { label: 'NAME', field: 'name' },
@@ -32,6 +34,7 @@ export function WorkersTable({
       <Table
         label="Workers"
         columns={COLS}
+        minWidth={MIN_W}
         headers={HEADERS}
         sort={sort}
         onSort={onSort}

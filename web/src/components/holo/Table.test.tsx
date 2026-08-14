@@ -30,14 +30,25 @@ test('ariaSort and sortCaret anchor the descending prefix, not any interior hyph
   expect(sortCaret('a-b', '-a-b')).toBe(' ▼')
 })
 
+// PLACEHOLDER_MIN_W: minWidth is a required prop, so every render in this file
+// must pass one; tests below this point that are not exercising minWidth's own
+// behaviour use this dummy value, which is intentionally too narrow to be
+// mistaken for a real consumer's sizing.
+const PLACEHOLDER_MIN_W = 'min-w-[1px]'
+
 test('renders a table role whose accessible name is the label', () => {
-  render(<Table label="Widgets" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]} />)
+  render(<Table label="Widgets" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]} />)
   expect(screen.getByRole('table', { name: 'Widgets' })).toBeInTheDocument()
 })
 
 test('renders a header row with one columnheader per configured column', () => {
   render(
-    <Table label="W" columns="grid-cols-[1fr_1fr_1fr]" headers={[{ label: 'A' }, { label: 'B' }, { label: 'C' }]} />,
+    <Table
+      label="W"
+      columns="grid-cols-[1fr_1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
+      headers={[{ label: 'A' }, { label: 'B' }, { label: 'C' }]}
+    />,
   )
   expect(screen.getAllByRole('row')).toHaveLength(1)
   expect(screen.getAllByRole('columnheader')).toHaveLength(3)
@@ -45,7 +56,7 @@ test('renders a header row with one columnheader per configured column', () => {
 
 test('applies the grid template to the header row and to every TableRow', () => {
   render(
-    <Table label="W" columns="grid-cols-[1fr_80px]" headers={[{ label: 'A' }, { label: 'B' }]}>
+    <Table label="W" columns="grid-cols-[1fr_80px]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }, { label: 'B' }]}>
       <TableRow data-testid="r1">
         <TableCell>x</TableCell>
         <TableCell>y</TableCell>
@@ -65,7 +76,14 @@ test('emits aria-sort only on sortable headers, and follows the active sort', ()
     { label: 'STATIC' },
   ]
   const { rerender } = render(
-    <Table label="W" columns="grid-cols-[1fr_1fr_1fr]" headers={headers} sort="-created_at" onSort={() => {}} />,
+    <Table
+      label="W"
+      columns="grid-cols-[1fr_1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
+      headers={headers}
+      sort="-created_at"
+      onSort={() => {}}
+    />,
   )
   expect(screen.getByRole('columnheader', { name: /^CREATED/ })).toHaveAttribute('aria-sort', 'descending')
   expect(screen.getByRole('columnheader', { name: /^NAME/ })).toHaveAttribute('aria-sort', 'none')
@@ -73,7 +91,14 @@ test('emits aria-sort only on sortable headers, and follows the active sort', ()
   expect(screen.getByRole('columnheader', { name: 'STATIC' })).not.toHaveAttribute('aria-sort')
 
   rerender(
-    <Table label="W" columns="grid-cols-[1fr_1fr_1fr]" headers={headers} sort="created_at" onSort={() => {}} />,
+    <Table
+      label="W"
+      columns="grid-cols-[1fr_1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
+      headers={headers}
+      sort="created_at"
+      onSort={() => {}}
+    />,
   )
   expect(screen.getByRole('columnheader', { name: /^CREATED/ })).toHaveAttribute('aria-sort', 'ascending')
 })
@@ -81,10 +106,12 @@ test('emits aria-sort only on sortable headers, and follows the active sort', ()
 test('the caret follows the active sort direction', () => {
   const headers = [{ label: 'NAME', field: 'name' as const }]
   const { rerender } = render(
-    <Table label="W" columns="grid-cols-[1fr]" headers={headers} sort="-name" onSort={() => {}} />,
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
   )
   expect(screen.getByRole('button', { name: 'NAME ▼' })).toBeInTheDocument()
-  rerender(<Table label="W" columns="grid-cols-[1fr]" headers={headers} sort="name" onSort={() => {}} />)
+  rerender(
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="name" onSort={() => {}} />,
+  )
   expect(screen.getByRole('button', { name: 'NAME ▲' })).toBeInTheDocument()
 })
 
@@ -94,6 +121,7 @@ test('clicking a sortable header calls onSort with that column field', async () 
     <Table
       label="W"
       columns="grid-cols-[1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
       headers={[{ label: 'NAME', field: 'name' as const }, { label: 'STATIC' }]}
       sort="-created_at"
       onSort={onSort}
@@ -110,6 +138,7 @@ test('a right-aligned header carries text-right, and a plain one carries no clas
     <Table
       label="W"
       columns="grid-cols-[1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
       headers={[{ label: 'A' }, { label: 'ACT', align: 'right' }]}
     />,
   )
@@ -120,7 +149,7 @@ test('a right-aligned header carries text-right, and a plain one carries no clas
 test('TableRow renders as the element named by `as` and forwards arbitrary props', async () => {
   const onClick = vi.fn()
   render(
-    <Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]}>
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]}>
       <TableRow as="button" type="button" aria-selected data-testid="row-btn" onClick={onClick}>
         <TableCell>x</TableCell>
       </TableRow>
@@ -137,7 +166,7 @@ test('TableRow renders as the element named by `as` and forwards arbitrary props
 
 test('TableCell exposes role=cell and merges its className', () => {
   render(
-    <Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]}>
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]}>
       <TableRow>
         <TableCell className="text-fg-mute">only</TableCell>
       </TableRow>
@@ -157,7 +186,7 @@ test('a caller-passed role does not override the role the primitive owns', () =>
   const rowProps = { role: 'presentation' } as Record<string, string>
   const cellProps = { role: 'rowheader' } as Record<string, string>
   render(
-    <Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'A' }]}>
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]}>
       <TableRow data-testid="row" {...rowProps}>
         <TableCell data-testid="cell" {...cellProps}>
           x
@@ -175,7 +204,14 @@ test('a sortable header without an onSort handler throws instead of rendering a 
   // when activated - it type-checks and looks correct but is silently broken.
   const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
   expect(() =>
-    render(<Table label="W" columns="grid-cols-[1fr]" headers={[{ label: 'NAME', field: 'name' as const }]} />),
+    render(
+      <Table
+        label="W"
+        columns="grid-cols-[1fr]"
+        minWidth={PLACEHOLDER_MIN_W}
+        headers={[{ label: 'NAME', field: 'name' as const }]}
+      />,
+    ),
   ).toThrow(/onSort/)
   spy.mockRestore()
 })
@@ -187,7 +223,12 @@ test('does not warn about duplicate React keys when two headers share a label', 
   // would collide as React keys.
   const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
   render(
-    <Table label="W" columns="grid-cols-[1fr_1fr]" headers={[{ label: 'DUP' }, { label: 'DUP' }]} />,
+    <Table
+      label="W"
+      columns="grid-cols-[1fr_1fr]"
+      minWidth={PLACEHOLDER_MIN_W}
+      headers={[{ label: 'DUP' }, { label: 'DUP' }]}
+    />,
   )
   const dupKeyWarning = spy.mock.calls.some((args) => String(args[0]).includes('same key'))
   expect(dupKeyWarning).toBe(false)
@@ -200,4 +241,88 @@ test('TableRow rendered outside a Table throws, naming both components', () => {
   const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
   expect(() => render(<TableRow>orphan</TableRow>)).toThrow(/TableRow must be rendered inside a Table/)
   spy.mockRestore()
+})
+
+// Cause 2 of docs/backlog/bug-2026-08-12-web-narrow-viewport-horizontal-overflow.md.
+// Every consumer's template has fixed px tracks that sum past a narrow viewport
+// (SchedulesTable's nine columns total 580px of fixed track before any `fr` gets a
+// pixel), and nothing wrapped them in a scroll region.
+//
+// The min-width is NOT decoration and it is not a substitute for the wrapper. With
+// negative free space an `fr` track falls back to its CONTENT minimum, and the
+// header row and the body rows are SEPARATE grid containers whose content minimums
+// differ ("NAME" versus a truncating link, whose min-content is 0) - so the columns
+// visibly desynchronize. A shared min-width keeps free space non-negative, at which
+// point `fr` resolves identically in both. That agreement is the property this
+// primitive exists to own, which is why minWidth travels on the same context string
+// as columns rather than being applied by hand in each consumer.
+test('minWidth lands on the header row and on every body row as ONE identical class string', () => {
+  render(
+    <Table label="W" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }, { label: 'B' }]}>
+      <TableRow data-testid="r1">
+        <TableCell>x</TableCell>
+        <TableCell>y</TableCell>
+      </TableRow>
+    </Table>,
+  )
+  const header = screen.getAllByRole('row')[0]
+  const row = screen.getByTestId('r1')
+  expect(header).toHaveClass('grid', 'grid-cols-[1fr_80px]', 'min-w-[640px]')
+  expect(row).toHaveClass('grid', 'grid-cols-[1fr_80px]', 'min-w-[640px]', 'items-center')
+  // The load-bearing assertion: not "both have a min-width" but "both have the
+  // SAME one". A per-element implementation can satisfy the two lines above and
+  // still put the two grids out of agreement.
+  const gridOf = (el: HTMLElement) =>
+    el.className.split(/\s+/).filter((c) => c.startsWith('grid-cols-') || c.startsWith('min-w-')).sort().join(' ')
+  expect(gridOf(row)).toBe(gridOf(header))
+})
+
+test('minWidth wraps the table subtree in a scroll container, and nothing else moves', () => {
+  render(
+    <div data-testid="frame">
+      <Table label="W" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }]} />
+      <div data-testid="footer">page 1 of 3</div>
+    </div>,
+  )
+  const table = screen.getByRole('table', { name: 'W' })
+  expect(table.parentElement).toHaveClass('overflow-x-auto')
+  // The scroll container wraps the role="table" subtree ONLY. Footers, error
+  // banners and dialogs are siblings of <Table> in every consumer, and they must
+  // stay outside the scroll region or a paginator would scroll away with the rows.
+  expect(screen.getByTestId('footer').parentElement).toBe(screen.getByTestId('frame'))
+  expect(screen.getByTestId('footer').closest('.overflow-x-auto')).toBeNull()
+  // And the wrapper is not a frame: overflow only, no border/background/padding,
+  // per the no-frame contract in Table.tsx's header comment.
+  expect(table.parentElement?.className).toBe('overflow-x-auto')
+})
+
+// "Without minWidth the DOM is byte-identical" was deleted here: minWidth is now
+// a required prop (TableProps), so omitting it is a configuration no production
+// code (or valid test code) can express any more - `tsc -b` rejects the call site
+// itself, which is a stronger guarantee than a runtime DOM assertion ever gave.
+// See the deleted `every Table call site opts in to a scroll min-width` test in
+// responsive.guard.test.ts, which this replaces.
+
+// EnrollmentsTable and InvitesTable have ZERO focusable elements in any row - no
+// links, no buttons - so their clipped right-hand columns were reachable only via
+// the scroll wrapper's own implicit scroller focusability, which Chromium grants
+// and Safari does not, and which was never exercised by a real Tab press in any
+// environment this slice's verification could reach. It is also an axe
+// scrollable-region-focusable violation as shipped: a scrollable region with no
+// other means of keyboard reaching its overflowing content needs its own tab
+// stop. tabIndex={0} plus role="group" (a scroll region is not a landmark, but it
+// needs SOME accessible-name-bearing role for the aria-label to attach to) fixes
+// both. The label is derived from the existing `label` prop, not a second
+// constant, so it can never drift from the table's own accessible name.
+test('the scroll wrapper is a keyboard-reachable, labelled group', () => {
+  render(<Table label="Widgets" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }]} />)
+  const table = screen.getByRole('table', { name: 'Widgets' })
+  const wrapper = table.parentElement as HTMLElement
+  // The DOM attribute is lowercase ("tabindex") regardless of the JSX prop's
+  // casing - React reflects tabIndex onto the standard HTML attribute name.
+  expect(wrapper).toHaveAttribute('tabindex', '0')
+  expect(wrapper).toHaveAttribute('role', 'group')
+  // Derived, not duplicated: a caller who renames the table via `label` cannot
+  // leave this one stale by forgetting a second place to update it.
+  expect(wrapper).toHaveAccessibleName(expect.stringContaining('Widgets'))
 })

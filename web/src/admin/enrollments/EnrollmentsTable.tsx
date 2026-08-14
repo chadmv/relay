@@ -14,6 +14,8 @@ import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api
 // is no DELETE /v1/agent-enrollments/{id} in v1.
 // CREATED is added because it is the default sort key and needs a clickable header.
 const COLS = 'grid-cols-[1.6fr_130px_130px_120px_1fr]'
+// Fixed tracks total 380px.
+const MIN_W = 'min-w-[660px]'
 
 const HEADERS: TableColumn<EnrollmentSortField>[] = [
   { label: 'HOSTNAME HINT' },
@@ -38,6 +40,7 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
       <Table
         label="Agent enrollments"
         columns={COLS}
+        minWidth={MIN_W}
         headers={HEADERS}
         sort={sort}
         onSort={onSort}

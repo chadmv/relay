@@ -70,7 +70,7 @@ export function WorkerDetailPage() {
   return (
     <div className={`flex flex-col gap-4 ${view.dimClass}`}>
       {/* Breadcrumb + header row: back link, name, inline status chip; action bar (admin, ml-auto). */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex flex-wrap items-center gap-2.5">
         <Link to="/workers" className="text-[12px] text-fg-mute hover:text-fg">
           &larr; Workers
         </Link>
@@ -95,8 +95,9 @@ export function WorkerDetailPage() {
       {/* Admin action bar (repositioned WorkerActions; banners + edit form render below the header). */}
       {isAdmin && <WorkerActions worker={worker} />}
 
-      {/* KPI stat row. */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* KPI stat row. Two-up rather than one-up below `md`: four short stat cards
+          stacked singly push the page body a screen down for no gain. */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <KpiStat label="CPU · RAM" value={`${worker.cpu_cores}c · ${worker.ram_gb}G`} sub={`os: ${worker.os}`} />
         <KpiStat
           label="GPU"
@@ -110,8 +111,8 @@ export function WorkerDetailPage() {
         <KpiStat label="Jobs today" value="—" sub="activity endpoint pending" />
       </div>
 
-      {/* Two-column body. */}
-      <div className="grid grid-cols-2 gap-3">
+      {/* Two-column body. Stacks below `md`, matching ServerTab.tsx. */}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {/* Left column. */}
         <div className="flex flex-col gap-3">
           {/* Backend-blocked: no per-worker task feed endpoint exists yet.
