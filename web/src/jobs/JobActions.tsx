@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { PillButton } from '../components/holo'
 import { useJobActions } from './useJobActions'
+import { classifyRetryFailure } from './retryError'
 import type { JobDetail } from './api'
 
 type Pending = null | 'cancel' | 'force' | 'retry-failed' | 'retry-all'
@@ -29,6 +30,11 @@ export function JobActions({ job }: { job: JobDetail }) {
   const retryable = job.status === 'done' || job.status === 'failed'
 
   const actionError = cancel.error as Error | null
+  // `retry.variables` is TanStack's record of the argument the last mutate() call
+  // carried, i.e. the mode this failure belongs to. It is defined whenever
+  // retry.error is, and reset() clears both together, so no separate state is
+  // needed to give the blocked hint its mode.
+  const retryFailure = retry.error ? classifyRetryFailure(retry.error, retry.variables) : null
 
   function openConfirm(which: Exclude<Pending, null>) {
     // Both mutations are reset, so a stale banner from the OTHER action cannot
@@ -106,9 +112,24 @@ export function JobActions({ job }: { job: JobDetail }) {
         </div>
       )}
 
-      {actionError ? (
+      {retryFailure ? (
+        <div className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
+          <div>{retryFailure.message}</div>
+          {retryFailure.hint ? <div className="mt-1 text-fg-mute">{retryFailure.hint}</div> : null}
+        </div>
+      ) : actionError ? (
         <div className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
           {actionError.message}
+        </div>
+      ) : null}
+
+      {/* The success line and the banner both sit OUTSIDE the availability gate on
+          purpose: a successful retry flips the job to `running`, which hides the
+          retry pills on the very refetch this success triggered. Rendering the
+          confirmation inside that gate would unmount it immediately. */}
+      {retry.data ? (
+        <div className="rounded-card border border-ok/40 bg-ok/10 px-4 py-2 text-[12px] text-ok">
+          Retried {retry.data.tasks_retried} {retry.data.tasks_retried === 1 ? 'task' : 'tasks'}.
         </div>
       ) : null}
 
