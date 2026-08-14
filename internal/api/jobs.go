@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -801,4 +802,194 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, toJobResponse(job, "", nil, nil))
+}
+
+// retryJobResponse is the body returned by POST /v1/jobs/{id}/retry. It embeds
+// jobResponse (its fields flatten into the JSON object) and adds one key, the
+// same shape disableWorkerResponse uses for requeued_tasks. tasks_retried is
+// always >= 1 on a 200: a zero-match retry is a 409, never a successful no-op,
+// so a client never has to tell a no-op from a real re-run by reading a number.
+type retryJobResponse struct {
+	jobResponse
+	TasksRetried int `json:"tasks_retried"`
+}
+
+// uuidStrList renders task ids for the two server-side diagnostic log lines.
+// The blocked ids belong in the log, not in the error body: every handler in
+// this codebase errors through writeError into {"error": string}, and inventing
+// a second error shape for one endpoint is a bigger change than the diagnosis is
+// worth. The per-task detail is one GET /v1/jobs/{id} away.
+func uuidStrList(ids []pgtype.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = uuidStr(id)
+	}
+	return out
+}
+
+// handleRetryJob returns a finished job's tasks to the queue so the farm re-runs
+// them. See docs/superpowers/specs/2026-08-13-job-retry-endpoint.md.
+//
+// This is a fenced multi-row write on tasks. The ordering below is load-bearing
+// and every 4xx/5xx path returns before the commit, so the deferred rollback
+// undoes any write - which is what makes "nothing was applied" literally true.
+//
+// No request body: ?task= is a query parameter, matching ?force= on the cancel
+// sibling. readJSON is never called and must not be added.
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+
+	// ?task is required, single-valued and matched exactly. Query().Get() would
+	// silently return the first of a repeated parameter, and ParseBool-style
+	// leniency is wrong here: ?force=garbage fails safe to "graceful", while a
+	// misread here means "re-ran everything". Parsed BEFORE any database work,
+	// so a malformed request costs nothing and returns the same 400 for an
+	// existing and a non-existent job.
+	vals := r.URL.Query()["task"]
+	if len(vals) != 1 || (vals[0] != "failed" && vals[0] != "all") {
+		writeError(w, http.StatusBadRequest,
+			`query parameter "task" is required and must be exactly "failed" or "all"`)
+		return
+	}
+	mode := vals[0]
+	includeDone := mode == "all"
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer tx.Rollback(ctx)
+	q := s.q.WithTx(tx)
+
+	// Lock the job row FIRST, before touching any task row. handleCancelJob does
+	// the same; see GetJobForUpdate for the two properties that depend on it.
+	job, err := q.GetJobForUpdate(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "job not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	if !s.jobOwnerOr404(ctx, w, job) {
+		return
+	}
+
+	// Retry requires a finished job. Because this gate admits only done and
+	// failed, the ONLY job-status transition this endpoint can cause is
+	// done|failed -> running, so RecomputeJobStatus - which has no notion of
+	// `cancelled` - is unreachable from a cancelled job through this path. That
+	// is a stronger property than fixing its CASE would give, and it is
+	// verifiable by reading these eight lines.
+	//
+	// A cancelled job is refused rather than un-cancelled: CancelJobTasks
+	// squashes cancellation onto `failed`, so ?task=failed on a cancelled job
+	// would select every task that was in flight when the cancel landed. "Retry"
+	// would silently mean "un-cancel everything".
+	switch job.Status {
+	case "done", "failed":
+	case "cancelled":
+		writeError(w, http.StatusConflict,
+			"job was cancelled; retry is not available for a cancelled job")
+		return
+	default:
+		writeError(w, http.StatusConflict,
+			"job is not finished; retry is available for a done or failed job")
+		return
+	}
+
+	selected, err := q.SelectRetryableTaskIDs(ctx, store.SelectRetryableTaskIDsParams{
+		JobID: id, IncludeDone: includeDone,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if len(selected) == 0 {
+		if includeDone {
+			writeError(w, http.StatusConflict,
+				"no tasks matched task=all; this job has no finished tasks")
+		} else {
+			writeError(w, http.StatusConflict,
+				"no tasks matched task=failed; this job has no failed or timed_out tasks")
+		}
+		return
+	}
+
+	reopened, err := q.RetryJobTasks(ctx, store.RetryJobTasksParams{
+		JobID: id, IncludeDone: includeDone,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	// The dependents guard is all-or-nothing by construction (its NOT EXISTS is
+	// uncorrelated), so zero-against-nonzero is the guard and any other mismatch
+	// is provably concurrency. That structural argument is why no extra query is
+	// needed to classify these two cases apart.
+	if len(reopened) == 0 {
+		log.Printf("api: retry job %s task=%s blocked by dependents: selected=%v",
+			uuidStr(id), mode, uuidStrList(selected))
+		writeError(w, http.StatusConflict,
+			"no tasks were reopened: a selected task has dependents that have already run, "+
+				"or the job changed while the request was in flight; nothing was applied")
+		return
+	}
+	if len(reopened) != len(selected) {
+		log.Printf("api: retry job %s task=%s raced: selected=%v reopened=%v",
+			uuidStr(id), mode, uuidStrList(selected), uuidStrList(reopened))
+		writeError(w, http.StatusConflict,
+			"the job changed while the retry was in flight; nothing was applied - try again")
+		return
+	}
+
+	// By construction this returns 'running': at least one task is now pending.
+	if _, err := q.RecomputeJobStatus(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	// Re-read inside the transaction so the response carries the recomputed
+	// status and the new updated_at; RecomputeJobStatus returns only the status.
+	job, err = q.GetJob(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Wake the dispatcher from INSIDE the transaction. Postgres queues pg_notify
+	// payloads until commit, so this side effect is gated on BOTH the row count
+	// (we only reach here with len(reopened) == len(selected) >= 1) and on the
+	// transaction actually committing - a strictly stronger form of "gate any
+	// side effect on the fence having matched" than a post-commit call. Same
+	// shape as the requeue path in workers.go.
+	if err := q.NotifyTaskSubmitted(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// After commit, matching handleCancelJob. Unlike cancel there is no agent
+	// signal to send: every reopened row was terminal, so no agent holds it.
+	s.broker.Publish(events.Event{
+		Type:  "job",
+		JobID: uuidStr(job.ID),
+		Data:  []byte(`{"status":"running"}`),
+	})
+
+	writeJSON(w, http.StatusOK, retryJobResponse{
+		jobResponse:  toJobResponse(job, "", nil, nil),
+		TasksRetried: len(reopened),
+	})
 }
