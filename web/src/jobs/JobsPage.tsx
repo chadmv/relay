@@ -124,7 +124,7 @@ export function JobsPage() {
           <span><b className="text-[18px] text-ok">{stats?.done_24h ?? 0}</b> DONE·24H</span>
           <span><b className="text-[18px] text-err">{stats?.failed_24h ?? 0}</b> FAILED·24H</span>
         </div>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex flex-wrap items-center gap-3">
           <span className="font-mono text-[10px] text-fg-mute">
             <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
           </span>

@@ -217,7 +217,7 @@ export function WorkersPage() {
           <span><b className="text-err">{counts.offline}</b> OFFLINE</span>
           <span className="text-fg-dim">· <span>{`${counts.total} workers`}</span></span>
         </div>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex flex-wrap items-center gap-3">
           {sectionTabs}
           <span className="font-mono text-[10px] text-fg-mute">
             <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing

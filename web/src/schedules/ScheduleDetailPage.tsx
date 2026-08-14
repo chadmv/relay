@@ -100,7 +100,7 @@ export function ScheduleDetailPage() {
   return (
     <div className="flex flex-col gap-4">
       {/* Breadcrumb + name + state pill + right-aligned action bar. */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex flex-wrap items-center gap-2.5">
         <Link to="/schedules" className="text-[12px] text-fg-mute hover:text-fg">
           &larr; Schedules
         </Link>

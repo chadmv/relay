@@ -70,7 +70,7 @@ export function WorkerDetailPage() {
   return (
     <div className={`flex flex-col gap-4 ${view.dimClass}`}>
       {/* Breadcrumb + header row: back link, name, inline status chip; action bar (admin, ml-auto). */}
-      <div className="flex items-center gap-2.5">
+      <div className="flex flex-wrap items-center gap-2.5">
         <Link to="/workers" className="text-[12px] text-fg-mute hover:text-fg">
           &larr; Workers
         </Link>

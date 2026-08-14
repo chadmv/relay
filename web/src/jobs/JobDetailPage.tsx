@@ -100,7 +100,10 @@ export function JobDetailPage() {
           retry endpoint and "Abort" is just cancel; the real Cancel/Force cancel
           live in JobActions. */}
       <div className="flex flex-col gap-1">
-        <div className="flex items-center gap-2.5">
+        {/* flex-wrap so the breadcrumb, the 28px title and the action bar stack
+            instead of setting a floor under <main> - MAIN measured 458px at a 375px
+            viewport without it. Matches TaskLogPage's breadcrumb row. */}
+        <div className="flex flex-wrap items-center gap-2.5">
           <Link to="/jobs" className="font-mono text-[11px] text-fg-mute hover:text-fg">&larr; Jobs</Link>
           <span className="text-fg-dim">/</span>
           <span className="font-mono text-[12px] text-accent">{job.id.slice(0, 8)}</span>
