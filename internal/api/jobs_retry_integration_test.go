@@ -322,3 +322,158 @@ func TestRetryJob_JobStatusRecomputedToRunningInsideTheTransaction(t *testing.T)
 	assert.True(t, after.UpdatedAt.Time.After(before.UpdatedAt.Time),
 		"RecomputeJobStatus stamps updated_at, and it ran in the same transaction as the reopen")
 }
+
+// installSkipUpdateTrigger makes UPDATEs on the named task a silent no-op, so
+// RetryJobTasks matches it but produces no RETURNING row. This is the ONLY
+// deterministic way to reach the handler's count-mismatch branch: two concurrent
+// retries cannot, because both take the job row lock first and fully serialize
+// (see the plan's Deviations section). Modeled on installFailDeleteTrigger.
+func installSkipUpdateTrigger(t *testing.T, pool *pgxpool.Pool, taskName string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE OR REPLACE FUNCTION skip_update_task() RETURNS trigger AS $$
+		BEGIN
+		  IF NEW.name = %s THEN RETURN NULL; END IF;
+		  RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER skip_update_tasks BEFORE UPDATE ON tasks
+		FOR EACH ROW EXECUTE FUNCTION skip_update_task();
+	`, quoteLiteral(taskName)))
+	require.NoError(t, err)
+}
+
+func quoteLiteral(s string) string { return "'" + s + "'" }
+
+func TestRetryJob_CancelledJob_409_NothingChanged(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-cancelled@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	e.task(t, job, "t", "running")
+
+	// Cancel through the real endpoint, so CancelJobTasks squashes the running
+	// task onto `failed` exactly as production does. That squash is why retry on
+	// a cancelled job would mean "un-cancel everything".
+	cancelReq := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+uuidString(job.ID), nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+token)
+	cancelRec := httptest.NewRecorder()
+	e.srv.Handler().ServeHTTP(cancelRec, cancelReq)
+	require.Equal(t, http.StatusOK, cancelRec.Code)
+	require.Equal(t, "cancelled", e.getJob(t, job.ID).Status)
+
+	tasksBefore, err := e.q.ListTasksByJob(t.Context(), job.ID)
+	require.NoError(t, err)
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, errBody(t, rec), "job was cancelled")
+
+	assert.Equal(t, "cancelled", e.getJob(t, job.ID).Status,
+		"RecomputeJobStatus is cancelled-blind; this endpoint must never reach it from cancelled")
+	for _, was := range tasksBefore {
+		got := e.getTask(t, was.ID)
+		assert.Equal(t, was.Status, got.Status)
+		assert.Equal(t, was.AssignmentEpoch, got.AssignmentEpoch)
+	}
+}
+
+func TestRetryJob_NonTerminalJob_409(t *testing.T) {
+	for _, tc := range []struct{ name, taskStatus, jobStatus string }{
+		{"pending", "pending", "pending"},
+		{"running", "running", "running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRetryEnv(t)
+			owner := createTestUser(t, e.q, "Owner",
+				fmt.Sprintf("retry-nonterm-%s@example.com", tc.name), false)
+			token := createTestToken(t, e.q, owner.ID)
+			job := e.job(t, owner.ID)
+			task := e.task(t, job, "t", tc.taskStatus)
+			if tc.taskStatus != "pending" {
+				require.Equal(t, tc.jobStatus, e.recompute(t, job))
+			}
+
+			rec := e.do(t, token, uuidString(job.ID), "task=all")
+			require.Equal(t, http.StatusConflict, rec.Code)
+			assert.Contains(t, errBody(t, rec), "job is not finished")
+
+			got := e.getTask(t, task.ID)
+			assert.Equal(t, tc.taskStatus, got.Status)
+			assert.Equal(t, task.AssignmentEpoch, got.AssignmentEpoch)
+		})
+	}
+}
+
+// Case A. The item leaves the zero-match outcome open; the spec chose 409, so a
+// client never gets a success toast and three refetches for a job that did not
+// change.
+func TestRetryJob_ZeroMatched_409_CaseA(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-zero@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	e.task(t, job, "t", "done")
+	require.Equal(t, "done", e.recompute(t, job))
+	before := e.getJob(t, job.ID)
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, errBody(t, rec), "no failed or timed_out tasks")
+
+	after := e.getJob(t, job.ID)
+	assert.Equal(t, "done", after.Status)
+	assert.Equal(t, before.UpdatedAt.Time, after.UpdatedAt.Time,
+		"a refused retry must not stamp updated_at, which the 24h stats buckets window on")
+}
+
+// Case B. The selection is non-empty but the guard blocks everything.
+func TestRetryJob_DependentsBlocked_409_CaseB_NothingApplied(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-blocked@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	tsk := e.task(t, job, "t", "failed")
+	dep := e.task(t, job, "d", "done")
+	require.NoError(t, e.q.CreateTaskDependency(t.Context(), store.CreateTaskDependencyParams{
+		TaskID: dep.ID, DependsOnTaskID: tsk.ID,
+	}))
+	require.Equal(t, "failed", e.recompute(t, job))
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, errBody(t, rec), "dependents that have already run")
+
+	assert.Equal(t, "failed", e.getTask(t, tsk.ID).Status)
+	assert.Equal(t, tsk.AssignmentEpoch, e.getTask(t, tsk.ID).AssignmentEpoch)
+	assert.Equal(t, "failed", e.getJob(t, job.ID).Status)
+}
+
+// Case C, forced deterministically. See installSkipUpdateTrigger: racing two
+// retries cannot produce this, because the job row lock serializes them.
+func TestRetryJob_PartialMatch_409_CaseC_RollbackIsTotal(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-partial@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+	keep := e.task(t, job, "t-keep", "failed")
+	skip := e.task(t, job, "t-skip", "failed")
+	require.Equal(t, "failed", e.recompute(t, job))
+	before := e.getJob(t, job.ID)
+
+	installSkipUpdateTrigger(t, e.pool, "t-skip")
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, errBody(t, rec), "the job changed while the retry was in flight")
+
+	// Rollback is TOTAL: the row that did update must be back where it started.
+	got := e.getTask(t, keep.ID)
+	assert.Equal(t, "failed", got.Status, "a partial retry must never be committed")
+	assert.Equal(t, keep.AssignmentEpoch, got.AssignmentEpoch,
+		"the rolled-back row must not keep its epoch bump")
+	assert.Equal(t, "failed", e.getTask(t, skip.ID).Status)
+	after := e.getJob(t, job.ID)
+	assert.Equal(t, "failed", after.Status)
+	assert.Equal(t, before.UpdatedAt.Time, after.UpdatedAt.Time)
+}
