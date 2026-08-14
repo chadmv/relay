@@ -12,13 +12,48 @@ export class ApiError extends Error {
   }
 }
 
-type Listener = () => void
+// The token the request actually attached, or null if it went out unauthenticated.
+// It is the 401's IDENTITY: a subscriber must be able to tell a 401 belonging to
+// the credential it holds now from one belonging to a session that is already
+// dead. Widened from `() => void`; a zero-parameter callback is still assignable,
+// so existing subscribers that do not care are unaffected.
+type Listener = (token: string | null) => void
 const unauthorizedListeners = new Set<Listener>()
 
-/** Register a callback fired whenever a request returns 401. Returns an unsubscribe fn. */
+/**
+ * Register a callback fired whenever a request returns 401, with the token that
+ * request carried. Returns an unsubscribe fn.
+ *
+ * The token argument is not optional context - it is what makes the notification
+ * actionable. Firing bare would tell every subscriber only THAT a 401 happened,
+ * so a 401 from a revoked credential would look identical to one from the live
+ * session and could tear down a session issued seconds after it. Subscribers that
+ * act on a 401 must compare this against the credential they hold; see
+ * AuthProvider's onUnauthorized subscription.
+ */
 export function onUnauthorized(fn: Listener): () => void {
   unauthorizedListeners.add(fn)
   return () => unauthorizedListeners.delete(fn)
+}
+
+// Both fire sites (apiFetch and apiStream) call this instead of iterating
+// unauthorizedListeners directly. Set#forEach does not catch a callback's own
+// throw: an uncaught one would stop iteration (subscribers registered after the
+// throwing one never run) AND propagate out of apiFetch/apiStream, replacing the
+// real result - the ApiError the caller is about to throw for this 401 - with an
+// unrelated error from a subscriber that has nothing to do with the request. One
+// buggy subscriber must not be able to silently break every other subscriber or
+// turn every 401 in the app into a surprise thrown Error.
+function notifyUnauthorized(token: string | null): void {
+  unauthorizedListeners.forEach((fn) => {
+    try {
+      fn(token)
+    } catch (err) {
+      // The token itself must never reach console - it is the SPA's bearer
+      // credential. Only the subscriber's own error is logged.
+      console.error('onUnauthorized listener threw', err)
+    }
+  })
 }
 
 interface ApiOptions extends Omit<RequestInit, 'body'> {
@@ -42,7 +77,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   })
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn())
+    notifyUnauthorized(token)
   }
 
   if (!res.ok) {
@@ -91,7 +126,7 @@ function isAbortSignalRealmMismatch(err: unknown): boolean {
  *
  * It lives HERE, next to apiFetch, on purpose: the bearer token (token.ts:3-5) is
  * attached in exactly one place, and a streaming 401 fires the same
- * onUnauthorized notifier AuthProvider subscribes to (AuthProvider.tsx:39-49).
+ * onUnauthorized notifier AuthProvider subscribes to (its onUnauthorized effect).
  * Otherwise a revoked token would turn into a silently empty log instead of a
  * redirect to sign-in. sse.ts holds framing only and knows nothing about auth.
  *
@@ -125,7 +160,7 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   }
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn())
+    notifyUnauthorized(token)
   }
 
   // A non-ok response arrives as JSON BEFORE the headers switch to

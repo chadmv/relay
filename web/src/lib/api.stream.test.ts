@@ -43,7 +43,7 @@ test('a 401 fires the onUnauthorized listeners and does not retry', async () => 
     }),
   ).rejects.toBeInstanceOf(ApiError)
   // Without this, a revoked token becomes a silently empty log instead of a
-  // redirect to sign-in (AuthProvider.tsx:39-49 is the subscriber).
+  // redirect to sign-in (AuthProvider's onUnauthorized effect is the subscriber).
   expect(seen).toHaveBeenCalledTimes(1)
   // apiStream never retries: recovery policy belongs to the hook.
   expect(fake.connections).toHaveLength(1)
@@ -246,6 +246,28 @@ test('through the real global fetch (MSW): a 404 envelope becomes ApiError', asy
 // repeated runs). The fetchImpl seam and its own 'delivers the first frame
 // BEFORE the stream closes' test above remain regardless (spec Testing 12) - do
 // not delete them just because MSW happens to work here.
+// The 401 notification must say WHICH credential produced it. An SSE connection
+// is long-lived by construction, so it is the likeliest source of a 401 that
+// outlives its own session - which makes stamping matter MORE here than on
+// apiFetch.
+test('the 401 listener receives the token the stream carried', async () => {
+  const fake = fakeSseServer()
+  fake.status = 401
+  fake.errorBody = { error: 'unauthorized' }
+  setToken('tok-stream')
+  const seen = vi.fn()
+  const off = onUnauthorized(seen)
+  await expect(
+    apiStream('/events?task_id=t1', {
+      signal: new AbortController().signal,
+      onEvent: () => {},
+      fetchImpl: fake.fetchImpl,
+    }),
+  ).rejects.toBeInstanceOf(ApiError)
+  expect(seen).toHaveBeenCalledWith('tok-stream')
+  off()
+})
+
 test('through the real global fetch (MSW): the first frame arrives before close', async () => {
   let ctl!: ReadableStreamDefaultController<Uint8Array>
   const enc = new TextEncoder()

@@ -32,7 +32,7 @@ interface AuthContextValue {
   // Its one caller is the Sessions tab, and by the time it runs the server has
   // already destroyed EVERY bearer token for this user - DELETE /v1/auth/tokens
   // is DeleteTokensForUser, `DELETE FROM api_tokens WHERE user_id = $1`
-  // (internal/store/query/tokens.sql:25-26), with no `id <> $2`. Any request made
+  // (internal/store/query/tokens.sql:40-41), with no `id <> $2`. Any request made
   // after that point is a guaranteed 401 racing this teardown, which is exactly
   // why logout() is NOT reused there: logout() would first fire
   // DELETE /v1/auth/token against a token that no longer exists.
@@ -70,11 +70,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   statusRef.current = status
 
   // Reset auth state on any 401 so the route guards send the user to sign-in.
-  // Guarded to no-op when already anonymous: a failed login still on the sign-in
-  // screen must not churn state or clear an empty cache on every request.
+  //
+  // TWO fences, answering two different questions. This is CLAUDE.md's rule in its
+  // frontend form: a status check establishes CURRENCY, never IDENTITY. The backend
+  // learned it on tasks.status writes, where a matching assignment_epoch proves the
+  // caller's generation is current and proves nothing about who the caller is, so
+  // every such write also fences on worker_id. Until 2026-08-13 this listener had
+  // the currency half and not the identity half.
+  //
+  // IDENTITY - requestToken !== getToken(). apiFetch and apiStream stamp each 401
+  // with the token that request actually attached (lib/api.ts). Without this fence
+  // a 401 produced by an ALREADY DEAD credential clears whatever token happens to
+  // be in localStorage when it lands, including one issued seconds earlier by a
+  // fresh login: sign out everywhere, sign back in, and a straggler 401 from a
+  // still-in-flight poll silently undoes the new session with no error message.
+  // Nothing cancels in-flight requests at teardown - apiFetch passes no
+  // AbortSignal, and queryClient.clear() evicts cached data without aborting a
+  // request already on the wire - so that straggler is guaranteed, not theoretical.
+  //
+  // The comparison reads getToken() FRESH rather than a ref, deliberately.
+  // localStorage is the credential's single source of truth and setToken/clearToken
+  // write it synchronously, whereas any React-committed mirror lags: applyAuth
+  // stores the new token and only THEN awaits /users/me, so a mirror would still
+  // say "old" through that whole window and would reject a 401 belonging to the
+  // brand-new session - reintroducing this same bug through its own fix.
+  //
+  // Comparing by VALUE covers replacement as well as removal, so no session
+  // generation counter is needed: a token is 32 random bytes (CLAUDE.md, "Token
+  // format"), so a later session never reuses an earlier one's string.
+  //
+  // A 401 arriving DURING clearSession() fails this fence - the token is already
+  // gone - and correctly does nothing: clearSession() already did all four of
+  // its own statements, synchronously, with clearToken() first.
+  //
+  // CURRENCY - statusRef.current === 'anonymous'. Still load-bearing, and it is
+  // NOT made redundant by the fence above: a failed login on the sign-in screen
+  // sends a request with no token while getToken() is also null, so it passes the
+  // identity fence BY EQUALITY. This guard is the only thing that stops it churning
+  // state and clearing an empty cache on every attempt.
   useEffect(
     () =>
-      onUnauthorized(() => {
+      onUnauthorized((requestToken) => {
+        if (requestToken !== getToken()) return
         if (statusRef.current === 'anonymous') return
         clearToken()
         setUser(null)

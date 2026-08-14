@@ -75,7 +75,7 @@ test('changePassword PUTs exactly current_password and new_password, and NOTHING
 
 test('changePassword surfaces a wrong current password as ApiError(403), not 401', async () => {
   // 403 is deliberate on the server (internal/api/auth.go:298-301). A 401 would
-  // fire onUnauthorized (lib/api.ts:44-46) and sign the user out on a typo.
+  // fire the onUnauthorized notifier in lib/api.ts and sign the user out on a typo.
   server.use(
     http.put('/v1/users/me/password', () =>
       HttpResponse.json({ error: 'current password is incorrect' }, { status: 403 }),

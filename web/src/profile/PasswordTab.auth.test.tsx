@@ -58,9 +58,9 @@ async function submit(current: string, next: string) {
 
 test('a 403 renders inline and leaves the user SIGNED IN', async () => {
   // 403, not 401, is the server's own choice (internal/api/auth.go:298-301), and
-  // onUnauthorized is 401-only (web/src/lib/api.ts:44-46). Asserting a specific
-  // 403 is the discriminating input: a test using a generic error mock would pass
-  // against a component that signs the user out on ANY failure.
+  // onUnauthorized is 401-only (the onUnauthorized notifier in lib/api.ts).
+  // Asserting a specific 403 is the discriminating input: a test using a generic
+  // error mock would pass against a component that signs the user out on ANY failure.
   server.use(
     http.put('/v1/users/me/password', () =>
       HttpResponse.json({ error: 'current password is incorrect' }, { status: 403 }),
@@ -103,7 +103,7 @@ test('a 204 leaves the user SIGNED IN - this endpoint spares the caller token', 
   // opposite for DELETE /v1/auth/tokens. These two tests are each other's control
   // and the difference between them is the whole session story of this slice:
   // DeleteOtherTokensForUser has `AND id <> $2`
-  // (internal/store/query/tokens.sql:28-29); DeleteTokensForUser does not (:25-26).
+  // (internal/store/query/tokens.sql:43-44); DeleteTokensForUser does not (:40-41).
   server.use(http.put('/v1/users/me/password', () => new HttpResponse(null, { status: 204 })))
   renderTab()
   await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('mira@studio.dev'))

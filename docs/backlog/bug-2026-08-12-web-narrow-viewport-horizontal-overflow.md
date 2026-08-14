@@ -27,6 +27,11 @@ The third row is the reason this is medium rather than low. This is not only a m
 **a desktop user who does not maximize the browser window hits it**, which is an ordinary way to
 use a dashboard beside an editor or a terminal.
 
+**Start by reading the 2026-08-13 measurements at the bottom of this item before the Proposal.** Three
+independent surfaces have now been measured and the third one changes where the investigation should
+start: the driver at 375px looks like the **header nav bar**, not the tables this item's Proposal was
+originally built around.
+
 ## Repro / Symptoms
 
 1. Open any list or detail page in the SPA.
@@ -45,7 +50,25 @@ rather than introducing one, and fixing it there would have meant editing shared
 slice's scope guard forbade. That reasoning is recorded in
 `docs/retros/2026-08-12-schedule-detail-page.md` (Deferred Findings 1).
 
-There are two independent causes, and they need different fixes.
+**Three candidate causes are enumerated below. They are independent, they need different fixes, and
+they are listed in the order the 2026-08-13 measurement suggests they should be investigated - which
+is NOT the order they were discovered in.** Cause 0 was added on 2026-08-13 and is the one with a
+direct per-element measurement behind it; causes 1 and 2 were derived by reading the source after
+measuring page totals, and neither has been measured as the widest element on any surface.
+
+**Cause 0 (added 2026-08-13, measured): the header nav bar does not shrink.**
+
+`web/src/shell/HoloShell.tsx:49-71` renders the app header as
+`flex items-center justify-between border-b ... px-[22px] py-3`, containing a left group
+(`flex items-center gap-6`) with the wordmark and a `<nav className="flex gap-0.5">` of route links,
+and the user menu on the right. Nothing in that structure wraps, shrinks or scrolls: a `flex` row of
+non-wrapping link labels plus 44px of horizontal padding establishes a **floor width** that every page
+inherits, because the header is a sibling of `<main>` inside the same document.
+
+On `/profile/sessions` at a 375px viewport the browser lane measured
+`document.documentElement.scrollWidth` = **523px** (148px of overflow) with the **`HEADER` element at
+523px and `MAIN` at only 391px**. The header was the widest element on the page. See the 2026-08-13
+update for the full numbers and for what this does and does not prove.
 
 **Cause 1: unconditional two-column detail bodies.**
 
@@ -87,12 +110,37 @@ are correctly contained - the schedule detail job-spec `<pre>` reports `scrollHe
 
 ## Proposal
 
-Two separable changes; the first is small enough to do on its own.
+**Step 0 (added 2026-08-13): measure the header before writing any code, and let that decide the
+order of the rest.** At 375px, on a page with no table and no two-column body - `/profile/sessions` is
+the one already measured - record `document.documentElement.scrollWidth` and then the `offsetWidth` of
+`HEADER` and of `MAIN` separately. Then repeat on a table page. Two things to settle:
+
+- **Is the header a floor?** If the header measures at or near 523px on both a table page and a
+  table-less page, the header sets a minimum document width app-wide and no amount of work on the
+  `Table` primitive can bring any page below it. That would make the header the **first** fix, not the
+  last.
+- **What does each cause contribute on top of that floor?** Schedule detail measured 653px total at
+  375px while two other surfaces measured 523px. If the header explains 523 of the 653, the tables are
+  a real but secondary contributor and B below is still needed - just not first.
+
+This step is cheap (one browser, three numbers per surface) and it decides whether A, B or C is the
+change that closes the Acceptance criteria. **Do not start from the `Table` primitive on the strength
+of this item's original framing** - that framing predates the header measurement.
+
+**C. Make the header shrink, wrap or scroll.** No fix is prescribed here, deliberately, because the
+right answer is a design decision and the measurement in step 0 should inform it. The options a reader
+will reach for are: let the nav wrap; give the nav its own `overflow-x-auto`; collapse the nav into a
+disclosure below a breakpoint; reduce the horizontal padding below a breakpoint. **Read
+`web/src/shell/HoloShell.tsx:29-49` before touching anything**: the header carries `relative z-10` and
+a `backdrop-blur`, and its stacking behaviour was established by a measured 275-point hit test and is
+depended on by `UserMenu`'s deliberately non-portalled dropdown. A structural change to the header must
+not invalidate that; see [[idea-2026-08-12-document-z-index-layering-scale]].
 
 **A. Give the two-column bodies a breakpoint.** Change the three `grid-cols-2` sites to
 `grid-cols-1 ... md:grid-cols-2`, matching `ServerTab.tsx:70` exactly rather than inventing a
 second convention. Decide the breakpoint once (`md` is what the existing correct site uses) and
-apply it uniformly. This is close to mechanical and closes the detail pages.
+apply it uniformly. This is close to mechanical and closes the detail pages. **Independent of C** and
+safe to do in either order.
 
 **B. Give the tables a horizontal scroll container - once, not nine times.** The natural place is
 the shared `Table` primitive (`web/src/components/holo/Table.tsx`), but read its header comment
@@ -107,6 +155,12 @@ outside the `role="table"` subtree. So the fix is a design decision, not a one-l
   following `TaskDag.tsx:49`. No primitive change and no contract risk, at the cost of nine edits
   and a convention that has to be remembered by the tenth table.
 
+**Note on B's standing:** the 2026-08-13 update below originally concluded that the repeated 375px
+breakage "is the argument for fixing it once in the shared `Table` primitive rather than per page".
+That conclusion is now in question - the third measured surface renders **no table at all** and
+overflows by the same amount. B is still probably needed; it is no longer established as the fix that
+closes this item.
+
 Also to settle: whether a horizontally scrolling table is the right UX at 375px at all, or whether
 some columns should drop below a breakpoint. **Scrolling is the honest minimum** - it makes every
 column reachable and no data disappear - and column-dropping is a per-table product decision that
@@ -117,26 +171,38 @@ This item is about content being unreachable, not about the app being pleasant o
 
 ## Acceptance / Done When
 
-- At 375px, 768px and 800px, on the jobs list, workers list, schedules list, admin console, and the
-  job / worker / schedule detail pages: `document.documentElement.scrollWidth` equals
-  `clientWidth`. **Measured in a real browser** - jsdom computes no layout, so a Vitest assertion
-  here would be vacuous.
+- At 375px, 768px and 800px, on the jobs list, workers list, schedules list, admin console, the
+  job / worker / schedule detail pages, **and `/profile/sessions` (the table-less control surface)**:
+  `document.documentElement.scrollWidth` equals `clientWidth`. **Measured in a real browser** - jsdom
+  computes no layout, so a Vitest assertion here would be vacuous.
+- **No single element is wider than the viewport at 375px**, header included. Assert per-element
+  `offsetWidth` on `HEADER` and `MAIN`, not only the document total - a document-level assertion alone
+  cannot tell you which fix worked, which is how this item spent two measurements pointing at the
+  wrong cause.
 - Where a table is wider than the viewport, it scrolls **within its own container** and every
   column remains reachable; no data is hidden and no row is clipped.
 - Behaviour at 1280px and above is unchanged - compare against the current rendering rather than
   asserting the new one is fine.
+- The header's stacking behaviour is unchanged: the `UserMenu` dropdown still paints over `<main>` at
+  every tested width.
 - One documented convention for the two-column breakpoint, and one for the table scroll container,
   so the next page and the next table get it right by default.
 
 ## Related
 
+- Source, cause 0: `web/src/shell/HoloShell.tsx:49-71` (the header, its `flex` nav and its `px-[22px]`),
+  and `:29-49` (the stacking comment and the 275-point hit test that a header change must not
+  invalidate)
 - Source, cause 1: `web/src/schedules/ScheduleDetailPage.tsx:185`,
   `web/src/workers/WorkerDetailPage.tsx:114`, `web/src/admin/server/StatSection.tsx:61`; the
   correct precedent at `web/src/admin/server/ServerTab.tsx:70`
 - Source, cause 2: the nine `COLS` constants in the table above; the shared primitive at
   `web/src/components/holo/Table.tsx` and its no-frame contract; the correct precedent at
   `web/src/jobs/TaskDag.tsx:49`
-- Measurement and scoping decision: `docs/retros/2026-08-12-schedule-detail-page.md`
+- Measurement and scoping decision: `docs/retros/2026-08-12-schedule-detail-page.md`; the 2026-08-13
+  header measurement: `docs/retros/2026-08-13-cross-generation-401.md`
+- A header restructure interacts with the two `z-50`s and the non-portalled dropdown:
+  [[idea-2026-08-12-document-z-index-layering-scale]]
 - **Check before starting**: [[idea-2026-08-12-detail-page-state-triad-primitive]] touches the same
   three detail pages. Either order is fine, concurrent is not, and they must not be folded together
   - that one is behavior-preserving and gated on a zero test diff, this one changes rendering and
@@ -155,10 +221,50 @@ default window size would not have**, and nothing in `npm test` can find it at a
 performs no layout. Until an e2e harness exists, this class of defect is invisible to the project's
 entire automated gate.
 
-## Update 2026-08-13
+## Update 2026-08-13 (a): the Invites tab
+
 Measured again in a real browser during `2026-08-13-admin-invites-tab`, on the Invites tab: **no
 overflow at 1280px or 768px, 148px of overflow at 375px** (`scrollWidth` 523 vs `clientWidth` 375).
-That is the same Cause 2 idiom already listed here, not a new one - the new table was simply added to
-the enumeration above rather than filed separately. Two independent browser measurements now agree
-that the 375px breakage is app-wide and reproduces on whichever surface happens to be under test,
-which is the argument for fixing it once in the shared `Table` primitive rather than per page.
+Recorded at the time as the same Cause 2 idiom already listed here, so the new table was added to the
+enumeration above rather than filed separately.
+
+**That attribution is now in doubt.** Only the page total was measured; no per-element width was taken,
+so "the table did it" was an inference from the source, not an observation. See update (b).
+
+## Update 2026-08-13 (b): `/profile/sessions`, and the header
+
+Measured in a real browser by the Phase 4 browser lane of the `2026-08-13-cross-generation-401` slice,
+on `/profile/sessions` at a 375px viewport:
+
+| measurement | value |
+|---|---|
+| `document.documentElement.scrollWidth` | **523px** |
+| `clientWidth` | 375px |
+| overflow | **148px** |
+| widest offending element | **`HEADER` at 523px** |
+| `MAIN` | 391px |
+
+Three things follow, stated at exactly the strength of the evidence.
+
+1. **This is a third independent surface**, after schedule detail (2026-08-12) and the Invites tab
+   (update (a)). The 375px breakage is confirmed app-wide by three separate browser sessions.
+2. **On this one surface, the header was measured as the widest element**, at 523px against a `MAIN` of
+   391px. That is a direct per-element measurement, and it is the only per-element measurement any of
+   the three sessions has taken.
+3. **This surface renders no table.** `web/src/profile/` contains no `grid-cols-[...]` template and no
+   consumer of the shared `Table` primitive - `SessionsTab` currently renders explanatory copy, not a
+   list. So Cause 2 cannot explain the overflow here, and this item's Proposal, which points the reader
+   at `web/src/components/holo/Table.tsx`, would not have closed this page.
+
+**A hypothesis, clearly labelled as one and not yet tested:** the header sets a floor of roughly 523px
+on every page, and table pages add to it. It is consistent with the numbers - 523px on two surfaces and
+653px (375 + 278) on schedule detail, which has both a table and a `grid-cols-2` body - and it is
+consistent with the header's source, a non-wrapping `flex` row with 44px of padding and no `min-w-0`.
+**It has not been measured on a table page.** Step 0 of the Proposal is the experiment that would
+confirm or kill it, and it is two browser measurements.
+
+**What this changes about the item, and what it does not.** It does not retract causes 1 or 2: three
+`grid-cols-2` sites with no breakpoint and ten fixed-px table templates with no scroll container are
+still true statements about the source, and B is still probably needed for tables to be usable at 375px.
+What it changes is **where the next implementer starts.** Investigate the header first. If the header is
+a floor, fixing the tables alone cannot satisfy this item's first acceptance criterion on any page.

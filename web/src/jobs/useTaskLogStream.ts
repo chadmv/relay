@@ -333,10 +333,15 @@ export function useTaskLogStream(
         } catch (err) {
           if (cancelled || myGen !== gen) return
           if (err instanceof ApiError) {
-            // 401 already fired onUnauthorized inside apiStream and
-            // AuthProvider redirects (AuthProvider.tsx:39-49). 400 and 404 are
-            // not transient: a bad id or a deleted task. No retry for any of
-            // them. Never log the error object.
+            // 401 already fired the onUnauthorized notifier inside apiStream.
+            // AuthProvider's onUnauthorized effect only redirects when this 401's
+            // token still matches the CURRENT session (its identity fence) - a
+            // cross-generation 401 (this stream outliving a sign-out-everywhere)
+            // fires the notifier but AuthProvider deliberately does nothing with
+            // it, since the credential it names is already gone. Either way this
+            // hook's own handling below is correct on its own: set error status,
+            // no retry. 400 and 404 are not transient either: a bad id or a
+            // deleted task. No retry for any of them. Never log the error object.
             if (err.status === 400 || err.status === 401 || err.status === 404) {
               setErrorMessage(err.message)
               setStatus('error')

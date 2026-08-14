@@ -50,10 +50,11 @@ test('renders NO session list and issues no request for one', async () => {
     }),
   )
   renderTab()
-  // GET /v1/auth/tokens is not registered anywhere in internal/api/server.go, and
-  // api_tokens has no last_used_at, agent, IP or location column
-  // (internal/store/migrations/000001_initial.up.sql:13-19). Mirrors
-  // EnrollmentsTable.test.tsx:74-78.
+  // GET /v1/auth/tokens exists (internal/api/server.go:103) but this tab holds no
+  // query against it - the list UI is simply not built here yet, not blocked on a
+  // missing endpoint. api_tokens also still has no last_used_at, agent, IP or
+  // location column (internal/store/migrations/000001_initial.up.sql:13-19), so
+  // even a built list would be minimal. Mirrors EnrollmentsTable.test.tsx:74-78.
   expect(listCalls).toBe(0)
   expect(screen.queryByRole('table')).toBeNull()
   expect(screen.queryByRole('columnheader')).toBeNull()
@@ -68,7 +69,7 @@ test('the button is labelled "Sign out everywhere" and never says "else"', async
   expect(screen.getByRole('button', { name: 'Sign out everywhere' })).toBeInTheDocument()
   // The hi-fi's label is "Sign out everywhere else" (hifi3-holo-pages.jsx:3049)
   // and describes an endpoint that does not exist: DeleteTokensForUser has no
-  // `id <> $2` (internal/store/query/tokens.sql:25-26). Anyone implementing from
+  // `id <> $2` (internal/store/query/tokens.sql:40-41). Anyone implementing from
   // the mockup rather than the spec ships it. Assert over the whole subtree, not
   // just the accessible name, so it cannot hide in the copy either.
   expect(container.textContent).not.toMatch(/everywhere else/i)
@@ -82,11 +83,14 @@ test('the page copy states that this browser is included', async () => {
   )
 })
 
-test('the omission footnote explains the missing endpoint and names the enabler', async () => {
+test('the omission footnote names the endpoint and states the list is not built', async () => {
+  // GET /v1/auth/tokens shipped in PR #125 (internal/api/server.go:103), so the
+  // note must no longer claim there is no endpoint - only that this tab does not
+  // render the list it could supply.
   renderTab()
   const note = screen.getByTestId('sessions-omission-note')
-  expect(note).toHaveTextContent(/no endpoint/i)
   expect(note).toHaveTextContent('GET /v1/auth/tokens')
+  expect(note).not.toHaveTextContent(/no endpoint|not registered/i)
 })
 
 test('the confirm dialog states the blast radius and the CLI consequence', async () => {

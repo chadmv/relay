@@ -149,7 +149,7 @@ export function PasswordTab() {
       {/* A verified consequence, not a hedge. The handler revokes every OTHER
           token in the same transaction as the password write and keeps the
           caller's own (internal/api/auth.go:325-328 ->
-          internal/store/query/tokens.sql:28-29 `AND id <> $2`), so this browser
+          internal/store/query/tokens.sql:43-44 `AND id <> $2`), so this browser
           survives and every other browser, device and `relay` CLI login gets a
           401 on its next request. */}
       <div

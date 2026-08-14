@@ -202,7 +202,7 @@ test('the warning states OTHER sessions are signed out and this browser stays si
   renderTab()
   const warning = screen.getByTestId('password-session-warning')
   // Verified against DeleteOtherTokensForUser (internal/api/auth.go:325-328 ->
-  // internal/store/query/tokens.sql:28-29 `AND id <> $2`). This is the ONE place
+  // internal/store/query/tokens.sql:43-44 `AND id <> $2`). This is the ONE place
   // the hi-fi's session copy is correct (hifi3-holo-pages.jsx:3010-3012).
   expect(warning).toHaveTextContent(/other/i)
   expect(warning).toHaveTextContent(/this browser stays signed in/i)
