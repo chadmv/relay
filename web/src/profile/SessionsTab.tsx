@@ -8,21 +8,24 @@ import { signOutEverywhere } from './api'
 
 // The Sessions tab: ONE action, NO list.
 //
-// There is no GET /v1/auth/tokens anywhere in internal/api/server.go, and
-// api_tokens has exactly five columns - id, user_id, token_hash, created_at,
-// expires_at (internal/store/migrations/000001_initial.up.sql:13-19) - so the
-// hi-fi's kind / agent / IP / location / last-active table (:3054-3113) is a
-// migration plus an endpoint, not a query. The house rule is: omit what the
-// backend cannot supply, and file the enabler (EnrollmentsTab.tsx:197-205,
-// AdminPage.tsx:6-14).
+// GET /v1/auth/tokens exists (internal/api/server.go:103, handleListTokens,
+// shipped in PR #125) and returns id, created_at, is_current and expires_at
+// per token (internal/api/tokens.go:51-61). It does NOT return the hi-fi's kind
+// / agent / IP / location / last-active columns (hifi3-holo-pages.jsx:3054-3113):
+// api_tokens has no columns for those (internal/store/migrations/000001_initial.up.sql:13-19).
+// So the gap here is not a missing endpoint - it is that this tab does not yet
+// render the list the endpoint can already supply, and even that list would be
+// a bare id/created-at/expires-at table, not the hi-fi's richer one. The house
+// rule is: omit what the backend cannot supply, and file the enabler for what
+// it now can (EnrollmentsTab.tsx:197-205, AdminPage.tsx:6-14).
 //
 // The ACTION, though, works: DELETE /v1/auth/tokens is a live, auth-gated,
 // idempotent 204 (internal/api/auth.go:350-357). Applied faithfully the rule
-// drops the list and keeps the control - dropping a working capability because an
-// unrelated READ endpoint is missing would be over-applying it. And because this
-// tab holds no query, there is no active observer to fire against a destroyed
-// token when the session is torn down below; a Sessions LIST would have had to
-// solve that ordering problem too.
+// drops the list and keeps the control - dropping a working capability while its
+// list has not been built yet would be over-applying it. And because this tab
+// holds no query, there is no active observer to fire against a destroyed token
+// when the session is torn down below; a Sessions LIST would have had to solve
+// that ordering problem too.
 export function SessionsTab() {
   const { clearSession } = useAuth()
   const navigate = useNavigate()
@@ -110,15 +113,11 @@ export function SessionsTab() {
         data-testid="sessions-omission-note"
         className="font-mono text-[10px] leading-relaxed tracking-[0.04em] text-fg-dim"
       >
-        ▸ There is no per-session list here because the server exposes no endpoint to enumerate
-        tokens: <span className="text-fg-mute">GET /v1/auth/tokens</span> is not registered, and
-        the <span className="text-fg-mute">api_tokens</span> table has no last-used, agent or IP
-        column to populate one. Tracked at{' '}
-        <span className="text-fg-mute">
-          docs/backlog/feature-2026-06-26-web-enabler-backend-endpoints.md
-        </span>
-        . Until it lands, signing out everywhere is the only session control, and it is
-        all-or-nothing.
+        ▸ There is no per-session list here yet. The server does expose{' '}
+        <span className="text-fg-mute">GET /v1/auth/tokens</span>, but this tab does not render it
+        - and the <span className="text-fg-mute">api_tokens</span> table still has no last-used,
+        agent or IP column, so even a built list could not show which device is which. Until a list
+        is built, signing out everywhere is the only session control, and it is all-or-nothing.
       </div>
 
       {confirming && (
