@@ -1,8 +1,10 @@
 ---
 title: A 401 from an old session clears a brand-new one, bouncing the user back to sign-in
 type: bug
-status: open
+status: closed
 created: 2026-08-13
+closed: 2026-08-13
+resolution: fixed
 priority: medium
 source: Phase 6 triage of the 2026-08-12-profile-pages slice (pre-existing gap, newly reachable through sign-out-everywhere)
 ---
@@ -127,3 +129,42 @@ The generalizable shape is the project's own: **a status check establishes curre
 identity.** The backend learned this on `tasks.status` writes, where a matching `assignment_epoch`
 proves the caller's generation is current and proves nothing about who the caller is, so every such
 write also fences on `worker_id`. This listener has the epoch half and not the identity half.
+
+## Resolution
+
+Fixed by `docs/superpowers/plans/2026-08-13-cross-generation-401.md`. `apiFetch` and `apiStream`
+now stamp each 401 notification with the token the request actually attached
+(`web/src/lib/api.ts`), and `AuthProvider`'s `onUnauthorized` listener ignores a 401 unless that
+stamped token still equals `getToken()` at the moment the 401 lands (`web/src/auth/AuthProvider.tsx`).
+The discriminating test - sign in as token A, hold a request open, tear the session down, sign in
+as token B, then release the held request - was proven RED against the pre-fix listener and is now
+green (`web/src/auth/AuthProvider.crossgen.test.tsx`). The paired positive control (a 401 for the
+CURRENT token still tears the session down) stays green throughout, and
+`web/src/profile/PasswordTab.auth.test.tsx:83-99` - the item's own existing instance of that control -
+was left byte-identical.
+
+Two corrections to this item's own text, recorded so a future reader does not inherit either:
+
+1. **Option A shipped, not option B**, and the item's stated advantage for B - that only B covers a
+   token that was *replaced* rather than removed - is **false**. Option A compares token *values*,
+   not presence: `getToken() === 'tok_B' !== 'tok_A'` rejects a replaced token exactly as it rejects
+   a removed one. A token is 32 random bytes hex-encoded (CLAUDE.md, "Token format") and never
+   reused across sessions, so there is no input A fails to distinguish that B would catch. No
+   session generation counter was added, and the plan explicitly reasons that one should not be
+   added on that argument alone. A also has no ordering hazard to get wrong (CLAUDE.md Invariant
+   1, "end the generation before releasing the resource"), since it introduces no new state at all.
+2. **This item's own citation had drifted.** It named `DeleteTokensForUser` at
+   `internal/store/query/tokens.sql:25-26`; PR #125 added a doc-comment block ahead of that
+   statement, moving it to `:40-41` (`DeleteOtherTokensForUser` likewise moved from `:28-29` to
+   `:43-44`). The behaviour claim - no `id <> $2`, every token for the user destroyed - was correct
+   throughout; only the line numbers were stale. The plan corrected the same drift at its two other
+   live sites (`AuthProvider.tsx`, `api.ts`, `api.stream.test.ts`) and reported five further stale
+   instances in `web/src/profile/api.ts`, `SessionsTab.tsx`, `SessionsTab.test.tsx` and
+   `PasswordTab.auth.test.tsx` as a separate, unfixed finding, to keep `PasswordTab.auth.test.tsx`
+   byte-identical as clean evidence.
+
+One item beyond the plan's own scope was also fixed in the same slice: `SessionsTab.tsx` told
+users, in visible page copy, that `GET /v1/auth/tokens` does not exist. It shipped in PR #125
+(`internal/api/server.go:103`, `handleListTokens`) - the actual gap is that this tab does not yet
+render a list from it, not that the endpoint is missing. The copy and a doc comment were corrected
+to state that; no list UI was built.
