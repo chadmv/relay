@@ -30,16 +30,23 @@ import (
 //
 // Known weakness, accepted: a rename defeats it. Same weakness and same trade as
 // TestUpdateTaskStatusEpochHasNoProductionCaller.
+//
+// The check is a substring match, so it also sees the identifier in PROSE. Every
+// generated internal/store/*.sql.go file is therefore exempt: tasks.sql.go
+// defines the statement, and jobs.sql.go carries the JobStatusCounts comment that
+// names it while explaining which statements keep a terminal task unwritable.
+// Those files are emitted by sqlc from query/*.sql and cannot contain a
+// hand-written call site, so exempting them costs the guard nothing - a real
+// caller would live in a hand-written file, which no exemption covers.
 func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 	root := repoRoot(t)
 	const ident = "IncrementTaskRetryCount"
 
-	// The generated store layer necessarily defines it; the agent status path is
-	// its one legitimate caller.
+	// The agent status path is its one legitimate caller.
 	allowed := map[string]bool{
-		filepath.Join(root, "internal", "store", "tasks.sql.go"): true,
-		filepath.Join(root, "internal", "worker", "handler.go"):  true,
+		filepath.Join(root, "internal", "worker", "handler.go"): true,
 	}
+	storeDir := filepath.Join(root, "internal", "store")
 
 	var offenders []string
 	err := filepath.WalkDir(filepath.Join(root, "internal"), func(path string, d os.DirEntry, err error) error {
@@ -50,6 +57,10 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 			return nil
 		}
 		if allowed[path] {
+			return nil
+		}
+		// sqlc-generated query files: definitions and comments, never call sites.
+		if filepath.Dir(path) == storeDir && strings.HasSuffix(path, ".sql.go") {
 			return nil
 		}
 		b, err := os.ReadFile(path)
