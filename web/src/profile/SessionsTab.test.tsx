@@ -69,7 +69,7 @@ test('the button is labelled "Sign out everywhere" and never says "else"', async
   expect(screen.getByRole('button', { name: 'Sign out everywhere' })).toBeInTheDocument()
   // The hi-fi's label is "Sign out everywhere else" (hifi3-holo-pages.jsx:3049)
   // and describes an endpoint that does not exist: DeleteTokensForUser has no
-  // `id <> $2` (internal/store/query/tokens.sql:25-26). Anyone implementing from
+  // `id <> $2` (internal/store/query/tokens.sql:40-41). Anyone implementing from
   // the mockup rather than the spec ships it. Assert over the whole subtree, not
   // just the accessible name, so it cannot hide in the copy either.
   expect(container.textContent).not.toMatch(/everywhere else/i)
