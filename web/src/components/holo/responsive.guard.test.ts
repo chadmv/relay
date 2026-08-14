@@ -140,33 +140,13 @@ test('every numeric col-span carries a breakpoint prefix', () => {
   expect(offenders).toEqual([])
 })
 
-// THE CONVENTION FOR TABLES, enforced. Every <Table> call site passes minWidth, so
-// the eleventh table cannot silently reintroduce
-// docs/backlog/bug-2026-08-12-web-narrow-viewport-horizontal-overflow.md. A comment
-// in the primitive would not have caught the tenth.
-test('every Table call site opts in to a scroll min-width', () => {
-  const opens: string[] = []
-  const missing: string[] = []
-  let bareCount = 0
-  for (const file of FILES) {
-    // withoutComments, not a `//`-only strip: Table.tsx's own header comment
-    // mentions "<Table>" in prose, and (per the fix above) so can any consumer's
-    // {/* ... */} JSX comment - a naive scan of either counts prose as a call
-    // site, which is not what "every call site" means.
-    const src = withoutComments(readFileSync(file, 'utf8'))
-    bareCount += [...src.matchAll(/<Table\b/g)].length
-    for (const m of src.matchAll(/<Table\b[\s\S]*?>/g)) {
-      const where = toPosix(relative(SRC, file))
-      opens.push(where)
-      if (!m[0].includes('minWidth')) missing.push(where)
-    }
-  }
-  // Control 1: the tag regex matched every occurrence. It stops at the first '>',
-  // so an inline arrow function in the props (`onSort={(f) => ...}`) would truncate
-  // a tag - no consumer does that today, and if one starts, the truncated tag will
-  // almost certainly lack minWidth and fail loudly below rather than silently pass.
-  expect(opens).toHaveLength(bareCount)
-  // Control 2: the scan found the consumers rather than nothing at all.
-  expect(opens.length).toBeGreaterThanOrEqual(10)
-  expect(missing).toEqual([])
-})
+// THE CONVENTION FOR TABLES is enforced by the type system now, not by a scan
+// here. `TableProps.minWidth` (Table.tsx) is REQUIRED, so `tsc -b` rejects any
+// call site that omits it - including an aliased import (`Table as HoloTable`)
+// or a file this directory walker never reaches, which a regex-based presence
+// scan could not do. The deleted version of this test (`every Table call site
+// opts in to a scroll min-width`) text-matched `<Table` tags and existed only to
+// enforce presence; presence is now a compile error instead of a test failure,
+// and the fragility that motivated the comment-stripping and regex-widening
+// fixes above (a scan is only ever as good as its pattern) no longer applies to
+// this rule at all.

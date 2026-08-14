@@ -11,10 +11,15 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 // footers, error banners and dialogs inside the visual surface but OUTSIDE the
 // role="table" subtree, where they would be invalid children.
 //
-// THE NARROW-VIEWPORT CONVENTION FOR TABLES (2026-08-13). A consumer whose template
-// has fixed px tracks passes `minWidth` (a Tailwind min-w-[NNNpx] literal, sized at
-// or above the sum of its own fixed tracks). That does two things, and both are
-// required: it publishes ONE min-width onto the header row and every body row, and
+// THE NARROW-VIEWPORT CONVENTION FOR TABLES (2026-08-13). Every consumer's
+// template has fixed px tracks, so `minWidth` (a Tailwind min-w utility literal
+// with a bracketed pixel value, sized at or above the sum of its own fixed
+// tracks - see each consumer's own MIN_W constant for the literal, not spelled
+// out here where Tailwind's static scan would pick up a placeholder pattern as
+// an invalid literal class) is a REQUIRED prop, not an opt-in one: `tsc` rejects
+// a call site that omits it, everywhere, including an aliased import or a file
+// no source-scanning guard test reaches. That does two things, and both always
+// happen: it publishes ONE min-width onto the header row and every body row, and
 // it wraps the role="table" subtree in an overflow-x-auto div so the table scrolls
 // inside the caller's frame instead of widening the document.
 //
@@ -22,7 +27,13 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 // minimum; the header row and the body rows are separate grid containers with
 // different content, so they desynchronize. The min-width keeps free space
 // non-negative so `fr` resolves identically in both - the same agreement guarantee
-// this component already gives for `columns`.
+// this component already gives for `columns`. Sizing minWidth at or above the
+// fixed-track sum is NECESSARY but not SUFFICIENT: free space stays non-negative
+// only if it also does not fall below the `fr` cells' own content minimums. It
+// holds today only because every `fr` cell carries `truncate` or `min-w-0`, which
+// (per the flex/grid automatic-minimum-size rule) drops that cell's content
+// minimum to 0 - an `fr` cell without one would need its own minimum added to the
+// budget.
 //
 // The wrapper is not the frame this primitive refuses to be: overflow only, no
 // border, background, padding or radius, and it wraps ONLY the role="table"
@@ -32,9 +43,6 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 // the table box. Audited across all ten consumers as of 2026-08-13 - no row cell
 // renders an absolutely-positioned popover; WorkspacesPanel's ConfirmDialog is a
 // sibling AND portals. If a future row needs a popover, it must portal.
-//
-// Enforced by web/src/components/holo/responsive.guard.test.ts, which fails if any
-// <Table> call site omits minWidth.
 //
 // The base strings below contain ONLY utilities that are byte-identical across all
 // eight consumers. Two competing Tailwind utilities on one element resolve by
@@ -85,10 +93,13 @@ interface TableProps<F extends string> {
   // consumer file for Tailwind v4's static scan, but it is declared once there
   // instead of being applied to two elements by hand.
   columns: string
-  // Optional Tailwind min-width utility (a literal, for Tailwind v4's static scan),
-  // applied to the header row AND every TableRow, and the trigger for the
-  // overflow-x-auto wrapper. Omit it only for a table with no fixed px tracks.
-  minWidth?: string
+  // Required Tailwind min-width utility (a literal, for Tailwind v4's static
+  // scan), applied to the header row AND every TableRow, and the reason the
+  // scroll wrapper always exists. Required rather than optional so `tsc` rejects
+  // an omitted call site everywhere, including an aliased import and any file a
+  // source-scanning guard test never reaches - the enforcement the ten-consumer
+  // guard test used to carry by text-scanning `<Table` call sites.
+  minWidth: string
   headers: TableColumn<F>[]
   sort?: string
   onSort?: (field: F) => void
@@ -117,7 +128,7 @@ export function Table<F extends string = string>({
   // is that these two cannot be put out of agreement by hand, and a min-width that
   // applied to only one of them would desynchronize the columns at exactly the
   // widths this exists to fix.
-  const grid = minWidth ? `${columns} ${minWidth}` : columns
+  const grid = `${columns} ${minWidth}`
   const table = (
     <ColumnsContext.Provider value={grid}>
       <div role="table" aria-label={label}>
@@ -162,10 +173,10 @@ export function Table<F extends string = string>({
       </div>
     </ColumnsContext.Provider>
   )
-  // Opt-in: with no minWidth the DOM is byte-identical to what eight consumers
-  // shipped against, and a wrapper with no min-width would only scroll a misaligned
-  // table anyway.
-  if (!minWidth) return table
+  // Unconditional: minWidth is a required prop, so every valid call site has one,
+  // and a wrapper with no min-width would only scroll a misaligned table anyway.
+  // The old opt-in branch is dead now that omission is a compile error rather
+  // than a runtime configuration - see TableProps.minWidth.
   return <div className="overflow-x-auto">{table}</div>
 }
 
