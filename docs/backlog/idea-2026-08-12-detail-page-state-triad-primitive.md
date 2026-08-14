@@ -61,6 +61,9 @@ assertion that needs adjusting during a refactor that is supposed to change noth
 removed. Any plan that picks this up should state that gate up front, because the tempting move
 mid-migration is to "fix up" a selector or a text match and keep going.
 
+**Read the Update section below before planning this.** The same gate has now been run to completion
+on a bigger instance of the same rule, and it turned out to be weaker than this item assumes.
+
 The honest counter-argument, recorded so it does not have to be re-argued: the rule exists to stop
 this exact deferral from being used a fourth time. **If a fourth detail page arrives before the
 extraction lands, the deviation has become a policy** and the copy should not ship.
@@ -98,10 +101,54 @@ Points to settle at spec time:
 - **`WorkerDetailPage.test.tsx`, `JobDetailPage.test.tsx`, `ScheduleDetailPage.test.tsx` and
   `ScheduleDetailPage.transition.test.tsx` have a zero-line diff.** If any assertion needs
   adjustment, stop and investigate rather than adjusting - that is the finding.
+- **Additionally (added 2026-08-14, see Update):** for each behaviour the migration re-wires, mutate
+  it and confirm some test reddens. A zero-line diff is a negative control; it does not establish
+  that the frozen tests constrain what you changed.
 - The component itself has direct tests for all three states plus the has-data case, including
   that a 404 renders **no** Retry control (a 404 is documented as non-transient; retrying it is a
   known defect shape in this codebase).
 - The comment at `ScheduleDetailPage.tsx:30-34` naming this item is removed.
+
+## Update (2026-08-14): the sibling extraction landed, and its gate was decorative on six wirings
+
+This item's Related section used to say that `idea-2026-08-13-cursor-pager-hook` was
+"sibling extraction debt, filed 2026-08-13 and considerably worse ... at **seven** consumers rather
+than three", and that the two were "worth reading together". **That extraction has now landed**
+(`web/src/lib/useCursorPager.ts`, slice `2026-08-14-cursor-pager-hook`), so it is no longer a sibling
+in a queue - it is the **worked precedent** for this item: the same rule, the same gate, run to
+completion across seven surfaces. Read the hook, its five `*.pager.test.tsx` siblings, and
+`docs/retros/2026-08-14-cursor-pager-hook.md` before planning this one.
+
+Three things it learned that this item should inherit, and the first is a correction to this item's
+own acceptance criteria:
+
+1. **A zero-diff gate proves you did not weaken the tests. It says nothing about whether the tests
+   constrained the thing you changed.** In that slice the gate held perfectly and was **void on six
+   wirings**: deleting `resetPaging()` from `SchedulesPage.chooseSort` left that file with zero reset
+   sites and 11/11 green; the same held for `JobsPage.pickSort`/`pickFilter` and `UsersTab.pickEmail`;
+   and a bogus page size left `WorkersPage` (13/13) and `ReservationsTab` (17/17) green. The only way
+   anyone found out was by mutating each wiring and watching the suite stay green. This item's
+   equivalent exposure is the **404-versus-error branch** and the **Retry control's presence** -
+   mutate both in each of the three pages, per page, and see what reddens.
+2. **New coverage goes in new sibling files, never in the frozen ones.** That slice put its six
+   remediation tests in `*.pager.test.tsx` files beside the frozen suites, and declined an "adding
+   cases is obviously safe" exception on the grounds that a mechanical gate stops being a gate the
+   moment it admits a judgment call.
+3. **State the gate over files that existed at the base**, not over the diff's file list. That
+   slice's gate was phrased as "exactly one new test file appears in the diff" and went stale the
+   moment remediation added five more. "No test file that existed at `$BASE` appears in the diff"
+   (`git diff --diff-filter=M`) is enumeration-free and survives the slice adding files.
+
+The concurrency warning this item and its sibling carried - do not run the two refactors at once,
+because a red run over overlapping test directories would be hard to attribute - is **discharged**.
+The pager half is done and merged; this item is now free-standing.
+
+Its `statusTone` warning still transfers, though: a naive merge that harmonizes near-identical
+per-module behaviour can flatten a deliberate difference with **no test going red**, because each
+module's own test simply gets rewritten to match. That is the same hazard this item faces with the
+404-versus-error branch, and it is why the mutation step above matters more than the diff step.
+
+No scope change, no priority change. Still low; still a countdown against a fourth detail page.
 
 ## Related
 
@@ -109,21 +156,21 @@ Points to settle at spec time:
   `web/src/schedules/ScheduleDetailPage.tsx:30-66` (the third copy and the deviation comment)
 - Design record: `docs/superpowers/plans/2026-08-12-schedule-detail-page.md` ("THIRD-CONSUMER
   FLAG"), `docs/retros/2026-08-12-schedule-detail-page.md` (Problem 5)
-- Sibling extraction debt, filed 2026-08-13 and considerably worse: [[idea-2026-08-13-cursor-pager-hook]]
-  is the same "extract before the third consumer" rule at **seven** consumers rather than three.
-  Worth reading together - they share the byte-identical-test gate, and its `statusTone` warning
-  (a naive merge would flatten a deliberate per-module difference) is the same hazard this item
-  faces with the 404-versus-error branch.
+- **The worked precedent - read before planning:** `web/src/lib/useCursorPager.ts`,
+  `docs/superpowers/specs/2026-08-14-cursor-pager-hook.md`,
+  `docs/retros/2026-08-14-cursor-pager-hook.md`. Its parent item
+  (`idea-2026-08-13-cursor-pager-hook`) is closed. See the Update section above.
 - Same shape, already done for a different primitive: the shared accessible-table component that
   landed earlier in this workstream is the precedent for how far to take an extraction and where to
   stop
 - Adjacent frontend consistency items: [[idea-2026-08-09-table-visual-harmonization]],
   [[idea-2026-08-09-table-accessible-name-consistency]]
-- Would touch the same pages: [[bug-2026-08-12-web-narrow-viewport-horizontal-overflow]] - **check
-  before starting.** That item edits the two-column body of the same three pages. Doing them in
-  either order is fine; doing them concurrently is not, and neither should be folded into the other
-  (this one is behavior-preserving and gated on a zero test diff, that one changes rendering and
-  needs new assertions).
+- Touched the same pages, and is **now closed** (corrected 2026-08-14 - this bullet used to read
+  "check before starting"): `bug-2026-08-12-web-narrow-viewport-horizontal-overflow` shipped on
+  2026-08-13 and lives in `docs/backlog/closed/`. There is no concurrency hazard left, but its
+  outcome constrains this one: `ScheduleDetailPage`'s and `WorkerDetailPage`'s two-column bodies
+  gained `md:` breakpoints in that slice, and `Table` now takes a **required** `minWidth`. Any
+  markup this extraction moves must carry those along unchanged.
 
 ## Notes
 
