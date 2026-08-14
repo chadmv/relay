@@ -100,8 +100,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // format"), so a later session never reuses an earlier one's string.
   //
   // A 401 arriving DURING clearSession() fails this fence - the token is already
-  // gone - and correctly does nothing: clearSession already did all four of the
-  // statements below, synchronously, with clearToken() first (:127-132).
+  // gone - and correctly does nothing: clearSession() already did all four of
+  // its own statements, synchronously, with clearToken() first.
   //
   // CURRENCY - statusRef.current === 'anonymous'. Still load-bearing, and it is
   // NOT made redundant by the fence above: a failed login on the sign-in screen
