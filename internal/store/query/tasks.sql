@@ -127,10 +127,13 @@ RETURNING *;
 -- the exact opposite of an operator re-run. POST /v1/jobs/{id}/retry must NOT
 -- call it: that endpoint reopens tasks that ARE terminal and has no worker
 -- identity to supply, so both the status and the worker predicate would reject
--- every call. It needs its own statement with an explicit
+-- every call, and the symptom would be an endpoint that silently does nothing.
+-- It has its own statement, RetryJobTasks (below in this file), with an explicit
 -- `status IN ('failed','timed_out')` allow-list and its own epoch bump - the
--- operator analogue of RequeueTaskByID, not of this. See
--- docs/backlog/feature-2026-06-26-web-enabler-backend-endpoints.md.
+-- operator analogue of RequeueTaskByID, not of this. The separation is enforced
+-- by TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath, which fails if
+-- this identifier appears in any non-test Go file outside
+-- internal/worker/handler.go.
 UPDATE tasks
 SET retry_count = retry_count + 1,
     status = 'pending',
@@ -260,10 +263,19 @@ JOIN tasks t ON t.worker_id = w.id
 WHERE t.status IN ('dispatched', 'running');
 
 -- name: RequeueTaskByID :exec
--- Revert a single task back to 'pending' regardless of current status.
--- Used by the reconcile path when the coordinator has a task assigned
--- that the agent didn't report as running.
+-- Revert a single ASSIGNED task back to 'pending': the WHERE clause matches only
+-- `dispatched` and `running`, so a task that has already finished - or that was
+-- already requeued by someone else - is left exactly as it is.
+-- Used by the reconcile path when the coordinator has a task assigned that the
+-- agent didn't report as running. Candidates come from GetActiveTasksForWorker,
+-- which filters on the same two statuses, so the predicate is normally redundant
+-- with the caller; it is the backstop for the window between that read and this
+-- write, and it is what keeps reconcile from being able to resurrect a terminal
+-- task.
 -- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
+-- The bump is inside the same UPDATE as the WHERE, so it happens only for rows
+-- that actually matched - the "conditionally end the assignment" branch of the
+-- epoch fence, never an unconditional bump.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -359,3 +371,131 @@ SET status = 'pending',
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')
   AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
 RETURNING id;
+
+-- name: SelectRetryableTaskIDs :many
+-- The UNGUARDED selection for POST /v1/jobs/{id}/retry: exactly the rows
+-- RetryJobTasks would reopen if no dependent blocked it. Its only purpose is to
+-- let the handler tell three outcomes apart: nothing matched the mode (empty
+-- here), the dependents guard blocked everything (non-empty here, empty there),
+-- and a concurrent write (a strict subset there). Do NOT add the dependents
+-- guard to this statement - that collapses the second case into the first and
+-- reports "no failed tasks" for a job that has several.
+-- The status predicate must stay byte-identical to RetryJobTasks's; change both
+-- or neither.
+-- TestTasksStatusVocabularyIsExactly names this statement.
+SELECT id FROM tasks
+WHERE job_id = sqlc.arg(job_id)
+  AND (status IN ('failed','timed_out')
+       OR (sqlc.arg(include_done)::bool AND status = 'done'))
+ORDER BY created_at;
+
+-- name: RetryJobTasks :many
+-- OPERATOR re-run of a terminal job's tasks: the analogue of RequeueTaskByID,
+-- and explicitly NOT of IncrementTaskRetryCount. Its preconditions are the exact
+-- inverse of that statement's: it reopens tasks that ARE terminal and has no
+-- worker identity to bind, so that statement's status and worker predicates
+-- would reject every call. See the note at IncrementTaskRetryCount.
+--
+-- Epoch fence: this satisfies the invariant's "conditionally end the assignment"
+-- branch. The bump is inside the same UPDATE as the WHERE, so it happens only
+-- for rows that actually matched - never unconditionally, which would satisfy
+-- the rule vacuously.
+--
+-- No fence on a CALLER epoch and no worker predicate, deliberately, for the same
+-- reason CancelJobTasks has none: an operator has no generation and no worker
+-- identity to prove. What replaces the identity predicate is the status
+-- allow-list. A terminal row has no live assignment, so there is no agent to
+-- evict; a `dispatched` or `running` task is unreachable by this statement in
+-- either mode.
+--
+-- THAT ARGUMENT HAS A DEPENDENCY, and it is not visible from this WHERE clause:
+-- it holds because of WHO writes each terminal status, not because the statuses
+-- are terminal. `timed_out` has exactly one writer, and it is the assignee
+-- itself: the agent gives each task's subprocess a context deadline built from
+-- timeout_sec (internal/agent/runner.go, newRunner), and when cmd.Wait returns
+-- with ctx.Err() == context.DeadlineExceeded - so the process is already dead
+-- and its proctree already cleaned up - the runner reports TASK_STATUS_TIMED_OUT
+-- as its final status. internal/worker/handler.go maps that to 'timed_out' and
+-- writes it through UpdateTaskStatus, fenced on the sender's epoch and worker
+-- id. So a `timed_out` row, like a `failed` or `done` one, records an agent
+-- saying "I am finished with this", after it stopped executing. There is nothing
+-- left to evict.
+-- What would break this is a SERVER-SIDE watchdog: something that stamps
+-- `timed_out` on a task the agent is still happily running, because the row
+-- looks stale from the coordinator's side. That row would be terminal AND still
+-- executing, and this statement would become a duplicate-execution primitive -
+-- the retry reopens it, the dispatcher hands it to a second worker, and the
+-- first agent's eventual completion is fenced out by the epoch bump, so nothing
+-- reports the collision. Whoever adds a coordinator-side terminal writer must
+-- revisit this clause, not just the status vocabulary test.
+--
+-- THE STATUS ALLOW-LIST MUST STAY IN THIS WHERE CLAUSE, on tasks' own columns.
+-- Do not "simplify" it to `t.id IN (SELECT id FROM selected)`. Under READ
+-- COMMITTED a blocked UPDATE re-evaluates its ROW-LEVEL qual against the updated
+-- tuple (EvalPlanQual); it does not re-execute CTEs. With the status test only
+-- in the CTE, a second concurrent retry re-updates rows the first already
+-- reopened and double-bumps assignment_epoch.
+-- This is pinned by
+-- TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpEpoch.
+-- This is the multi-row analogue of the reasoning in IncrementTaskRetryCount's
+-- `assignment_epoch` note.
+--
+-- The allow-list is an ALLOW-LIST for the same reason UpdateTaskStatus's is:
+-- a new status must be un-retryable until somebody decides otherwise.
+-- TestTasksStatusVocabularyIsExactly names this statement.
+--
+-- The dependents guard is all-or-nothing by construction: the NOT EXISTS is
+-- uncorrelated, so it is true for every row or for none. Partial application is
+-- unrepresentable, which is what keeps a retry from stranding a reopened task
+-- behind a dependency that stayed terminal. `dep.status <> 'pending'` is a
+-- NEGATION on purpose: this predicate authorizes BLOCKING, so failing closed
+-- means blocking on any status added later. The allow-list spelling would fail
+-- open here. `pending` is the only status that proves a dependent was never
+-- claimed (ClaimTaskForWorker requires status='pending').
+--
+-- A dependent that is itself in `selected` does not block: FailDependentTasks
+-- cascade-fails a failing task's pending dependents, so on any healthy failed
+-- job every selected task has failed dependents. Without the NOT IN (selected)
+-- exclusion this statement would refuse every ordinary retry.
+--
+-- retry_count = 0 is a stated decision, not a copied SET clause: its one
+-- behavioral consumer is `terminal && task.RetryCount < task.Retries` in
+-- handleTaskStatus (internal/worker/handler.go), so leaving the counter at its
+-- exhausted value hands the operator a re-run with zero agent retries - exactly
+-- what they pressed Retry to escape.
+--
+-- UNION (not UNION ALL) in the recursive term dedupes, so the walk terminates
+-- even if a cycle is ever introduced. Edges are intra-job by construction
+-- (jobcreate resolves depends_on within one spec).
+WITH RECURSIVE selected AS (
+    SELECT id FROM tasks
+    WHERE job_id = sqlc.arg(job_id)
+      AND (status IN ('failed','timed_out')
+           OR (sqlc.arg(include_done)::bool AND status = 'done'))
+), descendants AS (
+    SELECT td.task_id AS id
+    FROM task_dependencies td
+    WHERE td.depends_on_task_id IN (SELECT id FROM selected)
+  UNION
+    SELECT td.task_id
+    FROM task_dependencies td
+    JOIN descendants dd ON dd.id = td.depends_on_task_id
+)
+UPDATE tasks t
+SET status           = 'pending',
+    worker_id        = NULL,
+    started_at       = NULL,
+    finished_at      = NULL,
+    retry_count      = 0,
+    assignment_epoch = t.assignment_epoch + 1
+WHERE t.job_id = sqlc.arg(job_id)
+  AND (t.status IN ('failed','timed_out')
+       OR (sqlc.arg(include_done)::bool AND t.status = 'done'))
+  AND NOT EXISTS (
+        SELECT 1
+        FROM descendants d
+        JOIN tasks dep ON dep.id = d.id
+        WHERE dep.status <> 'pending'
+          AND d.id NOT IN (SELECT id FROM selected)
+      )
+RETURNING t.id;

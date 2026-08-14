@@ -1,8 +1,10 @@
 ---
 title: "POST /v1/jobs/{id}/retry - operator re-run of a terminal job's failed or all tasks"
 type: feature
-status: open
+status: closed
 created: 2026-08-13
+closed: 2026-08-13
+resolution: fixed
 priority: medium
 source: split out of feature-2026-06-26-web-enabler-backend-endpoints during the 2026-08-13-web-enabler-list-endpoints slice
 ---
@@ -144,3 +146,39 @@ The reason this item is long is that seven weeks of accumulated constraints were
 separated from the endpoint they constrain. Every bullet above was learned by fixing something else,
 and the cheapest possible failure mode for this work is an implementer who reads only the title,
 finds `IncrementTaskRetryCount`, and reuses it.
+
+## Resolution
+
+Shipped in the 2026-08-13-job-retry-endpoint slice. `POST /v1/jobs/{id}/retry` exists with an
+owner-or-admin gate (404 on deny), a required `?task=failed|all` parsed before any DB work, and
+its own store statement `RetryJobTasks` - the operator analogue of `RequeueTaskByID`, never
+`IncrementTaskRetryCount`, with a structural guard test keeping the two apart module-wide.
+
+All six carried constraints were honoured, and three of the item's own premises were corrected
+at spec time rather than implemented as written:
+
+1. `IncrementTaskRetryCount` is not called; `TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath`
+   enforces it across the whole module.
+2. `RetryJobTasks` carries an explicit status allow-list in its own row-level `WHERE` - not only in
+   a CTE, because EvalPlanQual re-checks the row qual but does not re-execute CTEs - and bumps
+   `assignment_epoch` inside the same `UPDATE`, so the bump is conditional rather than vacuous.
+3. `retry_count` resets to 0; its one consumer is `handleTaskStatus`'s `RetryCount < Retries`
+   branch, so leaving it exhausted would hand the operator a re-run with zero agent retries.
+4. A `cancelled` job is refused (409). Because the gate admits only `done` and `failed`, the only
+   transition this endpoint can cause is `done|failed -> running`, so the cancelled-blind
+   `RecomputeJobStatus` is structurally unreachable from `cancelled` and needed no change.
+5. The dependents guard is uncorrelated and therefore all-or-nothing; a dependent blocks unless it
+   is `pending` or is itself in the selected set. The item's wording would have blocked the ordinary
+   cascade-failed case and made the guard inert - corrected at spec time.
+6. The jobs-stats `updated_at` proxy interaction was scoped out and accepted in writing; the
+   premise did not reproduce. [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] stays OPEN.
+   `JobStatusCounts`'s own comment about `updated_at` writers was wrong and is corrected here.
+
+Two things the item did not anticipate. It framed the auth decision on an admin-gated force-cancel
+that does not exist - `force` is a query param on the same owner-or-admin cancel handler. And it
+never mentioned `handleCancelJob`, which was an ABBA lock-order pair with the new handler; both now
+read through `GetJobForUpdate` in one lock order (job, then tasks), and both gate ownership on an
+unlocked read *before* taking that lock, so an unauthorized caller cannot queue on a victim's row
+lock.
+
+[[feature-2026-07-01-job-retry-action]] can now drop its backend-blocked caveat.

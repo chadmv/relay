@@ -107,9 +107,12 @@ func (s *Server) Handler() http.Handler {
 	// Read routes (GET) are intentionally global: any authenticated user may
 	// read any job's metadata, task list, and logs. This is deliberate
 	// render-farm semantics - a shared farm where operators inspect any job.
-	// Only the destructive cancel (DELETE) is owner-or-admin gated.
+	// The two destructive writes - cancel (DELETE) and retry
+	// (POST /v1/jobs/{id}/retry) - are owner-or-admin gated inside their
+	// handlers, via the single jobOwnerOr404 helper in jobs.go.
 	//
-	// Note the interaction with that cancel gate: handleCancelJob returns 404
+	// Note the interaction with that cancel gate: handleCancelJob and
+	// handleRetryJob return 404
 	// (not 403) on deny to avoid leaking job existence, but these global reads
 	// already expose existence and metadata to any authenticated user. The
 	// cancel 404 is therefore defense-in-depth for the destructive action, not
@@ -120,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
+	mux.Handle("POST /v1/jobs/{id}/retry", auth(http.HandlerFunc(s.handleRetryJob)))
 
 	// Tasks (read routes are intentionally global - see Jobs note above).
 	mux.Handle("GET /v1/jobs/{id}/tasks", auth(http.HandlerFunc(s.handleListTasks)))

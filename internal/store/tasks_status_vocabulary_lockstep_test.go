@@ -45,6 +45,21 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     'timed_out')` as terminal. This must remain the exact complement of the
 //     two predicates above; a status that one side treats as terminal and the
 //     other does not is precisely the split-brain that produced that bug.
+//   - RetryJobTasks (query/tasks.sql) - `status IN ('failed','timed_out')`, plus
+//     'done' when include_done is true. This is the OPERATOR re-run's selection
+//     (POST /v1/jobs/{id}/retry). A new TERMINAL status probably belongs in
+//     ?task=all's widening, and belongs in ?task=failed's only if it is a
+//     failure mode the way timed_out is. A new NON-TERMINAL status must stay out
+//     of BOTH modes: this statement clears worker_id and bumps the epoch, so
+//     admitting a non-terminal status would let an operator retry evict a live
+//     agent. The same statement's dependents guard reads
+//     `dep.status <> 'pending'` - a negation, because there the predicate
+//     authorizes BLOCKING, so a new status must block. Do not "fix" it into an
+//     allow-list.
+//   - SelectRetryableTaskIDs (query/tasks.sql) - the unguarded twin of that
+//     selection, used only to classify the endpoint's three 409s. Its status
+//     predicate must stay byte-identical to RetryJobTasks's; change both or
+//     neither.
 //
 // The allow-list form of the two predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
