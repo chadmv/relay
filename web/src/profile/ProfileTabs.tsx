@@ -10,7 +10,11 @@ import { PROFILE_TABS } from './tabs'
 // returns it.
 export function ProfileTabs() {
   return (
-    <div className="flex gap-1.5 self-start rounded-full border border-border bg-black/30 p-[3px] backdrop-blur-[8px]">
+    // flex-wrap: same fix and same reason as AdminTabs.tsx - found by Task 7's
+    // real-browser pass of
+    // docs/superpowers/plans/2026-08-13-narrow-viewport-overflow.md, masked by the
+    // header floor (Cause 0) until that was fixed.
+    <div className="flex flex-wrap gap-1.5 self-start rounded-full border border-border bg-black/30 p-[3px] backdrop-blur-[8px]">
       {PROFILE_TABS.map((t) => (
         <NavLink
           key={t.slug}
