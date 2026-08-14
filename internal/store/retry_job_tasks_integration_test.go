@@ -384,3 +384,171 @@ func TestGetJobForUpdate_TakesARowLockThatBlocksASecondReader(t *testing.T) {
 		t.Fatal("B never unblocked after A committed")
 	}
 }
+
+// NEGATIVE control. T failed, its dependent D already ran (done) and is not in
+// the selected set. Reopening T under D would reproduce route B of
+// bug-2026-06-26 by design.
+func TestRetryJobTasks_DependentsGuard_AlreadyRanDependentBlocks(t *testing.T) {
+	f := newRetryFixture(t)
+	tsk := f.inStatus(t, "t", "failed")
+	d := f.inStatus(t, "d", "done")
+	f.dep(t, d, tsk) // d depends on t
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reopened, "a task whose dependent already ran must not reopen")
+	require.Equal(t, "failed", f.get(t, tsk.ID).Status)
+	require.Equal(t, tsk.AssignmentEpoch, f.get(t, tsk.ID).AssignmentEpoch)
+}
+
+// POSITIVE control - the one that catches a guard that blocks everything. On any
+// healthy failed job FailDependentTasks has cascade-failed the failing task's
+// pending dependents, so every selected task HAS failed dependents. A dependent
+// that is itself being reopened by this same request must not block.
+func TestRetryJobTasks_DependentsGuard_CascadeFailedDependentDoesNotBlock(t *testing.T) {
+	f := newRetryFixture(t)
+	tsk := f.inStatus(t, "t", "failed")
+	d := f.pending(t, "d")
+	f.dep(t, d, tsk)
+	require.NoError(t, f.q.FailDependentTasks(f.ctx, tsk.ID))
+	require.Equal(t, "failed", f.get(t, d.ID).Status)
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []pgtype.UUID{tsk.ID, d.ID}, reopened,
+		"the ordinary retry case: a cascade-failed dependent is reopened alongside its dependency")
+	require.Equal(t, "pending", f.get(t, tsk.ID).Status)
+	require.Equal(t, "pending", f.get(t, d.ID).Status)
+}
+
+// A -> B -> C (C depends on B, B depends on A). A failed, B failed, C done.
+//
+// HONEST SCOPE, corrected from the plan: this does NOT prove the recursive term.
+// B is itself selected, so C is a DIRECT dependent of a selected task and the
+// non-recursive term alone reaches it - dropping the UNION and the recursive
+// term was observed to leave this test green. What it does pin is that a chain
+// blocks as a unit and that widening to include_done unblocks it.
+// TestRetryJobTasks_DependentsGuard_RecursionIsRequiredForAnUnselectedIntermediate
+// is the test that pins the closure.
+func TestRetryJobTasks_DependentsGuard_TransitiveDescendantBlocks(t *testing.T) {
+	f := newRetryFixture(t)
+	a := f.inStatus(t, "a", "failed")
+	b := f.inStatus(t, "b", "failed")
+	c := f.inStatus(t, "c", "done")
+	f.dep(t, b, a)
+	f.dep(t, c, b)
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reopened, "a transitive descendant that already ran must block the whole request")
+
+	withDone, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: true,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []pgtype.UUID{a.ID, b.ID, c.ID}, withDone,
+		"with C selected too, the closure is fully covered and all three reopen")
+}
+
+// ALL-OR-NOTHING, asserting NO row changed rather than merely that the count was
+// zero. A per-row guard would reopen X and strand it: X would be pending on a
+// job whose other failed task stayed terminal, and the job would sit at running.
+//
+// The DAG is NOT the plan's A -> B -> C chain, which cannot discriminate this:
+// there every selected row has the same blocking descendant, so a correlated
+// (per-row) guard blocks all of them too and the mutation was observed to leave
+// the test green. Here X has no dependents at all and Y does, so an uncorrelated
+// guard blocks BOTH while a per-row guard would reopen X alone.
+func TestRetryJobTasks_DependentsGuard_ExclusionIsAllOrNothing(t *testing.T) {
+	f := newRetryFixture(t)
+	a := f.inStatus(t, "x-no-dependents", "failed")
+	b := f.inStatus(t, "y-blocked", "failed")
+	c := f.inStatus(t, "z-already-ran", "done")
+	f.dep(t, c, b) // z depends on y; x is unencumbered
+
+	before := map[pgtype.UUID]store.Task{a.ID: a, b.ID: b, c.ID: c}
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reopened)
+
+	for id, was := range before {
+		got := f.get(t, id)
+		require.Equal(t, was.Status, got.Status, "no row may change under a blocked retry")
+		require.Equal(t, was.AssignmentEpoch, got.AssignmentEpoch)
+		require.Equal(t, was.WorkerID, got.WorkerID)
+		require.Equal(t, was.RetryCount, got.RetryCount)
+	}
+}
+
+// SelectRetryableTaskIDs must NOT carry the dependents guard: if it did, the
+// handler could not tell "no failed tasks" from "blocked by a dependent", and
+// would report the former for a job that has several failed tasks.
+func TestSelectRetryableTaskIDs_IsUnguardedAndMatchesRetryJobTasksSelection(t *testing.T) {
+	f := newRetryFixture(t)
+	tsk := f.inStatus(t, "t", "failed")
+	d := f.inStatus(t, "d", "done")
+	f.dep(t, d, tsk)
+
+	selected, err := f.q.SelectRetryableTaskIDs(f.ctx, store.SelectRetryableTaskIDsParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []pgtype.UUID{tsk.ID}, selected,
+		"the selection is unguarded: it reports what the mode matched, not what the guard allowed")
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reopened, "the guard blocks here, and the difference is what the handler classifies")
+
+	all, err := f.q.SelectRetryableTaskIDs(f.ctx, store.SelectRetryableTaskIDsParams{
+		JobID: f.job.ID, IncludeDone: true,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []pgtype.UUID{tsk.ID, d.ID}, all,
+		"include_done widens the selection identically to RetryJobTasks's")
+}
+
+// RECURSION. The closure only needs its recursive term when an UNSELECTED,
+// NON-BLOCKING task sits between a selected task and one that already ran:
+// A (failed, selected) -> B (pending, not selected, does not block) -> C (done,
+// not selected, blocks). Direct edges from `selected` reach only B, which is
+// pending and therefore harmless, so a non-recursive `descendants` lets A reopen
+// underneath a dependent that has already produced output. Only the recursive
+// term reaches C.
+//
+// Every all-terminal chain is covered by direct edges alone, because each link
+// is itself selected - which is why the plan's transitive test stayed green
+// under the drop-the-recursion mutation. This shape is the discriminating one.
+func TestRetryJobTasks_DependentsGuard_RecursionIsRequiredForAnUnselectedIntermediate(t *testing.T) {
+	f := newRetryFixture(t)
+	a := f.inStatus(t, "a", "failed")
+	b := f.pending(t, "b")
+	c := f.inStatus(t, "c", "done")
+	f.dep(t, b, a)
+	f.dep(t, c, b)
+
+	require.Equal(t, "pending", f.get(t, b.ID).Status,
+		"the intermediate must be pending, or it would block on its own status")
+
+	reopened, err := f.q.RetryJobTasks(f.ctx, store.RetryJobTasksParams{
+		JobID: f.job.ID, IncludeDone: false,
+	})
+	require.NoError(t, err)
+	require.Empty(t, reopened,
+		"a descendant reachable only through an unselected pending intermediate "+
+			"must still block: reopening a under an already-done c is route B of "+
+			"bug-2026-06-26 by design")
+	require.Equal(t, "failed", f.get(t, a.ID).Status)
+	require.Equal(t, a.AssignmentEpoch, f.get(t, a.ID).AssignmentEpoch)
+	require.Equal(t, "done", f.get(t, c.ID).Status)
+}
