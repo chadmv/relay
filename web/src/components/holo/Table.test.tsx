@@ -302,3 +302,27 @@ test('minWidth wraps the table subtree in a scroll container, and nothing else m
 // itself, which is a stronger guarantee than a runtime DOM assertion ever gave.
 // See the deleted `every Table call site opts in to a scroll min-width` test in
 // responsive.guard.test.ts, which this replaces.
+
+// EnrollmentsTable and InvitesTable have ZERO focusable elements in any row - no
+// links, no buttons - so their clipped right-hand columns were reachable only via
+// the scroll wrapper's own implicit scroller focusability, which Chromium grants
+// and Safari does not, and which was never exercised by a real Tab press in any
+// environment this slice's verification could reach. It is also an axe
+// scrollable-region-focusable violation as shipped: a scrollable region with no
+// other means of keyboard reaching its overflowing content needs its own tab
+// stop. tabIndex={0} plus role="group" (a scroll region is not a landmark, but it
+// needs SOME accessible-name-bearing role for the aria-label to attach to) fixes
+// both. The label is derived from the existing `label` prop, not a second
+// constant, so it can never drift from the table's own accessible name.
+test('the scroll wrapper is a keyboard-reachable, labelled group', () => {
+  render(<Table label="Widgets" columns="grid-cols-[1fr_80px]" minWidth="min-w-[640px]" headers={[{ label: 'A' }]} />)
+  const table = screen.getByRole('table', { name: 'Widgets' })
+  const wrapper = table.parentElement as HTMLElement
+  // The DOM attribute is lowercase ("tabindex") regardless of the JSX prop's
+  // casing - React reflects tabIndex onto the standard HTML attribute name.
+  expect(wrapper).toHaveAttribute('tabindex', '0')
+  expect(wrapper).toHaveAttribute('role', 'group')
+  // Derived, not duplicated: a caller who renames the table via `label` cannot
+  // leave this one stale by forgetting a second place to update it.
+  expect(wrapper).toHaveAccessibleName(expect.stringContaining('Widgets'))
+})

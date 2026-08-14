@@ -177,7 +177,20 @@ export function Table<F extends string = string>({
   // and a wrapper with no min-width would only scroll a misaligned table anyway.
   // The old opt-in branch is dead now that omission is a compile error rather
   // than a runtime configuration - see TableProps.minWidth.
-  return <div className="overflow-x-auto">{table}</div>
+  //
+  // tabIndex={0} + role="group": EnrollmentsTable and InvitesTable have ZERO
+  // focusable elements in any row, so their clipped right-hand columns were
+  // reachable only via this wrapper's own IMPLICIT scroller focusability, which
+  // Chromium grants and Safari does not, and an axe scrollable-region-focusable
+  // violation as shipped. role="group" is not a landmark - a scroll region isn't
+  // one - it exists only so aria-label has a role to attach an accessible name
+  // to. The label is derived from `label`, never a second constant, so it cannot
+  // drift from the table's own accessible name.
+  return (
+    <div className="overflow-x-auto" tabIndex={0} role="group" aria-label={`${label}, scrolls horizontally`}>
+      {table}
+    </div>
+  )
 }
 
 type TableRowProps = Omit<ComponentPropsWithoutRef<'div'>, 'role' | 'dangerouslySetInnerHTML'> & {
