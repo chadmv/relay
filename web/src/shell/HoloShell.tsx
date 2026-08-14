@@ -46,10 +46,20 @@ export function HoloShell({ children }: { children: ReactNode }) {
 
           Dialogs are unaffected either way: they portal to a layer appended to
           <body>, outside both siblings, and keep their z-50 above them. */}
-      <header className="relative z-10 flex items-center justify-between border-b border-border bg-white/[0.025] px-[22px] py-3 backdrop-blur-[10px]">
-        <div className="flex items-center gap-6">
+      {/* Narrow-viewport rule for this header (measured 2026-08-13): the <nav> is
+          the ONLY element allowed to become a scroll container. The dropdown that
+          UserMenu hangs below this header would be clipped by an overflow declared
+          here, which is the same stacking behaviour the comment above measures. See
+          docs/superpowers/plans/2026-08-13-narrow-viewport-overflow.md. */}
+      <header className="relative z-10 flex items-center justify-between gap-3 border-b border-border bg-white/[0.025] px-[22px] py-3 backdrop-blur-[10px]">
+        <div className="flex min-w-0 items-center gap-6">
           <Eyebrow className="text-accent">RELAY</Eyebrow>
-          <nav className="flex gap-0.5">
+          {/* min-w-0 lets this shrink below its content (a flex item's automatic
+              minimum is its content width, which is what made the header a 523px
+              floor); overflow-x-auto then makes every route reachable by scrolling.
+              Inert at any width where the links fit: a scroll container with no
+              overflow renders no scrollbar and no visual difference. */}
+          <nav className="flex min-w-0 gap-0.5 overflow-x-auto">
             {nav.map((n) => (
               <NavLink
                 key={n.to}

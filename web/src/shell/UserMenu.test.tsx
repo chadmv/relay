@@ -371,3 +371,27 @@ test('arrow keys do nothing - this is a disclosure, not a menu', async () => {
   expect(document.activeElement).toBe(first)
   expect(screen.getByTestId('user-menu-panel')).toBeInTheDocument()
 })
+
+// The other half of the header floor: the toggle renders the full email, and as a
+// flex item of the header its automatic minimum size is that text - so a long
+// address sets a floor of its own no matter what the nav does. REGRESSION PIN
+// (jsdom does no layout); the widths were measured in Chrome.
+//
+// truncate carries overflow:hidden, which is also what drops the SPAN's automatic
+// minimum size to 0; the button needs min-w-0 explicitly because it has no
+// overflow of its own.
+test('the toggle can shrink and truncates a long email rather than setting a header floor', () => {
+  render(
+    <MemoryRouter>
+      <UserMenu email="a-very-long-address-that-would-set-a-floor@studio.dev" onLogout={vi.fn()} />
+    </MemoryRouter>,
+  )
+  const toggle = screen.getByRole('button', { name: /studio\.dev/i })
+  expect(toggle).toHaveClass('min-w-0')
+  expect(toggle.parentElement).toHaveClass('min-w-0')
+  // Positive control: the email is still rendered in full as text, so this is a
+  // truncation, not a substring the component silently dropped.
+  const label = toggle.firstElementChild as HTMLElement
+  expect(label).toHaveClass('truncate')
+  expect(label).toHaveTextContent('a-very-long-address-that-would-set-a-floor@studio.dev')
+})
