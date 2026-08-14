@@ -27,6 +27,17 @@ const ME = {
 // project has rejected those before.
 let inflight: Promise<unknown> | null = null
 
+// login()'s own promise, captured the same way as `inflight` above and for the
+// same reason. login() is fired fire-and-forget from the button below (mirroring
+// real usage, where nothing awaits it either): it calls setToken() synchronously
+// but only sets status to 'authenticated' AFTER an internal, unawaited-by-the-test
+// GET /users/me settles. A test that polls getToken() with waitFor and stops there
+// has NOT waited for that second half - it has only proven the synchronous part
+// happened. Capturing and awaiting this promise directly closes that gap with a
+// real await instead of a poll, the same "explicit deferred promise, never a
+// timer" discipline `inflight` already documents above.
+let loginResult: Promise<unknown> | null = null
+
 function Probe() {
   const { status, user, login, clearSession } = useAuth()
   const [fired, setFired] = useState(0)
@@ -46,7 +57,13 @@ function Probe() {
         fire
       </button>
       <button onClick={() => clearSession()}>clear</button>
-      <button onClick={() => void login('mira@studio.dev', 'pw').catch(() => {})}>login</button>
+      <button
+        onClick={() => {
+          loginResult = login('mira@studio.dev', 'pw').catch(() => {})
+        }}
+      >
+        login
+      </button>
     </div>
   )
 }
@@ -106,8 +123,9 @@ test('a 401 from a DEAD session does not clear the session that replaced it', as
   await userEvent.click(screen.getByText('clear'))
   await waitFor(() => expect(getToken()).toBeNull())
   await userEvent.click(screen.getByText('login'))
-  await waitFor(() => expect(getToken()).toBe('tok_B'))
-  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('authenticated'))
+  // Await the WHOLE login flow, not just the synchronous setToken() half - see the
+  // comment on `loginResult` above. This is deterministic, not a poll.
+  await loginResult
 
   // Only NOW does the dead session's 401 land.
   release()
@@ -153,8 +171,8 @@ test('a 401 landing DURING teardown still leaves everything torn down', async ()
   // It still holds, but for a DIFFERENT reason after this change: the listener no
   // longer runs at all here (the token is already gone, so the identity fence
   // rejects), and convergence now rests entirely on clearSession having done all
-  // four things itself, synchronously, with clearToken() first
-  // (AuthProvider.tsx:127-132). Pin it, because that is a load-bearing dependency
+  // four things itself, synchronously, with clearToken() first (AuthProvider's
+  // clearSession() function). Pin it, because that is a load-bearing dependency
   // the fix silently acquired.
   server.use(http.get('/v1/users/me', () => HttpResponse.json(ME)))
   setToken('tok_A')
@@ -225,7 +243,12 @@ test('a stream 401 from a DEAD session does not clear the session that replaced 
   await userEvent.click(screen.getByText('clear'))
   await waitFor(() => expect(getToken()).toBeNull())
   await userEvent.click(screen.getByText('login'))
-  await waitFor(() => expect(getToken()).toBe('tok_B'))
+  // Await the WHOLE login flow before releasing the gated 401 - see the comment on
+  // `loginResult` above. Previously this only polled getToken() (the synchronous
+  // half of login()) and asserted 'authenticated' with a bare expect at the end
+  // with no wait backing it; if the login flow's own GET /users/me had not yet
+  // settled by the time the released 401 resolved, that bare assert raced it.
+  await loginResult
 
   release()
   await act(async () => {
