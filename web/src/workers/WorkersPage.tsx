@@ -8,6 +8,7 @@ import { WorkersGrid } from './WorkersGrid'
 import { WorkersTable, type SortField } from './WorkersTable'
 import { RevokedWorkersTable } from './RevokedWorkersTable'
 import { computePageRange } from '../lib/pageRange'
+import { useCursorPager } from '../lib/useCursorPager'
 import type { Worker, WorkerSort, WorkerStats, WorkerStatus } from './api'
 
 type View = 'grid' | 'table'
@@ -37,40 +38,15 @@ export function WorkersPage() {
   const [view, setView] = useState<View>(loadView)
   const [section, setSection] = useState<Section>('active')
 
-  // Revoked-workers pagination state (mirrors JobsPage cursor-stack pattern).
-  const [revokedCursor, setRevokedCursor] = useState('')
-  const [revokedStack, setRevokedStack] = useState<string[]>([])
-  const [revokedStartOffset, setRevokedStartOffset] = useState(0)
-  const [revokedOffsets, setRevokedOffsets] = useState<number[]>([])
+  const revokedPager = useCursorPager()
 
   const { data, error, isLoading, isFetching, refetch } = useWorkers(sort)
   const { data: stats } = useWorkerStats()
-  const revoked = useRevokedWorkers(section === 'decommissioned', revokedCursor)
+  const revoked = useRevokedWorkers(section === 'decommissioned', revokedPager.cursor)
 
   function chooseView(v: View) {
     setView(v)
     localStorage.setItem(VIEW_KEY, v)
-  }
-
-  function revokedNext() {
-    if (!revoked.data?.next_cursor) return
-    const currentPageSize = revoked.data.items.length
-    setRevokedStack([...revokedStack, revokedCursor])
-    setRevokedCursor(revoked.data.next_cursor)
-    setRevokedOffsets([...revokedOffsets, revokedStartOffset])
-    setRevokedStartOffset(revokedStartOffset + currentPageSize)
-  }
-
-  function revokedPrev() {
-    if (revokedStack.length === 0) return
-    const copy = [...revokedStack]
-    const back = copy.pop() ?? ''
-    setRevokedStack(copy)
-    setRevokedCursor(back)
-    const offsetsCopy = [...revokedOffsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setRevokedOffsets(offsetsCopy)
-    setRevokedStartOffset(prevOffset)
   }
 
   const sectionTabs = (
@@ -102,7 +78,7 @@ export function WorkersPage() {
   if (section === 'decommissioned') {
     const revokedWorkers = revoked.data?.items ?? []
     const revokedTotal = revoked.data?.total ?? 0
-    const { x, y } = computePageRange(revokedStartOffset, revokedWorkers.length)
+    const { x, y } = computePageRange(revokedPager.startOffset, revokedWorkers.length)
     const rangeText =
       revokedWorkers.length === 0
         ? `0 of ${revokedTotal.toLocaleString()}`
@@ -131,15 +107,15 @@ export function WorkersPage() {
               <div className="flex gap-2">
                 <button
                   type="button"
-                  onClick={revokedPrev}
-                  disabled={revokedStack.length === 0 || revoked.isPlaceholderData}
+                  onClick={revokedPager.prev}
+                  disabled={!revokedPager.canPrev || revoked.isPlaceholderData}
                   className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
                 >
                   &larr; prev
                 </button>
                 <button
                   type="button"
-                  onClick={revokedNext}
+                  onClick={() => revokedPager.next(revoked.data?.next_cursor, revokedWorkers.length)}
                   disabled={!revoked.data?.next_cursor || revoked.isPlaceholderData}
                   className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
                 >
