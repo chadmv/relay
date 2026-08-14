@@ -36,6 +36,26 @@ export function onUnauthorized(fn: Listener): () => void {
   return () => unauthorizedListeners.delete(fn)
 }
 
+// Both fire sites (apiFetch and apiStream) call this instead of iterating
+// unauthorizedListeners directly. Set#forEach does not catch a callback's own
+// throw: an uncaught one would stop iteration (subscribers registered after the
+// throwing one never run) AND propagate out of apiFetch/apiStream, replacing the
+// real result - the ApiError the caller is about to throw for this 401 - with an
+// unrelated error from a subscriber that has nothing to do with the request. One
+// buggy subscriber must not be able to silently break every other subscriber or
+// turn every 401 in the app into a surprise thrown Error.
+function notifyUnauthorized(token: string | null): void {
+  unauthorizedListeners.forEach((fn) => {
+    try {
+      fn(token)
+    } catch (err) {
+      // The token itself must never reach console - it is the SPA's bearer
+      // credential. Only the subscriber's own error is logged.
+      console.error('onUnauthorized listener threw', err)
+    }
+  })
+}
+
 interface ApiOptions extends Omit<RequestInit, 'body'> {
   json?: unknown
 }
@@ -57,7 +77,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   })
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn(token))
+    notifyUnauthorized(token)
   }
 
   if (!res.ok) {
@@ -140,7 +160,7 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   }
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn(token))
+    notifyUnauthorized(token)
   }
 
   // A non-ok response arrives as JSON BEFORE the headers switch to

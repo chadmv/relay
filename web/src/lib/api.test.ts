@@ -102,3 +102,35 @@ test('the 401 listener receives null when the request carried no token', async (
   expect(spy).toHaveBeenCalledWith(null)
   off()
 })
+
+// unauthorizedListeners is a Set iterated with forEach: an uncaught throw from one
+// subscriber stops iteration (later subscribers never run) AND replaces the
+// caller's real result - the ApiError apiFetch is about to throw for this 401 -
+// with the subscriber's unrelated error. Neither is acceptable: one buggy
+// subscriber (of which AuthProvider is only one; more can register) must not be
+// able to silently stop every other subscriber, or turn every 401 anywhere in the
+// app into a thrown Error the calling code was never written to expect.
+test('a throwing onUnauthorized listener does not stop delivery to the others or replace the ApiError', async () => {
+  server.use(
+    http.get('/v1/users/me', () =>
+      HttpResponse.json({ error: 'invalid_credentials' }, { status: 401 }),
+    ),
+  )
+  const throwing = vi.fn(() => {
+    throw new Error('boom')
+  })
+  const after = vi.fn()
+  const offThrowing = onUnauthorized(throwing)
+  const offAfter = onUnauthorized(after)
+  // The thrown error is expected to be logged (that is the fix); spy on
+  // console.error so the expected log line does not read as test-output noise.
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const err = await apiFetch('/users/me').catch((e) => e)
+  expect(throwing).toHaveBeenCalledOnce()
+  expect(after).toHaveBeenCalledOnce()
+  expect(err).toBeInstanceOf(ApiError)
+  expect((err as ApiError).status).toBe(401)
+  errorSpy.mockRestore()
+  offThrowing()
+  offAfter()
+})
