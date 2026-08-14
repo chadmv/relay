@@ -4,6 +4,7 @@ import { Button } from '../../components/Button'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { useCursorPager } from '../../lib/useCursorPager'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
 import { CreateUserForm } from './CreateUserForm'
 import { ResetPasswordDialog } from './ResetPasswordDialog'
@@ -31,13 +32,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
   const [includeArchived, setIncludeArchived] = useState(false)
   const [emailInput, setEmailInput] = useState('')
   const email = useDebouncedValue(emailInput, debounceMs).trim()
-  // Cursor of the current page (''=first). The stack holds the cursors we paged
-  // forward from; offsets tracks the real row offset so partial pages stay
-  // correct. Same pattern as JobsPage.
-  const [cursor, setCursor] = useState('')
-  const [stack, setStack] = useState<string[]>([])
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
   const [creating, setCreating] = useState(false)
   const [confirm, setConfirm] = useState<Confirm>(null)
   const [resetting, setResetting] = useState<AdminUser | null>(null)
@@ -45,7 +40,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
   const { data, error, isLoading, isPlaceholderData, refetch } = useAdminUsers(
     sort,
     includeArchived,
-    cursor,
+    pager.cursor,
     email,
   )
   const { create, rename, archive, unarchive, resetPassword } = useAdminUserActions()
@@ -60,52 +55,21 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
     rename.isPending || archive.isPending || unarchive.isPending || resetPassword.isPending
   const filtering = email !== ''
 
-  function resetPaging() {
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
-  }
-
   function pickSort(field: UserSortField) {
     setSort(toggleSort(field, sort))
     // The server rejects a cursor whose sort key does not match (internal/api/pagination.go).
-    resetPaging()
+    pager.resetPaging()
   }
 
   function pickIncludeArchived(v: boolean) {
     setIncludeArchived(v)
     // Different row set and total, so the old cursor is meaningless.
-    resetPaging()
+    pager.resetPaging()
   }
 
   function pickEmail(v: string) {
     setEmailInput(v)
-    resetPaging()
-  }
-
-  // Plain setters, not functional updaters: cursor, stack, and offsets are all read
-  // from the current render and React batches them in one event (same reasoning as
-  // JobsPage.next/prev).
-  function next() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setStack([...stack, cursor])
-    setCursor(data.next_cursor)
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function prev() {
-    if (stack.length === 0) return
-    const copy = [...stack]
-    const back = copy.pop() ?? ''
-    setStack(copy)
-    setCursor(back)
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging()
   }
 
   function onCreate(body: CreateUserBody) {
@@ -129,7 +93,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
 
   const users = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, users.length)
+  const { x, y } = computePageRange(pager.startOffset, users.length)
   const rangeText =
     users.length === 0
       ? `0 of ${total.toLocaleString()}`
@@ -191,15 +155,15 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={prev}
-                disabled={stack.length === 0 || isPlaceholderData}
+                onClick={pager.prev}
+                disabled={!pager.canPrev || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 ← prev
               </button>
               <button
                 type="button"
-                onClick={next}
+                onClick={() => pager.next(data?.next_cursor, users.length)}
                 disabled={!data?.next_cursor || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >

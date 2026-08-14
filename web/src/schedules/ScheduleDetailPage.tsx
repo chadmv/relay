@@ -23,7 +23,7 @@ export function ScheduleDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   // Local 1s clock so the relative countdown stays fresh between 10s polls. It issues
   // NO request (lib/useNow.ts:8-15). SchedulesPage rolls its own setTick
-  // (SchedulesPage.tsx:43-47); the shared hook is used here rather than adding a
+  // (SchedulesPage.tsx's setTick effect); the shared hook is used here rather than adding a
   // second local-timer idiom to the codebase.
   const now = useNow(1000)
 

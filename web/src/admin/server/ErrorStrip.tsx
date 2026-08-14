@@ -5,7 +5,7 @@ import { GlassPanel } from '../../components/holo'
 // One component because the copy and the affordance must be identical in all three:
 // a region that fails shows what failed and offers a way to try again, and NEVER a
 // fabricated value. Same shape as the sibling tabs' error state
-// (ReservationsTab.tsx:133-141), scoped to a region rather than the page.
+// (ReservationsTab.tsx's `error && !data` branch), scoped to a region rather than the page.
 export function ErrorStrip({
   message,
   label,

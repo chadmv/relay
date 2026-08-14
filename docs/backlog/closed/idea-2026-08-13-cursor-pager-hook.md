@@ -1,9 +1,11 @@
 ---
 title: The cursor-pager block is duplicated verbatim in seven list surfaces
 type: idea
-status: open
+status: closed
 created: 2026-08-13
 priority: medium
+closed: 2026-08-14
+resolution: fixed
 source: recorded deviation from the extract-before-the-third-consumer rule in the 2026-08-13-admin-invites-tab slice
 ---
 
@@ -218,3 +220,54 @@ A lens confirmed during the invites slice that the seventh copy is character-for
 its siblings. That is the only thing that makes shipping it defensible and it is also what makes this
 extraction mechanical rather than a redesign. If a future copy drifts, the extraction gets
 meaningfully harder, so the window for a cheap version of this work is now rather than later.
+
+## Resolution
+
+Shipped 2026-08-14 as `web/src/lib/useCursorPager.ts`. All seven surfaces migrated in one
+change; no copy or renamed variant survives (`setStack`/`setOffsets`/`setStartOffset`/
+`cursorStack` appear nowhere in `web/src` outside the hook).
+
+**This item's central premise was false, and that is the most useful thing it leaves behind.**
+It claimed all seven copies were verbatim and that `SchedulesPage` "differs only in
+identifiers; the bodies are the same". Verification at HEAD found only **four** byte-identical
+(the admin tabs). `SchedulesPage` was a genuinely different algorithm: three state pieces
+rather than four, `cursor` derived from the stack top rather than stored, `goNext` pushing the
+*destination* cursor where the canonical `next` pushes the *source*, and `goPrev` popping and
+discarding. A mechanical rename would have produced wrong code, and a reviewer told "only
+identifiers differ" would have passed it. `JobsPage` and `WorkersPage` had no `resetPaging` at
+all. Equivalence was ultimately established by hand-walk and by a 3000-trial x 40-step
+randomized differential simulation of both state machines, zero divergence. The item's own
+summary code sketch was the `SchedulesPage` shape presented as the shared block.
+
+**The gate held, and mutation proved it was not enough.** No pre-existing test file was
+modified (`git diff --diff-filter=M` over `web/src` returns no test file). But six wirings were
+unconstrained by any existing test: the `resetPaging` calls in `SchedulesPage.chooseSort`,
+`JobsPage.pickSort`, `JobsPage.pickFilter` and `UsersTab.pickEmail`, plus the `pageSize`
+argument at `WorkersPage` and `ReservationsTab` - each could be broken with the full suite
+green. Closed by five new sibling `*.pager.test.tsx` files, so the existing seven kept a literal
+zero-line diff. **A zero-diff gate proves you did not weaken the tests; it says nothing about
+whether the tests constrained the thing you changed.**
+
+Deliberate exclusions, both from acceptance criterion 12:
+
+- **`toggleSort` did not come along.** Five copies over five per-module sort unions; a shared
+  version needs a generic plus a cast decision at every call site, which is a type-level design
+  question and not something to settle inside a refactor whose premise is that nothing changes.
+  Filed as [[idea-2026-08-14-toggle-sort-generic]]. The `InvitesTab` comment carrying the debt
+  was corrected in passing (it said FOURTH copy; it is the FIFTH).
+- **The `formatExpiryLabel` / `EXPIRING_WINDOW_MS` half was excluded and gets no item.** Two
+  consumers, so the extract-before-the-third rule has not fired, and `inviteStatus.ts:5-9`
+  already names both the destination (`web/src/lib/expiry.ts`) and the trigger (a third status
+  module) in source. A source comment at the point of use is a better carrier than a backlog
+  entry nobody is reading when they add consumer three.
+
+Suite 1102 -> 1116. Also filed: [[idea-2026-08-14-cursor-pager-next-takes-the-page]] (the hook
+hides `stack`/`offsets` but takes `pageSize` as an unvalidatable `number` - the value both
+closed footer-range bugs were about), [[bug-2026-08-14-stale-citations-in-gate-frozen-test-files]]
+and [[bug-2026-08-14-schedules-footer-range-not-localized]].
+
+Note for anyone following this item's own references: the footer-range bug cited at line 68 as
+`bug-2026-06-21-jobs-pagination-footer-absolute-range` does not exist. The two real ones are
+`bug-2026-06-05-jobs-pagination-footer-absolute-range` and
+`bug-2026-06-21-schedules-pagination-footer-absolute-range`; the phantom citation had also
+propagated into three shipped source files and no longer survives anywhere in `web/src`.

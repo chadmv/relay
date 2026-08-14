@@ -5,6 +5,7 @@ import { useSchedules } from './useSchedules'
 import { useScheduleActions } from './useScheduleActions'
 import { SchedulesTable } from './SchedulesTable'
 import { computePageRange } from '../lib/pageRange'
+import { useCursorPager } from '../lib/useCursorPager'
 import { Eyebrow, GlassPanel } from '../components/holo'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
@@ -26,16 +27,10 @@ function countEnabled(schedules: Schedule[]): { enabled: number; paused: number 
 
 export function SchedulesPage() {
   const [sort, setSort] = useState<ScheduleSort>('-created_at')
-  // Cursor stack: [] is the first page; each entry is the cursor for a deeper page.
-  const [cursorStack, setCursorStack] = useState<string[]>([])
-  const cursor = cursorStack[cursorStack.length - 1]
-  // Accumulated actual-row offset to the start of the current page. Mirrors
-  // cursorStack depth so partial pages stay correct (same pattern as JobsPage).
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
   const [pendingId, setPendingId] = useState<string | null>(null)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, pager.cursor)
   const { runNow, setEnabled } = useScheduleActions()
 
   // Tick once a second so relative "next run"/"last run" strings stay fresh
@@ -48,32 +43,7 @@ export function SchedulesPage() {
 
   function chooseSort(next: ScheduleSort) {
     setSort(next)
-    setCursorStack([]) // restart paging when the sort changes
-    setOffsets([])
-    setStartOffset(0)
-  }
-
-  // goNext/goPrev use plain setters (not functional updaters): cursorStack,
-  // offsets, and startOffset are all read from the current render and React
-  // batches the updates in one event. Mixing a functional setCursorStack
-  // updater with plain offset setters would desync the stacks under StrictMode.
-  function goNext() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setCursorStack([...cursorStack, data.next_cursor])
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function goPrev() {
-    if (cursorStack.length === 0) return
-    const cursorCopy = [...cursorStack]
-    cursorCopy.pop()
-    setCursorStack(cursorCopy)
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging() // restart paging when the sort changes
   }
 
   async function onRunNow(id: string) {
@@ -119,7 +89,7 @@ export function SchedulesPage() {
 
   const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
-  const { x, y } = computePageRange(startOffset, schedules.length)
+  const { x, y } = computePageRange(pager.startOffset, schedules.length)
   const actionError = (runNow.error ?? setEnabled.error) as Error | null
 
   return (
@@ -182,8 +152,8 @@ export function SchedulesPage() {
             <div className="flex gap-1.5">
               <button
                 type="button"
-                disabled={cursorStack.length === 0 || isPlaceholderData}
-                onClick={goPrev}
+                disabled={!pager.canPrev || isPlaceholderData}
+                onClick={pager.prev}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 ← prev
@@ -191,7 +161,7 @@ export function SchedulesPage() {
               <button
                 type="button"
                 disabled={!data?.next_cursor || isPlaceholderData}
-                onClick={goNext}
+                onClick={() => pager.next(data?.next_cursor, schedules.length)}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 next 50 →
