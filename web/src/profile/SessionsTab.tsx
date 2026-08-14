@@ -17,7 +17,8 @@ import { signOutEverywhere } from './api'
 // render the list the endpoint can already supply, and even that list would be
 // a bare id/created-at/expires-at table, not the hi-fi's richer one. The house
 // rule is: omit what the backend cannot supply, and file the enabler for what
-// it now can (EnrollmentsTab.tsx:197-205, AdminPage.tsx:6-14).
+// it now can (EnrollmentsTab.tsx's footnote documenting the missing revoke
+// endpoint, AdminPage.tsx:6-14).
 //
 // The ACTION, though, works: DELETE /v1/auth/tokens is a live, auth-gated,
 // idempotent 204 (internal/api/auth.go:350-357). Applied faithfully the rule

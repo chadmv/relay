@@ -17,7 +17,7 @@ import type {
   ReservationSortField,
 } from './api'
 
-// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx:16-21): clicking the
+// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx): clicking the
 // active column flips its direction, clicking another selects it ascending.
 function toggleSort(field: ReservationSortField, current: ReservationSort): ReservationSort {
   if (current.replace('-', '') === field) {
@@ -60,7 +60,7 @@ export function ReservationsTab() {
   const { create, remove } = useReservationActions()
 
   // create.error is routed into the panel (it owns that copy); delete errors land in
-  // the shared box, matching UsersTab.tsx:53-60.
+  // the shared box, matching UsersTab.tsx's actionError.
   const actionError = remove.error as Error | null
 
   function pickSort(field: ReservationSortField) {
@@ -108,7 +108,8 @@ export function ReservationsTab() {
     )
   } else if (reservations.length === 0) {
     // A concurrent delete can empty a non-first page; without a way back, a reload is
-    // the admin's only exit (same escape hatch as EnrollmentsTab.tsx:113-130).
+    // the admin's only exit (same escape hatch as EnrollmentsTab.tsx's active-only
+    // empty state, in its `enrollments.length === 0` branch).
     body = (
       <>
         <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
@@ -138,7 +139,8 @@ export function ReservationsTab() {
           busy={remove.isPending}
           onDelete={(r) => {
             // Clear a stale error before opening for a (possibly different) row -
-            // the reset()-before-open convention from UsersTab.tsx:173-179.
+            // the reset()-before-open convention from UsersTab.tsx (resetPassword.reset()
+            // before setResetting).
             remove.reset()
             setConfirm(r)
           }}
@@ -182,7 +184,8 @@ export function ReservationsTab() {
           className="ml-auto"
           onClick={() => {
             // reset() clears a stale error so a freshly reopened empty form never
-            // shows a leftover message (UsersTab.tsx:238-245).
+            // shows a leftover message (UsersTab.tsx's create.reset()-before-toggle
+            // convention).
             create.reset()
             setCreating((v) => !v)
           }}

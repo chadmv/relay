@@ -87,6 +87,40 @@ test('paging back off a partial last page restores the previous offset, not page
   expect(result.current.startOffset).toBe(50)
 })
 
+// Three pages with two DISTINCT partial sizes (13 then 50 then 7), so neither of the
+// two wrong formulas below can coincide with the right answer by accident:
+//   - `copy.length * 50` (stack depth times a fixed page size): with a two-page walk
+//     of (50, 13) the first `prev` already diverges (50 vs the naive 1*50), but that
+//     collision is with the SAME number this test also uses for pageSize, which is
+//     exactly the coincidence that let a naive formula hide. Three distinct sizes
+//     remove any pageSize value that could double as "the" pageSize.
+//   - `startOffset - 50` (subtract a fixed page size from the running total instead of
+//     popping the real offsets stack): on a two-page walk of (13, 50), the second
+//     page's real size (50) happens to equal the constant being subtracted, so
+//     restoring 63 - 50 = 13 matches the correct answer BY COINCIDENCE. A third page
+//     of a third size breaks that coincidence.
+test('paging back through three partial pages restores each real offset, not a fixed-page-size guess', () => {
+  const { result } = renderHook(() => useCursorPager())
+  act(() => {
+    result.current.next('CUR1', 13)
+  })
+  act(() => {
+    result.current.next('CUR2', 50)
+  })
+  act(() => {
+    result.current.next('CUR3', 7)
+  })
+  expect(result.current.startOffset).toBe(70)
+  act(() => {
+    result.current.prev()
+  })
+  expect(result.current.startOffset).toBe(63)
+  act(() => {
+    result.current.prev()
+  })
+  expect(result.current.startOffset).toBe(13)
+})
+
 test('resetPaging returns to the first page', () => {
   let renders = 0
   const { result } = renderHook(() => {

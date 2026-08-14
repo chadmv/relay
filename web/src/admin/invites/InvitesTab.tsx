@@ -11,7 +11,7 @@ import { useInviteActions } from './useInviteActions'
 import { useInvites } from './useInvites'
 import type { CreateInviteBody, InviteSort, InviteSortField } from './api'
 
-// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx:16-21): clicking
+// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx): clicking
 // the active column flips its direction, clicking the other selects it ascending.
 //
 // FIFTH copy of this helper - WorkersPage, UsersTab, EnrollmentsTab and

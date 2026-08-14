@@ -11,9 +11,8 @@ import { useAgentEnrollmentActions } from './useAgentEnrollmentActions'
 import { useAgentEnrollments } from './useAgentEnrollments'
 import type { CreateEnrollmentBody, EnrollmentSort, EnrollmentSortField } from './api'
 
-// Same shape as UsersTab's toggleSort (web/src/admin/users/UsersTab.tsx:17-22):
-// clicking the active column flips its direction, clicking the other selects it
-// ascending.
+// Same shape as UsersTab's toggleSort (web/src/admin/users/UsersTab.tsx): clicking
+// the active column flips its direction, clicking the other selects it ascending.
 function toggleSort(field: EnrollmentSortField, current: EnrollmentSort): EnrollmentSort {
   if (current.replace('-', '') === field) {
     return (current.startsWith('-') ? field : `-${field}`) as EnrollmentSort

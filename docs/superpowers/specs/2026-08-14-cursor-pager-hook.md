@@ -555,11 +555,31 @@ MSW, no component.
    correct, and this is the bug
    `bug-2026-06-21-jobs-pagination-footer-absolute-range` (closed) already
    shipped once.
+   > **Correction (Phase 4 review, 2026-08-14):** that filename does not exist.
+   > The two real closed items are
+   > `docs/backlog/closed/bug-2026-06-05-jobs-pagination-footer-absolute-range.md`
+   > and `docs/backlog/closed/bug-2026-06-21-schedules-pagination-footer-absolute-range.md`
+   > - this line conflated the date of one with the surface of the other. Also,
+   > mutation-proven: the two-step `next(50)/next(13)/prev()` walk above does NOT
+   > discriminate the bug it is named after - `prev`'s restore mutated to
+   > `copy.length * 50` and to `startOffset - 50` both leave it green, because with
+   > only one prior page the naive and correct answers coincide. The shipped test
+   > (`web/src/lib/useCursorPager.test.ts`) instead walks three pages with three
+   > distinct sizes (13, 50, 7) so neither wrong formula can coincide by accident.
 5. **`resetPaging` clears all three pieces.** From depth 2, `resetPaging()` ->
    `cursor === ''` **and** `startOffset === 0` **and** `canPrev === false`.
    Asserting only `cursor` passes against a reset that forgets `offsets`, which is
    precisely the failure mode that produces a wrong footer range with a correct
    page of rows.
+   > **Correction (Phase 4 review, 2026-08-14):** disproved by mutation. Deleting
+   > `setOffsets([])` from `resetPaging` leaves the entire suite green: `offsets` is
+   > popped only while `stack` is non-empty, and `next` pushes exactly one offset
+   > per stack entry, so a stale prefix left behind by a forgotten clear is dead
+   > weight the pops never reach - it cannot produce a wrong footer range. The
+   > shipped hook keeps the `setOffsets([])` call anyway (byte-for-byte with the
+   > five originals that had a four-setter reset body), but the claim that a test
+   > exists to catch its removal is wrong; none does, and the code comment at
+   > `web/src/lib/useCursorPager.ts`'s `resetPaging` says so directly.
 
 Plus two guards the item does not name but that pin decisions:
 

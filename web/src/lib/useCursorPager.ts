@@ -1,8 +1,12 @@
 import { useState } from 'react'
 
 // One page-walk over a cursor-paginated list endpoint. Seven list surfaces used to
-// carry a copy of this each (JobsPage, WorkersPage, SchedulesPage, and the four
-// admin tabs); this is the single owner.
+// carry this logic before this hook (JobsPage, WorkersPage, SchedulesPage, and the
+// four admin tabs), but not as seven copies of one shape: five (JobsPage and the
+// admin tabs) were byte-identical copies, WorkersPage had the same shape under
+// `revoked`-prefixed identifiers and no reset call, and SchedulesPage ran a
+// different algorithm that stacked *destination* cursors rather than source
+// cursors. This hook is the single owner of all three variants' behaviour.
 //
 // The server returns only `next_cursor`, never a previous one, so walking BACK means
 // remembering where we came from. `stack` holds the cursors of the pages we paged
@@ -51,16 +55,18 @@ export interface CursorPager {
    * Return to the first page. Consumers MUST call this whenever the query's sort
    * key or its filters change: the server 400s a cursor issued under a different
    * sort ("cursor sort key does not match requested sort", internal/api/pagination.go).
-   * The hook deliberately does not watch a sort argument - the surfaces reset on
-   * six different trigger conditions (sort, status filter, include_archived, a
-   * debounced email), and a single `sort` dependency does not model that.
+   * The hook deliberately does not watch a sort argument - the surfaces reset from
+   * 9 call sites across 6 surfaces, on four distinct trigger conditions (sort,
+   * status filter, include_archived, a debounced email), and a single `sort`
+   * dependency does not model that.
    */
   resetPaging: () => void
 }
 
-// There is deliberately no `canNext`. Every surface computes it as
-// `!data?.next_cursor`, which is a fact about the query result, not about the pager,
-// and moving it in would make this hook depend on seven different response shapes.
+// There is deliberately no `canNext`. Every surface computes its next button's
+// `disabled` as `!data?.next_cursor || isPlaceholderData` - `!data?.next_cursor` is
+// only the cannot-page-further half, the query-result fact, not a pager fact - and
+// moving it in would make this hook depend on seven different response shapes.
 export function useCursorPager(): CursorPager {
   const [cursor, setCursor] = useState('')
   const [stack, setStack] = useState<string[]>([])
@@ -94,8 +100,11 @@ export function useCursorPager(): CursorPager {
     // Clearing offsets is NOT observable and no test covers it: offsets is popped
     // only while stack is non-empty, and next pushes exactly one offset per stack
     // entry, so a stale prefix is dead weight the pops never reach. Kept anyway,
-    // byte-for-byte with the seven originals, so the state stays honest and a future
-    // reader is not left wondering which of the four was left behind on purpose.
+    // byte-for-byte with the five originals that had a four-setter reset body
+    // (JobsPage and the four admin tabs) - WorkersPage had no reset at all, and
+    // SchedulesPage's cleared only three fields because its cursor was derived, not
+    // stacked - so the state stays honest and a future reader is not left wondering
+    // which piece was left behind on purpose.
     setOffsets([])
   }
 
