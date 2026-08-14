@@ -274,6 +274,7 @@ All configuration is via environment variables:
 | `RELAY_BOOTSTRAP_PASSWORD` | _(empty)_ | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum PostgreSQL connection pool size |
 | `RELAY_WORKER_GRACE_WINDOW` | `2m` | How long to wait before requeueing tasks from a disconnected agent |
+| `RELAY_TASKLOG_TRAILING_WINDOW` | `15m` | How long after a task finishes its assigned agent may still append log chunks for it. A legitimately late chunk is under 2 minutes late in the worst case, so the default carries about 8x margin. **Set it too small and real trailing output is silently truncated** - a rejected chunk is dropped with no error to the agent and no line in the server log, exactly like a stale-epoch chunk. An unparseable, zero or negative value keeps the default and logs one warning at startup. Set a very large value (`8760h`) to restore the old unbounded behaviour. |
 | `RELAY_TELEMETRY_WINDOW` | `30m` | Retention window for the in-memory worker utilization ring buffer |
 | `RELAY_TELEMETRY_STALE_AFTER` | `30s` | A connected worker with no telemetry received for longer than this is marked `stale`. Should be greater than `RELAY_TELEMETRY_INTERVAL`. |
 | `RELAY_CORS_ORIGINS` | _(empty)_ | Comma-separated CORS allowlist for HTTP API (empty = same-origin only, wildcard `*` rejected) |
