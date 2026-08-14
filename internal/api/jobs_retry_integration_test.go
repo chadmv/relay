@@ -581,3 +581,69 @@ func TestRetryJob_NotifyTaskSubmitted_FiresOnSuccessOnly(t *testing.T) {
 		})
 	}
 }
+
+// Item criterion: the retry_count decision must be pinned by a test. Asserting
+// the column alone would pass against a reset no consumer honors, so this test
+// asserts the CONSUMER's predicate - `terminal && task.RetryCount < task.Retries`
+// in handleTaskStatus (internal/worker/handler.go) - and then proves an agent
+// retry at the new generation is genuinely accepted and burns one.
+func TestRetryJob_RetryCountResetRestoresAgentRetryBudget(t *testing.T) {
+	e := newRetryEnv(t)
+	ctx := t.Context()
+	owner := createTestUser(t, e.q, "Owner", "retry-budget@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+	job := e.job(t, owner.ID)
+
+	// Seed a task with retries=1 whose single agent retry is already spent, then
+	// leave it terminal - all through production statements, no raw SQL.
+	task, err := e.q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "t", Commands: []byte(`[["echo","x"]]`),
+		Env: []byte("{}"), Requires: []byte("{}"), Retries: 1,
+	})
+	require.NoError(t, err)
+	claimed, err := e.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: e.w.ID,
+	})
+	require.NoError(t, err)
+	burned, err := e.q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: claimed.WorkerID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), burned.RetryCount)
+	claimed2, err := e.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: e.w.ID,
+	})
+	require.NoError(t, err)
+	exhausted, err := e.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: task.ID, Status: "failed", WorkerID: claimed2.WorkerID,
+		AssignmentEpoch: claimed2.AssignmentEpoch,
+		StartedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		FinishedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.False(t, exhausted.RetryCount < exhausted.Retries,
+		"precondition: the agent-side budget is spent, so handleTaskStatus would NOT retry")
+	require.Equal(t, "failed", e.recompute(t, job))
+
+	rec := e.do(t, token, uuidString(job.ID), "task=failed")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	reopened := e.getTask(t, task.ID)
+	require.Equal(t, int32(0), reopened.RetryCount, "retry_count must reset to 0")
+	require.True(t, reopened.RetryCount < reopened.Retries,
+		"the consumer's predicate in internal/worker/handler.go must now be TRUE: "+
+			"an operator re-run that starts with zero agent retries dies on the first "+
+			"transient error, which is the situation the operator pressed Retry to escape")
+
+	// And it is genuinely spendable: an agent retry at the new generation is
+	// accepted and burns one.
+	claimed3, err := e.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+		ID: task.ID, WorkerID: e.w.ID,
+	})
+	require.NoError(t, err)
+	again, err := e.q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
+		ID: task.ID, AssignmentEpoch: claimed3.AssignmentEpoch, WorkerID: claimed3.WorkerID,
+	})
+	require.NoError(t, err, "the reopened generation must be able to burn a retry")
+	require.Equal(t, int32(1), again.RetryCount)
+}
