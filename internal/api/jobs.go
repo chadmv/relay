@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"relay/internal/events"
@@ -841,17 +843,37 @@ type retryJobResponse struct {
 	TasksRetried int `json:"tasks_retried"`
 }
 
-// uuidStrList renders task ids for the two server-side diagnostic log lines.
-// The blocked ids belong in the log, not in the error body: every handler in
-// this codebase errors through writeError into {"error": string}, and inventing
-// a second error shape for one endpoint is a bigger change than the diagnosis is
-// worth. The per-task detail is one GET /v1/jobs/{id} away.
-func uuidStrList(ids []pgtype.UUID) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = uuidStr(id)
+// logIDHead is how many task ids the 409 diagnostic lines name individually.
+// Enough to recognize which tasks are involved; small enough that the line is
+// the same size for a 3-task job and a 3000-task job.
+const logIDHead = 8
+
+// uuidStrHead renders at most max task ids for the two server-side diagnostic
+// log lines, annotating how many it dropped.
+//
+// Bounded on purpose. Task count is bounded only against zero (jobspec.Validate),
+// the blocked-by-dependents condition is permanent, and log.Printf holds a global
+// mutex, so an unbounded rendering turns a Retry button an operator will press
+// again into a repeated multi-hundred-kilobyte write.
+//
+// The ids belong in the log rather than the error body: every handler in this
+// codebase errors through writeError into {"error": string}, and inventing a
+// second error shape for one endpoint is a bigger change than the diagnosis is
+// worth. The full per-task detail is one GET /v1/jobs/{id} away, which is also
+// why truncating here loses nothing that cannot be recovered.
+func uuidStrHead(ids []pgtype.UUID, max int) string {
+	n := len(ids)
+	if n > max {
+		n = max
 	}
-	return out
+	parts := make([]string, 0, n+1)
+	for _, id := range ids[:n] {
+		parts = append(parts, uuidStr(id))
+	}
+	if len(ids) > n {
+		parts = append(parts, fmt.Sprintf("... (+%d more)", len(ids)-n))
+	}
+	return strings.Join(parts, ",")
 }
 
 // handleRetryJob returns a finished job's tasks to the queue so the farm re-runs
@@ -976,16 +998,17 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	// is provably concurrency. That structural argument is why no extra query is
 	// needed to classify these two cases apart.
 	if len(reopened) == 0 {
-		log.Printf("api: retry job %s task=%s blocked by dependents: selected=%v",
-			uuidStr(id), mode, uuidStrList(selected))
+		log.Printf("api: retry job %s task=%s blocked by dependents: selected=%d [%s]",
+			uuidStr(id), mode, len(selected), uuidStrHead(selected, logIDHead))
 		writeError(w, http.StatusConflict,
 			"no tasks were reopened: a selected task has dependents that have already run, "+
 				"or the job changed while the request was in flight; nothing was applied")
 		return
 	}
 	if len(reopened) != len(selected) {
-		log.Printf("api: retry job %s task=%s raced: selected=%v reopened=%v",
-			uuidStr(id), mode, uuidStrList(selected), uuidStrList(reopened))
+		log.Printf("api: retry job %s task=%s raced: selected=%d [%s] reopened=%d [%s]",
+			uuidStr(id), mode, len(selected), uuidStrHead(selected, logIDHead),
+			len(reopened), uuidStrHead(reopened, logIDHead))
 		writeError(w, http.StatusConflict,
 			"the job changed while the retry was in flight; nothing was applied - try again")
 		return
