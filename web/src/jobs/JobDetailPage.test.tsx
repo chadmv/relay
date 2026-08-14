@@ -197,12 +197,33 @@ test('derives progress from the tasks array (1 of 2 done)', async () => {
   expect(await screen.findByText(/1\s*\/\s*2 tasks done/i)).toBeInTheDocument()
 })
 
+test('an owner sees the retry pills in the reserved slot for a done job', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json({ ...JOB, status: 'done' })))
+  renderDetail()
+  await screen.findByText('shot-042 render')
+  const slot = screen.getByTestId('job-actions')
+  expect(within(slot).getByRole('button', { name: 'Retry failed' })).toBeInTheDocument()
+  expect(within(slot).getByRole('button', { name: 'Retry all' })).toBeInTheDocument()
+})
+
+test('a non-owner non-admin sees no retry pills on a done job', async () => {
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json({ ...JOB, status: 'done' })))
+  renderDetail({ id: 'other', email: 'a@b.co', name: 'A', is_admin: false })
+  await screen.findByText('shot-042 render')
+  const slot = screen.getByTestId('job-actions')
+  expect(within(slot).queryByRole('button', { name: 'Retry failed' })).not.toBeInTheDocument()
+  expect(within(slot).queryByRole('button', { name: 'Retry all' })).not.toBeInTheDocument()
+})
+
 test('does not fabricate unbacked timing or the live-log affordances', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
   renderDetail()
   await screen.findByText('shot-042 render')
-  // Omitted per spec (no backend field / SSE blocked): elapsed, ETA, and a
-  // Retry/Abort header pill are not rendered. A dead control reads as broken.
+  // Omitted per spec (no backend field): elapsed and ETA. The hi-fi's Retry/Abort
+  // pills are absent HERE because this fixture job is `running`: Abort was never
+  // built (it is just cancel), and the retry pills are shown only for a done or
+  // failed job, which is the exact set POST /v1/jobs/{id}/retry accepts. A dead
+  // control reads as broken.
   expect(screen.queryByText(/elapsed/i)).toBeNull()
   expect(screen.queryByText(/\beta\b/i)).toBeNull()
   expect(screen.queryByRole('button', { name: /^abort$/i })).toBeNull()
