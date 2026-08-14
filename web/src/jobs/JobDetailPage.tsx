@@ -96,9 +96,10 @@ export function JobDetailPage() {
   return (
     <div className="flex flex-col gap-5">
       {/* Breadcrumb + header row: back link, id, name, inline status; the reserved
-          JobActions slot (ml-auto). No Retry/Abort header pill - there is no per-job
-          retry endpoint and "Abort" is just cancel; the real Cancel/Force cancel
-          live in JobActions. */}
+          JobActions slot (ml-auto). The hi-fi's "Abort" pill is just cancel, and its
+          single "Retry" pill became two - Retry failed / Retry all - because
+          POST /v1/jobs/{id}/retry requires ?task= and has no default. All four live
+          in JobActions, which hides each pair for the statuses the server refuses. */}
       <div className="flex flex-col gap-1">
         {/* flex-wrap so the breadcrumb, the 28px title and the action bar stack
             instead of setting a floor under <main> - MAIN measured 458px at a 375px

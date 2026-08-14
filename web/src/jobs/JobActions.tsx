@@ -2,15 +2,17 @@ import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { PillButton } from '../components/holo'
 import { useJobActions } from './useJobActions'
+import { classifyRetryFailure } from './retryError'
 import type { JobDetail } from './api'
 
-type Pending = null | 'cancel' | 'force'
+type Pending = null | 'cancel' | 'force' | 'retry-failed' | 'retry-all'
 
-// Job-detail header action bar. Owns the two cancel buttons, the confirm dialog,
-// and the inline error. A cancelled job stays viewable, so on success we do NOT
-// navigate; the ['job', id] invalidation flips the status pill on refetch.
+// Job-detail header action bar. Owns the cancel pair, the retry pair, the confirm
+// dialog, and the inline error. A cancelled or retried job stays viewable, so on
+// success we do NOT navigate; the ['job', id] invalidation flips the status pill on
+// refetch.
 export function JobActions({ job }: { job: JobDetail }) {
-  const { cancel } = useJobActions(job.id)
+  const { cancel, retry } = useJobActions(job.id)
   const [confirm, setConfirm] = useState<Pending>(null)
 
   // Hide the buttons only for states the server treats as terminal for cancel
@@ -18,16 +20,39 @@ export function JobActions({ job }: { job: JobDetail }) {
   // cancellable and keeps its buttons.
   const terminal = job.status === 'cancelled' || job.status === 'done'
 
+  // Retry availability, spelled as an ALLOW-LIST of the exact two statuses
+  // handleRetryJob admits. Everything else - pending, running, cancelled - is a
+  // deterministic 409 from its status switch, and a control that is always visible
+  // and always fails is a dead control. The allow-list spelling is not cosmetic:
+  // a status added to JobStatus later must be un-retryable until somebody decides
+  // otherwise, which is the frontend reading of the rule RetryJobTasks's own
+  // status predicate follows. A deny-list here would fail open.
+  const retryable = job.status === 'done' || job.status === 'failed'
+
   const actionError = cancel.error as Error | null
+  // `retry.variables` is TanStack's record of the argument the last mutate() call
+  // carried, i.e. the mode this failure belongs to. It is defined whenever
+  // retry.error is, and reset() clears both together, so no separate state is
+  // needed to give the blocked hint its mode.
+  const retryFailure = retry.error ? classifyRetryFailure(retry.error, retry.variables) : null
 
   function openConfirm(which: Exclude<Pending, null>) {
+    // Both mutations are reset, so a stale banner from the OTHER action cannot
+    // outlive the next confirm.
     cancel.reset()
+    retry.reset()
     setConfirm(which)
   }
 
   function runConfirmed() {
     if (confirm === 'cancel') cancel.mutate(false)
     else if (confirm === 'force') cancel.mutate(true)
+    else if (confirm === 'retry-failed') retry.mutate('failed')
+    else if (confirm === 'retry-all') retry.mutate('all')
+    // The dialog closes BEFORE the response lands, on purpose: the error banner
+    // below lives on the page, and an open dialog would put its scrim on top of
+    // it, so the button would look like it did nothing. Do not "improve" this by
+    // holding the dialog open while the request is in flight.
     setConfirm(null)
   }
 
@@ -46,24 +71,65 @@ export function JobActions({ job }: { job: JobDetail }) {
       label: 'Force cancel',
       destructive: true,
     },
+    'retry-failed': {
+      title: `Retry failed tasks of ${job.name}?`,
+      body: 'Every task that failed or timed out is queued again and the job goes back to running. Tasks that already succeeded are left alone.',
+      // Distinct from the pill label, like "Cancel job" above, so a test (and a
+      // screen reader) can tell the trigger from the confirmation.
+      label: 'Retry failed tasks',
+    },
+    'retry-all': {
+      title: `Retry all tasks of ${job.name}?`,
+      body: 'Every finished task is queued again, including the ones that already succeeded, and the job goes back to running. This re-runs work that is already done and spends farm capacity on it.',
+      label: 'Retry all tasks',
+    },
   }
 
   return (
     <div className="flex flex-col gap-2">
-      {!terminal && (
+      {(retryable || !terminal) && (
         <div className="flex items-center gap-2">
-          <PillButton variant="ghost" disabled={cancel.isPending} onClick={() => openConfirm('cancel')}>
-            Cancel
-          </PillButton>
-          <PillButton variant="danger" disabled={cancel.isPending} onClick={() => openConfirm('force')}>
-            Force cancel
-          </PillButton>
+          {retryable && (
+            <>
+              <PillButton variant="ghost" disabled={retry.isPending} onClick={() => openConfirm('retry-failed')}>
+                Retry failed
+              </PillButton>
+              <PillButton variant="ghost" disabled={retry.isPending} onClick={() => openConfirm('retry-all')}>
+                Retry all
+              </PillButton>
+            </>
+          )}
+          {!terminal && (
+            <>
+              <PillButton variant="ghost" disabled={cancel.isPending} onClick={() => openConfirm('cancel')}>
+                Cancel
+              </PillButton>
+              <PillButton variant="danger" disabled={cancel.isPending} onClick={() => openConfirm('force')}>
+                Force cancel
+              </PillButton>
+            </>
+          )}
         </div>
       )}
 
-      {actionError ? (
+      {retryFailure ? (
+        <div className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
+          <div>{retryFailure.message}</div>
+          {retryFailure.hint ? <div className="mt-1 text-fg-mute">{retryFailure.hint}</div> : null}
+        </div>
+      ) : actionError ? (
         <div className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
           {actionError.message}
+        </div>
+      ) : null}
+
+      {/* The success line and the banner both sit OUTSIDE the availability gate on
+          purpose: a successful retry flips the job to `running`, which hides the
+          retry pills on the very refetch this success triggered. Rendering the
+          confirmation inside that gate would unmount it immediately. */}
+      {retry.data ? (
+        <div className="rounded-card border border-ok/40 bg-ok/10 px-4 py-2 text-[12px] text-ok">
+          Retried {retry.data.tasks_retried} {retry.data.tasks_retried === 1 ? 'task' : 'tasks'}.
         </div>
       ) : null}
 

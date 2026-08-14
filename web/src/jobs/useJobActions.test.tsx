@@ -76,3 +76,66 @@ test('a failed cancel rejects and does not invalidate', async () => {
   await expect(result.current.cancel.mutateAsync(false)).rejects.toBeTruthy()
   expect(spy).not.toHaveBeenCalledWith({ queryKey: ['job', ID] })
 })
+
+test('retry POSTs /jobs/{id}/retry?task=failed', async () => {
+  const client = newClient()
+  let task: string | null = null
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, ({ request }) => {
+      task = new URL(request.url).searchParams.get('task')
+      return HttpResponse.json({ id: ID, status: 'running', tasks_retried: 2 })
+    }),
+  )
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.retry.mutateAsync('failed')
+
+  expect(task).toBe('failed')
+})
+
+test('retry POSTs ?task=all when mutated with all', async () => {
+  const client = newClient()
+  let task: string | null = null
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, ({ request }) => {
+      task = new URL(request.url).searchParams.get('task')
+      return HttpResponse.json({ id: ID, status: 'running', tasks_retried: 7 })
+    }),
+  )
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.retry.mutateAsync('all')
+
+  expect(task).toBe('all')
+})
+
+test('a successful retry invalidates all THREE keys: [job,id], [jobs], and [job-stats]', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, () =>
+      HttpResponse.json({ id: ID, status: 'running', tasks_retried: 1 }),
+    ),
+  )
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.retry.mutateAsync('failed')
+
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job', ID] }))
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['jobs'] }))
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-stats'] }))
+})
+
+test('a 409 retry rejects and invalidates nothing', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, () =>
+      HttpResponse.json(
+        { error: 'no tasks matched task=failed; this job has no failed or timed_out tasks' },
+        { status: 409 },
+      ),
+    ),
+  )
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+
+  await expect(result.current.retry.mutateAsync('failed')).rejects.toBeTruthy()
+  expect(spy).not.toHaveBeenCalledWith({ queryKey: ['job', ID] })
+})

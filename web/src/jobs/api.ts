@@ -220,6 +220,33 @@ export function cancelJob(id: string, force: boolean): Promise<JobDetail> {
   return apiFetch<JobDetail>(`/jobs/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' })
 }
 
+// The two retry modes accepted by POST /v1/jobs/{id}/retry. `failed` reopens
+// tasks in `failed` AND `timed_out`; `all` widens that to `done` as well
+// (internal/store/query/tasks.sql, RetryJobTasks). There is no third value and no
+// default: handleRetryJob 400s an absent, empty, repeated or unrecognized ?task
+// rather than guessing, because a misread here means "re-ran everything".
+export type RetryMode = 'failed' | 'all'
+
+// What the caller is allowed to believe about a 200 from the retry endpoint.
+//
+// The response body is a full jobResponse plus this field, but it is built with
+// `toJobResponse(job, "", nil, nil)` (internal/api/jobs.go, handleRetryJob), so
+// `total_tasks`/`done_tasks` are ZERO, `tasks` is absent and `submitted_by_email`
+// is absent. Writing that body into the ['job', id] cache would blank the task
+// table on the page the user is looking at. `tasks_retried` is the only field
+// that means anything here, and it is always >= 1 (a zero-match is a 409, never a
+// successful no-op), so it is the only field this type exposes.
+export interface RetryResult {
+  tasks_retried: number
+}
+
+// Re-runs a finished job's tasks. Sends NO body - handleRetryJob never calls
+// readJSON and ?task= is a query parameter, matching ?force= on cancelJob.
+export function retryJob(id: string, mode: RetryMode): Promise<RetryResult> {
+  const q = new URLSearchParams({ task: mode })
+  return apiFetch<RetryResult>(`/jobs/${id}/retry?${q}`, { method: 'POST' })
+}
+
 // Creates a job from a raw parsed job-spec object. The client keeps the spec
 // type permissive (unknown) and posts it verbatim; the server (ValidateJobSpec)
 // is the validator of record, so new TaskSpec fields need no client change. The

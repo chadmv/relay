@@ -11,6 +11,7 @@ import {
   getTaskLogs,
   listJobs,
   listJobsBySchedule,
+  retryJob,
   streamTaskLog,
   type JobsPage,
   type TaskLogEvent,
@@ -180,6 +181,38 @@ test('streamTaskLog routes task_log frames to onLine and dropped frames to onDro
 
   conn.close()
   await p
+})
+
+test('retryJob POSTs /jobs/{id}/retry?task=failed with no request body', async () => {
+  let search = ''
+  let method = ''
+  let body = ''
+  server.use(
+    http.post('/v1/jobs/j1/retry', async ({ request }) => {
+      search = new URL(request.url).search
+      method = request.method
+      body = await request.text()
+      return HttpResponse.json({ id: 'j1', status: 'running', tasks_retried: 3 })
+    }),
+  )
+  const res = await retryJob('j1', 'failed')
+  expect(method).toBe('POST')
+  expect(search).toBe('?task=failed')
+  // handleRetryJob never calls readJSON; a body would be a contract violation.
+  expect(body).toBe('')
+  expect(res.tasks_retried).toBe(3)
+})
+
+test('retryJob sends ?task=all for the all mode', async () => {
+  let search = ''
+  server.use(
+    http.post('/v1/jobs/j1/retry', ({ request }) => {
+      search = new URL(request.url).search
+      return HttpResponse.json({ id: 'j1', status: 'running', tasks_retried: 9 })
+    }),
+  )
+  await retryJob('j1', 'all')
+  expect(search).toBe('?task=all')
 })
 
 test('listJobsBySchedule sends scheduled_job_id and limit and NEVER sends sort', async () => {
