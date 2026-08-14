@@ -1,8 +1,10 @@
 ---
 title: The SPA overflows horizontally below roughly 840px viewport width, app-wide
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-14
+resolution: fixed
 priority: medium
 source: measured in a real browser by the Phase 4 browser lane of the 2026-08-12-schedule-detail-page slice, and ruled out of scope there as app-wide
 ---
@@ -268,3 +270,55 @@ confirm or kill it, and it is two browser measurements.
 still true statements about the source, and B is still probably needed for tables to be usable at 375px.
 What it changes is **where the next implementer starts.** Investigate the header first. If the header is
 a floor, fixing the tables alone cannot satisfy this item's first acceptance criterion on any page.
+
+## Resolution
+
+Fixed in the 2026-08-13-narrow-viewport-overflow slice. Acceptance is a measurement, and it was
+taken in a real browser twice by two independent parties: `documentElement.scrollWidth <=
+clientWidth` at **both 375px and 320px** on all 17 surfaces, with **populated** tables.
+
+**This item was wrong about the cause twice, and both errors came from measuring the convenient
+state rather than the populated one.** Its original framing said fix it once in the shared `Table`
+primitive. A later amendment blamed the header nav instead, on the strength of the first
+per-element measurement anyone had taken. Both were incomplete. The header-only reading came from
+surfaces whose tables were empty or in card view - the Invites empty state, Workers in Grid view,
+and `/profile/*`, which has no table at all. With rows present the tables dominate: `/jobs` reached
+763px against a 523px header floor.
+
+There were **four** independent causes, not one, and no proper subset satisfied the acceptance
+predicate on even a single page:
+
+1. **Header floor.** `HoloShell`'s `<nav>` of non-wrapping route labels set a 494-523px floor on
+   every shell page. `/auth`, which has no shell, never overflowed - the clean control that
+   confirmed the shell was the source. Fixed by letting the nav shrink and scroll.
+2. **Multi-column detail bodies.** `grid-cols-2`/`grid-cols-4` at four sites, now breakpointed.
+   This one persisted past 768px, unlike every other cause.
+3. **Fixed-px table templates.** Fixed at the primitive: `Table` gained a required `minWidth` that
+   publishes one grid string to the header row and every body row and wraps the `role="table"`
+   subtree in a scroll container. The argument for the primitive over per-consumer edits was
+   alignment, not edit count - under negative free space an `fr` track falls back to its content
+   minimum, and the header row and body rows are separate grid containers, so a hand-applied
+   min-width desynchronizes exactly what the primitive exists to keep in agreement.
+4. **Non-wrapping breadcrumb, toolbar and tab-bar rows** - a cause this item never named, found
+   only because fixing the header unmasked it.
+
+Two decisions were taken **without a hi-fi reference**, since the Holo hi-fi is silent on narrow
+viewports, and both are the reviewer's to overrule. The nav scrolls rather than collapsing to a
+disclosure: invisible at any width where the content fits, no new state or a11y surface, revertible
+by deleting three class strings. And the scroll container is the `<nav>`, never the `<header>` -
+`overflow` on the header would clip the UserMenu dropdown, so that hazard carries its own test and
+was hit-tested in a browser at 375/768/1280px.
+
+Review found one real regression the slice introduced - `StatSection` breakpointed its container to
+`grid-cols-1 md:grid-cols-2` but left the cell at `col-span-2`, forcing an implicit second track
+below `md` - plus two mutation proofs that reddened at an earlier assertion than claimed, leaving
+the assertions they called load-bearing unreached. Both were re-run against discriminating
+mutations and confirmed genuine.
+
+The `minWidth` prop is **required**, not optional: all ten consumers pass it, so `tsc` enforces it
+at every call site including aliased imports, which is stronger than the source-scanning guard test
+it replaced - a guard a lane proved could be reddened by an innocent JSX comment.
+
+Two follow-ups are filed rather than fixed here: nothing enforces numerically that `minWidth`
+exceeds the sum of a consumer's fixed tracks, and the `overflow-y: auto` clipping audit is a
+point-in-time claim with no test behind it.
