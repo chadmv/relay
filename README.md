@@ -1198,6 +1198,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional). Paginated. |
 | `GET` | `/v1/jobs/{id}` | Get a job |
 | `DELETE` | `/v1/jobs/{id}` | Cancel a job (`?force=true` for forced termination, skips pipe drain and workspace cleanup) |
+| `POST` | `/v1/jobs/{id}/retry` | Re-run a finished job's tasks. `?task=failed` reopens `failed` **and `timed_out`** tasks; `?task=all` also reopens `done` tasks. `task` is **required** and has no default; absent, empty, repeated or unrecognized values are a 400. Owner or admin (404 on deny). 409 if the job is not `done` or `failed`, if the job was cancelled, if nothing matched the mode, or if a selected task has dependents that already ran. Returns the job plus `tasks_retried` (always >= 1). |
 | `GET` | `/v1/jobs/{id}/tasks` | List tasks for a job |
 
 ### Tasks
