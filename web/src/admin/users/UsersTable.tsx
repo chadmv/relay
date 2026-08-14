@@ -7,6 +7,8 @@ import type { AdminUser, UserSort, UserSortField } from './api'
 // columns are omitted: no endpoint exposes a per-user token count and `users` has
 // no last_login_at column. Faking either would read as real data.
 const COLS = 'grid-cols-[1.6fr_1fr_110px_120px_270px]'
+// Fixed tracks total 500px (the 270px ACTIONS column holds three mini buttons).
+const MIN_W = 'min-w-[780px]'
 
 const HEADERS: TableColumn<UserSortField>[] = [
   { label: 'EMAIL', field: 'email' },
@@ -71,6 +73,7 @@ export function UsersTable({
       <Table
         label="Users"
         columns={COLS}
+        minWidth={MIN_W}
         headers={HEADERS}
         sort={sort}
         onSort={onSort}

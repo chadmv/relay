@@ -5,6 +5,9 @@ import type { Job } from './api'
 import { statusColor, progressPct, formatDuration, formatStarted } from './status'
 
 const COLS = 'grid-cols-[90px_1fr_120px_150px_120px_70px_150px]'
+// Fixed tracks total 700px; 880 leaves the 1fr NAME column 180px before the table
+// scrolls inside its panel. See Table.tsx's narrow-viewport convention.
+const MIN_W = 'min-w-[880px]'
 
 const HEADERS: TableColumn[] = [
   { label: 'ID' },
@@ -29,7 +32,7 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
   }
   return (
     <GlassPanel data-testid="jobs-table">
-      <Table label="Jobs" columns={COLS} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
+      <Table label="Jobs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
         {jobs.map((j) => {
           const c = statusColor(j.status)
           const pct = progressPct(j.done_tasks, j.total_tasks)

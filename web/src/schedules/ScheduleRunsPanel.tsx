@@ -4,6 +4,9 @@ import type { Job } from '../jobs/api'
 import { formatDuration, formatStarted, statusColor } from '../jobs/status'
 
 const COLS = 'grid-cols-[130px_70px_110px_100px_1fr]'
+// Fixed tracks total 410px. Sits in a detail-page column (~614px at 1280), so 560
+// stays under the container and only scrolls once the column is narrower.
+const MIN_W = 'min-w-[560px]'
 
 const HEADERS: TableColumn[] = [
   { label: 'STARTED' },
@@ -30,7 +33,7 @@ export function ScheduleRunsPanel({ runs, total }: { runs: Job[]; total: number 
           this schedule has never fired
         </div>
       ) : (
-        <Table label="Recent runs" columns={COLS} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-wider">
+        <Table label="Recent runs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-wider">
           {runs.map((j) => {
             const c = statusColor(j.status)
             return (

@@ -30,6 +30,18 @@ function sourceFiles(dir: string): string[] {
 
 const FILES = sourceFiles(SRC)
 
+// Strips lines whose trimmed content starts with `//`, so a prose comment naming a
+// JSX tag (e.g. Table.tsx's own header comment saying "<Table> call site") is not
+// counted as that tag's usage. Line comments only, matching every comment this repo
+// actually writes in these files; a `/* */` block would need a different pass, and
+// none of the files this scan targets uses one for prose that names a component tag.
+function withoutLineComments(src: string): string {
+  return src
+    .split('\n')
+    .map((line) => (line.trim().startsWith('//') ? '' : line))
+    .join('\n')
+}
+
 // THE CONVENTION, enforced rather than merely written down: a numeric Tailwind
 // column count must carry a breakpoint prefix, so the layout is single-column (or
 // two-column) on a narrow viewport and multi-column from `md` up. The one site that
@@ -79,4 +91,36 @@ test('every numeric grid column count carries a breakpoint prefix', () => {
     'schedules/ScheduleDetailPage.tsx',
     'workers/WorkerDetailPage.tsx',
   ])
+})
+
+// THE CONVENTION FOR TABLES, enforced. Every <Table> call site passes minWidth, so
+// the eleventh table cannot silently reintroduce
+// docs/backlog/bug-2026-08-12-web-narrow-viewport-horizontal-overflow.md. A comment
+// in the primitive would not have caught the tenth.
+test('every Table call site opts in to a scroll min-width', () => {
+  const opens: string[] = []
+  const missing: string[] = []
+  let bareCount = 0
+  for (const file of FILES) {
+    // Drop `//` comment lines before scanning: Table.tsx's own header comment
+    // (Task 3) mentions "<Table>" in prose twice, and a naive text scan of the
+    // whole file counts those as call sites, which is not what "every call site"
+    // means. Every real call site in this codebase is JSX, never inside a line
+    // comment.
+    const src = withoutLineComments(readFileSync(file, 'utf8'))
+    bareCount += [...src.matchAll(/<Table\b/g)].length
+    for (const m of src.matchAll(/<Table\b[\s\S]*?>/g)) {
+      const where = relative(SRC, file).replace(/\\/g, '/')
+      opens.push(where)
+      if (!m[0].includes('minWidth')) missing.push(where)
+    }
+  }
+  // Control 1: the tag regex matched every occurrence. It stops at the first '>',
+  // so an inline arrow function in the props (`onSort={(f) => ...}`) would truncate
+  // a tag - no consumer does that today, and if one starts, the truncated tag will
+  // almost certainly lack minWidth and fail loudly below rather than silently pass.
+  expect(opens).toHaveLength(bareCount)
+  // Control 2: the scan found the consumers rather than nothing at all.
+  expect(opens.length).toBeGreaterThanOrEqual(10)
+  expect(missing).toEqual([])
 })
