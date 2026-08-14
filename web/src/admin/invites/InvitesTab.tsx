@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from '../../components/Button'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { TokenRevealDialog } from '../TokenRevealDialog'
 import { CreateInviteForm } from './CreateInviteForm'
@@ -13,12 +14,15 @@ import type { CreateInviteBody, InviteSort, InviteSortField } from './api'
 // Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx:16-21): clicking
 // the active column flips its direction, clicking the other selects it ascending.
 //
-// SEVENTH consumer of the cursor-pager block below (JobsPage, WorkersPage,
-// SchedulesPage, UsersTab, EnrollmentsTab, ReservationsTab are the first six), and
-// FOURTH of this helper. Not extracted here on purpose: the extraction has to
-// migrate six shipped surfaces under a zero-line-diff gate on their existing test
-// files, which is its own slice with a different risk profile. See
-// docs/superpowers/plans/2026-08-13-admin-invites-tab.md, "Extraction debt".
+// FIFTH copy of this helper - WorkersPage, UsersTab, EnrollmentsTab and
+// ReservationsTab are the first four. (This note previously read FOURTH, an
+// off-by-one it inherited from the invites spec and plan, which were written before
+// the copy count moved.) Still not extracted: each copy is typed over its own
+// per-module sort union, so a shared version needs a generic plus a cast at every
+// call site - a type-level design question deliberately kept out of the cursor-pager
+// extraction, whose whole premise was that nothing changes.
+//
+// The pager half of this debt is discharged: see web/src/lib/useCursorPager.ts.
 function toggleSort(field: InviteSortField, current: InviteSort): InviteSort {
   if (current.replace('-', '') === field) {
     return (current.startsWith('-') ? field : `-${field}`) as InviteSort
@@ -28,55 +32,21 @@ function toggleSort(field: InviteSortField, current: InviteSort): InviteSort {
 
 export function InvitesTab() {
   const [sort, setSort] = useState<InviteSort>('-created_at')
-  // Cursor of the current page (''=first); stack holds the cursors we paged
-  // forward from; offsets tracks the real row offset so partial pages stay
-  // correct. Same pattern as UsersTab / EnrollmentsTab.
-  const [cursor, setCursor] = useState('')
-  const [stack, setStack] = useState<string[]>([])
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
   const [creating, setCreating] = useState(false)
 
   // A local 60s clock tick, NOT a poll: it re-renders so relative labels and
   // status pills stay correct and issues no request.
   const now = useNow(60_000)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useInvites(sort, cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useInvites(sort, pager.cursor)
   const { create } = useInviteActions()
-
-  function resetPaging() {
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
-  }
 
   function pickSort(field: InviteSortField) {
     setSort(toggleSort(field, sort))
     // The server rejects a cursor whose sort key does not match
     // (internal/api/pagination.go:272-286).
-    resetPaging()
-  }
-
-  function next() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setStack([...stack, cursor])
-    setCursor(data.next_cursor)
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function prev() {
-    if (stack.length === 0) return
-    const copy = [...stack]
-    const back = copy.pop() ?? ''
-    setStack(copy)
-    setCursor(back)
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging()
   }
 
   function onCreate(body: CreateInviteBody) {
@@ -90,7 +60,7 @@ export function InvitesTab() {
 
   const invites = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, invites.length)
+  const { x, y } = computePageRange(pager.startOffset, invites.length)
   const rangeText =
     invites.length === 0
       ? `0 of ${total.toLocaleString()}`
@@ -138,15 +108,15 @@ export function InvitesTab() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={prev}
-              disabled={stack.length === 0 || isPlaceholderData}
+              onClick={pager.prev}
+              disabled={!pager.canPrev || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
               ← prev
             </button>
             <button
               type="button"
-              onClick={next}
+              onClick={() => pager.next(data?.next_cursor, invites.length)}
               disabled={!data?.next_cursor || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >
