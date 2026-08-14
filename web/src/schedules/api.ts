@@ -53,11 +53,12 @@ export function runScheduleNow(id: string): Promise<unknown> {
   return apiFetch(`/scheduled-jobs/${encodeURIComponent(id)}/run-now`, { method: 'POST' })
 }
 
-// One scheduled job. NOTE the asymmetry with the list endpoint: handleGetScheduledJob
-// (internal/api/scheduled_jobs.go:508-519) never calls fillOwnerEmails, unlike both
-// list arms (:371, :504), and OwnerEmail has no omitempty (:25) - so `owner_email` is
-// ALWAYS present and ALWAYS "" here. Callers must omit the owner rather than render an
-// empty label, and must not substitute owner_id (36 opaque characters).
+// One scheduled job. `owner_email` is resolved here exactly as on the list endpoint -
+// handleGetScheduledJob and both list arms all go through fillOwnerEmails. That helper
+// is best-effort though: it logs and leaves the field "" when the owner lookup fails,
+// and OwnerEmail carries no omitempty, so the key is ALWAYS present and may still be
+// empty. Callers must omit the owner rather than render an empty label when it is, and
+// must not substitute owner_id (36 opaque characters).
 //
 // Rejects with ApiError(404) both for a missing row and for a non-owner non-admin:
 // ownedScheduledJob hides rather than refuses (:147-169). The two are indistinguishable

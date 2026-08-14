@@ -93,7 +93,7 @@ const ROW = {
   id: 's1',
   name: 'nightly-build',
   owner_id: 'o1',
-  owner_email: '',
+  owner_email: 'dev@studio.com',
   cron_expr: '0 2 * * *',
   timezone: 'UTC',
   job_spec: { name: 'nightly-build', tasks: [] },
@@ -116,10 +116,10 @@ test('getSchedule GETs the id path and parses the row', async () => {
   expect(path).toBe('/v1/scheduled-jobs/s1')
   expect(s.name).toBe('nightly-build')
   expect(s.cron_expr).toBe('0 2 * * *')
-  // ALWAYS present and ALWAYS "" on THIS endpoint: handleGetScheduledJob never
-  // calls fillOwnerEmails (internal/api/scheduled_jobs.go:508-519, unlike both
-  // list arms at :371 and :504) and OwnerEmail has no omitempty (:25).
-  expect(s.owner_email).toBe('')
+  // Populated on THIS endpoint too: handleGetScheduledJob goes through
+  // fillOwnerEmails, same as both list arms. OwnerEmail has no omitempty, so the
+  // key is always present; this asserts the client parses the value through.
+  expect(s.owner_email).toBe('dev@studio.com')
   // last_run_at / last_job_id carry omitempty, so the KEY IS ABSENT when NULL -
   // not null. Consumers must handle undefined, never `=== null`.
   expect('last_run_at' in s).toBe(false)

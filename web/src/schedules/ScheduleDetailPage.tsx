@@ -142,14 +142,12 @@ export function ScheduleDetailPage() {
         </div>
       </div>
 
-      {/* Identity sub-line. The OWNER is deliberately conditional and therefore today
-          always absent: GET /v1/scheduled-jobs/{id} never calls fillOwnerEmails
-          (internal/api/scheduled_jobs.go:508-519, unlike both list arms at :371 and
-          :504) and owner_email has no omitempty (:25), so it is always "". Falling
-          back to owner_id would render 36 opaque characters, and carrying the value
-          over from the cached list row would make a deep link behave differently from
-          a click-through.
-          Enabler: bug-2026-08-12-scheduled-job-detail-missing-owner-email (to be filed). */}
+      {/* Identity sub-line. handleGetScheduledJob now populates owner_email through
+          fillOwnerEmails, same as both list arms, so the owner normally renders. The
+          line stays conditional because fillOwnerEmails is best-effort: it logs and
+          leaves the field "" when the owner lookup fails, and owner_email carries no
+          omitempty. Omitting the label beats rendering a blank one, and falling back
+          to owner_id would put 36 opaque characters on the identity line. */}
       <div className="font-mono text-[11px] tracking-[0.04em] text-fg-mute">
         {schedule.owner_email ? (
           <>

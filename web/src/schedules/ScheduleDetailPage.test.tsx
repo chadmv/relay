@@ -86,10 +86,10 @@ test('the owner line is ABSENT while owner_email is empty', async () => {
   server.use(...handlers(sched({ owner_email: '' })))
   renderPage()
   await screen.findByText('nightly-build')
-  // GET /v1/scheduled-jobs/{id} never calls fillOwnerEmails, so owner_email is
-  // always "" today (internal/api/scheduled_jobs.go:508-519). The page must omit the
-  // owner entirely rather than render an empty label - and must NOT fall back to
-  // owner_id, which is 36 opaque characters.
+  // GET /v1/scheduled-jobs/{id} populates owner_email via fillOwnerEmails, but that
+  // helper is best-effort and leaves the field "" when the owner lookup fails. The
+  // page must omit the owner entirely rather than render an empty label - and must
+  // NOT fall back to owner_id, which is 36 opaque characters.
   expect(screen.queryByText(/owner/i)).toBeNull()
   expect(screen.queryByText('o1')).toBeNull()
 })
