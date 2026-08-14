@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -646,4 +647,58 @@ func TestRetryJob_RetryCountResetRestoresAgentRetryBudget(t *testing.T) {
 	})
 	require.NoError(t, err, "the reopened generation must be able to burn a retry")
 	require.Equal(t, int32(1), again.RetryCount)
+}
+
+// A cancel and a retry on the same job, released together. The end state must be
+// one of exactly two allowed states, and never (cancelled job, pending tasks) -
+// which the dispatcher would happily run, because GetEligibleTasks does not
+// consult job status. Ten rounds, because which handler wins the job row lock is
+// not controlled here; the assertion holds for both winners.
+func TestRetryJob_CancelSerialization_NeverCancelledJobWithPendingTasks(t *testing.T) {
+	e := newRetryEnv(t)
+	owner := createTestUser(t, e.q, "Owner", "retry-serialize@example.com", false)
+	token := createTestToken(t, e.q, owner.ID)
+
+	for round := 0; round < 10; round++ {
+		job := e.job(t, owner.ID)
+		task := e.task(t, job, fmt.Sprintf("t-%d", round), "failed")
+		require.Equal(t, "failed", e.recompute(t, job))
+		jobID := uuidString(job.ID)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			e.do(t, token, jobID, "task=failed")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			e.srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+		}()
+		close(start)
+		wg.Wait()
+
+		gotJob := e.getJob(t, job.ID)
+		gotTask := e.getTask(t, task.ID)
+		switch gotJob.Status {
+		case "cancelled":
+			require.NotEqual(t, "pending", gotTask.Status,
+				"round %d: a cancelled job must never be left with a pending task - "+
+					"GetEligibleTasks does not consult job status, so the farm would run it", round)
+		case "running":
+			require.Equal(t, "pending", gotTask.Status,
+				"round %d: a running job produced by the retry must have its task pending", round)
+		case "failed":
+			require.Equal(t, "failed", gotTask.Status,
+				"round %d: if neither write landed, nothing may have changed", round)
+		default:
+			t.Fatalf("round %d: unexpected end state job=%s task=%s",
+				round, gotJob.Status, gotTask.Status)
+		}
+	}
 }
