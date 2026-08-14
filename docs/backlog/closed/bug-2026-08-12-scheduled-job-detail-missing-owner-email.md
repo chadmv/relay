@@ -1,8 +1,10 @@
 ---
 title: GET /v1/scheduled-jobs/{id} always returns owner_email "" - the detail handler never calls fillOwnerEmails
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-14
+resolution: fixed
 priority: medium
 source: filed from the 2026-08-12-schedule-detail-page slice, which omitted the owner line entirely because of it
 ---
@@ -136,3 +138,51 @@ defect the type system cannot see.** `scheduledJobResponse` compiles identically
 struct with an enriched field, which handlers build it. Worth a grep for other
 `fill*`/`enrich*` helpers with an uneven call-site distribution while this one is open -
 `applyJobEnrichment` in `internal/api/jobs.go` is the obvious next one to check.
+
+## Resolution
+
+Fixed in the 2026-08-14-scheduled-job-owner-email slice. `handleGetScheduledJob` builds a
+one-element slice, calls `fillOwnerEmails` and writes that element back out, mirroring both list
+arms rather than inventing a third shape.
+
+**The item's own Proposal sketch was wrong as written**, and the bug it contained is the one the
+item warned about in prose. It passed `[]scheduledJobResponse{resp}` - a copy - and then wrote
+`resp`, so the enrichment would have been discarded and the endpoint would have kept returning
+`""` while looking fixed. `fillOwnerEmails` mutates its elements in place, so the enriched element
+must be read back out of the slice.
+
+The three deferred decisions, each settled with evidence:
+
+1. **Signature and semantics.** `fillOwnerEmails(r, items []scheduledJobResponse, selfEmail string)`
+   mutates in place. One-element slice in, `items[0]` out.
+2. **Where the caller comes from.** `UserFromCtx(r.Context())` - the same source `ownedScheduledJob`
+   already uses, so no new lookup. `selfEmail` is passed only when `row.OwnerID == u.ID`, which
+   mirrors the list arms' self-short-circuit and avoids a query on the common self-fetch. Review
+   confirmed the comparison cannot degenerate: `scheduled_jobs.owner_id` is `NOT NULL REFERENCES
+   users(id)`, and the identical comparison already gates authorization one function up.
+3. **`omitempty` on `OwnerEmail`: deliberately NOT added.** It is a breaking change for every
+   existing consumer of the list endpoints, which today always receive the key, and it would force
+   the shipped TS type optional in the same commit. That is a contract decision deserving its own
+   item, not a rider on a bug fix.
+
+**Both directions are asserted, and the discriminating one was proven necessary.** An admin
+fetching another user's schedule sees that owner's email; the owner fetching their own sees their
+own. Dropping `&& row.OwnerID == u.ID` reddens only the admin test while the owner test stays
+green - so the one-directional test the item warned about is confirmed vacuous on its own. The
+list arms' existing tests were untouched (`git diff --numstat` shows zero deletions).
+
+**A frontend test was pinning the defect.** `web/src/schedules/api.test.ts` asserted
+`expect(s.owner_email).toBe('')` with a comment explaining the value is always empty here. That
+assertion was green *because of* the bug; it now asserts a real value passes through, which is
+strictly stronger. Three further files carried comments making the same now-false claim and were
+corrected in the same change.
+
+One citation discrepancy: `OwnerEmail` is at `scheduled_jobs.go:23`, not `:25` - the wrong line was
+repeated in this item and in three frontend files. The corrected comments cite by symbol instead,
+per the rule this batch adopted after two self-stranded citations.
+
+The item's generalization - an enrichment step applied at some call sites and not others is a
+defect the type system cannot see - was acted on: a repo-wide sweep for `fill*`/`enrich*` and for
+`resolve|attach|hydrate|populate|decorate|augment|annotate` found only two response-shaped helpers.
+`applyJobEnrichment` is the other, and it is already tracked as
+[[bug-2026-08-13-single-job-responses-report-zero-total-tasks]]. Nothing new to file.
