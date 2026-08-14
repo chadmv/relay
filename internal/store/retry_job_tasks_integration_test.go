@@ -330,6 +330,9 @@ func TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected(t *
 	_, err = f.q.AppendTaskLog(f.ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, AssignmentEpoch: oldEpoch, WorkerID: oldWorker,
 		Stream: "stdout", Content: "zombie output",
+		// A live cutoff, so this assertion still fails on the epoch and worker
+		// predicates rather than passing for the new predicate's reason.
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	require.ErrorIs(t, err, pgx.ErrNoRows, "a trailing log chunk from the dead generation must be dropped")
 
