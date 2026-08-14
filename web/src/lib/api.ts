@@ -12,10 +12,25 @@ export class ApiError extends Error {
   }
 }
 
-type Listener = () => void
+// The token the request actually attached, or null if it went out unauthenticated.
+// It is the 401's IDENTITY: a subscriber must be able to tell a 401 belonging to
+// the credential it holds now from one belonging to a session that is already
+// dead. Widened from `() => void`; a zero-parameter callback is still assignable,
+// so existing subscribers that do not care are unaffected.
+type Listener = (token: string | null) => void
 const unauthorizedListeners = new Set<Listener>()
 
-/** Register a callback fired whenever a request returns 401. Returns an unsubscribe fn. */
+/**
+ * Register a callback fired whenever a request returns 401, with the token that
+ * request carried. Returns an unsubscribe fn.
+ *
+ * The token argument is not optional context - it is what makes the notification
+ * actionable. Firing bare would tell every subscriber only THAT a 401 happened,
+ * so a 401 from a revoked credential would look identical to one from the live
+ * session and could tear down a session issued seconds after it. Subscribers that
+ * act on a 401 must compare this against the credential they hold; see
+ * AuthProvider's onUnauthorized subscription.
+ */
 export function onUnauthorized(fn: Listener): () => void {
   unauthorizedListeners.add(fn)
   return () => unauthorizedListeners.delete(fn)
@@ -42,7 +57,7 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiOptions = {})
   })
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn())
+    unauthorizedListeners.forEach((fn) => fn(token))
   }
 
   if (!res.ok) {
@@ -125,7 +140,7 @@ export async function apiStream(path: string, opts: StreamOptions): Promise<void
   }
 
   if (res.status === 401) {
-    unauthorizedListeners.forEach((fn) => fn())
+    unauthorizedListeners.forEach((fn) => fn(token))
   }
 
   // A non-ok response arrives as JSON BEFORE the headers switch to

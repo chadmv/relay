@@ -65,3 +65,40 @@ test('returns undefined for a 202 Accepted empty-body response', async () => {
   const out = await apiFetch<void>('/workers/w1/workspaces/ws-a/evict', { method: 'POST' })
   expect(out).toBeUndefined()
 })
+
+// The 401 notification must say WHICH credential produced it, or the subscriber
+// cannot tell a 401 belonging to the session it holds from one belonging to a
+// session that died two logins ago. See
+// docs/superpowers/plans/2026-08-13-cross-generation-401.md.
+test('the 401 listener receives the exact token the request carried', async () => {
+  server.use(
+    http.get('/v1/users/me', () =>
+      HttpResponse.json({ error: 'invalid_credentials' }, { status: 401 }),
+    ),
+  )
+  setToken('tok_stamped')
+  const spy = vi.fn()
+  const off = onUnauthorized(spy)
+  await apiFetch('/users/me').catch(() => {})
+  // toHaveBeenCalledWith, not just toHaveBeenCalled: fn() with no argument is the
+  // pre-fix behaviour and passes any arity-blind assertion.
+  expect(spy).toHaveBeenCalledWith('tok_stamped')
+  off()
+})
+
+test('the 401 listener receives null when the request carried no token', async () => {
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({ error: 'invalid_credentials' }, { status: 401 }),
+    ),
+  )
+  // No setToken: this is the failed-login-on-the-sign-in-screen shape, and the
+  // subscriber must be able to see that the request was anonymous rather than
+  // guess. null, explicitly - NOT undefined, which is what an unstamped fn()
+  // would deliver and which would compare unequal to getToken()'s null.
+  const spy = vi.fn()
+  const off = onUnauthorized(spy)
+  await apiFetch('/auth/login', { method: 'POST', json: {} }).catch(() => {})
+  expect(spy).toHaveBeenCalledWith(null)
+  off()
+})
