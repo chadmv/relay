@@ -673,6 +673,31 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toJobResponse(job, row.SubmittedByEmail, tasks, taskDeps))
 }
 
+// jobOwnerOr404 is the shared owner-or-admin gate for the two destructive
+// job-scoped writes, cancel and retry. It takes a job row the caller has already
+// read INSIDE its own transaction, so the decision is made against the same
+// snapshot the write will use.
+//
+// It writes the response and returns false when the caller may not act; callers
+// simply return, which rolls back their open transaction and leaves nothing
+// written. A non-owner non-admin gets 404, not 403, matching ownedScheduledJob.
+// See the Jobs block comment in server.go for why that is defense-in-depth
+// rather than a true existence secret: the GET routes are global.
+//
+// There is exactly one copy of this gate. Do not inline a second one.
+func (s *Server) jobOwnerOr404(ctx context.Context, w http.ResponseWriter, job store.Job) bool {
+	u, ok := UserFromCtx(ctx)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	if !u.IsAdmin && job.SubmittedBy != u.ID {
+		writeError(w, http.StatusNotFound, "job not found")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := parseUUID(r.PathValue("id"))
@@ -691,7 +716,13 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	q := s.q.WithTx(tx)
 
 	// Check current job status before cancelling.
-	job, err := q.GetJob(ctx, id)
+	//
+	// Lock the job row FIRST, before touching any task row. handleRetryJob does
+	// the same. The single lock order (job, then tasks) is what keeps the two
+	// handlers from being an ABBA deadlock pair, and what makes a retry landing
+	// in this request's window serialize instead of interleave. See
+	// GetJobForUpdate.
+	job, err := q.GetJobForUpdate(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "job not found")
@@ -701,16 +732,9 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Owner-or-admin gate. A non-owner non-admin caller gets 404 (existence
-	// hidden), matching ownedScheduledJob. Returning here rolls back the open
-	// tx, so no task is cancelled and no agent signal is sent.
-	u, ok := UserFromCtx(ctx)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	if !u.IsAdmin && job.SubmittedBy != u.ID {
-		writeError(w, http.StatusNotFound, "job not found")
+	// Owner-or-admin gate. Returning here rolls back the open tx, so no task is
+	// cancelled and no agent signal is sent.
+	if !s.jobOwnerOr404(ctx, w, job) {
 		return
 	}
 
