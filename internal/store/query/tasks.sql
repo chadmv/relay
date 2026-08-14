@@ -263,10 +263,19 @@ JOIN tasks t ON t.worker_id = w.id
 WHERE t.status IN ('dispatched', 'running');
 
 -- name: RequeueTaskByID :exec
--- Revert a single task back to 'pending' regardless of current status.
--- Used by the reconcile path when the coordinator has a task assigned
--- that the agent didn't report as running.
+-- Revert a single ASSIGNED task back to 'pending': the WHERE clause matches only
+-- `dispatched` and `running`, so a task that has already finished - or that was
+-- already requeued by someone else - is left exactly as it is.
+-- Used by the reconcile path when the coordinator has a task assigned that the
+-- agent didn't report as running. Candidates come from GetActiveTasksForWorker,
+-- which filters on the same two statuses, so the predicate is normally redundant
+-- with the caller; it is the backstop for the window between that read and this
+-- write, and it is what keeps reconcile from being able to resurrect a terminal
+-- task.
 -- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
+-- The bump is inside the same UPDATE as the WHERE, so it happens only for rows
+-- that actually matched - the "conditionally end the assignment" branch of the
+-- epoch fence, never an unconditional bump.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
