@@ -151,6 +151,83 @@ test('the stats query refetches after a successful cancel (three-key invalidatio
   await waitFor(() => expect(statsCalls).toBe(2))
 })
 
+test('a done job shows Retry failed and Retry all, and no cancel pills', () => {
+  renderActions({ ...JOB, status: 'done' })
+  expect(screen.getByRole('button', { name: 'Retry failed' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry all' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+})
+
+test('a failed job shows the retry pills AND the cancel pills (server allows both)', () => {
+  renderActions({ ...JOB, status: 'failed' })
+  expect(screen.getByRole('button', { name: 'Retry failed' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Retry all' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+})
+
+test('a running job shows NO retry pills (the server 409s an unfinished job)', () => {
+  renderActions(JOB)
+  expect(screen.queryByRole('button', { name: 'Retry failed' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Retry all' })).not.toBeInTheDocument()
+})
+
+test('a cancelled job shows NO retry pills (the server refuses it permanently)', () => {
+  renderActions({ ...JOB, status: 'cancelled' })
+  expect(screen.queryByRole('button', { name: 'Retry failed' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Retry all' })).not.toBeInTheDocument()
+})
+
+test('Retry failed confirms first, then POSTs ?task=failed', async () => {
+  let task: string | null = null
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, ({ request }) => {
+      task = new URL(request.url).searchParams.get('task')
+      return HttpResponse.json({ tasks_retried: 2 })
+    }),
+  )
+  renderActions({ ...JOB, status: 'failed' })
+  await userEvent.click(screen.getByRole('button', { name: 'Retry failed' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Retry failed tasks' }))
+  await waitFor(() => expect(task).toBe('failed'))
+})
+
+test('Retry all confirms first, then POSTs ?task=all', async () => {
+  let task: string | null = null
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, ({ request }) => {
+      task = new URL(request.url).searchParams.get('task')
+      return HttpResponse.json({ tasks_retried: 5 })
+    }),
+  )
+  renderActions({ ...JOB, status: 'done' })
+  await userEvent.click(screen.getByRole('button', { name: 'Retry all' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Retry all tasks' }))
+  await waitFor(() => expect(task).toBe('all'))
+})
+
+test('dismissing the retry confirm dialog fires no request', async () => {
+  let hits = 0
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, () => {
+      hits++
+      return HttpResponse.json({ tasks_retried: 1 })
+    }),
+  )
+  renderActions({ ...JOB, status: 'done' })
+  await userEvent.click(screen.getByRole('button', { name: 'Retry all' }))
+  await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+  await new Promise((r) => setTimeout(r, 20))
+  expect(hits).toBe(0)
+})
+
+test('the retry confirm copy names what each mode re-runs', async () => {
+  renderActions({ ...JOB, status: 'failed' })
+  await userEvent.click(screen.getByRole('button', { name: 'Retry failed' }))
+  const dialog = screen.getByRole('dialog')
+  // "failed" silently includes timed_out server-side; the copy must say so.
+  expect(within(dialog).getByText(/timed out/i)).toBeInTheDocument()
+})
+
 test('a 409 surfaces an inline error banner and does not navigate', async () => {
   server.use(
     http.delete(`/v1/jobs/${ID}`, () =>
