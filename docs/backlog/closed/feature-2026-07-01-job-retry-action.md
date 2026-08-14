@@ -1,8 +1,10 @@
 ---
 title: "Job retry action (retry failed / all tasks)"
 type: feature
-status: open
+status: closed
 created: 2026-07-01
+closed: 2026-08-14
+resolution: fixed
 priority: medium
 source: carved from feature-2026-06-26-job-actions-submit-cancel-retry during 2026-07-01 job-cancel-actions
 ---
@@ -82,3 +84,53 @@ Was backend-blocked; no longer is, as of 2026-08-13. The FE wiring is a near-mir
 action, with one shape difference worth planning for: cancel has no mode parameter and no rich
 conflict vocabulary, whereas retry needs a `failed`-versus-`all` choice in the UI and must render
 three distinguishable 409 reasons rather than a generic failure.
+
+## Resolution
+
+Shipped in the 2026-08-14-job-retry-action slice, closing a loop this batch opened: the endpoint it
+consumes, `POST /v1/jobs/{id}/retry`, shipped four iterations earlier in the same batch, and the
+Phase 4 browser lane drove the one against the other for real rather than against a mock.
+
+Two pills, `Retry failed` and `Retry all`, each behind its own confirm dialog. Two pills rather than
+one control with a mode picker, because the endpoint has **no server-side default** for `?task` -
+deliberately - so the UI must make the choice explicit. The precedent is the hi-fi's single `Abort`
+shipping as `Cancel` plus `Force cancel`.
+
+**The three 409s render as three different things**, which is the point of the slice. Nothing-matched
+is a dead end, blocked-by-dependents is permanent for that job in that mode, and raced means try
+again; a generic failure banner would hand the operator no next step. `retryError.ts` classifies on
+the server's own sentence and adds a frontend-owned hint, falling through to the server's text
+rather than a generic string when it cannot classify.
+
+Verified end to end in a real browser against the shipped handler: `?task=failed` returned 200 with
+`tasks_retried: 1`, a real `job is not finished` 409 rendered its specific sentence plus its hint and
+was hit-tested as **not occluded** by any scrim, and the availability matrix held on all five job
+statuses. Four pills at a 375px viewport produced no overflow, confirming the previous slice's
+app-wide fix holds under a new worst case.
+
+Decisions worth keeping:
+
+- **Invalidate, never seed.** The retry 200 goes through `toJobResponse(job, "", nil, nil)`, so
+  besides the zeroed counters this item already warned about it drops `tasks` and
+  `submitted_by_email` entirely - seeding would have blanked the task table, not merely two numbers.
+  `retryJob` returns only `{tasks_retried}`, so seeding will not compile.
+- **Availability is an allow-list** (`done || failed`), never the equivalent deny-list, so a status
+  added later fails closed.
+- **The dialog closes before `mutate`**, so the classified banner is never painted behind its own
+  scrim - the failure mode this repo recorded once already.
+- The hi-fi is **not** silent here, contrary to what this item implied: it carries a `Retry` ghost
+  pill, on a *running* job, which the endpoint refuses. This slice diverges deliberately on both
+  count and availability.
+
+Review found one medium, and it is the vacuity pattern this batch kept surfacing: the contract test
+pinning the server's error prefixes did not actually pin the `raced` one, because `the job changed`
+is also a substring of the *blocked* sentence. Rewording the handler's raced sentence left the test
+green while the frontend would have silently degraded to `unknown`. The prefix is now the
+branch-unique `the job changed while the retry was in flight`, and the test's real limit - it cannot
+catch a wholly new 409 branch with no prefix entry - is written down rather than left to be
+over-trusted.
+
+Also fixed: the unknown fallback rendered `err.message`, which carries a numeric status prefix, so
+an unclassified error showed the user `500 db error` while every sibling branch showed a bare
+sentence. An existing assertion was pinning that defect and was corrected with it - the second time
+in this batch a test was green *because of* the bug it covered.
