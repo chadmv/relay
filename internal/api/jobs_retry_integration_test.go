@@ -571,8 +571,17 @@ func listenForTaskSubmitted(t *testing.T, pool *pgxpool.Pool) func(d time.Durati
 
 // Item requirement: "a retry that matched zero tasks must not wake the
 // dispatcher and must not report success". NotifyTaskSubmitted is called INSIDE
-// the transaction, so Postgres holds the payload until commit - the wake is
-// gated on both the row count and the commit.
+// the transaction, so Postgres holds the payload until commit, and every 409
+// path returns before the commit.
+//
+// What these four cases prove is exactly that COMMIT half, and no more. The
+// handler also places the call after both row-count checks, but that guard is
+// not independently observable from here: moving NotifyTaskSubmitted above the
+// count checks leaves all four subtests green, because cancelled_409 and
+// zero_matched_409 return before the call either way, and blocked_409 reaches it
+// but then rolls back - which suppresses the notification for the same reason
+// the count check would have. Do not read this test as evidence for the count
+// half; that one is held by reading the handler.
 func TestRetryJob_NotifyTaskSubmitted_FiresOnSuccessOnly(t *testing.T) {
 	type setup func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string)
 

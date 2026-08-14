@@ -1026,6 +1026,18 @@ type RetryJobTasksParams struct {
 // evict; a `dispatched` or `running` task is unreachable by this statement in
 // either mode.
 //
+// THAT ARGUMENT HAS A DEPENDENCY, and it is not visible from this WHERE clause:
+// it holds because nothing in the repo ever WRITES `timed_out`. The status
+// exists in the CHECK constraint and in read-side predicates only, so today
+// every row this statement can match reached its status through a terminal
+// transition that had already released the assignment. The day something -
+// a server-side watchdog is the obvious candidate - stamps `timed_out` on a
+// task whose agent is still running it, "terminal implies no live assignment"
+// becomes false and this statement becomes a duplicate-execution primitive: the
+// retry reopens the row, the dispatcher hands it to a second worker, and the
+// first agent's completion is fenced out by the epoch bump. Whoever adds that
+// writer must revisit this clause, not just the status vocabulary test.
+//
 // THE STATUS ALLOW-LIST MUST STAY IN THIS WHERE CLAUSE, on tasks' own columns.
 // Do not "simplify" it to `t.id IN (SELECT id FROM selected)`. Under READ
 // COMMITTED a blocked UPDATE re-evaluates its ROW-LEVEL qual against the updated
