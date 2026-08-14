@@ -54,6 +54,21 @@ func remoteAddr(ctx context.Context) string {
 	return "unknown"
 }
 
+// DefaultTrailingLogWindow is how long after a task's finished_at its assignee
+// may still append log chunks to it. It bounds a window that used to be
+// infinite: a terminal transition deliberately keeps worker_id and
+// assignment_epoch so a trailing chunk still lands (see UpdateTaskStatus), and
+// with no third predicate that stayed true for as long as the row existed.
+//
+// 15m is roughly 8x the worst case for a legitimately late chunk, which composes
+// from three independent agent-side timers: cmd.WaitDelay (5s, internal/agent/
+// runner.go), gRPC keepalive ping + timeout (30s + 10s, cmd/relay-server/
+// main.go) and the reconnect backoff cap (60s, internal/agent). Under 2 minutes
+// in total. Large enough that no realistic agent-side delay truncates real
+// output, small enough that "forever" is genuinely closed. Override with
+// RELAY_TASKLOG_TRAILING_WINDOW.
+const DefaultTrailingLogWindow = 15 * time.Minute
+
 // Handler implements relayv1.AgentServiceServer.
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
@@ -71,6 +86,14 @@ type Handler struct {
 	// AllowAutoEnroll, when true, permits agents to register with no credential
 	// (token-less auto-enrollment). Set by cmd/relay-server after construction.
 	AllowAutoEnroll bool
+
+	// TrailingLogWindow bounds how long after a task's finished_at its assignee
+	// may still append log chunks. Non-positive means DefaultTrailingLogWindow,
+	// which is what keeps every existing NewHandler/NewHandlerWithGrace call site
+	// correct with no edit and lets a test narrow the window to prove the wiring.
+	// Set by cmd/relay-server after construction, from
+	// RELAY_TASKLOG_TRAILING_WINDOW. Read-only after startup.
+	TrailingLogWindow time.Duration
 }
 
 // NewHandler returns a Handler wired to the given dependencies.
