@@ -58,7 +58,8 @@ export function StatSection({
               stale · last update failed · {formatRelativeTime(new Date(dataUpdatedAt).toISOString())}
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Stacks below `md`, matching the ServerTab grid that lays these out. */}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {cells.map((c) => (
               <div key={c.label} className={c.wide ? 'col-span-2' : undefined}>
                 <KpiStat
