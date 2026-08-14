@@ -515,7 +515,18 @@ func (s *Server) handleGetScheduledJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, toScheduledJobResponse(row))
+	// fillOwnerEmails mutates through the slice header, so hand it a one-element
+	// slice and write the enriched element back out. selfEmail short-circuits the
+	// store lookup only when the caller owns this row; an admin reading someone
+	// else's schedule must resolve the real owner, exactly as the admin list arm
+	// does. ownedScheduledJob has already established the caller may read the row.
+	selfEmail := ""
+	if u, ok := UserFromCtx(r.Context()); ok && row.OwnerID == u.ID {
+		selfEmail = u.Email
+	}
+	items := []scheduledJobResponse{toScheduledJobResponse(row)}
+	s.fillOwnerEmails(r, items, selfEmail)
+	writeJSON(w, http.StatusOK, items[0])
 }
 
 type patchScheduledJobRequest struct {

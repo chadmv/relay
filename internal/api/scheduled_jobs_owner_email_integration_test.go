@@ -3,9 +3,13 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"relay/internal/api"
 
 	"github.com/stretchr/testify/require"
 )
@@ -52,4 +56,53 @@ func TestListScheduledJobs_OwnerEmail_OwnerScoped(t *testing.T) {
 	require.Len(t, p.Items, 1)
 	ownerEmail, _ := p.Items[0]["owner_email"].(string)
 	require.Equal(t, "sjmail-alice@test.com", ownerEmail)
+}
+
+// getScheduledJobDetail fetches one schedule as a raw map, so the assertions read
+// the wire shape rather than a re-decoded Go struct.
+func getScheduledJobDetail(t *testing.T, srv *api.Server, token, id string) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/scheduled-jobs/"+id, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	var body map[string]any
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	}
+	return rec.Code, body
+}
+
+// Admin detail view: the ROW OWNER's email, not the caller's. This is the
+// discriminating direction - the owner-scoped test below also passes against a
+// handler that just stamps the caller's own email onto every response, and this
+// one does not.
+func TestGetScheduledJob_OwnerEmail_AdminSeesOwnersEmail(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	admin := createTestUser(t, q, "Admin", "sjget-admin@test.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	owner := createTestUser(t, q, "Owner", "sjget-owner@test.com", false)
+
+	id := seedScheduledJob(t, pool, "get-mail-sched", uuidString(owner.ID),
+		time.Now().Add(1*time.Hour), time.Now())
+
+	code, body := getScheduledJobDetail(t, srv, adminToken, id)
+	require.Equal(t, http.StatusOK, code)
+	ownerEmail, _ := body["owner_email"].(string)
+	require.Equal(t, "sjget-owner@test.com", ownerEmail)
+}
+
+// Owner detail view: the caller's own email on their own row.
+func TestGetScheduledJob_OwnerEmail_OwnerSeesOwn(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	alice := createTestUser(t, q, "Alice", "sjget-alice@test.com", false)
+	aliceToken := createTestToken(t, q, alice.ID)
+
+	id := seedScheduledJob(t, pool, "alice-get-sched", uuidString(alice.ID),
+		time.Now().Add(1*time.Hour), time.Now())
+
+	code, body := getScheduledJobDetail(t, srv, aliceToken, id)
+	require.Equal(t, http.StatusOK, code)
+	ownerEmail, _ := body["owner_email"].(string)
+	require.Equal(t, "sjget-alice@test.com", ownerEmail)
 }
