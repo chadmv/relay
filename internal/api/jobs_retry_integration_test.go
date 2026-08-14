@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -476,4 +477,107 @@ func TestRetryJob_PartialMatch_409_CaseC_RollbackIsTotal(t *testing.T) {
 	after := e.getJob(t, job.ID)
 	assert.Equal(t, "failed", after.Status)
 	assert.Equal(t, before.UpdatedAt.Time, after.UpdatedAt.Time)
+}
+
+// listenForTaskSubmitted attaches a dedicated connection to
+// relay_task_submitted BEFORE the request under test runs, and returns a
+// function that reports whether a notification arrived within d.
+func listenForTaskSubmitted(t *testing.T, pool *pgxpool.Pool) func(d time.Duration) bool {
+	t.Helper()
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release)
+	_, err = conn.Exec(context.Background(), "LISTEN relay_task_submitted")
+	require.NoError(t, err)
+
+	return func(d time.Duration) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		_, err := conn.Conn().WaitForNotification(ctx)
+		if err == nil {
+			return true
+		}
+		require.ErrorIs(t, err, context.DeadlineExceeded,
+			"WaitForNotification failed for a reason other than the timeout")
+		return false
+	}
+}
+
+// Item requirement: "a retry that matched zero tasks must not wake the
+// dispatcher and must not report success". NotifyTaskSubmitted is called INSIDE
+// the transaction, so Postgres holds the payload until commit - the wake is
+// gated on both the row count and the commit.
+func TestRetryJob_NotifyTaskSubmitted_FiresOnSuccessOnly(t *testing.T) {
+	type setup func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string)
+
+	cases := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantNotify bool
+		seed       setup
+	}{
+		{
+			name: "success", query: "task=failed", wantStatus: http.StatusOK, wantNotify: true,
+			seed: func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string) {
+				job := e.job(t, owner)
+				e.task(t, job, "t", "failed")
+				e.recompute(t, job)
+				return job, ""
+			},
+		},
+		{
+			name: "cancelled_409", query: "task=failed", wantStatus: http.StatusConflict, wantNotify: false,
+			seed: func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string) {
+				job := e.job(t, owner)
+				e.task(t, job, "t", "failed")
+				e.recompute(t, job)
+				_, err := e.q.UpdateJobStatus(t.Context(), store.UpdateJobStatusParams{
+					ID: job.ID, Status: "cancelled",
+				})
+				require.NoError(t, err)
+				return job, ""
+			},
+		},
+		{
+			name: "zero_matched_409", query: "task=failed", wantStatus: http.StatusConflict, wantNotify: false,
+			seed: func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string) {
+				job := e.job(t, owner)
+				e.task(t, job, "t", "done")
+				e.recompute(t, job)
+				return job, ""
+			},
+		},
+		{
+			name: "blocked_409", query: "task=failed", wantStatus: http.StatusConflict, wantNotify: false,
+			seed: func(e *retryEnv, t *testing.T, owner pgtype.UUID) (store.Job, string) {
+				job := e.job(t, owner)
+				tsk := e.task(t, job, "t", "failed")
+				dep := e.task(t, job, "d", "done")
+				require.NoError(t, e.q.CreateTaskDependency(t.Context(), store.CreateTaskDependencyParams{
+					TaskID: dep.ID, DependsOnTaskID: tsk.ID,
+				}))
+				e.recompute(t, job)
+				return job, ""
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRetryEnv(t)
+			owner := createTestUser(t, e.q, "Owner",
+				fmt.Sprintf("retry-notify-%s@example.com", tc.name), false)
+			token := createTestToken(t, e.q, owner.ID)
+			job, _ := tc.seed(e, t, owner.ID)
+
+			wait := listenForTaskSubmitted(t, e.pool)
+			rec := e.do(t, token, uuidString(job.ID), tc.query)
+			require.Equal(t, tc.wantStatus, rec.Code)
+
+			got := wait(2 * time.Second)
+			require.Equal(t, tc.wantNotify, got,
+				"dispatcher wake must fire exactly on the success path")
+		})
+	}
 }
