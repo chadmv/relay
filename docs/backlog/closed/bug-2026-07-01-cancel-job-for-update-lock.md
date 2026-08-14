@@ -1,8 +1,10 @@
 ---
 title: handleCancelJob reads the job row without FOR UPDATE (cancel not fully serializable)
 type: bug
-status: open
+status: closed
 created: 2026-07-01
+closed: 2026-08-13
+resolution: fixed
 priority: low
 source: ROADMAP deep-refresh gaps sweep (2026-06-26)
 ---
@@ -49,3 +51,31 @@ writes are serialized against concurrent cancels and terminal recomputes.
 ## Notes
 Lower confidence than the retry bug - the epoch fence already prevents the concrete resurrect-a-task
 corruption; this makes the job-side of cancel fully serializable.
+
+## Resolution
+
+Closed as a side effect of the 2026-08-13-job-retry-endpoint slice, which nobody had scheduled
+against this item - it was found during that slice's retro, not planned.
+
+`handleCancelJob` now reads the job through the new `GetJobForUpdate` statement inside its own
+transaction, and the terminal-state check reads that locked row, so the check and the subsequent
+`CancelJobTasks` / `UpdateJobStatus` writes are serialized against a concurrent cancel or terminal
+recompute. That is acceptance bullets 1 and 2 exactly as written.
+
+The retry endpoint is why it happened: `handleRetryJob` is the second multi-statement writer over
+jobs+tasks, and with cancel reading tasks-then-job the two were an ABBA deadlock pair reachable by
+two ordinary operator actions. Both handlers now take one lock order - job, then tasks - and the
+`GetJobForUpdate` comment records that ordering as load-bearing so neither is "optimized" back.
+
+One deliberate caveat, recorded rather than glossed. Acceptance bullet 3 asked for coverage of the
+concurrent-cancel path; what shipped covers cancel-versus-**retry**
+(`TestRetryJob_CancelSerialization_NeverCancelledJobWithPendingTasks`, 5/5 stable at `-count=5`,
+10 racing rounds per invocation), not cancel-versus-cancel. The lock that serializes the one
+serializes the other - it is the same row lock taken at the same point - so the mechanism is
+covered even though that specific pairing has no dedicated test. Flagged here so a future reader
+does not assume a cancel-versus-cancel test exists.
+
+A second gate change rode along: the owner-or-admin check now runs on an **unlocked** read taken
+before the transaction opens, so an unauthorized caller cannot queue on a victim's job row lock
+before receiving its 404. That was a regression this slice introduced and then fixed, not
+something this item asked for.

@@ -20,14 +20,26 @@ split out here because it is backend-blocked and has real correctness dependenci
 not.
 
 ## Blocked
-**BLOCKED** on backend and correctness prerequisites:
-- The `POST /v1/jobs/{id}/retry` route **does not exist yet**. As of 2026-08-13 it is tracked in its
-  own item, [[feature-2026-08-13-job-retry-endpoint]], split out of
-  [[feature-2026-06-26-web-enabler-backend-endpoints]] when that item's other two endpoints shipped.
-  The full constraint block for the statement lives in the new item.
-- Retry re-opens terminal jobs, which reactivates the latent
-  [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]] (the `done_24h`/`failed_24h` buckets window on
-  `updated_at` as a finish proxy, which breaks once terminal jobs re-open).
+**NO LONGER BLOCKED as of 2026-08-13.** Both prerequisites are resolved; this item is FE-ready.
+- The `POST /v1/jobs/{id}/retry` route **now exists**, shipped in the 2026-08-13-job-retry-endpoint
+  slice ([[feature-2026-08-13-job-retry-endpoint]], now in `docs/backlog/closed/`). The wire contract
+  the FE must implement against, which differs from what this item assumed: `?task=failed|all` is
+  **required** with no default - absent, empty, repeated or unrecognized values are a 400 - and
+  `failed` reopens `failed` **and `timed_out`**. Auth is owner-or-admin with a **404** on deny. A
+  success is 200 carrying the job plus `tasks_retried`, always `>= 1`. There is **no successful
+  no-op**: nothing-matched, blocked-by-dependents and raced are all **409** with distinct messages,
+  so the FE needs a 409 surface, not just a success/failure toggle.
+- Retry re-opening terminal jobs did **not** reactivate
+  [[bug-2026-06-05-jobs-stats-24h-updated-at-proxy]]. That slice measured it: a retried job leaves
+  both 24h buckets the instant it becomes `running` and re-enters with a correct new `updated_at`
+  when it finishes again, so the only effect is a transient undercount that self-corrects. Accepted
+  in writing at the statement. That bug stays open on its own merits, but it is not a blocker here.
+
+## Known trap for the FE slice
+The retry 200 reports `total_tasks: 0` / `done_tasks: 0`, because the enrichment fields are only
+populated by the list-row converter. Do **not** seed the job cache from this response or it will
+overwrite real counts with zeros. Tracked as
+[[bug-2026-08-13-single-job-responses-report-zero-total-tasks]].
 - ~~Retry re-queues tasks and so must respect the epoch fence per
   `bug-2026-06-26-retry-resurrects-cancelled-task`.~~ **Resolved 2026-08-12** - that item is closed
   (`docs/backlog/closed/bug-2026-06-26-retry-resurrects-cancelled-task.md`). It is **not** a blocker
@@ -66,5 +78,7 @@ cancel action:
 - Source: `internal/api/jobs.go`, `web/src/jobs/`
 
 ## Notes
-Unlike cancel and submit, retry is backend-blocked. Schedule it after the retry endpoint and the two
-correctness bugs, then the FE wiring is a small mirror of the cancel action.
+Was backend-blocked; no longer is, as of 2026-08-13. The FE wiring is a near-mirror of the cancel
+action, with one shape difference worth planning for: cancel has no mode parameter and no rich
+conflict vocabulary, whereas retry needs a `failed`-versus-`all` choice in the UI and must render
+three distinguishable 409 reasons rather than a generic failure.
