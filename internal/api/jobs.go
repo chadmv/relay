@@ -1015,6 +1015,8 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// By construction this returns 'running': at least one task is now pending.
+	// The return is discarded because the re-read below carries it, along with
+	// the new updated_at.
 	if _, err := q.RecomputeJobStatus(ctx, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
@@ -1045,10 +1047,26 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 
 	// After commit, matching handleCancelJob. Unlike cancel there is no agent
 	// signal to send: every reopened row was terminal, so no agent holds it.
+	//
+	// The payload is built from the status this handler actually read, not from a
+	// literal. It is provably 'running' today - RecomputeJobStatus cannot return
+	// anything else with a task now pending - but nothing keeps a literal and the
+	// response body in step if that changes, and the body already carries
+	// job.Status.
+	//
+	// KNOWN AND ACCEPTED: this publish happens AFTER tx.Commit, so on a one-task
+	// job the dispatcher can claim, run and finish the task in the window between
+	// those two lines, and a subscriber then sees this 'running' arrive after the
+	// 'done' that overtook it. The status is stale, not wrong - it is the status
+	// at commit - and a subscriber that treats an SSE status as a cache hint
+	// rather than a source of truth converges on the next refetch. handleCancelJob
+	// has the identical post-commit shape; publishing inside the transaction
+	// instead would announce a state that a rollback could still erase, which is
+	// the worse failure. Do not "fix" one of these two handlers alone.
 	s.broker.Publish(events.Event{
 		Type:  "job",
 		JobID: uuidStr(job.ID),
-		Data:  []byte(`{"status":"running"}`),
+		Data:  []byte(fmt.Sprintf(`{"status":%q}`, job.Status)),
 	})
 
 	writeJSON(w, http.StatusOK, retryJobResponse{
