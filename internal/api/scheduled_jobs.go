@@ -194,9 +194,15 @@ func scheduledJobsRowKeyByUpdated(s store.ScheduledJob) (anySortVal, pgtype.UUID
 	return s.UpdatedAt.Time, s.ID
 }
 
-// fillOwnerEmails resolves owner_email for a page of items. For the owner-scoped
-// path every item belongs to the caller, so pass selfEmail to skip the lookup.
-// For the admin path pass selfEmail == "" to batch-resolve from the store.
+// fillOwnerEmails resolves owner_email for a set of items, mutating them in
+// place. Pass selfEmail when every item is known to belong to the caller, which
+// skips the lookup entirely; pass "" to batch-resolve from the store.
+//
+// Three callers, and the choice is per call site rather than per path: the
+// owner-scoped list passes selfEmail because every row is the caller's, the
+// admin list passes "" because the rows are anyone's, and handleGetScheduledJob
+// decides per row. A store lookup that fails is logged and leaves owner_email
+// empty rather than failing the request - the same degradation for all three.
 func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, selfEmail string) {
 	if selfEmail != "" {
 		for i := range items {
@@ -515,8 +521,8 @@ func (s *Server) handleGetScheduledJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// fillOwnerEmails mutates through the slice header, so hand it a one-element
-	// slice and write the enriched element back out. selfEmail short-circuits the
+	// fillOwnerEmails mutates its elements in place, so hand it a one-element
+	// slice and write that element back out. selfEmail short-circuits the
 	// store lookup only when the caller owns this row; an admin reading someone
 	// else's schedule must resolve the real owner, exactly as the admin list arm
 	// does. ownedScheduledJob has already established the caller may read the row.
