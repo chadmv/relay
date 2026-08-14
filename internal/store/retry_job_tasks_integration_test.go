@@ -184,14 +184,27 @@ func TestRetryJobTasks_RowLevelPredicate_ConcurrentSecondRetryDoesNotDoubleBumpE
 	// Wait until B is genuinely blocked on a row lock. This replaces a sleep:
 	// if B has not reached the lock, committing A would let B run against a
 	// post-A snapshot and the test would prove nothing.
+	//
+	// The condition func runs on testify's own goroutine, not the test
+	// goroutine, so require.NoError (which calls t.FailNow) is documented
+	// misuse here: a transient poll error would Goexit the wrong goroutine
+	// and the test would instead time out 10s later reporting the unrelated
+	// "B never blocked" message. Capture the error and assert it on the test
+	// goroutine after Eventually returns.
+	var pollErr error
 	require.Eventually(t, func() bool {
 		var n int
-		require.NoError(t, f.pool.QueryRow(f.ctx,
+		if err := f.pool.QueryRow(f.ctx,
 			`SELECT count(*) FROM pg_stat_activity
 			  WHERE datname = current_database()
-			    AND wait_event_type = 'Lock' AND state = 'active'`).Scan(&n))
+			    AND wait_event_type = 'Lock' AND state = 'active'`).Scan(&n); err != nil {
+			pollErr = err
+			return false
+		}
+		pollErr = nil
 		return n > 0
 	}, 10*time.Second, 50*time.Millisecond, "B never blocked on A's row lock")
+	require.NoError(t, pollErr, "pg_stat_activity poll failed")
 
 	require.NoError(t, txA.Commit(f.ctx))
 	wg.Wait()
