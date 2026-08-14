@@ -6,6 +6,7 @@ import { useJobStats } from './useJobStats'
 import { JobsTable } from './JobsTable'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
+import { useCursorPager } from '../lib/useCursorPager'
 import type { JobSort } from './api'
 import { Eyebrow, GlassPanel } from '../components/holo'
 
@@ -22,64 +23,22 @@ const DEFAULT_SORT: JobSort = '-created_at'
 export function JobsPage() {
   const [sort, setSort] = useState<JobSort>(DEFAULT_SORT)
   const [filter, setFilter] = useState('all')
-  // Cursor of the current page (''=first). The stack holds the cursors of the
-  // pages we paged forward from, so prev can pop back (server returns only
-  // next_cursor).
-  const [cursor, setCursor] = useState('')
-  const [stack, setStack] = useState<string[]>([])
-  // Accumulated actual-row offset to the start of the current page. Grows by
-  // the real page size on each forward page, shrinks on back. Tracks in parallel
-  // with stack so partial pages stay correct.
-  const [startOffset, setStartOffset] = useState(0)
-  const [offsets, setOffsets] = useState<number[]>([])
+  const pager = useCursorPager()
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
-  const { data, error, isLoading, isFetching, isPlaceholderData, refetch } = useJobs(sort, status, cursor)
+  const { data, error, isLoading, isFetching, isPlaceholderData, refetch } = useJobs(sort, status, pager.cursor)
   const { data: stats } = useJobStats()
 
   function pickFilter(key: string) {
     setFilter(key)
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
+    pager.resetPaging()
     if (key !== 'all') setSort(DEFAULT_SORT) // server rejects sort + status
   }
 
   function pickSort(s: JobSort) {
     setSort(s)
-    setCursor('')
-    setStack([])
-    setStartOffset(0)
-    setOffsets([])
-  }
-
-  // next/prev use plain setters (not functional updaters): cursor and stack are
-  // both read from the current render and React batches the two updates in one
-  // event. Side effects inside a functional updater would double-fire under
-  // StrictMode.
-  function next() {
-    if (!data?.next_cursor) return
-    const currentPageSize = data.items.length
-    setStack([...stack, cursor])
-    setCursor(data.next_cursor)
-    // Accumulate the actual row count of this page before moving forward.
-    setOffsets([...offsets, startOffset])
-    setStartOffset(startOffset + currentPageSize)
-  }
-
-  function prev() {
-    if (stack.length === 0) return
-    const copy = [...stack]
-    const back = copy.pop() ?? ''
-    setStack(copy)
-    setCursor(back)
-    // Restore the offset of the previous page.
-    const offsetsCopy = [...offsets]
-    const prevOffset = offsetsCopy.pop() ?? 0
-    setOffsets(offsetsCopy)
-    setStartOffset(prevOffset)
+    pager.resetPaging()
   }
 
   if (isLoading && !data) {
@@ -105,7 +64,7 @@ export function JobsPage() {
 
   const jobs = data?.items ?? []
   const total = data?.total ?? 0
-  const { x, y } = computePageRange(startOffset, jobs.length)
+  const { x, y } = computePageRange(pager.startOffset, jobs.length)
   const rangeText =
     jobs.length === 0
       ? `0 of ${total.toLocaleString()}`
@@ -181,15 +140,15 @@ export function JobsPage() {
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={prev}
-                disabled={stack.length === 0 || isPlaceholderData}
+                onClick={pager.prev}
+                disabled={!pager.canPrev || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 ← prev
               </button>
               <button
                 type="button"
-                onClick={next}
+                onClick={() => pager.next(data?.next_cursor, jobs.length)}
                 disabled={!data?.next_cursor || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
