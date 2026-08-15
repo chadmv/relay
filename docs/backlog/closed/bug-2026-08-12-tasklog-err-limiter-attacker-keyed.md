@@ -1,8 +1,10 @@
 ---
 title: Agent-ingest error logging is attacker-driven and unbounded (task-log limiter keyed on wire input; task-status path has no limiter at all)
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-15
+resolution: fixed
 updated: 2026-08-14
 priority: medium
 source: Phase 4 review of the task-log assignee-fence iteration (2026-08-12); broadened to the status path by the task-status assignee-fence retro (2026-08-12)
@@ -241,3 +243,66 @@ two.
 stale twice in a row: `handleTaskStatus` grew by about 40 lines in the task-status assignee fence
 and by roughly 30 more in the retry-resurrect status guard, so every offset this item carried was
 wrong within days of being written. Cite symbols here.
+
+## Resolution
+
+Fixed 2026-08-15. `taskLogErrLimiter` is replaced by `internal/worker/ingest_log_limiter.go`:
+a **dedupe map** with a time-based re-arm, plus a **per-connection token bucket keyed on
+nothing**, which is the bound. Allocated as a stack local in `Connect` and threaded into
+`handleTaskLog`, `handleTaskStatus` and `handleInventoryUpdate` - so the task-status path, which
+had no limiter at all, is now covered by the same budget.
+
+**This item's prescribed remedy would have closed nothing, and the reason is worth keeping.** It
+said to key on the authenticated worker and cap per worker, and named reset-instead-of-suppress
+at 1024 as the defect. But `epoch` was the map **value**, not part of the key, so a caller
+sending one fixed task id with a varying `chunk.Epoch` got one `log.Printf` per message from a
+map of exactly **one entry** - never growing, never reaching the cap, never calling `reset()`. So
+the specific defect named here was neither sufficient nor the real resource concern: 1024 entries
+were already bounded; the unbounded resource is the process-global `log` mutex. **An item names
+the mechanism it saw, not necessarily the one that binds** - the second consecutive slice where a
+materially useful item prescribed a fix that failed open (see
+[[reference_accurate_item_wrong_remedy]] territory, and the trailing-window item before this one).
+
+**The design story, which changed twice.** The spec's headline claim was that moving `epoch` back
+into the map value must redden; the plan refuted it (64 varying epochs are still 64 unreported
+events requesting 64 tokens), and a review lens later confirmed it empirically by rewriting the
+limiter that way and watching the flood tests still pass. The durable form is now in the file's
+doc comment: **the composite key is required because one map holds several kinds, NOT because it
+closes the flood. The bucket closes the flood.**
+
+Also fixed, all found by the Phase 4 fan-out:
+
+- **`pgtype.UUID.Scan` does not constrain the bytes it accepts.** For a 36-byte input it discards
+  indices 8, 13, 18 and 23 without checking they are hyphens, so four bytes are attacker-chosen
+  and never inspected. Two lenses proved it independently. That made the wire id both a
+  log-injection sink (one event rendering as five physical log lines, reachable without owning
+  the task, since a NUL in `content` fails at bind before the fence evaluates) and a **2^32-way
+  dedupe-key escape** defeating the stated one-line-per-task-per-epoch property. Logs and dedupe
+  keys now use the canonical re-encoded id. The same defect one function outward is filed as
+  [[bug-2026-08-15-reconcile-compares-wire-task-ids-against-canonical-ones]].
+- **Three kinds logged once per connection, forever.** The kinds carrying no wire value are each
+  exactly one key, and `seen` only cleared at 128, which they could never reach alone - measured
+  at one failing message per second for seven simulated days: one line. Against `main` that was a
+  net observability regression for real infra errors. **The file argued against this exact
+  property two comments below**, for the 128-key case it does not reach, so the fix is the
+  project's own "a recovery bound must be time-based" rule applied to code whose comment already
+  stated it.
+- **A shared bad-id key let one forged message kill the log-path diagnostic.** One
+  `TaskStatusUpdate{TaskId: "z"}` permanently suppressed the log-path line - the one this file's
+  own comment calls the only signal for total silent log-data loss. Split into two kinds.
+- **`logKey.kind` had zero coverage**: setting it to a constant reddened nothing across the whole
+  worker package, unit and integration. Now pinned.
+- The auto-enroll audit line's unvalidated hostname is now `%q` + clipped; a lens captured a real
+  two-line forgery through the live `autoEnrollAndRegister` path before the fix.
+
+**Scope, stated honestly.** The bound is per connection and connection admission is unbounded -
+`MaxConcurrentStreams` is unset, so grpc-go's `MaxUint32` default applies. Sized fairly: before,
+the bad-id path emitted one line per message with **zero** DB work; now it is roughly 17 lines
+per connection-with-five-queries, four to five orders of magnitude on lines-per-attacker-CPU. The
+residual is filed as [[bug-2026-08-15-grpc-connection-admission-is-unbounded]]. The suppression is
+now silent, so a flood is invisible rather than noisy -
+[[idea-2026-08-15-ingest-log-suppression-is-uncounted]]. Two registration-time log sites remain
+outside the budget because `lim` is allocated after `authenticateAndRegister` runs:
+[[bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget]].
+
+Unit 487 -> 491 top-level; worker integration 75 -> 100; `-race` green.
