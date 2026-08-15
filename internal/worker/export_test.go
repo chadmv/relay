@@ -4,6 +4,7 @@ package worker
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,19 +14,76 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// handlerShimLimiters gives each *Handler ONE ingestLogLimiter for the lifetime
+// of the test binary, so that HandleTaskLog / HandleTaskStatus behave like a
+// single agent connection and the existing call sites across four test files
+// compile and behave unchanged.
+//
+// READ THIS BEFORE ASSERTING ON LOG-LINE COUNTS. "One Handler equals one
+// connection" is TRUE in these shims and FALSE in production, where a single
+// Handler serves every connection and Connect allocates one limiter per stream.
+// So these shims are usable evidence for what ONE connection's budget does, and
+// are NEVER evidence for isolation BETWEEN connections. That property is pinned
+// by TestConnect_TwoConnectionsDoNotShareTheLogBudget, which drives two real
+// Connect streams against one Handler.
+//
+// The earlier design for this seam allocated a throwaway limiter per call, which
+// would have made these wrappers exercise no limiting at all - a test asserting
+// a log-line count through them would have been green and meaningless. Do not
+// go back to that.
+var (
+	handlerShimLimitersMu sync.Mutex
+	handlerShimLimiters   = map[*Handler]*ingestLogLimiter{}
+)
+
+func shimLimiterFor(h *Handler) *ingestLogLimiter {
+	handlerShimLimitersMu.Lock()
+	defer handlerShimLimitersMu.Unlock()
+	l, ok := handlerShimLimiters[h]
+	if !ok {
+		l = newIngestLogLimiter()
+		handlerShimLimiters[h] = l
+	}
+	return l
+}
+
 // HandleTaskStatus exposes the unexported handleTaskStatus method for
 // integration tests in package worker_test. workerID is the sending
 // connection's authenticated worker, exactly as Connect supplies it in
-// production.
+// production; the log budget is this Handler's shim limiter (see above).
 func (h *Handler) HandleTaskStatus(ctx context.Context, workerID pgtype.UUID, upd *relayv1.TaskStatusUpdate) {
-	h.handleTaskStatus(ctx, workerID, upd)
+	h.handleTaskStatus(ctx, workerID, shimLimiterFor(h), upd)
 }
 
 // HandleTaskLog exposes the unexported handleTaskLog method for integration
 // tests in package worker_test. workerID is the sending connection's
-// authenticated worker, exactly as Connect supplies it in production.
+// authenticated worker, exactly as Connect supplies it in production; the log
+// budget is this Handler's shim limiter (see above).
 func (h *Handler) HandleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk *relayv1.TaskLogChunk) {
-	h.handleTaskLog(ctx, workerID, chunk)
+	h.handleTaskLog(ctx, workerID, shimLimiterFor(h), chunk)
+}
+
+// LimiterHandle is an opaque wrapper around an unexported *ingestLogLimiter, in
+// the same shape as SenderHandle below, so package worker_test can hold two
+// independent budgets against ONE Handler without going through Connect.
+type LimiterHandle struct {
+	l *ingestLogLimiter
+}
+
+// NewLimiterForTest returns a fresh per-connection log budget, in the state
+// Connect allocates one in.
+func NewLimiterForTest() *LimiterHandle {
+	return &LimiterHandle{l: newIngestLogLimiter()}
+}
+
+// HandleTaskLogWithLimiter is HandleTaskLog with an explicit budget.
+func (h *Handler) HandleTaskLogWithLimiter(ctx context.Context, workerID pgtype.UUID, lim *LimiterHandle, chunk *relayv1.TaskLogChunk) {
+	h.handleTaskLog(ctx, workerID, lim.l, chunk)
+}
+
+// HandleTaskStatusWithLimiter is HandleTaskStatus with an explicit budget.
+func (h *Handler) HandleTaskStatusWithLimiter(ctx context.Context, workerID pgtype.UUID, lim *LimiterHandle, upd *relayv1.TaskStatusUpdate) {
+	h.handleTaskStatus(ctx, workerID, lim.l, upd)
 }
 
 // TaskLogPublishesForTest reports how many chunks have got past the
@@ -34,12 +92,6 @@ func (h *Handler) HandleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 // marshal, which is otherwise unobservable from outside the package.
 func TaskLogPublishesForTest() int64 {
 	return taskLogPublishes.Load()
-}
-
-// ResetTaskLogErrLimiterForTest clears the persist-failure log rate limiter so a
-// test starts from a known state regardless of what earlier tests reported.
-func ResetTaskLogErrLimiterForTest() {
-	taskLogErrs.reset()
 }
 
 // ApplyInventory exposes the unexported applyInventory method for integration tests.

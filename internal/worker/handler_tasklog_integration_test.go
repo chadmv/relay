@@ -276,7 +276,6 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	ctx := context.Background()
 	broker := events.NewBroker()
 	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
-	worker.ResetTaskLogErrLimiterForTest()
 
 	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs4@example.com", "w-logs4")
 	taskIDStr := h.UUIDStringForTest(taskID)
@@ -521,7 +520,7 @@ func TestHandleTaskLog_RejectsAChunkForANeverClaimedTask(t *testing.T) {
 // Every other test in this file reaches handleTaskLog through the export_test
 // shim, passing a worker id the test chose. That leaves the ONE line that wires
 // the connection's real identity into it - Connect's
-// `h.handleTaskLog(ctx, workerUUID, p.TaskLog)` - pinned by nothing. If that
+// `h.handleTaskLog(ctx, workerUUID, lim, p.TaskLog)` - pinned by nothing. If that
 // call site bound a zero-value UUID, or the wrong variable, every test in this
 // package would stay green while production silently dropped 100% of log
 // ingest, because the assignee predicate would never match. That is precisely
