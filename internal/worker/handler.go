@@ -351,7 +351,14 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 		return "", nil, txErr
 	}
 
-	log.Printf("worker: auto-enrolled worker %s (hostname=%s) from %s", uuidStr(workerID), reg.Hostname, remoteAddr(ctx))
+	// reg.Hostname is a caller-supplied proto string: validated nowhere, bounded
+	// only by gRPC's 4 MiB default receive limit. %q is the injection defence and
+	// clipID the volume defence, the same pair the ingest log sites use. This line
+	// is the ONLY record anywhere that a token-less enrollment happened, so a
+	// forgeable one corrupts the audit trail of the mechanism it documents - the
+	// RELAY_ALLOW_AUTO_ENROLL gate is not a substitute. It is bounded to one line
+	// per connection by registration itself, so it takes no budget key.
+	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
 
@@ -479,12 +486,11 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
-		// Under the connection's budget, keyed on kindBadTaskID with NO wire
-		// value, and SHARED with handleTaskLog's identical guard: an agent
-		// malforming ids on both streams costs one line, not two. The trade is
-		// per-id detail for a key the caller cannot vary - the content of the
-		// second malformed id adds nothing an operator can act on, and the fact
-		// that this agent sends malformed ids is the whole signal.
+		// Under the connection's budget, keyed on kindBadTaskIDStatus with NO wire
+		// value. NOT shared with handleTaskLog's identical guard, though it was
+		// until 2026-08-15: sharing saved one token out of sixteen and cost the
+		// log path's line entirely, which is the only signal anywhere for an agent
+		// losing 100% of a task's output. See the logKind block.
 		//
 		// %q is MANDATORY and is the injection defence; clipID is the volume
 		// defence. Neither substitutes for the other: upd.TaskId has just FAILED
@@ -495,9 +501,13 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 		// non-obvious half: pgtype's parse failure is
 		// fmt.Errorf("cannot parse UUID %v", src), so err carries a verbatim,
 		// unescaped SECOND COPY of the same caller bytes. Rendering it with a
-		// bare %v would leave the line unbounded and unescaped no matter what
-		// was done to upd.TaskId - measured at 205544 bytes for a 100k id.
-		if lim.allow(logKey{kind: kindBadTaskID}) {
+		// bare %v would leave the line unbounded and unescaped no matter what was
+		// done to upd.TaskId. Measured against the pre-slice handler with a 100k
+		// id: the SINGLE line rendered 200060 bytes, and the WHOLE captured buffer
+		// of TestHandleTaskStatus_MalformedTaskIdsAreLoggedOncePerConnectionAndClipped
+		// (that line plus its 64 short followers) rendered 205544. Both numbers are
+		// stated because the figure alone was previously ambiguous between them.
+		if lim.allow(logKey{kind: kindBadTaskIDStatus}) {
 			log.Printf("worker: handleTaskStatus bad task id %q: %q", clipID(upd.TaskId), clipID(err.Error()))
 		}
 		return
@@ -520,11 +530,16 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 		// per-task: keying on the task id would multiply one infra event by the
 		// task count.
 		//
-		// upd.TaskId keeps its bare %s and needs no clip: control only reaches
-		// here after taskID.Scan SUCCEEDED, so the string is already constrained
-		// to pgtype's accepted UUID forms.
+		// The id is rendered from the PARSED value, never from upd.TaskId. It
+		// needs no clip - Scan succeeded, so the wire string is at most 36 bytes -
+		// but that is a length constraint and not a byte constraint: parseUUID
+		// splices out indices 8, 13, 18 and 23 of a 36-byte input without ever
+		// checking they are hyphens, so four bytes of upd.TaskId are caller-chosen
+		// and uninspected. uuidStr re-encodes canonically, which is what keeps a
+		// newline out of this line. Every id-bearing log site in this file does the
+		// same; see the logKey doc comment.
 		if !errors.Is(err, pgx.ErrNoRows) && lim.allow(logKey{kind: kindStatusGetTask}) {
-			log.Printf("worker: handleTaskStatus GetTask %s: %v", upd.TaskId, err)
+			log.Printf("worker: handleTaskStatus GetTask %s: %v", uuidStr(taskID), err)
 		}
 		return
 	}
@@ -660,7 +675,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 			// correct outcome, so there is nothing to diagnose. Any other error
 			// is real.
 			if !errors.Is(err, pgx.ErrNoRows) {
-				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", uuidStr(taskID), err)
 			}
 		} else {
 			// Both of these are already correctly gated on the write having
@@ -705,14 +720,14 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 		// the recv goroutine with no sink to send it to, and detection belongs
 		// with the audit-log work. Any other error is real.
 		if !errors.Is(err, pgx.ErrNoRows) {
-			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", uuidStr(taskID), statusStr, err)
 		}
 		return
 	}
 
 	if terminal {
 		if err := h.q.FailDependentTasks(ctx, taskID); err != nil {
-			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", upd.TaskId, err)
+			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", uuidStr(taskID), err)
 		}
 	}
 
@@ -787,9 +802,10 @@ var taskLogPublishes atomic.Int64
 func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, chunk *relayv1.TaskLogChunk) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(chunk.TaskId); err != nil {
-		// Deliberately symmetric with handleTaskStatus's identical guard, and
-		// they SHARE ONE budget key (kindBadTaskID) so an agent malforming ids on
-		// both streams costs one line, not two.
+		// Deliberately symmetric with handleTaskStatus's identical guard, but with
+		// its OWN budget key (kindBadTaskIDLog). They shared one key until
+		// 2026-08-15; one forged 1-byte status message then suppressed this line
+		// for the connection's whole life, and this is the line that must survive.
 		//
 		// This used to return silently, and that was correct BEFORE the budget
 		// existed: an unbounded line on this path is a flood vector. Logging it
@@ -802,7 +818,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 		// keep them on the ERROR too: pgtype renders the offending string
 		// verbatim into its parse error, so a bare %v would re-emit the same
 		// unbounded caller bytes unescaped. See handleTaskStatus's guard.
-		if lim.allow(logKey{kind: kindBadTaskID}) {
+		if lim.allow(logKey{kind: kindBadTaskIDLog}) {
 			log.Printf("worker: handleTaskLog bad task id %q: %q", clipID(chunk.TaskId), clipID(err.Error()))
 		}
 		return
@@ -881,10 +897,21 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 		// SQLSTATE - never Detail, which is where Postgres puts "Failing row
 		// contains (...)". Do not start logging pgErr.Detail here.
 		//
-		// chunk.TaskId needs no clip at this site: taskID.Scan succeeded above, so
-		// it is already constrained to pgtype's accepted UUID forms.
-		if lim.allow(logKey{kind: kindTaskLogPersist, id: chunk.TaskId, epoch: chunk.Epoch}) {
-			log.Printf("worker: handleTaskLog AppendTaskLog %s: %v", chunk.TaskId, err)
+		// THE ID IS THE CANONICAL RE-ENCODING, NOT THE WIRE STRING, in the log line
+		// AND in the dedupe key - and the distinction is the whole point. Passing
+		// taskID.Scan constrains the wire string's LENGTH (36 bytes, so no clip is
+		// needed) and NOT its bytes: for a 36-byte input parseUUID splices
+		// src[0:8]+src[9:13]+src[14:18]+src[19:23]+src[24:] and never checks that
+		// indices 8, 13, 18 and 23 are hyphens, so four bytes are fully
+		// caller-chosen and never inspected. Scan("aaaaaaaa\nbbbb\ncccc\ndddd\n
+		// eeeeeeeeeeee") succeeds. Rendering the wire string with a bare %s turned
+		// one event into five physical log lines, and keying on it gave a caller
+		// 2^32 distinct dedupe keys for one (task, epoch) pair. uuidStr closes both
+		// at once and is already what the broker publishes. Pinned by
+		// TestHandleTaskLog_TheLoggedTaskIdIsCanonicalNotTheWireString.
+		canonicalID := uuidStr(taskID)
+		if lim.allow(logKey{kind: kindTaskLogPersist, id: canonicalID, epoch: chunk.Epoch}) {
+			log.Printf("worker: handleTaskLog AppendTaskLog %s: %v", canonicalID, err)
 		}
 		return
 	}
@@ -906,7 +933,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 		CreatedAt: row.CreatedAt.Time,
 	})
 	if err != nil {
-		log.Printf("worker: handleTaskLog marshal %s: %v", chunk.TaskId, err)
+		log.Printf("worker: handleTaskLog marshal %s: %v", taskIDStr, err)
 		return
 	}
 

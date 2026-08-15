@@ -90,9 +90,14 @@ if chunk.Epoch < 0 || chunk.Epoch > math.MaxInt32 {
 ```
 
 Dropping is the right failure mode and matches the surrounding code: an out-of-range epoch cannot
-correspond to any real assignment, `handleTaskLog` already returns silently on an unparseable task
-id, and a fence miss is already a silent drop. Do not add a log line - that would hand an attacker a
-new flood vector on the recv goroutine, which is exactly the problem in
+correspond to any real assignment, and a fence miss is already a silent drop. (The claim that
+`handleTaskLog` "already returns silently on an unparseable task id" was true when this was written
+and is FALSE as of 2026-08-15: that guard now logs one budgeted line per connection, because an
+agent malforming ids on the log path loses 100% of that task's output with no other signal
+anywhere. It is the one failure mode on this path with total, silent data loss, which is exactly
+what an out-of-range epoch is NOT - the epoch case is indistinguishable from a forgery.) Do not
+add a log line - that would hand an attacker a new flood vector on the recv goroutine, which is
+exactly the problem in
 [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]].
 
 Alternatively, and slightly better if the diff is being touched anyway: compare at int64 width the

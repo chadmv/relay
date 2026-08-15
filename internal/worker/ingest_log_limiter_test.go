@@ -23,21 +23,42 @@ func TestIngestLogLimiter_ConstantsAreWhatTheHandlerTestsAssume(t *testing.T) {
 	if ingestLogRefill != 10*time.Second {
 		t.Errorf("ingestLogRefill = %v, want 10s", ingestLogRefill)
 	}
+	if ingestLogDedupeWindow != 5*time.Minute {
+		t.Errorf("ingestLogDedupeWindow = %v, want 5m", ingestLogDedupeWindow)
+	}
+	// The integration flood tests count lines over 64 round trips against a real
+	// container. They are only deterministic while that stays well inside one
+	// dedupe window, or a re-arm would start adding lines to their upper bound.
+	if ingestLogDedupeWindow < 20*ingestLogRefill {
+		t.Errorf("ingestLogDedupeWindow (%v) must stay well above ingestLogRefill (%v), or the "+
+			"integration flood tests become timing-dependent", ingestLogDedupeWindow, ingestLogRefill)
+	}
 	if ingestLogIDClip != 64 {
 		t.Errorf("ingestLogIDClip = %d, want 64", ingestLogIDClip)
 	}
 }
 
 // newFrozen returns a limiter whose clock never advances unless the test moves
-// it, so every count below is exact rather than wall-clock dependent. Both `now`
-// and `last` must be reset: newIngestLogLimiter stamps last from time.Now.
+// it, so every count below is exact rather than wall-clock dependent. It goes
+// through newIngestLogLimiterAt rather than poking fields, which is what makes
+// every test in this file a guard on the seam being whole: a constructor that
+// stamped `last` from the real clock would leave these limiters hours out and
+// the exact counts below would stop being exact.
 func newFrozen() (*ingestLogLimiter, *time.Time) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	clock := &now
-	l := newIngestLogLimiter()
-	l.now = func() time.Time { return *clock }
-	l.last = *clock
-	return l, clock
+	return newIngestLogLimiterAt(func() time.Time { return *clock }), clock
+}
+
+// The seam cannot be half-used. Overriding only `now` while `last` came from the
+// real clock is a latent real-vs-fake skew (measured at ~9 hours by a review
+// lens) that no current test would notice, because they all go through newFrozen.
+func TestNewIngestLogLimiterAt_TakesLastFromTheInjectedClockToo(t *testing.T) {
+	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	l := newIngestLogLimiterAt(func() time.Time { return epoch })
+	if !l.last.Equal(epoch) {
+		t.Errorf("last = %v, want %v - the initial stamp must come through the injected clock", l.last, epoch)
+	}
 }
 
 func key(n int) logKey { return logKey{kind: kindTaskLogPersist, id: "t", epoch: int64(n)} }
@@ -190,12 +211,96 @@ func TestIngestLogLimiter_SeenMapIsBoundedAndClearsAtCapacity(t *testing.T) {
 	}
 }
 
+// THE DEDUPE RE-ARMS ON TIME, NOT ON ACTIVITY. This is the exact boundary; the
+// 7-day leg below is the operational consequence.
+//
+// A recovery bound must be TIME-BASED (docs/agent-team, and this file's own
+// argument at the capacity branch). Without the window, the three kinds that
+// carry no wire value are exactly ONE key each, so they log once per connection
+// and then never again - a second infra outage forty hours later on the same
+// long-lived stream is completely silent.
+func TestIngestLogLimiter_AKeyReArmsAtTheDedupeWindowBoundary(t *testing.T) {
+	l, clock := newFrozen()
+	k := logKey{kind: kindInventory} // no wire value: exactly ONE key, forever
+
+	if !l.allow(k) {
+		t.Fatal("fixture: the first occurrence must log")
+	}
+	*clock = clock.Add(ingestLogDedupeWindow - time.Nanosecond)
+	if l.allow(k) {
+		t.Error("a repeat INSIDE the dedupe window must still be dropped")
+	}
+	*clock = clock.Add(time.Nanosecond)
+	before := l.tokens
+	if !l.allow(k) {
+		t.Error("at the dedupe window boundary the key must re-arm; permanent suppression has no time-based recovery")
+	}
+	if l.tokens != before-1 {
+		t.Errorf("tokens went %d -> %d, want a spend of exactly 1 - a re-arm must still cost a token, so the bucket stays the bound",
+			before, l.tokens)
+	}
+}
+
+// THE OPERATIONAL CONSEQUENCE, measured the way the review measured it: one
+// failing message per second for seven simulated days on ONE constant key.
+// Without the window this is 1. With it, it is one line per window, and the
+// bucket is never even approached (6 tokens/min refill against 1 token per
+// window).
+func TestIngestLogLimiter_AConstantKeyKeepsReportingAcrossALongConnection(t *testing.T) {
+	l, clock := newFrozen()
+	k := logKey{kind: kindInventory}
+
+	const seconds = 7 * 24 * 60 * 60
+	allowed := 0
+	for i := 0; i < seconds; i++ {
+		*clock = clock.Add(time.Second)
+		if l.allow(k) {
+			allowed++
+		}
+	}
+
+	want := seconds / int(ingestLogDedupeWindow/time.Second)
+	if allowed < want-1 || allowed > want+1 {
+		t.Errorf("allowed = %d over 7 days of one failing message per second, want ~%d "+
+			"(one per dedupe window). 1 means the kind is suppressed for the connection's whole lifetime",
+			allowed, want)
+	}
+	if l.tokens != ingestLogBurst {
+		t.Errorf("tokens = %d, want %d - re-arming one key must not drain the bucket", l.tokens, ingestLogBurst)
+	}
+}
+
+// THE `kind` COMPONENT OF THE KEY. Four of the five kinds carry NO wire value,
+// so each is exactly one logKey and `kind` is the ONLY thing keeping them apart.
+// Nothing else in the tree pins it: a lens set k.kind = 0 at the top of allow and
+// the entire package, unit plus integration, stayed green. A refactor that drops
+// the field, or a sixth kind with the same zero-value shape, would silently
+// collapse independent diagnostics into one.
+func TestIngestLogLimiter_EveryKindIsItsOwnDedupeKey(t *testing.T) {
+	l, _ := newFrozen()
+	kinds := map[string]logKind{
+		"kindTaskLogPersist":  kindTaskLogPersist,
+		"kindBadTaskIDLog":    kindBadTaskIDLog,
+		"kindBadTaskIDStatus": kindBadTaskIDStatus,
+		"kindStatusGetTask":   kindStatusGetTask,
+		"kindInventory":       kindInventory,
+	}
+	for name, kind := range kinds {
+		if !l.allow(logKey{kind: kind}) {
+			t.Errorf("%s did not get its own log line - the kind component is not discriminating", name)
+		}
+	}
+	if len(l.seen) != len(kinds) {
+		t.Errorf("len(seen) = %d, want %d - one distinct key per kind", len(l.seen), len(kinds))
+	}
+}
+
 // A NIL LIMITER DROPS THE LINE INSTEAD OF PANICKING. Connect has no recover and
 // grpc-go does not recover handler panics, so a nil dereference on the recv
 // goroutine would take down the whole server process. Fail closed on volume.
 func TestIngestLogLimiter_NilLimiterDropsTheLineInsteadOfPanicking(t *testing.T) {
 	var l *ingestLogLimiter
-	if l.allow(logKey{kind: kindBadTaskID}) {
+	if l.allow(logKey{kind: kindBadTaskIDLog}) {
 		t.Error("a nil limiter must drop the line, not allow it")
 	}
 }

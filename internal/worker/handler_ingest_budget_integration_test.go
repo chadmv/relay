@@ -150,21 +150,24 @@ func TestHandleTaskLog_VaryingWireEpochOnOneTaskCannotFloodTheLog(t *testing.T) 
 	assert.NotContains(t, logged(), secret, "chunk content must never be logged")
 }
 
-// Two legs with two different jobs, stated separately because only one of them
-// is RED at HEAD.
+// Two legs with two different jobs.
 //
-// LEG A is RED at HEAD (0 lines, want 1): today handleTaskLog's taskID.Scan
-// failure returns SILENTLY, so an agent sending unparseable ids on the log path
-// loses 100% of that task's output with no signal anywhere. That is the one
-// failure mode on this path with total, silent data loss, and it is worth
-// exactly one line per connection - which is only safe because of the budget.
+// LEG A: an agent sending unparseable ids on the log path loses 100% of that
+// task's output with no signal anywhere. That is the one failure mode on this
+// path with total, silent data loss, and it is worth exactly one line per
+// connection per dedupe window - which is only safe because of the budget.
 //
-// LEG B is GREEN at HEAD for the wrong reason (0 lines from the log path plus 1
-// from the status path is also 1). It carries no HEAD-RED and is honestly a
-// MUTATION-ONLY test: it goes red when the two handlers are given separate key
-// kinds, which would let an agent malforming ids on both streams cost two lines
-// instead of one. Keep it for that, not for shape.
-func TestHandleTaskLog_MalformedTaskIdIsLoggedOncePerConnectionAndSharesTheStatusBudget(t *testing.T) {
+// LEG B: THE TWO PATHS MUST NOT SHARE A KEY. They did until 2026-08-15, and the
+// sharing was measured to defeat LEG A's whole point: one 1-byte forged
+// TaskStatusUpdate{TaskId: "z"} at the top of a connection consumed the shared
+// key, and 64 unparseable ids on the LOG path then produced ZERO lines. The two
+// messages are worded differently, so an operator grepping the log path's marker
+// saw nothing at all. It needs no attacker either - a buggy agent malforming ids
+// on both paths (likely, since both ids come from the same plumbing) reported
+// whichever arrived first, nondeterministically. The sharing was defending ONE
+// token out of sixteen against losing the only signal for total silent log-data
+// loss, so it lost.
+func TestHandleTaskLog_MalformedTaskIdIsLoggedOncePerConnectionAndHasItsOwnBudgetKey(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()
 
@@ -183,20 +186,82 @@ func TestHandleTaskLog_MalformedTaskIdIsLoggedOncePerConnectionAndSharesTheStatu
 	assert.Contains(t, loggedA(), "\"not-a-uuid-0\"",
 		"the line must name the FIRST offending id, %q-quoted")
 
-	// LEG B: a second fresh Handler. One malformed id on each handler, one
-	// budget, must cost ONE line in total, not two.
+	// LEG B: a second fresh Handler, so a fresh budget. The status path burns its
+	// bad-id key FIRST, exactly as one forged 1-byte message would; the log path
+	// must still report.
 	hB := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
 	loggedB := captureLog(t)
-	hB.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
-		TaskId: "log-side-garbage", Content: []byte("x\n"), Epoch: 1,
-	})
 	hB.HandleTaskStatus(ctx, workerID, &relayv1.TaskStatusUpdate{
-		TaskId: "status-side-garbage", Status: relayv1.TaskStatus_TASK_STATUS_RUNNING, Epoch: 1,
+		TaskId: "z", Status: relayv1.TaskStatus_TASK_STATUS_RUNNING, Epoch: 1,
 	})
-	total := countLines(loggedB(), "handleTaskLog bad task id") +
-		countLines(loggedB(), "handleTaskStatus bad task id")
-	assert.Equal(t, 1, total,
-		"both handlers share ONE bad-task-id budget key, so an agent malforming ids on both streams costs one line, not two")
+	for i := 0; i < 64; i++ {
+		hB.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+			TaskId: fmt.Sprintf("log-side-garbage-%d", i), Content: []byte("x\n"), Epoch: 1,
+		})
+	}
+	logLines := countLines(loggedB(), "handleTaskLog bad task id")
+	statusLines := countLines(loggedB(), "handleTaskStatus bad task id")
+	assert.Equal(t, 1, logLines,
+		"the log path has its OWN bad-task-id key: one forged status message must not silence the "+
+			"only signal for total, silent log-data loss")
+	assert.Equal(t, 1, statusLines,
+		"the status path still costs exactly one line per connection")
+}
+
+// pgtype.UUID.Scan CONSTRAINS THE LENGTH, NOT THE BYTES, and every log site that
+// renders a task id after a successful Scan used to trust the wire string.
+//
+// For a 36-byte input parseUUID splices src[0:8]+src[9:13]+src[14:18]+src[19:23]
+// +src[24:] and NEVER checks that indices 8, 13, 18 and 23 are hyphens, so those
+// four bytes are fully attacker-chosen and never inspected:
+//
+//	Scan("aaaaaaaa\nbbbb\ncccc\ndddd\neeeeeeeeeeee") -> err=<nil>, valid=true
+//
+// Reaching the persist-failure line needs no ownership and no epoch match: a NUL
+// in content makes Postgres reject the bind before the fence CTE runs (see
+// TestHandleTaskLog_ANulChunkForAnUnfencedTaskIsAPersistErrorNotAFenceRejection),
+// so the error is non-pgx.ErrNoRows. One event therefore became five physical log
+// lines, and the same four free bytes gave 2^32 distinct dedupe keys for ONE
+// (task, epoch) pair. Both are closed by logging and keying on the canonical
+// re-encoding, which is what the broker already publishes.
+func TestHandleTaskLog_TheLoggedTaskIdIsCanonicalNotTheWireString(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+
+	_, _, workerID, _ := seedClaimedTask(t, ctx, q, "canon-id@example.com", "w-canon-id")
+
+	const canonical = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	forged := func(sep string) string {
+		return "aaaaaaaa" + sep + "bbbb" + sep + "cccc" + sep + "dddd" + sep + "eeeeeeeeeeee"
+	}
+
+	// LEG A: INJECTION. Newline separators forge four extra physical log lines.
+	hA := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+	loggedA := captureLog(t)
+	hA.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: forged("\n"), Content: []byte("x\x00"), Epoch: 1,
+	})
+	outA := loggedA()
+	require.Contains(t, outA, "handleTaskLog AppendTaskLog",
+		"fixture: a NUL chunk must reach the persist-failure branch")
+	assert.NotContains(t, outA, "aaaaaaaa\nbbbb",
+		"the WIRE task id must never reach the log: its separator bytes are unvalidated and caller-chosen")
+	assert.Contains(t, outA, canonical,
+		"the log must carry the canonical re-encoding of the id that actually parsed")
+	assert.Equal(t, 1, strings.Count(outA, "\n"),
+		"one event must be one physical log line; newline separators in the wire id must not forge more")
+
+	// LEG B: DEDUPE-KEY ESCAPE. 32 wire ids that all parse to the SAME uuid at the
+	// SAME epoch must be ONE dedupe key, not 32.
+	hB := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+	loggedB := captureLog(t)
+	for i := 0; i < 32; i++ {
+		hB.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+			TaskId: forged(string(rune('A' + i))), Content: []byte("x\x00"), Epoch: 1,
+		})
+	}
+	assert.Equal(t, 1, countLines(loggedB(), "handleTaskLog AppendTaskLog"),
+		"one (task, epoch) pair is one dedupe key; the four bytes Scan never inspects must not vary it")
 }
 
 // A status update naming a task that does not exist is indistinguishable from a

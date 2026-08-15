@@ -36,6 +36,18 @@ var (
 	handlerShimLimiters   = map[*Handler]*ingestLogLimiter{}
 )
 
+// THE MUTEX PROTECTS THE MAP ONLY. It does NOT protect the *ingestLogLimiter it
+// returns: the caller mutates that pointer unlocked, which is the shape the "no
+// interior pointers across locks" invariant warns about. Safe today only because
+// nothing in this package calls t.Parallel, so the shims are never driven
+// concurrently - if that changes, this is the finding, not the missing lock. The
+// production allocation site has no such seam: it is a stack local in Connect,
+// reached from one goroutine.
+//
+// The map is also never pruned. It holds one entry per *Handler for the lifetime
+// of the test binary, which is deliberate (that is what makes one Handler behave
+// like one connection) and is bounded by the number of Handlers a test run
+// creates.
 func shimLimiterFor(h *Handler) *ingestLogLimiter {
 	handlerShimLimitersMu.Lock()
 	defer handlerShimLimitersMu.Unlock()

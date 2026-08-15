@@ -205,8 +205,8 @@ Grepped `log.Printf` across `internal/worker` and classified:
 | --- | --- | --- |
 | `:158` worker id unusable | No - registration only, once per connection | Unchanged |
 | `:179` inventory update failed | **Yes** - NUL in any inventory string | Budgeted |
-| `:344` auto-enrolled | No - once per connection | Unchanged |
-| `:375` register inventory replace | No - registration only | Unchanged |
+| `:344` auto-enrolled | **Yes**, but capped at one per connection - `reg.Hostname` is validated nowhere and bounded only by gRPC's 4 MiB default | `%q` + `clipID` (2026-08-15 review). *Forceable* and *rate-limited* are different questions and this row conflated them: registration bounds the COUNT, not the CONTENT, and this is the only record that a token-less enrollment happened |
+| `:375` register inventory replace | **Yes**, but capped at one per connection - `applyInventory` swallows `time.Parse` on `LastUsedAt`, which binds SQL NULL into a `TIMESTAMPTZ NOT NULL` column; no NUL needed | Unchanged. The disposition stands (one line per connection, and it renders no caller string), but not for the reason first written |
 | `:467` handleTaskStatus bad task id | **Yes** - any unparseable string | Budgeted, deduped |
 | `:473` handleTaskStatus GetTask | **Yes** - any random UUID | `ErrNoRows` dropped; other errors budgeted |
 | `:604` IncrementTaskRetryCount | No (2.4) | Unchanged |
@@ -471,8 +471,9 @@ safe *because of* the bucket, so that removing the bucket is visibly the thing t
 
 | Site | Key | What it trades |
 | --- | --- | --- |
-| `handleTaskLog` persist failure | `{kindTaskLogPersist, chunk.TaskId, chunk.Epoch}` | Preserves exactly today's diagnostic - one line per task per generation - because the dedupe layer is no longer the bound. This is what keeps the existing test's `1` then `2` assertions byte-identical. |
-| bad task id (**both** handlers) | `{kindBadTaskID}` - no wire value | One line per connection per dedupe generation, showing the *first* offending id (`%q`). The content of the second malformed id adds nothing an operator can act on; the fact that this agent sends malformed ids is the whole signal. Trades per-id detail for a key the caller cannot vary. |
+| `handleTaskLog` persist failure | `{kindTaskLogPersist, uuidStr(taskID), chunk.Epoch}` | Preserves exactly today's diagnostic - one line per task per generation - because the dedupe layer is no longer the bound. This is what keeps the existing test's `1` then `2` assertions byte-identical. **Amended 2026-08-15**: the id is the CANONICAL re-encoding, never `chunk.TaskId`. Passing `pgtype.UUID.Scan` constrains the wire string's length and not its bytes - `parseUUID` splices out indices 8, 13, 18 and 23 of a 36-byte input without checking they are hyphens - so keying on the wire string gave a caller 2^32 distinct keys for one `(task, epoch)` pair, and logging it turned one event into five physical lines. |
+| bad task id, **log** path | `{kindBadTaskIDLog}` - no wire value | One line per connection per dedupe window, showing the *first* offending id (`%q`, clipped). **Superseded the shared key on 2026-08-15.** Sharing one key with the status path was measured to cost this line entirely: one forged `TaskStatusUpdate{TaskId: "z"}` then 64 malformed log chunks gave 0 log-path lines. This is the only signal anywhere for an agent losing 100% of a task's output, and the sharing was defending one token out of sixteen. |
+| bad task id, **status** path | `{kindBadTaskIDStatus}` - no wire value | Same shape, own key. |
 | `GetTask` non-`ErrNoRows` | `{kindStatusGetTask}` - no wire value | A pool or context failure is not per-task; keying on the task id would multiply one infra event by the task count. Trades per-task attribution for one honest line per infra episode. |
 | inventory update failure | `{kindInventory}` - no wire value | Same reasoning. |
 
