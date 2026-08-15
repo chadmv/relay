@@ -1,0 +1,123 @@
+---
+title: Generalize the env-to-field wiring guard - Metrics, AllowAutoEnroll and two duration knobs have the identical untested seam
+type: idea
+status: open
+created: 2026-08-14
+priority: low
+source: Phase 4 of the 2026-08-14-tasklog-terminal-append-bound slice; the new guard's own comment names this item and says "do not generalize here"
+---
+
+# Generalize the env-to-field wiring guard
+
+## Summary
+
+`cmd/relay-server/main.go` configures `worker.Handler` by assigning exported fields after
+construction:
+
+```go
+agentHandler := worker.NewHandlerWithGrace(...)
+agentHandler.Metrics = metricsStore
+// ... parse RELAY_TASKLOG_TRAILING_WINDOW ...
+agentHandler.TrailingLogWindow = trailingLogWindow
+// ... parse RELAY_ALLOW_AUTO_ENROLL ...
+agentHandler.AllowAutoEnroll = allow
+```
+
+**Deleting any one of those assignment lines compiles, and leaves the entire test suite green.**
+Nothing constructs `main()`. The field falls back to its zero value (or its documented default), the
+feature quietly stops working, and every gate in the project stays green - including
+`go build ./...`, `go vet -tags integration ./...`, `go test ./...` and all four integration suites.
+
+The 2026-08-14 slice measured this rather than assuming it, then closed the gap for exactly one
+field. `cmd/relay-server/trailing_log_window_test.go` now carries
+`TestTrailingLogWindowIsWiredIntoTheHandler`, a `go/ast` structural guard that parses `main.go` and
+asserts something derived from `parseTrailingLogWindow` reaches a `.TrailingLogWindow` field. Its own
+comment says:
+
+> `agentHandler.Metrics` and `agentHandler.AllowAutoEnroll` have the identical gap ... so this guard
+> is worth generalizing rather than pasting a third time. The conductor is filing that as its own
+> item - do not generalize here.
+
+This is that item. Not filing it would leave a source comment pointing at nothing.
+
+## Context
+
+Three points that shape the design, all verified:
+
+- **The seam is real and measured.** The correctness lens deleted the six-line wiring block and ran
+  every package: 20 green. That is what upgraded "no test covers this" from a plan footnote to a
+  remediation.
+- **The pattern already existed.** `internal/store/incrementtaskretrycount_guard_test.go` and
+  `internal/store/updatetaskstatusepoch_guard_test.go` are structural guards over source. The new one
+  is the third in the repo, and this project's own **extract-before-the-third-consumer rule just fired
+  on the cursor-pager item** (`idea-2026-08-13-cursor-pager-hook`, closed 2026-08-14).
+- **It must not be a regex.** A source-scanning regex guard in `web/` was proven breakable by a single
+  JSX comment (`docs/retros/2026-08-13-narrow-viewport-overflow.md`), and the fix there was to delete
+  the guard in favour of something the compiler enforces. The new guard uses `go/ast` for that reason
+  and any generalization must keep that property.
+
+## Proposal
+
+One table-driven guard in `cmd/relay-server` covering every post-construction wiring the binary
+depends on, replacing the single-purpose one rather than sitting beside it:
+
+```go
+cases := []struct{ field, derivedFrom string }{
+    {"Metrics",           "metricsStore"},       // or NewStore, whichever names the source
+    {"AllowAutoEnroll",   "RELAY_ALLOW_AUTO_ENROLL"},
+    {"TrailingLogWindow", "parseTrailingLogWindow"},
+}
+```
+
+Points to settle at spec time:
+
+- **What "derived from" should mean per row.** The shipped guard walks assignments transitively: it
+  collects `name -> identifiers its RHS mentions`, then follows `x := f(...)` into `h.Field = x`. That
+  is the right shape and it should be lifted verbatim rather than reinvented.
+- **The two limitations the shipped guard has, which a generalization should decide about rather than
+  inherit silently.** (1) It proves *derivation*, not *fidelity* - `TrailingLogWindow =
+  trailingLogWindow / 2` passes. (2) It keys on the field **name** only, so an assignment to any
+  object carrying that field name satisfies it. Both are acceptable for "the wiring was not deleted";
+  neither is stated in the test's own name, which claims `...IsWiredIntoTheHandler`. Either tighten
+  (match the receiver identifier too) or say so in the comment.
+- **Whether the guard should also cover `internal/api`'s equivalent seams.** `Server` has several
+  exported knobs (`RegisterLimitN`, `LoginLimitWin`, and friends) set the same way in `main.go`. If
+  the answer is yes, the guard is about `main.go` rather than about `worker.Handler`, which is a
+  better framing and changes the file it lives in.
+- **Whether a constructor-argument refactor would be better than any guard.** Passing these as
+  arguments to `NewHandlerWithGrace` would make the compiler enforce them and delete the guard
+  entirely. It was rejected in the trailing-window slice as pure churn (every test in
+  `internal/worker` constructs a handler), and that reasoning is still sound - but it should be
+  re-checked once, deliberately, rather than assumed forever. A functional-options constructor is the
+  middle path and has its own cost.
+
+## Acceptance / Done When
+
+- One guard test covers all three (or more) post-construction assignments in
+  `cmd/relay-server/main.go`; the single-purpose `TestTrailingLogWindowIsWiredIntoTheHandler` is
+  removed rather than left as a fourth copy.
+- Each row is proven by deleting its wiring line and observing that guard row - and only that row -
+  go RED. A guard that passes with the wiring deleted is worse than no guard.
+- The guard is structural (`go/ast`), never a regex or a string scan.
+- Its stated claim matches what it checks: whatever it does not prove (fidelity of the value, identity
+  of the receiver) is written in its comment.
+- It stays untagged, so it runs under `make test`.
+
+## Related
+
+- Source: `cmd/relay-server/main.go` (the three assignments), `cmd/relay-server/trailing_log_window_test.go`
+  (`TestTrailingLogWindowIsWiredIntoTheHandler`, the one to generalize), `internal/worker/handler.go`
+  (the `Metrics` / `AllowAutoEnroll` / `TrailingLogWindow` field block)
+- Existing structural guards to follow: `internal/store/incrementtaskretrycount_guard_test.go`,
+  `internal/store/updatetaskstatusepoch_guard_test.go`
+- Why not a regex: `docs/retros/2026-08-13-narrow-viewport-overflow.md` (a compliant consumer reddened
+  by one JSX comment; the guard was deleted and replaced with a required prop)
+- The rule that says three copies is the trigger: `docs/retros/2026-08-14-cursor-pager-hook.md`
+- Origin: `docs/retros/2026-08-14-tasklog-terminal-append-bound.md` ("The conductor override")
+
+## Notes
+
+Filed at **low** priority on purpose. Nothing is broken today; all three assignments are present and
+correct. The value is that the next knob added to `Handler` gets its wiring covered for free instead
+of arriving with a fourth copy of the same test or - much likelier - with no test at all, which is
+the state all three of these were in until 2026-08-14.

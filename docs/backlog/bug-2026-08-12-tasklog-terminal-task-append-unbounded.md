@@ -150,4 +150,3 @@ the task is **load-bearing**, not an oversight, and anybody who "fixes" this wit
 will pass every existing test except one and will silently truncate the tail of every task's output
 in production. That is why the bound has to be time-based, and why that sentence belongs in the code
 when the fix lands rather than only here.
-</content>

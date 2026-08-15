@@ -162,4 +162,3 @@ Half A is cheap and self-contained; half B is a one-line predicate plus a test, 
 reason to keep them on one item is the framing: the retry path was audited end to end on 2026-08-12
 and this is what the audit left, at both ends - an unvalidated input at the front and an unenforced
 budget at the back. Splitting them would lose that, and each half alone reads like a nit.
-</content>

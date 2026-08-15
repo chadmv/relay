@@ -133,5 +133,4 @@ Raise the priority if either trigger fires: an eleventh table is added by someon
 `Table.tsx`'s comment, or someone edits a `COLS` template (adding a column changes the fixed-track sum
 and nothing will remind them to revisit `MIN_W`). The second is the more likely of the two and it is
 the one no reviewer would think to check.
-</content>
 </invoke>

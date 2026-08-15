@@ -3,7 +3,7 @@ title: Agent-ingest error logging is attacker-driven and unbounded (task-log lim
 type: bug
 status: open
 created: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 priority: medium
 source: Phase 4 review of the task-log assignee-fence iteration (2026-08-12); broadened to the status path by the task-status assignee-fence retro (2026-08-12)
 ---
@@ -117,11 +117,34 @@ SQL-only fence would have turned every forged status message into a `log.Printf`
 `UpdateTaskStatus`'s `pgx.ErrNoRows`. That vector was avoided, but the two pre-existing pre-gate
 lines above it were not addressed, and they are the same defect.
 
-The limiter's honest-failure behavior is well covered by
-`TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch`
-(`internal/worker/handler_tasklog_integration_test.go`), which is worth reading before changing
-anything here: it pins one line per task per epoch, that a new assignment generation earns one more
-line, that a stale-epoch drop stays silent, and that chunk content never reaches the log.
+### Update 2026-08-14 - deliberately NOT folded into the trailing-window slice, and why
+
+The `2026-08-14-tasklog-terminal-append-bound` slice shipped next door (it bounded how long a
+terminal task accepts log appends) and **deliberately left this item alone**. Recorded here because
+ROADMAP.md had scheduled the two as one slice, and that recommendation was wrong:
+
+- ROADMAP's rationale was "both are `handleTaskLog` and both fence the same wire-supplied fields".
+  **Both halves are false.** This item's half B is in `handleTaskStatus`, a different handler and a
+  different message type, and the item requires both halves be fixed together - so "one slice" would
+  have been a three-handler slice. And **a logging rate limiter fences nothing**: there is no
+  predicate here and no wire-supplied field being validated. The shared shape is a coincidence of
+  file, not of mechanism. That rationale survived two roadmap refreshes unchecked.
+- **The two changes provably do not interact**, and this is now evidence rather than an argument:
+  `TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch` passed with **no edit at all** after
+  the fence gained a third predicate. It does so for the reason half A's repro describes - NUL-bearing
+  content fails during bind-parameter **decode**, before the fence CTE is ever evaluated - so the new
+  predicate is unreachable from this item's test, and this item's test is unreachable from it.
+- **This item should still go next, and second**, so it can reuse the trailing-window slice's handler
+  fixtures and be written by somebody who has just read `handleTaskLog` closely.
+
+**One new constraint that slice creates for this one.** `AppendTaskLog`'s `pgx.ErrNoRows` now has a
+**third** meaning - "the trailing window has closed" - alongside stale generation and wrong assignee,
+and the third one occurs legitimately. So the "should a rejection log?" question this item touches is
+now strictly more settled in the "no" direction: a log line on that branch would fire on honest late
+flushes as well as forged chunks. The diagnosability gap that creates is filed separately as
+[[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]], whose proposal is a counter through
+`Handler.Metrics` and **explicitly not a log line**. If both are scheduled, they should agree on one
+mechanism rather than inventing two.
 
 ## Proposal
 
@@ -199,6 +222,10 @@ Points to settle for the shared mechanism:
 - The tasklog spec's section 10 lists "rate limiting the gRPC message loop" as out of scope; a
   per-connection bucket here is the narrow version of that, and if a general recv-loop limiter is
   ever built this item folds into it
+- Why this was not folded into the 2026-08-14 slice, with the evidence:
+  `docs/superpowers/specs/2026-08-14-tasklog-terminal-append-bound.md` section 5,
+  `docs/retros/2026-08-14-tasklog-terminal-append-bound.md`
+- Should agree on one mechanism with: [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]]
 - Adjacent: [[bug-2026-08-12-tasklog-epoch-int32-truncation]], same call site, same wire-supplied
   epoch value
 
@@ -214,4 +241,3 @@ two.
 stale twice in a row: `handleTaskStatus` grew by about 40 lines in the task-status assignee fence
 and by roughly 30 more in the retry-resurrect status guard, so every offset this item carried was
 wrong within days of being written. Cite symbols here.
-</content>
