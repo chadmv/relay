@@ -1,8 +1,10 @@
 ---
 title: AppendTaskLog has no terminality or time bound, so a finished task's log stream never closes
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-14
+resolution: fixed
 priority: medium
 source: Phase 4 review of the retry-resurrect status-guard iteration (2026-08-12); raised independently by two lenses
 ---
@@ -150,3 +152,74 @@ the task is **load-bearing**, not an oversight, and anybody who "fixes" this wit
 will pass every existing test except one and will silently truncate the tail of every task's output
 in production. That is why the bound has to be time-based, and why that sentence belongs in the code
 when the fix lands rather than only here.
+
+## Resolution
+
+Fixed 2026-08-14. `AppendTaskLog`'s fence gained a third predicate:
+
+```sql
+AND (t.status IN ('pending', 'dispatched', 'running')
+     OR t.finished_at > sqlc.arg(min_finished_at)::timestamptz)
+```
+
+Bounded by `RELAY_TASKLOG_TRAILING_WINDOW`, default 15m, threaded through
+`Handler.TrailingLogWindow` where non-positive means the default. The cutoff is an absolute
+timestamp computed in Go, never `NOW() - interval`: every `finished_at` reachable through this
+fence is written by a relay-server Go clock, verified exhaustively (`CancelJobTasks` nulls
+`worker_id`, `FailDependentTasks` touches only `pending` rows which always have a NULL
+`worker_id`, and every terminal-to-`pending` transition clears `finished_at`).
+
+**This item was materially accurate** - the quoted SQL was byte-accurate, the pinning test
+existed and asserted what the item claimed, `finished_at` existed and was set on every terminal
+transition, and the repro was exact. That is worth recording because it has not been the recent
+norm.
+
+**But its prescribed fix failed open, and that is the transferable lesson: accuracy about a bug
+is not accuracy about its remedy.** The item specified
+`(finished_at IS NULL OR finished_at > cutoff)`, which admits any terminal row whose
+`finished_at` is NULL. The shipped spelling uses a status allow-list as the first disjunct
+instead, so a terminal row with a NULL timestamp and a caller that forgets the argument both
+fail *closed* - `NULL > cutoff` is NULL, not true. Both directions are pinned by their own
+subtests and by two discriminating mutations.
+
+The item's acceptance criterion that `TestUpdateTaskStatus_...StillPersists` pass **with no
+edit** was unachievable under any parameterized design: the call is a keyed struct literal, so a
+new field binds a zero `pgtype.Timestamptz` = SQL NULL. It was met in substance - one mechanical
+parameter line, and **no assertion changed**.
+
+**Scope, stated honestly.** This bounds the *post-terminal* arm of the exposure, not the whole
+of it. A token-holding agent with one live assignment can still append without limit: nothing
+caps per-task log volume, no coordinator-side watchdog ever terminates a stale `running` task
+(only the agent writes `timed_out`), and nothing prunes `task_logs`. What the fix genuinely buys
+is that **eviction now works** - previously, requeueing or cancelling a suspect worker's tasks
+bumped the epoch only on `dispatched`/`running` rows, leaving every historical *finished* task
+permanently writable; those now expire on their own. Follow-ons filed:
+[[bug-2026-08-14-task-logs-have-no-per-task-volume-cap]],
+[[idea-2026-08-14-task-logs-retention-and-pruning]],
+[[bug-2026-08-14-no-coordinator-watchdog-on-a-stale-running-task]].
+
+**Two accepted trades**, recorded so they are not rediscovered as bugs:
+
+1. A chunk buffered in the agent's `sendCh` across a coordinator outage longer than the window is
+   now dropped where it previously landed. The "under 2 minutes worst case" arithmetic that
+   originally defended the 15m default was per-*attempt*, not total - the reconnect loop retries
+   indefinitely and `sendCh` is shared across reconnects. Both the code comment and README now
+   state the real shape rather than a bound the code does not enforce.
+2. `'pending'` in the allow-list is provably unreachable (every writer returning a row to
+   `pending` also nulls `worker_id`), and is kept deliberately so the arm stays byte-identical to
+   `UpdateTaskStatus`'s and `IncrementTaskRetryCount`'s. A scope boundary was added to
+   [[idea-2026-07-01-dead-status-vocabulary]], because a correct execution of that item would
+   delete it and nothing would go red.
+
+The adjacent [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] was deliberately **not** folded
+in, refuting ROADMAP's "one slice can carry the pair" rationale on both halves: that item's second
+half is in `handleTaskStatus`, and a logging limiter fences nothing. Independence was then
+confirmed positively - its test stayed green with no edit, because NUL content fails at
+bind-parameter decode before the fence is ever evaluated.
+
+`CLAUDE.md`'s epoch-fence invariant was amended to name `AppendTaskLog` as the third
+status-predicate site and to carve out the one place its allow-list guidance **inverts**:
+everywhere else omitting a new status fails closed harmlessly, but here omitting a new
+*non-terminal* status silently discards 100% of that state's log output, since a non-terminal row
+has `finished_at IS NULL` and so fails the second arm too. `TASK_STATUS_PREPARING` is the live
+candidate.
