@@ -3,7 +3,7 @@ title: handleTaskLog narrows the wire-supplied int64 epoch to int32, so 2^32 + E
 type: bug
 status: open
 created: 2026-08-12
-updated: 2026-08-14
+updated: 2026-08-15
 priority: low
 source: Phase 4 review of the task-log assignee-fence iteration (2026-08-12)
 ---
@@ -79,6 +79,40 @@ re-derive it:
 is slightly stronger, because that literal has now been edited twice by people who read this item and
 stepped around it.
 
+### Update 2026-08-15 - the recommendation is unchanged and its JUSTIFICATION is not
+
+The `2026-08-15-tasklog-err-limiter-keying` slice edited the same neighbourhood for the **third**
+consecutive time and again stepped around the narrowing deliberately, on the same
+attribution grounds: folding an epoch-semantics change into a logging slice blurs what the slice
+closed. The limiter's dedupe key now carries `chunk.Epoch` at **full int64 width**, which is free and
+correct, and `internal/worker/handler.go`'s comment above it says in as many words that the int32
+narrowing at the fence parameter is this item and is untouched. So there is now a source comment
+pointing at this file; do not close it by deleting the comment.
+
+Three things in the text above went stale, none of which changes the fix:
+
+1. **The "do not add a log line" argument no longer rests on what it says it rests on.**
+   [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] is **closed**, and its wikilink now resolves
+   into `docs/backlog/closed/`. More importantly the flood argument itself is materially weaker: every
+   caller-driven log line on the recv goroutine now goes through a per-connection token bucket
+   (`internal/worker/ingest_log_limiter.go`), so a line here would be bounded rather than unbounded.
+   **The recommendation is unchanged and the reason is different:** drop silently because an
+   out-of-range epoch is indistinguishable from a forgery and carries nothing an operator can act on -
+   not because a line there would flood. Do not restate the flood argument when implementing.
+2. **The already-corrected parenthetical in Proposal stands and is now load-bearing.** The log path's
+   bad-task-id guard does log, once per connection, under `kindBadTaskIDLog`. The distinction the
+   parenthetical draws is the one to apply here: that guard logs because an unparseable id on the log
+   path means **total, silent loss of 100% of a task's output** with no other signal anywhere. An
+   out-of-range epoch is not that - it is one chunk, indistinguishable from a forgery. Different
+   failure, different answer.
+3. **Acceptance criterion "no new log line on the rejection path" is unchanged**, and is now easier to
+   satisfy incorrectly: an implementer with the budget in scope may reasonably think a budgeted line is
+   fine. It is not, for reason 1's revised justification. Left as written, with this note.
+
+**Severity, priority and the one-line fix are unchanged.** The item is now cited from source in two
+places (the limiter's neighbouring comment and this file's own Related list), which is the strongest
+argument yet for doing it the next time anybody is legitimately in that literal.
+
 ## Proposal
 One line, if and when anyone is in this path for another reason. Reject out-of-range epochs before
 narrowing rather than wrapping:
@@ -96,9 +130,10 @@ and is FALSE as of 2026-08-15: that guard now logs one budgeted line per connect
 agent malforming ids on the log path loses 100% of that task's output with no other signal
 anywhere. It is the one failure mode on this path with total, silent data loss, which is exactly
 what an out-of-range epoch is NOT - the epoch case is indistinguishable from a forgery.) Do not
-add a log line - that would hand an attacker a new flood vector on the recv goroutine, which is
-exactly the problem in
-[[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]].
+add a log line - **[corrected 2026-08-15, see the Update above]** not because it would hand an
+attacker a new flood vector (that vector is closed; a line here would now be budgeted), but because
+an out-of-range epoch carries nothing actionable and is indistinguishable from forged traffic, so a
+line would be noise an operator cannot use.
 
 Alternatively, and slightly better if the diff is being touched anyway: compare at int64 width the
 way `handleTaskStatus` does, so there is one pattern in the file rather than two. That is a larger
@@ -110,7 +145,7 @@ change here, since the log path does its epoch check inside SQL rather than in G
   `Epoch = 2^32 + <current epoch>`, it must not be stored and must not be published.
 - A positive control on the same path: the same assignee at the real epoch is still stored and
   published.
-- No new log line on the rejection path.
+- No new log line on the rejection path - **including a budgeted one** (2026-08-15).
 - `handleTaskLog` still performs exactly one DB round trip and one statement.
 
 ## Related
@@ -120,10 +155,18 @@ change here, since the log path does its epoch check inside SQL rather than in G
 - Context: `docs/superpowers/specs/2026-08-12-tasklog-append-assignee-fence.md` - the assignee
   predicate is what makes this inert today
 - Assessed and left unchanged by: `docs/superpowers/specs/2026-08-14-tasklog-terminal-append-bound.md`
-  (out-of-scope list), `docs/retros/2026-08-14-tasklog-terminal-append-bound.md`
-- Adjacent: [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] (same call site),
+  (out-of-scope list), `docs/retros/2026-08-14-tasklog-terminal-append-bound.md`, and
+  `docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md` (decision D9),
+  `docs/retros/2026-08-15-tasklog-err-limiter-keying.md`
+- **Cited from source**: the comment above `lim.allow(logKey{kind: kindTaskLogPersist, ...})` in
+  `handleTaskLog` names this item as the reason the fence argument is untouched while the dedupe key
+  uses the full int64
+- Adjacent: [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] (same call site; **closed
+  2026-08-15**, now in `docs/backlog/closed/`),
   [[bug-2026-08-12-taskstatus-update-unauthenticated-epoch-zero]] (cited for its comparison order,
   not otherwise related)
+- Same file, same "a wire value was used more literally than it should be" shape:
+  [[bug-2026-08-15-reconcile-compares-wire-task-ids-against-canonical-ones]]
 
 ## Notes
 Filed at low priority deliberately. There is no exploit path today and the fix is a one-line guard;
