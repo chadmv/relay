@@ -142,6 +142,12 @@ func main() {
 	agentHandler := worker.NewHandlerWithGrace(q, pool, registry, broker, dispatcher.Trigger, grace)
 	agentHandler.Metrics = metricsStore
 
+	trailingLogWindow, trailingLogWindowWarning := parseTrailingLogWindow(os.Getenv("RELAY_TASKLOG_TRAILING_WINDOW"))
+	if trailingLogWindowWarning != "" {
+		log.Printf("WARNING: %s", trailingLogWindowWarning)
+	}
+	agentHandler.TrailingLogWindow = trailingLogWindow
+
 	if v := os.Getenv("RELAY_ALLOW_AUTO_ENROLL"); v != "" {
 		allow, err := strconv.ParseBool(v)
 		if err != nil {
@@ -301,4 +307,50 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// minSaneTrailingLogWindow is the documented worst case for a legitimately late
+// log chunk on a single reconnect attempt (see worker.DefaultTrailingLogWindow).
+// It is not a floor - a smaller window is accepted, because narrowing this knob
+// is the operator's prerogative - only the point below which
+// parseTrailingLogWindow says out loud what the value costs.
+const minSaneTrailingLogWindow = 2 * time.Minute
+
+// parseTrailingLogWindow resolves RELAY_TASKLOG_TRAILING_WINDOW's raw value into
+// the window handed to worker.Handler, plus the startup warning to log, empty
+// when there is nothing to say. There are three outcomes, not two, which is why
+// the second return is a message and not an ok bool:
+//
+//   - Unset, or a sensible duration: used as-is, silently. The ordinary case.
+//   - Unparseable, zero or negative: the default is used instead and the warning
+//     says so. A silently-ignored typo would leave an operator believing they
+//     had tightened a security-relevant knob they had not.
+//   - Parseable, positive, but far smaller than a legitimately late chunk: the
+//     operator's value is KEPT and the warning names the consequence. Units
+//     confusion (`15s` for `15m`) is likelier than a typo and is the only
+//     failure mode here that loses data rather than being a no-op - a rejected
+//     chunk is dropped with no error to the agent and no line in the server log.
+//
+// Deliberately not a log.Fatalf, unlike RELAY_ALLOW_AUTO_ENROLL: an unparseable
+// duration must not stop a server booting when a safe default exists. Follows
+// the `d > 0 or keep the default` idiom of RELAY_TELEMETRY_WINDOW above, plus
+// the warning.
+func parseTrailingLogWindow(raw string) (time.Duration, string) {
+	if raw == "" {
+		return worker.DefaultTrailingLogWindow, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return worker.DefaultTrailingLogWindow, fmt.Sprintf(
+			"RELAY_TASKLOG_TRAILING_WINDOW=%q is not a positive Go duration; using %s",
+			raw, worker.DefaultTrailingLogWindow)
+	}
+	if d < minSaneTrailingLogWindow {
+		return d, fmt.Sprintf(
+			"RELAY_TASKLOG_TRAILING_WINDOW=%q resolves to %s, below %s - the worst case for a legitimately late "+
+				"log chunk. Using it anyway, but trailing task output will be silently truncated: a rejected chunk "+
+				"produces no error to the agent and no line here. Check the units (%s, not %s?).",
+			raw, d, minSaneTrailingLogWindow, worker.DefaultTrailingLogWindow, d)
+	}
+	return d, ""
 }

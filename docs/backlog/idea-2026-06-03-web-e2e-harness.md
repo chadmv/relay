@@ -59,4 +59,3 @@ is protected against regression by `npm test`. jsdom performs no layout, so `off
 either a structural guard or a class-string pin. That slice is the strongest argument this item has
 accumulated: it fixed an app-wide rendering defect whose entire acceptance criterion the project's
 automated gate cannot express.
-</content>

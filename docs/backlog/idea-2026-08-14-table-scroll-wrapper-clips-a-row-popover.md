@@ -125,4 +125,3 @@ The app reached three hand-rolled dialogs before anyone consolidated them.
 The cheapest possible outcome is acceptable: a two-line addition to `Table.tsx`'s comment naming the
 `overflow-y` implication, plus one structural test. What should not happen is a future author spending
 an afternoon on a clipped dropdown before finding the sentence that predicted it.
-</content>

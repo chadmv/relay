@@ -102,4 +102,3 @@ is a deliberate decision rather than an omission. The 2026-08-12 addition does n
 for raising the priority - the deferral is accepted and the exposure it leaves is observability, not
 correctness - but it does mean this item now has two independent constituencies, and a future
 priority review should weigh both.
-</content>

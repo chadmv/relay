@@ -282,6 +282,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// Log with matching epoch: returns the inserted row plus the task's job id.
 	first, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "hello\n", AssignmentEpoch: 1, WorkerID: w.ID,
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, job.ID, first.JobID, "the row must carry the task's job id so the publish needs no second query")
@@ -292,6 +293,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// GET /v1/tasks/{id}/logs pages by via ?since_seq.
 	second, err := q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stderr", Content: "more\n", AssignmentEpoch: 1, WorkerID: w.ID,
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	require.NoError(t, err)
 	assert.Greater(t, second.ID, first.ID)
@@ -302,6 +304,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	// row" and "inserted zero rows" into the same nil error.
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "from zombie\n", AssignmentEpoch: 0, WorkerID: w.ID,
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows)
 
@@ -311,9 +314,10 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	require.Len(t, logs, 2)
 	assert.Equal(t, "hello\n", logs[0].Content)
 	assert.Equal(t, "more\n", logs[1].Content)
-	// The fence's parameter numbering shifted when the worker_id predicate was
-	// added ($3,$4 -> $4,$5 for stream and content). Read stream back so a future
-	// renumbering that swapped these two cannot pass unnoticed.
+	// The fence's parameter numbering has shifted twice as predicates were added:
+	// stream and content were $3,$4, then $4,$5 (worker_id), and are now $5,$6
+	// (min_finished_at). Read stream back so a future renumbering that swapped
+	// these two cannot pass unnoticed.
 	assert.Equal(t, "stdout", logs[0].Stream)
 	assert.Equal(t, "stderr", logs[1].Stream)
 
@@ -330,6 +334,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "from a non-assignee\n",
 		AssignmentEpoch: 1, WorkerID: w2.ID,
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "a worker that is not the assignee must not be able to append")
 
@@ -339,6 +344,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "from a caller with no identity\n",
 		AssignmentEpoch: 1, WorkerID: pgtype.UUID{},
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "a zero-value worker id must fail closed")
 
@@ -354,6 +360,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: unclaimed.ID, Stream: "stdout", Content: "forged at epoch zero\n",
 		AssignmentEpoch: 0, WorkerID: w.ID,
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "a never-claimed task must reject appends from every worker")
 
@@ -365,6 +372,7 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: unclaimed.ID, Stream: "stdout", Content: "NULL matching NULL\n",
 		AssignmentEpoch: 0, WorkerID: pgtype.UUID{},
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	assert.ErrorIs(t, err, pgx.ErrNoRows, "NULL worker_id must not match a NULL worker id argument")
 
@@ -378,10 +386,12 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 }
 
 // A terminal status transition must NOT end the assignment, because
-// AppendTaskLog fences on BOTH assignment_epoch and worker_id: a trailing chunk
-// arriving just after a terminal status is a real and common ordering, and if
-// the terminal write ended the generation that chunk would be dropped silently
-// and forever.
+// AppendTaskLog fences on assignment_epoch, worker_id AND a trailing recency
+// window: a trailing chunk arriving just after a terminal status is a real and
+// common ordering, and if the terminal write ended the generation that chunk
+// would be dropped silently and forever. The window is what bounds "forever" on
+// the other side - it is the only one of the three that a terminal transition is
+// allowed to eventually close.
 //
 // What this test can still catch is the EPOCH half, and that is what it is named
 // for. If someone adds `assignment_epoch = assignment_epoch + 1` to
@@ -439,6 +449,9 @@ func TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLog
 	_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID: task.ID, Stream: "stdout", Content: "trailing after done\n",
 		AssignmentEpoch: done.AssignmentEpoch, WorkerID: done.WorkerID,
+		// The trailing-window arm. A caller that omits this binds SQL NULL and
+		// every terminal append is rejected, which is the fence failing closed.
+		MinFinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
 	})
 	require.NoError(t, err, "a trailing chunk from the assignee must still persist after a terminal status")
 
@@ -1427,4 +1440,146 @@ func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pending", afterCase7.Status, "a caller that lost its identity must fail closed")
 	assert.Equal(t, int32(0), afterCase7.RetryCount, "a caller that lost its identity must not burn a retry")
+}
+
+// TestAppendTaskLog_TerminalTaskAcceptsOnlyInsideTheTrailingWindow specifies the
+// third fence predicate at the statement, with an explicit MinFinishedAt in every
+// case so nothing sleeps and nothing depends on wall-clock timing.
+//
+// The last two cases are the ones that discriminate this spelling from the naive
+// `finished_at IS NULL OR finished_at > cutoff`, and they discriminate it against
+// DIFFERENT mutations. Do not drop either for brevity: together they are the
+// whole reason the predicate uses a status allow-list as the live-task arm.
+func TestAppendTaskLog_TerminalTaskAcceptsOnlyInsideTheTrailingWindow(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	ctx := context.Background()
+
+	user := makeTestUser(t, q, ctx, "Tess", "tess-window@example.com")
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "j", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: "w-window", Hostname: "w-window", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+
+	// Every timestamp in this test comes from THIS process's clock, exactly as
+	// production does: the fence compares a Go-written finished_at against a
+	// Go-computed cutoff. Never introduce NOW() here.
+	now := time.Now()
+	ts := func(d time.Duration) pgtype.Timestamptz {
+		return pgtype.Timestamptz{Time: now.Add(d), Valid: true}
+	}
+	finish := func(t *testing.T, taskID pgtype.UUID, epoch int32, at pgtype.Timestamptz) {
+		t.Helper()
+		_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+			ID: taskID, Status: "done", WorkerID: w.ID, AssignmentEpoch: epoch, FinishedAt: at,
+		})
+		require.NoError(t, err, "fixture: the terminal transition must land")
+	}
+
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, taskID pgtype.UUID, epoch int32)
+		cutoff  pgtype.Timestamptz
+		wantErr error // nil means the chunk must be stored
+	}{
+		{
+			name:    "dispatched task passes on the status arm",
+			prepare: func(*testing.T, pgtype.UUID, int32) {},
+			cutoff:  ts(0),
+		},
+		{
+			name: "running task passes on the status arm",
+			prepare: func(t *testing.T, taskID pgtype.UUID, epoch int32) {
+				_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+					ID: taskID, Status: "running", WorkerID: w.ID, AssignmentEpoch: epoch,
+					StartedAt: ts(-time.Minute),
+				})
+				require.NoError(t, err, "fixture: the running transition must land")
+			},
+			cutoff: ts(0),
+		},
+		{
+			name:    "live task with NO cutoff at all - the status arm must not depend on one",
+			prepare: func(*testing.T, pgtype.UUID, int32) {},
+			cutoff:  pgtype.Timestamptz{},
+		},
+		{
+			name: "finished one minute ago, fifteen minute window - the trailing flush",
+			prepare: func(t *testing.T, taskID pgtype.UUID, epoch int32) {
+				finish(t, taskID, epoch, ts(-time.Minute))
+			},
+			cutoff: ts(-15 * time.Minute),
+		},
+		{
+			name: "finished one hour ago, fifteen minute window - the window is closed",
+			prepare: func(t *testing.T, taskID pgtype.UUID, epoch int32) {
+				finish(t, taskID, epoch, ts(-time.Hour))
+			},
+			cutoff:  ts(-15 * time.Minute),
+			wantErr: pgx.ErrNoRows,
+		},
+		{
+			name: "terminal with a NULL finished_at must fail CLOSED",
+			prepare: func(t *testing.T, taskID pgtype.UUID, epoch int32) {
+				finish(t, taskID, epoch, ts(-time.Minute))
+				// Raw SQL: no statement in the repo produces this state today, but
+				// an older row or a future terminal writer that forgets the stamp
+				// would. `NULL > cutoff` is NULL, not true, so both arms reject.
+				// This is the case that rejects the naive `finished_at IS NULL OR
+				// ...` spelling, which would ADMIT this row.
+				_, err := pool.Exec(ctx, `UPDATE tasks SET finished_at = NULL WHERE id = $1`, taskID)
+				require.NoError(t, err)
+			},
+			cutoff:  ts(-15 * time.Minute),
+			wantErr: pgx.ErrNoRows,
+		},
+		{
+			name: "terminal and the caller omits the cutoff must fail CLOSED",
+			prepare: func(t *testing.T, taskID pgtype.UUID, epoch int32) {
+				finish(t, taskID, epoch, ts(-time.Minute))
+			},
+			// A zero pgtype.Timestamptz binds SQL NULL, and `finished_at > NULL`
+			// is NULL, not true. This is the case that rejects any future
+			// COALESCE-the-cutoff "convenience" fix.
+			cutoff:  pgtype.Timestamptz{},
+			wantErr: pgx.ErrNoRows,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			task, err := q.CreateTask(ctx, store.CreateTaskParams{
+				JobID: job.ID, Name: tc.name, Commands: []byte(`[["true"]]`),
+				Env: []byte(`{}`), Requires: []byte(`{}`),
+			})
+			require.NoError(t, err)
+			claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+				ID: task.ID, WorkerID: w.ID,
+			})
+			require.NoError(t, err)
+			tc.prepare(t, task.ID, claimed.AssignmentEpoch)
+
+			_, err = q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+				TaskID: task.ID, Stream: "stdout", Content: "chunk\n",
+				AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w.ID,
+				MinFinishedAt: tc.cutoff,
+			})
+			logs, lerr := q.GetTaskLogs(ctx, task.ID)
+			require.NoError(t, lerr)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Empty(t, logs, "a rejected append must insert nothing")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, logs, 1)
+			require.Equal(t, "chunk\n", logs[0].Content)
+		})
+	}
 }

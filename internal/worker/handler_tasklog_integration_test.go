@@ -598,3 +598,228 @@ func TestConnect_TaskLogChunkIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
 	stream.CloseSend()
 	<-done
 }
+
+// A terminal transition deliberately keeps worker_id and assignment_epoch so a
+// trailing chunk from the agent that just finished still lands (see
+// TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist).
+// Without a third predicate that is true FOREVER: anything holding this worker's
+// agent token can keep appending rows to a task it finished for as long as the
+// row exists, and nothing in the repo prunes task_logs.
+//
+// This test sends the CORRECT epoch as the GENUINE assignee on purpose. The
+// other two fence predicates match, so only a time bound can reject this chunk -
+// a wrong-worker or stale-epoch variant would be green today and therefore
+// vacuous.
+func TestHandleTaskLog_RejectsAChunkForATaskThatFinishedOutsideTheTrailingWindow(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win1@example.com", "w-logs-win1")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// Finish it an hour ago, on THIS process's clock. Production writes
+	// finished_at from the same clock (handleTaskStatus), and the cutoff is
+	// computed from it too, so this test never straddles two clocks. Do NOT
+	// rewrite this as NOW() - interval '1 hour': that would compare the container
+	// clock against the Go clock and reintroduce exactly the skew the design
+	// eliminates.
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("long after the task finished\n"), Epoch: int64(epoch),
+	})
+
+	// HandleTaskLog is synchronous and Publish delivers into the subscriber's
+	// buffer before returning, so a non-blocking receive is exact here - no
+	// wall-clock window is needed to decide "nothing was published".
+	var published []byte
+	select {
+	case e := <-ch:
+		published = e.Data
+	default:
+	}
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	// Non-fatal asserts so a RED run reports BOTH halves of the exposure - the
+	// chunk is stored AND fanned out live - rather than stopping at one. The
+	// publish half is not decoration: it is what makes this test able to catch a
+	// publish that is not gated on the fence having matched.
+	assert.Empty(t, rows, "a chunk for a task that finished outside the window must not be stored")
+	assert.Nil(t, published, "a chunk for a task that finished outside the window must not be published")
+	if t.Failed() {
+		t.FailNow() // the window is open; the rest of the run is moot
+	}
+}
+
+// The regression control for the trailing flush, at the layer the flush actually
+// happens. A chunk arriving just after the terminal status is a real and common
+// ordering, and it MUST still be stored and published: that flush is the REASON
+// the assignment outlives the task. This test goes red the moment the fence's
+// two arms are conjoined instead of disjoined.
+func TestHandleTaskLog_TrailingChunkJustAfterATerminalStatusIsStillStored(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win2@example.com", "w-logs-win2")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("trailing after done\n"), Epoch: int64(epoch),
+	})
+
+	select {
+	case e := <-ch:
+		require.Contains(t, string(e.Data), "trailing after done")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a trailing chunk from the assignee must still be published after a terminal status")
+	}
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "a trailing chunk from the assignee must still be stored")
+	require.Equal(t, "trailing after done\n", rows[0].Content)
+}
+
+// The positive control on a LIVE task, and the test that guards the trap this
+// predicate creates. A running task has finished_at IS NULL, so it can only pass
+// on the status arm of the disjunction - the finished_at arm rejects it (NULL >
+// anything is NULL). This is therefore the test that goes red if a non-terminal
+// status is ever dropped from that allow-list, which would silently drop 100% of
+// that state's log output with no error anywhere.
+func TestHandleTaskLog_LiveTaskWithNoFinishedAtIsStillStoredAndPublished(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win3@example.com", "w-logs-win3")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "running", WorkerID: workerID, AssignmentEpoch: epoch,
+		StartedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the running transition must land")
+	fresh, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.False(t, fresh.FinishedAt.Valid,
+		"fixture: a live task must have a NULL finished_at, or this test proves nothing about the status arm")
+
+	ch, cancel := broker.Subscribe(events.Filter{TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("from a live task\n"), Epoch: int64(epoch),
+	})
+
+	select {
+	case e := <-ch:
+		require.Contains(t, string(e.Data), "from a live task")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a chunk from a live task must be published")
+	}
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "a chunk from a live task must be stored")
+	require.Equal(t, "from a live task\n", rows[0].Content)
+}
+
+// The only test that proves TrailingLogWindow is wired to the predicate rather
+// than merely existing. Asserting the exported constant would prove nothing
+// about the code consuming it; the mutation this catches is a call site that
+// hard-codes DefaultTrailingLogWindow and ignores the field.
+//
+// No sleep. The two legs run the SAME chunk through the SAME handler against the
+// SAME task, and differ in NOTHING but the field's value. If the window were read
+// from anywhere else, both legs would agree.
+func TestHandleTaskLog_TheWindowIsReadFromTheHandlerFieldAtEveryCall(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win4@example.com", "w-logs-win4")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// Finished two seconds ago on this process's clock - the same clock the
+	// cutoff is computed from.
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-2 * time.Second), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	// Leg A: a one-second window. Two seconds have passed, so the window is shut.
+	// A call site that ignored the field and used DefaultTrailingLogWindow (15m)
+	// would store this chunk.
+	h.TrailingLogWindow = 1 * time.Second
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("outside\n"), Epoch: int64(epoch),
+	})
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Empty(t, rows, "with a 1s window, a task that finished 2s ago must reject the chunk")
+
+	// Leg B: same handler, same task, same epoch, same assignee - only the field
+	// moved.
+	h.TrailingLogWindow = 1 * time.Hour
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("inside\n"), Epoch: int64(epoch),
+	})
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "with a 1h window the very same chunk must land")
+	require.Equal(t, "inside\n", rows[0].Content)
+}
+
+// Non-positive means the default, NOT a zero-length window. That rule is what
+// keeps every existing NewHandler and NewHandlerWithGrace call site correct with
+// no edit - and every one of them leaves this field at its zero value. Without
+// it, a zero field would set the cutoff to time.Now() and every terminal append
+// in the system, including the trailing flush, would be rejected.
+func TestHandleTaskLog_AZeroWindowMeansTheDefaultNotAZeroLengthWindow(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+	require.Zero(t, h.TrailingLogWindow,
+		"fixture: this test is about the field's ZERO value, so it must not be set")
+
+	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs-win5@example.com", "w-logs-win5")
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	// A minute ago: comfortably inside the 15m default, comfortably outside a
+	// zero-length window.
+	_, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: workerID, AssignmentEpoch: epoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Minute), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	h.HandleTaskLog(ctx, workerID, &relayv1.TaskLogChunk{
+		TaskId: taskIDStr, Content: []byte("inside the default\n"), Epoch: int64(epoch),
+	})
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "an unset window must behave as DefaultTrailingLogWindow, not as zero")
+	require.Equal(t, "inside the default\n", rows[0].Content)
+}

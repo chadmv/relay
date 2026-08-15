@@ -10,11 +10,13 @@ SELECT * FROM tasks WHERE id = $1;
 SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 
 -- name: UpdateTaskStatus :one
--- Updates a task's status only if BOTH fence predicates hold: the task is
--- currently assigned to the caller's worker (identity), and the caller's epoch
--- matches the current assignment (currency). The epoch answers "is this
--- generation current"; the worker id answers "are you who you say you are".
--- Neither substitutes for the other - do not delete either.
+-- Updates a task's status only if ALL THREE fence predicates hold: the task is
+-- currently assigned to the caller's worker (identity), the caller's epoch
+-- matches the current assignment (currency), and the task is not already
+-- terminal (one-way status machine, see the terminality paragraph below). The
+-- epoch answers "is this generation current"; the worker id answers "are you who
+-- you say you are"; the status answers "is this task still writable at all".
+-- None substitutes for another - do not delete any of them.
 -- This statement no longer writes worker_id; the argument is a fence, not a
 -- value. That makes the old contract ("callers MUST pass the task's existing
 -- worker_id through, because clearing it would strand a live agent forever")
@@ -168,21 +170,28 @@ ON CONFLICT DO NOTHING;
 SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1;
 
 -- name: AppendTaskLog :one
--- Inserts a log chunk only if BOTH fence predicates hold: the task is currently
--- assigned to the sending worker (identity), and the caller's epoch matches the
--- task's current assignment (currency). The epoch answers "is this generation
--- current"; the worker id answers "are you who you say you are". Neither
--- substitutes for the other, and neither is redundant - do not delete either.
+-- Inserts a log chunk only if ALL THREE fence predicates hold: the task is
+-- currently assigned to the sending worker (identity), the caller's epoch
+-- matches the task's current assignment (currency), and the task is either still
+-- live or finished recently enough to be inside the caller's trailing window
+-- (recency - see THE TRAILING WINDOW below). The epoch answers "is this
+-- generation current"; the worker id answers "are you who you say you are"; the
+-- window answers "is this assignment still allowed to speak". None substitutes
+-- for another, and none is redundant - do not delete any of them.
 -- Returns the inserted row's id (the seq the polling endpoint pages by) plus
 -- created_at plus the task's job_id - all from one round trip, because this runs
 -- synchronously on the agent's gRPC recv goroutine and a second query here would
 -- delay that worker's status and telemetry ingest too.
--- A chunk failing EITHER predicate - a stale chunk from a reassigned or
--- cancelled generation, or a chunk from an agent that is not this task's
--- assignee - matches no fence row, inserts nothing, and returns zero rows ->
--- pgx.ErrNoRows. Callers must treat ErrNoRows as "one or both checks failed:
+-- A chunk failing ANY predicate - a stale chunk from a reassigned or cancelled
+-- generation, a chunk from an agent that is not this task's assignee, or a chunk
+-- for a task that finished longer ago than the caller's trailing window -
+-- matches no fence row, inserts nothing, and returns zero rows ->
+-- pgx.ErrNoRows. Callers must treat ErrNoRows as "one or more checks failed:
 -- drop silently, do not publish" and any other error as a real failure worth
--- logging. The two cases are deliberately indistinguishable here; see the spec.
+-- logging. The three cases are deliberately indistinguishable here; see the
+-- spec. Note that only the first two are misbehaviour - the third is a
+-- legitimate sender arriving late, and is the cause to suspect first when output
+-- is missing rather than spurious.
 -- The worker_id comparison must stay a plain `=`. tasks.worker_id is NULLABLE,
 -- so `=` makes a never-claimed task (worker_id NULL) reject every append, which
 -- is exactly the hole this predicate closes, and makes a caller that lost its
@@ -193,11 +202,74 @@ SELECT depends_on_task_id FROM task_dependencies WHERE task_id = $1;
 -- them sqlc's analyzer cannot resolve "id" across the two CTEs and fails with
 -- 'column reference "id" is ambiguous'. Only job_id is selected because that is
 -- all the publish needs; the fence's job is to yield exactly one row, or none.
+-- THE TRAILING WINDOW - the third predicate, and the one with a trap in it.
+-- A terminal transition deliberately keeps worker_id and assignment_epoch (see
+-- UpdateTaskStatus), so without a bound the two predicates above keep matching
+-- for the agent that finished the task FOREVER: anything holding worker W's
+-- agent token can append rows to a task W finished at epoch N for as long as the
+-- row exists, and nothing in this repo prunes task_logs. This predicate closes
+-- that window without closing the flush.
+--   * It is a DISJUNCTION and must NEVER become a conjunction. A live task
+--     always accepts logs (first arm); a finished task accepts them only while
+--     its finished_at is inside the caller's window (second arm). Conjoining the
+--     arms - a bare `AND status IN (...)` - would reject the trailing chunk that
+--     arrives just after the terminal status, which is a real and common
+--     ordering, and would silently truncate the tail of every task's output in
+--     production. THE ASSIGNMENT OUTLIVING THE TASK IS LOAD-BEARING, NOT AN
+--     OVERSIGHT. Pinned by
+--     TestUpdateTaskStatus_TerminalTransitionDoesNotEndTheAssignmentSoTrailingLogsStillPersist
+--     and by TestHandleTaskLog_TrailingChunkJustAfterATerminalStatusIsStillStored.
+--   * The first arm is an ALLOW-LIST for the same reason UpdateTaskStatus's is,
+--     but READ THE GUIDANCE BACKWARDS AT THIS SITE. Everywhere else a new status
+--     must usually stay OUT, and the omission fails closed harmlessly. Here the
+--     omission is catastrophic and silent: a new NON-TERMINAL status left out of
+--     this arm drops 100% of that state's log output, because a non-terminal row
+--     has finished_at IS NULL and therefore fails the second arm too, and the
+--     drop produces no error and no log line anywhere. That is not hypothetical:
+--     TASK_STATUS_PREPARING already exists in proto/relayv1/relay.proto and the
+--     agent already streams prepare progress as LOG_STREAM_PREPARE chunks
+--     (internal/agent/runner.go, makePrepareProgressFn) while the row is still
+--     `dispatched`. The day `preparing` becomes a persisted status and is not
+--     added here, every workspace-sync log line in the system disappears. Its
+--     twin TASK_STATUS_PREPARE_FAILED needs the OPPOSITE treatment: a new
+--     TERMINAL status stays OUT and is then bounded by finished_at like
+--     done/failed/timed_out. TestTasksStatusVocabularyIsExactly names this site.
+--   * min_finished_at is an ABSOLUTE cutoff computed in Go as
+--     time.Now().Add(-window), never NOW() - interval. Every finished_at
+--     reachable through this fence was written by *a* relay-server's Go clock
+--     (handleTaskStatus and Dispatcher.failClaimedTask). CancelJobTasks and
+--     FailDependentTasks do write finished_at from the database clock, but the
+--     first nulls worker_id and the second only touches `pending` rows, which
+--     always have a NULL worker_id - so neither is reachable through the
+--     worker_id predicate above. On the common path both sides are the SAME Go
+--     clock by construction: handleTaskStatus and handleTaskLog for one task run
+--     on that stream's single recv goroutine, in one process. Across replicas
+--     (README documents multi-replica operation) they can be two Go clocks - a
+--     cross-replica Dispatcher.failClaimedTask, or an agent reconnecting to a
+--     different replica - so this is not skew-free in the absolute. The trade is
+--     still the right one: app-vs-app NTP skew is milliseconds, against a 15m
+--     window, whereas NOW() - interval would put app-vs-database skew on the
+--     window every time, including single-instance.
+--   * The pair fails CLOSED on a missing value, which is why it is spelled this
+--     way and not the other. A terminal row with a NULL finished_at (a row from
+--     an older schema, or a future terminal writer that forgets the timestamp)
+--     fails both arms, because `NULL > cutoff` is NULL, not true. A caller that
+--     omits the cutoff binds SQL NULL and every terminal append is rejected. DO
+--     NOT rewrite the second arm as
+--     `finished_at IS NULL OR finished_at > cutoff`: that spelling admits every
+--     terminal row that has no timestamp, which is the fail-OPEN direction. Same
+--     rule as the plain `=` on worker_id above.
+--   * No EvalPlanQual reasoning applies here, and do not import it from
+--     RetryJobTasks. That lesson is about an UPDATE whose row-level qual is
+--     re-checked after it unblocks. This statement performs no UPDATE and takes
+--     no row lock; its fence is a plain non-locking SELECT.
 WITH fence AS (
     SELECT t.job_id FROM tasks t
     WHERE t.id = sqlc.arg(task_id)
       AND t.assignment_epoch = sqlc.arg(assignment_epoch)
       AND t.worker_id = sqlc.arg(worker_id)
+      AND (t.status IN ('pending', 'dispatched', 'running')
+           OR t.finished_at > sqlc.arg(min_finished_at)::timestamptz)
 ), ins AS (
     INSERT INTO task_logs (task_id, stream, content)
     SELECT sqlc.arg(task_id), sqlc.arg(stream), sqlc.arg(content) FROM fence
