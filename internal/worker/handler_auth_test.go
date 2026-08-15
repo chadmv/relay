@@ -5,6 +5,7 @@ package worker_test
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -387,6 +388,57 @@ func TestConnect_AutoEnrollIssuesAgentToken(t *testing.T) {
 
 	stream.CloseSend()
 	<-done
+}
+
+// THE AUTO-ENROLL LINE IS AN AUDIT RECORD AND MUST NOT BE CALLER-WRITABLE.
+//
+// reg.Hostname is validated nowhere and bounded only by gRPC's 4 MiB default
+// receive limit, and this line is the ONLY record anywhere that a token-less
+// enrollment happened. Rendering it with a bare %s let one register message emit
+// a second, entirely fabricated enrollment record - i.e. it corrupted the audit
+// trail of the very mechanism it exists to document. Gated behind
+// RELAY_ALLOW_AUTO_ENROLL, which is off by default, but the gate is not the fix.
+func TestConnect_AutoEnrollLogLineCannotBeForgedOrFloodedByTheHostname(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+
+	enroll := func(hostname string) {
+		t.Helper()
+		stream := newMockConnectStream(t)
+		stream.SendToServer(&relayv1.AgentMessage{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: hostname,
+					CpuCores: 4, RamGb: 8, Os: "linux",
+				},
+			},
+		})
+		done := make(chan error, 1)
+		go func() { done <- fx.Handler.Connect(stream) }()
+		require.NotNil(t, stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse())
+		stream.CloseSend()
+		<-done
+	}
+
+	logged := captureLog(t)
+
+	// LEG A: INJECTION. A newline plus the line's own prefix forges a second
+	// enrollment record naming a worker id that was never issued.
+	enroll("real-host\nworker: auto-enrolled worker FORGED (hostname=evil) from 10.0.0.1")
+	out := logged()
+	assert.Equal(t, 1, countLines(out, "auto-enrolled worker"),
+		"one token-less enrollment must produce exactly ONE audit line; the hostname must not be able to forge another")
+	assert.NotContains(t, out, "\nworker: auto-enrolled worker FORGED",
+		"an unescaped hostname lets a caller write its own enrollment record into the audit trail. "+
+			"The forged text may still appear INSIDE the %q-quoted hostname - escaped and inert on the "+
+			"record's own line is the whole point; what must not exist is a second physical line")
+	assert.Equal(t, 1, strings.Count(out, "\n"),
+		"the whole audit record must be one physical line")
+
+	// LEG B: VOLUME. %q escapes but does not truncate.
+	enroll(strings.Repeat("H", 100000))
+	assert.Less(t, len(logged()), 2000,
+		"an unvalidated, caller-supplied hostname must be clipped before it reaches the log")
 }
 
 func TestConnect_AutoEnrollDisabledRejectsNoCredential(t *testing.T) {

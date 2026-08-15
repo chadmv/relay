@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -159,6 +158,19 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 		return status.Errorf(codes.Internal, "worker identity unusable")
 	}
 
+	// ONE log budget per CONNECTION, for every caller-driven log line on this
+	// recv goroutine. It is deliberately NOT a field on Handler: Handler is
+	// shared by every connection, and a shared budget would let one agent
+	// suppress another's diagnostics. It is deliberately not in a registry
+	// either - as a stack local it dies with this frame, so there is no teardown
+	// to get wrong and no way for a stale connection to clobber a fresh one.
+	//
+	// It never escapes this goroutine, which is what lets it be mutex-free. DO
+	// NOT capture it in a goroutine, store it anywhere, or hand it to anything
+	// that outlives this call. TestConnect_TwoConnectionsDoNotShareTheLogBudget
+	// is what pins this allocation site.
+	lim := newIngestLogLimiter()
+
 	// Message loop.
 	for {
 		msg, err := stream.Recv()
@@ -171,13 +183,11 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 
 		switch p := msg.Payload.(type) {
 		case *relayv1.AgentMessage_TaskStatus:
-			h.handleTaskStatus(ctx, workerUUID, p.TaskStatus)
+			h.handleTaskStatus(ctx, workerUUID, lim, p.TaskStatus)
 		case *relayv1.AgentMessage_TaskLog:
-			h.handleTaskLog(ctx, workerUUID, p.TaskLog)
+			h.handleTaskLog(ctx, workerUUID, lim, p.TaskLog)
 		case *relayv1.AgentMessage_WorkspaceInventory:
-			if err := h.applyInventoryUpdate(ctx, workerUUID, p.WorkspaceInventory); err != nil {
-				log.Printf("worker: inventory update failed: %v", err)
-			}
+			h.handleInventoryUpdate(ctx, workerUUID, lim, p.WorkspaceInventory)
 		case *relayv1.AgentMessage_Telemetry:
 			h.handleTelemetry(workerID, p.Telemetry)
 		}
@@ -341,7 +351,14 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 		return "", nil, txErr
 	}
 
-	log.Printf("worker: auto-enrolled worker %s (hostname=%s) from %s", uuidStr(workerID), reg.Hostname, remoteAddr(ctx))
+	// reg.Hostname is a caller-supplied proto string: validated nowhere, bounded
+	// only by gRPC's 4 MiB default receive limit. %q is the injection defence and
+	// clipID the volume defence, the same pair the ingest log sites use. This line
+	// is the ONLY record anywhere that a token-less enrollment happened, so a
+	// forgeable one corrupts the audit trail of the mechanism it documents - the
+	// RELAY_ALLOW_AUTO_ENROLL gate is not a substitute. It is bounded to one line
+	// per connection by registration itself, so it takes no budget key.
+	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
 
@@ -461,16 +478,69 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 // registration and never taken from the wire - an agent cannot influence it, so
 // it cannot claim to be somebody else. It is threaded here the same way
 // handleTaskLog and applyInventoryUpdate already receive it.
-func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, upd *relayv1.TaskStatusUpdate) {
+//
+// lim is this connection's log budget, allocated once in Connect. Both pre-gate
+// log lines below run AHEAD of the identity and currency gates, so the budget is
+// the only thing bounding them - see
+// docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md.
+func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
-		log.Printf("worker: handleTaskStatus bad task id %q: %v", upd.TaskId, err)
+		// Under the connection's budget, keyed on kindBadTaskIDStatus with NO wire
+		// value. NOT shared with handleTaskLog's identical guard, though it was
+		// until 2026-08-15: sharing saved one token out of sixteen and cost the
+		// log path's line entirely, which is the only signal anywhere for an agent
+		// losing 100% of a task's output. See the logKind block.
+		//
+		// %q is MANDATORY and is the injection defence; clipID is the volume
+		// defence. Neither substitutes for the other: upd.TaskId has just FAILED
+		// to parse, so it is a proto string bounded only by gRPC's receive limit,
+		// and %q escapes without truncating.
+		//
+		// BOTH defences must also be applied to the ERROR, which is the
+		// non-obvious half: pgtype's parse failure is
+		// fmt.Errorf("cannot parse UUID %v", src), so err carries a verbatim,
+		// unescaped SECOND COPY of the same caller bytes. Rendering it with a
+		// bare %v would leave the line unbounded and unescaped no matter what was
+		// done to upd.TaskId. Measured against the pre-slice handler with a 100k
+		// id: the SINGLE line rendered 200060 bytes, and the WHOLE captured buffer
+		// of TestHandleTaskStatus_MalformedTaskIdsAreLoggedOncePerConnectionAndClipped
+		// (that line plus its 64 short followers) rendered 205544. Both numbers are
+		// stated because the figure alone was previously ambiguous between them.
+		if lim.allow(logKey{kind: kindBadTaskIDStatus}) {
+			log.Printf("worker: handleTaskStatus bad task id %q: %q", clipID(upd.TaskId), clipID(err.Error()))
+		}
 		return
 	}
 
 	task, err := h.q.GetTask(ctx, taskID)
 	if err != nil {
-		log.Printf("worker: handleTaskStatus GetTask %s: %v", upd.TaskId, err)
+		// pgx.ErrNoRows here means the named task does not exist. That is
+		// indistinguishable from a forged message, carries nothing an operator
+		// can act on, and is the cheapest message an attacker can send - so it is
+		// dropped SILENTLY, exactly as handleTaskLog drops an unresolvable chunk
+		// and exactly as both gates below drop a rejected one. It also has one
+		// legitimate cause: DeleteJob cascades to tasks (tasks.job_id ... ON
+		// DELETE CASCADE, migration 000001), so a task row can vanish under a
+		// running agent, and there is nothing to do about that either.
+		//
+		// Any other error is real infrastructure - a pool failure, a context
+		// cancellation - and logs under the connection's budget. Keyed on
+		// kindStatusGetTask with no wire value, because such an episode is not
+		// per-task: keying on the task id would multiply one infra event by the
+		// task count.
+		//
+		// The id is rendered from the PARSED value, never from upd.TaskId. It
+		// needs no clip - Scan succeeded, so the wire string is at most 36 bytes -
+		// but that is a length constraint and not a byte constraint: parseUUID
+		// splices out indices 8, 13, 18 and 23 of a 36-byte input without ever
+		// checking they are hyphens, so four bytes of upd.TaskId are caller-chosen
+		// and uninspected. uuidStr re-encodes canonically, which is what keeps a
+		// newline out of this line. Every id-bearing log site in this file does the
+		// same; see the logKey doc comment.
+		if !errors.Is(err, pgx.ErrNoRows) && lim.allow(logKey{kind: kindStatusGetTask}) {
+			log.Printf("worker: handleTaskStatus GetTask %s: %v", uuidStr(taskID), err)
+		}
 		return
 	}
 
@@ -501,11 +571,15 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 	// It does NOT save a log line. Both write-error branches below are wrapped
 	// in `if !errors.Is(err, pgx.ErrNoRows)`, so a forged message rejected by
 	// either fence logs nothing at all - delete this gate and the log volume is
-	// unchanged. Nor did this function ever have a "zero attacker-keyed log
-	// lines" property to protect: the bad-task-id and GetTask branches at the
-	// top of this function both log unconditionally, keyed on upd.TaskId, AHEAD
-	// of this gate. That is bug-2026-08-12-tasklog-err-limiter-attacker-keyed's
-	// shape, it is still live on this path, and this gate does not address it.
+	// unchanged. Nor does this function have a "zero attacker-keyed log lines"
+	// property to protect: the two branches at the top of this function still
+	// run AHEAD of this gate, and a gate cannot protect a line placed before
+	// it. What bounds them now is the CONNECTION'S BUDGET (ingestLogLimiter),
+	// which is keyed on nothing the caller supplies - the GetTask branch's
+	// pgx.ErrNoRows case is silent outright, and everything else there costs at
+	// most one line per connection.
+	// bug-2026-08-12-tasklog-err-limiter-attacker-keyed is closed; do not cite
+	// it here as live.
 	//
 	// Second, and this is the load-bearing reason: it answers a different
 	// question. This gate asks "may this sender drive this task's status machine
@@ -601,7 +675,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 			// correct outcome, so there is nothing to diagnose. Any other error
 			// is real.
 			if !errors.Is(err, pgx.ErrNoRows) {
-				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", upd.TaskId, err)
+				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", uuidStr(taskID), err)
 			}
 		} else {
 			// Both of these are already correctly gated on the write having
@@ -646,14 +720,14 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, up
 		// the recv goroutine with no sink to send it to, and detection belongs
 		// with the audit-log work. Any other error is real.
 		if !errors.Is(err, pgx.ErrNoRows) {
-			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", upd.TaskId, statusStr, err)
+			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", uuidStr(taskID), statusStr, err)
 		}
 		return
 	}
 
 	if terminal {
 		if err := h.q.FailDependentTasks(ctx, taskID); err != nil {
-			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", upd.TaskId, err)
+			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", uuidStr(taskID), err)
 		}
 	}
 
@@ -702,55 +776,6 @@ type taskLogEvent struct {
 // Production code never reads it.
 var taskLogPublishes atomic.Int64
 
-// taskLogErrLimiterMax caps how many task ids the persist-failure limiter
-// retains. Only tasks whose chunks actually failed ever land here, but a
-// long-lived server must not accumulate them without bound, so the whole set is
-// dropped on overflow - the worst case is one extra log line per task that is
-// still failing after the reset.
-const taskLogErrLimiterMax = 1024
-
-// taskLogErrs bounds handleTaskLog's persist-failure logging to one line per
-// task per assignment epoch.
-//
-// The realistic non-stale failure repeats for every chunk of a task rather than
-// once: a subprocess writing binary stdout makes Postgres reject each insert with
-// 'invalid byte sequence for encoding "UTF8": 0x00'. Because handleTaskLog runs
-// synchronously on the Connect recv goroutine, logging per chunk would put tens
-// of thousands of serialized log writes in front of that worker's status,
-// inventory and telemetry ingest for a single large binary stream. One line per
-// generation carries the same diagnostic information.
-var taskLogErrs taskLogErrLimiter
-
-type taskLogErrLimiter struct {
-	mu       sync.Mutex
-	reported map[string]int32 // task id -> the assignment epoch already logged
-}
-
-// shouldLog reports whether this task+epoch has not yet been logged, recording
-// it if so. A later epoch for the same task reports again: a new assignment
-// generation is a new failure worth one line.
-func (l *taskLogErrLimiter) shouldLog(taskID string, epoch int32) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.reported == nil {
-		l.reported = make(map[string]int32)
-	}
-	if got, ok := l.reported[taskID]; ok && got == epoch {
-		return false
-	}
-	if len(l.reported) >= taskLogErrLimiterMax {
-		l.reported = make(map[string]int32)
-	}
-	l.reported[taskID] = epoch
-	return true
-}
-
-func (l *taskLogErrLimiter) reset() {
-	l.mu.Lock()
-	l.reported = nil
-	l.mu.Unlock()
-}
-
 // handleTaskLog appends a log chunk from an agent and, if anyone is tailing that
 // task, publishes it to the SSE broker.
 //
@@ -769,9 +794,33 @@ func (l *taskLogErrLimiter) reset() {
 // deliberately cheap: exactly one DB round trip (the insert itself returns the
 // job id and seq), one map lookup when nobody is watching, and a non-blocking
 // Publish. Do not add a query, a goroutine, or a queue here.
-func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk *relayv1.TaskLogChunk) {
+//
+// lim is this connection's log budget, allocated once in Connect. It bounds
+// every caller-driven log line below; it performs one map lookup and one integer
+// compare and never blocks, which is what keeps this function inside the
+// one-round-trip budget stated above.
+func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, chunk *relayv1.TaskLogChunk) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(chunk.TaskId); err != nil {
+		// Deliberately symmetric with handleTaskStatus's identical guard, but with
+		// its OWN budget key (kindBadTaskIDLog). They shared one key until
+		// 2026-08-15; one forged 1-byte status message then suppressed this line
+		// for the connection's whole life, and this is the line that must survive.
+		//
+		// This used to return silently, and that was correct BEFORE the budget
+		// existed: an unbounded line on this path is a flood vector. Logging it
+		// is safe only because of the budget. It earns its line because an agent
+		// sending unparseable ids on the log path loses 100% of that task's
+		// output with no other signal anywhere - the one failure mode here with
+		// total, silent data loss.
+		//
+		// %q is the injection defence, clipID the volume defence. Keep both, and
+		// keep them on the ERROR too: pgtype renders the offending string
+		// verbatim into its parse error, so a bare %v would re-emit the same
+		// unbounded caller bytes unescaped. See handleTaskStatus's guard.
+		if lim.allow(logKey{kind: kindBadTaskIDLog}) {
+			log.Printf("worker: handleTaskLog bad task id %q: %q", clipID(chunk.TaskId), clipID(err.Error()))
+		}
 		return
 	}
 
@@ -798,38 +847,71 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 		MinFinishedAt:   pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true},
 	})
 	if err != nil {
-		// pgx.ErrNoRows means the fence rejected the chunk, for any of three
-		// independent reasons: the sender is not the task's current assignee (a
-		// forged or misrouted chunk - workerID comes from the authenticated
-		// registration, never from the wire); the sender's generation is stale
-		// because the task was requeued or cancelled (both bump
-		// assignment_epoch); or the task finished longer ago than the trailing
-		// window, which is DefaultTrailingLogWindow unless
-		// RELAY_TASKLOG_TRAILING_WINDOW overrides it. THAT THIRD ONE IS THE ONE TO
-		// SUSPECT FIRST WHEN OUTPUT IS MISSING RATHER THAN SPURIOUS: it is the
-		// only cause that is operator-configurable, time-dependent, and triggered
-		// by a perfectly legitimate sender, so a window set too small truncates
-		// the tail of real task output with no other symptom anywhere. The three
-		// are deliberately indistinguishable here; see the comment on
-		// AppendTaskLog. Expected - drop it silently, and in
-		// particular do NOT publish it: a zombie agent's output would otherwise
-		// appear in a live view and then vanish on refresh, because it was
-		// correctly never stored. Anything else is a real persist failure that
-		// used to be swallowed by `_ =`.
+		if errors.Is(err, pgx.ErrNoRows) {
+			// pgx.ErrNoRows means the fence rejected the chunk, for any of three
+			// independent reasons: the sender is not the task's current assignee (a
+			// forged or misrouted chunk - workerID comes from the authenticated
+			// registration, never from the wire); the sender's generation is stale
+			// because the task was requeued or cancelled (both bump
+			// assignment_epoch); or the task finished longer ago than the trailing
+			// window, which is DefaultTrailingLogWindow unless
+			// RELAY_TASKLOG_TRAILING_WINDOW overrides it. THAT THIRD ONE IS THE ONE TO
+			// SUSPECT FIRST WHEN OUTPUT IS MISSING RATHER THAN SPURIOUS: it is the
+			// only cause that is operator-configurable, time-dependent, and triggered
+			// by a perfectly legitimate sender, so a window set too small truncates
+			// the tail of real task output with no other symptom anywhere. The three
+			// are deliberately indistinguishable here; see the comment on
+			// AppendTaskLog. Expected - drop it silently, and in
+			// particular do NOT publish it: a zombie agent's output would otherwise
+			// appear in a live view and then vanish on refresh, because it was
+			// correctly never stored.
+			//
+			// THIS ARM IS DELIBERATELY SIDE-EFFECT-FREE AND MUST STAY SILENT. A log
+			// line here would be caller-driven volume on the recv goroutine, and it
+			// would fire on the legitimate late-flush case as well as on forged
+			// chunks. Observability for this arm is
+			// idea-2026-08-14-tasklog-fence-rejection-is-unobservable, whose answer
+			// is a COUNTER, not a log line. Nothing here may publish. Pinned by
+			// TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll, which asserts the
+			// whole captured log is empty, so any wording reddens it.
+			return
+		}
+
+		// A real persist failure that used to be swallowed by `_ =`.
 		//
-		// Rate-limited to one line per task per assignment epoch: the realistic
+		// Deduplicated to one line per task per assignment epoch: the realistic
 		// such failure repeats for every chunk of the task (binary stdout ->
 		// 'invalid byte sequence for encoding "UTF8"'), and this runs on the recv
 		// goroutine, so logging per chunk would delay that worker's status,
-		// inventory and telemetry ingest. See taskLogErrs.
+		// inventory and telemetry ingest. The dedupe is keyed on wire values on
+		// purpose and is NOT the bound - the connection's token bucket is. See
+		// ingestLogLimiter.
+		//
+		// The epoch goes in at full int64 width here. The int32 narrowing at the
+		// fence parameter above is bug-2026-08-12-tasklog-epoch-int32-truncation
+		// and is deliberately untouched by this slice.
 		//
 		// Never log chunk.Content: it is raw subprocess output and can contain
 		// secrets a job's own script echoed. Logging the error with %v is safe
 		// because pgconn.PgError.Error() renders only severity, message and
 		// SQLSTATE - never Detail, which is where Postgres puts "Failing row
 		// contains (...)". Do not start logging pgErr.Detail here.
-		if !errors.Is(err, pgx.ErrNoRows) && taskLogErrs.shouldLog(chunk.TaskId, int32(chunk.Epoch)) {
-			log.Printf("worker: handleTaskLog AppendTaskLog %s: %v", chunk.TaskId, err)
+		//
+		// THE ID IS THE CANONICAL RE-ENCODING, NOT THE WIRE STRING, in the log line
+		// AND in the dedupe key - and the distinction is the whole point. Passing
+		// taskID.Scan constrains the wire string's LENGTH (36 bytes, so no clip is
+		// needed) and NOT its bytes: for a 36-byte input parseUUID splices
+		// src[0:8]+src[9:13]+src[14:18]+src[19:23]+src[24:] and never checks that
+		// indices 8, 13, 18 and 23 are hyphens, so four bytes are fully
+		// caller-chosen and never inspected. Scan("aaaaaaaa\nbbbb\ncccc\ndddd\n
+		// eeeeeeeeeeee") succeeds. Rendering the wire string with a bare %s turned
+		// one event into five physical log lines, and keying on it gave a caller
+		// 2^32 distinct dedupe keys for one (task, epoch) pair. uuidStr closes both
+		// at once and is already what the broker publishes. Pinned by
+		// TestHandleTaskLog_TheLoggedTaskIdIsCanonicalNotTheWireString.
+		canonicalID := uuidStr(taskID)
+		if lim.allow(logKey{kind: kindTaskLogPersist, id: canonicalID, epoch: chunk.Epoch}) {
+			log.Printf("worker: handleTaskLog AppendTaskLog %s: %v", canonicalID, err)
 		}
 		return
 	}
@@ -851,7 +933,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 		CreatedAt: row.CreatedAt.Time,
 	})
 	if err != nil {
-		log.Printf("worker: handleTaskLog marshal %s: %v", chunk.TaskId, err)
+		log.Printf("worker: handleTaskLog marshal %s: %v", taskIDStr, err)
 		return
 	}
 
@@ -1006,6 +1088,36 @@ func (h *Handler) applyInventoryUpdate(ctx context.Context, workerID pgtype.UUID
 		BaselineHash: u.BaselineHash,
 		LastUsedAt:   pgtype.Timestamptz{Time: ts, Valid: !ts.IsZero()},
 	})
+}
+
+// handleInventoryUpdate applies one workspace inventory update and reports a
+// failure under the connection's log budget.
+//
+// It exists as a named method rather than an inline block in Connect so that the
+// budgeted path is testable at the same layer as handleTaskLog and
+// handleTaskStatus, and so the log line has an owner. It adds no logic.
+//
+// This line needs the budget for the same reason the other three do, and it is
+// the CHEAPEST of the four for an attacker: every string in u is bound straight
+// into UpsertWorkerWorkspace or DeleteWorkerWorkspace, whose source_type,
+// source_key, short_id and baseline_hash columns are all TEXT NOT NULL, so a NUL
+// byte in any of them fails during bind-parameter conversion. And no NUL is even
+// needed: applyInventoryUpdate swallows the time.Parse error on u.LastUsedAt, so
+// an empty string binds SQL NULL into last_used_at, which is also NOT NULL. One
+// error per message either way, with no gate ahead of it.
+//
+// Key is kindInventory with NO wire value: a persist failure here is an episode,
+// not a per-workspace event, and keying on the source key would multiply one
+// infra event by the workspace count. Never log u itself - source_key is a
+// caller-supplied, unbounded depot path.
+func (h *Handler) handleInventoryUpdate(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, u *relayv1.WorkspaceInventoryUpdate) {
+	err := h.applyInventoryUpdate(ctx, workerID, u)
+	if err == nil {
+		return
+	}
+	if lim.allow(logKey{kind: kindInventory}) {
+		log.Printf("worker: inventory update failed: %v", err)
+	}
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.
