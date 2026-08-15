@@ -386,10 +386,12 @@ func TestAppendTaskLog_EpochGuarded(t *testing.T) {
 }
 
 // A terminal status transition must NOT end the assignment, because
-// AppendTaskLog fences on BOTH assignment_epoch and worker_id: a trailing chunk
-// arriving just after a terminal status is a real and common ordering, and if
-// the terminal write ended the generation that chunk would be dropped silently
-// and forever.
+// AppendTaskLog fences on assignment_epoch, worker_id AND a trailing recency
+// window: a trailing chunk arriving just after a terminal status is a real and
+// common ordering, and if the terminal write ended the generation that chunk
+// would be dropped silently and forever. The window is what bounds "forever" on
+// the other side - it is the only one of the three that a terminal transition is
+// allowed to eventually close.
 //
 // What this test can still catch is the EPOCH half, and that is what it is named
 // for. If someone adds `assignment_epoch = assignment_epoch + 1` to

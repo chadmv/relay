@@ -77,10 +77,12 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     timed_out. Never conjoin this arm with the rest of the fence: that closes
 //     the trailing flush.
 //
-// The allow-list form of the two predicates is what makes this guard the only
+// The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
 // equivalent deny-list a new status would be writable and retryable by default,
-// and this test would be the last chance to notice.
+// and this test would be the last chance to notice. AppendTaskLog is the one
+// site where the allow-list points the other way, which is why it is spelled out
+// at length above rather than folded into the list.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -98,6 +100,9 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 
 	want := []string{"dispatched", "done", "failed", "pending", "running", "timed_out"}
 	require.Equal(t, want, got,
-		"tasks.status vocabulary changed - read this test's comment before updating it; "+
-			"UpdateTaskStatus, IncrementTaskRetryCount and RecomputeJobStatus all partition this set")
+		"tasks.status vocabulary changed - read this test's comment before updating it. Six statements slice "+
+			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
+			"SelectRetryableTaskIDs and AppendTaskLog. Revisit ALL SIX. AppendTaskLog is the one that "+
+			"fails OPEN in the damaging direction: a new NON-TERMINAL status omitted from its first arm "+
+			"silently discards 100% of that state's log output, with no error and no log line anywhere")
 }

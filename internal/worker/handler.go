@@ -60,12 +60,30 @@ func remoteAddr(ctx context.Context) string {
 // assignment_epoch so a trailing chunk still lands (see UpdateTaskStatus), and
 // with no third predicate that stayed true for as long as the row existed.
 //
-// 15m is roughly 8x the worst case for a legitimately late chunk, which composes
-// from three independent agent-side timers: cmd.WaitDelay (5s, internal/agent/
-// runner.go), gRPC keepalive ping + timeout (30s + 10s, cmd/relay-server/
-// main.go) and the reconnect backoff cap (60s, internal/agent). Under 2 minutes
-// in total. Large enough that no realistic agent-side delay truncates real
-// output, small enough that "forever" is genuinely closed. Override with
+// 15m is a JUDGEMENT CALL, not a derived bound, and the distinction matters
+// because the obvious derivation is wrong. Three agent-side timers do compose to
+// bound a SINGLE reconnect attempt at roughly 105s: cmd.WaitDelay (5s,
+// internal/agent/runner.go), gRPC keepalive ping + timeout (30s + 10s,
+// cmd/relay-server/main.go) and the reconnect backoff cap (60s, internal/agent).
+// But that cap is PER ATTEMPT. Agent.Run retries indefinitely, and sendCh is
+// buffered 64 and shared across reconnects (internal/agent/agent.go); runSender
+// drops at most the one in-flight message per stream drop and does not
+// re-enqueue, so everything else survives the outage and flushes on reconnect.
+// The real bound on a late chunk is therefore the outage duration, which is
+// unbounded: a 20-minute network partition delivers a chunk 20 minutes late and
+// this window drops it. That is deliberate, and RELAY_TASKLOG_TRAILING_WINDOW is
+// the escape hatch - but do not defend the number with a total the code does not
+// enforce.
+//
+// The reachable case is narrower than "any queued chunk". chunkWriter's writes
+// are enqueued before sendFinalStatus and sendCh is FIFO, so a chunk ordered
+// BEFORE the terminal status cannot outlive it - by the time the status has
+// landed, that chunk already has. What can arrive after the terminal status is a
+// chunk enqueued after it: the WaitDelay orphan-writer race, and the
+// cancel/abandon cleanup paths.
+//
+// So: large enough that no ordinary agent-side delay truncates real output,
+// small enough that "forever" is genuinely closed. Override with
 // RELAY_TASKLOG_TRAILING_WINDOW.
 const DefaultTrailingLogWindow = 15 * time.Minute
 
@@ -780,13 +798,20 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, chunk
 		MinFinishedAt:   pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true},
 	})
 	if err != nil {
-		// pgx.ErrNoRows means the fence rejected the chunk, for either of two
+		// pgx.ErrNoRows means the fence rejected the chunk, for any of three
 		// independent reasons: the sender is not the task's current assignee (a
 		// forged or misrouted chunk - workerID comes from the authenticated
-		// registration, never from the wire), or the sender's generation is stale
+		// registration, never from the wire); the sender's generation is stale
 		// because the task was requeued or cancelled (both bump
-		// assignment_epoch). The two are deliberately indistinguishable here; see
-		// the comment on AppendTaskLog. Expected - drop it silently, and in
+		// assignment_epoch); or the task finished longer ago than the trailing
+		// window, which is DefaultTrailingLogWindow unless
+		// RELAY_TASKLOG_TRAILING_WINDOW overrides it. THAT THIRD ONE IS THE ONE TO
+		// SUSPECT FIRST WHEN OUTPUT IS MISSING RATHER THAN SPURIOUS: it is the
+		// only cause that is operator-configurable, time-dependent, and triggered
+		// by a perfectly legitimate sender, so a window set too small truncates
+		// the tail of real task output with no other symptom anywhere. The three
+		// are deliberately indistinguishable here; see the comment on
+		// AppendTaskLog. Expected - drop it silently, and in
 		// particular do NOT publish it: a zombie agent's output would otherwise
 		// appear in a live view and then vanish on refresh, because it was
 		// correctly never stored. Anything else is a real persist failure that
