@@ -3,6 +3,7 @@ title: A task's timeout is enforced only by the agent, so a connected agent that
 type: bug
 status: open
 created: 2026-08-14
+updated: 2026-08-20
 priority: medium
 source: Phase 4 security lens of the 2026-08-14-tasklog-terminal-append-bound slice, while establishing the honest scope of that fix
 ---
@@ -83,7 +84,8 @@ long. Design questions:
   - **Requeue it** (`RequeueTaskByID`, epoch bumped, `worker_id` nulled) - reuses the eviction path
     the codebase already trusts and ends the assignment cleanly, but silently re-runs work that may
     still be executing on the agent. Requires the dispatch-side duplicate-execution question to be
-    answered.
+    answered. **See the 2026-08-20 amendment below before choosing this shape:
+    `RequeueTaskByID` is unfenced.**
   Pick one, and write down why, because the reader will assume the other.
 - **The interaction with `GraceRegistry`.** Both mechanisms end an assignment on a timer. Two timers
   that can fire on the same row need an explicit ordering argument, and the epoch fence is what makes
@@ -109,16 +111,22 @@ an agent goes through that stream's single bounded sender.
 - The bound(s) are env-configurable with documented defaults and a README row.
 - The write fences on the epoch (or bumps it) and carries a status allow-list;
   `TestTasksStatusVocabularyIsExactly` gains the new site if a new hard-coded partition is introduced.
+- **(added 2026-08-20)** A task left `dispatched` with no holder by a stale-epoch cancel - see the
+  amendment below - is recovered by the sweeper, proven by a test that seeds that exact state.
 
 ## Related
 
 - Source: `internal/agent/runner.go` (`newRunner`, the only enforcement), `internal/agent/agent.go`
   (the dispatch carrying `timeout_sec`), `internal/worker/handler.go` (`handleTaskStatus`, the only
-  writer of `timed_out`), `internal/worker/grace.go` (`GraceRegistry`, the disconnect-only path),
-  `internal/scheduler/dispatch.go` (`failClaimedTask`, the dispatch-failure-only path)
+  writer of `timed_out`; `reconcileRunningTasks`, which produces the orphaned-`dispatched` state
+  described in the 2026-08-20 amendment), `internal/worker/grace.go` (`GraceRegistry`, the
+  disconnect-only path), `internal/scheduler/dispatch.go` (`failClaimedTask`, the
+  dispatch-failure-only path)
 - The question that produced it: `docs/superpowers/specs/2026-08-14-tasklog-terminal-append-bound.md`
   section 4, `docs/retros/2026-08-14-tasklog-terminal-append-bound.md` ("The honest scope")
 - The other unbounded arm of the same exposure: [[bug-2026-08-14-task-logs-have-no-per-task-volume-cap]]
+- **Hard prerequisite if the requeue-shaped fix is chosen:**
+  [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]]
 - Prior art on wedged agents: `docs/retros/2026-06-10-wedged-agent-dispatch-fix.md`,
   `docs/retros/2026-06-25-sendinventory-wedge-escape.md`
 - The eviction path a requeue-shaped fix would reuse: [[bug-2026-08-12-tasklog-terminal-task-append-unbounded]]
@@ -131,3 +139,34 @@ this is a new periodic writer with a duplicate-execution question attached. They
 observation that produced them - **that the trailing window bounds the post-terminal arm and nothing
 else** - which is exactly the kind of finding that should leave an item behind rather than a sentence
 in a retro nobody greps.
+
+## Amendment 2026-08-20 - two inputs from the reconcile-canonical-task-ids slice
+
+No scope change. Both are cases this item's sweeper should cover or account for, recorded here rather
+than in a retro because this is the artifact the implementing slice will read.
+
+**1. A stale-epoch report cancels WITHOUT requeueing, leaving a `dispatched` row with no holder and
+no recovery path.** Found by the Phase 4 security lens of the 2026-08-20 slice. In
+`reconcileRunningTasks`, `agentSet[canonical] = true` runs **unconditionally on parse success**,
+before and independently of the epoch comparison. So an agent that reports a task it genuinely holds
+but at the *wrong* epoch gets that task into `cancelIDs` (correct - the coordinator wants it stopped)
+and simultaneously marks it "reported", which suppresses the requeue loop from touching it. The task
+stays `dispatched` with `worker_id` still set to a worker that has been told to abandon it. Nothing
+sweeps it. Today the only exits are a job cancel or a disconnect that arms the grace timer.
+
+This is **not a regression** and it is **not new in that slice**: for a canonical id spelling the
+same suppression existed before the fix, byte for byte. It also needs an agent that lies about its
+own epoch, and such an agent can already wedge its own tasks by simply never sending a terminal
+status - which is the headline case this item is about. It is recorded here because **this item's
+sweeper is the mechanism that would recover it**, and a design that keys only on "running too long"
+may miss it: the row may never have gone `running` at all. Key on non-terminal duration, not on
+`status = 'running'`.
+
+**2. `RequeueTaskByID` is unfenced, which matters directly to the "requeue it" option above.** It
+carries no `assignment_epoch` predicate and no `worker_id` predicate - only the id and a status
+allow-list - so a caller acting on a stale view can tear a *fresh* assignment off a live worker.
+Today its single caller is reconcile, so the exposure is a race. **Choosing the requeue shape here
+would add a second, periodic, non-agent-driven caller**, converting that race into a scheduled
+unfenced write. Filed as [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]]; treat it
+as a prerequisite, not an adjacent nicety, if this item goes that way. The "fail it" shape does not
+depend on it.
