@@ -861,6 +861,137 @@ func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidate
 	return items, nil
 }
 
+const listOverdueAssignedTasks = `-- name: ListOverdueAssignedTasks :many
+SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
+WHERE status IN ('dispatched', 'running')
+  AND worker_id IS NOT NULL
+  AND (
+        ( $1::bool
+          AND assigned_at IS NOT NULL
+          AND assigned_at < $2::timestamptz )
+     OR ( $3::bool
+          AND started_at IS NOT NULL
+          AND timeout_seconds IS NOT NULL AND timeout_seconds > 0
+          AND EXTRACT(EPOCH FROM ($4::timestamptz - started_at))
+              > timeout_seconds + $5::bigint )
+      )
+ORDER BY assigned_at NULLS LAST, id
+`
+
+type ListOverdueAssignedTasksParams struct {
+	AbsoluteEnabled bool               `json:"absolute_enabled"`
+	AbsoluteCutoff  pgtype.Timestamptz `json:"absolute_cutoff"`
+	ExecEnabled     bool               `json:"exec_enabled"`
+	Now             pgtype.Timestamptz `json:"now"`
+	MarginSeconds   int64              `json:"margin_seconds"`
+}
+
+// The coordinator-side stale-task watchdog's scan (internal/scheduler/watchdog.go).
+// Returns every ASSIGNED task that has blown one of two independent bounds. It
+// is READ-ONLY: the watchdog writes through UpdateTaskStatus, so this slice adds
+// no new writer of tasks.status and no new status partition on a write path.
+//
+// THE PARTITION IS ('dispatched','running'), i.e. "currently assigned" - the
+// same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
+// ListGraceCandidates, RequeueWorkerTasks(IfEpoch) and idx_tasks_worker_active
+// already use. It is deliberately NOT `status = 'running'`: a task spends the
+// whole workspace sync as `dispatched` (handleTaskStatus has no case for
+// TASK_STATUS_PREPARING, so the row does not move), and a stale-epoch reconcile
+// can strand a `dispatched` row whose worker was told to abandon it. Keying on
+// `running` would miss both.
+//
+// READ THIS ALLOW-LIST BACKWARDS, exactly like AppendTaskLog's first arm and
+// unlike every other status predicate in this file. A new NON-TERMINAL status
+// omitted here is NEVER SWEPT, which silently reopens the unbounded-assignment
+// hole this statement exists to close, for that status - no error, no log line.
+// `preparing` is the live candidate. A new TERMINAL status must stay OUT.
+// TestTasksStatusVocabularyIsExactly names this site.
+//
+// worker_id IS NOT NULL is not decoration. UpdateTaskStatus's worker predicate is
+// a plain `=`, so a row with a NULL worker_id can never be written by it;
+// selecting such a row would buy a guaranteed zero-row round trip every sweep. It
+// also documents the one state this watchdog cannot recover - a `dispatched` row
+// whose worker_id was nulled by workers' ON DELETE SET NULL - which is
+// unreachable today, because nothing in this repo DELETEs a worker.
+//
+// EVERY ARM FAILS CLOSED ON A MISSING VALUE. A NULL assigned_at, a NULL
+// started_at, and a NULL or zero timeout_seconds each make their arm FALSE
+// rather than true, and the row is left alone. Do NOT "fix" any of them into
+// `IS NULL OR ...`: that is the fail-OPEN direction and it would let the
+// watchdog kill work it knows nothing about. Same rule as AppendTaskLog's
+// second arm.
+//
+// Both cutoffs are computed in Go and bound as parameters, never NOW() -
+// interval. started_at is written by a relay-server Go clock and by nothing
+// else (handleTaskStatus); assigned_at is written by a relay-server Go clock and
+// by nothing else except migration 000021's one-time backfill. Cross-replica
+// that is app-vs-app NTP skew (milliseconds) against bounds measured in hours,
+// whereas NOW() would put app-vs-database skew on every comparison.
+//
+// Each arm carries its own explicit _enabled bool rather than encoding "off" as
+// a sentinel cutoff; `0` in either env var means "this arm is off".
+// EXTRACT(EPOCH FROM ...) is preferred over make_interval so only a timestamptz
+// and a bigint are bound - sqlc's handling of interval parameters is exactly the
+// kind of thing that emits a surprising Go type.
+//
+//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
+//	WHERE status IN ('dispatched', 'running')
+//	  AND worker_id IS NOT NULL
+//	  AND (
+//	        ( $1::bool
+//	          AND assigned_at IS NOT NULL
+//	          AND assigned_at < $2::timestamptz )
+//	     OR ( $3::bool
+//	          AND started_at IS NOT NULL
+//	          AND timeout_seconds IS NOT NULL AND timeout_seconds > 0
+//	          AND EXTRACT(EPOCH FROM ($4::timestamptz - started_at))
+//	              > timeout_seconds + $5::bigint )
+//	      )
+//	ORDER BY assigned_at NULLS LAST, id
+func (q *Queries) ListOverdueAssignedTasks(ctx context.Context, arg ListOverdueAssignedTasksParams) ([]Task, error) {
+	rows, err := q.db.Query(ctx, listOverdueAssignedTasks,
+		arg.AbsoluteEnabled,
+		arg.AbsoluteCutoff,
+		arg.ExecEnabled,
+		arg.Now,
+		arg.MarginSeconds,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.Name,
+			&i.Env,
+			&i.Requires,
+			&i.TimeoutSeconds,
+			&i.Retries,
+			&i.RetryCount,
+			&i.Status,
+			&i.WorkerID,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CreatedAt,
+			&i.AssignmentEpoch,
+			&i.Source,
+			&i.Commands,
+			&i.AssignedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTasksByJob = `-- name: ListTasksByJob :many
 SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks WHERE job_id = $1 ORDER BY created_at
 `

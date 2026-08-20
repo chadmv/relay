@@ -391,6 +391,69 @@ WHERE worker_id IS NOT NULL
   AND status IN ('dispatched', 'running')
 GROUP BY worker_id;
 
+-- name: ListOverdueAssignedTasks :many
+-- The coordinator-side stale-task watchdog's scan (internal/scheduler/watchdog.go).
+-- Returns every ASSIGNED task that has blown one of two independent bounds. It
+-- is READ-ONLY: the watchdog writes through UpdateTaskStatus, so this slice adds
+-- no new writer of tasks.status and no new status partition on a write path.
+--
+-- THE PARTITION IS ('dispatched','running'), i.e. "currently assigned" - the
+-- same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
+-- ListGraceCandidates, RequeueWorkerTasks(IfEpoch) and idx_tasks_worker_active
+-- already use. It is deliberately NOT `status = 'running'`: a task spends the
+-- whole workspace sync as `dispatched` (handleTaskStatus has no case for
+-- TASK_STATUS_PREPARING, so the row does not move), and a stale-epoch reconcile
+-- can strand a `dispatched` row whose worker was told to abandon it. Keying on
+-- `running` would miss both.
+--
+-- READ THIS ALLOW-LIST BACKWARDS, exactly like AppendTaskLog's first arm and
+-- unlike every other status predicate in this file. A new NON-TERMINAL status
+-- omitted here is NEVER SWEPT, which silently reopens the unbounded-assignment
+-- hole this statement exists to close, for that status - no error, no log line.
+-- `preparing` is the live candidate. A new TERMINAL status must stay OUT.
+-- TestTasksStatusVocabularyIsExactly names this site.
+--
+-- worker_id IS NOT NULL is not decoration. UpdateTaskStatus's worker predicate is
+-- a plain `=`, so a row with a NULL worker_id can never be written by it;
+-- selecting such a row would buy a guaranteed zero-row round trip every sweep. It
+-- also documents the one state this watchdog cannot recover - a `dispatched` row
+-- whose worker_id was nulled by workers' ON DELETE SET NULL - which is
+-- unreachable today, because nothing in this repo DELETEs a worker.
+--
+-- EVERY ARM FAILS CLOSED ON A MISSING VALUE. A NULL assigned_at, a NULL
+-- started_at, and a NULL or zero timeout_seconds each make their arm FALSE
+-- rather than true, and the row is left alone. Do NOT "fix" any of them into
+-- `IS NULL OR ...`: that is the fail-OPEN direction and it would let the
+-- watchdog kill work it knows nothing about. Same rule as AppendTaskLog's
+-- second arm.
+--
+-- Both cutoffs are computed in Go and bound as parameters, never NOW() -
+-- interval. started_at is written by a relay-server Go clock and by nothing
+-- else (handleTaskStatus); assigned_at is written by a relay-server Go clock and
+-- by nothing else except migration 000021's one-time backfill. Cross-replica
+-- that is app-vs-app NTP skew (milliseconds) against bounds measured in hours,
+-- whereas NOW() would put app-vs-database skew on every comparison.
+--
+-- Each arm carries its own explicit _enabled bool rather than encoding "off" as
+-- a sentinel cutoff; `0` in either env var means "this arm is off".
+-- EXTRACT(EPOCH FROM ...) is preferred over make_interval so only a timestamptz
+-- and a bigint are bound - sqlc's handling of interval parameters is exactly the
+-- kind of thing that emits a surprising Go type.
+SELECT * FROM tasks
+WHERE status IN ('dispatched', 'running')
+  AND worker_id IS NOT NULL
+  AND (
+        ( sqlc.arg(absolute_enabled)::bool
+          AND assigned_at IS NOT NULL
+          AND assigned_at < sqlc.arg(absolute_cutoff)::timestamptz )
+     OR ( sqlc.arg(exec_enabled)::bool
+          AND started_at IS NOT NULL
+          AND timeout_seconds IS NOT NULL AND timeout_seconds > 0
+          AND EXTRACT(EPOCH FROM (sqlc.arg(now)::timestamptz - started_at))
+              > timeout_seconds + sqlc.arg(margin_seconds)::bigint )
+      )
+ORDER BY assigned_at NULLS LAST, id;
+
 -- name: CreateTaskWithSource :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries, source)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
