@@ -201,3 +201,56 @@ func TestRegisterWorker_ReconcileMatchesNonCanonicalTaskIdSpellings(t *testing.T
 		})
 	}
 }
+
+// TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing pins
+// the two deliberate decisions around an id that pgtype.UUID.Scan rejects
+// outright. It is green against the pre-canonicalization handler too, because
+// that behaviour was deliberately preserved - its value is that it reddens if
+// anyone later changes either decision. Proven discriminating by mutation: swap
+// the `cancelIDs = append(...)` in the parse-failure branch for a bare `continue`
+// and the first assertion fails; add any log.Printf to that branch and the last
+// one fails.
+func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(t *testing.T) {
+	ctx := context.Background()
+	q, pool := newTestStore(t)
+
+	grace := worker.NewGraceRegistry(1*time.Minute, func(string, int32) {})
+	t.Cleanup(grace.Stop)
+	h := worker.NewHandlerWithGrace(q, pool, worker.NewRegistry(), events.NewBroker(), func() {}, grace)
+
+	f := seedReconcileFixture(t, ctx, q, "unparseable")
+	matchCanonical := h.UUIDStringForTest(f.matchID)
+
+	// Neither 32 nor 36 bytes, so parseUUID rejects it on length alone. It also
+	// carries a NUL and a newline: if this ever DID reach a log line, the line
+	// would be unescaped and split in two, which is precisely why the branch may
+	// not log at all outside the connection budget.
+	const garbage = "not-a-uuid-at-all-\x00-with-a-NUL-and-a-\n-newline"
+
+	logged := captureLog(t)
+
+	resp := runRegister(t, ctx, h, f, []*relayv1.RunningTask{
+		{TaskId: matchCanonical, Epoch: int64(f.matchEpoch)},
+		{TaskId: garbage, Epoch: 1},
+	})
+
+	// DECIDED BEHAVIOUR: an unparseable id names no assignment of ours, so the
+	// agent is told to stop it - echoed byte for byte, exactly as before the
+	// canonicalization fix. Dropping it would be fail-open and silent.
+	assert.Equal(t, []string{garbage}, resp.CancelTaskIds,
+		"an unparseable id is echoed into the cancel list verbatim, and nothing else is cancelled")
+
+	// An unparseable sibling must not contaminate a correctly-reported task.
+	match, err := q.GetTask(ctx, f.matchID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", match.Status, "a correctly-reported task survives an unparseable sibling")
+	assert.Equal(t, f.matchEpoch, match.AssignmentEpoch, "a correctly-reported task keeps its assignment epoch")
+
+	// NO UNBUDGETED LOG LINE. reconcileRunningTasks runs inside finishRegister, at
+	// registration, before Connect allocates this connection's ingestLogLimiter,
+	// so it has no budget to spend and may not log a caller-supplied id at all.
+	// Asserting the WHOLE captured log is empty (rather than NotContains) means
+	// any wording reddens this, exactly like
+	// TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll.
+	assert.Empty(t, logged(), "registration-time reconcile must log nothing; it is outside the connection log budget")
+}
