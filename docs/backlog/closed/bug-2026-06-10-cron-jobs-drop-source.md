@@ -1,8 +1,10 @@
 ---
 title: Cron-fired scheduled jobs silently drop task source specs
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-19
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -20,3 +22,6 @@ The import cycle that motivated the duplicate types no longer exists (the cycle 
 - `internal/api/job_spec.go` (`CreateJobFromSpec`)
 - `internal/jobspec/jobspec.go:38` (`TaskSpec.Source`)
 - bug-2026-06-10-source-tasks-run-without-workspace
+
+## Resolution
+Closed 2026-06-19 by `c7abcc6`; cron source persistence fixed, so cron-fired scheduled jobs retain their task source specs.

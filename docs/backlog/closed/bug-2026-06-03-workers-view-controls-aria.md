@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-03
 closed: 2026-06-05
+resolution: fixed
 priority: low
 source: web workers slice retro (final code review flagged it as a minor a11y gap)
 ---
@@ -25,3 +26,6 @@ On the Workers list page, the Grid/Table view toggle does not set `aria-pressed`
 - `web/src/workers/WorkersPage.tsx` - the view toggle.
 - `web/src/workers/WorkersTable.tsx` - the sortable headers.
 - [`bug-2026-06-03-usermenu-aria-attributes`](usermenu-aria-attributes.md) - sibling a11y gap on the UserMenu toggle.
+
+## Resolution
+Closed 2026-06-05 (`3b91e74`). The Grid/Table toggle sets `aria-pressed` (`web/src/workers/WorkersPage.tsx`) and the sortable headers expose `aria-sort`. The deeper markup question was split into `idea-2026-06-05-workers-table-aria-semantics`, filed in the same commit and since closed.

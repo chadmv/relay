@@ -3,6 +3,8 @@ title: Stale stream teardown clobbers a fresh registration for the same worker
 type: bug
 status: closed
 created: 2026-06-10
+closed: 2026-06-19
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -28,3 +30,6 @@ source: full-codebase review (2026-06-10)
 - `internal/worker/registry.go:34` (`Unregister`)
 - `internal/worker/handler.go:105-112` (Connect defers)
 - `cmd/relay-server/main.go:176` (no keepalive)
+
+## Resolution
+Closed 2026-06-19 by `efd14a4`, implementing `docs/superpowers/plans/2026-06-19-stale-stream-teardown.md`.

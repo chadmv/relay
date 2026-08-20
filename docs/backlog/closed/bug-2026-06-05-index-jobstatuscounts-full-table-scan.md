@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-05
 closed: 2026-06-20
+resolution: fixed
 priority: low
 source: jobs-list-frontend retro (2026-06-05)
 ---

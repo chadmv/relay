@@ -4,6 +4,7 @@ type: idea
 status: closed
 created: 2026-06-20
 closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: noticed while closing bug-2026-06-19-finishregister-gap-connection-epoch-race (Phase 4 caught a HIGH compile break invisible to unit make test)
 ---

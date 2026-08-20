@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-10
 closed: 2026-06-11
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -34,3 +35,6 @@ Then fix the test to seed via `ClaimTaskForWorker`.
 - `internal/api/jobs.go:720-729`
 - `internal/store/query/tasks.sql:12-19` (`UpdateTaskStatus`)
 - `internal/api/jobs_cancel_test.go:93-126`
+
+## Resolution
+Closed 2026-06-11 by `015ef6f`. `handleCancelJob` was calling the epoch-fenced `UpdateTaskStatus` with a zero-value `AssignmentEpoch`; any task ever dispatched has `assignment_epoch >= 1`, so the update returned `pgx.ErrNoRows`, the handler 500d, and the whole cancel transaction rolled back.

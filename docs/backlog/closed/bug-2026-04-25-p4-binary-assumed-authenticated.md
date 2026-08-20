@@ -1,8 +1,10 @@
 ---
 title: "`p4` binary assumed on PATH and authenticated"
 type: bug
-status: open
+status: closed
 created: 2026-04-25
+closed: 2026-05-02
+resolution: fixed
 source: 2026-04-25 perforce-workspace-management retro — Known Limitations
 ---
 

@@ -1,8 +1,10 @@
 ---
 title: Perforce workspace registry races - unlocked iteration and escaping interior pointers
 type: bug
-status: open
+status: closed
 created: 2026-06-10
+closed: 2026-06-19
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -24,7 +26,7 @@ Never let interior pointers escape:
 - `internal/agent/source/perforce/registry.go:78, 106, 113-119`
 - `internal/agent/source/perforce/perforce.go:208-229, 396-403`
 
-## Closed 2026-06-19
+## Resolution
 Fixed: `Get`/`GetBySourceKey` now return `WorkspaceEntry` value copies + bool;
 added `Mutate`/`Snapshot`/`ShortIDInUse` locked methods. All consumers (Prepare,
 EvictWorkspace, ListInventory, allocateShortID, sweeper) route through the locked

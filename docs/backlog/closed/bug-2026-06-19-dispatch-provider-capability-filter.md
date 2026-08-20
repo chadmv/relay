@@ -3,6 +3,8 @@ title: Dispatch has no provider-capability filter; selectWorker can route source
 type: bug
 status: closed
 created: 2026-06-19
+closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: follow-up to closed bug-2026-06-10-source-tasks-run-without-workspace
 ---
@@ -37,3 +39,6 @@ Have workers report workspace-provider capability over gRPC (e.g. a boolean/enum
 - `internal/agent/runner.go` (agent-side `PREPARE_FAILED` guard)
 - `internal/worker/handler.go` (`PREPARE_FAILED` -> terminal `"failed"`)
 - [[bug-2026-06-10-source-tasks-run-without-workspace]]
+
+## Resolution
+Closed 2026-06-20 by `17e89b6`, implementing `docs/superpowers/plans/2026-06-19-dispatch-provider-capability-filter.md`.

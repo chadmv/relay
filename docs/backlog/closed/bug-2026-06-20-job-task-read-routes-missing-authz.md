@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-20
 closed: 2026-06-20
+resolution: wontfix
 priority: low
 source: discovered by relay-code-reviewer during job-cancel-missing-authz
 ---

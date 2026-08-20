@@ -1,8 +1,10 @@
 ---
 title: Add GET /v1/workers/stats aggregate endpoint for fleet-wide status counts
 type: idea
-status: open
+status: closed
 created: 2026-06-03
+closed: 2026-06-04
+resolution: fixed
 priority: low
 source: web workers slice - the summary strip is page-scoped because no aggregate exists
 ---
@@ -24,3 +26,6 @@ The Workers list page shows a status summary strip (online/stale/offline/disable
 - `internal/api/workers.go` - where the handler would live (alongside `handleListWorkers`).
 - `web/src/workers/WorkersPage.tsx` - the page-scoped summary strip this would replace.
 - `docs/superpowers/specs/2026-06-03-web-workers-design.md` - recorded as a future gap.
+
+## Resolution
+Closed 2026-06-04 by `195a1c6`; `GET /v1/workers/stats` implemented.

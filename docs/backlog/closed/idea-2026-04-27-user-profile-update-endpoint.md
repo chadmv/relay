@@ -3,6 +3,7 @@ title: User profile update endpoint (name, email)
 type: idea
 status: closed
 closed: 2026-04-29
+resolution: fixed
 created: 2026-04-27
 source: deferred from 2026-04-27 admin user list endpoint brainstorm
 ---
@@ -22,3 +23,6 @@ Surfaced while designing the admin `GET /v1/users` endpoint (see [`2026-04-27-ad
 - CLI: `relay profile set-name "<name>"` and possibly `relay admin users set-name <email> "<name>"`.
 
 Open question: does changing `email` invalidate existing tokens? (Probably yes, mirroring the password-change behavior.) Brainstorm before implementing.
+
+## Resolution
+Closed 2026-04-29 by `c3750dd`. The PATCH profile endpoints and their two CLI subcommands shipped and are documented in CLAUDE.md.

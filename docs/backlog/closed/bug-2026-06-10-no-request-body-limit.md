@@ -3,6 +3,8 @@ title: No request body size limit on any endpoint, including unauthenticated one
 type: bug
 status: closed
 created: 2026-06-10
+closed: 2026-06-11
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -27,3 +29,6 @@ Consider distinguishing `*http.MaxBytesError` to return 413 instead of 400.
 ## Related
 - `internal/api/server.go:179-181` (`readJSON`)
 - `internal/api/server.go:81-93` (unauthenticated routes)
+
+## Resolution
+Closed 2026-06-11 by `dd96fe9`. Request-size limits now live in `readJSON` (`internal/api/server.go`), the single JSON entry point for every HTTP request body.

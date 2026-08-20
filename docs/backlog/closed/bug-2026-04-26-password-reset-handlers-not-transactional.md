@@ -1,8 +1,10 @@
 ---
 title: handleAdminPasswordReset and handleChangePassword are not transactional
 type: bug
-status: open
+status: closed
 created: 2026-04-26
+closed: 2026-04-27
+resolution: fixed
 source: 2026-04-26 token-lifecycle-auth retro — Known Limitations
 ---
 
@@ -26,3 +28,6 @@ Wrap the `SetPasswordHash` + `DeleteTokens*` calls in a single transaction using
 ## Related
 - `internal/api/auth.go` — both handlers
 - `internal/store/` — `q.WithTx(tx)` pattern already used elsewhere
+
+## Resolution
+Closed 2026-04-27 by `f92a281`. `handleChangePassword` and `handleAdminPasswordReset` now wrap `SetPasswordHash` plus token deletion in a single transaction, so a DB failure on the revocation step can no longer leave the password rotated with old sessions still alive. The prior log-and-return-204 degradation in `handleChangePassword` was replaced with a 500 and rollback.
