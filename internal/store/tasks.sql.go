@@ -200,7 +200,7 @@ SET status = 'dispatched',
     worker_id = $2,
     assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'pending'
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type ClaimTaskForWorkerParams struct {
@@ -218,7 +218,7 @@ type ClaimTaskForWorkerParams struct {
 //	    worker_id = $2,
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status = 'pending'
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorkerParams) (Task, error) {
 	row := q.db.QueryRow(ctx, claimTaskForWorker, arg.ID, arg.WorkerID)
 	var i Task
@@ -239,6 +239,7 @@ func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorker
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -301,7 +302,7 @@ func (q *Queries) CountTaskLogs(ctx context.Context, taskID pgtype.UUID) (int64,
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type CreateTaskParams struct {
@@ -318,7 +319,7 @@ type CreateTaskParams struct {
 //
 //	INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7)
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, error) {
 	row := q.db.QueryRow(ctx, createTask,
 		arg.JobID,
@@ -347,6 +348,7 @@ func (q *Queries) CreateTask(ctx context.Context, arg CreateTaskParams) (Task, e
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -375,7 +377,7 @@ func (q *Queries) CreateTaskDependency(ctx context.Context, arg CreateTaskDepend
 const createTaskWithSource = `-- name: CreateTaskWithSource :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries, source)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type CreateTaskWithSourceParams struct {
@@ -393,7 +395,7 @@ type CreateTaskWithSourceParams struct {
 //
 //	INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries, source)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) CreateTaskWithSource(ctx context.Context, arg CreateTaskWithSourceParams) (Task, error) {
 	row := q.db.QueryRow(ctx, createTaskWithSource,
 		arg.JobID,
@@ -423,6 +425,7 @@ func (q *Queries) CreateTaskWithSource(ctx context.Context, arg CreateTaskWithSo
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -500,7 +503,7 @@ func (q *Queries) GetActiveTasksForWorker(ctx context.Context, workerID pgtype.U
 }
 
 const getEligibleTasks = `-- name: GetEligibleTasks :many
-SELECT t.id, t.job_id, t.name, t.env, t.requires, t.timeout_seconds, t.retries, t.retry_count, t.status, t.worker_id, t.started_at, t.finished_at, t.created_at, t.assignment_epoch, t.source, t.commands FROM tasks t
+SELECT t.id, t.job_id, t.name, t.env, t.requires, t.timeout_seconds, t.retries, t.retry_count, t.status, t.worker_id, t.started_at, t.finished_at, t.created_at, t.assignment_epoch, t.source, t.commands, t.assigned_at FROM tasks t
 WHERE t.status = 'pending'
   AND NOT EXISTS (
     SELECT 1 FROM task_dependencies td
@@ -513,7 +516,7 @@ ORDER BY t.created_at
 
 // Tasks that are pending and have no unfinished dependencies.
 //
-//	SELECT t.id, t.job_id, t.name, t.env, t.requires, t.timeout_seconds, t.retries, t.retry_count, t.status, t.worker_id, t.started_at, t.finished_at, t.created_at, t.assignment_epoch, t.source, t.commands FROM tasks t
+//	SELECT t.id, t.job_id, t.name, t.env, t.requires, t.timeout_seconds, t.retries, t.retry_count, t.status, t.worker_id, t.started_at, t.finished_at, t.created_at, t.assignment_epoch, t.source, t.commands, t.assigned_at FROM tasks t
 //	WHERE t.status = 'pending'
 //	  AND NOT EXISTS (
 //	    SELECT 1 FROM task_dependencies td
@@ -548,6 +551,7 @@ func (q *Queries) GetEligibleTasks(ctx context.Context) ([]Task, error) {
 			&i.AssignmentEpoch,
 			&i.Source,
 			&i.Commands,
+			&i.AssignedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -560,12 +564,12 @@ func (q *Queries) GetEligibleTasks(ctx context.Context) ([]Task, error) {
 }
 
 const getTask = `-- name: GetTask :one
-SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands FROM tasks WHERE id = $1
+SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks WHERE id = $1
 `
 
 // GetTask
 //
-//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands FROM tasks WHERE id = $1
+//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks WHERE id = $1
 func (q *Queries) GetTask(ctx context.Context, id pgtype.UUID) (Task, error) {
 	row := q.db.QueryRow(ctx, getTask, id)
 	var i Task
@@ -586,6 +590,7 @@ func (q *Queries) GetTask(ctx context.Context, id pgtype.UUID) (Task, error) {
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -709,7 +714,7 @@ WHERE id = $1
   AND assignment_epoch = $2
   AND worker_id = $3
   AND status IN ('pending', 'dispatched', 'running')
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type IncrementTaskRetryCountParams struct {
@@ -773,7 +778,7 @@ type IncrementTaskRetryCountParams struct {
 //	  AND assignment_epoch = $2
 //	  AND worker_id = $3
 //	  AND status IN ('pending', 'dispatched', 'running')
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTaskRetryCountParams) (Task, error) {
 	row := q.db.QueryRow(ctx, incrementTaskRetryCount, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
 	var i Task
@@ -794,6 +799,7 @@ func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTask
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -840,12 +846,12 @@ func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidate
 }
 
 const listTasksByJob = `-- name: ListTasksByJob :many
-SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands FROM tasks WHERE job_id = $1 ORDER BY created_at
+SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks WHERE job_id = $1 ORDER BY created_at
 `
 
 // ListTasksByJob
 //
-//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands FROM tasks WHERE job_id = $1 ORDER BY created_at
+//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks WHERE job_id = $1 ORDER BY created_at
 func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task, error) {
 	rows, err := q.db.Query(ctx, listTasksByJob, jobID)
 	if err != nil {
@@ -872,6 +878,7 @@ func (q *Queries) ListTasksByJob(ctx context.Context, jobID pgtype.UUID) ([]Task
 			&i.AssignmentEpoch,
 			&i.Source,
 			&i.Commands,
+			&i.AssignedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1284,7 +1291,7 @@ WHERE id = $4
   AND assignment_epoch = $5
   AND worker_id = $6
   AND status IN ('pending', 'dispatched', 'running')
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type UpdateTaskStatusParams struct {
@@ -1380,7 +1387,7 @@ type UpdateTaskStatusParams struct {
 //	  AND assignment_epoch = $5
 //	  AND worker_id = $6
 //	  AND status IN ('pending', 'dispatched', 'running')
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusParams) (Task, error) {
 	row := q.db.QueryRow(ctx, updateTaskStatus,
 		arg.Status,
@@ -1408,6 +1415,7 @@ func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusPara
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
@@ -1416,7 +1424,7 @@ const updateTaskStatusEpoch = `-- name: UpdateTaskStatusEpoch :one
 UPDATE tasks
 SET status = $1
 WHERE id = $2 AND assignment_epoch = $3
-RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type UpdateTaskStatusEpochParams struct {
@@ -1436,7 +1444,7 @@ type UpdateTaskStatusEpochParams struct {
 //	UPDATE tasks
 //	SET status = $1
 //	WHERE id = $2 AND assignment_epoch = $3
-//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands
+//	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) UpdateTaskStatusEpoch(ctx context.Context, arg UpdateTaskStatusEpochParams) (Task, error) {
 	row := q.db.QueryRow(ctx, updateTaskStatusEpoch, arg.Status, arg.ID, arg.Epoch)
 	var i Task
@@ -1457,6 +1465,7 @@ func (q *Queries) UpdateTaskStatusEpoch(ctx context.Context, arg UpdateTaskStatu
 		&i.AssignmentEpoch,
 		&i.Source,
 		&i.Commands,
+		&i.AssignedAt,
 	)
 	return i, err
 }
