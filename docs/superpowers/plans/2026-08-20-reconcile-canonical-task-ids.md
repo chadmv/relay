@@ -138,8 +138,12 @@ choices, so this decision is confined to `cancelIDs`.
 
 **No log line, and this is a hard constraint.** `reconcileRunningTasks` runs inside
 `finishRegister`, at registration - **before** `Connect` allocates the connection's
-`ingestLogLimiter` (`internal/worker/handler.go:172`) and outside the four budgeted ingest
-sites. A `log.Printf` here would be unbudgeted, caller-driven volume with a
+`ingestLogLimiter` (`internal/worker/handler.go:172`), so it has no budget to spend at
+all. (An earlier draft said "the four budgeted ingest sites"; there are **five** -
+`ingest_log_limiter.go` defines five kinds and `handler.go` has five `lim.allow(` sites, at
+lines 555, 586, 866, 958 and 1163. The count went stale when `kindBadTaskIDLog` was split
+out on 2026-08-15. The load-bearing claim is "this site has no budget", not how many sites
+do.) A `log.Printf` here would be unbudgeted, caller-driven volume with a
 caller-chosen payload, which is the open half of
 `bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget`. Do not add
 one, and do not "just clip and `%q` it" - the budget, not the escaping, is the missing
@@ -174,8 +178,8 @@ conclusion.
 
 | Site | Verdict |
 | --- | --- |
-| `server.go:235-241` `parseUUID` | Clean, and this was the item's "look here first". It returns only the parsed value. Its error embeds the raw string as `%q`, but **no caller renders it**: a multiline grep for a `log.`/`%v`/`%s`/`err.Error()` within three lines of a `parseUUID(` call returns zero matches, and all 29 call sites write a fixed client message instead. |
-| 23 x `parseUUID(r.PathValue("id"))` | Clean. Every one is the inline form, so no local variable retains the raw path segment; where a string id is needed downstream the code re-renders from the parsed value - `worker_metrics.go:73`, `workspaces.go:79`, `jobs.go:820-821`, `workers.go:502-503`. |
+| `server.go:235-241` `parseUUID` | Clean in itself - it returns only the parsed value. **CORRECTION (Phase 4): the original claim here, that "no caller renders it", was false.** Of the 28 non-test call sites, 26 write a fixed client message, but **two reflect the raw path segment**: `workspaces.go:19-22` (`handleListWorkerWorkspaces`) and `workspaces.go:43-46` (`handleEvictWorkerWorkspace`) both do `writeError(w, http.StatusBadRequest, err.Error())` within three lines of the call, and `parseUUID`'s error wraps pgtype's `fmt.Errorf("cannot parse UUID %v", src)`. **Same class as `reservations.go:270` below, and dismissed the same way: reflected-but-escaped, not filed.** Nothing is keyed or compared on the raw string; `writeError`/`writeJSON` encode via `json.NewEncoder`, so it is JSON-escaped on the way out; and the path length is bounded by `MaxHeaderBytes`. Whether the two should match the other 26 for consistency is a separate question, filed separately - **not changed by this slice.** |
+| 22 x `parseUUID(r.PathValue("id"))` | Clean. Every one is the inline form, so no local variable retains the raw path segment; where a string id is needed downstream the code re-renders from the parsed value - `worker_metrics.go:73`, `workspaces.go:79`, `jobs.go:820-821`, `workers.go:502-503`. |
 | `events.go:31-47` `?task_id=` | Clean **and already commented**: `logTaskID = uuidStr(taskID)` "so the broker key matches the one `handleTaskLog` derives from the chunk's task id". This is the exact fix pattern, already applied. |
 | `events.go:53` `?job_id=` | **Same shape, deliberately accepted, documented in place.** Not parsed and not canonicalized; `broker.go:157` compares `f.JobID == e.JobID` while every publisher renders `uuidStr(...)`, so an uppercase `?job_id=` yields an open, permanently empty stream. The existing comment states the asymmetry is intentional and that "an unknown job has always yielded an open, permanently empty stream ... an existing contract with existing clients". **Not in this slice.** There is no live exposure (the SPA only ever passes ids it received from the API), and changing it is a client-contract change, not a bug fix. Recorded here so the next reader does not have to rediscover it; if it is wanted, it is a separate low-priority item, not scope creep on this one. |
 | `pagination.go:125` `decodeCursor` | Clean. `cursor.ID` is a `pgtype.UUID` bound as a query parameter; the raw `w.I` is discarded. |
@@ -584,7 +588,7 @@ with:
 			//
 			// IT IS NOT LOGGED, AND MUST NOT BE. This runs inside finishRegister,
 			// at registration - BEFORE Connect allocates this connection's
-			// ingestLogLimiter, and outside the four budgeted ingest sites. A line
+			// ingestLogLimiter, so this site has no budget to spend at all. A line
 			// here would be unbudgeted, caller-driven volume with a caller-chosen
 			// payload; clip + %q is not a substitute for the missing budget. See
 			// bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget.

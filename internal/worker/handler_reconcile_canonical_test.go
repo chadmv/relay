@@ -19,11 +19,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// reconcileFixture is one worker (with an agent token) plus three tasks claimed
+// reconcileFixture is one worker (with an agent token) plus four tasks claimed
 // by it: "match" (the agent will report it at the correct epoch), "stale" (the
-// agent will report it at a wrong epoch) and "serverOnly" (the agent will not
-// report it at all). The three cover the defect and both positive controls in a
-// single reconcile call.
+// agent will report it at a wrong epoch), "serverOnly" (the agent will not
+// report it at all) and "match2", a second correctly-reportable task used only
+// by the unparseable-id test, so that its report can place TWO parseable entries
+// AFTER the unparseable one (see the ordering note there). The first three cover
+// the defect and both positive controls in a single reconcile call.
 type reconcileFixture struct {
 	rawToken     string
 	hostname     string
@@ -31,6 +33,8 @@ type reconcileFixture struct {
 	matchEpoch   int32
 	staleID      pgtype.UUID
 	serverOnlyID pgtype.UUID
+	match2ID     pgtype.UUID
+	match2Epoch  int32
 }
 
 func seedReconcileFixture(t *testing.T, ctx context.Context, q *store.Queries, tag string) reconcileFixture {
@@ -76,6 +80,7 @@ func seedReconcileFixture(t *testing.T, ctx context.Context, q *store.Queries, t
 	f.matchID, f.matchEpoch = claim("match")
 	f.staleID, _ = claim("stale")
 	f.serverOnlyID, _ = claim("server-only")
+	f.match2ID, f.match2Epoch = claim("match2")
 	return f
 }
 
@@ -206,10 +211,11 @@ func TestRegisterWorker_ReconcileMatchesNonCanonicalTaskIdSpellings(t *testing.T
 // the two deliberate decisions around an id that pgtype.UUID.Scan rejects
 // outright. It is green against the pre-canonicalization handler too, because
 // that behaviour was deliberately preserved - its value is that it reddens if
-// anyone later changes either decision. Proven discriminating by mutation: swap
-// the `cancelIDs = append(...)` in the parse-failure branch for a bare `continue`
-// and the first assertion fails; add any log.Printf to that branch and the last
-// one fails.
+// anyone later changes either decision. Proven discriminating by mutation:
+// replacing the `cancelIDs = append(...)` in the parse-failure branch with a bare
+// `continue` fails the echo assertion; turning its `continue` into a `break`
+// fails both contamination assertions; adding any log.Printf to that branch
+// fails the empty-log assertion.
 func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(t *testing.T) {
 	ctx := context.Background()
 	q, pool := newTestStore(t)
@@ -220,6 +226,7 @@ func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(
 
 	f := seedReconcileFixture(t, ctx, q, "unparseable")
 	matchCanonical := h.UUIDStringForTest(f.matchID)
+	match2Canonical := h.UUIDStringForTest(f.match2ID)
 
 	// Neither 32 nor 36 bytes, so parseUUID rejects it on length alone. It also
 	// carries a NUL and a newline: if this ever DID reach a log line, the line
@@ -229,9 +236,20 @@ func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(
 
 	logged := captureLog(t)
 
+	// THE ORDERING IS LOAD-BEARING, NOT COSMETIC. The unparseable entry goes
+	// FIRST, with two parseable-and-assigned entries after it. With the garbage
+	// last, any mutation that TERMINATES the loop at the parse failure is
+	// invisible - `continue` -> `break` was verified to pass the whole
+	// TestRegisterWorker_Reconcile set under the old ordering - even though it
+	// silently converts one bad id into "requeue every task this agent is
+	// running", the exact failure this file exists to prevent. Garbage first
+	// makes `break` redden both contamination assertions below; the second
+	// parseable entry additionally catches a mutation that consumes only the
+	// next entry rather than all of them.
 	resp := runRegister(t, ctx, h, f, []*relayv1.RunningTask{
-		{TaskId: matchCanonical, Epoch: int64(f.matchEpoch)},
 		{TaskId: garbage, Epoch: 1},
+		{TaskId: matchCanonical, Epoch: int64(f.matchEpoch)},
+		{TaskId: match2Canonical, Epoch: int64(f.match2Epoch)},
 	})
 
 	// DECIDED BEHAVIOUR: an unparseable id names no assignment of ours, so the
@@ -240,11 +258,17 @@ func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(
 	assert.Equal(t, []string{garbage}, resp.CancelTaskIds,
 		"an unparseable id is echoed into the cancel list verbatim, and nothing else is cancelled")
 
-	// An unparseable sibling must not contaminate a correctly-reported task.
+	// An unparseable sibling must not contaminate the parseable entries that
+	// follow it - neither the one immediately after nor any later one.
 	match, err := q.GetTask(ctx, f.matchID)
 	require.NoError(t, err)
 	assert.Equal(t, "dispatched", match.Status, "a correctly-reported task survives an unparseable sibling")
 	assert.Equal(t, f.matchEpoch, match.AssignmentEpoch, "a correctly-reported task keeps its assignment epoch")
+
+	match2, err := q.GetTask(ctx, f.match2ID)
+	require.NoError(t, err)
+	assert.Equal(t, "dispatched", match2.Status, "every parseable entry after an unparseable one is still reconciled")
+	assert.Equal(t, f.match2Epoch, match2.AssignmentEpoch, "every parseable entry after an unparseable one keeps its epoch")
 
 	// NO UNBUDGETED LOG LINE. reconcileRunningTasks runs inside finishRegister, at
 	// registration, before Connect allocates this connection's ingestLogLimiter,
@@ -252,5 +276,7 @@ func TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing(
 	// Asserting the WHOLE captured log is empty (rather than NotContains) means
 	// any wording reddens this, exactly like
 	// TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll.
-	assert.Empty(t, logged(), "registration-time reconcile must log nothing; it is outside the connection log budget")
+	assert.Empty(t, logged(), "no log line anywhere in this registration: reconcile has no budget to spend, "+
+		"and this also reddens if a NEW unbudgeted registration log site is added on an adjacent path "+
+		"(auto-enroll and inventory-replace already log here)")
 }

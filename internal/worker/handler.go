@@ -446,17 +446,29 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 		// A STRING THAT PARSED IS NOT A STRING THAT IS CANONICAL. serverSet above
 		// is keyed on uuidStr - lowercase, hyphenated, 36 bytes - and rt.TaskId is
 		// whatever the agent chose to send. pgtype.UUID.Scan accepts three
-		// spellings that decode to the same 16 bytes and equal none of them:
-		// uppercase hex (hex.DecodeString takes A-F), the 32-byte undashed form,
-		// and the 36-byte form with ANY four bytes at indices 8, 13, 18 and 23,
-		// which parseUUID splices out without ever checking they are hyphens.
+		// independent WAYS a spelling can differ from that and still decode to the
+		// same 16 bytes: uppercase hex (hex.DecodeString takes A-F), the 32-byte
+		// undashed form, and the 36-byte form with ANY four bytes at indices 8, 13,
+		// 18 and 23, which parseUUID splices out without ever checking they are
+		// hyphens. They COMPOSE - the third axis alone is 2^32 strings per id - so
+		// these are three families, not three strings. Re-encoding is total across
+		// all of them by construction, which is why the tests cover the axes and
+		// not their combinations.
 		//
 		// Keying and looking up on the wire string therefore missed the map, and
 		// the `!ok` short-circuit below skipped the epoch comparison ENTIRELY - so
 		// a live, correctly-reported task was cancelled here AND requeued by the
-		// loop that follows (its canonical key looked "not reported"), silently,
-		// on every reconnect. Compare on the RE-ENCODING, never on the input. Same
-		// rule as handleTaskLog's canonicalID block and logKey's doc comment.
+		// loop that follows (its canonical key looked "not reported"), silently.
+		//
+		// SCOPE - the shipped Go agent never triggered this, on any reconnect.
+		// scheduler/dispatch.go sends uuidStr(claimed.ID), agent.go keys a.runners
+		// on exactly that string and reports it back verbatim, so its spelling is
+		// canonical by construction. The exposure is a reimplemented or
+		// third-party agent that spells ids differently: an interop bug with a
+		// silent failure mode, not a live production one.
+		//
+		// Compare on the RE-ENCODING, never on the input. Same rule as
+		// handleTaskLog's canonicalID block and logKey's doc comment.
 		var tID pgtype.UUID
 		if err := tID.Scan(rt.TaskId); err != nil {
 			// UNPARSEABLE. It can name no assignment of ours, so tell the agent to
@@ -467,7 +479,7 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 			//
 			// IT IS NOT LOGGED, AND MUST NOT BE. This runs inside finishRegister,
 			// at registration - BEFORE Connect allocates this connection's
-			// ingestLogLimiter, and outside the four budgeted ingest sites. A line
+			// ingestLogLimiter, so this site has no budget to spend at all. A line
 			// here would be unbudgeted, caller-driven volume with a caller-chosen
 			// payload; clip + %q is not a substitute for the missing budget. See
 			// bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget.
@@ -488,8 +500,11 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 			// to serve - a spelling it has never used; its lookup would miss,
 			// Abandon() would never run, and a task the coordinator has decided to
 			// cancel would keep running. "Not cancelled at all" is strictly worse
-			// than "cancelled spuriously". The canonical form belongs on the
-			// COMPARISON, never on the echo. Pinned by the stale-epoch control in
+			// than "cancelled spuriously". It buys less than it looks like, mind:
+			// api/cancel_signals.go always sends the DB's canonical rendering, so a
+			// re-spelling agent already misses every runtime CancelTask; the echo
+			// only helps on this register-response path. The canonical form belongs
+			// on the COMPARISON, never on the echo. Pinned by the stale-epoch control in
 			// TestRegisterWorker_ReconcileMatchesNonCanonicalTaskIdSpellings.
 			cancelIDs = append(cancelIDs, rt.TaskId)
 		}
