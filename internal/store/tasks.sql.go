@@ -1298,8 +1298,24 @@ type RetryJobTasksParams struct {
 // executing, and this statement would become a duplicate-execution primitive -
 // the retry reopens it, the dispatcher hands it to a second worker, and the
 // first agent's eventual completion is fenced out by the epoch bump, so nothing
-// reports the collision. Whoever adds a coordinator-side terminal writer must
-// revisit this clause, not just the status vocabulary test.
+// reports the collision.
+// THAT WATCHDOG NOW EXISTS, so read the paragraph above as history: `timed_out`
+// has TWO writers. The assignee itself (handleTaskStatus, after its subprocess
+// is already dead), and the coordinator watchdog
+// (internal/scheduler/watchdog.go), which stamps `timed_out` on a task whose
+// agent may still be happily running it. So a `timed_out` row selected here MAY
+// be terminal and still executing, and this statement can reopen it for a second
+// worker while the first agent's eventual completion is fenced out silently.
+// THAT HAZARD IS NOT NEW WITH THE WATCHDOG, which is why it did not block it:
+// CancelJobTasks already stamps `failed` on live `dispatched`/`running`
+// assignments and handleCancelJob mitigates with a best-effort
+// sendCancelSignals. The watchdog adopts the identical mitigation - it sends
+// CancelTask (force=false) to every swept task's worker after the write.
+// The residual is bounded by: the sweep fires only long past the deadline plus a
+// generous margin, the reopen is OPERATOR-GATED (nothing retries a swept task
+// automatically), and the original agent's own completion is fenced out.
+// Eliminating it entirely needs a per-assignment fencing token at the agent.
+// That is a NAMED NON-GOAL, not a plan.
 //
 // THE STATUS ALLOW-LIST MUST STAY IN THIS WHERE CLAUSE, on tasks' own columns.
 // Do not "simplify" it to `t.id IN (SELECT id FROM selected)`. Under READ
@@ -1518,10 +1534,15 @@ type UpdateTaskStatusParams struct {
 // (ClaimTaskForWorker requires `status='pending'`), so this predicate is
 // tautological there, exactly like the worker predicate above and for the same
 // reason: one statement with no exceptions to remember.
-// Both callers are fenced by the same statement deliberately;
+// All THREE callers are fenced by the same statement deliberately;
 // Dispatcher.failClaimedTask passes claimed.WorkerID from ClaimTaskForWorker,
-// where the predicate is tautological by design. For why that beats a second
-// un-fenced query or a "skip the check" sentinel, see
+// and scheduler.Watchdog passes the worker_id and assignment_epoch off the row
+// its own scan just returned - so in both the worker predicate is tautological
+// by design, exactly as this comment goes on to describe, while the EPOCH
+// predicate is the real TOCTOU guard and is not tautological in either. The
+// watchdog is why this slice added no new statement that writes tasks.status.
+// For why that beats a second un-fenced query or a "skip the check" sentinel,
+// see
 // docs/superpowers/specs/2026-08-12-taskstatus-update-assignee-fence.md.
 // The fence binds a WORKER identity, not a connection: two concurrent streams
 // registered for the same worker row both satisfy it. That matches AppendTaskLog
