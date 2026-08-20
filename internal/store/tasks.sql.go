@@ -172,6 +172,7 @@ const cancelJobTasks = `-- name: CancelJobTasks :exec
 UPDATE tasks
 SET status = 'failed',
     worker_id = NULL,
+    assigned_at = NULL,
     finished_at = NOW(),
     assignment_epoch = assignment_epoch + 1
 WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
@@ -186,6 +187,7 @@ WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
 //	UPDATE tasks
 //	SET status = 'failed',
 //	    worker_id = NULL,
+//	    assigned_at = NULL,
 //	    finished_at = NOW(),
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
@@ -719,6 +721,7 @@ UPDATE tasks
 SET retry_count = retry_count + 1,
     status = 'pending',
     worker_id = NULL,
+    assigned_at = NULL,
     started_at = NULL,
     finished_at = NULL,
     assignment_epoch = assignment_epoch + 1
@@ -783,6 +786,7 @@ type IncrementTaskRetryCountParams struct {
 //	SET retry_count = retry_count + 1,
 //	    status = 'pending',
 //	    worker_id = NULL,
+//	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    finished_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
@@ -929,7 +933,7 @@ func (q *Queries) NotifyTaskSubmitted(ctx context.Context) error {
 
 const requeueTask = `-- name: RequeueTask :exec
 UPDATE tasks
-SET status = 'pending', worker_id = NULL, started_at = NULL,
+SET status = 'pending', worker_id = NULL, assigned_at = NULL, started_at = NULL,
     assignment_epoch = assignment_epoch + 1
 WHERE id = $1 AND status = 'dispatched'
 `
@@ -939,7 +943,7 @@ WHERE id = $1 AND status = 'dispatched'
 // Bumps assignment_epoch so a late update from the prior assignment is fenced out.
 //
 //	UPDATE tasks
-//	SET status = 'pending', worker_id = NULL, started_at = NULL,
+//	SET status = 'pending', worker_id = NULL, assigned_at = NULL, started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE id = $1 AND status = 'dispatched'
 func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
@@ -951,6 +955,7 @@ const requeueTaskByID = `-- name: RequeueTaskByID :exec
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
+    assigned_at = NULL,
     started_at = NULL,
     finished_at = NULL,
     assignment_epoch = assignment_epoch + 1
@@ -970,10 +975,16 @@ WHERE id = $1 AND status IN ('dispatched', 'running')
 // The bump is inside the same UPDATE as the WHERE, so it happens only for rows
 // that actually matched - the "conditionally end the assignment" branch of the
 // epoch fence, never an unconditional bump.
+// assigned_at is nulled alongside worker_id. Every statement in this file that
+// nulls worker_id does the same, and ClaimTaskForWorker is the only statement
+// that sets either - so `assigned_at IS NOT NULL` means exactly "currently
+// assigned". The watchdog's correctness does not depend on this (the claim
+// overwrites on the way back in); the readable invariant does.
 //
 //	UPDATE tasks
 //	SET status = 'pending',
 //	    worker_id = NULL,
+//	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    finished_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
@@ -987,6 +998,7 @@ const requeueWorkerTasks = `-- name: RequeueWorkerTasks :many
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
+    assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')
@@ -1002,6 +1014,7 @@ RETURNING id
 //	UPDATE tasks
 //	SET status = 'pending',
 //	    worker_id = NULL,
+//	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
@@ -1030,6 +1043,7 @@ const requeueWorkerTasksIfEpoch = `-- name: RequeueWorkerTasksIfEpoch :many
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
+    assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
 WHERE worker_id = $1 AND status IN ('dispatched', 'running')
@@ -1050,6 +1064,7 @@ type RequeueWorkerTasksIfEpochParams struct {
 //	UPDATE tasks
 //	SET status = 'pending',
 //	    worker_id = NULL,
+//	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
 //	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
@@ -1093,6 +1108,7 @@ WITH RECURSIVE selected AS (
 UPDATE tasks t
 SET status           = 'pending',
     worker_id        = NULL,
+    assigned_at      = NULL,
     started_at       = NULL,
     finished_at      = NULL,
     retry_count      = 0,
@@ -1210,6 +1226,7 @@ type RetryJobTasksParams struct {
 //	UPDATE tasks t
 //	SET status           = 'pending',
 //	    worker_id        = NULL,
+//	    assigned_at      = NULL,
 //	    started_at       = NULL,
 //	    finished_at      = NULL,
 //	    retry_count      = 0,
