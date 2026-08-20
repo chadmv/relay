@@ -1,7 +1,9 @@
 ---
 title: reconcileRunningTasks compares wire task-id strings against canonical ones, so a non-canonical spelling cancels and requeues the agent's live tasks
 type: bug
-status: open
+status: closed
+closed: 2026-08-20
+resolution: fixed
 created: 2026-08-15
 priority: medium
 source: Phase 6 of the 2026-08-15-tasklog-err-limiter-keying slice; the lenses' pgtype.UUID.Scan finding carried one function outward
@@ -171,3 +173,37 @@ this is the second site in one file where a wire-supplied UUID string was used a
 had normalized it. The first one cost 2^32 dedupe keys and five log lines per event; this one costs a
 running task. **The lesson is not about UUIDs - it is that a successful parse is a statement about
 decodability, never about form.**
+
+## Resolution
+
+Fixed 2026-08-20 by the `reconcile-canonical-task-ids` slice.
+
+`reconcileRunningTasks` now canonicalizes the wire id (`pgtype.UUID.Scan` -> `uuidStr`) at the
+top of the reported loop and uses that form for BOTH map operations, so all three non-canonical
+spellings match and the epoch comparison is genuinely reached instead of being short-circuited
+by `!ok`.
+
+Two of the item's "settle these" questions were decided against its own leading reading:
+
+- **`cancelIDs` still echoes the raw wire spelling.** The agent looks each id up in `a.runners[tid]`
+  (`internal/agent/agent.go:246`), keyed at dispatch with the string it later reports back, so
+  canonicalizing the echo would hand a non-canonical agent - the exact client this fix serves - a
+  spelling it has never used, its lookup would miss, `Abandon()` would never run, and a task the
+  coordinator decided to cancel would keep running. The result is a ZERO wire-visible change, and
+  no agent-side test was needed (that criterion was conditional on the spelling changing).
+- **Unparseable ids stay in `cancelIDs`, verbatim, silently.** Fail-safe, and no log line: reconcile
+  runs inside `finishRegister`, before `Connect` allocates the connection's `ingestLogLimiter`.
+
+Sweep result: exactly one defect. `internal/worker` is otherwise canonical throughout, and
+`RegisterRequest.WorkerId` is never read server-side. In `internal/api`, `parseUUID` itself is clean;
+the sweep's first pass wrongly concluded no caller renders its raw-string error, and Phase 4 caught
+that - `workspaces.go:19-22` and `:43-46` both do `writeError(w, 400, err.Error())`. Reflected but
+JSON-escaped by `writeJSON`, so not a vulnerability; filed separately as a consistency item.
+`events.go:53`'s `?job_id=` is the same shape but deliberate and commented in place.
+
+Guarded by `TestRegisterWorker_ReconcileMatchesNonCanonicalTaskIdSpellings` (three spellings x
+{not cancelled, not requeued, epoch intact} plus both positive controls) and
+`TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing`. Both integration-tagged,
+consistent with every other handler test in the package. Verified RED at `0fc1efc` independently by
+the integration lane; three mutations killed, including a `continue`->`break` that Phase 4 proved was
+invisible until the unparseable id was moved to the FRONT of the report.
