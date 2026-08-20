@@ -3,6 +3,8 @@ title: Surface revoked workers for admin audit or re-enrollment
 type: idea
 status: closed
 created: 2026-06-04
+closed: 2026-06-05
+resolution: fixed
 priority: low
 source: noticed while excluding revoked workers from the workers-stats endpoint (PR #12)
 ---
@@ -23,3 +25,6 @@ A dedicated admin-only listing (e.g. `GET /v1/workers?status=revoked` or a separ
 - `internal/api/workers.go` - `WorkerStatusCounts` / stats handler.
 - `docs/retros/2026-06-04-workers-stats-endpoint.md` - Open Questions.
 - `docs/superpowers/specs/2026-06-04-workers-stats-endpoint-design.md`
+
+## Resolution
+Closed 2026-06-05 by `d980b42`.

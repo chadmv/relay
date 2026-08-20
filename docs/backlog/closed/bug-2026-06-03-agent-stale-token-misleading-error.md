@@ -3,6 +3,8 @@ title: Agent logs misleading "token may have been revoked" when a stale token fi
 type: bug
 status: closed
 created: 2026-06-03
+closed: 2026-06-05
+resolution: fixed
 priority: medium
 source: surfaced while manually testing the web Workers page; enroll appeared to fail but root cause was a leftover state-dir token file
 ---
@@ -39,3 +41,6 @@ The no-fallback-to-enrollment behavior is intentional and correct (security-hard
 - `internal/agent/credentials.go` - `LoadCredentials`, `TokenFilePath()`, `HasAgentToken()`.
 - `internal/agent/agent.go:73-77` - the `Unauthenticated` handling and the misleading log line.
 - `docs/superpowers/specs/2026-04-22-security-hardening-pass-2-design.md` - the intentional no-fallback design.
+
+## Resolution
+Closed 2026-06-05 by `a4dc0d8`, implementing `docs/superpowers/plans/2026-06-05-agent-stale-token-diagnostics.md`.

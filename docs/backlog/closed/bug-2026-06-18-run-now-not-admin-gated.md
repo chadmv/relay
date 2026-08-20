@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-18
 closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: 2026-06-18 /roadmap deep Gaps review agent, confirmed by direct code read
 ---

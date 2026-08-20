@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-19
 closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: verification of bug-2026-06-10-agent-pipe-drain-hang
 ---

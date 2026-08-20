@@ -1,8 +1,10 @@
 ---
 title: Fix flaky TestNotifyListener_TriggersOnNotify
 type: bug
-status: open
+status: closed
 created: 2026-05-01
+closed: 2026-05-04
+resolution: fixed
 source: noticed during integration test run in self-serve registration session
 ---
 
@@ -27,3 +29,6 @@ Pre-existing flaky integration test in the notify listener suite. Surfaces inter
 
 - `internal/api/` — notify listener tests
 - Retro: `docs/retros/2026-05-01-self-serve-registration.md`
+
+## Resolution
+Closed 2026-05-04 by `c688c01`; the flake was fixed in the immediately preceding commit.

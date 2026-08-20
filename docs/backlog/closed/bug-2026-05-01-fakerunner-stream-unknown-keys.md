@@ -1,8 +1,10 @@
 ---
 title: fakeRunner.Stream silently no-ops on unknown fixture keys
 type: bug
-status: open
+status: closed
 created: 2026-05-01
+closed: 2026-05-04
+resolution: fixed
 source: p4client-explicit-flag retro — What We Did Not Do Well
 ---
 
@@ -42,3 +44,6 @@ func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 ## Related
 - `internal/agent/source/perforce/fixtures_test.go` — `fakeRunner.Stream` and `fakeRunner.Run`
 - Retro: `docs/retros/2026-05-01-p4client-explicit-flag.md` § What We Did Not Do Well
+
+## Resolution
+Closed 2026-05-04 by `6fb1b37`. `fakeRunner.Run` and `fakeRunner.Stream` now call `t.Errorf` and return a non-nil error when no fixture matches, instead of silently returning nil/no-output and hiding stale or missing fixture keys.

@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-03
 closed: 2026-06-05
+resolution: fixed
 priority: low
 source: web front end auth slice final review
 ---

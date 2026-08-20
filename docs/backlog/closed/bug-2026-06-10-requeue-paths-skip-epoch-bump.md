@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-10
 closed: 2026-06-19
+resolution: fixed
 priority: medium
 source: full-codebase review (2026-06-10)
 ---
@@ -21,3 +22,6 @@ Add `assignment_epoch = assignment_epoch + 1` to all five requeue/retry statemen
 - `internal/store/query/tasks.sql:177-188` (`RequeueWorkerTasksWithEpoch`, the existing precedent)
 - `internal/worker/handler.go:443-449` (retry path)
 - bug-2026-06-10-job-cancel-epoch-zero
+
+## Resolution
+Closed 2026-06-19 by `84825c7`.

@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-10
 closed: 2026-06-20
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---

@@ -4,6 +4,8 @@ type: bug
 status: closed
 resolved: 2026-05-02
 created: 2026-04-25
+closed: 2026-05-02
+resolution: fixed
 source: 2026-04-25 perforce-workspace-management retro — Known Limitations
 ---
 
@@ -11,3 +13,6 @@ source: 2026-04-25 perforce-workspace-management retro — Known Limitations
 
 ## Summary
 **No client-side UUID validation in `relay workers workspaces`/`evict-workspace`.** The server returns 400 for malformed IDs and the CLI surfaces it, so it's UX-only.
+
+## Resolution
+Closed 2026-05-02 by `f30df92`. Extracted a `resolveWorkerID` helper, mirroring the existing `workers revoke` pattern, so all three workspace-related commands accept either a UUID or a worker hostname.

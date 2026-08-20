@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-06-19
 closed: 2026-06-20
+resolution: fixed
 priority: medium
 source: discovered by relay-verify while fixing bug-2026-06-10-requeue-paths-skip-epoch-bump
 ---

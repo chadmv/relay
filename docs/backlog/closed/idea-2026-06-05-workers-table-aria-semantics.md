@@ -3,6 +3,7 @@ title: Workers table uses div/button markup so aria-sort may not be announced
 type: idea
 status: closed
 closed: 2026-06-05
+resolution: fixed
 created: 2026-06-05
 priority: low
 source: follow-up from bug-2026-06-03-workers-view-controls-aria (aria-sort added, but on plain buttons)
@@ -28,3 +29,6 @@ Keep the sort affordance operable: the clickable element should remain a button 
 ## Related
 - `web/src/workers/WorkersTable.tsx` - the pseudo-table markup and sortable headers.
 - [`closed/bug-2026-06-03-workers-view-controls-aria`](closed/bug-2026-06-03-workers-view-controls-aria.md) - added `aria-sort`/`aria-pressed`; this item addresses the deeper semantics gap noted there.
+
+## Resolution
+Closed 2026-06-05 by `67fc841`.

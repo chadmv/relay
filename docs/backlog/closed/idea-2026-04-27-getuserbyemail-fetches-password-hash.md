@@ -3,6 +3,7 @@ title: GetUserByEmail fetches password_hash unnecessarily on email filter path
 type: idea
 status: closed
 closed: 2026-04-29
+resolution: fixed
 created: 2026-04-27
 source: noticed during 2026-04-27 admin user list endpoint retro
 ---
@@ -19,3 +20,6 @@ Add a new sqlc query `GetUserByEmailPublic :one` selecting only the five public 
 - `internal/api/users.go` — `handleListUsers` email-filter branch
 - `internal/store/query/users.sql` — where the new query would live
 - `idea-2026-04-26-admin-user-list-endpoint` (closed) — parent feature
+
+## Resolution
+Closed 2026-04-29 by `c3750dd`, alongside `idea-2026-04-27-user-profile-update-endpoint`.

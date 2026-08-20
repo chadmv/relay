@@ -3,6 +3,8 @@ title: Dependency cycles pass validation and drive FailDependentTasks into infin
 type: bug
 status: closed
 created: 2026-06-10
+closed: 2026-06-11
+resolution: fixed
 priority: high
 source: full-codebase review (2026-06-10)
 ---
@@ -22,3 +24,6 @@ Three layers:
 - `internal/store/query/tasks.sql:60-73` (`FailDependentTasks`)
 - `internal/jobspec/jobspec.go:91-97` (`Validate`)
 - `internal/store/migrations/000001_initial.up.sql:69-73` (task_dependencies)
+
+## Resolution
+Closed 2026-06-11 by `71b9fea`.

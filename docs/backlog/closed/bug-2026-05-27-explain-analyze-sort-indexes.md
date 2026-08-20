@@ -1,8 +1,10 @@
 ---
 title: Run EXPLAIN ANALYZE on sort indexes against populated jobs table
 type: bug
-status: open
+status: closed
 created: 2026-05-27
+closed: 2026-05-27
+resolution: fixed
 priority: medium
 source: list-endpoint-sort retro (docs/retros/2026-05-27-list-endpoint-sort.md)
 ---
@@ -51,3 +53,6 @@ Currently unknown — that's the point of the check. If the planner is falling b
 
 - `internal/store/migrations/000013_paginated_sort_indexes.up.sql` — the 19 indexes under test
 - `docs/superpowers/specs/2026-05-26-list-endpoint-sort-design.md` — original spec that called for this verification
+
+## Resolution
+Closed 2026-05-27 by `5c7d60c`. EXPLAIN output captured from a clean run of `scripts/explain_sort_indexes` against a 100k-row jobs seed (plus 10k each for five other tables): every (table, sort_key, direction) tuple uses the expected composite index from migration 000011 or 000013. 44/44 PASS.

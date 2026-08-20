@@ -4,6 +4,7 @@ type: bug
 status: closed
 created: 2026-05-27
 closed: 2026-05-27
+resolution: fixed
 priority: low
 source: list-endpoint-sort retro (docs/retros/2026-05-27-list-endpoint-sort.md)
 ---

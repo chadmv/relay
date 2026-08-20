@@ -1,8 +1,10 @@
 ---
 title: Python SDK list methods don't handle pagination envelope
 type: bug
-status: open
+status: closed
 created: 2026-05-26
+closed: 2026-06-03
+resolution: fixed
 priority: high
 source: surfaced while scoping the list-endpoint-sort design (docs/superpowers/specs/2026-05-26-list-endpoint-sort-design.md)
 ---
@@ -38,3 +40,6 @@ Run [python/tests/integration/test_smoke.py:48](../../python/tests/integration/t
 - `docs/superpowers/specs/2026-05-26-list-endpoint-sort-design.md` — sort feature that this bug blocks from being usable from Python
 - `internal/relayclient/` — Go equivalent (`FetchAllPages[T]`, `PageEnvelope[T]`) for reference
 - `docs/retros/2026-05-09-relay-mcp-server.md` — retro that landed the pagination envelope
+
+## Resolution
+Closed 2026-06-03 by `81a3d65`. The Python SDK list methods handle the pagination envelope; SDK version bumped to 0.1.2.
