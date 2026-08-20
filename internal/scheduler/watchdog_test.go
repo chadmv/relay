@@ -232,3 +232,109 @@ func TestWatchdog_OneArmDisabledStillScansWithOnlyThatArmOff(t *testing.T) {
 	assert.True(t, q.listParams[0].ExecEnabled)
 	assert.False(t, q.listParams[0].AbsoluteEnabled)
 }
+
+// recordingCanceller records each send in order and can block, so one test can
+// assert ordering relative to the write and another can assert the fan-out is
+// concurrent.
+type recordingCanceller struct {
+	mu    sync.Mutex
+	store *fakeWatchdogStore
+	block time.Duration
+	sends []cancelRecord
+}
+
+type cancelRecord struct {
+	workerID string
+	taskID   string
+	force    bool
+}
+
+func (c *recordingCanceller) SendCancel(workerID, taskID string, force bool) error {
+	if c.block > 0 {
+		time.Sleep(c.block)
+	}
+	if c.store != nil {
+		c.store.mu.Lock()
+		c.store.events = append(c.store.events, "cancel:"+taskID)
+		c.store.mu.Unlock()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sends = append(c.sends, cancelRecord{workerID, taskID, force})
+	return nil
+}
+
+func indexOf(ss []string, want string) int {
+	for i, s := range ss {
+		if s == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestWatchdog_CancelsAfterTheWriteAndOnlyForMatchedRows. Two properties in one
+// test because they are the same property: the send is a CONSEQUENCE of the
+// write having matched.
+//
+// force=false is the conservative arm and a genuine trade. force=true skips
+// workspace finalize, which risks leaving a P4 workspace in a state that poisons
+// warm-workspace scoring for every later task on that machine; force=false still
+// closes cancelledCh, which is the escape that frees a log write parked on a
+// full sendCh. It also matches handleDisableWorker, the other place the
+// coordinator unilaterally takes tasks from a still-connected agent.
+//
+// THE REJECTED ROW IS FIRST, so a mutation that stops the sweep on the first
+// fence rejection cannot hide behind the good row having already been handled.
+func TestWatchdog_CancelsAfterTheWriteAndOnlyForMatchedRows(t *testing.T) {
+	now := time.Now()
+	rejected := overdueRow(1, 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour))
+	swept := overdueRow(2, 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour))
+	q := &fakeWatchdogStore{
+		overdue:   []store.Task{rejected, swept},
+		updateErr: map[pgtype.UUID]error{rejected.ID: pgx.ErrNoRows},
+	}
+	c := &recordingCanceller{store: q}
+	w := NewWatchdog(q, c, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+	w.now = func() time.Time { return now }
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	require.Len(t, c.sends, 1,
+		"a row the fence rejected belongs to somebody else now; cancelling it would tear a LIVE assignment off a worker")
+	assert.Equal(t, uuidStr(swept.ID), c.sends[0].taskID)
+	assert.Equal(t, uuidStr(swept.WorkerID), c.sends[0].workerID)
+	assert.False(t, c.sends[0].force,
+		"force=false: skipping workspace finalize can poison warm-workspace scoring for every later task")
+
+	trace := q.trace()
+	assert.Less(t, indexOf(trace, "update:"+uuidStr(swept.ID)), indexOf(trace, "cancel:"+uuidStr(swept.ID)),
+		"the write must be durable before the agent is told to stop: sending first would leave an agent told to "+
+			"abandon a task the coordinator still considers live")
+}
+
+// TestWatchdog_CancelFanOutIsConcurrent: N overdue tasks on ONE wedged worker
+// must cost ~one send timeout, not N of them. Modelled on
+// internal/api/cancel_signals_test.go:29-62.
+func TestWatchdog_CancelFanOutIsConcurrent(t *testing.T) {
+	const block = 200 * time.Millisecond
+	const n = 5
+
+	now := time.Now()
+	rows := make([]store.Task, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, overdueRow(byte(10+i), 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour)))
+	}
+	q := &fakeWatchdogStore{overdue: rows}
+	c := &recordingCanceller{block: block}
+	w := NewWatchdog(q, c, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+	w.now = func() time.Time { return now }
+
+	start := time.Now()
+	require.NoError(t, w.SweepOnce(context.Background()))
+	elapsed := time.Since(start)
+
+	require.Len(t, c.sends, n)
+	assert.Less(t, elapsed, (n-1)*block,
+		"the cancel fan-out must be concurrent: a sequential loop over one wedged worker costs N send timeouts")
+}

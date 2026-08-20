@@ -64,3 +64,15 @@ func (r *Registry) SendEvictCommand(workerID string, cmd *relayv1.EvictWorkspace
 		Payload: &relayv1.CoordinatorMessage_EvictWorkspace{EvictWorkspace: cmd},
 	})
 }
+
+// SendCancel sends a CancelTask to the named connected worker. Returns an error
+// if the worker is not connected. Together with api.sendCancelSignals this is the
+// only construction site for CancelTask in the tree; both go through Send, so
+// both are bounded by the worker sender's sendTimeout.
+func (r *Registry) SendCancel(workerID, taskID string, force bool) error {
+	return r.Send(workerID, &relayv1.CoordinatorMessage{
+		Payload: &relayv1.CoordinatorMessage_CancelTask{
+			CancelTask: &relayv1.CancelTask{TaskId: taskID, Force: force},
+		},
+	})
+}

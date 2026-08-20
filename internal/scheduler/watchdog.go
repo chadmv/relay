@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"relay/internal/events"
@@ -144,6 +145,7 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		return err
 	}
 
+	var cancels []watchdogCancel
 	for _, t := range overdue {
 		updated, err := w.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 			ID:              t.ID,
@@ -178,8 +180,51 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		if err := w.q.NotifyTaskCompleted(ctx); err != nil {
 			log.Printf("watchdog: NotifyTaskCompleted: %v", err)
 		}
+		cancels = append(cancels, watchdogCancel{
+			workerID: uuidStr(t.WorkerID),
+			taskID:   uuidStr(t.ID),
+		})
 	}
+	w.sendCancels(cancels)
 	return nil
+}
+
+// watchdogCancel is one best-effort CancelTask to deliver to a connected agent.
+type watchdogCancel struct {
+	workerID string
+	taskID   string
+}
+
+// sendCancels tells each swept task's agent to stop, so the coordinator does not
+// merely do bookkeeping while an orphan subprocess keeps running against a
+// workspace and the freed slot over-subscribes the machine that is already in
+// trouble. Deliberately identical in shape to api.sendCancelSignals, which is
+// the reviewed precedent for a coordinator-side terminal write over a live
+// assignment - handleCancelJob does exactly this today.
+//
+// Best-effort: the return value is ignored, because a failed send just means the
+// agent already lost the task, and the watchdog is registry-blind by design -
+// under multi-replica operation the agent may be connected elsewhere. The sends
+// run concurrently and this blocks until all complete, so N overdue tasks on ONE
+// wedged worker cost ~one send timeout instead of N of them.
+//
+// force=false deliberately. force=true skips workspace finalize, which risks
+// leaving a P4 workspace in a state that poisons warm-workspace scoring for
+// every later task on that machine; force=false still closes cancelledCh, which
+// is the escape that frees a log write parked on a full sendCh. It also matches
+// handleDisableWorker, the other place the coordinator unilaterally takes tasks
+// away from a still-connected agent.
+func (w *Watchdog) sendCancels(cancels []watchdogCancel) {
+	var wg sync.WaitGroup
+	for _, c := range cancels {
+		c := c
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = w.canceller.SendCancel(c.workerID, c.taskID, false)
+		}()
+	}
+	wg.Wait()
 }
 
 // overdueReason reports which bound a swept row blew, FOR THE LOG LINE ONLY. It
