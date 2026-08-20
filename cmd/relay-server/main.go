@@ -213,6 +213,21 @@ func main() {
 	// Mark connected-but-silent workers stale based on telemetry age.
 	go metrics.NewSweeper(q, broker, metricsStore, staleAfter).Run(ctx)
 
+	// Bound how long a task may hold an assignment. tasks.timeout_sec is
+	// otherwise enforced only by the agent, so a wedged or lying agent holds its
+	// task - and its worker slot, and its job - forever.
+	watchdogMargin, marginWarning := parseWatchdogDuration(
+		"RELAY_TASK_WATCHDOG_MARGIN", os.Getenv("RELAY_TASK_WATCHDOG_MARGIN"), scheduler.DefaultWatchdogMargin)
+	if marginWarning != "" {
+		log.Printf("WARNING: %s", marginWarning)
+	}
+	maxAssignment, maxAssignmentWarning := parseWatchdogDuration(
+		"RELAY_TASK_MAX_ASSIGNMENT", os.Getenv("RELAY_TASK_MAX_ASSIGNMENT"), scheduler.DefaultMaxAssignment)
+	if maxAssignmentWarning != "" {
+		log.Printf("WARNING: %s", maxAssignmentWarning)
+	}
+	go scheduler.NewWatchdog(q, registry, broker, watchdogMargin, maxAssignment).Run(ctx)
+
 	// Purge expired enrollment tokens hourly.
 	go runEnrollmentJanitor(ctx, q)
 
