@@ -197,30 +197,42 @@ func (q *Queries) CancelJobTasks(ctx context.Context, jobID pgtype.UUID) error {
 const claimTaskForWorker = `-- name: ClaimTaskForWorker :one
 UPDATE tasks
 SET status = 'dispatched',
-    worker_id = $2,
+    worker_id = $1,
+    assigned_at = $2,
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status = 'pending'
+WHERE id = $3 AND status = 'pending'
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
 type ClaimTaskForWorkerParams struct {
-	ID       pgtype.UUID `json:"id"`
-	WorkerID pgtype.UUID `json:"worker_id"`
+	WorkerID   pgtype.UUID        `json:"worker_id"`
+	AssignedAt pgtype.Timestamptz `json:"assigned_at"`
+	ID         pgtype.UUID        `json:"id"`
 }
 
 // Atomically transition a pending task to 'dispatched' on the given worker.
 // Increments assignment_epoch so subsequent status updates from prior
 // generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
 // pending (another dispatcher already claimed it, or the row vanished).
+// THIS IS THE ONLY LOAD-BEARING WRITE OF assigned_at. It is the sole route into
+// the ('dispatched','running') partition that ListOverdueAssignedTasks scans, so
+// a stale assigned_at left behind by a requeue can never be observed by the
+// watchdog: this statement overwrites it on the way back in. assigned_at is
+// supplied by the caller's Go clock, never NOW(), so it is directly comparable
+// with the watchdog's Go-computed cutoff (same argument as AppendTaskLog's
+// min_finished_at). A caller that omits the parameter binds SQL NULL, which
+// fails CLOSED - the row is simply never swept by the absolute arm - and is
+// caught for the production call site by TestDispatcher_ClaimStampsAssignedAt.
 //
 //	UPDATE tasks
 //	SET status = 'dispatched',
-//	    worker_id = $2,
+//	    worker_id = $1,
+//	    assigned_at = $2,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE id = $1 AND status = 'pending'
+//	WHERE id = $3 AND status = 'pending'
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) ClaimTaskForWorker(ctx context.Context, arg ClaimTaskForWorkerParams) (Task, error) {
-	row := q.db.QueryRow(ctx, claimTaskForWorker, arg.ID, arg.WorkerID)
+	row := q.db.QueryRow(ctx, claimTaskForWorker, arg.WorkerID, arg.AssignedAt, arg.ID)
 	var i Task
 	err := row.Scan(
 		&i.ID,

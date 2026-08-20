@@ -300,11 +300,21 @@ WHERE status = 'pending'
 -- Increments assignment_epoch so subsequent status updates from prior
 -- generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
 -- pending (another dispatcher already claimed it, or the row vanished).
+-- THIS IS THE ONLY LOAD-BEARING WRITE OF assigned_at. It is the sole route into
+-- the ('dispatched','running') partition that ListOverdueAssignedTasks scans, so
+-- a stale assigned_at left behind by a requeue can never be observed by the
+-- watchdog: this statement overwrites it on the way back in. assigned_at is
+-- supplied by the caller's Go clock, never NOW(), so it is directly comparable
+-- with the watchdog's Go-computed cutoff (same argument as AppendTaskLog's
+-- min_finished_at). A caller that omits the parameter binds SQL NULL, which
+-- fails CLOSED - the row is simply never swept by the absolute arm - and is
+-- caught for the production call site by TestDispatcher_ClaimStampsAssignedAt.
 UPDATE tasks
 SET status = 'dispatched',
-    worker_id = $2,
+    worker_id = sqlc.arg(worker_id),
+    assigned_at = sqlc.arg(assigned_at),
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status = 'pending'
+WHERE id = sqlc.arg(id) AND status = 'pending'
 RETURNING *;
 
 -- name: RequeueTask :exec

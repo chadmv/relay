@@ -278,8 +278,9 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	// pass has already claimed it, ClaimTaskForWorker returns pgx.ErrNoRows and
 	// we skip silently — this is the critical race guard.
 	claimed, err := d.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
-		ID:       task.ID,
-		WorkerID: w.ID,
+		ID:         task.ID,
+		WorkerID:   w.ID,
+		AssignedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
 		// pgx.ErrNoRows is the benign claim race (another dispatcher won) and
