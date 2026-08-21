@@ -86,6 +86,38 @@ func remoteAddr(ctx context.Context) string {
 // RELAY_TASKLOG_TRAILING_WINDOW.
 const DefaultTrailingLogWindow = 15 * time.Minute
 
+// DefaultRegistrationTimeout bounds how long a peer that has opened a stream may
+// go without sending its RegisterRequest before the server closes the stream.
+//
+// WITHOUT IT, THE CONNECTION CAPS ARE A WEAPON RATHER THAN A CONTROL. A peer
+// that opens a stream and sends nothing reaches Connect and parks in the first
+// stream.Recv forever. It never authenticates, so it costs no credential and no
+// database round trip; and it never goes idle either, because opening a stream
+// zeroes grpc-go's t.idle and MaxConnectionIdle reaps only a transport whose
+// t.idle is NON-zero (internal/transport/http2_server.go:582-585, :1204-1220).
+// The keepalive liveness probe does not reach it: any frame the peer reads
+// re-stamps t.lastRead, so that arm resets forever. Before
+// RELAY_GRPC_MAX_CONNS existed, such a peer was bounded only by file
+// descriptors - a nuisance, orders of magnitude out. With a 1024-slot cap it is
+// a cheap, permanent, fleet-wide denial.
+//
+// WHAT THIS DOES NOT CLOSE, stated rather than implied. Returning ends the
+// STREAM, which re-stamps t.idle and hands the connection back to
+// MaxConnectionIdle. It does not end the CONNECTION, so a peer willing to open a
+// fresh stream once per idle window keeps its slot indefinitely at very low
+// cost. MaxConnectionAge is the arm that would close that, and it is
+// deliberately out of this slice - it terminates connections that are doing
+// their job. This bound turns "free and permanent" into "requires a periodic
+// round trip", which is a real reduction and not a fix.
+//
+// 30s is generous by three orders of magnitude: a legitimate agent sends its
+// RegisterRequest immediately after opening the stream (internal/agent/
+// agent.go:202-215), so the honest window is a network round trip. The value is
+// large enough that a wedged middlebox or a badly stalled host still registers,
+// small enough that parking costs something. Override with
+// RELAY_GRPC_REGISTRATION_TIMEOUT.
+const DefaultRegistrationTimeout = 30 * time.Second
+
 // Handler implements relayv1.AgentServiceServer.
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
@@ -103,6 +135,12 @@ type Handler struct {
 	// AllowAutoEnroll, when true, permits agents to register with no credential
 	// (token-less auto-enrollment). Set by cmd/relay-server after construction.
 	AllowAutoEnroll bool
+
+	// RegistrationTimeout bounds how long a peer that has opened a stream may go
+	// without sending its RegisterRequest. Non-positive means
+	// DefaultRegistrationTimeout. Set by cmd/relay-server after construction,
+	// from RELAY_GRPC_REGISTRATION_TIMEOUT. Read-only after startup.
+	RegistrationTimeout time.Duration
 
 	// TrailingLogWindow bounds how long after a task's finished_at its assignee
 	// may still append log chunks. Non-positive means DefaultTrailingLogWindow,
@@ -128,9 +166,9 @@ func NewHandlerWithGrace(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *e
 func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	ctx := stream.Context()
 
-	first, err := stream.Recv()
+	first, err := h.recvRegistration(stream)
 	if err != nil {
-		return fmt.Errorf("recv first message: %w", err)
+		return err
 	}
 	reg := first.GetRegister()
 	if reg == nil {
@@ -192,6 +230,68 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 			h.handleTelemetry(workerID, p.Telemetry)
 		}
 	}
+}
+
+// recvRegistration is the FIRST stream.Recv, bounded by registrationTimeout. See
+// DefaultRegistrationTimeout for why an unbounded one is a denial primitive.
+//
+// ONLY THE FIRST Recv IS BOUNDED. The message loop's Recv must stay unbounded
+// forever: a healthy agent holds one silent stream for hours between dispatches,
+// and a deadline there would disconnect the entire fleet on a timer. That is
+// what makes this a separate function called exactly once rather than a wrapper
+// around Recv.
+//
+// The Recv runs in a goroutine because there is no other way to bound it -
+// grpc-go's ServerStream takes its deadline from the stream context, which the
+// client controls. The channel is buffered so that goroutine can NEVER block
+// after this function has returned: it stays parked in Recv until grpc tears the
+// stream down (which returning is what causes), then sends and exits. Exactly
+// one goroutine calls Recv at any time - this one before we return, the message
+// loop only after a successful return - so the "one Recv caller at a time"
+// contract holds.
+func (h *Handler) recvRegistration(stream relayv1.AgentService_ConnectServer) (*relayv1.AgentMessage, error) {
+	type recvResult struct {
+		msg *relayv1.AgentMessage
+		err error
+	}
+	ch := make(chan recvResult, 1)
+	go func() {
+		msg, err := stream.Recv()
+		ch <- recvResult{msg, err}
+	}()
+
+	timer := time.NewTimer(h.registrationTimeout())
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, fmt.Errorf("recv first message: %w", r.err)
+		}
+		return r.msg, nil
+	case <-timer.C:
+		// Deliberately NOT logged. This is reachable by any unauthenticated peer
+		// that can open a TCP connection, so a line here would be a new
+		// attacker-driven log site inside a control that exists to bound
+		// attacker-driven resource use. The refusal summary in cmd/relay-server
+		// is where admission pressure is surfaced, in counts.
+		return nil, status.Errorf(codes.DeadlineExceeded,
+			"no RegisterRequest within %s", h.registrationTimeout())
+	}
+}
+
+// registrationTimeout resolves the effective bound. Non-positive means the
+// default, which keeps every NewHandler/NewHandlerWithGrace call site correct
+// with no edit, exactly as TrailingLogWindow does. There is deliberately no
+// "disabled" value: the only fail-aggressive direction is a window too SHORT,
+// whose remedy is to raise it, and unlike the connection caps this cannot be
+// delegated to a proxy - no proxy can enforce "send a RegisterRequest within N"
+// on the server's behalf. An operator who wants the old behaviour writes a very
+// large duration and can see in the startup line that they did.
+func (h *Handler) registrationTimeout() time.Duration {
+	if h.RegistrationTimeout > 0 {
+		return h.RegistrationTimeout
+	}
+	return DefaultRegistrationTimeout
 }
 
 // authenticateAndRegister dispatches to the appropriate auth path based on the credential type.
@@ -357,7 +457,12 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	// is the ONLY record anywhere that a token-less enrollment happened, so a
 	// forgeable one corrupts the audit trail of the mechanism it documents - the
 	// RELAY_ALLOW_AUTO_ENROLL gate is not a substitute. It is bounded to one line
-	// per connection by registration itself, so it takes no budget key.
+	// per STREAM by registration itself - NOT per connection, which is a weaker
+	// claim than it sounds: grpc.MaxConcurrentStreams bounds CONCURRENT streams,
+	// not how many a connection may open over its life, so a caller that opens
+	// and closes streams in a loop emits one of these per cycle. What prices that
+	// loop is RELAY_GRPC_REGISTRATION_TIMEOUT plus the connection caps, not this
+	// line, which is why it still takes no budget key.
 	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
@@ -676,7 +781,8 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// it. What bounds them now is the CONNECTION'S BUDGET (ingestLogLimiter),
 	// which is keyed on nothing the caller supplies - the GetTask branch's
 	// pgx.ErrNoRows case is silent outright, and everything else there costs at
-	// most one line per connection.
+	// most one line per STREAM - the limiter is allocated per Connect call, and
+	// a connection may open streams over its life without limit.
 	// bug-2026-08-12-tasklog-err-limiter-attacker-keyed is closed; do not cite
 	// it here as live.
 	//
