@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 
+	"relay/internal/netlimit"
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/assert"
@@ -211,4 +214,76 @@ func TestGRPCServer_ConnectionHoldingAStreamIsNotIdle(t *testing.T) {
 	}
 	require.NoError(t, stream.Send(&relayv1.AgentMessage{}),
 		"the stream must still be usable after ten idle windows")
+}
+
+// TestGRPCServer_ConnectionBeyondPerIPCapIsRefused is the end-to-end arm over
+// real TCP.
+//
+// THE LAST TWO BLOCKS ARE THE POINT. Refusing the third connection is also what
+// happens under the single most dangerous mis-implementation - returning an
+// error from Accept, which grpc.Server.Serve treats as fatal
+// (grpc@v1.80.0/server.go:944-951) and which kills the listener entirely. A test
+// that stopped at "the third connection was refused" would pass under that
+// mutation. So: Serve must not have returned, and after a slot is released a
+// fresh peer must be able to open a REAL stream.
+//
+// RED at HEAD: with no limiter all three connections stay open and the read
+// blocks until its deadline.
+func TestGRPCServer_ConnectionBeyondPerIPCapIsRefused(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	lim := netlimit.Wrap(raw, netlimit.Config{MaxTotal: 100, MaxPerIP: 2})
+
+	stub := &blockingAgentService{entered: make(chan struct{}, 8)}
+	srv := grpc.NewServer(grpcServerOptions(grpcBounds{})...)
+	relayv1.RegisterAgentServiceServer(srv, stub)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(lim) }()
+	t.Cleanup(srv.Stop)
+
+	addr := raw.Addr().String()
+	dialRaw := func() net.Conn {
+		c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	c1 := dialRaw()
+	_ = dialRaw()
+	c3 := dialRaw()
+
+	require.NoError(t, c3.SetReadDeadline(time.Now().Add(3*time.Second)))
+	_, err = c3.Read(make([]byte, 1))
+	require.Error(t, err, "the third connection from one source IP must be refused (per-IP cap is 2)")
+	assert.False(t, errors.Is(err, os.ErrDeadlineExceeded),
+		"the third connection stayed open: either the limiter is not wired or it admitted over the cap")
+
+	select {
+	case err := <-serveErr:
+		t.Fatalf("grpc Serve RETURNED while the server should still be serving: %v. A refusal expressed "+
+			"as an Accept error is fatal to Serve, so the 'cap' would be a total outage.", err)
+	default:
+	}
+
+	require.NoError(t, c1.Close())
+	require.Eventually(t, func() bool {
+		cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = cc.Close() }()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if _, err := relayv1.NewAgentServiceClient(cc).Connect(ctx); err != nil {
+			return false
+		}
+		select {
+		case <-stub.entered:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}, 5*time.Second, 100*time.Millisecond,
+		"after releasing a slot, a fresh peer must be admitted AND able to open a real stream - which "+
+			"proves the listener is still alive and the accept loop continued past the refusal")
 }

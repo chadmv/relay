@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
+
+	"relay/internal/netlimit"
+
 	"strconv"
 	"time"
 
@@ -206,4 +211,46 @@ func grpcBoundsLine(b grpcBounds) string {
 	}
 	return fmt.Sprintf("gRPC admission: %d stream(s) per connection; connections %s, %s; %s",
 		grpcMaxConcurrentStreams, total, perIP, idle)
+}
+
+// grpcRefusalReportInterval is how often the refusal summary may speak. One line
+// per minute, and only when something moved.
+const grpcRefusalReportInterval = time.Minute
+
+// refusalReporter turns netlimit's counters into at most one log line per
+// interval. A line per refusal is deliberately NOT an option: it would be a new
+// unbounded attacker-driven log site inside the control that bounds
+// attacker-driven log volume. The line names counts and never addresses, so no
+// caller-supplied byte can reach the log through it.
+//
+// tick is separate from runRefusalReporter so the "only when counters move"
+// property can be driven directly, with no timer and no sleeping.
+type refusalReporter struct {
+	last netlimit.Stats
+	logf func(format string, args ...any)
+}
+
+func (r *refusalReporter) tick(s netlimit.Stats) {
+	if s == r.last {
+		return
+	}
+	r.logf("gRPC admission: %d connection(s) refused over the total cap and %d over the per-source-IP cap since startup",
+		s.RefusedTotal, s.RefusedPerIP)
+	r.last = s
+}
+
+// runRefusalReporter logs a refusal summary at most once per interval, in the
+// shape of runEnrollmentJanitor (cmd/relay-server/main.go:269).
+func runRefusalReporter(ctx context.Context, l *netlimit.Listener, interval time.Duration) {
+	r := &refusalReporter{logf: log.Printf}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.tick(l.Stats())
+		}
+	}
 }

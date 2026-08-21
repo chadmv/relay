@@ -16,6 +16,7 @@ import (
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/metrics"
+	"relay/internal/netlimit"
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/schedrunner"
 	"relay/internal/scheduler"
@@ -26,7 +27,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 )
 
 func main() {
@@ -182,18 +182,44 @@ func main() {
 		httpServer.AllowSelfRegister = allow
 	}
 
-	// Start gRPC.
-	grpcSrv := grpc.NewServer(
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    30 * time.Second, // ping after 30s of transport inactivity
-			Timeout: 10 * time.Second, // close the transport if no ack within 10s
-		}),
-	)
+	// Start gRPC. Admission on this port is bounded three ways - one stream per
+	// connection, a total and per-source-IP connection cap at the listener, and
+	// an idle-transport reaper - because every per-connection control this
+	// server ships (worker.ingestLogLimiter above all) states its budget per a
+	// unit that was previously unbounded. See cmd/relay-server/grpc_config.go.
+	grpcMaxConns, maxConnsMsg := parseConnLimit(
+		"RELAY_GRPC_MAX_CONNS", os.Getenv("RELAY_GRPC_MAX_CONNS"), defaultGRPCMaxConns)
+	if maxConnsMsg != "" {
+		log.Printf("WARNING: %s", maxConnsMsg)
+	}
+	grpcMaxConnsPerIP, perIPMsg := parseConnLimit(
+		"RELAY_GRPC_MAX_CONNS_PER_IP", os.Getenv("RELAY_GRPC_MAX_CONNS_PER_IP"), defaultGRPCMaxConnsPerIP)
+	if perIPMsg != "" {
+		log.Printf("WARNING: %s", perIPMsg)
+	}
+	grpcConnIdle, connIdleMsg := parseGRPCConnIdle(
+		"RELAY_GRPC_MAX_CONN_IDLE", os.Getenv("RELAY_GRPC_MAX_CONN_IDLE"), defaultGRPCMaxConnIdle)
+	if connIdleMsg != "" {
+		log.Printf("WARNING: %s", connIdleMsg)
+	}
+	grpcBnds := grpcBounds{
+		maxConns:      grpcMaxConns,
+		maxConnsPerIP: grpcMaxConnsPerIP,
+		maxConnIdle:   grpcConnIdle,
+	}
+	log.Print(grpcBoundsLine(grpcBnds))
+
+	grpcSrv := grpc.NewServer(grpcServerOptions(grpcBnds)...)
 	relayv1.RegisterAgentServiceServer(grpcSrv, agentHandler)
-	grpcLis, err := net.Listen("tcp", grpcAddr)
+	grpcRawLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		log.Fatalf("listen gRPC: %v", err)
 	}
+	grpcLis := netlimit.Wrap(grpcRawLis, netlimit.Config{
+		MaxTotal: grpcBnds.maxConns,
+		MaxPerIP: grpcBnds.maxConnsPerIP,
+	})
+	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
 	go func() {
 		log.Printf("gRPC listening on %s", grpcAddr)
 		if err := grpcSrv.Serve(grpcLis); err != nil {

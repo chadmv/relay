@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 	"time"
 
+	"relay/internal/netlimit"
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/stretchr/testify/assert"
@@ -202,4 +206,181 @@ func TestGRPCBoundsLine(t *testing.T) {
 	off := grpcBoundsLine(grpcBounds{})
 	assert.Equal(t, 3, strings.Count(off, "DISABLED"),
 		"all three knobs off is the single most important thing this line can say")
+}
+
+// TestRefusalSummaryLogsOnlyWhenCountersMove.
+//
+// A log.Printf per refused connection would be a new, unbounded,
+// ATTACKER-DRIVEN log site on the exact path this slice exists to bound - the
+// 2026-08-15 lesson one layer down. The reporter is bounded at one line per
+// interval BY CONSTRUCTION, and it carries counts only.
+//
+// This test is necessary and NOT sufficient: adding a per-refusal line inside
+// netlimit leaves this reporter perfectly correct. That half is pinned by
+// TestLimitListener_RefusalWritesNothingToTheLog, in the package where the
+// refusal happens.
+func TestRefusalSummaryLogsOnlyWhenCountersMove(t *testing.T) {
+	type line struct {
+		format string
+		args   []any
+	}
+	var lines []line
+	r := &refusalReporter{logf: func(f string, a ...any) { lines = append(lines, line{f, a}) }}
+
+	r.tick(netlimit.Stats{})
+	assert.Empty(t, lines, "a quiet interval must produce no line at all")
+
+	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	require.Len(t, lines, 1, "the first movement must be reported")
+
+	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	assert.Len(t, lines, 1,
+		"an unchanged counter must not re-log: a sustained attack must cost ONE line per interval, not one per tick")
+
+	r.tick(netlimit.Stats{RefusedTotal: 2, RefusedPerIP: 3})
+	require.Len(t, lines, 2, "a movement on the OTHER counter must also be reported")
+
+	for i, l := range lines {
+		assert.Contains(t, l.format, "%d", "line %d must be a counts template", i)
+		require.NotEmpty(t, l.args)
+		for _, a := range l.args {
+			assert.IsType(t, uint64(0), a,
+				"the summary must carry COUNTS ONLY. A caller-supplied byte here (a peer address) would "+
+					"make this an attacker-writable log site inside the slice that bounds attacker-driven "+
+					"log volume.")
+		}
+	}
+}
+
+// TestGRPCAdmissionIsWiredByMain is a structural guard in the same spirit as
+// TestWatchdogIsStartedByMain (watchdog_config_test.go:129). Deleting the
+// netlimit.Wrap call from main.go compiles and leaves `go test ./...` fully
+// green - netlimit keeps its own passing unit tests, grpc_config keeps its own,
+// and the agent port silently has no connection bound again, which is the entire
+// bug. The end-to-end test next door builds its OWN listener, so it cannot see
+// this.
+//
+// go/ast, NOT a regex: a source-scanning regex guard in this repo was proven
+// breakable by a single stray comment.
+//
+// WHAT IT CANNOT REACH, stated rather than overclaimed: it cannot tell that
+// `grpcBnds = grpcBounds{}` inserted just above the Wrap call disables both caps,
+// and it cannot tell that runRefusalReporter was handed a pre-cancelled context.
+// Both compile and both leave every package green.
+func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err)
+
+	// name assigned -> identifiers its RHS mentions, so the walk can follow
+	// `x := netlimit.Wrap(...)` and then srv.Serve(x).
+	from := map[string][]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		var rhs []string
+		for _, e := range as.Rhs {
+			ast.Inspect(e, func(m ast.Node) bool {
+				if id, ok := m.(*ast.Ident); ok {
+					rhs = append(rhs, id.Name)
+				}
+				return true
+			})
+		}
+		for _, l := range as.Lhs {
+			if id, ok := l.(*ast.Ident); ok {
+				from[id.Name] = append(from[id.Name], rhs...)
+			}
+		}
+		return true
+	})
+	reaches := func(seed, target string) bool {
+		seen := map[string]bool{}
+		queue := []string{seed}
+		for len(queue) > 0 {
+			name := queue[0]
+			queue = queue[1:]
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if name == target {
+				return true
+			}
+			queue = append(queue, from[name]...)
+		}
+		return false
+	}
+	mentions := func(n ast.Node, want string) bool {
+		found := false
+		ast.Inspect(n, func(m ast.Node) bool {
+			if id, ok := m.(*ast.Ident); ok && id.Name == want {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+
+	// 1. The listener handed to Serve must derive from netlimit.Wrap.
+	var serveArg string
+	ast.Inspect(file, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := ce.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Serve" || len(ce.Args) != 1 {
+			return true
+		}
+		if id, ok := ce.Args[0].(*ast.Ident); ok {
+			serveArg = id.Name
+		}
+		return true
+	})
+	require.NotEmpty(t, serveArg, "main.go has no `<server>.Serve(<listener>)` call with a single identifier argument")
+	require.True(t, reaches(serveArg, "Wrap"),
+		"the listener passed to grpcSrv.Serve(%s) does not derive from netlimit.Wrap: the gRPC port has NO "+
+			"connection cap, in total or per source IP, and nothing else fails", serveArg)
+
+	// 2. grpc.NewServer must be built from grpcServerOptions, or the stream cap,
+	//    the keepalive policy and MaxConnectionIdle are all absent.
+	var newServer *ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := ce.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewServer" {
+			newServer = ce
+		}
+		return true
+	})
+	require.NotNil(t, newServer, "main.go no longer calls grpc.NewServer")
+	require.True(t, mentions(newServer, "grpcServerOptions"),
+		"grpc.NewServer must be built from grpcServerOptions(...): otherwise MaxConcurrentStreams, the "+
+			"keepalive enforcement policy and MaxConnectionIdle are all silently absent")
+
+	// 3. The refusal reporter must be started, and NOT from inside a conditional.
+	//    A `go` statement nested in an if-body would leave refusals unreported
+	//    while an ast.Inspect walk happily found it.
+	started := false
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		for _, stmt := range fn.Body.List {
+			gs, ok := stmt.(*ast.GoStmt)
+			if ok && mentions(gs.Call, "runRefusalReporter") {
+				started = true
+			}
+		}
+	}
+	require.True(t, started,
+		"main.go has no `go runRefusalReporter(...)` statement directly in a function body: refused "+
+			"connections are counted and never surfaced, so an operator sees agents fail to appear with "+
+			"nothing in the log")
 }
