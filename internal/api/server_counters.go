@@ -89,8 +89,25 @@ type GRPCAdmissionSource interface {
 
 // CounterSources is the set of subsystem counter sources the endpoint
 // assembles. Every field is nil-able and nil means the section is ABSENT from
-// the payload, not zero. cmd/relay-server sets this after construction, in the
-// established shape of Server.Metrics.
+// the payload, not zero.
+//
+// "NIL" HERE MEANS A NIL INTERFACE, AND A TYPED NIL IS NOT ONE. Storing a
+// (*scheduler.Watchdog)(nil) - or any other typed nil pointer - in one of these
+// fields produces an interface that is NOT == nil, so handleServerCounters'
+// `src != nil` is true and the method call below it dereferences a nil receiver.
+// Per admin request, that is a goroutine stack trace to the log, inside the
+// feature whose subject is bounding log volume.
+//
+// This is not hypothetical for the next section to land. The watchdog is
+// legitimately disable-able (RELAY_TASK_WATCHDOG_MARGIN=0 and
+// RELAY_TASK_MAX_ASSIGNMENT=0), so `var wd *scheduler.Watchdog; if enabled
+// { wd = ... }; CounterSources{Watchdog: wd}` is the natural shape and it
+// panics. Filter the typed nil where the CONCRETE type is still visible, at the
+// wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
+// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent is its guard. Do
+// not instead make the source's snapshot method nil-tolerant - returning a zero
+// snapshot turns an unwired control into a section of zeros, which is the one
+// distinction this payload exists to preserve.
 type CounterSources struct {
 	GRPCAdmission GRPCAdmissionSource
 }

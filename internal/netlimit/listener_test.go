@@ -273,7 +273,10 @@ func TestLimitListener_ZeroDisables(t *testing.T) {
 		require.NoError(t, err, "conn %d must be admitted when both caps are disabled", i)
 		require.NotNil(t, c)
 	}
-	assert.Equal(t, Stats{}, l.Stats(), "nothing may be counted as refused when both caps are off")
+	assert.Equal(t, Stats{}, l.Stats(),
+		"with both caps off the listener does no accounting at all, so EVERY field stays zero - not just "+
+			"the refusal counts. That is what makes a zero level here mean 'not measured' rather than "+
+			"'nothing there', which README and Stats both have to state because the payload cannot.")
 }
 
 // TestLimitListener_RefusalWritesNothingToTheLog.

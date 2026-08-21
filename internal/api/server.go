@@ -38,13 +38,19 @@ type Server struct {
 	Metrics *metrics.Store
 
 	// Counters, when its fields are non-nil, supplies process-lifetime counters
-	// for GET /v1/server/counters. Set by cmd/relay-server after construction.
-	// A nil field means the section is ABSENT from the payload, not zero.
+	// for GET /v1/server/counters. A nil field means the section is ABSENT from
+	// the payload, not zero. Set by cmd/relay-server's buildHTTPServer, which
+	// owns construction of this value and of the http.Server that serves it -
+	// see the typed-nil note on CounterSources before wiring a new section.
 	Counters CounterSources
 
-	// startedAt is when this server object was constructed, i.e. process start.
-	// It is in the payload because a restart zeroes every counter, so a stalled
-	// counter and a restart are otherwise identical.
+	// startedAt is when this server object was constructed - which is NOT
+	// process start, and the difference is worth a sentence because the field is
+	// served to operators. New runs after the pool, the migrations and the
+	// bootstrap admin, and the counters it timestamps do not start moving until
+	// cmd/relay-server has built the bounded gRPC listener. Read it as "when
+	// these counters began", which is what it is for: a restart zeroes every
+	// counter, so a stalled counter and a restart are otherwise identical.
 	startedAt time.Time
 
 	// StaticHandler, when non-nil, serves the embedded web UI for any path not
