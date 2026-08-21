@@ -128,7 +128,9 @@ type IngestLogBudgetSource interface {
 // { wd = ... }; CounterSources{Watchdog: wd}` is the natural shape and it
 // panics. Filter the typed nil where the CONCRETE type is still visible, at the
 // wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
-// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent is its guard. Do
+// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent plus
+// TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent are its
+// guards - one per wired source, because the filter is per FIELD. Do
 // not instead make the source's snapshot method nil-tolerant - returning a zero
 // snapshot turns an unwired control into a section of zeros, which is the one
 // distinction this payload exists to preserve.
