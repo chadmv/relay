@@ -211,6 +211,14 @@ func TestIngestLogCounters_EveryKindIsPublishedDistinctly(t *testing.T) {
 // that kills the process (Connect has no recover; grpc-go does not recover
 // handler panics). It is unreachable while the two kind guards above are green,
 // and this test exists so that "unreachable" does not mean "untested".
+//
+// IT ASSERTS ON THE WHOLE ARRAY, NOT ON THE SNAPSHOT, and that is not
+// thoroughness for its own sake - the snapshot version SURVIVED a mutation.
+// Slot 0 exists (the kinds start at 1) and no published field reads it, so
+// relaxing the guard from `i <= 0` to `i < 0` files kind 0 into a cell nobody
+// looks at: no panic, no visible number, and a snapshot-only assertion stays
+// green. Reading c.n directly is what makes the message's own claim - "not
+// folded into SOME OTHER CELL" - checkable.
 func TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked(t *testing.T) {
 	var c ingestLogCounters
 	require.NotPanics(t, func() {
@@ -222,6 +230,14 @@ func TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked(t *testing.T) {
 	})
 	require.Equal(t, IngestLogDrops{}, c.snapshot(),
 		"an out-of-range kind or arm must be dropped, not folded into some other cell")
+	for k := range c.n {
+		for arm := range c.n[k] {
+			require.Zero(t, c.n[k][arm].Load(),
+				"cell [%d][%d] is non-zero. Every call above was out of range, so NOTHING may have "+
+					"been written anywhere in this array - including slot 0, which is unpublished and "+
+					"therefore invisible to the snapshot assertion above.", k, arm)
+		}
+	}
 }
 
 // TestIngestLogLimiter_TheDedupeArmCountsDeduped. One key logged twice inside
