@@ -1080,27 +1080,128 @@ func (q *Queries) NotifyTaskSubmitted(ctx context.Context) error {
 	return err
 }
 
-const requeueTask = `-- name: RequeueTask :exec
+const requeueTask = `-- name: RequeueTask :execrows
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, assigned_at = NULL, started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status = 'dispatched'
+WHERE id = $1
+  AND assignment_epoch = $2
+  AND worker_id = $3
+  AND status = 'dispatched'
 `
 
-// Revert a single task from 'dispatched' back to 'pending'.
-// Used when the registry send fails after the task has been claimed.
-// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
+type RequeueTaskParams struct {
+	ID              pgtype.UUID `json:"id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
+	WorkerID        pgtype.UUID `json:"worker_id"`
+}
+
+// Revert a single task from 'dispatched' back to 'pending', on the SAME FOUR
+// predicates as RequeueTaskByID: id (which row), assignment_epoch (is the
+// caller's view still current), worker_id (is this the caller's own
+// assignment), status (is the row still dispatched at all).
+//
+// THIS IS THE SECOND OF TWO STATEMENTS THAT HAD THE UNFENCED SHAPE, AND BOTH ARE
+// NOW FENCED. Recorded here because
+// bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence says
+// RequeueTaskByID was "the only requeue statement in the tree whose WHERE clause
+// names nothing but the task id and a status allow-list". That was FALSE when it
+// was written: this statement, three statements away in this same file, had
+// exactly that WHERE. The sweep is finished - do not re-derive it.
+//
+// Used when the registry send fails after the task has been claimed
+// (internal/scheduler/dispatch.go).
+//
+// WHICH SEND FAILURE ACTUALLY LEAVES A WINDOW. An earlier version of this
+// comment said the window is reachable because "a disconnected worker is what
+// arms its own grace timer". THAT WAS WRONG and it is written down so nobody
+// reinstates it: the two halves cannot co-occur. If the worker is gone from the
+// registry, Registry.Send returns before workerSender.Send is ever reached, so
+// there is no window at all. If the worker DISCONNECTED, sender.closed is closed
+// when the send loop returns, so a blocked Send takes `case <-sender.closed` and
+// returns IMMEDIATELY - and teardownConnection closes the sender before it calls
+// h.grace.Start, so this requeue is unblocked strictly before the grace timer is
+// even armed, which then waits its full window on top.
+//
+// The only branch that burns the 5s sendTimeout is `case <-timeout.C` on a full
+// 64-slot queue, which requires the send loop alive inside stream.Send: the
+// worker is WEDGED BUT STILL REGISTERED, online, and has no grace timer armed.
+// Two mechanisms reach the race from there, and neither involves a grace timer:
+//   - ADMIN DISABLE. handleDisableWorker (internal/api/workers.go) calls
+//     RequeueWorkerTasks, which returns T to 'pending' and bumps the epoch; the
+//     dispatcher re-claims it for W2; the still-wedged goroutine then fires this
+//     statement on its stale snapshot.
+//   - A SECOND Connect FROM THE SAME AGENT while the first stream is wedged.
+//     Nothing serializes Connect per worker. The new stream's reconcile sees T
+//     as 'dispatched', the agent does not report it (it never received it), the
+//     SIBLING statement requeues it, triggerDispatch fires, W2 gets it, and the
+//     wedged goroutine tears it off. No admin, no grace timer.
+//
+// In both, a fresh assignment is 'dispatched', so on the id and the status alone
+// this statement MATCHED and tore a live task off W2 - duplicate execution with
+// no log line anywhere, the same end state as its sibling.
+//
+// THE STATUS PREDICATE STAYS 'dispatched' ONLY, pinned by
+// TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath. Do not widen it
+// to include 'running' for symmetry with RequeueTaskByID: at this caller's own
+// (epoch, worker) pair the task cannot have reported running - for any agent
+// that only reports epochs it was actually dispatched - because the Send that
+// would have delivered the dispatch is the thing that just failed.
+// BE PRECISE ABOUT WHAT THAT PROOF COVERS, because the next reader will use this
+// paragraph to decide whether the epoch is coordinator-side or agent-side.
+// workerSender.Send has exactly TWO error values, ErrWorkerDisconnected and
+// ErrSendTimeout, and both are select branches mutually exclusive with the
+// enqueue, so on either the DispatchTask was never queued, never written to the
+// stream, and never seen by the agent. The third case, "worker is not
+// connected", is Registry.Send's own error, returned before workerSender.Send is
+// reached - so it never enqueues either, but it is NOT a select branch and the
+// mutual-exclusion argument does not cover it. The residual gap is that
+// handleTaskStatus takes the epoch OFF THE WIRE and compares it to the DB's
+// current value, so a connected agent that is the current assignee could report
+// 'running' at an epoch it was never dispatched. That needs a task id it would
+// not otherwise know, and the watchdog bounds it, so the decision here is
+// unaffected - but it is why this says "cannot for a well-behaved agent" rather
+// than "cannot".
+//
+// The worker_id comparison must stay a plain `=`, never IS NOT DISTINCT FROM:
+// tasks.worker_id is NULLABLE and a zero-value pgtype.UUID binds SQL NULL, so
+// `=` makes a caller that lost its identity fail CLOSED instead of matching an
+// unassigned row. TestRequeueTask_NullWorkerIDDoesNotMatchANullArgument PLANTS
+// the row it tests, because the status predicate makes that state unreachable
+// through production statements - a second guarantee behind the first, not a
+// reason to relax the first.
+//
+// Bumps assignment_epoch so a late update from the prior assignment is fenced
+// out. The bump is inside the same UPDATE as the WHERE, so it happens only for
+// rows that actually matched - the "conditionally end the assignment" branch of
+// the epoch fence, never an unconditional bump.
+//
+// :execrows, not :exec, matching its sibling, so the fence tests can assert a
+// rowcount rather than infer rejection from row state. THE CALLER DISCARDS THE
+// COUNT DELIBERATELY and that is not copied reasoning: unlike the reconcile
+// path, this site is in the dispatcher and DOES have a log budget - it already
+// logs the send failure unconditionally on the line above. A second line saying
+// the requeue moved nothing would add no information that line does not already
+// carry, and would double the volume of an already-unbudgeted path. Zero rows is
+// the CORRECT outcome anyway: another writer ended this assignment first, and
+// dispatchOne returns false either way.
 //
 //	UPDATE tasks
 //	SET status = 'pending', worker_id = NULL, assigned_at = NULL, started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE id = $1 AND status = 'dispatched'
-func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, requeueTask, id)
-	return err
+//	WHERE id = $1
+//	  AND assignment_epoch = $2
+//	  AND worker_id = $3
+//	  AND status = 'dispatched'
+func (q *Queries) RequeueTask(ctx context.Context, arg RequeueTaskParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueTask, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const requeueTaskByID = `-- name: RequeueTaskByID :exec
+const requeueTaskByID = `-- name: RequeueTaskByID :execrows
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -1108,22 +1209,78 @@ SET status = 'pending',
     started_at = NULL,
     finished_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status IN ('dispatched', 'running')
+WHERE id = $1
+  AND assignment_epoch = $2
+  AND worker_id = $3
+  AND status IN ('dispatched', 'running')
 `
 
-// Revert a single ASSIGNED task back to 'pending': the WHERE clause matches only
-// `dispatched` and `running`, so a task that has already finished - or that was
-// already requeued by someone else - is left exactly as it is.
+type RequeueTaskByIDParams struct {
+	ID              pgtype.UUID `json:"id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
+	WorkerID        pgtype.UUID `json:"worker_id"`
+}
+
+// Revert a single ASSIGNED task back to 'pending', on FOUR predicates. Each
+// answers a different question, none is redundant with the others, and none may
+// be deleted:
+//   - id               - WHICH ROW.
+//   - assignment_epoch - IS THE CALLER'S VIEW STILL CURRENT? (currency)
+//   - worker_id        - IS THIS THE CALLER'S OWN ASSIGNMENT? (identity)
+//   - status           - IS THE ROW STILL ASSIGNED AT ALL, i.e. not terminal.
+//
 // Used by the reconcile path when the coordinator has a task assigned that the
-// agent didn't report as running. Candidates come from GetActiveTasksForWorker,
-// which filters on the same two statuses, so the predicate is normally redundant
-// with the caller; it is the backstop for the window between that read and this
-// write, and it is what keeps reconcile from being able to resurrect a terminal
-// task.
-// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
-// The bump is inside the same UPDATE as the WHERE, so it happens only for rows
-// that actually matched - the "conditionally end the assignment" branch of the
-// epoch fence, never an unconditional bump.
+// agent didn't report as running (internal/worker/handler.go,
+// reconcileRunningTasks). Candidates come from GetActiveTasksForWorker, which
+// reads the id and the epoch under one snapshot; the worker id is the
+// connection's own, resolved at registration and never taken from the wire.
+//
+// WHAT THE STATUS ALLOW-LIST ALONE DOES NOT COVER, and what this comment used to
+// claim it did. It called the allow-list "the backstop for the window between
+// that read and this write". It is the backstop for exactly ONE thing that can
+// happen in that window - the task FINISHING - and it was silent about the more
+// damaging one: the task being requeued by somebody else and RE-DISPATCHED to a
+// second worker. A fresh assignment is 'dispatched', which the allow-list
+// admits, so a reconcile walking a stale snapshot used to tear a live task off a
+// worker that had only just been given it, bump the epoch, and leave the first
+// agent's subprocess running with every message it sent afterwards fenced out in
+// silence - duplicate execution, with no log line anywhere. Two overlapping
+// registrations of one worker reach that, and so does a grace timer firing just
+// before finishRegister cancels it. See
+// bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence.
+//
+// The epoch predicate closes it: a re-dispatch bumps assignment_epoch, so the
+// stale caller's epoch no longer matches and zero rows move. The worker
+// predicate closes it independently AND closes what the epoch cannot, because
+// THE EPOCH ESTABLISHES CURRENCY, NOT IDENTITY: a matching epoch proves the
+// caller's generation is current, never that the caller was entitled to end it.
+// Keep all four.
+//
+// The worker_id comparison must stay a plain `=`, never IS NOT DISTINCT FROM,
+// for exactly the reason spelled out at UpdateTaskStatus: tasks.worker_id is
+// NULLABLE and a zero-value pgtype.UUID binds SQL NULL, so `=` makes a caller
+// that lost its identity fail CLOSED instead of matching an unassigned row. Do
+// not "fix the NULL bug" here either. The status allow-list happens to make that
+// state unreachable today - a row with a NULL worker_id is 'pending' or terminal,
+// and neither is admitted - which is why
+// TestRequeueTaskByID_NullWorkerIDDoesNotMatchANullArgument has to PLANT the row
+// it tests. That is a second guarantee behind the first, not a reason to relax
+// the first.
+//
+// Bumps assignment_epoch so a late update from the prior assignment is fenced
+// out. The bump is inside the same UPDATE as the WHERE, so it happens only for
+// rows that actually matched - the "conditionally end the assignment" branch of
+// the epoch fence, never an unconditional bump.
+//
+// :execrows, not :exec, so the caller counts MATCHES rather than ATTEMPTS. Zero
+// rows is a NORMAL, CORRECT outcome here - it means another writer ended this
+// assignment first - and it is deliberately neither logged nor counted: this
+// runs inside finishRegister, ahead of the connection's ingestLogLimiter, so the
+// site has no budget to spend, and Handler.Metrics is a utilization ring buffer
+// that is not even Activated yet at that point. The general gap is tracked by
+// idea-2026-08-14-tasklog-fence-rejection-is-unobservable; do not close it here
+// with a one-off.
+//
 // assigned_at is nulled alongside worker_id. Every statement in this file that
 // nulls worker_id does the same, and ClaimTaskForWorker is the only statement
 // that sets either.
@@ -1146,10 +1303,16 @@ WHERE id = $1 AND status IN ('dispatched', 'running')
 //	    started_at = NULL,
 //	    finished_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE id = $1 AND status IN ('dispatched', 'running')
-func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, requeueTaskByID, id)
-	return err
+//	WHERE id = $1
+//	  AND assignment_epoch = $2
+//	  AND worker_id = $3
+//	  AND status IN ('dispatched', 'running')
+func (q *Queries) RequeueTaskByID(ctx context.Context, arg RequeueTaskByIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueTaskByID, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const requeueWorkerTasks = `-- name: RequeueWorkerTasks :many

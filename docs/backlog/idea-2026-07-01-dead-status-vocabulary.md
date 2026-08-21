@@ -3,7 +3,7 @@ title: Remove dead 'queued'/'dispatched' status vocabulary from CancelJobTasks a
 type: idea
 status: open
 created: 2026-07-01
-updated: 2026-08-14
+updated: 2026-08-20
 priority: low
 source: ROADMAP deep-refresh gaps sweep (2026-06-26)
 ---
@@ -51,11 +51,51 @@ If a future sweep wants to argue that unreachable-but-valid vocabulary is also w
 a different item with a different (and much weaker) case, and it has to be argued against the
 byte-identical-siblings rule rather than around it.
 
+### Evidence added 2026-08-20 - the lockstep guard grew to thirteen sites and still does not name `CancelJobTasks`
+
+No scope change; the two statements this item claims are unchanged. What is new is leverage, and a
+reason the item is worth more than its `low` priority suggests.
+
+The 2026-08-20 requeue-fence slice expanded `TestTasksStatusVocabularyIsExactly`
+(`internal/store/tasks_status_vocabulary_lockstep_test.go`) from **seven** named statements to
+**thirteen**, adding `RequeueTask`, `RequeueTaskByID`, `RequeueWorkerTasks`,
+`RequeueWorkerTasksIfEpoch`, `GetActiveTasksForWorker` and `ListGraceCandidates`, with per-site
+guidance and a failure message stating that seven of the thirteen fail **open** when a status is
+omitted.
+
+`CancelJobTasks` is still not on that list. It appears in the test's preamble only, and as
+*motivation* rather than as a site - "CancelJobTasks squashes cancellation onto `failed` today, so
+somebody will eventually want the real thing". But it does slice the vocabulary:
+
+```sql
+WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched');
+```
+
+So the guard whose entire purpose is to force a per-site decision when the vocabulary moves would not
+name the one statement whose filter is **already wrong** - and, per its own preamble, the concrete
+near-term candidate for a new status is a task-level `cancelled`, which is exactly the change that
+would send a reader to `CancelJobTasks` first.
+
+Two consequences for whoever picks this up:
+
+- The fix is now cheaper than when this was filed. The guard's per-site prose exists for twelve of the
+  thirteen neighbours; `CancelJobTasks` needs one entry written in the same shape, and the entry
+  writes itself once the dead `'queued'` literal is gone.
+- Getting there via the guard is the better order: add the site to the guard's list **and** trim the
+  literal in the same commit, so the list and the statement are correct at the same moment. Adding it
+  to the list while the dead literal is still there would enshrine the wrong filter as reviewed.
+
+Source: `docs/retros/2026-08-20-requeue-task-by-id-fence.md`.
+
 ## Acceptance / Done When
 - Each query filters only on statuses valid for its table per the 000019 CHECK constraints.
 - `make generate` run; the diff is query-only and behavior is unchanged.
 - No allow-list in the epoch-fence family (`AppendTaskLog`, `UpdateTaskStatus`,
   `IncrementTaskRetryCount`, `RetryJobTasks`, `SelectRetryableTaskIDs`) is edited.
+- **Added 2026-08-20:** `CancelJobTasks` is named in `TestTasksStatusVocabularyIsExactly`'s statement
+  list and failure message, with per-site prose in the same shape as its neighbours, in the same
+  commit that trims its filter. (`CountActiveJobsForSchedule` is out of that guard's scope - it
+  partitions `jobs.status`, not `tasks.status`.)
 
 ## Related
 - Found in the same sweep as `bug-2026-06-26-retry-resurrects-cancelled-task`, closed 2026-08-12
@@ -63,8 +103,9 @@ byte-identical-siblings rule rather than around it.
   `tasks_status_check` vocabulary is exactly the six live values and names every query that
   partitions it - useful leverage for this cleanup, and the test that will go RED if this idea is
   implemented by widening or narrowing the vocabulary rather than only removing dead filters. **That
-  guard now names six sites, and the sixth (`AppendTaskLog`) has inverted guidance** - read its
-  comment before touching anything it names.
+  guard now names THIRTEEN sites (was six, then seven), and two of them - `AppendTaskLog` and the
+  whole "currently assigned" partition - have inverted guidance** - read its comment before touching
+  anything it names.
 - Source: `internal/store/query/tasks.sql` (`CancelJobTasks`),
   `internal/store/query/scheduled_jobs.sql` (`CountActiveJobsForSchedule`),
   `internal/store/migrations/000019_status_vocabulary_checks.up.sql`. **Citations converted from line
@@ -73,6 +114,9 @@ byte-identical-siblings rule rather than around it.
 - The slice that added the sixth site and the scope boundary above:
   `docs/superpowers/specs/2026-08-14-tasklog-terminal-append-bound.md`,
   `docs/retros/2026-08-14-tasklog-terminal-append-bound.md`
+- The slice that took the guard from seven sites to thirteen and left `CancelJobTasks` off it:
+  [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]],
+  `docs/retros/2026-08-20-requeue-task-by-id-fence.md`
 
 ## Notes
 Cosmetic/consistency only. Remember the sqlc regeneration and the CRLF/LF hygiene noted in CLAUDE.md

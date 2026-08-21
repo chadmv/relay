@@ -88,14 +88,51 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     anything: this statement is read-only, and UpdateTaskStatus's own
 //     allow-list would reject the write regardless. Including one simply buys a
 //     guaranteed zero-row round trip on every sweep, forever.
+//   - THE ASSIGNMENT-PARTITION GROUP - GetActiveTasksForWorker,
+//     ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks and
+//     RequeueWorkerTasksIfEpoch (query/tasks.sql), all carrying the identical
+//     `status IN ('dispatched','running')`. THESE ARE INVERTED, exactly like
+//     ListOverdueAssignedTasks, and they were missing from this list until the
+//     RequeueTaskByID fence slice - which means five of the eight sites that
+//     slice the "currently assigned" partition were unlisted while the one that
+//     motivated the warning was spelled out at length.
+//     A new NON-TERMINAL status omitted here fails OPEN in the damaging
+//     direction at every one of them at once. Trace `preparing`, this file's own
+//     named candidate: a task sitting in it through a long P4 sync is invisible
+//     to GetActiveTasksForWorker, so reconcile never sees it and never requeues
+//     it; invisible to ListGraceCandidates, so no grace timer covers it;
+//     unmatched by all three requeue statements, so neither a disconnect nor an
+//     admin disable releases it; and already unswept by
+//     ListOverdueAssignedTasks. It holds its worker slot and its job FOREVER,
+//     with no error and no log line - and it is outside idx_tasks_worker_active
+//     as well. A new non-terminal status MUST BE ADDED to all five. A new
+//     TERMINAL status must stay OUT: the three requeue statements write, so
+//     admitting one would let a requeue resurrect a finished task, which is the
+//     guarantee TestRequeueTaskByID_TerminalTaskIsNotResurrected pins.
+//     The positive arm is pinned too, and needs to stay pinned:
+//     TestRequeueTaskByID_RequeuesARunningTaskForItsAssignee exists because
+//     halving that IN list to ('dispatched') left the store, worker, scheduler
+//     and api suites ALL GREEN while silently stranding reconcile's dominant
+//     case.
+//   - RequeueTask (query/tasks.sql) - `status = 'dispatched'`, and the one
+//     member of the requeue family that is DELIBERATELY NARROWER than the group
+//     above. Do not "harmonize" it by adding 'running'. Its only caller is the
+//     dispatcher's send-failure path, where the dispatch never reached the agent,
+//     so the task cannot be running for any agent that reports only epochs it was
+//     actually dispatched; the full argument is in the statement's own comment.
+//     TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath pins it. A new
+//     status belongs here only if a task can be in it while its DispatchTask is
+//     still in flight.
 //
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
 // equivalent deny-list a new status would be writable and retryable by default,
-// and this test would be the last chance to notice. AppendTaskLog and
-// ListOverdueAssignedTasks are the two sites where the allow-list points the
-// other way, which is why both are spelled out at length above rather than
-// folded into the list.
+// and this test would be the last chance to notice. AppendTaskLog and the whole
+// "currently assigned" partition - ListOverdueAssignedTasks plus the
+// assignment-partition group - are where the allow-list points the OTHER way and
+// omission fails open, which is why they are spelled out at length above rather
+// than folded into the list. Count them before assuming the fail-closed default:
+// seven of the thirteen sites named here are inverted.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -115,8 +152,14 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	require.Equal(t, want, got,
 		"tasks.status vocabulary changed - read this test's comment before updating it. These statements slice "+
 			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
-			"SelectRetryableTaskIDs, AppendTaskLog and ListOverdueAssignedTasks. Revisit ALL OF THEM. The last "+
-			"two fail OPEN in the damaging direction: a new NON-TERMINAL status omitted from AppendTaskLog's "+
-			"first arm silently discards 100% of that state's log output, and one omitted from "+
-			"ListOverdueAssignedTasks means a task in that state is never swept and holds its assignment forever")
+			"SelectRetryableTaskIDs, AppendTaskLog, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
+			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks and RequeueWorkerTasksIfEpoch. "+
+			"Revisit ALL OF THEM. SEVEN fail OPEN in the damaging direction. A new NON-TERMINAL status omitted "+
+			"from AppendTaskLog's first arm silently discards 100% of that state's log output. One omitted from "+
+			"the six that carry the 'currently assigned' partition - ListOverdueAssignedTasks, "+
+			"GetActiveTasksForWorker, ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks and "+
+			"RequeueWorkerTasksIfEpoch - means a task in that state is never seen by reconcile, never covered by "+
+			"a grace timer, never requeued on disconnect or disable, and never swept: it holds its worker slot "+
+			"and its job forever, with no error and no log line. RequeueTask's narrower 'dispatched'-only "+
+			"predicate is deliberate - see its own comment before touching it")
 }

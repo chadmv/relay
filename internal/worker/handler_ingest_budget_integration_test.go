@@ -428,7 +428,10 @@ func TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll(t *testing.T) {
 	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "fence-silent@example.com", "w-fence-silent")
 	taskIDStr := h.UUIDStringForTest(taskID)
 
-	require.NoError(t, q.RequeueTask(ctx, taskID))
+	_, err := q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: taskID, AssignmentEpoch: epoch, WorkerID: workerID,
+	})
+	require.NoError(t, err)
 	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: workerID})
 	require.NoError(t, err)
 	require.Equal(t, epoch+2, fresh.AssignmentEpoch, "fixture: requeue and redispatch bump twice")
