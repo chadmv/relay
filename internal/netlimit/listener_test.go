@@ -138,3 +138,91 @@ func TestLimitListener_AcceptErrorFromUnderlyingListenerPropagates(t *testing.T)
 var _ = bytes.MinRead
 var _ = fmt.Sprintf
 var _ = log.Flags
+
+// TestLimitListener_CloseReleasesTheSlot. A leak here converts the limiter from
+// a cap into a permanent lockout, which is strictly worse than no cap at all.
+func TestLimitListener_CloseReleasesTheSlot(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1001")
+	c2 := newFakeConn("10.0.0.1:1002")
+	c3 := newFakeConn("10.0.0.1:1003")
+	l := Wrap(&fakeListener{conns: []net.Conn{c1, c2, c3}}, Config{MaxTotal: 100, MaxPerIP: 2})
+
+	got1, err := l.Accept()
+	require.NoError(t, err)
+	_, err = l.Accept()
+	require.NoError(t, err)
+
+	require.NoError(t, got1.Close())
+
+	got3, err := l.Accept()
+	require.NoError(t, err)
+	require.NotNil(t, got3)
+	assert.Equal(t, c3.remote.String(), got3.RemoteAddr().String(),
+		"closing an admitted conn must free its slot for the same source IP")
+	assert.Equal(t, int32(0), c3.closes.Load(), "the third conn was admitted; nothing should have closed it")
+}
+
+// TestLimitListener_DoubleCloseReleasesExactlyOneSlot.
+//
+// grpc-go double-closes routinely, not exceptionally: a peer that opens TCP and
+// hangs up before the HTTP/2 preface is closed by NewServerTransport's deferred
+// t.Close AND by newHTTP2Transport's c.Close. Without the sync.Once the counter
+// over-releases and the cap silently stops firing.
+func TestLimitListener_DoubleCloseReleasesExactlyOneSlot(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1001")
+	c2 := newFakeConn("10.0.0.1:1002")
+	c3 := newFakeConn("10.0.0.1:1003")
+	c4 := newFakeConn("10.0.0.1:1004")
+	l := Wrap(&fakeListener{conns: []net.Conn{c1, c2, c3, c4}}, Config{MaxTotal: 100, MaxPerIP: 2})
+
+	got1, err := l.Accept()
+	require.NoError(t, err)
+	_, err = l.Accept()
+	require.NoError(t, err)
+
+	require.NoError(t, got1.Close())
+	require.NoError(t, got1.Close(), "a second Close must be a no-op for accounting, not an error")
+
+	// White-box: exactly one slot came back.
+	l.mu.Lock()
+	total, perIP := l.total, l.perIP["10.0.0.1"]
+	l.mu.Unlock()
+	assert.Equal(t, 1, total, "a double Close must release ONE slot, not two")
+	assert.Equal(t, 1, perIP, "a double Close must release ONE per-IP slot, not two")
+
+	// And behaviourally: exactly ONE further conn is admitted, and the next is refused.
+	got3, err := l.Accept()
+	require.NoError(t, err)
+	assert.Equal(t, c3.remote.String(), got3.RemoteAddr().String())
+
+	got4, err := l.Accept()
+	assert.ErrorIs(t, err, errDrained,
+		"c4 must be REFUSED and the fake then drained: had the double Close opened a fourth slot, "+
+			"Accept would have returned c4 with a nil error")
+	assert.Nil(t, got4)
+	assert.Equal(t, int32(1), c4.closes.Load(), "the refused c4 must have been closed")
+}
+
+// TestLimitListener_ReleasedIPIsRemovedFromTheMap. Without delete-at-zero the
+// limiter is itself unbounded memory growth keyed on attacker-chosen source
+// addresses - the same defect one layer down from the one it closes.
+func TestLimitListener_ReleasedIPIsRemovedFromTheMap(t *testing.T) {
+	const n = 1000
+	conns := make([]net.Conn, 0, n)
+	for i := 0; i < n; i++ {
+		conns = append(conns, newFakeConn(fmt.Sprintf("10.0.%d.%d:1000", i/256%256, i%256)))
+	}
+	l := Wrap(&fakeListener{conns: conns}, Config{MaxTotal: 0, MaxPerIP: 4})
+
+	for i := 0; i < n; i++ {
+		c, err := l.Accept()
+		require.NoError(t, err)
+		require.NoError(t, c.Close())
+	}
+
+	l.mu.Lock()
+	size, total := len(l.perIP), l.total
+	l.mu.Unlock()
+	assert.Equal(t, 0, size, "every per-IP entry must be deleted when its count reaches zero")
+	assert.Equal(t, 0, total)
+}
