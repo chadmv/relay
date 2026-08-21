@@ -675,6 +675,7 @@ func TestLimitListener_BothCapsOffReturnsTheUnderlyingConnUnwrapped(t *testing.T
 	require.NoError(t, err)
 	assert.NotSame(t, inner2, got2, "a live cap needs the wrapper, or Close can never release the slot")
 }
+
 // TestStats_ReportsOccupancy is the "how full is it right now" half of
 // idea-2026-08-21-netlimit-occupancy-is-unobservable. Cumulative refusals cannot
 // answer it: a RefusedTotal that stopped moving means either the pressure ended
@@ -788,6 +789,15 @@ func TestStats_DistinguishesDistributedFromNAT(t *testing.T) {
 // synchronised and -race stays perfectly quiet under it. The INVARIANTS are the
 // instrument.
 //
+// THE INVARIANT HALF NEEDS MORE THAN ONE CPU AND THE VACUITY HALF NO LONGER
+// DOES, which is why they are made positive by different means. Measured: the
+// three-lock mutation is caught 10/10 at default GOMAXPROCS (`[{2 3 1}]` - two
+// live connections reported alongside three distinct sources) and 0/10 under
+// -cpu=1, where the reader is never preempted between the three acquisitions.
+// CI runs on a 2-4 vCPU runner, so the kill is live there; a 1-CPU cgroup would
+// merely stop detecting the mutation rather than fail, now that the two "saw"
+// counters are structural.
+//
 // The two "saw" counters are not decoration: a reader that only ever sampled an
 // empty listener would satisfy every invariant vacuously, which is the recorded
 // "measure the populated state" failure. They make the test fail when it proves
@@ -803,6 +813,24 @@ func TestStats_IsOneCriticalSection(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("10.9.%d.%d", i/256, i%256)
 	}
+
+	// THE POPULATED STATE IS STRUCTURAL, NOT HOPED FOR. The two "saw" counters
+	// below are the vacuity guard, and leaving them to interleaving made this
+	// test fail 30/30 under GOMAXPROCS=1 and 6/6 under -cpu=1 ("412628
+	// snapshots; 0 saw live connections"): the reader is an unsynchronised
+	// busy-spin, so on one CPU the churn goroutine runs its entire loop inside a
+	// single scheduling slice and every snapshot the reader takes is of an empty
+	// listener. CI runs -race on a 2-4 vCPU runner and any 1-CPU cgroup fails it
+	// every time. Admitting two sources BEFORE the churn starts and releasing
+	// them after it finishes puts a floor of LiveTotal>=2, DistinctSources>=2
+	// under every snapshot, so the guard is positive by construction while the
+	// churn still supplies the interleaving the invariant needs.
+	const (
+		pinnedA = "10.8.0.1"
+		pinnedB = "10.8.0.2"
+	)
+	require.True(t, l.admit(pinnedA))
+	require.True(t, l.admit(pinnedB))
 
 	stop := make(chan struct{})
 	var churn sync.WaitGroup
@@ -842,6 +870,8 @@ func TestStats_IsOneCriticalSection(t *testing.T) {
 		}
 	}
 	churn.Wait()
+	l.release(pinnedA)
+	l.release(pinnedB)
 
 	t.Logf("%d snapshots; %d saw live connections; %d saw more than one source", reads, sawLive, sawManySources)
 	require.Positive(t, sawLive,
