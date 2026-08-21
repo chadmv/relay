@@ -184,11 +184,24 @@ func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
 // buildHTTPServer.
 //
 // The old version asked eight, six of them re-derived from individual evasions,
-// and four evasions still got past it. Everything those six covered - a second
-// literal, an empty literal, an explicit nil field, a field assignment on the
-// following line, a named intermediate mutated before assignment, a mutation
-// after the fact - is now impossible to write rather than checked for, because
-// main does not hold the api.Server.
+// and four evasions still got past it. Returning *http.Server took some of those
+// shapes out of the LANGUAGE and left others merely CHECKED, and the difference
+// has to be stated: a reader who believes a shape is unwritable has no reason to
+// preserve the check that is in fact the only thing stopping it.
+//
+//   - IMPOSSIBLE TO WRITE, because main never holds the *api.Server: a pointer
+//     alias on the field (`cs := &httpServer.Counters; cs.GRPCAdmission = nil`),
+//     a helper in a sibling file mutating it, an explicit
+//     `Counters: api.CounterSources{}`, a `Counters` assignment on any following
+//     line, and moving that assignment below the line that starts serving. There
+//     is no *api.Server value in main for any of them to reach.
+//   - STILL WRITABLE, AND CHECKED BELOW: everything about the LISTENER and the
+//     server binding, both of which are ordinary mutable locals. `grpcLis = nil`
+//     inside an if - the same defect one variable to the left of the one the
+//     return type removed - compiled and left every package green until the
+//     assignment count below was added. Also checked here: a second
+//     buildHTTPServer call, serving some other server, and a grpcAdmission
+//     argument that does not derive from netlimit.Wrap.
 //
 // The one real defect carried over from the old guard is fixed here: its
 // `reaches` walk asked only "was this identifier EVER assigned something
@@ -325,6 +338,60 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 			"assignment in main's body. `var grpcLis *netlimit.Listener` assigned inside an if - the "+
 			"natural shape for wrapping only when a cap is set - reaches the endpoint as a typed nil and "+
 			"the section vanishes on every deployment that does not take the branch.", argIdent.Name)
+
+	// EVERY NAME ON THAT CHAIN, PLUS THE SERVER BINDING, MUST BE ASSIGNED
+	// EXACTLY ONCE IN THE WHOLE OF MAIN.
+	//
+	// `from` above is built from main's DIRECT statements only, so a name
+	// assigned solely inside an if never reaches Wrap and the check above fails.
+	// The shape that survives it is a name assigned BOTH ways:
+	//
+	//	grpcLis := netlimit.Wrap(grpcRawLis, ...)
+	//	if grpcBnds.maxConns == 0 && grpcBnds.maxConnsPerIP == 0 {
+	//		grpcLis = nil
+	//	}
+	//
+	// The top-level seed still reaches Wrap, so every check above passes, while
+	// each deployment taking that branch feeds buildHTTPServer a typed nil and
+	// serves an endpoint with no grpc_admission section at all - an admission
+	// control that reads as having never refused anything, which is the exact
+	// defect this whole guard exists for. It is also the shape a maintainer is
+	// most likely to reach for, since "only wrap when a cap is configured" is a
+	// reasonable-sounding optimisation.
+	//
+	// Counting assignments across main's ENTIRE subtree - ifs, loops, switches
+	// and closures included - is what separates a single unconditional binding
+	// from a binding that is later taken back. srvName is checked the same way:
+	// the ListenAndServe check above matches on NAME, so a conditional
+	// `srv = &http.Server{...}` would serve an unwired server through an
+	// identifier this test already blessed.
+	assignedAnywhere := map[string]int{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, l := range as.Lhs {
+			if id, ok := l.(*ast.Ident); ok {
+				assignedAnywhere[id.Name]++
+			}
+		}
+		return true
+	})
+	chain := append([]string{srvName}, keysOf(seen)...)
+	for _, name := range chain {
+		if len(from[name]) == 0 && assignedAnywhere[name] == 0 {
+			// Not a local bound by an assignment in main's body: a package
+			// name, a function name, a field name. Nothing to count.
+			continue
+		}
+		require.Equal(t, 1, assignedAnywhere[name],
+			"%q is assigned %d times inside main. Exactly one unconditional assignment is the whole "+
+				"basis on which this test concludes anything: a second one, in an if or a loop or a "+
+				"closure, can take the wiring back on some deployments while every check above still "+
+				"passes. If the second assignment is legitimate, this guard can no longer answer the "+
+				"question and needs replacing, not relaxing.", name, assignedAnywhere[name])
+	}
 }
 
 func keysOf(m map[string]bool) []string {

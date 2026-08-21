@@ -828,6 +828,16 @@ func TestStats_IsOneCriticalSection(t *testing.T) {
 	// them after it finishes puts a floor of LiveTotal>=2, DistinctSources>=2
 	// under every snapshot, so the guard is positive by construction while the
 	// churn still supplies the interleaving the invariant needs.
+	//
+	// AND THAT IS PRECISELY WHY THE GUARD NO LONGER INSTRUMENTS ANYTHING. With
+	// the floor pinned, sawLive == sawManySources == reads in every run, so the
+	// two counters cannot go to zero any more: deleting the churn goroutine
+	// outright would leave them satisfied. They now assert that the FLOOR is
+	// still in place, not that the churn populated anything - a constant, not a
+	// measurement. That is the accepted trade (the alternative was a test that
+	// fails 30/30 on one CPU), but it means the churn's own liveness is
+	// unguarded, and it is the mutation invariant below - MaxPerSource <=
+	// LiveTotal and friends - that has to earn its keep on a >=2 CPU host.
 	const (
 		pinnedA = "10.8.0.1"
 		pinnedB = "10.8.0.2"

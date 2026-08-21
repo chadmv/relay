@@ -130,9 +130,20 @@ type Listener struct {
 	// true. Deciding over-cap under the lock, unlocking, then Add(1) outside
 	// left netlimit, cmd/relay-server and internal/api all green, and a poller
 	// would then see refused_total climbing while live_total sat BELOW the
-	// configured cap: an arrangement the fleet was never in. As plain fields the
-	// compiler forbids a read outside the lock and -race catches a write outside
-	// it, so the coupling is a type-level fact rather than a paragraph.
+	// configured cap: an arrangement the fleet was never in.
+	//
+	// WHAT ENFORCES THAT NOW IS -race PLUS ONE NAMED TEST, and nothing else.
+	// The compiler does not help: Go has no mutex-guard analysis, and adding
+	// `func (l *Listener) unlockedRead() uint64 { return l.refusedTotal +
+	// l.refusedPerIP }` to this file builds clean AND vets clean. What plain
+	// fields buy over atomics is only that an unsynchronised access is a DATA
+	// RACE rather than a legal-but-inconsistent read - which -race can see, but
+	// only where some test drives both sides at once.
+	// TestStats_ConcurrentRefusalsAndReadsShareTheMutex is that test, and it is
+	// the ONLY one in this package that is: with the increments moved back
+	// outside the lock, every other test here still reports ok under -race. It
+	// is LOAD-BEARING and must not be deleted; without it this coupling is once
+	// again held by nothing but a comment.
 	mu           sync.Mutex
 	total        int
 	perIP        map[string]int
@@ -207,9 +218,11 @@ func (l *Listener) Accept() (net.Conn, error) {
 // the level-to-level half by invariant. The count-to-level half has NO test that
 // can pin it - counts are monotonic and levels move freely, so no single
 // snapshot is impossible enough to assert on - which is exactly why the counters
-// are plain fields under this mutex rather than atomics: the enforcement is the
-// compiler plus -race, and TestStats_ConcurrentRefusalsAndReadsShareTheMutex is
-// the concurrent exposure that gives -race something to see.
+// are plain fields under this mutex rather than atomics. The enforcement is
+// -race plus TestStats_ConcurrentRefusalsAndReadsShareTheMutex, the sole test in
+// this package that gives -race anything to see on those two fields. NOT the
+// compiler: an unlocked read of them builds and vets clean. Delete that test and
+// the count-to-level coupling is enforced by this paragraph and nothing more.
 //
 // COST, PRICED AS A LOCK HOLD AND NOT AS A REQUEST. MaxPerSource is an
 // O(len(perIP)) walk under l.mu. len(perIP) is bounded by MaxTotal (1024 at the

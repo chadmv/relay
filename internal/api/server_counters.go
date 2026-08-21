@@ -34,14 +34,23 @@ import (
 //     two replicas may be added; levels may NOT (max_per_source in particular
 //     does not sum into anything meaningful). No persistence, no history, no
 //     rates, no alerting - a poller derives rates itself.
-//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. The only non-integer
-//     values in the whole payload are started_at and, when slice 4 lands, the
-//     server-resolved worker UUIDs keying watchdog.counts.swept_by_worker.
-//     TestCounterPayloadCarriesNoIdentifiers enforces that as an ALLOW-LIST, so
-//     any third one goes RED and forces an argument. Worker UUIDs are admissible
-//     HERE and remain inadmissible in any log line reachable from the gRPC recv
-//     path, and those are two different arguments: this route is
-//     admin-authenticated, so it is not an attacker-writable site.
+//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. started_at is the ONE
+//     exemption today, and it is the whole allow-list:
+//     TestCounterPayloadCarriesNoIdentifiers enforces that, so the SECOND
+//     non-integer value anywhere in the payload goes RED and forces an argument.
+//     "watchdog.counts.swept_by_worker" was written into that allow-list in
+//     slice 1, against code nobody had written, and has been DELIBERATELY
+//     DE-AUTHORIZED: a map keyed on server-resolved worker UUIDs may well be
+//     the right answer for slice 4, but it is a design decision, and
+//     pre-blessing it in slice 1 reduced its only forcing function to a
+//     one-line edit with the justification already supplied. Adding it back
+//     means adding a counterPayloadExemption with its own typeOK and jsonOK
+//     predicates, argued in the same commit that can be read against the code -
+//     including whether unbounded key cardinality is acceptable here. The
+//     admin-authentication argument (this route is not an attacker-writable
+//     site, so a worker UUID admissible HERE stays inadmissible in any log line
+//     reachable from the gRPC recv path) is one input to that decision, not a
+//     standing grant.
 //
 // WHAT THIS ENDPOINT DOES NOT BUY, stated next to what it does:
 //

@@ -473,6 +473,18 @@ func routeIdentName(e ast.Expr) string {
 // server-resolved identifier may well be the right answer for that section, but
 // the argument has to be made in the commit that can be read against the code,
 // not inherited from one that could not.
+//
+// THE RESIDUAL, STATED SO THE NEXT ENTRY IS WRITTEN KNOWING IT: both walks
+// still stop at an exempted path - the JSON walk `return`s and the type walk
+// `continue`s once the predicate passes - so an exemption is SHAPE-CHECKED but
+// NON-DESCENDING. That is exactly right for started_at, whose shape is a scalar
+// and whose predicate therefore examines the whole value. It would not be right
+// for a container: a jsonOK that accepted map[string]any would leave every key
+// and every value in that map uninspected, which is the total exemption this
+// mechanism replaced, re-entered through the predicate. An exemption for a
+// container must therefore do the descending ITSELF inside jsonOK/typeOK -
+// checking key shape, value shape and cardinality - or the walks must be taught
+// to recurse past it first.
 type counterPayloadExemption struct {
 	// why is the argument for the exemption, quoted back in the failure.
 	why string

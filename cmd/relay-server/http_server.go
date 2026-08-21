@@ -68,6 +68,20 @@ type httpServerDeps struct {
 // to serve by mistake. What is left is checked by EXECUTION in
 // counters_wiring_test.go, which calls this function with a real
 // netlimit.Wrap'd socket and reads the counters back out through the real route.
+//
+// THAT CLAIM IS ABOUT Counters AND NOTHING ELSE. Two wiring mistakes are still
+// writable INSIDE this function and nothing catches either:
+//
+//   - api.New is positional and takes four same-typed arguments in a row.
+//     Swapping loginLimitN/loginLimitWin with registerLimitN/registerLimitWin
+//     compiles, and every package stays green; login would then be rate-limited
+//     at the registration budget. The named fields on httpServerDeps make the
+//     CALL SITE in main readable; they do nothing for the four positions here.
+//   - Deleting any of the three assignments below - Metrics, StaticHandler,
+//     AllowSelfRegister - is likewise green everywhere. That is the same gap
+//     already named for agentHandler.Metrics and agentHandler.AllowAutoEnroll
+//     in trailing_log_window_test.go, which the conductor is filing; see the
+//     note there about why a guard parsing main.go alone would now miss these.
 func buildHTTPServer(d httpServerDeps) *http.Server {
 	s := api.New(d.pool, d.q, d.broker, d.registry, d.corsOrigins,
 		d.loginLimitN, d.loginLimitWin, d.registerLimitN, d.registerLimitWin)
