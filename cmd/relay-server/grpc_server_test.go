@@ -114,3 +114,101 @@ func TestGRPCServer_SecondStreamOnOneConnectionBlocks(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 1500*time.Millisecond,
 		"it must have BLOCKED on stream quota until the deadline, not failed fast for some other reason")
 }
+
+// signalListener reports every server-side conn Close on ch. This is a
+// SERVER-SIDE signal on purpose: asserting via the client's connectivity state
+// would depend on grpc-go's reconnect state machine rather than on whether the
+// transport was reaped. ch is buffered because grpc-go double-closes routinely.
+type signalListener struct {
+	net.Listener
+	ch chan struct{}
+}
+
+func (l *signalListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &signalConn{Conn: c, ch: l.ch}, nil
+}
+
+type signalConn struct {
+	net.Conn
+	ch chan struct{}
+}
+
+func (c *signalConn) Close() error {
+	err := c.Conn.Close()
+	select {
+	case c.ch <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+func startTestGRPCServerWithCloseSignal(t *testing.T, b grpcBounds) (string, chan struct{}, chan struct{}) {
+	t.Helper()
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closed := make(chan struct{}, 16)
+
+	stub := &blockingAgentService{entered: make(chan struct{}, 8)}
+	srv := grpc.NewServer(grpcServerOptions(b)...)
+	relayv1.RegisterAgentServiceServer(srv, stub)
+	go func() { _ = srv.Serve(&signalListener{Listener: raw, ch: closed}) }()
+	t.Cleanup(srv.Stop)
+	return raw.Addr().String(), stub.entered, closed
+}
+
+// TestGRPCServer_IdleConnectionWithNoStreamIsClosed.
+//
+// RED at HEAD: defaultMaxConnectionIdle is infinity (defaults.go:35), so the
+// connection is never reaped and this fails on its 5s bound. Without this
+// option, a connection cap is a PARKING PRIMITIVE: an attacker completes the
+// HTTP/2 preface, opens no stream, and holds RELAY_GRPC_MAX_CONNS_PER_IP slots
+// forever.
+func TestGRPCServer_IdleConnectionWithNoStreamIsClosed(t *testing.T) {
+	addr, _, closed := startTestGRPCServerWithCloseSignal(t, grpcBounds{maxConnIdle: 200 * time.Millisecond})
+	cc := dialTestServer(t, addr)
+	waitReady(t, cc) // preface done, transport up, zero streams
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a transport that completed the HTTP/2 preface and opened no stream was never closed: " +
+			"MaxConnectionIdle is not set")
+	}
+}
+
+// TestGRPCServer_ConnectionHoldingAStreamIsNotIdle proves the reading of t.idle
+// behind grpcKeepaliveParams and prices MaxConnectionIdle at zero for a
+// legitimate agent, which holds ONE silent stream for hours at a time. It is
+// also what catches MaxConnectionAge-style semantics slipping in under this name.
+func TestGRPCServer_ConnectionHoldingAStreamIsNotIdle(t *testing.T) {
+	addr, entered, closed := startTestGRPCServerWithCloseSignal(t, grpcBounds{maxConnIdle: 200 * time.Millisecond})
+	cc := dialTestServer(t, addr)
+	waitReady(t, cc)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := relayv1.NewAgentServiceClient(cc).Connect(ctx)
+	require.NoError(t, err)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server handler never entered")
+	}
+
+	// Ten idle windows of complete silence in both directions.
+	time.Sleep(2 * time.Second)
+
+	select {
+	case <-closed:
+		t.Fatal("a connection HOLDING A STREAM was closed. MaxConnectionIdle must never terminate a " +
+			"working connection - if this fails, something gave it MaxConnectionAge semantics, which is " +
+			"explicitly out of scope for this slice.")
+	default:
+	}
+	require.NoError(t, stream.Send(&relayv1.AgentMessage{}),
+		"the stream must still be usable after ten idle windows")
+}
