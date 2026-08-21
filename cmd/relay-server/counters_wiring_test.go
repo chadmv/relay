@@ -1,204 +1,336 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"relay/internal/netlimit"
+	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
 
-// TestServerCountersIsWiredByMain is a structural guard in the same spirit as
-// TestGRPCAdmissionIsWiredByMain. Deleting `httpServer.Counters = ...` from
-// main.go compiles and leaves `go test ./...` entirely green: internal/api keeps
-// its own passing tests with a fake source, internal/netlimit keeps its own, and
-// the endpoint permanently answers 200 with started_at and nothing else - which
-// reads exactly like a server whose admission control has never refused
-// anything. That is the whole bug.
+// stubAdminDB is a store.DBTX for exactly one query, GetTokenWithUser, so that
+// BearerAuth resolves a token to an ADMIN with no Postgres. That is what lets
+// the wiring below be proved by driving a real request through the real
+// admin-gated route rather than by reading main.go and hoping.
 //
-// HEED THE RECORDED LESSON THAT A GUARD BUILT FROM A MUTATION KILL INHERITS THE
-// MUTATION'S SHAPE, NOT THE DEFECT'S. The admission slice's three structural
-// guards were each evaded on the first attempt - by an append, by an import
-// alias, and by moving a field assignment to the next line. This one is written
-// from the property "the value that reaches the SERVED api.Server's Counters
-// field is a CounterSources literal whose GRPCAdmission derives from
-// netlimit.Wrap", and it was attacked with five evasions before it was called
-// done: deletion, an empty literal, an explicit nil field, a field assignment on
-// the following line, and a named intermediate variable mutated before the
-// assignment. Searching past those five for the SHAPE found three more, and one
-// of them SURVIVED the first version of this guard: a conditional wrapper (see
-// the unconditional check below). The other two were already covered - wiring a
-// second api.Server and serving the original, and feeding a typed-nil
-// *netlimit.Listener declared with var. One further evasion is blocked by the
-// TYPE SYSTEM rather than by this guard and so is not checked here:
-// GRPCAdmission: grpcRawLis does not compile, because a raw net.Listener has no
-// Stats method.
+// Every other statement panics rather than returning a plausible zero value: a
+// handler that grew a second query must fail here loudly, not pass by accident.
+type stubAdminDB struct{}
+
+func (stubAdminDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	panic("stubAdminDB: Exec is not part of the bearer-auth path")
+}
+
+func (stubAdminDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("stubAdminDB: Query is not part of the bearer-auth path")
+}
+
+func (stubAdminDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row { return stubAdminRow{} }
+
+type stubAdminRow struct{}
+
+// Scan fills GetTokenWithUserRow BY DESTINATION TYPE rather than by column
+// index, so a reordered or added column cannot silently authenticate a
+// zero-valued (non-admin) user and turn every assertion below into a 403.
+func (stubAdminRow) Scan(dest ...any) error {
+	bools := 0
+	for _, d := range dest {
+		switch v := d.(type) {
+		case *bool:
+			*v = true
+			bools++
+		case *string:
+			*v = "counters-wiring"
+		}
+	}
+	if bools != 1 {
+		return fmt.Errorf("stubAdminDB: GetTokenWithUserRow has %d bool destinations, want exactly 1 "+
+			"(user_is_admin); the row shape changed and this stub no longer authenticates an admin", bools)
+	}
+	return nil
+}
+
+func countersAsAdmin(t *testing.T, srv *http.Server) map[string]json.RawMessage {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/server/counters", nil)
+	req.Header.Set("Authorization", "Bearer any-token-the-stub-resolves")
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	return top
+}
+
+// TestBuildHTTPServer_ServesTheRealListenersCounters is the wiring guard, and it
+// is an EXECUTED one.
+//
+// The property - "the server main serves reports the counters of the listener
+// main serves gRPC on" - is a runtime property, and the previous guard checked
+// it syntactically by parsing main.go. That guard was evaded four separate ways,
+// every one of them green across the whole repo:
+//
+//   - a pointer alias on the next line: `cs := &httpServer.Counters;
+//     cs.GRPCAdmission = nil` (the LHS path does not contain ".Counters.");
+//   - a helper call in a sibling file of the same package:
+//     `disableCounters(httpServer)` (a CallExpr is not an AssignStmt, and the
+//     guard parsed main.go alone);
+//   - a conditionally-built listener reaching the field as a TYPED NIL, which
+//     is not == nil in an interface, so `src != nil` was true and Stats()
+//     panicked on a nil receiver - a goroutine stack trace to the log per admin
+//     request, inside the feature whose subject is bounding log volume;
+//   - moving the assignment BELOW the line that starts serving, which main.go
+//     named in prose as a constraint and nothing checked.
+//
+// Patching four more syntactic sub-checks is what produced that pattern. Instead
+// buildHTTPServer now returns the *http.Server and main never holds the
+// api.Server, so none of the four can be written at all - and this test calls
+// buildHTTPServer with a REAL netlimit.Wrap'd socket, opens real connections
+// through it, and reads the numbers back out through the real admin-gated route.
+// A stub source, a second server, a wrong listener, an empty literal or a
+// reordering all produce different numbers here or no section at all.
+func TestBuildHTTPServer_ServesTheRealListenersCounters(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer raw.Close()
+	lis := netlimit.Wrap(raw, netlimit.Config{MaxTotal: 8, MaxPerIP: 8})
+
+	srv := buildHTTPServer(httpServerDeps{
+		addr:          "127.0.0.1:0",
+		q:             store.New(stubAdminDB{}),
+		grpcAdmission: lis,
+	})
+
+	// Nothing has connected yet: a wired section is PRESENT and zero, which the
+	// payload's contract reads as "this control ran and stopped nothing".
+	before := countersAsAdmin(t, srv)
+	require.Contains(t, before, "grpc_admission",
+		"the section must be present the moment the server is built, not only once something happens")
+
+	// Two real connections, admitted through the wrapper. Accept is what runs
+	// the accounting, so both must be accepted, and both are held open.
+	var held []net.Conn
+	for i := 0; i < 2; i++ {
+		dialed, err := net.Dial("tcp", raw.Addr().String())
+		require.NoError(t, err)
+		defer dialed.Close()
+		accepted, err := lis.Accept()
+		require.NoError(t, err)
+		defer accepted.Close()
+		held = append(held, accepted)
+	}
+	require.Len(t, held, 2)
+
+	after := countersAsAdmin(t, srv)
+	var section struct {
+		Levels struct {
+			LiveTotal       uint64 `json:"live_total"`
+			DistinctSources uint64 `json:"distinct_sources"`
+			MaxPerSource    uint64 `json:"max_per_source"`
+		} `json:"levels"`
+	}
+	require.NoError(t, json.Unmarshal(after["grpc_admission"], &section))
+	require.Equal(t, uint64(2), section.Levels.LiveTotal,
+		"the served endpoint must report THIS listener's occupancy. A stub, a second listener or an "+
+			"unwired section cannot produce this number.")
+	require.Equal(t, uint64(1), section.Levels.DistinctSources, "both peers dialed from 127.0.0.1")
+	require.Equal(t, uint64(2), section.Levels.MaxPerSource)
+}
+
+// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent.
+//
+// `var grpcLis *netlimit.Listener` conditionally assigned - the natural shape
+// for "only wrap when a cap is configured", and the shape slice 4's optional
+// watchdog will reach for - stores a TYPED nil in api.GRPCAdmissionSource. That
+// is not == nil, so the handler's `src != nil` is true and Stats() panics on a
+// nil receiver.
+//
+// The fix is at the wiring boundary, where the concrete type still makes the
+// distinction visible, and NOT a nil-tolerant Stats() returning an empty struct:
+// that would turn an unwired control into a section of zeros, and "not wired"
+// versus "ran and stopped nothing" is the one distinction this whole payload
+// exists to preserve.
+func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
+	var unwired *netlimit.Listener
+	srv := buildHTTPServer(httpServerDeps{
+		addr:          "127.0.0.1:0",
+		q:             store.New(stubAdminDB{}),
+		grpcAdmission: unwired,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.NotContains(t, top, "grpc_admission",
+		"a nil listener must leave the section ABSENT, never present-and-zero: zeros mean the control "+
+			"ran and stopped nothing")
+	require.Contains(t, top, "started_at",
+		"started_at is present even when every section is absent")
+}
+
+// TestServerCountersIsWiredByMain is what remains of the syntactic guard, and it
+// is deliberately THIN: three questions execution cannot answer from inside
+// buildHTTPServer.
+//
+// The old version asked eight, six of them re-derived from individual evasions,
+// and four evasions still got past it. Everything those six covered - a second
+// literal, an empty literal, an explicit nil field, a field assignment on the
+// following line, a named intermediate mutated before assignment, a mutation
+// after the fact - is now impossible to write rather than checked for, because
+// main does not hold the api.Server.
+//
+// The one real defect carried over from the old guard is fixed here: its
+// `reaches` walk asked only "was this identifier EVER assigned something
+// mentioning Wrap", and applied its `unconditional` filter to the assignment
+// TARGET while never applying it to the SEED. So a conditionally-wrapped
+// listener passed. The walk below follows only assignments that are direct
+// statements of main's own body.
 func TestServerCountersIsWiredByMain(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
 	require.NoError(t, err)
 
-	// name -> identifiers its RHS mentions, so the walk can follow
-	// `grpcLis := netlimit.Wrap(...)`.
-	from := map[string][]string{}
-	type selAssign struct {
-		lhs  string
-		rhs  ast.Expr
-		stmt *ast.AssignStmt
-	}
-	var sels []selAssign
-
-	// Statements that run UNCONDITIONALLY, once, in main's own body. Everything
-	// else - an if, a switch, a for, a closure, a goroutine - is a place the
-	// assignment can sit while never executing, or executing twice.
-	unconditional := map[*ast.AssignStmt]bool{}
+	var body *ast.BlockStmt
 	for _, d := range file.Decls {
 		fd, ok := d.(*ast.FuncDecl)
 		if !ok || fd.Name.Name != "main" || fd.Recv != nil || fd.Body == nil {
 			continue
 		}
-		for _, st := range fd.Body.List {
-			if as, ok := st.(*ast.AssignStmt); ok {
-				unconditional[as] = true
-			}
-		}
+		body = fd.Body
 	}
-	require.NotEmpty(t, unconditional, "main.go no longer declares func main with a body of statements")
+	require.NotNil(t, body, "main.go no longer declares func main with a body")
 
-	ast.Inspect(file, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, l := range as.Lhs {
-			var rhs ast.Expr
-			if len(as.Lhs) == len(as.Rhs) {
-				rhs = as.Rhs[i]
-			}
-			if id, ok := l.(*ast.Ident); ok {
-				if rhs != nil {
-					ast.Inspect(rhs, func(m ast.Node) bool {
-						if x, ok := m.(*ast.Ident); ok {
-							from[id.Name] = append(from[id.Name], x.Name)
-						}
-						return true
-					})
-				}
-				continue
-			}
-			// A SELECTOR on the left. Keyed by the rendered path, so that
-			// `httpServer.Counters.GRPCAdmission = nil` on the next line is
-			// visible as a mutation rather than invisible as "not an *ast.Ident".
-			sels = append(sels, selAssign{lhs: exprString(l), rhs: rhs, stmt: as})
-		}
-		return true
-	})
-
-	reaches := func(seed, target string) bool {
-		seen := map[string]bool{}
-		queue := []string{seed}
-		for len(queue) > 0 {
-			name := queue[0]
-			queue = queue[1:]
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			if name == target {
-				return true
-			}
-			queue = append(queue, from[name]...)
-		}
-		return false
-	}
-
-	var target *selAssign
-	var mutations []string
-	for i := range sels {
-		switch {
-		case strings.HasSuffix(sels[i].lhs, ".Counters"):
-			require.Nil(t, target,
-				"main.go assigns to .Counters more than once. The last write decides and this guard cannot "+
-					"say which one it is.")
-			target = &sels[i]
-		case strings.Contains(sels[i].lhs, ".Counters."):
-			mutations = append(mutations, sels[i].lhs)
-		}
-	}
-	require.NotNil(t, target,
-		"main.go never assigns <httpServer>.Counters = api.CounterSources{...}. Deleting that one line "+
-			"compiles, leaves every package green, and makes GET /v1/server/counters report an empty "+
-			"payload forever - indistinguishable from a control that has stopped nothing.")
-	require.Empty(t, mutations,
-		"main.go mutates the counter sources after building them (%v). `httpServer.Counters.GRPCAdmission "+
-			"= nil` on the following line compiles and silently unwires the section: this is the exact "+
-			"evasion that beat the netlimit.Config guard one slice ago.", mutations)
-
-	// NOT IN THE PLAN, AND IT IS AN EVASION THE PLAN'S FIVE MISSED. Wrapping the
-	// assignment in `if os.Getenv("RELAY_ENABLE_COUNTERS") != "" { ... }` -
-	// exactly the shape somebody reaches for to make a section opt-in - compiles,
-	// leaves this whole guard green, and unwires the section on every deployment
-	// that does not set the variable. Proved by running it. The assignment must
-	// therefore be an unconditional statement in main's own body.
-	require.True(t, unconditional[target.stmt],
-		"the assignment to %s is nested inside a conditional, a loop, a closure or a goroutine rather "+
-			"than sitting unconditionally in main's body. Every check below still passes in that shape, "+
-			"and the section is silently absent on any run that does not take the branch.", target.lhs)
-
-	base := strings.TrimSuffix(target.lhs, ".Counters")
-	cl, ok := target.rhs.(*ast.CompositeLit)
-	require.True(t, ok,
-		"the value assigned to %s must be an api.CounterSources composite literal AT THE ASSIGNMENT SITE. "+
-			"Building it into a named variable first re-opens the hole: `cs := api.CounterSources{...}; "+
-			"cs.GRPCAdmission = nil; %s = cs` compiles and every other check here still passes.",
-		target.lhs, target.lhs)
-	require.Equal(t, "api.CounterSources", exprString(cl.Type))
-
-	var src ast.Expr
-	for _, e := range cl.Elts {
-		kv, ok := e.(*ast.KeyValueExpr)
+	// from[name] = identifiers its RHS mentions, populated ONLY from assignments
+	// that are direct, unconditional statements of main's body. An assignment
+	// inside an if, a loop, a switch or a closure contributes nothing, so a
+	// conditionally-built listener does not reach anything.
+	from := map[string][]string{}
+	var built []string // names assigned from buildHTTPServer(...)
+	for _, st := range body.List {
+		as, ok := st.(*ast.AssignStmt)
 		if !ok {
 			continue
 		}
-		if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "GRPCAdmission" {
-			src = kv.Value
+		for i, l := range as.Lhs {
+			id, ok := l.(*ast.Ident)
+			if !ok || len(as.Lhs) != len(as.Rhs) {
+				continue
+			}
+			ast.Inspect(as.Rhs[i], func(m ast.Node) bool {
+				if x, ok := m.(*ast.Ident); ok {
+					from[id.Name] = append(from[id.Name], x.Name)
+					if x.Name == "buildHTTPServer" {
+						built = append(built, id.Name)
+					}
+				}
+				return true
+			})
 		}
 	}
-	require.NotNil(t, src,
-		"api.CounterSources is built with no GRPCAdmission field, so the only wired section is absent and "+
-			"the endpoint reports an empty payload")
-	srcIdent, ok := src.(*ast.Ident)
-	require.True(t, ok,
-		"GRPCAdmission must be fed a plain identifier - the netlimit listener - not %s. A nil or a stub "+
-			"defined in this file compiles and reports zeros forever.", exprString(src))
-	require.True(t, reaches(srcIdent.Name, "Wrap"),
-		"GRPCAdmission is fed %q, which does not derive from netlimit.Wrap: the endpoint would report a "+
-			"listener that is not the one serving the agent port.", srcIdent.Name)
+	require.Len(t, built, 1,
+		"main's own body must call buildHTTPServer exactly once and bind the result. Nested inside an if, "+
+			"a loop or a closure it may never run; called twice, the last one decides and this guard "+
+			"cannot say which. Found: %v", built)
+	srvName := built[0]
 
-	// The api.Server that received the sources must be the one whose Handler()
-	// is served. Wiring a DIFFERENT api.Server value compiles and satisfies
-	// every check above.
-	handlerBase := ""
+	// The server main SERVES must be the one buildHTTPServer returned.
+	served := map[string]bool{}
 	ast.Inspect(file, func(n ast.Node) bool {
-		kv, ok := n.(*ast.KeyValueExpr)
+		ce, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		k, ok := kv.Key.(*ast.Ident)
-		if !ok || k.Name != "Handler" {
+		sel, ok := ce.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "ListenAndServe" {
 			return true
 		}
-		if ce, ok := kv.Value.(*ast.CallExpr); ok {
-			if s, ok := ce.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Handler" {
-				handlerBase = exprString(s.X)
-			}
+		if x, ok := sel.X.(*ast.Ident); ok {
+			served[x.Name] = true
 		}
 		return true
 	})
-	require.NotEmpty(t, handlerBase, "main.go no longer builds the http.Server from <server>.Handler()")
-	require.Equal(t, handlerBase, base,
-		"main.go wires the counter sources into %q but serves %q.Handler(). The endpoint would report an "+
-			"empty payload with every check above satisfied.", base, handlerBase)
+	require.True(t, served[srvName],
+		"main builds %q with buildHTTPServer but serves %v. A second http.Server would answer every "+
+			"request while the wired one sat idle.", srvName, keysOf(served))
+
+	// The grpcAdmission argument must derive from netlimit.Wrap through
+	// unconditional assignments in main's body.
+	var admissionArg ast.Expr
+	for _, st := range body.List {
+		as, ok := st.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for _, r := range as.Rhs {
+			ce, ok := r.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if fn, ok := ce.Fun.(*ast.Ident); !ok || fn.Name != "buildHTTPServer" {
+				continue
+			}
+			require.Len(t, ce.Args, 1)
+			cl, ok := ce.Args[0].(*ast.CompositeLit)
+			require.True(t, ok, "buildHTTPServer must be called with an httpServerDeps composite literal "+
+				"at the call site, so that every dependency is readable there")
+			for _, e := range cl.Elts {
+				kv, ok := e.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "grpcAdmission" {
+					admissionArg = kv.Value
+				}
+			}
+		}
+	}
+	require.NotNil(t, admissionArg,
+		"buildHTTPServer is called with no grpcAdmission field, so the only wired section is absent and "+
+			"the endpoint reports started_at and nothing else - which reads exactly like an admission "+
+			"control that has never refused anything")
+	argIdent, ok := admissionArg.(*ast.Ident)
+	require.True(t, ok,
+		"grpcAdmission must be fed a plain identifier - the netlimit listener bound in main's body - "+
+			"not %T", admissionArg)
+
+	seen := map[string]bool{}
+	queue := []string{argIdent.Name}
+	reachesWrap := false
+	for len(queue) > 0 && !reachesWrap {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if name == "Wrap" {
+			reachesWrap = true
+			break
+		}
+		queue = append(queue, from[name]...)
+	}
+	require.True(t, reachesWrap,
+		"grpcAdmission is fed %q, which does not derive from netlimit.Wrap through an UNCONDITIONAL "+
+			"assignment in main's body. `var grpcLis *netlimit.Listener` assigned inside an if - the "+
+			"natural shape for wrapping only when a cap is set - reaches the endpoint as a typed nil and "+
+			"the section vanishes on every deployment that does not take the branch.", argIdent.Name)
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
