@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,4 +168,38 @@ func TestParseGRPCConnIdle(t *testing.T) {
 			assert.Contains(t, msg, "RELAY_GRPC_MAX_CONN_IDLE")
 		})
 	}
+}
+
+// TestGRPCBoundsLine mirrors TestWatchdogBoundsLine. A mechanism that can REFUSE
+// a user's agent must state its limits at every boot: the ordinary path is
+// otherwise completely silent, so an operator cannot tell from the log whether
+// the caps are on, what they are, or that somebody switched them off.
+func TestGRPCBoundsLine(t *testing.T) {
+	all := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 64, maxConnIdle: 15 * time.Minute})
+	assert.Contains(t, all, "1024")
+	assert.Contains(t, all, "64")
+	assert.Contains(t, all, "15m")
+	// The plan asked for `Contains(all, "1")` here with the message below. That
+	// assertion is VACUOUS - "1024" already contains "1", so it holds under any
+	// implementation that never mentions the stream cap at all. Asserting the
+	// rendered phrase is what actually pins it.
+	assert.Contains(t, all, "1 stream(s) per connection",
+		"the stream cap is part of the admission story and must be named")
+	assert.NotContains(t, all, "DISABLED")
+
+	noTotal := grpcBoundsLine(grpcBounds{maxConns: 0, maxConnsPerIP: 64, maxConnIdle: 15 * time.Minute})
+	assert.Contains(t, noTotal, "DISABLED")
+	assert.Contains(t, noTotal, "64", "one cap off is not both caps off; saying so sends an operator hunting the wrong thing")
+
+	noPerIP := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 0, maxConnIdle: 15 * time.Minute})
+	assert.Contains(t, noPerIP, "DISABLED")
+	assert.Contains(t, noPerIP, "1024")
+
+	noIdle := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 64, maxConnIdle: 0})
+	assert.Contains(t, noIdle, "DISABLED")
+	assert.Contains(t, noIdle, "1024")
+
+	off := grpcBoundsLine(grpcBounds{})
+	assert.Equal(t, 3, strings.Count(off, "DISABLED"),
+		"all three knobs off is the single most important thing this line can say")
 }

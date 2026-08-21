@@ -165,3 +165,45 @@ func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, stri
 	}
 	return d, ""
 }
+
+// Defaults for the three knobs.
+//
+//   - defaultGRPCMaxConns: far above any plausible relay fleet and far below
+//     where file descriptors or goroutines hurt. Anchor: RELAY_DB_MAX_CONNS
+//     defaults to 25 and an agent's recv loop holds at most one in-flight
+//     statement, so more than ~25 simultaneously busy agents already queue on
+//     the pool.
+//   - defaultGRPCMaxConnsPerIP: NOT DERIVABLE from this repo, and said so out
+//     loud. One agent process is strictly one connection at a time
+//     (internal/agent/agent.go:184-212), so the legitimate maximum is "how many
+//     agent processes share a source address", which depends on NAT topology
+//     nothing here can see. 64 is chosen generously and is reversible.
+//   - defaultGRPCMaxConnIdle: a legitimate agent's idle window is the gap
+//     between dialing and opening its stream, sub-millisecond on a LAN, so this
+//     is bounded below only by paranoia about slow middleboxes.
+const (
+	defaultGRPCMaxConns      = 1024
+	defaultGRPCMaxConnsPerIP = 64
+	defaultGRPCMaxConnIdle   = 15 * time.Minute
+)
+
+// grpcBoundsLine renders the unconditional startup line naming every effective
+// admission bound, in the shape of watchdogBoundsLine
+// (cmd/relay-server/watchdog_config.go:88). It must say DISABLED explicitly for
+// each knob that is off: a disabled safety bound is never allowed to be silent.
+func grpcBoundsLine(b grpcBounds) string {
+	total := fmt.Sprintf("%d total", b.maxConns)
+	if b.maxConns <= 0 {
+		total = "total DISABLED"
+	}
+	perIP := fmt.Sprintf("%d per source IP", b.maxConnsPerIP)
+	if b.maxConnsPerIP <= 0 {
+		perIP = "per-source-IP DISABLED"
+	}
+	idle := fmt.Sprintf("idle transports reaped after %s", b.maxConnIdle)
+	if b.maxConnIdle <= 0 {
+		idle = "idle reaping DISABLED"
+	}
+	return fmt.Sprintf("gRPC admission: %d stream(s) per connection; connections %s, %s; %s",
+		grpcMaxConcurrentStreams, total, perIP, idle)
+}
