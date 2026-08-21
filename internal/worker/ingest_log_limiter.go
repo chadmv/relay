@@ -30,9 +30,17 @@ import "time"
 // every cycle without ever needing a second connection. Multiplying 1024 by 6
 // and calling the result a lines-per-minute ceiling would therefore be wrong.
 // What actually prices that attack is not this file: reaching any of these log
-// sites requires passing authenticateAndRegister first (handler.go:140, which
-// runs BEFORE the allocation at :172), so each cycle costs the caller a valid
-// credential and a round trip to Postgres. That is a real cost, not a bound.
+// sites requires passing authenticateAndRegister first, which runs BEFORE the
+// allocation of this limiter, so each cycle costs the caller a valid credential
+// and a round trip to Postgres. That is a real cost, not a bound.
+//
+// THAT PRICE IS ZERO UNDER RELAY_ALLOW_AUTO_ENROLL. On that path the credential
+// is not merely cheap, it is absent: any host able to reach the port registers
+// by claiming a hostname. The Postgres round trip remains, and so do the
+// connection caps and RELAY_GRPC_REGISTRATION_TIMEOUT, but the sentence above
+// describes the credentialed paths only. Auto-enrollment is off by default and
+// its documented trust model is that any host able to reach gRPC is trusted;
+// this is one more thing that model is buying.
 //
 // See docs/superpowers/specs/2026-08-20-grpc-admission-bounds.md.
 //
