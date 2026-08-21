@@ -105,6 +105,13 @@ func (c *ingestLogCounters) record(k logKind, arm int) {
 	// THOSE TWO TESTS ARE THE ONLY THING KEEPING IT SO - a reader who believes
 	// the branch is dead has no reason to preserve them, which is precisely how
 	// the property gets lost.
+	//
+	// WHAT THE BRANCH ITSELF DOES is pinned by
+	// TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked, and that test
+	// asserts on the WHOLE array rather than on the snapshot for a measured
+	// reason: kind 0 would land in c.n[0], which no published field reads, so
+	// relaxing `i <= 0` to `i < 0` is invisible to any assertion made through
+	// snapshot(). It was a live mutation survivor, not a hypothetical.
 	i := int(k)
 	if i <= 0 || i >= len(c.n) || arm < 0 || arm >= ingestDropArms {
 		return
