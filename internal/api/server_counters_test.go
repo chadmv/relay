@@ -80,6 +80,78 @@ func TestServerCounters_OmitsUnwiredSections(t *testing.T) {
 			"stalled counter and a restart are otherwise the same payload")
 }
 
+// TestServerCounters_WiredButZeroSectionIsStillPresent is the OTHER half of the
+// absent-versus-zero contract, and until now only the absent half had a test.
+//
+// server_counters.go states that a section of zeros means "this control ran and
+// stopped nothing" and an absent section means "not wired on this build", and
+// calls collapsing the two the very defect the payload exists to fix. Both
+// existing wired-source tests use five NON-ZERO values, so an early return that
+// omitted the section whenever Stats() was the zero value - the tidy-looking
+// `if st == (netlimit.Stats{}) { return }` - was green across `go test ./...`.
+// A healthy server that has refused nothing is exactly the case that mutation
+// breaks, and it is the common case.
+//
+// The assertion is on the RAW JSON key set, twice: a decoded struct cannot tell
+// a present-and-zero object from a missing one, which is the whole distinction.
+func TestServerCounters_WiredButZeroSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{GRPCAdmission: fakeAdmissionSource{s: netlimit.Stats{}}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "grpc_admission"}, counterKeys(top),
+		"a WIRED source whose every counter is zero must still emit its section. Omitting it says 'this "+
+			"control is not on this build', when the truth is 'this control ran and stopped nothing' - "+
+			"and telling those apart is the entire purpose of this payload.")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["grpc_admission"], &section))
+	require.ElementsMatch(t, []string{"counts", "levels"}, counterKeys(section),
+		"both halves must be present as objects, not elided by omitempty")
+
+	for _, half := range []string{"counts", "levels"} {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(section[half], &fields))
+		require.NotEmpty(t, fields, "%s must be an object of zeros, not an empty object", half)
+		for k, v := range fields {
+			assert.Equal(t, "0", string(v), "%s.%s must serialise as an explicit zero", half, k)
+		}
+	}
+}
+
+// TestNewStampsStartedAt.
+//
+// Every other test in this file hand-builds &Server{startedAt: ...}, and the
+// only check of the PRODUCTION path was behind //go:build integration - which CI
+// does not run. Deleting `startedAt: time.Now().UTC()` from New builds clean and
+// leaves `go test ./internal/api/ ./cmd/relay-server/` green, and the endpoint
+// then reports 0001-01-01T00:00:00Z forever.
+//
+// That is not a cosmetic field. started_at is the ONLY thing separating "the
+// counters stopped moving" from "the process restarted and zeroed them", so a
+// zero value makes every restart invisible to a poller, silently, while still
+// answering 200 - this endpoint's own subject one layer down.
+func TestNewStampsStartedAt(t *testing.T) {
+	before := time.Now().UTC()
+	s := New(nil, nil, nil, nil, nil, 0, 0, 0, 0)
+	after := time.Now().UTC()
+
+	require.False(t, s.startedAt.IsZero(),
+		"New must stamp startedAt. A zero value serialises as 0001-01-01T00:00:00Z and makes every "+
+			"restart invisible to a poller.")
+	assert.False(t, s.startedAt.Before(before), "startedAt must be taken during New, not earlier")
+	assert.False(t, s.startedAt.After(after), "startedAt must be taken during New, not later")
+	assert.Equal(t, time.UTC, s.startedAt.Location(),
+		"startedAt is serialised straight into the payload, so it must be UTC rather than whatever zone "+
+			"the host happens to be in")
+}
+
 func TestServerCounters_ReportsTheNetlimitSnapshot(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
@@ -378,23 +450,52 @@ func routeIdentName(e ast.Expr) string {
 	return ""
 }
 
-// counterPayloadAllowList maps a payload path to the argument for why a
-// non-integer is admissible there.
+// counterPayloadExemption authorizes a SHAPE at a path, never the path itself.
 //
-// WRITTEN AS AN ALLOW-LIST, NEVER AS A DENY-LIST. The two are interchangeable
-// against today's payload, but a deny-list fails OPEN on the next field somebody
-// adds and an allow-list fails closed. The list already names slice 4's
-// swept_by_worker map, so slice 4 adds a field rather than an exception, and any
-// OTHER new non-integer field goes RED and forces the argument.
+// THE PREDICATE IS THE POINT, AND IT REPLACES A PROSE REASON THAT WAS A TOTAL
+// EXEMPTION. Both walks below used to consult the allow-list BEFORE the
+// marshaller check and before the kind switch, then continue without descending,
+// so an allow-listed path was never inspected at all - not its kind, not its key
+// type, not its cardinality, and on the wire not its keys or its values. A
+// map[string]string sitting at such a path, carrying a hostname-shaped key with
+// an embedded newline and an RTL override and an IP address for a value, passed
+// BOTH guards with zero failures. Demonstrated, not theorised.
 //
-// Entries need not exist yet, which means an entry can go stale. That is a cost
-// accepted in exchange for the contract being decided once.
-var counterPayloadAllowList = map[string]string{
-	"started_at": "a timestamp, server-generated, and the one field that makes a zeroed counter " +
-		"distinguishable from a restart",
-	"watchdog.counts.swept_by_worker": "server-resolved worker UUIDs from a row the coordinator's own " +
-		"scan returned, never a caller-supplied byte. Admissible HERE because this route is " +
-		"admin-authenticated; still inadmissible in any log line reachable from the gRPC recv path.",
+// So an exemption now says what shape it argued for and is checked against it:
+// started_at is exempt AS A time.Time serialising as an RFC 3339 instant, and
+// nothing else at that path is exempt from anything.
+//
+// AND THE LIST NAMES ONLY PATHS THAT EXIST. It previously carried
+// "watchdog.counts.swept_by_worker" - an entry written in slice 1 against code
+// nobody had written, pre-authorizing a map of UUID keys whose only remaining
+// forcing function was a one-line edit to counterPayloadLeaves with its
+// justification already supplied. An unbounded-cardinality map keyed on a
+// server-resolved identifier may well be the right answer for that section, but
+// the argument has to be made in the commit that can be read against the code,
+// not inherited from one that could not.
+type counterPayloadExemption struct {
+	// why is the argument for the exemption, quoted back in the failure.
+	why string
+	// typeOK reports whether the Go type at this path is the exempted shape.
+	typeOK func(reflect.Type) bool
+	// jsonOK reports whether the decoded JSON value at this path is that shape.
+	jsonOK func(any) bool
+}
+
+var counterPayloadAllowList = map[string]counterPayloadExemption{
+	"started_at": {
+		why: "a timestamp, server-generated, and the one field that makes a zeroed counter " +
+			"distinguishable from a restart",
+		typeOK: func(t reflect.Type) bool { return t == reflect.TypeOf(time.Time{}) },
+		jsonOK: func(v any) bool {
+			s, ok := v.(string)
+			if !ok {
+				return false
+			}
+			_, err := time.Parse(time.RFC3339, s)
+			return err == nil
+		},
+	},
 }
 
 // counterPayloadLeaves is the response CONTRACT, asserted by both halves of the
@@ -460,16 +561,22 @@ func TestCounterPayloadCarriesNoIdentifiers(t *testing.T) {
 			if path != "" {
 				p = path + "." + name
 			}
-			// The allow-list is consulted BEFORE the kind switch, and that
-			// ordering is load-bearing: time.Time is a struct whose own fields
-			// would otherwise be walked into.
-			if _, ok := counterPayloadAllowList[p]; ok {
-				leaves = append(leaves, p)
-				continue
-			}
 			ft := f.Type
 			for ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
+			}
+			// The allow-list is consulted BEFORE the kind switch, and that
+			// ordering is load-bearing: time.Time is a struct whose own fields
+			// would otherwise be walked into. What it is NOT is a free pass -
+			// the exempted SHAPE is checked here, or the entry authorizes
+			// whatever a later commit puts at that path.
+			if ex, ok := counterPayloadAllowList[p]; ok {
+				require.True(t, ex.typeOK(ft),
+					"counter payload field %q is exempt from the unsigned-integer rule AS A SHAPE, and "+
+						"its type is now %s, which is not that shape. The exemption argued: %s. Re-argue "+
+						"it for the new type or take the exemption out.", p, ft.String(), ex.why)
+				leaves = append(leaves, p)
+				continue
 			}
 			for _, iface := range []struct {
 				t    reflect.Type
@@ -531,7 +638,10 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 	var leaves []string
 	var walk func(v any, path string)
 	walk = func(v any, path string) {
-		if _, ok := counterPayloadAllowList[path]; ok && path != "" {
+		if ex, ok := counterPayloadAllowList[path]; ok && path != "" {
+			require.True(t, ex.jsonOK(v),
+				"counter payload value %q is exempt AS A SHAPE and serialises as %T (%v), which is not "+
+					"that shape. The exemption argued: %s.", path, v, v, ex.why)
 			leaves = append(leaves, path)
 			return
 		}
