@@ -179,6 +179,30 @@ type Handler struct {
 	// check will say so at any `*h` copy. That is a feature: nothing should ever
 	// copy a Handler.
 	ingestDrops ingestLogCounters
+
+	// taskLogFenceRejects counts chunks handleTaskLog dropped because
+	// AppendTaskLog's fence returned pgx.ErrNoRows. A VALUE, not a pointer, for
+	// the same reason ingestDrops is: the zero value works, so a bare &Handler{}
+	// in a test has a working counter and there is no nil case anywhere. Read
+	// through TaskLogFenceRejections; wired to GET /v1/server/counters by
+	// cmd/relay-server's buildHTTPServer under its OWN section and its OWN
+	// CounterSources field.
+	//
+	// A DIFFERENT NOUN FROM ingestDrops, and neither number covers any part of
+	// the other. ingestDrops counts LOG LINES THE BUDGET DROPPED; this counts
+	// CHUNKS THE FENCE REJECTED, on an arm that never consults the budget at all.
+	// No input moves both. Do not sum them and do not merge the sections.
+	//
+	// NOT IN metrics.Store, AND THE REASON IS MECHANICAL RATHER THAN STYLISTIC.
+	// That type's Append is a no-op for an untracked worker, and its Clear
+	// DELETES the whole entry when a worker goes offline (internal/metrics, called
+	// from this file's teardown), so a cumulative rejection counter parked there
+	// is destroyed by the very disconnect that produced the rejections: a worker
+	// that floods and then drops leaves zero behind. The Metrics WIRING pattern -
+	// an exported thing main sets, nil-checked at every use - is the right
+	// precedent and is what api.CounterSources uses. metrics.Store is the wrong
+	// HOME and must not gain a counter method.
+	taskLogFenceRejects atomic.Uint64
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -188,6 +212,17 @@ type Handler struct {
 // one Handler per server - and are never sent to an agent: the only read path is
 // the admin-authenticated GET /v1/server/counters.
 func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.snapshot() }
+
+// TaskLogFenceRejections reports how many task-log chunks this server's
+// AppendTaskLog fence has rejected since process start, across every worker and
+// all three rejection reasons.
+//
+// It satisfies api.TaskLogFenceSource. ONE NUMBER, AND THE REASON IS NOT
+// AVAILABLE - see the pgx.ErrNoRows arm in handleTaskLog for why, and do not add
+// a second query to find out. Per PROCESS, monotonic, zeroed by a restart, and
+// never returned to an agent: the only read path is the admin-authenticated
+// GET /v1/server/counters.
+func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
 
 // NewHandler returns a Handler wired to the given dependencies.
 func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
@@ -1127,14 +1162,46 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 			// appear in a live view and then vanish on refresh, because it was
 			// correctly never stored.
 			//
-			// THIS ARM IS DELIBERATELY SIDE-EFFECT-FREE AND MUST STAY SILENT. A log
-			// line here would be caller-driven volume on the recv goroutine, and it
-			// would fire on the legitimate late-flush case as well as on forged
-			// chunks. Observability for this arm is
-			// idea-2026-08-14-tasklog-fence-rejection-is-unobservable, whose answer
-			// is a COUNTER, not a log line. Nothing here may publish. Pinned by
-			// TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll, which asserts the
-			// whole captured log is empty, so any wording reddens it.
+			// THIS ARM IS DELIBERATELY SIDE-EFFECT-FREE APART FROM THE COUNT, AND
+			// MUST STAY SILENT. A log line here would be caller-driven volume on
+			// the recv goroutine, and it would fire on the legitimate late-flush
+			// case as well as on forged chunks; a BUDGETED line is no better,
+			// because it would spend a token from a six-per-minute bucket that a
+			// genuine infra failure needs. Nothing here may publish. Pinned by
+			// TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll, which asserts
+			// the whole captured log is empty, so any wording reddens it, and by
+			// its default-lane twin in tasklog_fence_counter_test.go.
+			//
+			// THE COUNTER IS THE OBSERVABILITY, and it is one atomic add: no
+			// allocation, no lock, no map, no round trip, sitting next to a
+			// Postgres round trip that already happened. The one-statement
+			// constraint at the top of this function is respected in substance and
+			// not merely in letter. Without this number an operator who set
+			// RELAY_TASKLOG_TRAILING_WINDOW too small gets silently truncated task
+			// output with NO runtime signal of any kind. Served as
+			// task_log_fence.counts.rejected_total on the admin-only
+			// GET /v1/server/counters. Never returned to an agent.
+			//
+			// IT IS ONE NUMBER AND NOT THREE, AND THAT IS A PRICED DECISION RATHER
+			// THAN AN IMPOSSIBILITY. The three cases are not recoverable from this
+			// statement's RESULT: the fence is a CTE that yields no row at all when
+			// any predicate fails, so there is nothing to carry a reason column on
+			// (see AppendTaskLog's comment). Recovering the reason needs either a
+			// SECOND query, which the top of this function forbids, or a rewrite of
+			// AppendTaskLog to return a row on the rejection path - a LEFT JOIN over
+			// the task row exposing the three predicates as booleans, which IS
+			// expressible in one round trip. That rewrite is DECLINED, and here is
+			// its price: it deletes the pgx.ErrNoRows signal that every caller,
+			// every comment and every test of this fence is written against; it
+			// makes AppendTaskLogRow's three columns nullable on the success path,
+			// so the publish below would have to re-derive "did the insert happen"
+			// from a NULL check - a new way to publish an unstored chunk, which the
+			// paragraph above forbids absolutely; and it puts a rewrite of the most
+			// security-sensitive statement in the repo inside an observability
+			// change. Bigger and riskier than one number is worth. Do not spend an
+			// afternoon rediscovering either half, and do not restate this as
+			// "impossible" - it is not, it is declined.
+			h.taskLogFenceRejects.Add(1)
 			return
 		}
 
