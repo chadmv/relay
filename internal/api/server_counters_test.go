@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -15,7 +17,10 @@ import (
 	"time"
 
 	"relay/internal/netlimit"
+	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -110,79 +115,232 @@ func TestServerCounters_ReportsTheNetlimitSnapshot(t *testing.T) {
 	assert.Equal(t, "2026-08-21T09:00:00Z", body.StartedAt)
 }
 
-// TestServerCountersRouteIsAdminGated.
+// stubTokenDB is the narrowest store.DBTX that lets BearerAuth resolve a token
+// WITHOUT Postgres, so the admin gate on this route can be proved BEHAVIOURALLY
+// in the default (non-integration) lane. That matters because CI runs
+// `go test -race ./...` with no tag and no container
+// (.github/workflows/go-ci.yml): before this existed, the only behavioural 403
+// lived behind //go:build integration and the default gate was a source scan
+// alone - which a block-scoped `admin := func(h http.Handler) http.Handler
+// { return h }` walked straight past, leaving every authenticated NON-ADMIN
+// able to read the payload with the whole repo green.
 //
-// THE BEHAVIOURAL PROOF OF THE ADMIN HALF NEEDS A DATABASE - BearerAuth resolves
-// a token against Postgres - and CI runs `go test -race ./...` with no
-// integration tag and no container (.github/workflows/go-ci.yml). So the
-// integration test next door (server_counters_integration_test.go) proves 403 vs
-// 200 for real, and THIS guard is what keeps the default gate able to see
-// `auth(...)` silently losing its `admin(...)`.
+// It is a stub for ONE query, GetTokenWithUser, and it is deliberately not
+// general: any other statement panics rather than returning a plausible zero
+// value, so a handler that grew a second query cannot pass here by accident.
+type stubTokenDB struct{ isAdmin bool }
+
+func (d stubTokenDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	panic("stubTokenDB: Exec is not part of the bearer-auth path")
+}
+
+func (d stubTokenDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	panic("stubTokenDB: Query is not part of the bearer-auth path")
+}
+
+func (d stubTokenDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+	return stubTokenRow{isAdmin: d.isAdmin}
+}
+
+type stubTokenRow struct{ isAdmin bool }
+
+// Scan fills GetTokenWithUserRow BY DESTINATION TYPE rather than by column
+// index, so adding or reordering a column in the query cannot silently make this
+// stub authenticate a zero-valued user. The single *bool is user_is_admin, and
+// it is what the gate under test reads; the strings are filled so the resulting
+// AuthUser is a plausible one rather than empty.
+func (r stubTokenRow) Scan(dest ...any) error {
+	bools := 0
+	for _, d := range dest {
+		switch v := d.(type) {
+		case *bool:
+			*v = r.isAdmin
+			bools++
+		case *string:
+			*v = "counters-guard"
+		}
+	}
+	if bools != 1 {
+		return fmt.Errorf("stubTokenDB: GetTokenWithUserRow has %d bool destinations, want exactly 1 "+
+			"(user_is_admin). The row shape changed and this stub no longer decides the admin gate", bools)
+	}
+	return nil
+}
+
+// serverWithStubAuth builds a Server whose bearer-auth resolves any token to a
+// user with the given admin flag. Nothing else is wired: Handler() only
+// registers routes.
+func serverWithStubAuth(isAdmin bool) *Server {
+	return &Server{q: store.New(stubTokenDB{isAdmin: isAdmin}), startedAt: testStartedAt()}
+}
+
+func countersRequest() *http.Request {
+	req := httptest.NewRequest("GET", "/v1/server/counters", nil)
+	req.Header.Set("Authorization", "Bearer any-token-the-stub-resolves")
+	return req
+}
+
+// TestServerCounters_NonAdminIsForbidden is the BEHAVIOURAL half of the admin
+// gate, run through srv.Handler() so that the route pattern, the middleware
+// order and the handler are all exercised as one. A guard that compares
+// middleware IDENTIFIER NAMES at the registration site cannot see a locally
+// rebound `admin`, and a Handler() split into
+// `serverRoutes(mux, auth, admin func(http.Handler) http.Handler)` would pass
+// every name check while the caller supplied whatever it liked. Execution has no
+// such blind spot.
+func TestServerCounters_NonAdminIsForbidden(t *testing.T) {
+	rec := httptest.NewRecorder()
+	serverWithStubAuth(false).Handler().ServeHTTP(rec, countersRequest())
+
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"an AUTHENTICATED NON-ADMIN must not read GET /v1/server/counters. These numbers describe "+
+			"adversary activity and internal control state, and this route is the one place they are "+
+			"served on demand.")
+	assert.NotContains(t, rec.Body.String(), "started_at",
+		"a 403 must carry no part of the payload")
+}
+
+// TestServerCounters_AdminReadsThePayload is the other side of the same gate.
+// Without it, `admin := func(http.Handler) http.Handler { return nil }` - or
+// admin(auth(...)) in the wrong order, which 403s everybody including admins -
+// would satisfy the test above and lock the endpoint shut instead of open.
+func TestServerCounters_AdminReadsThePayload(t *testing.T) {
+	s := serverWithStubAuth(true)
+	s.Counters = CounterSources{GRPCAdmission: fakeAdmissionSource{s: netlimit.Stats{
+		Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
+		Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
+	}}}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, countersRequest())
+
+	require.Equal(t, http.StatusOK, rec.Code, "an admin must reach the handler through the real route")
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	assert.ElementsMatch(t, []string{"started_at", "grpc_admission"}, counterKeys(top))
+}
+
+// TestServerCountersRouteIsAdminGated is the SECOND layer, and it is SCOPED
+// rather than file-wide.
 //
-// go/ast, not a regex: a source-scanning regex guard in this repo was proven
-// breakable by a single stray comment. Written from the PROPERTY - "the counters
-// pattern is registered exactly once, with Handle, wrapped in bearer-auth
-// outermost and AdminOnly inside" - and then searched for other spellings:
-// HandleFunc (no auth at all), a non-literal pattern, a locally-defined `admin`
-// that is not AdminOnly, and admin(auth(...)) in the wrong order, which 403s
-// every caller including admins because AdminOnly reads the user that BearerAuth
-// puts in the context.
+// The behavioural pair above is what actually proves 403-then-200. This exists
+// for the two shapes one call cannot see: a SECOND registration of the same
+// pattern elsewhere in the file, and the registration migrating out of Handler()
+// into a helper whose middleware arrive as parameters.
+//
+// EVERY LOOKUP HERE IS ANCHORED TO func (s *Server) Handler()'s OWN BODY, which
+// is precisely what the first version got wrong: it resolved `auth` and `admin`
+// from assignments ANYWHERE in server.go and then compared identifiers by NAME
+// at the registration site, so
+//
+//	{
+//	    admin := func(h http.Handler) http.Handler { return h }
+//	    mux.Handle("GET /v1/server/counters", auth(admin(...)))
+//	}
+//
+// passed with `go test ./...` entirely green while every authenticated non-admin
+// could read the payload. Names are not bindings. Requiring the registration to
+// be a DIRECT STATEMENT of Handler's body, and each middleware name to be bound
+// EXACTLY ONCE in that same body, is what makes the name comparison mean what it
+// says.
 func TestServerCountersRouteIsAdminGated(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "server.go", nil, 0)
 	require.NoError(t, err)
 
-	// Resolve the two middleware locals from their RIGHT-HAND SIDES. A name-only
-	// check would be satisfied by `admin := func(h http.Handler) http.Handler { return h }`.
+	var body *ast.BlockStmt
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "Handler" || fd.Recv == nil || fd.Body == nil {
+			continue
+		}
+		body = fd.Body
+	}
+	require.NotNil(t, body, "server.go no longer declares func (s *Server) Handler() with a body")
+
+	// Resolve the two middleware locals from assignments that are DIRECT
+	// statements of Handler's body, and from their RIGHT-HAND SIDES. Name-only
+	// resolution is satisfied by any `admin := ...`; file-wide resolution is
+	// satisfied by the real binding while a shadow does the work.
 	authName, adminName := "", ""
-	ast.Inspect(file, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
+	authBinds, adminBinds := 0, 0
+	for _, st := range body.List {
+		as, ok := st.(*ast.AssignStmt)
 		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
-			return true
+			continue
 		}
 		id, ok := as.Lhs[0].(*ast.Ident)
 		if !ok {
-			return true
+			continue
 		}
 		switch rhs := as.Rhs[0].(type) {
 		case *ast.CallExpr:
 			if fn, ok := rhs.Fun.(*ast.Ident); ok && fn.Name == "BearerAuth" {
-				authName = id.Name
+				authName, authBinds = id.Name, authBinds+1
 			}
 		case *ast.Ident:
 			if rhs.Name == "AdminOnly" {
-				adminName = id.Name
+				adminName, adminBinds = id.Name, adminBinds+1
 			}
 		}
-		return true
-	})
-	require.NotEmpty(t, authName, "server.go no longer binds BearerAuth(...) to a local in Handler()")
-	require.NotEmpty(t, adminName, "server.go no longer binds AdminOnly to a local in Handler()")
+	}
+	require.Equal(t, 1, authBinds,
+		"Handler()'s body must bind BearerAuth(...) to a local exactly once; found %d such bindings", authBinds)
+	require.Equal(t, 1, adminBinds,
+		"Handler()'s body must bind AdminOnly to a local exactly once; found %d such bindings", adminBinds)
 
 	const route = "GET /v1/server/counters"
-	var regs []*ast.CallExpr
-	ast.Inspect(file, func(n ast.Node) bool {
+	asReg := func(n ast.Node) *ast.CallExpr {
 		ce, ok := n.(*ast.CallExpr)
 		if !ok || len(ce.Args) == 0 {
-			return true
+			return nil
 		}
 		sel, ok := ce.Fun.(*ast.SelectorExpr)
 		if !ok || (sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc") {
-			return true
+			return nil
 		}
 		lit, ok := ce.Args[0].(*ast.BasicLit)
 		if !ok || lit.Kind != token.STRING {
-			return true
+			return nil
 		}
 		if v, err := strconv.Unquote(lit.Value); err == nil && v == route {
-			regs = append(regs, ce)
+			return ce
+		}
+		return nil
+	}
+
+	// File-wide first: a second registration anywhere is a second answer.
+	var all []*ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		if ce := asReg(n); ce != nil {
+			all = append(all, ce)
 		}
 		return true
 	})
+	require.Len(t, all, 1,
+		"%q must be registered exactly once in server.go, with the pattern spelled as a string literal at "+
+			"the registration site. A pattern built from a constant or a variable leaves this guard unable "+
+			"to see the route at all.", route)
+
+	// Then scoped: the one registration must be a DIRECT statement of Handler's
+	// body, so the middleware identifiers it names are the ones bound above and
+	// not a block-scoped, closure-scoped or parameter-supplied rebinding.
+	var regs []*ast.CallExpr
+	for _, st := range body.List {
+		es, ok := st.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		if ce := asReg(es.X); ce != nil {
+			regs = append(regs, ce)
+		}
+	}
 	require.Len(t, regs, 1,
-		"%q must be registered exactly once, with the pattern spelled as a string literal at the "+
-			"registration site. A pattern built from a constant or a variable leaves this guard unable to "+
-			"see the route at all.", route)
+		"%q is registered in server.go but NOT as a direct statement of func (s *Server) Handler()'s own "+
+			"body. Wrapping it in a block, an if or a closure, or moving it into a routes helper that "+
+			"receives `auth, admin func(http.Handler) http.Handler` as PARAMETERS, all put a different "+
+			"binding behind the same two identifiers - which is exactly what a by-name check cannot see. "+
+			"If the route table is being split, the split is the decision: make it here.", route)
 
 	sel := regs[0].Fun.(*ast.SelectorExpr)
 	require.Equal(t, "Handle", sel.Sel.Name,
@@ -193,10 +351,11 @@ func TestServerCountersRouteIsAdminGated(t *testing.T) {
 	outer, ok := regs[0].Args[1].(*ast.CallExpr)
 	require.True(t, ok, "the counters handler is registered unwrapped: no auth, no admin")
 	outerName := routeIdentName(outer.Fun)
-	require.Contains(t, []string{authName, "BearerAuth"}, outerName,
-		"the OUTERMOST wrapper on the counters route must be the bearer-auth middleware, got %q. AdminOnly "+
-			"reads the user out of the request context and BearerAuth is what puts it there, so "+
-			"admin(auth(...)) returns 403 to every caller including admins.", outerName)
+	require.Equal(t, authName, outerName,
+		"the OUTERMOST wrapper on the counters route must be the bearer-auth middleware bound in "+
+			"Handler()'s body (%q), got %q. AdminOnly reads the user out of the request context and "+
+			"BearerAuth is what puts it there, so admin(auth(...)) returns 403 to every caller including "+
+			"admins.", authName, outerName)
 	require.Len(t, outer.Args, 1)
 
 	inner, ok := outer.Args[0].(*ast.CallExpr)
@@ -204,8 +363,9 @@ func TestServerCountersRouteIsAdminGated(t *testing.T) {
 		"the counters route is wrapped in %s(...) alone. Every authenticated user would then be able to "+
 			"read numbers that describe adversary activity and internal control state.", outerName)
 	innerName := routeIdentName(inner.Fun)
-	require.Contains(t, []string{adminName, "AdminOnly"}, innerName,
-		"the counters route must be wrapped in AdminOnly inside the bearer-auth middleware, got %q", innerName)
+	require.Equal(t, adminName, innerName,
+		"the counters route must be wrapped in the AdminOnly local bound in Handler()'s body (%q), inside "+
+			"the bearer-auth middleware; got %q", adminName, innerName)
 }
 
 func routeIdentName(e ast.Expr) string {
