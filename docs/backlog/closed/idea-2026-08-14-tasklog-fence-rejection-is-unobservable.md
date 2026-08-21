@@ -1,9 +1,11 @@
 ---
 title: A rejected task-log chunk is completely unobservable, and since the trailing window it can mean "legitimately late"
 type: idea
-status: open
+status: closed
 created: 2026-08-14
 updated: 2026-08-21
+closed: 2026-08-21
+resolution: fixed
 priority: medium
 source: Phase 4 of the 2026-08-14-tasklog-terminal-append-bound slice; the diagnosability cost that slice accepted deliberately
 ---
@@ -333,3 +335,95 @@ fix separately from the diagnosis.
 reporting shipped a counter that could silently stop counting. Whatever this slice adds, ask what
 compares the two ends of every hand-written copy it introduces - that was the single worst finding of
 slice 2 and it was found three times independently, once the question was asked.
+
+
+## Resolution
+
+Shipped 2026-08-21 as slice 3 of 4 of the silent-drop-observability batch
+(`docs/retros/2026-08-21-silent-drop-observability-slice3.md`,
+`docs/superpowers/plans/2026-08-21-silent-drop-observability-slice3.md`).
+
+One `atomic.Uint64` VALUE field on `*worker.Handler`, incremented in the existing named
+`pgx.ErrNoRows` arm of `handleTaskLog` before its return; an exported scalar accessor satisfying a
+new `api.TaskLogFenceSource`; a third `api.CounterSources` field fed by the `*worker.Handler`
+`cmd/relay-server` already wires; and `task_log_fence.counts.rejected_total` on the admin-only
+`GET /v1/server/counters`. Zero SQL, zero migration, zero generated file - `git diff -- internal/store/`
+is 0 bytes.
+
+All thirteen Done-When bullets are met. Two are met in AMENDED form, and both amendments were made
+deliberately with the reason recorded in code:
+
+1. **The comment says DECLINED, not "structurally impossible" - the bullet asked for a statement that
+   is false.** The premise is correct: the fence is a CTE that yields no row when any predicate fails,
+   so nothing can carry a reason column. But a one-round-trip variant IS expressible (a LEFT JOIN over
+   the task row exposing the predicates as booleans), and it is declined ON PRICE: it deletes the
+   `pgx.ErrNoRows` signal that five statements' contracts are written against, it makes
+   `AppendTaskLogRow`'s columns nullable on the success path (a new way to publish an unstored chunk,
+   which the arm forbids absolutely), and it rewrites the repo's most security-sensitive statement
+   inside an observability change. Shipping "impossible" would have put this project's dominant
+   recorded defect class inside the very comment that exists to stop the question being re-litigated.
+   Both sites now read "declined, and here is the price".
+2. **The typed-nil property is guarded by an ADDED assertion on the shipped test, not a duplicated
+   one**, and the section reuses `httpServerDeps.agentHandler` rather than taking a second deps field.
+   One deps field means one nil filter and one `if`; a sibling field for the same object could
+   legitimately have been fed a DIFFERENT `*worker.Handler` with every check green, because only
+   `agentHandler` is compared against the identifier passed to `RegisterAgentServiceServer` - the
+   confident zero the guard exists to prevent, created in order to satisfy a bullet.
+
+**The item's explicit instruction "Resolve it deliberately ... Do not relax the check" was honoured,
+and the outcome is stronger than what was asked for.** The predicted RED fired exactly as the guard's
+own comment foretold. It was resolved deliberately, by re-expressing the relation as N sections over M
+deps fields rather than by duplicating a row - and then BOTH review lenses proved that resolution
+decorative and a REGRESSION on what it replaced. The `sections []string` strings were never read
+against any code: swapping which row claimed which section left the package green, and a whole FOURTH
+`CounterSources` field wired end to end except for its assignment went green module-wide once one
+string was appended to an existing row. Before the rewrite the relation was a bijection that FORCED a
+new deps field, which then inherited three other checks; after it, a new section cost one token and
+inherited nothing. And the failure message ("EVERY SECTION needs to be named by exactly one row") made
+it worse, because following it literally IS the evasion.
+
+The check was therefore not relaxed and not patched: it was replaced at the top of the ladder.
+`TestBuildHTTPServer_EverySourceFieldProducesAServedSection` builds a real `buildHTTPServer` with every
+source wired and counts the SERVED top-level keys against `NumField(api.CounterSources)` - it cannot be
+satisfied by editing a fixture, because the source must be passed, assigned AND rendered before the
+count comes out right. A second property-counting walk (`countersAssignmentSources`) covers the one
+direction execution cannot: a deps field reaching `s.Counters` with no `wiredDep` row is RED, and the
+assignment must be spelled `d.<field>` exactly, so the crude substituted-handler evasion moved from
+integration-only into the DEFAULT lane.
+
+**What the number does NOT cover, stated here because it is one number rather than three:**
+
+- **It is one number, not four.** The fence has FOUR conjuncts, not three - `t.id = task_id` is one of
+  them, and this commit's own integration test drives exactly that path. A chunk is rejected because
+  the sender is not the assignee, or the task id matches no task, or the generation is stale, or the
+  task finished longer ago than `RELAY_TASKLOG_TRAILING_WINDOW`. The payload cannot say which. Only
+  the fourth is legitimate, and it is the one an operator who set that knob too small hits constantly
+  - so the number answers "output is being dropped", never "why".
+- **It is neither a subset nor a superset of `ingest_log_budget`.** The rejection arm never consults
+  the log budget, so no input moves both numbers and neither explains any part of the other.
+- **It is caller-inflatable.** Only `worker_id` is authenticated on an incoming chunk and nothing
+  rate-limits task-log CHUNKS (the ingest budget bounds LINES), so any enrolled agent can forge the
+  exact "climbs steadily on a healthy fleet" signature README attributes to a too-small trailing
+  window - whose documented remedy is to RAISE the window, widening the hole it exists to bound.
+  Disclosed in README in-slice and filed as
+  [[idea-2026-08-21-rejected-total-is-forgeable-and-its-remedy-helps-the-forger]], together with the
+  priced split that would resolve it.
+- **The strongest forwarding proof is integration-only.** CI compiles the end-to-end test and never
+  runs it, because reaching the fence arm through `buildHTTPServer` needs `Connect`'s message loop and
+  therefore Postgres. Stated in the test's comment rather than implied.
+- **It is per replica, per process, zeroed by a restart**, with `started_at` always present.
+
+Two things closed beyond the item's own scope. The counter's own behaviour is proven in the DEFAULT
+lane - `AppendTaskLog` is one `QueryRow` plus one `Scan` over a `store.DBTX`, so a ~35-line stub drives
+the REAL fence arm with no container, which slice 2's counter could not do. And the epoch fence's own
+named consequence - "gate any side effect on the fence having actually matched, or a zombie agent's
+output appears in a live view and then vanishes on refresh" - was guarded ONLY behind
+`//go:build integration`, so inserting a `broker.Publish` into the rejection arm left
+`go test ./internal/worker/...` green (measured). The new default-lane test subscribes the broker,
+which also defeats the `HasLogSubscriber` short-circuit and therefore makes the assertion non-vacuous
+against exactly that mutation; the test's message says so.
+
+Sibling arms in `handleTaskStatus` are still silent and uncounted; filed as
+[[idea-2026-08-21-handletaskstatus-fence-rejections-are-uncounted]]. The last slice of the batch,
+[[idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced]], remains open and was
+amended with this slice's forward guidance.
