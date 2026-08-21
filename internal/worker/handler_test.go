@@ -927,3 +927,82 @@ func TestRegister_OldAgentOmittingFieldKeepsDefaultTrue(t *testing.T) {
 		t.Fatal("timeout waiting for Connect to return")
 	}
 }
+// TestHandler_MessageLoopRecvIsNotBoundedByTheRegistrationDeadline.
+//
+// "ONLY THE FIRST Recv IS BOUNDED" WAS A PRINCIPLE STATED IN A COMMENT WITH NO
+// CHECK BEHIND IT. recvRegistration's doc says the message loop's Recv "must
+// stay unbounded forever ... a deadline there would disconnect the entire fleet
+// on a timer", and then replacing the loop's `stream.Recv()` with
+// `h.recvRegistration(stream)` - one token - compiled and left `go test
+// ./internal/worker` fully green. That edit cuts every healthy agent at 30s of
+// stream silence, fleet-wide and permanently, which is the single worst change
+// available in that file. It is doubly invisible: recvRegistration wraps its
+// error, so `err == io.EOF` stops matching too, and nothing objected to that
+// either.
+//
+// A HEALTHY AGENT IS SILENT FOR HOURS. It holds one stream open between
+// dispatches and sends nothing on it, so "no message for N" is the normal state
+// of the fleet, not a symptom. That is why the bound belongs on the FIRST Recv -
+// where nothing has authenticated yet - and nowhere else.
+//
+// THIS TEST NEEDS A DATABASE, and that is a property of the code rather than a
+// preference. Connect only reaches the message loop after authenticateAndRegister
+// succeeds, and all three credential paths go to the store, so the DB-free
+// scriptedStream tests in handler_registration_deadline_test.go can reach the
+// deadline but never the loop behind it. RegistrationTimeout is 100ms here and
+// the silence is twenty windows long, so the mutation above fails in ~100ms
+// while HEAD sits in Recv until the test releases it.
+func TestHandler_MessageLoopRecvIsNotBoundedByTheRegistrationDeadline(t *testing.T) {
+	q, pool := newTestStore(t)
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+	h.RegistrationTimeout = 100 * time.Millisecond
+
+	_, rawToken := seedWorkerWithAgentToken(t, context.Background(), q, "quiet-01")
+
+	hold := make(chan struct{})
+	stream := &fakeStream{
+		ctx:    context.Background(),
+		sentCh: make(chan struct{}, 1),
+		hold:   hold,
+		msgs: []*relayv1.AgentMessage{
+			{Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname:   "quiet-01",
+					Os:         "linux",
+					Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: rawToken},
+				},
+			}},
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.Connect(stream) }()
+
+	// The RegisterResponse is the signal that registration cleared the bounded
+	// first Recv and the message loop is what is running now.
+	select {
+	case <-stream.sentCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for RegisterResponse")
+	}
+
+	// Twenty registration windows of complete silence, which is what a healthy
+	// agent between dispatches looks like from the server's side.
+	select {
+	case err := <-done:
+		t.Fatalf("Connect returned (%v) while a REGISTERED agent was merely idle. The message loop's "+
+			"stream.Recv must never carry a deadline: a healthy agent holds one silent stream for hours "+
+			"between dispatches, so a bound there disconnects the entire fleet on a timer, forever. Only "+
+			"the FIRST Recv is bounded, because nothing has authenticated at that point.", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	close(hold)
+	select {
+	case err := <-done:
+		assert.NoError(t, err, "an io.EOF from the message loop is a clean disconnect and must stay one; "+
+			"routing the loop through a wrapper that decorates the error breaks that comparison too")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Connect to return after the stream ended")
+	}
+}
