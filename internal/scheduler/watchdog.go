@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -29,6 +30,15 @@ const WatchdogSweepInterval = 60 * time.Second
 // the stream dropped - which README's own analysis puts at roughly 105s. 30m is
 // about seventeen times that, chosen generously because the failure direction of
 // "too small" is killing healthy work.
+// WatchdogMaxRowsPerSweep bounds one sweep. It is not only a volume cap: every
+// row in a batch is written against the same scan, so an unbounded sweep makes
+// the scan-to-write window for the last row the whole loop rather than an
+// instant, and that window is where a concurrent agent transition lands. A few
+// hundred comfortably exceeds a healthy fleet's entire assigned set, so in
+// normal operation it never binds; when it does, the 60s tick drains the
+// remainder oldest-first and the sweep says so in the log.
+const WatchdogMaxRowsPerSweep = 500
+
 const DefaultWatchdogMargin = 30 * time.Minute
 
 // DefaultMaxAssignment is the absolute cap on how long a task may stay assigned,
@@ -133,27 +143,52 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		return nil
 	}
 
-	now := w.now()
+	scanNow := w.now()
 	overdue, err := w.q.ListOverdueAssignedTasks(ctx, store.ListOverdueAssignedTasksParams{
 		AbsoluteEnabled: absoluteEnabled,
-		AbsoluteCutoff:  pgtype.Timestamptz{Time: now.Add(-w.maxAssignment), Valid: true},
+		AbsoluteCutoff:  pgtype.Timestamptz{Time: scanNow.Add(-w.maxAssignment), Valid: true},
 		ExecEnabled:     execEnabled,
-		Now:             pgtype.Timestamptz{Time: now, Valid: true},
+		Now:             pgtype.Timestamptz{Time: scanNow, Valid: true},
 		MarginSeconds:   int64(w.margin / time.Second),
+		MaxRows:         WatchdogMaxRowsPerSweep,
 	})
 	if err != nil {
 		return err
 	}
+	if len(overdue) >= WatchdogMaxRowsPerSweep {
+		// Say so, or a capped sweep is indistinguishable from a complete one and
+		// an operator reading "N swept" concludes the fleet is healthy again.
+		log.Printf("watchdog: sweep hit its %d-row cap; the remainder is left for the next tick (oldest first)",
+			WatchdogMaxRowsPerSweep)
+	}
 
-	var cancels []watchdogCancel
+	// Cancels are dispatched AS EACH ROW IS SWEPT, not batched after the loop.
+	// Batching delays a send by the length of the whole sweep, and CancelTask
+	// carries no epoch - the agent cancels whatever a.runners[taskID] finds - so a
+	// late cancel can kill a FRESH run of the same task id that an operator retry
+	// reopened in the meantime. Adding an epoch to the proto is a named non-goal;
+	// not delaying the send is free. Each send still runs on its own goroutine, so
+	// N overdue tasks on ONE wedged worker cost ~one send timeout, not N.
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for _, t := range overdue {
+		// The clock is read PER ROW. Sharing one reading across a batch stamps
+		// every row with a finished_at from the start of the loop, and - now that
+		// started_at is write-once - a row whose agent stamped a real start time
+		// mid-sweep could end up with started_at LATER than finished_at.
+		now := w.now()
 		updated, err := w.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
-			ID:              t.ID,
-			Status:          "timed_out",
-			WorkerID:        t.WorkerID,        // fence, not a value
-			StartedAt:       t.StartedAt,       // preserved unchanged
+			ID:     t.ID,
+			Status: "timed_out",
+			// WorkerID and AssignmentEpoch are FENCES, not values. StartedAt is
+			// neither: UpdateTaskStatus COALESCEs it, so this argument only ever
+			// fills a NULL and can no longer clobber a start time the agent
+			// stamped after this row was scanned.
+			WorkerID:        t.WorkerID,
+			StartedAt:       t.StartedAt,
 			FinishedAt:      pgtype.Timestamptz{Time: now, Valid: true},
-			AssignmentEpoch: t.AssignmentEpoch, // fence: real and non-zero, from the row
+			AssignmentEpoch: t.AssignmentEpoch,
 		})
 		if err != nil {
 			// pgx.ErrNoRows means somebody else got there first - the agent
@@ -167,46 +202,41 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 			continue
 		}
 
-		arm, age, bound := overdueReason(t, now, w.margin, w.maxAssignment)
 		// One line per SWEPT task, unbudgeted, and that is safe: the count per
-		// sweep is bounded by the fleet's assigned-task count, each task can be
-		// swept at most once (it is terminal afterwards), and nothing in the line
-		// is caller-supplied. A watchdog that kills somebody's work without saying
-		// why it decided to is worse than no watchdog.
-		log.Printf("watchdog: task %s (job %s, worker %s) timed out by the %s bound: assignment age %s exceeds %s",
-			uuidStr(updated.ID), uuidStr(updated.JobID), uuidStr(t.WorkerID), arm, age.Round(time.Second), bound)
+		// sweep is bounded by WatchdogMaxRowsPerSweep, each task can be swept at
+		// most once (it is terminal afterwards), and nothing in the line is
+		// caller-supplied. A watchdog that kills somebody's work without saying
+		// why it decided to is worse than no watchdog - which is also why the line
+		// must never assert something false; see watchdogSweptLine.
+		log.Printf("watchdog: task %s (job %s, worker %s) %s",
+			uuidStr(updated.ID), uuidStr(updated.JobID), uuidStr(t.WorkerID),
+			watchdogSweptLine(t, now, w.margin, w.maxAssignment))
 
 		finalizeTerminalTask(ctx, w.q, w.broker, "watchdog", updated, "timed_out")
 		if err := w.q.NotifyTaskCompleted(ctx); err != nil {
 			log.Printf("watchdog: NotifyTaskCompleted: %v", err)
 		}
-		cancels = append(cancels, watchdogCancel{
-			workerID: uuidStr(t.WorkerID),
-			taskID:   uuidStr(t.ID),
-		})
+
+		workerID, taskID := uuidStr(t.WorkerID), uuidStr(t.ID)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.sendCancel(workerID, taskID)
+		}()
 	}
-	w.sendCancels(cancels)
 	return nil
 }
 
-// watchdogCancel is one best-effort CancelTask to deliver to a connected agent.
-type watchdogCancel struct {
-	workerID string
-	taskID   string
-}
-
-// sendCancels tells each swept task's agent to stop, so the coordinator does not
+// sendCancel tells one swept task's agent to stop, so the coordinator does not
 // merely do bookkeeping while an orphan subprocess keeps running against a
 // workspace and the freed slot over-subscribes the machine that is already in
-// trouble. Deliberately identical in shape to api.sendCancelSignals, which is
-// the reviewed precedent for a coordinator-side terminal write over a live
+// trouble. Deliberately the same shape as api.sendCancelSignals, which is the
+// reviewed precedent for a coordinator-side terminal write over a live
 // assignment - handleCancelJob does exactly this today.
 //
 // Best-effort: the return value is ignored, because a failed send just means the
 // agent already lost the task, and the watchdog is registry-blind by design -
-// under multi-replica operation the agent may be connected elsewhere. The sends
-// run concurrently and this blocks until all complete, so N overdue tasks on ONE
-// wedged worker cost ~one send timeout instead of N of them.
+// under multi-replica operation the agent may be connected elsewhere.
 //
 // force=false deliberately. force=true skips workspace finalize, which risks
 // leaving a P4 workspace in a state that poisons warm-workspace scoring for
@@ -214,23 +244,21 @@ type watchdogCancel struct {
 // is the escape that frees a log write parked on a full sendCh. It also matches
 // handleDisableWorker, the other place the coordinator unilaterally takes tasks
 // away from a still-connected agent.
-func (w *Watchdog) sendCancels(cancels []watchdogCancel) {
-	var wg sync.WaitGroup
-	for _, c := range cancels {
-		c := c
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = w.canceller.SendCancel(c.workerID, c.taskID, false)
-		}()
-	}
-	wg.Wait()
+func (w *Watchdog) sendCancel(workerID, taskID string) {
+	_ = w.canceller.SendCancel(workerID, taskID, false)
 }
 
 // overdueReason reports which bound a swept row blew, FOR THE LOG LINE ONLY. It
 // is not a second gate: the database decided, and this only re-derives the
-// explanation. If a row somehow satisfies neither arm in Go it is reported as
-// "absolute", because that arm applies to every assigned row.
+// explanation from a row read at a slightly different instant, so the two CAN
+// disagree.
+//
+// When neither arm explains the row it returns "unknown" rather than naming one.
+// The previous version fell back to "absolute" unconditionally and so could print
+// "timed out by the absolute bound: assignment age 3h0m0s exceeds 24h0m0s" - a
+// sentence contradicted by its own numbers. Since this line is the whole
+// justification for logging one per swept task without a budget, it may not
+// assert something an operator can see is false.
 func overdueReason(t store.Task, now time.Time, margin, maxAssignment time.Duration) (arm string, age, bound time.Duration) {
 	if margin > 0 && t.StartedAt.Valid && t.TimeoutSeconds != nil && *t.TimeoutSeconds > 0 {
 		execAge := now.Sub(t.StartedAt.Time)
@@ -242,5 +270,24 @@ func overdueReason(t store.Task, now time.Time, margin, maxAssignment time.Durat
 	if t.AssignedAt.Valid {
 		age = now.Sub(t.AssignedAt.Time)
 	}
-	return "absolute", age, maxAssignment
+	if maxAssignment > 0 && t.AssignedAt.Valid && age > maxAssignment {
+		return "absolute", age, maxAssignment
+	}
+	return "unknown", age, maxAssignment
+}
+
+// watchdogSweptLine renders the explanation half of the per-task sweep line. The
+// "exceeds" clause appears only when the derived age really does exceed the
+// derived bound; otherwise the line reports that the row no longer looks overdue
+// from here, which is informative and true rather than confident and false.
+func watchdogSweptLine(t store.Task, now time.Time, margin, maxAssignment time.Duration) string {
+	arm, age, bound := overdueReason(t, now, margin, maxAssignment)
+	if arm == "unknown" {
+		return fmt.Sprintf(
+			"timed out by the scan, but neither bound explains it when re-derived here (assignment age %s, "+
+				"cap %s): the row was re-read after the scan compared it",
+			age.Round(time.Second), maxAssignment)
+	}
+	return fmt.Sprintf("timed out by the %s bound: age %s exceeds %s",
+		arm, age.Round(time.Second), bound)
 }

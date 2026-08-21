@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,10 @@ type fakeWatchdogStore struct {
 	notifies   int
 
 	events []string // append-only trace of "update:<id>" / "cancel:<id>"
+
+	// beforeUpdate runs OUTSIDE the mutex, before the update for that id is
+	// recorded, so a test can rendezvous with work the sweep does concurrently.
+	beforeUpdate func(pgtype.UUID)
 }
 
 func (f *fakeWatchdogStore) ListOverdueAssignedTasks(_ context.Context, p store.ListOverdueAssignedTasksParams) ([]store.Task, error) {
@@ -47,6 +52,9 @@ func (f *fakeWatchdogStore) ListOverdueAssignedTasks(_ context.Context, p store.
 }
 
 func (f *fakeWatchdogStore) UpdateTaskStatus(_ context.Context, p store.UpdateTaskStatusParams) (store.Task, error) {
+	if f.beforeUpdate != nil {
+		f.beforeUpdate(p.ID)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updates = append(f.updates, p)
@@ -241,6 +249,11 @@ type recordingCanceller struct {
 	store *fakeWatchdogStore
 	block time.Duration
 	sends []cancelRecord
+
+	// signalOnce is closed the first time SendCancel is ENTERED, so a test can
+	// prove a send is in flight rather than queued behind the rest of the batch.
+	signalOnce chan struct{}
+	signalled  bool
 }
 
 type cancelRecord struct {
@@ -250,6 +263,12 @@ type cancelRecord struct {
 }
 
 func (c *recordingCanceller) SendCancel(workerID, taskID string, force bool) error {
+	c.mu.Lock()
+	if c.signalOnce != nil && !c.signalled {
+		c.signalled = true
+		close(c.signalOnce)
+	}
+	c.mu.Unlock()
 	if c.block > 0 {
 		time.Sleep(c.block)
 	}
@@ -337,4 +356,159 @@ func TestWatchdog_CancelFanOutIsConcurrent(t *testing.T) {
 	require.Len(t, c.sends, n)
 	assert.Less(t, elapsed, (n-1)*block,
 		"the cancel fan-out must be concurrent: a sequential loop over one wedged worker costs N send timeouts")
+}
+
+// TestWatchdog_ScanIsBounded: an unbounded sweep is not just a volume question.
+// Every row in a batch shares the sweep's scan snapshot, so for the LAST row the
+// scan-to-write window is the whole loop rather than an instant - which is
+// exactly the window the started_at clobber lived in. A LIMIT bounds that window
+// as well as the batch, and the 60s tick drains the remainder.
+func TestWatchdog_ScanIsBounded(t *testing.T) {
+	now := time.Now()
+	q := &fakeWatchdogStore{}
+	w := newTestWatchdog(t, q, now)
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	require.Len(t, q.listParams, 1)
+	assert.Equal(t, int32(WatchdogMaxRowsPerSweep), q.listParams[0].MaxRows,
+		"the scan must be bounded; an unbounded one widens the scan-to-write window to the whole loop")
+	assert.Positive(t, WatchdogMaxRowsPerSweep)
+}
+
+// TestWatchdog_TakesTheClockPerRow. finished_at and the age in the log line must
+// be each row's own instant, not the instant the sweep began. With one clock per
+// sweep, a long batch stamps every row with a finished_at from the start of the
+// loop - and after started_at became write-once, a row whose agent stamped a real
+// start time mid-sweep could end up with started_at LATER than finished_at.
+func TestWatchdog_TakesTheClockPerRow(t *testing.T) {
+	base := time.Now()
+	rows := []store.Task{
+		overdueRow(1, 7, base.Add(-2*time.Hour), base.Add(-3*time.Hour)),
+		overdueRow(2, 7, base.Add(-2*time.Hour), base.Add(-3*time.Hour)),
+		overdueRow(3, 7, base.Add(-2*time.Hour), base.Add(-3*time.Hour)),
+	}
+	q := &fakeWatchdogStore{overdue: rows}
+	w := NewWatchdog(q, nopCanceller{}, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+
+	var ticks int64
+	w.now = func() time.Time {
+		n := atomic.AddInt64(&ticks, 1)
+		return base.Add(time.Duration(n) * time.Second)
+	}
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	require.Len(t, q.updates, 3)
+	seen := map[time.Time]bool{}
+	for _, u := range q.updates {
+		require.False(t, seen[u.FinishedAt.Time],
+			"every row must be stamped with its OWN clock reading, not the one the sweep opened with")
+		seen[u.FinishedAt.Time] = true
+	}
+}
+
+// TestWatchdog_CancelForARowIsNotDelayedBehindTheRestOfTheBatch is a rendezvous,
+// not an ordering sniff: the second row's write BLOCKS until the first row's
+// cancel has actually been entered. Batching the sends until after the loop makes
+// that signal unreachable and the test fails on the timeout.
+//
+// It matters because CancelTask carries no epoch and the agent cancels whatever
+// a.runners[taskID] finds, so a cancel delayed behind a large batch can kill a
+// FRESH run of the same task id after POST /v1/jobs/{id}/retry reopened it.
+func TestWatchdog_CancelForARowIsNotDelayedBehindTheRestOfTheBatch(t *testing.T) {
+	now := time.Now()
+	first := overdueRow(1, 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour))
+	second := overdueRow(2, 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour))
+
+	cancelEntered := make(chan struct{})
+	q := &fakeWatchdogStore{overdue: []store.Task{first, second}}
+	q.beforeUpdate = func(id pgtype.UUID) {
+		if id != second.ID {
+			return
+		}
+		select {
+		case <-cancelEntered:
+		case <-time.After(3 * time.Second):
+			t.Errorf("the first row's cancel was still not in flight when the second row's write began: " +
+				"the sends are batched until after the loop, so a cancel can arrive arbitrarily late")
+		}
+	}
+	c := &recordingCanceller{signalOnce: cancelEntered}
+	w := NewWatchdog(q, c, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+	w.now = func() time.Time { return now }
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	require.Len(t, c.sends, 2, "both swept rows must still be cancelled")
+}
+
+// TestOverdueReason covers the log line that is the ENTIRE justification for
+// being unbudgeted ("a watchdog that kills somebody's work without saying why it
+// decided to is worse than no watchdog"). A line that can be self-evidently false
+// undercuts that, and the old fallback could print
+// "timed out by the absolute bound: assignment age 3h0m0s exceeds 24h0m0s" -
+// visible in this package's own test output.
+func TestOverdueReason(t *testing.T) {
+	now := time.Now()
+	sec := func(v int32) *int32 { return &v }
+
+	t.Run("execution arm when the row is past timeout+margin", func(t *testing.T) {
+		row := overdueRow(1, 7, now.Add(-2*time.Hour), now.Add(-3*time.Hour))
+		row.TimeoutSeconds = sec(60)
+		arm, age, bound := overdueReason(row, now, 30*time.Minute, 24*time.Hour)
+		assert.Equal(t, "execution", arm)
+		assert.Equal(t, 2*time.Hour, age)
+		assert.Equal(t, 60*time.Second+30*time.Minute, bound)
+	})
+
+	t.Run("absolute arm when the assignment is past the cap", func(t *testing.T) {
+		row := overdueRow(1, 7, now.Add(-time.Minute), now.Add(-30*time.Hour))
+		row.TimeoutSeconds = sec(0)
+		arm, age, bound := overdueReason(row, now, 30*time.Minute, 24*time.Hour)
+		assert.Equal(t, "absolute", arm)
+		assert.Equal(t, 30*time.Hour, age)
+		assert.Equal(t, 24*time.Hour, bound)
+	})
+
+	t.Run("neither arm explains it, so it must not claim one", func(t *testing.T) {
+		// The database decided; this only re-derives the explanation, and the two
+		// can disagree - the row is re-read here at a different instant than the
+		// scan compared it at. Reporting "absolute" regardless produced a sentence
+		// that contradicts its own numbers.
+		row := overdueRow(1, 7, now.Add(-time.Minute), now.Add(-3*time.Hour))
+		row.TimeoutSeconds = sec(60)
+		arm, _, _ := overdueReason(row, now, 30*time.Minute, 24*time.Hour)
+		assert.Equal(t, "unknown", arm,
+			"an age of 3h against a 24h cap does not exceed it; the line must not say `exceeds` about it")
+	})
+
+	t.Run("a row that never ran has no execution bound", func(t *testing.T) {
+		row := overdueRow(1, 7, now, now.Add(-30*time.Hour))
+		row.StartedAt = pgtype.Timestamptz{}
+		row.TimeoutSeconds = sec(60)
+		arm, _, _ := overdueReason(row, now, 30*time.Minute, 24*time.Hour)
+		assert.Equal(t, "absolute", arm, "started_at IS NULL means only the absolute arm can apply")
+	})
+
+	t.Run("a disabled execution arm never explains a sweep", func(t *testing.T) {
+		row := overdueRow(1, 7, now.Add(-2*time.Hour), now.Add(-30*time.Hour))
+		row.TimeoutSeconds = sec(60)
+		arm, _, _ := overdueReason(row, now, 0, 24*time.Hour)
+		assert.Equal(t, "absolute", arm, "margin 0 means the execution arm is off and cannot be the reason")
+	})
+}
+
+// TestWatchdogLogLineIsNeverSelfContradictory walks the sweep's own formatting
+// decision: the `exceeds %s` clause may only appear when the derived age really
+// does exceed the derived bound.
+func TestWatchdogLogLineIsNeverSelfContradictory(t *testing.T) {
+	now := time.Now()
+	row := overdueRow(1, 7, now.Add(-time.Minute), now.Add(-3*time.Hour))
+	assert.NotContains(t, watchdogSweptLine(row, now, 30*time.Minute, 24*time.Hour), "exceeds",
+		"when neither arm explains the row, the line must report the fact rather than assert a false comparison")
+
+	overdue := overdueRow(2, 7, now.Add(-2*time.Hour), now.Add(-30*time.Hour))
+	assert.Contains(t, watchdogSweptLine(overdue, now, 30*time.Minute, 24*time.Hour), "exceeds",
+		"and when an arm does explain it, the operator still gets the age and the bound")
 }
