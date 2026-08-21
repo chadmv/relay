@@ -3,6 +3,7 @@ title: Repeated watchdog sweeps against one worker are unsurfaced, so a wedged w
 type: idea
 status: open
 created: 2026-08-20
+updated: 2026-08-21
 priority: medium
 source: Phase 4 security lens of the 2026-08-20-coordinator-stale-task-watchdog slice; the diagnosability cost that slice accepted
 ---
@@ -72,24 +73,111 @@ this into either would widen it from one arm in one handler to a different packa
 keeps finding items that are wrong about their own scope precisely because somebody grew one by
 amendment.
 
-**The read surface is the shared expensive part**, and it is unchanged since 2026-08-15:
-`internal/api/server.go` routes `GET /v1/config`, `GET /v1/jobs/stats`, `GET /v1/workers/stats` and
-`GET /v1/workers/{id}/metrics`, and nothing that carries a server-wide counter. All three items
-therefore either extend `GET /v1/workers/stats` or depend on
-[[feature-2026-08-09-server-info-allowlist-endpoint]].
+## 2026-08-21: the read surface exists. This item is now the LAST slice of four, not the first.
 
-**This one has a genuinely easier answer than the other two, and that is worth noting at spec time.**
-The other two must count on the recv goroutine, where the constraint is "no new lock, queue,
-goroutine or round trip". The watchdog runs on its own goroutine on a 60s ticker with no hot path at
-all, so a per-worker counter here is cheap by comparison - and unlike the other two, the underlying
-event is **already durable in the database**: a `timed_out` row carries its `worker_id`, so a
-`COUNT(*) ... WHERE status = 'timed_out' AND worker_id = $1 AND finished_at > $2` is available with
-no new in-memory state whatsoever. That option does not exist for the sibling items and should be
-weighed first here.
+`docs/superpowers/specs/2026-08-21-silent-drop-observability.md` specced all four items in one
+sitting, and **slice 1 shipped the shared mechanism** (`docs/retros/2026-08-21-silent-drop-observability-slice1.md`).
+The expensive shared part every version of this item deferred to is settled. What changed for this
+item specifically:
+
+**What now exists and must be extended, not reinvented:**
+
+- **`GET /v1/server/counters`**, `auth(admin(...))`, in `internal/api/server_counters.go`. Admin-only
+  deliberately: these numbers describe adversary activity and internal control state, so it is NOT
+  modelled on `/v1/jobs/stats` or `/v1/workers/stats`, which are `auth`-only database censuses.
+- **`api.CounterSources`** - a struct of nil-able per-subsystem source fields, set at the wiring
+  boundary. A **nil field means the section is ABSENT from the payload, never zero-valued**: a section
+  of zeros means "this control ran and stopped nothing", an absent section means "this build or this
+  replica does not have that control wired". Do not collapse the two.
+- **The counts/levels contract.** `counts` are monotonic since `started_at`; `levels` are current. A
+  reporter may consult `counts` to decide whether to speak and may **never** consult `levels`. This
+  item's aggregate sweep line is exempt from the comparison problem because it is driven by the sweep
+  itself rather than by a counter-move test - but the monotonic-versus-current classification is part
+  of the payload contract and applies here regardless.
+- **Per replica, per process, zeroed by a restart**, with `started_at` always present. The watchdog is
+  multi-replica-safe by first-write-wins, so a sweep of worker X may be counted on either replica. Say
+  so in the field documentation.
+
+**THE HARD CONSTRAINT, and it is the one thing here that will otherwise be rediscovered as a compile
+error under time pressure: `internal/scheduler` ALREADY IMPORTS `internal/api`** (`scheduler/dispatch.go`,
+`scheduler/source_proto.go`). So `internal/api` can **never** import `internal/scheduler`, and this
+section therefore **cannot** follow slice 1's pattern of "the source interface returns the subsystem's
+own type". The required shape is:
+
+- declare the watchdog snapshot type (`WatchdogCounters` or similar) **inside `internal/api`**, next to
+  the other response types;
+- declare `type WatchdogSource interface { CounterSnapshot() WatchdogCounters }` **inside
+  `internal/api`**;
+- have `scheduler.Watchdog` return that type - legal, because scheduler already imports api.
+
+`CounterSources` is a struct of independent fields precisely so each section can make that choice
+separately. The note is already in `server_counters.go`'s doc comment; it is repeated here so this
+item carries it.
+
+**THE TYPED-NIL TRAP, which is not hypothetical for this section.** The watchdog is legitimately
+disable-able (`RELAY_TASK_WATCHDOG_MARGIN=0`, `RELAY_TASK_MAX_ASSIGNMENT=0`), so
+`var wd *scheduler.Watchdog; if enabled { wd = ... }; CounterSources{Watchdog: wd}` is the natural
+shape **and it panics**: a typed nil pointer stored in an interface is not `== nil`, so the handler's
+`src != nil` is true and the snapshot call dereferences a nil receiver - a goroutine stack trace to
+the log per admin request, inside the feature whose subject is bounding log volume. Filter the typed
+nil at the wiring boundary where the concrete type is still visible (`cmd/relay-server`'s
+`buildHTTPServer` is the live example, guarded by
+`TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent`). Do **not** instead make the snapshot
+method nil-tolerant: returning a zero snapshot turns an unwired control into a section of zeros, which
+is the one distinction this payload exists to preserve.
+
+**THE EXEMPTION-PREDICATE RULE, and `swept_by_worker` was DELIBERATELY DE-AUTHORIZED.** Slice 1's spec
+pre-blessed `watchdog.counts.swept_by_worker` in the payload's non-integer allow-list, against code
+nobody had written. **That entry was removed during slice 1's review**, and the removal is the point:
+pre-authorizing it reduced its only forcing function to a one-line edit with the justification already
+supplied. A map keyed on server-resolved worker UUIDs may well still be the right answer here - but it
+now costs a `counterPayloadExemption{why, typeOK, jsonOK}` argued **in the same commit that can be read
+against the code**, including whether unbounded key cardinality is acceptable. The admin-authentication
+argument (this route is not an attacker-writable site, so a worker UUID admissible HERE stays
+inadmissible in any log line reachable from the gRPC recv path) is one input to that decision, not a
+standing grant.
+
+**And the residual that entry must be written knowing:** exemptions are shape-checked but
+**NON-DESCENDING** - both payload walks stop at an exempted path once the predicate passes. That is
+right for a scalar like `started_at`, whose predicate examines the whole value. It is **wrong for a
+container**: a `jsonOK` that merely accepted `map[string]string` would leave every key and every value
+uninspected, which is the total exemption the predicate mechanism replaced, re-entered through the
+predicate. A `swept_by_worker` exemption must do the descending itself inside `typeOK`/`jsonOK` -
+checking key shape, value shape and cardinality - or the walks must first be taught to recurse past it.
+Slice 1 proved this is not theoretical: a `map[string]string` at an exempted path, with a
+newline-injected RTL-override key and an IP-address value, passed both guards with zero failures.
+
+**What the spec decided about this item's own design** (`spec` sections 3.1, 7.2 and 10.4), to be
+verified against code rather than adopted, per this project's standing rule:
+
+- **The item's "genuinely easier answer than the other two" framing is REFUTED in emphasis.** The
+  premise (the event is already durable in `tasks`) is true and the conclusion does not follow. This is
+  the **hardest** of the four: the only one whose correct-by-construction route is blocked and whose
+  fallback needs the only unbounded-in-principle key in the cluster.
+- **The DB-query route is rejected for now, with a revisit condition to record in source.** A windowed
+  `COUNT(*)` is better on every axis except one, and that one is fatal: an **agent** writes `timed_out`
+  itself (`handler.go` maps `TASK_STATUS_TIMED_OUT` straight through), and the two writers mean opposite
+  things about the worker's health. Distinguishing them needs a new terminal status (which must then be
+  threaded through every status allow-list, including the two that must be read backwards -
+  `AppendTaskLog`'s first arm and `ListOverdueAssignedTasks` - plus `TestTasksStatusVocabularyIsExactly`)
+  or a nullable `timed_out_by`-style column plus a migration on an epoch-fenced write path. **If such a
+  column is ever added for another reason, revisit this** - write that in the comment where the counter
+  lives.
+- **The in-process per-worker map is capped**: `sweptByWorker map[string]uint64` at 256, first-come
+  rather than top-K, with a `sweptOverflow` plain total for sweeps attributable to untracked workers and
+  a `sweptTotal` that always counts every sweep so the two reconcile. Cumulative since process start, no
+  rolling window. Read under the `Watchdog`'s own mutex and **copied out** - no interior pointer escapes
+  the lock. Unbounded is not an option while
+  [[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]] is open.
+- **`bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick` folds into this slice.** Both items
+  want a once-per-sweep aggregate line; shipping them separately produces two lines and a third item to
+  reconcile them.
 
 ## Proposal
 
-To be argued at spec time rather than adopted as written.
+To be argued at spec time rather than adopted as written. **Superseded in part by the 2026-08-21
+section above**; where the two disagree, the spec's reasoning is the later and better-evidenced one,
+but verify it against the code rather than inheriting it.
 
 - **Prefer the query to the counter, if the numbers reconcile.** A swept task is a durable row with a
   worker id and a `finished_at`; a windowed count over `tasks` needs no process state, survives
@@ -98,6 +186,7 @@ To be argued at spec time rather than adopted as written.
   **watchdog**, and they mean opposite things about the worker's health - the first is the agent
   behaving correctly. If the query route is taken, the two must be distinguishable, which probably
   means a column or a distinct status and is the reason this may not be as cheap as it looks.
+  **(2026-08-21: rejected on exactly this, with a revisit condition. See above.)**
 - **Otherwise, an in-process per-worker counter on the `Watchdog`**, flushed nowhere and read through
   the endpoint. Note that it is per replica and say so, since a fleet with two relay-servers splits
   its sweeps arbitrarily between them.
@@ -111,7 +200,11 @@ To be argued at spec time rather than adopted as written.
   machine out of a fleet, and the existing `handleDisableWorker` path already gives an operator a
   one-call remedy once they can see the number. Surface first, automate later if asked.
 - **Answer "per worker or global" once, for all three sibling items.** Per worker is the useful
-  diagnostic and matches where `metrics.Store` already keys.
+  diagnostic and matches where `metrics.Store` already keys. **(2026-08-21: answered. This is the only
+  one of the four with a per-worker key; the other three are process-wide or level-only. And
+  `metrics.Store` is the WRONG home for any of them - `Append` no-ops for an untracked worker and
+  `Clear` deletes the entry on teardown, so a counter there is destroyed by the disconnect that caused
+  it. The `Metrics` WIRING pattern is the precedent; the type is not.)**
 
 ## Acceptance / Done When
 
@@ -125,21 +218,39 @@ To be argued at spec time rather than adopted as written.
 - The counters or query results cannot be read by an agent - server-side observability, never a
   response on the worker stream.
 - The read surface is the one the two sibling items use, or the divergence is deliberate and written
-  down.
+  down. **(2026-08-21: it is `GET /v1/server/counters`. The divergence budget is spent.)**
+- **(2026-08-21) The watchdog snapshot type is declared in `internal/api`**, because
+  `internal/scheduler` imports `internal/api` and the reverse import is impossible.
+- **(2026-08-21) A disabled watchdog leaves the section ABSENT and does not panic**, with the typed nil
+  filtered at the wiring boundary rather than by making the snapshot method nil-tolerant.
+- **(2026-08-21) Any non-integer field added to the payload - `swept_by_worker` included - ships with a
+  `counterPayloadExemption` whose `typeOK`/`jsonOK` predicates descend into the container**, argued in
+  the same commit. `swept_by_worker` carries no standing pre-authorization.
+- **(2026-08-21) `bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick` is closed by the same
+  slice**, with ONE aggregate line covering both the swept set and the failed-write set.
 
 ## Related
 
 - Source: `internal/scheduler/watchdog.go` (`SweepOnce`'s per-task log line; `sendCancel`, which
   discards `SendCancel`'s error and says why), `internal/worker/registry.go` (`SendCancel`),
   `internal/store/query/tasks.sql` (`CountActiveTasksByAllWorkers`, which is what makes the slot free
-  the moment the row goes terminal), `internal/api/server.go` (the route table, which has no
-  server-wide counter surface), `internal/api/workers.go` (`handleDisableWorker`, the existing
+  the moment the row goes terminal), `internal/api/workers.go` (`handleDisableWorker`, the existing
   operator remedy)
-- Siblings on the same shape, to be specced together and shipped separately:
+- **The read surface, shipped 2026-08-21**: `internal/api/server_counters.go` (the payload contract for
+  all four sections, the import-direction note, the typed-nil note),
+  `internal/api/server_counters_test.go` (`counterPayloadExemption` and the two payload walks),
+  `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (`buildHTTPServer`, the wiring
+  boundary)
+- Siblings on the same shape, to be shipped separately:
   [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]],
   [[idea-2026-08-15-ingest-log-suppression-is-uncounted]]
-- Possible dependency for the read surface: [[feature-2026-08-09-server-info-allowlist-endpoint]]
-- Adjacent, on what one sweep should say: [[bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick]]
+- Adjacent, on what one sweep should say, and **to be folded into this slice**:
+  [[bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick]]
+- Why the per-worker map must be capped: [[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]]
+- The joint spec and the slice that settled the mechanism:
+  `docs/superpowers/specs/2026-08-21-silent-drop-observability.md` (sections 3.1, 7.2, 10.4),
+  `docs/superpowers/plans/2026-08-21-silent-drop-observability-slice1.md` (R2, the import direction),
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
 - The slice that created this gap: `docs/superpowers/specs/2026-08-20-coordinator-stale-task-watchdog.md`
   (section 11, "the freed slot is optimistic"),
   `docs/retros/2026-08-20-coordinator-stale-task-watchdog.md`
@@ -156,4 +267,7 @@ half only gets recorded if somebody writes it down at the time.
 
 Filed at medium rather than low because the sink behaviour is unbounded in the number of jobs it can
 fail, and because two sibling items are already waiting on the same endpoint decision. If the
-endpoint work happens for any other reason, all three become small.
+endpoint work happens for any other reason, all three become small. **(2026-08-21: the endpoint work
+has now happened. This item did not become small - it became the LAST of the four, because the
+endpoint was never its hard part. Its hard part is the per-worker key and the writer ambiguity, both
+untouched.)**

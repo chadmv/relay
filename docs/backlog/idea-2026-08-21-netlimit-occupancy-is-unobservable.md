@@ -3,6 +3,7 @@ title: netlimit reports refusals but not occupancy, so a saturated connection ca
 type: idea
 status: open
 created: 2026-08-21
+updated: 2026-08-21
 priority: medium
 source: Phase 4 of the 2026-08-20-grpc-admission-bounds slice; the diagnosability cost that slice accepted
 ---
@@ -73,9 +74,19 @@ open siblings:
 All four are "the system now silently drops, refuses or kills something and nobody can see it", and
 **all four want the same read surface**. `internal/api/server.go` routes `GET /v1/config`,
 `GET /v1/jobs/stats`, `GET /v1/workers/stats` and `GET /v1/workers/{id}/metrics`, and nothing that
-carries a server-wide counter, so each of the four either extends `GET /v1/workers/stats` or depends
-on [[feature-2026-08-09-server-info-allowlist-endpoint]]. **Spec the four in one sitting and ship them
-separately.** That instruction is already in the watchdog sibling and it applies unchanged here.
+carries a server-wide counter, so each of the four either extends `GET /v1/workers/stats` or needs a
+new endpoint. **Spec the four in one sitting and ship them separately.** That instruction is already in
+the watchdog sibling and it applies unchanged here.
+
+**(2026-08-21, corrected) This item previously named
+[[feature-2026-08-09-server-info-allowlist-endpoint]] as a possible dependency for the read surface.
+It is not one, and the same line appeared in all four cluster items.** `GET /v1/server/info` is build
+and config facts - a different noun, a different volatility profile, and it carries its own unrelated
+work (`-ldflags` stamping, a `db_version` round trip). The counters endpoint is a **sibling** under a
+shared `/v1/server/` prefix, not a consumer, and neither blocks the other. Treating it as a dependency
+is why this cluster waited three roadmap refreshes. The line has been removed from all four items; the
+`server-info` item itself stays open and untouched. See
+`docs/superpowers/specs/2026-08-21-silent-drop-observability.md` section 5.1.
 
 **This one is the easiest of the four and differs from all three in one respect:** it is the only one
 whose subject is not per worker. `netlimit` runs before authentication and never learns a worker
@@ -137,10 +148,15 @@ To be argued at spec time rather than adopted as written.
   [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]],
   [[idea-2026-08-15-ingest-log-suppression-is-uncounted]],
   [[idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced]]
-- Possible dependency for the read surface: [[feature-2026-08-09-server-info-allowlist-endpoint]]
+- Explicitly NOT a dependency (2026-08-21): [[feature-2026-08-09-server-info-allowlist-endpoint]] is a
+  sibling under the same `/v1/server/` prefix, not a consumer or a blocker, in either direction.
 - The slice that created the gap: `docs/superpowers/specs/2026-08-20-grpc-admission-bounds.md`
   section 6.5, `docs/retros/2026-08-21-grpc-admission-bounds.md`
 - The item that slice closed: [[bug-2026-08-15-grpc-connection-admission-is-unbounded]]
+- The joint spec and the slice that closes this item:
+  `docs/superpowers/specs/2026-08-21-silent-drop-observability.md`,
+  `docs/superpowers/plans/2026-08-21-silent-drop-observability-slice1.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
 
 ## Notes
 
@@ -154,4 +170,3 @@ has no code fix worth filing. **What it does have is a detection story, and it i
 `MaxPerSource` plus `DistinctSources`.** Sixteen prefixes each holding 64 connections is a shape those
 two numbers show and `RefusedTotal` does not. If this item is specced, that case belongs in its test
 matrix.
-</content>
