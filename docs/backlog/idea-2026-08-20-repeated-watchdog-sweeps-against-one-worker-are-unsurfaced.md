@@ -63,6 +63,7 @@ with a wedged task can be handed more work"); this item is the observability hal
   rejection counter.
 - [[idea-2026-08-15-ingest-log-suppression-is-uncounted]] is scoped to `ingestLogLimiter.allow`'s two
   `return false` paths - a **log line dropped** - across five kinds and three handlers.
+  (**Closed 2026-08-21** by slice 2.)
 - This one counts a **third noun** in a **fourth place**: an *assignment terminated by the
   coordinator*, on a periodic writer in `internal/scheduler`, not on the gRPC recv path at all.
 
@@ -122,9 +123,10 @@ shape **and it panics**: a typed nil pointer stored in an interface is not `== n
 the log per admin request, inside the feature whose subject is bounding log volume. Filter the typed
 nil at the wiring boundary where the concrete type is still visible (`cmd/relay-server`'s
 `buildHTTPServer` is the live example, guarded by
-`TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent`). Do **not** instead make the snapshot
-method nil-tolerant: returning a zero snapshot turns an unwired control into a section of zeros, which
-is the one distinction this payload exists to preserve.
+`TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent` and, since slice 2, by
+`TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent`). Do **not** instead make the
+snapshot method nil-tolerant: returning a zero snapshot turns an unwired control into a section of
+zeros, which is the one distinction this payload exists to preserve.
 
 **THE EXEMPTION-PREDICATE RULE, and `swept_by_worker` was DELIBERATELY DE-AUTHORIZED.** Slice 1's spec
 pre-blessed `watchdog.counts.swept_by_worker` in the payload's non-integer allow-list, against code
@@ -173,11 +175,81 @@ verified against code rather than adopted, per this project's standing rule:
   want a once-per-sweep aggregate line; shipping them separately produces two lines and a third item to
   reconcile them.
 
+## 2026-08-21 (later): slice 2 shipped the second section. Copy its pattern; do NOT repeat its two gaps.
+
+`docs/retros/2026-08-21-silent-drop-observability-slice2.md`. Slice 2 added `ingest_log_budget`, so
+there are now **two** shipped sections rather than one, and the differences between them are what this
+item should read for.
+
+**The section pattern, now established by two consumers, all six parts:**
+
+1. **Its own field on `api.CounterSources`.** Never widen an existing source interface: one interface
+   carrying two controls makes them appear and disappear together.
+2. **A CONCRETELY typed field on `httpServerDeps`** (`*scheduler.Watchdog`, not `api.WatchdogSource`),
+   so the typed nil is filtered where the concrete type is still visible. **This is the section for
+   which that matters most** - it is the only one of the four that is legitimately disable-able by
+   configuration, so the typed nil is the natural shape here rather than a hypothetical.
+3. **A per-section `if d.x != nil` in `buildHTTPServer`** - per section, never per struct.
+4. **A row in `TestServerCountersIsWiredByMain`'s `wiredDep` table**, naming the deps field and the
+   constructor its value must derive from.
+5. **A typed-nil test.** `TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent` is the twin
+   to copy.
+6. **A wired-but-zero test.** A watchdog that has swept nothing is the healthy case and must still emit
+   its section. Note that slice 2's version had to walk **two levels** because its `counts` half
+   contains objects - `TestServerCounters_WiredButZeroSectionIsStillPresent`'s scalar loop would have
+   failed. **This section has the same problem and worse**, because `swept_by_worker` is a map: copy
+   `TestServerCounters_WiredButZeroIngestSectionIsStillPresent`, not the `grpc_admission` one.
+
+**THE CARDINALITY CHECK WILL BE RED BEFORE ANYTHING ELSE IS.** `counters_wiring_test.go` asserts that
+the number of **distinct** `httpServerDeps` fields named by the `wiredDep` table equals
+`reflect.TypeOf(api.CounterSources{}).NumField()`. Slice 3 lands a third `CounterSources` field on the
+**same** `*worker.Handler`, so that relation is already under pressure before this item is reached; by
+slice 4 the table's shape may have changed. **Read the check's own comment first** - it records that
+counting rows rather than distinct fields was proved evadable in two steps, and that a duplicated row
+drops the field it displaces out of the plain-identifier check, the derives-from check and the
+assigned-exactly-once check at a stroke. Whatever slice 3 does with it, this slice inherits and must
+not relax it.
+
+**The two gaps slice 2 shipped and had to be told about. Neither may recur here:**
+
+- **THE CROSS-PACKAGE ARITY GAP, and this section is the one where it bites hardest.** In slice 2, a
+  fully correct sixth log kind left all three packages green while `internal/api`'s hand-written
+  mapping function never published it - counted on one side, published under no JSON key on the other.
+  `counterPayloadLeaves` cannot catch that class: it is an `ElementsMatch` against a list derived from
+  the api-side struct, so it reddens on an EXTRA api leaf and never on a MISSING source-side one. The
+  rule: **any section whose payload struct restates fields owned by another package needs a `NumField`
+  assertion between the two types, written where both are visible**
+  (`TestIngestLogKindCountsPublishesEveryWorkerSideField` is the live example, and cardinality alone
+  suffices because a by-name mapping already makes a rename a compile error). **The twist for THIS
+  section is that the import direction inverts the usual shape**: the snapshot type is declared in
+  `internal/api`, so `scheduler.Watchdog` is the side doing the hand-written copy, and the assertion
+  has to compare the watchdog's internal counter set against the published struct **in
+  `internal/scheduler`**. A `sweptOverflow` that exists on the `Watchdog` and reaches no JSON key is
+  exactly the sixth-kind defect with the packages swapped - and it is the field whose whole purpose is
+  to make a loss visible.
+- **THE `buildHTTPServer` FORWARDING GAP.** Nothing checked that the function forwards the source it
+  was GIVEN; substituting a freshly constructed handler compiled, vetted clean and left everything
+  green, serving a permanently-zero section. **Two questions, two guards**: does main pass what it
+  built (syntactic, `TestServerCountersIsWiredByMain`), and does `buildHTTPServer` forward what it was
+  given (executable). Slice 1's `TestBuildHTTPServer_ServesTheRealListenersCounters` and slice 2's
+  `TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers` are the two precedents.
+  **This section may be the easiest of the three to check at the top rung**, because a sweep can be
+  driven from a test without a gRPC stream - `SweepOnce` needs a store, not a recv goroutine - so the
+  forwarding proof may be able to move a real number through the real route in a lane closer to CI's
+  than slice 2 managed. Check that rather than assuming it, and state the lane either way.
+
+**One more thing slice 2 settled that this item inherits.** The payload must say what it does NOT
+count, in the same place it says what it does. Slice 2's numbers exclude a `&&`-short-circuited log
+decision and the entire fence-rejection arm, and the section documents that in three places. The
+equivalent sentence here is that a **watchdog** sweep count says nothing about agent-written
+`timed_out` rows, which is the writer ambiguity this item has carried since it was filed - the counter
+does not resolve it, it side-steps it, and the payload has to say so.
+
 ## Proposal
 
 To be argued at spec time rather than adopted as written. **Superseded in part by the 2026-08-21
-section above**; where the two disagree, the spec's reasoning is the later and better-evidenced one,
-but verify it against the code rather than inheriting it.
+sections above**; where they disagree, the later reasoning is the better-evidenced one, but verify it
+against the code rather than inheriting it.
 
 - **Prefer the query to the counter, if the numbers reconcile.** A swept task is a durable row with a
   worker id and a `finished_at`; a windowed count over `tasks` needs no process state, survives
@@ -228,6 +300,16 @@ but verify it against the code rather than inheriting it.
   the same commit. `swept_by_worker` carries no standing pre-authorization.
 - **(2026-08-21) `bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick` is closed by the same
   slice**, with ONE aggregate line covering both the swept set and the failed-write set.
+- **(2026-08-21, from slice 2) Every field the `Watchdog` counts reaches a JSON key**, proven by a
+  `NumField` arity assertion between the watchdog's own counter set and the api-declared snapshot type,
+  in `internal/scheduler` where both are visible. `sweptOverflow` in particular must not be countable
+  and unpublishable.
+- **(2026-08-21, from slice 2) `buildHTTPServer` is proven to FORWARD the watchdog it was given**, by
+  an executed test, with the lane it runs in stated rather than implied.
+- **(2026-08-21, from slice 2) The wired-but-zero test walks the section's full depth**, not the
+  `grpc_admission` scalar loop, because this section's `counts` half contains a map and an object.
+- **(2026-08-21, from slice 2) The section documents what it does NOT count** - specifically that an
+  agent-written `timed_out` contributes nothing - in the payload's own documentation and in README.
 
 ## Related
 
@@ -241,16 +323,23 @@ but verify it against the code rather than inheriting it.
   `internal/api/server_counters_test.go` (`counterPayloadExemption` and the two payload walks),
   `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (`buildHTTPServer`, the wiring
   boundary)
+- **The section pattern, established by two consumers**: `internal/worker/ingest_log_counters.go`,
+  `internal/api/server_counters.go` (`IngestLogBudgetSource`),
+  `internal/api/server_counters_test.go` (`TestIngestLogKindCountsPublishesEveryWorkerSideField`,
+  `TestServerCounters_WiredButZeroIngestSectionIsStillPresent`),
+  `cmd/relay-server/counters_wiring_test.go` (the `wiredDep` table and its DISTINCT-FIELDS block),
+  `cmd/relay-server/grpc_admission_e2e_integration_test.go`
 - Siblings on the same shape, to be shipped separately:
   [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]],
-  [[idea-2026-08-15-ingest-log-suppression-is-uncounted]]
+  [[idea-2026-08-15-ingest-log-suppression-is-uncounted]] (**closed 2026-08-21**)
 - Adjacent, on what one sweep should say, and **to be folded into this slice**:
   [[bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick]]
 - Why the per-worker map must be capped: [[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]]
-- The joint spec and the slice that settled the mechanism:
+- The joint spec and the slices that settled the mechanism:
   `docs/superpowers/specs/2026-08-21-silent-drop-observability.md` (sections 3.1, 7.2, 10.4),
   `docs/superpowers/plans/2026-08-21-silent-drop-observability-slice1.md` (R2, the import direction),
-  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice2.md`
 - The slice that created this gap: `docs/superpowers/specs/2026-08-20-coordinator-stale-task-watchdog.md`
   (section 11, "the freed slot is optimistic"),
   `docs/retros/2026-08-20-coordinator-stale-task-watchdog.md`
@@ -271,3 +360,9 @@ endpoint work happens for any other reason, all three become small. **(2026-08-2
 has now happened. This item did not become small - it became the LAST of the four, because the
 endpoint was never its hard part. Its hard part is the per-worker key and the writer ambiguity, both
 untouched.)**
+
+**2026-08-21 second addendum, from slice 2:** the mechanism built because controls silently stop
+reporting shipped a counter that could silently stop counting - a correct new kind, counted on one
+side and published under no JSON key on the other, with every package green. This section has the same
+shape with the packages swapped and one extra hazard: `sweptOverflow` exists precisely to make a loss
+visible, so a `sweptOverflow` that reaches no JSON key is the defect eating its own remedy.

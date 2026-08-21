@@ -227,6 +227,7 @@ func main() {
 		metrics:           metricsStore,
 		static:            webui.Handler(),
 		grpcAdmission:     grpcLis,
+		agentHandler:      agentHandler,
 	})
 	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
 	go func() {

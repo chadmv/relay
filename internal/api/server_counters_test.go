@@ -18,6 +18,7 @@ import (
 
 	"relay/internal/netlimit"
 	"relay/internal/store"
+	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -520,6 +521,16 @@ var counterPayloadLeaves = []string{
 	"grpc_admission.levels.live_total",
 	"grpc_admission.levels.distinct_sources",
 	"grpc_admission.levels.max_per_source",
+	"ingest_log_budget.counts.deduped.task_log_persist",
+	"ingest_log_budget.counts.deduped.bad_task_id_log",
+	"ingest_log_budget.counts.deduped.bad_task_id_status",
+	"ingest_log_budget.counts.deduped.status_get_task",
+	"ingest_log_budget.counts.deduped.inventory",
+	"ingest_log_budget.counts.suppressed.task_log_persist",
+	"ingest_log_budget.counts.suppressed.bad_task_id_log",
+	"ingest_log_budget.counts.suppressed.bad_task_id_status",
+	"ingest_log_budget.counts.suppressed.status_get_task",
+	"ingest_log_budget.counts.suppressed.inventory",
 }
 
 // TestCounterPayloadCarriesNoIdentifiers is the cardinality rule of the
@@ -633,10 +644,13 @@ func TestCounterPayloadCarriesNoIdentifiers(t *testing.T) {
 func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters: CounterSources{GRPCAdmission: fakeAdmissionSource{s: netlimit.Stats{
-			Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
-			Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
-		}}},
+		Counters: CounterSources{
+			GRPCAdmission: fakeAdmissionSource{s: netlimit.Stats{
+				Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
+				Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
+			}},
+			IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()},
+		},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
@@ -684,4 +698,168 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 		"the SERIALISED counter payload's leaf set is not the contract. The type-level guard next door "+
 			"cannot see this: a handler that assembles its own map, or a field with a custom marshaller, "+
 			"passes there and fails here.")
+}
+
+// TestIngestLogKindCountsPublishesEveryWorkerSideField is the completeness guard
+// on the ONE boundary in this chain that had none, and this package is the one
+// place both types are visible.
+//
+// EVERY OTHER LINK IS ALREADY COUNTED: the kinds against the counters array
+// (TestIngestLogKindsAreADenseRunFromOne), the array against
+// worker.IngestLogDropsByKind
+// (TestIngestLogCounters_EveryKindIsPublishedDistinctly's final require.Len),
+// api.CounterSources' fields against the wiring table
+// (TestServerCountersIsWiredByMain), the response against the handler's
+// branches (counterPayloadLeaves). ingestLogKindCountsFrom was the gap: it is
+// five hand-written assignments and NOTHING compared its arity to its source's.
+// Measured - a fully correct sixth kind (const inside the sentinel, a real
+// lim.allow call site, an IngestLogDropsByKind field, a byKind line, the dense-
+// run test's list updated) left internal/worker, internal/api AND
+// cmd/relay-server green with `go vet -tags integration` clean, while that kind
+// was counted on the recv path and published under no JSON key. That is this
+// slice's own defect class one layer up: a counter that silently stops counting,
+// inside the mechanism built because controls silently stop reporting.
+//
+// counterPayloadLeaves cannot cover it. It is an ElementsMatch against a fixed
+// list, so it reddens on an EXTRA api-side leaf and never on a MISSING
+// worker-side one - it is a contract check on this package's own payload, and
+// the missing field is not in the payload to be noticed.
+//
+// CARDINALITY IS ENOUGH, and the reason is worth stating so nobody "improves"
+// this into a name comparison it does not need: ingestLogKindCountsFrom assigns
+// BY NAME, so a worker-side rename is already a compile error here. Only the
+// arity can drift silently.
+func TestIngestLogKindCountsPublishesEveryWorkerSideField(t *testing.T) {
+	src := reflect.TypeOf(worker.IngestLogDropsByKind{})
+	pub := reflect.TypeOf(ingestLogKindCounts{})
+	require.Equal(t, src.NumField(), pub.NumField(),
+		"worker.IngestLogDropsByKind has %d fields and api.ingestLogKindCounts has %d. Every kind the "+
+			"recv path counts must reach a JSON key: ingestLogKindCountsFrom is hand-written, so a "+
+			"field added on one side and not the other is counted into a number nobody can read (or, "+
+			"the other way, published as a permanent zero). Add the field, its json tag, its line in "+
+			"ingestLogKindCountsFrom, and its name to the kinds list in "+
+			"TestServerCounters_ReportsTheIngestLogSnapshot.", src.NumField(), pub.NumField())
+}
+
+// fakeIngestLogSource returns a fixed snapshot. TEN DISTINCT VALUES: the mapping
+// from worker.IngestLogDrops into the response types is ten hand-written
+// assignments, and equal values would hide a crossed one.
+type fakeIngestLogSource struct{ d worker.IngestLogDrops }
+
+func (f fakeIngestLogSource) IngestLogDropCounts() worker.IngestLogDrops { return f.d }
+
+func tenDistinctDrops() worker.IngestLogDrops {
+	return worker.IngestLogDrops{
+		Deduped: worker.IngestLogDropsByKind{
+			TaskLogPersist: 11, BadTaskIDLog: 22, BadTaskIDStatus: 33,
+			StatusGetTask: 44, Inventory: 55,
+		},
+		Suppressed: worker.IngestLogDropsByKind{
+			TaskLogPersist: 66, BadTaskIDLog: 77, BadTaskIDStatus: 88,
+			StatusGetTask: 99, Inventory: 110,
+		},
+	}
+}
+
+func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		IngestLogBudget *struct {
+			Counts struct {
+				Deduped    map[string]any `json:"deduped"`
+				Suppressed map[string]any `json:"suppressed"`
+			} `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"ingest_log_budget"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.IngestLogBudget, "a wired section must be present")
+	require.Nil(t, body.IngestLogBudget.Levels,
+		"this section is COUNTS ONLY. Every limiter is a per-connection stack local, so there is no "+
+			"process-wide 'current' figure to report without building the shared registry the limiter "+
+			"deliberately refuses.")
+
+	// Key-set equality, not per-key assertions alone: a renamed key would decode
+	// as a missing value and a per-key check would report zero. THESE NAMES ARE A
+	// RESPONSE CONTRACT - see the logKind block in internal/worker.
+	kinds := []string{"task_log_persist", "bad_task_id_log", "bad_task_id_status", "status_get_task", "inventory"}
+	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Deduped))
+	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Suppressed))
+
+	assert.Equal(t, float64(11), body.IngestLogBudget.Counts.Deduped["task_log_persist"])
+	assert.Equal(t, float64(22), body.IngestLogBudget.Counts.Deduped["bad_task_id_log"])
+	assert.Equal(t, float64(33), body.IngestLogBudget.Counts.Deduped["bad_task_id_status"])
+	assert.Equal(t, float64(44), body.IngestLogBudget.Counts.Deduped["status_get_task"])
+	assert.Equal(t, float64(55), body.IngestLogBudget.Counts.Deduped["inventory"])
+	assert.Equal(t, float64(66), body.IngestLogBudget.Counts.Suppressed["task_log_persist"])
+	assert.Equal(t, float64(77), body.IngestLogBudget.Counts.Suppressed["bad_task_id_log"])
+	assert.Equal(t, float64(88), body.IngestLogBudget.Counts.Suppressed["bad_task_id_status"])
+	assert.Equal(t, float64(99), body.IngestLogBudget.Counts.Suppressed["status_get_task"])
+	assert.Equal(t, float64(110), body.IngestLogBudget.Counts.Suppressed["inventory"])
+}
+
+// TestServerCounters_WiredButZeroIngestSectionIsStillPresent is the
+// absent-versus-zero contract for this section. A server whose budget has
+// dropped nothing is the COMMON case, and it must not read as "this build does
+// not have an ingest budget".
+//
+// It walks two levels rather than one: unlike grpc_admission, this section's
+// counts half contains OBJECTS, so the shipped
+// TestServerCounters_WiredButZeroSectionIsStillPresent's scalar loop would fail
+// here. Do not copy that loop.
+func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "ingest_log_budget"}, counterKeys(top),
+		"a WIRED source whose every counter is zero must still emit its section: zeros mean 'this "+
+			"control ran and stopped nothing', absence means 'not wired on this build'")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["ingest_log_budget"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section),
+		"counts only; this section has no levels")
+
+	var counts map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &counts))
+	require.ElementsMatch(t, []string{"deduped", "suppressed"}, counterKeys(counts))
+	for _, arm := range []string{"deduped", "suppressed"} {
+		var fields map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(counts[arm], &fields))
+		require.Len(t, fields, 5, "%s must carry one key per kind, not an empty object", arm)
+		for k, v := range fields {
+			assert.Equal(t, "0", string(v), "%s.%s must serialise as an explicit zero", arm, k)
+		}
+	}
+}
+
+// TestServerCounters_OneWiredSectionDoesNotDragInTheOther. Each section is its
+// own nil-able source, so wiring the ingest budget must not conjure a
+// grpc_admission object and vice versa.
+func TestServerCounters_OneWiredSectionDoesNotDragInTheOther(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	assert.ElementsMatch(t, []string{"started_at", "ingest_log_budget"}, counterKeys(top),
+		"an unwired section stays ABSENT even when a sibling section is wired")
 }

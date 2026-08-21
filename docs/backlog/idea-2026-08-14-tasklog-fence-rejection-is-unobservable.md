@@ -146,6 +146,75 @@ container exemption must do the descending itself inside its predicates.
 The read-surface finding below was re-checked at 2026-08-15 and was unchanged then;
 **it is superseded as of 2026-08-21** by the endpoint above.
 
+### Update 2026-08-21 (later) - slice 2 shipped the second section. Copy its pattern; do NOT repeat its two gaps.
+
+`docs/retros/2026-08-21-silent-drop-observability-slice2.md` and
+`docs/superpowers/plans/2026-08-21-silent-drop-observability-slice2.md`. Slice 2 added the
+`ingest_log_budget` section and a counters home in `internal/worker`. **This item is still slice 3 and
+still open** - slice 2 added no counter on the fence-rejection arm, and none of the criteria below is
+met.
+
+**The section pattern to copy, all six parts, because slice 2 needed every one of them:**
+
+1. **Its own field on `api.CounterSources`**, never a widened existing interface. `IngestLogBudgetSource`'s
+   comment says this in as many words and names *this item* as the reason: both counters live on the
+   same `*worker.Handler`, and one interface carrying both would make two independent controls appear
+   and disappear together.
+2. **A CONCRETELY typed field on `httpServerDeps`** (`*worker.Handler`, not the interface), so the
+   typed nil is filtered where the concrete type is still visible.
+3. **A per-section `if d.x != nil` in `buildHTTPServer`** - per section, never per struct.
+4. **A row in `TestServerCountersIsWiredByMain`'s `wiredDep` table.**
+5. **A typed-nil test** (`TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent` is the twin
+   to copy).
+6. **A wired-but-zero test.** A server whose fence has rejected nothing is the COMMON case and must
+   still emit its section: zero means "the control ran and stopped nothing", absent means "not wired".
+
+**THE ONE THING THAT WILL GO RED FIRST, and it is already written into the guard's own comment.**
+`cmd/relay-server/counters_wiring_test.go` asserts that the number of **distinct** `httpServerDeps`
+fields named by the `wiredDep` table equals `reflect.TypeOf(api.CounterSources{}).NumField()`. This
+item adds a **third** `CounterSources` field fed by the **same** `*worker.Handler`, so `NumField` goes
+to 3 while the natural table still has 2 rows - RED. **The cheapest path to green is a duplicated
+`agentHandler` row, and that is the exact evasion the check was rewritten to stop**: counting rows
+rather than distinct fields was proved to let a displaced field fall out of the plain-identifier check,
+the derives-from check and the assigned-exactly-once check at a stroke. Resolve it deliberately -
+either a second deps field for the same handler, or a cardinality relation that expresses "N sections
+over M deps fields" - and say which, in the commit. **Do not relax the check.**
+
+**The two gaps slice 2 shipped and had to be told about. Neither may recur here:**
+
+- **THE CROSS-PACKAGE ARITY GAP.** A fully correct sixth log kind - const inside the sentinel, real
+  call site, own array cell, published in `worker.IngestLogDrops` - left all three packages green while
+  `internal/api`'s hand-written `ingestLogKindCountsFrom` never mapped it: counted on the recv path,
+  published under no JSON key. `counterPayloadLeaves` **cannot** catch that class - it is an
+  `ElementsMatch` against a list derived from the api-side struct, so it reddens on an EXTRA api leaf
+  and never on a MISSING worker-side one. The rule: **any section whose payload struct restates fields
+  owned by another package needs a `NumField` assertion between the two types, written in the package
+  where both are visible** (`TestIngestLogKindCountsPublishesEveryWorkerSideField` is the live
+  example). Cardinality alone is enough, because a hand-written by-name mapping already makes a rename
+  a compile error. **If this section's source returns a bare `uint64`** - the shape settled above -
+  there is no restated struct and the rule does not apply; **if it returns a struct of any width, the
+  assertion ships in the same commit.**
+- **THE `buildHTTPServer` FORWARDING GAP.** Nothing checked that the function forwards the source it
+  was GIVEN. Substituting a freshly constructed `worker.NewHandler` for `d.agentHandler` compiled,
+  vetted clean and left everything green, serving a permanently-zero section. The wiring guard cannot
+  see it: that guard is about `main.go`'s identifiers, which is a different question. **Two questions,
+  two guards** - does main pass what it registered (syntactic), and does `buildHTTPServer` forward what
+  it was given (executable). Slice 2's answer is
+  `TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers`: a real registered stream,
+  real drops, read back through the real admin route. **It is integration-tagged**, because moving the
+  counter needs `Connect`'s message loop and therefore Postgres, so CI compiles it and does not run it;
+  the default-lane presence/absence pair carries what CI can see. Expect the same split here, and state
+  it rather than implying it.
+
+**One thing slice 2 makes cheaper for this item, and one it does not.** Cheaper: `internal/worker` now
+has a counters home, a snapshot-method precedent (`Handler.IngestLogDropCounts`), and a value-field
+convention (the zero value is ready to use, so a bare `&Handler{}` in a test has working counters and
+there is no nil case anywhere). Not cheaper: this counter is a **different noun in a different branch**,
+and slice 2's own `&&`-short-circuit finding is the proof - `handleTaskStatus`'s `pgx.ErrNoRows`
+`GetTask` never reaches the budget at all, and this item's arm never consults it either.
+`ingest_log_budget` counts *log lines the budget dropped*; `task_log_fence` counts *rejections*.
+Neither number covers any part of the other, and the payload must not imply otherwise.
+
 ## Proposal
 
 A counter, not a log line. Shape, to be argued at spec time rather than adopted as written.
@@ -193,6 +262,15 @@ reasoning against the code rather than inheriting either.
   counter is declared.
 - **(2026-08-21) An unwired section is ABSENT from the payload, not zero-valued**, matching the contract
   slice 1 fixed.
+- **(2026-08-21, from slice 2) The section gets its OWN `CounterSources` field**, not a widened
+  `IngestLogBudgetSource`, and its own `wiredDep` row, typed-nil test and wired-but-zero test.
+- **(2026-08-21, from slice 2) The `wiredDep` cardinality check is satisfied by a deliberate decision,
+  not by a duplicated row.** A third `CounterSources` field fed by the same `*worker.Handler` makes
+  `NumField` disagree with the table's distinct-field count; the resolution is stated in the commit.
+- **(2026-08-21, from slice 2) `buildHTTPServer` is proven to FORWARD the source it was given**, by an
+  executed test, and the lane that test runs in is stated rather than implied.
+- **(2026-08-21, from slice 2) If the source method returns a struct rather than a scalar, a `NumField`
+  arity assertion between the worker-side and api-side types ships in the same commit.**
 
 ## Related
 
@@ -204,17 +282,25 @@ reasoning against the code rather than inheriting either.
 - **The read surface, shipped 2026-08-21**: `internal/api/server_counters.go` (the payload contract for
   all four sections), `internal/api/server_counters_test.go` (`counterPayloadExemption`),
   `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (the wiring boundary)
+- **The section pattern to copy, shipped 2026-08-21 by slice 2**:
+  `internal/worker/ingest_log_counters.go` (the counters home and the snapshot method),
+  `internal/api/server_counters.go` (`IngestLogBudgetSource`, whose comment names this item),
+  `internal/api/server_counters_test.go` (`TestIngestLogKindCountsPublishesEveryWorkerSideField`),
+  `cmd/relay-server/counters_wiring_test.go` (the `wiredDep` table and the DISTINCT-FIELDS block, which
+  already predicts what this item will hit), `cmd/relay-server/grpc_admission_e2e_integration_test.go`
+  (`TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers`)
 - The slice that added the third meaning: `docs/superpowers/specs/2026-08-14-tasklog-terminal-append-bound.md`
   section 6.4 ("What the agent sees when the window has closed: nothing"),
   `docs/retros/2026-08-14-tasklog-terminal-append-bound.md`
 - The slice that shaped the arm for this work and pinned it with a test:
   `docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md` section 5 ("what this spec owes the
   counter item"), `docs/retros/2026-08-15-tasklog-err-limiter-keying.md`
-- The joint spec and the slice that settled the mechanism:
+- The joint spec and the slices that settled the mechanism:
   `docs/superpowers/specs/2026-08-21-silent-drop-observability.md` (sections 2.1, 3.2, 7.3, 10.3),
-  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
-- **Sibling on the complementary arm, to be shipped separately, and FIRST** (2026-08-15, sequenced
-  2026-08-21): [[idea-2026-08-15-ingest-log-suppression-is-uncounted]]
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice2.md`
+- **Sibling on the complementary arm, shipped FIRST**: [[idea-2026-08-15-ingest-log-suppression-is-uncounted]]
+  (**closed 2026-08-21**)
 - Siblings on the same shape: [[idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced]]
 - Must not regress: [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] - the reason this is a
   counter and not a log line. **Closed 2026-08-15**; now in `docs/backlog/closed/`.
@@ -242,3 +328,8 @@ remedy the whole time - `metrics.Store` would have destroyed the number on the d
 produced it. That is the project's recorded "an accurate item can prescribe a wrong remedy" pattern,
 and the refutation was mechanical (two function bodies), not a matter of taste. Verify the prescribed
 fix separately from the diagnosis.
+
+**2026-08-21 second addendum, from slice 2:** the mechanism built because controls silently stop
+reporting shipped a counter that could silently stop counting. Whatever this slice adds, ask what
+compares the two ends of every hand-written copy it introduces - that was the single worst finding of
+slice 2 and it was found three times independently, once the question was asked.

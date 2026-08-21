@@ -21,7 +21,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -91,6 +93,16 @@ func seedE2EWorker(t *testing.T, ctx context.Context, q *store.Queries, hostname
 // worker.Handler, over real TCP on loopback.
 func startProductionGRPCServer(t *testing.T, pool *pgxpool.Pool, q *store.Queries, cfg netlimit.Config, b grpcBounds) string {
 	t.Helper()
+	addr, _ := startProductionGRPCServerWithHandler(t, pool, q, cfg, b)
+	return addr
+}
+
+// startProductionGRPCServerWithHandler is the same wiring, returning the
+// *worker.Handler it registered. Only the counters test needs it: its whole
+// subject is that the handler serving gRPC and the handler reporting counts are
+// ONE object, so it cannot let the constructor stay hidden in here.
+func startProductionGRPCServerWithHandler(t *testing.T, pool *pgxpool.Pool, q *store.Queries, cfg netlimit.Config, b grpcBounds) (string, *worker.Handler) {
+	t.Helper()
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	lis := netlimit.Wrap(raw, cfg)
@@ -103,7 +115,7 @@ func startProductionGRPCServer(t *testing.T, pool *pgxpool.Pool, q *store.Querie
 	relayv1.RegisterAgentServiceServer(srv, handler)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
-	return raw.Addr().String()
+	return raw.Addr().String(), handler
 }
 
 func dialE2E(t *testing.T, addr string) *grpc.ClientConn {
@@ -230,4 +242,131 @@ func TestGRPCAdmissionEndToEnd_ReconnectOverlapFromSameSourceIP(t *testing.T) {
 	require.Error(t, err, "a third connection from one source IP must be refused (per-IP cap is 2)")
 
 	require.NoError(t, streamNew.CloseSend())
+}
+
+// TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers is the
+// EXECUTED half of the ingest section's wiring, and it exists because
+// buildHTTPServer's own comment claimed no such thing was possible: "nothing
+// executable can check it from here". That was true of cmd/relay-server's
+// default lane and false of this one, and the asymmetry it left behind is what
+// makes the claim worth disproving - grpc_admission's twin,
+// TestBuildHTTPServer_ServesTheRealListenersCounters, dials real sockets and
+// reads the occupancy back, so substituting its source reddens; the ingest
+// section had only TestServerCountersIsWiredByMain's IDENTIFIER check on main's
+// call site, and NOTHING checked that buildHTTPServer forwards the value it was
+// handed. Measured, at HEAD before this test:
+//
+//	if d.agentHandler != nil {
+//	    s.Counters.IngestLogBudget = worker.NewHandler(d.q, d.pool, d.registry, d.broker, func() {})
+//	}
+//
+// compiled, vetted clean under both tag sets, and left internal/worker,
+// internal/api and cmd/relay-server green. The typed-nil test still passed (the
+// nil decision still reads d.agentHandler) and
+// TestBuildHTTPServer_ServesTheWiredHandlersIngestSection still passed (it
+// asserts the section exists with five keys per arm, and a fresh Handler's
+// section does). In production that serves ingest_log_budget as permanent zeros
+// while the real budget drops thousands of lines - a CONFIDENT ZERO, which
+// counters_wiring_test.go itself calls worse than no endpoint.
+//
+// The numbers here can only come from the Handler that ran the recv loop: this
+// test floods a REAL registered stream with unparseable task ids, which
+// handleTaskLog's bad-id arm counts on the recv goroutine, and then reads them
+// back through the REAL admin-gated route on a server built by buildHTTPServer.
+// A second Handler, a stub, or a dropped assignment all report zero.
+//
+// WHY THE INTEGRATION LANE AND NOT THE DEFAULT ONE, stated so nobody assumes CI
+// covers it: moving an ingest counter requires reaching Connect's message loop,
+// which is past authenticateAndRegister, which is a Postgres round trip. There
+// is no seam short of exporting one from internal/worker purely for a test, and
+// go-ci runs `go test -race ./...` with no tag, so this guard runs under `make
+// test-integration` only. Its cheap companion is the identifier check in
+// TestServerCountersIsWiredByMain; the two answer different questions and
+// neither replaces the other.
+func TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers(t *testing.T) {
+	pool, q := newTestPoolAndQueries(t)
+	ctx := context.Background()
+	rawToken := seedE2EWorker(t, ctx, q, "e2e-ingest-counters")
+
+	addr, handler := startProductionGRPCServerWithHandler(t, pool, q,
+		netlimit.Config{MaxTotal: 10, MaxPerIP: 10},
+		grpcBounds{maxConns: 10, maxConnsPerIP: 10, maxConnIdle: 0})
+
+	// Built exactly as main builds it, from the handler that is already serving
+	// gRPC above.
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: handler,
+	})
+
+	require.Zero(t, ingestDedupedCount(t, srv, "bad_task_id_log"),
+		"fixture: nothing has been dropped yet, so the section is present and zero")
+
+	cc := dialE2E(t, addr)
+	stream, _ := registerOverRealConnection(t, cc, "e2e-ingest-counters", rawToken)
+
+	// kindBadTaskIDLog carries NO wire value, so the whole flood is one dedupe
+	// key: one log line and flood-1 deduped drops. No task and no DB write is
+	// involved - handleTaskLog's bad-id arm returns before h.q is touched - so
+	// the only thing under test is where the count landed.
+	const flood = 40
+	for i := 0; i < flood; i++ {
+		require.NoError(t, stream.Send(&relayv1.AgentMessage{
+			Payload: &relayv1.AgentMessage_TaskLog{TaskLog: &relayv1.TaskLogChunk{
+				TaskId: "not-a-uuid", Content: []byte("x"),
+			}},
+		}))
+	}
+
+	// The recv loop is asynchronous, so poll the route rather than sleeping. An
+	// EXACT target, not "non-zero": a partially-drained stream would otherwise
+	// let this pass while proving less than it claims.
+	deadline := time.Now().Add(30 * time.Second)
+	var got uint64
+	for time.Now().Before(deadline) {
+		got = ingestDedupedCount(t, srv, "bad_task_id_log")
+		if got == uint64(flood-1) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, uint64(flood-1), got,
+		"GET /v1/server/counters must report the drops of the Handler that ran this connection's recv "+
+			"loop. Zero here means buildHTTPServer served some OTHER source - a second Handler, a stub, "+
+			"or nothing - and the endpoint is a confident zero over a live flood.")
+	require.Zero(t, ingestSuppressedCount(t, srv, "bad_task_id_log"),
+		"one repeating key costs one token per dedupe window, so nothing is budget-suppressed")
+	require.Zero(t, ingestDedupedCount(t, srv, "task_log_persist"),
+		"the drops must be attributed to the kind that lost them")
+
+	require.NoError(t, stream.CloseSend())
+}
+
+// ingestDedupedCount and ingestSuppressedCount read one published kind back
+// through the real admin-gated route, decoding the payload the way an operator's
+// poller would rather than reaching into the Handler.
+func ingestDedupedCount(t *testing.T, srv *http.Server, kind string) uint64 {
+	t.Helper()
+	return ingestCount(t, srv, "deduped", kind)
+}
+
+func ingestSuppressedCount(t *testing.T, srv *http.Server, kind string) uint64 {
+	t.Helper()
+	return ingestCount(t, srv, "suppressed", kind)
+}
+
+func ingestCount(t *testing.T, srv *http.Server, arm, kind string) uint64 {
+	t.Helper()
+	top := countersAsAdmin(t, srv)
+	raw, ok := top["ingest_log_budget"]
+	require.True(t, ok, "the ingest_log_budget section is ABSENT, so the handler was never wired at all")
+
+	var section struct {
+		Counts map[string]map[string]uint64 `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &section))
+	require.Contains(t, section.Counts, arm)
+	require.Contains(t, section.Counts[arm], kind)
+	return section.Counts[arm][kind]
 }

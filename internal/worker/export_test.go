@@ -53,7 +53,7 @@ func shimLimiterFor(h *Handler) *ingestLogLimiter {
 	defer handlerShimLimitersMu.Unlock()
 	l, ok := handlerShimLimiters[h]
 	if !ok {
-		l = newIngestLogLimiter()
+		l = newIngestLogLimiter(&h.ingestDrops)
 		handlerShimLimiters[h] = l
 	}
 	return l
@@ -83,9 +83,10 @@ type LimiterHandle struct {
 }
 
 // NewLimiterForTest returns a fresh per-connection log budget, in the state
-// Connect allocates one in.
-func NewLimiterForTest() *LimiterHandle {
-	return &LimiterHandle{l: newIngestLogLimiter()}
+// Connect allocates one in, reporting its drops into this Handler's counters
+// exactly as a real connection's does.
+func (h *Handler) NewLimiterForTest() *LimiterHandle {
+	return &LimiterHandle{l: newIngestLogLimiter(&h.ingestDrops)}
 }
 
 // HandleTaskLogWithLimiter is HandleTaskLog with an explicit budget.

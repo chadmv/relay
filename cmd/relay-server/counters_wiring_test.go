@@ -10,10 +10,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
+	"relay/internal/api"
+	"relay/internal/events"
 	"relay/internal/netlimit"
 	"relay/internal/store"
+	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -180,8 +184,39 @@ func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
 }
 
 // TestServerCountersIsWiredByMain is what remains of the syntactic guard, and it
-// is deliberately THIN: three questions execution cannot answer from inside
+// is deliberately THIN: four questions execution cannot answer from inside
 // buildHTTPServer.
+//
+// IT IS A TABLE, ONE ROW PER WIRED SOURCE, and the generalization from one row
+// to two is the point rather than a tidy-up. "Wired" is a per-SECTION fact - each
+// control is on or off on its own - so every new section adds a row here and
+// inherits the whole walk: the plain-identifier check, the derives-from-an-
+// unconditional-assignment check, and the assignments-per-identifier count over
+// main's entire subtree. Adding a section WITHOUT adding a row leaves it guarded
+// by nothing, which is why the row list and CounterSources' field list have to
+// be read against each other. All six evasions that beat this guard's
+// predecessors were re-run against the table form and all six still fail.
+//
+// THE FOURTH QUESTION IS NEW WITH agentHandler: the counters must come from the
+// Handler main REGISTERS ON. Feeding buildHTTPServer a second, otherwise
+// identical worker.Handler compiles and passes every other check, and the
+// endpoint then reports a permanently empty log budget while the real one fills
+// up.
+//
+// WHAT IS STILL ONLY SYNTACTIC HERE is the main.go half of that: whether the
+// identifier main passes is the identifier main registered. Nothing in the
+// DEFAULT lane can answer it, because moving an ingest counter needs Connect's
+// message loop and therefore a Postgres round trip. An earlier version of this
+// comment stopped there and said "nothing executable can answer that from
+// cmd/relay-server", which quietly covered a second question it does not ask:
+// whether buildHTTPServer forwards the handler it was handed. That one IS
+// executable and was unguarded - substituting a fresh worker.NewHandler inside
+// buildHTTPServer left every package green - and is now
+// TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers in the
+// integration lane. The numbers' own proof is
+// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in
+// internal/worker. Three guards, three questions; this identifier check is the
+// join between them.
 //
 // The old version asked eight, six of them re-derived from individual evasions,
 // and four evasions still got past it. Returning *http.Server took some of those
@@ -277,9 +312,57 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 		"main builds %q with buildHTTPServer but serves %v. A second http.Server would answer every "+
 			"request while the wired one sat idle.", srvName, keysOf(served))
 
-	// The grpcAdmission argument must derive from netlimit.Wrap through
-	// unconditional assignments in main's body.
-	var admissionArg ast.Expr
+	// EVERY WIRED SOURCE, not just the first one. The walk below is run once per
+	// row: a section whose source is fed a conditionally-assigned local reaches
+	// the endpoint as a typed nil and vanishes on every deployment that takes the
+	// branch, which reads exactly like a control that has never stopped anything.
+	deps := []wiredDep{
+		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
+		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
+	}
+
+	// COUNT THE DISTINCT FIELDS AGAINST THE SOURCE FIELDS, because "every wired
+	// source has a row" is a completeness claim and a completeness claim cannot
+	// be checked by reading the rows. The mapping is not mechanical -
+	// api.CounterSources' IngestLogBudget is fed by httpServerDeps.agentHandler -
+	// so a name match is not available, but the CARDINALITIES must agree: a third
+	// section added to CounterSources and wired through a new deps field, with no
+	// row added here, would be guarded by nothing at all while every assertion
+	// below still passed.
+	//
+	// DISTINCT FIELDS, NOT ROWS, and the difference is the cheapest path to
+	// green rather than a hypothetical. Counting rows was PROVED evadable in two
+	// steps: `agentHandler = nil` inside an if in main is correctly RED here
+	// ("assigned 2 times"), and replacing the agentHandler ROW with a second
+	// grpcAdmission row makes the whole package green again - two rows, NumField
+	// is 2, and agentHandler is now outside chainNames, losing the
+	// plain-identifier check, the derives-from check and the assigned-exactly-
+	// once check at a stroke. The next section makes that path more inviting,
+	// not less: server_counters.go says the fence counter will live on the SAME
+	// *worker.Handler with its own CounterSources field, so NumField goes to 3
+	// while the natural table still has 2 rows.
+	//
+	// The field-exists check is here for the same reason: a typo'd row leaves
+	// depArg[d.field] nil and fails several assertions down with a message about
+	// wiring rather than about the typo.
+	depsType := reflect.TypeOf(httpServerDeps{})
+	distinct := map[string]bool{}
+	for _, d := range deps {
+		_, ok := depsType.FieldByName(d.field)
+		require.True(t, ok,
+			"this table has a row for httpServerDeps.%s, which does not exist. A row naming no field "+
+				"guards nothing and makes the count below pass on a table that is short one section.",
+			d.field)
+		distinct[d.field] = true
+	}
+	require.Len(t, distinct, reflect.TypeOf(api.CounterSources{}).NumField(),
+		"api.CounterSources has %d source fields and this table names %d DISTINCT httpServerDeps "+
+			"fields (in %d rows). Every wired source needs its own row, or its section can be silently "+
+			"unwired on some deployments with this guard green - and a duplicated row satisfies a row "+
+			"count while dropping the field it displaced out of every check below.",
+		reflect.TypeOf(api.CounterSources{}).NumField(), len(distinct), len(deps))
+
+	depArg := map[string]*ast.Ident{}
 	for _, st := range body.List {
 		as, ok := st.(*ast.AssignStmt)
 		if !ok {
@@ -302,49 +385,91 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 				if !ok {
 					continue
 				}
-				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "grpcAdmission" {
-					admissionArg = kv.Value
+				k, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				id, isIdent := kv.Value.(*ast.Ident)
+				if d, wired := lookupWiredDep(deps, k.Name); wired {
+					require.True(t, isIdent,
+						"httpServerDeps.%s must be fed a plain identifier - %s - not %T. A helper call, "+
+							"a conversion or a composite literal there hides whether the value main "+
+							"actually built is the one this endpoint reports on.", k.Name, d.what, kv.Value)
+				}
+				if isIdent {
+					depArg[k.Name] = id
 				}
 			}
 		}
 	}
-	require.NotNil(t, admissionArg,
-		"buildHTTPServer is called with no grpcAdmission field, so the only wired section is absent and "+
-			"the endpoint reports started_at and nothing else - which reads exactly like an admission "+
-			"control that has never refused anything")
-	argIdent, ok := admissionArg.(*ast.Ident)
-	require.True(t, ok,
-		"grpcAdmission must be fed a plain identifier - the netlimit listener bound in main's body - "+
-			"not %T", admissionArg)
 
-	seen := map[string]bool{}
-	queue := []string{argIdent.Name}
-	reachesWrap := false
-	for len(queue) > 0 && !reachesWrap {
-		name := queue[0]
-		queue = queue[1:]
-		if seen[name] {
-			continue
+	chainNames := map[string]bool{srvName: true}
+	for _, d := range deps {
+		argIdent := depArg[d.field]
+		require.NotNil(t, argIdent,
+			"buildHTTPServer is called with no %s field, so that section is absent and the endpoint "+
+				"reports nothing about a control that IS running - which reads exactly like a control "+
+				"that has never stopped anything", d.field)
+
+		seen := map[string]bool{}
+		queue := []string{argIdent.Name}
+		reached := false
+		for len(queue) > 0 && !reached {
+			name := queue[0]
+			queue = queue[1:]
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			if name == d.mustReach {
+				reached = true
+				break
+			}
+			queue = append(queue, from[name]...)
 		}
-		seen[name] = true
-		if name == "Wrap" {
-			reachesWrap = true
-			break
+		require.True(t, reached,
+			"httpServerDeps.%s is fed %q, which does not derive from %s through an UNCONDITIONAL "+
+				"assignment in main's body. A local assigned inside an if - the natural shape for "+
+				"'only build it when configured' - reaches the endpoint as a typed nil and the section "+
+				"vanishes on every deployment that does not take the branch.",
+			d.field, argIdent.Name, d.mustReach)
+		for n := range seen {
+			chainNames[n] = true
 		}
-		queue = append(queue, from[name]...)
 	}
-	require.True(t, reachesWrap,
-		"grpcAdmission is fed %q, which does not derive from netlimit.Wrap through an UNCONDITIONAL "+
-			"assignment in main's body. `var grpcLis *netlimit.Listener` assigned inside an if - the "+
-			"natural shape for wrapping only when a cap is set - reaches the endpoint as a typed nil and "+
-			"the section vanishes on every deployment that does not take the branch.", argIdent.Name)
 
-	// EVERY NAME ON THAT CHAIN, PLUS THE SERVER BINDING, MUST BE ASSIGNED
+	// THE COUNTERS MUST COME FROM THE HANDLER THAT SERVES gRPC. Feeding
+	// buildHTTPServer a second worker.Handler compiles, passes every check above
+	// and leaves the endpoint reporting a permanently empty log budget while the
+	// real one fills up - which is worse than no endpoint, because it is a
+	// confident zero.
+	var registered []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := ce.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "RegisterAgentServiceServer" || len(ce.Args) != 2 {
+			return true
+		}
+		if id, ok := ce.Args[1].(*ast.Ident); ok {
+			registered = append(registered, id.Name)
+		}
+		return true
+	})
+	require.Len(t, registered, 1,
+		"main must register exactly one AgentService implementation; found %v", registered)
+	require.Equal(t, registered[0], depArg["agentHandler"].Name,
+		"main serves gRPC on %q but reports ingest log counters from %q. They must be the same "+
+			"Handler.", registered[0], depArg["agentHandler"].Name)
+
+	// EVERY NAME ON THOSE CHAINS, PLUS THE SERVER BINDING, MUST BE ASSIGNED
 	// EXACTLY ONCE IN THE WHOLE OF MAIN.
 	//
 	// `from` above is built from main's DIRECT statements only, so a name
-	// assigned solely inside an if never reaches Wrap and the check above fails.
-	// The shape that survives it is a name assigned BOTH ways:
+	// assigned solely inside an if never reaches its seed and the check above
+	// fails. The shape that survives it is a name assigned BOTH ways:
 	//
 	//	grpcLis := netlimit.Wrap(grpcRawLis, ...)
 	//	if grpcBnds.maxConns == 0 && grpcBnds.maxConnsPerIP == 0 {
@@ -357,7 +482,8 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	// control that reads as having never refused anything, which is the exact
 	// defect this whole guard exists for. It is also the shape a maintainer is
 	// most likely to reach for, since "only wrap when a cap is configured" is a
-	// reasonable-sounding optimisation.
+	// reasonable-sounding optimisation. The same shape one variable to the right
+	// - `agentHandler = nil` inside an if - silences the ingest log budget.
 	//
 	// Counting assignments across main's ENTIRE subtree - ifs, loops, switches
 	// and closures included - is what separates a single unconditional binding
@@ -365,6 +491,10 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	// the ListenAndServe check above matches on NAME, so a conditional
 	// `srv = &http.Server{...}` would serve an unwired server through an
 	// identifier this test already blessed.
+	//
+	// Field assignments (`agentHandler.Metrics = ...`) have a SelectorExpr on the
+	// left rather than an Ident, so they are deliberately not counted: they
+	// mutate the object, they do not rebind the name.
 	assignedAnywhere := map[string]int{}
 	ast.Inspect(body, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
@@ -378,8 +508,7 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 		}
 		return true
 	})
-	chain := append([]string{srvName}, keysOf(seen)...)
-	for _, name := range chain {
+	for name := range chainNames {
 		if len(from[name]) == 0 && assignedAnywhere[name] == 0 {
 			// Not a local bound by an assignment in main's body: a package
 			// name, a function name, a field name. Nothing to count.
@@ -400,4 +529,90 @@ func keysOf(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestBuildHTTPServer_ServesTheWiredHandlersIngestSection is EXECUTED: it builds
+// the server the way main does and reads the section back through the real
+// admin-gated route.
+//
+// SAY WHAT IT DOES NOT BUY, and the first sentence here used to overstate it. It
+// proves the section is PRESENT, with the right shape, whenever a non-nil
+// Handler is passed. It does NOT prove the section is served from THAT Handler:
+// a fresh worker.NewHandler substituted inside buildHTTPServer produces an
+// identical five-key-per-arm section of zeros and leaves this test green
+// (measured). Nor does it prove the numbers move, which needs the gRPC recv
+// goroutine and a registered agent.
+//
+// Those two live in integration lanes:
+// TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers drives
+// real drops through a real stream and reads them back through this route, and
+// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in
+// internal/worker proves the counts outlive the connection. The main.go half -
+// "the Handler serving gRPC is the Handler reporting counts" - is the identifier
+// property checked in TestServerCountersIsWiredByMain below.
+func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
+	h := worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {})
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: h,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.Contains(t, top, "ingest_log_budget",
+		"a wired Handler must produce the section from the moment the server is built. An absent "+
+			"section reads as 'this build has no ingest log budget', which is false and is exactly "+
+			"the distinction this payload exists to preserve.")
+
+	var section struct {
+		Counts struct {
+			Deduped    map[string]uint64 `json:"deduped"`
+			Suppressed map[string]uint64 `json:"suppressed"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(top["ingest_log_budget"], &section))
+	require.Len(t, section.Counts.Deduped, 5, "one key per kind")
+	require.Len(t, section.Counts.Suppressed, 5, "one key per kind")
+}
+
+// TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent. `var h
+// *worker.Handler` conditionally assigned stores a TYPED nil in the interface,
+// which is not == nil, so the handler's `src != nil` is true and the method call
+// dereferences a nil receiver - a goroutine stack trace per admin request,
+// inside the feature whose subject is bounding log volume.
+//
+// The fix belongs at the wiring boundary, where the concrete type still makes
+// the distinction visible, and NOT in a nil-tolerant snapshot method: that would
+// turn an unwired control into a section of zeros.
+func TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent(t *testing.T) {
+	var unwired *worker.Handler
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: unwired,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.NotContains(t, top, "ingest_log_budget",
+		"a nil handler must leave the section ABSENT, never present-and-zero, and must never panic")
+	require.Contains(t, top, "started_at")
+}
+
+// wiredDep names one httpServerDeps field whose source must be a plain,
+// unconditionally-bound local in main's body, and the constructor that local has
+// to derive from. One row per SECTION of the counters payload: "wired" is a
+// per-section fact, so a new section adds a row here rather than widening one.
+type wiredDep struct {
+	field     string
+	mustReach string
+	what      string
+}
+
+func lookupWiredDep(deps []wiredDep, name string) (wiredDep, bool) {
+	for _, d := range deps {
+		if d.field == name {
+			return d, true
+		}
+	}
+	return wiredDep{}, false
 }

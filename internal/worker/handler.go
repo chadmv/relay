@@ -167,7 +167,27 @@ type Handler struct {
 	// Set by cmd/relay-server after construction, from
 	// RELAY_TASKLOG_TRAILING_WINDOW. Read-only after startup.
 	TrailingLogWindow time.Duration
+
+	// ingestDrops counts what this server's per-connection log budgets dropped,
+	// split by kind and by arm. A VALUE, not a pointer: the zero value is ready
+	// to use, so a Handler built by any route (including a bare &Handler{} in a
+	// test) has working counters and there is no nil case anywhere. Read through
+	// IngestLogDropCounts; wired to GET /v1/server/counters by
+	// cmd/relay-server's buildHTTPServer.
+	//
+	// It contains atomics, which makes Handler non-copyable - go vet's copylocks
+	// check will say so at any `*h` copy. That is a feature: nothing should ever
+	// copy a Handler.
+	ingestDrops ingestLogCounters
 }
+
+// IngestLogDropCounts reports what this server's ingest log budget has dropped
+// since process start, split by kind and by arm.
+//
+// It satisfies api.IngestLogBudgetSource. The numbers are per PROCESS - there is
+// one Handler per server - and are never sent to an agent: the only read path is
+// the admin-authenticated GET /v1/server/counters.
+func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.snapshot() }
 
 // NewHandler returns a Handler wired to the given dependencies.
 func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
@@ -225,7 +245,14 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	// NOT capture it in a goroutine, store it anywhere, or hand it to anything
 	// that outlives this call. TestConnect_TwoConnectionsDoNotShareTheLogBudget
 	// is what pins this allocation site.
-	lim := newIngestLogLimiter()
+	//
+	// ONE THING DOES POINT OUT OF THIS FRAME, and it is not the budget: the
+	// limiter carries a pointer to the Handler's drop COUNTERS, which are shared
+	// by every connection on purpose, because a count that died with the
+	// connection would read zero exactly when an operator went looking for it.
+	// The budget stays private; the counters are process-wide and atomic. Do not
+	// merge the two.
+	lim := newIngestLogLimiter(&h.ingestDrops)
 
 	// Message loop.
 	for {

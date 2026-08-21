@@ -47,7 +47,7 @@ func TestIngestLogLimiter_ConstantsAreWhatTheHandlerTestsAssume(t *testing.T) {
 func newFrozen() (*ingestLogLimiter, *time.Time) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	clock := &now
-	return newIngestLogLimiterAt(func() time.Time { return *clock }), clock
+	return newIngestLogLimiterAt(func() time.Time { return *clock }, &ingestLogCounters{}), clock
 }
 
 // The seam cannot be half-used. Overriding only `now` while `last` came from the
@@ -55,7 +55,7 @@ func newFrozen() (*ingestLogLimiter, *time.Time) {
 // lens) that no current test would notice, because they all go through newFrozen.
 func TestNewIngestLogLimiterAt_TakesLastFromTheInjectedClockToo(t *testing.T) {
 	epoch := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	l := newIngestLogLimiterAt(func() time.Time { return epoch })
+	l := newIngestLogLimiterAt(func() time.Time { return epoch }, &ingestLogCounters{})
 	if !l.last.Equal(epoch) {
 		t.Errorf("last = %v, want %v - the initial stamp must come through the injected clock", l.last, epoch)
 	}

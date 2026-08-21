@@ -3,6 +3,7 @@ title: Two registration-time log sites sit outside the connection's log budget, 
 type: bug
 status: open
 created: 2026-08-15
+updated: 2026-08-21
 priority: low
 source: Phase 4 lens of the 2026-08-15-tasklog-err-limiter-keying slice; the structural half of a finding whose injection half shipped
 ---
@@ -64,18 +65,54 @@ would corrupt the audit trail of the mechanism it documents. If so, the right sh
 opt-out with a comment saying why, not an accident of allocation order. That distinction is the whole
 content of this item.
 
+### Update 2026-08-21 - the census, and the OTHER unbudgeted class is a separate item
+
+The ingest-counters slice (`docs/retros/2026-08-21-silent-drop-observability-slice2.md`) counted every
+`log.Printf` in `handler.go` while checking a README claim that turned out to be false. Twelve sites,
+five budgeted, seven not - and the seven are **two different problems**:
+
+- **Registration-time (`:233`, `:522`, `:553`) - this item.** The budget does not exist yet. The fix is
+  allocation order plus threading, exactly as proposed above.
+- **Post-registration, inside `handleTaskStatus` (`:939`, `:984`, `:991`) - NOT this item.** The budget
+  is a parameter of that function and is used twice in it; those three lines just do not call it. Filed
+  as [[bug-2026-08-21-handletaskstatus-db-error-lines-bypass-the-in-scope-budget]]. Read the two
+  together - they may well ship together - but do not merge them: this item's whole content is
+  allocation order and the audit-line decision, and widening it to "all unbudgeted log lines" is how an
+  item ends up wrong about its own scope.
+- `:1197` (`handleTaskLog marshal`) is the twelfth site and is claimed by neither item as an exposure;
+  no input is known to reach it.
+
+**Two things that changed the cost of this work.** README now names both unbudgeted classes explicitly,
+so the false "every caller-driven log line is rate-limited" sentence is gone and any fix here must
+update that text. And **the `logKind` names are now a response contract** - each is a JSON key under
+`ingest_log_budget.counts` - so `kindRegisterInventory`, if this item adds it, is a payload change with
+a checklist: the const inside the `kindCount` sentinel, an array cell, a field on
+`worker.IngestLogDropsByKind`, a line in `byKind`, a field and json tag on `api.ingestLogKindCounts`, a
+line in `ingestLogKindCountsFrom`, two `counterPayloadLeaves` entries and the kinds list in
+`TestServerCounters_ReportsTheIngestLogSnapshot`. Slice 2 proved a kind can be added correctly on the
+worker side and published nowhere with every package green; three guards now fire on a new kind, and
+`TestIngestLogKindCountsPublishesEveryWorkerSideField` is the one that catches the arity drift.
+
+**And a decision this item now inherits rather than invents:** if the auto-enroll audit line stays
+unbudgeted deliberately, that is a *third* state - not budgeted, not an accident - and the counters
+payload says nothing about it either way. Whatever ships, README's "the budget covers these sites and no
+others" sentence has to stay true.
+
 ## Proposal
 
 - Move `lim := newIngestLogLimiter()` to the top of `Connect`, before the first `stream.Recv()`.
 - Thread it through `authenticateAndRegister` -> the three register paths -> `finishRegister`.
 - Budget `finishRegister`'s inventory-replace line under a new kind (`kindRegisterInventory`), or under
   the existing `kindInventory` if a spec argues they are the same event - they are the same statement
-  family (`applyInventory` versus `applyInventoryUpdate`) but different phases.
+  family (`applyInventory` versus `applyInventoryUpdate`) but different phases. **(2026-08-21: whichever
+  is chosen, a NEW kind is now a JSON key; see the checklist above.)**
 - Decide the auto-enroll audit line deliberately: budgeted, or explicitly exempt with a comment stating
   that an audit record must not be suppressible and that its **volume** defence is `clipID` while its
   **count** defence is registration itself.
 - Add a comment at the allocation site stating the invariant the move establishes: every caller-driven
   log line on this goroutine goes through the budget, and a new one that does not is a finding.
+  **(2026-08-21: that invariant is not true until the sibling item ships too. Do not write the sentence
+  before it is.)**
 
 ## Acceptance / Done When
 
@@ -89,17 +126,26 @@ content of this item.
 - `TestConnect_TwoConnectionsDoNotShareTheLogBudget` still passes unchanged - the move must not make the
   limiter reachable from anywhere but its own connection's goroutine.
 - No new DB round trip, goroutine, queue or lock on the registration or recv path.
+- **(2026-08-21) If a new `logKind` is added, it is counted AND published**, proven by reading it back
+  through `GET /v1/server/counters`; and README's list of what the budget does and does not cover is
+  updated to match.
 
 ## Related
 
 - Source: `internal/worker/handler.go` (`Connect`'s allocation site, `authenticateAndRegister`,
   `autoEnrollAndRegister`'s audit line, `finishRegister`'s inventory-replace line, `applyInventory`)
-- The budget this extends: `internal/worker/ingest_log_limiter.go`
+- The budget this extends: `internal/worker/ingest_log_limiter.go`; the counters it now feeds:
+  `internal/worker/ingest_log_counters.go`
+- **The other unbudgeted class, a separate item:**
+  [[bug-2026-08-21-handletaskstatus-db-error-lines-bypass-the-in-scope-budget]]
 - The slice that created the gap and shipped the injection half:
   `docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md` section 2.6 (the per-site table),
   `docs/retros/2026-08-15-tasklog-err-limiter-keying.md`
+- The slice that made the kind names a response contract:
+  `docs/retros/2026-08-21-silent-drop-observability-slice2.md`
 - The reason "one line per connection" is not a bound:
-  [[bug-2026-08-15-grpc-connection-admission-is-unbounded]]
+  [[bug-2026-08-15-grpc-connection-admission-is-unbounded]] (**closed 2026-08-21**; see
+  [[idea-2026-08-21-per-stream-log-budget-renewal-is-unpriced]] for what the caps do not bound)
 - Adjacent, same hostname value: [[bug-2026-08-15-cli-prints-unvalidated-worker-hostname-unescaped]],
   [[bug-2026-08-12-auto-enroll-hostname-takeover]]
 
@@ -111,3 +157,8 @@ content defences shipped. The value of the item is that it converts a coincidenc
 about whether each line was caller-forceable, and got one of the rows right for the wrong reason (the
 `finishRegister` row's stated justification was the wrong mechanism, corrected in a dated amendment
 inside the spec). A rule at the allocation site replaces that per-site reasoning with one check.
+
+**2026-08-21:** still low, and the census above is the argument for keeping it open rather than closing
+it as theoretical. A README sentence asserting the rule this item would establish was written before the
+item shipped, and it was false in two different ways at once. The rule is worth having precisely because
+somebody will write that sentence again.

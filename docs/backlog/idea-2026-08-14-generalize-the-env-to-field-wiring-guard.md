@@ -106,6 +106,46 @@ must parse, count properties. See `TestServerCountersIsWiredByMain`'s "EVERY NAM
 for the working implementation, and `docs/retros/2026-08-21-silent-drop-observability-slice1.md` for the
 seven evasions.
 
+### Update 2026-08-21 (later) - the conditional pair is a SEVENTH and EIGHTH copy, and slice 3 adds a ninth
+
+Slice 2 (`docs/retros/2026-08-21-silent-drop-observability-slice2.md`) added a second section to the
+counters endpoint, and with it a second conditional assignment in the same function:
+
+```go
+if d.grpcAdmission != nil {
+    s.Counters.GRPCAdmission = d.grpcAdmission
+}
+if d.agentHandler != nil {
+    s.Counters.IngestLogBudget = d.agentHandler
+}
+```
+
+These are the **same unguarded-copy shape** as the three unconditional assignments above, with one
+wrinkle in each direction. Better: deleting either one is caught today, by an executed test rather than
+a parse (`TestBuildHTTPServer_ServesTheRealListenersCounters`,
+`TestBuildHTTPServer_ServesTheWiredHandlersIngestSection`) - which is the ladder's top rung and exactly
+what this item should prefer where it is available. Worse: the `if` is load-bearing (it filters the
+typed nil, and removing it panics per admin request), so the shape a generalized *derivation* guard
+would look for is not the shape that is written, and a third section arriving with no assignment at all
+is caught only by the hand-maintained `wiredDep` cardinality check in `counters_wiring_test.go`.
+
+**The copy count in `cmd/relay-server` is now eight - six unconditional and two conditional - and
+`idea-2026-08-14-tasklog-fence-rejection-is-unobservable` (slice 3) adds a ninth**, on the same
+`*worker.Handler`. That item's amendment already warns that the natural way to satisfy the cardinality
+check is a duplicated row, which is the evasion the check was rewritten to stop.
+
+**What this changes for this item's design, concretely:**
+
+- The guard must handle an assignment nested inside an `if` **without** treating the nesting as the
+  defect: here it is required. Counting assignments per identifier across the subtree still works;
+  matching "an `AssignStmt` at statement level of the function body" does not.
+- **Prefer extending the executed checks over widening the parse.** Two of the eight copies are already
+  covered by executing `buildHTTPServer` and reading the result; a generalization that replaces those
+  with an AST rule is a step DOWN the ladder. The right target is the six that nothing executes.
+- Whatever ships should decide, once, whether `s.Counters.X = d.x` inside a filter belongs in the same
+  table as `s.Metrics = d.metrics`, or whether the counters wiring is a separate mechanism with its own
+  guard. Both answers are defensible; leaving it implicit is what produces the ninth copy.
+
 ## Proposal
 
 One table-driven guard in `cmd/relay-server` covering every post-construction wiring the binary
@@ -131,6 +171,9 @@ Points to settle at spec time:
   is the right shape and it should be lifted verbatim rather than reinvented. **(2026-08-21: lift the
   assignment-count check with it. Derivation alone is defeated by a later conditional reassignment, and
   that was a live green evasion, not a hypothetical.)**
+- **Whether the two `s.Counters.X = d.x` assignments belong in this table at all** (2026-08-21, later).
+  They are the same shape, they are already covered by executed tests, and their `if` wrapper is
+  required rather than suspicious. Decide it explicitly; the ninth copy arrives with slice 3.
 - **The two limitations the shipped guard has, which a generalization should decide about rather than
   inherit silently.** (1) It proves *derivation*, not *fidelity* - `TrailingLogWindow =
   trailingLogWindow / 2` passes. (2) It keys on the field **name** only, so an assignment to any
@@ -170,23 +213,29 @@ Points to settle at spec time:
 - It stays untagged, so it runs under `make test`.
 - **`api.New`'s four same-typed positional arguments are either covered or explicitly declared out of
   scope with the reason**, since no derivation guard can see a swap between them.
+- **(2026-08-21) The two `s.Counters.X = d.x` conditional assignments are explicitly in scope or
+  explicitly out**, with the reason - they are the same shape, they are already covered by executed
+  tests, and their count is growing.
 
 ## Related
 
 - Source: `cmd/relay-server/main.go` (the three `agentHandler` assignments),
-  `cmd/relay-server/http_server.go` (`buildHTTPServer`'s three `api.Server` assignments and its comment
-  naming both uncaught gaps), `cmd/relay-server/trailing_log_window_test.go`
+  `cmd/relay-server/http_server.go` (`buildHTTPServer`'s three `api.Server` assignments, the two
+  conditional `s.Counters.X` assignments, and its comment naming both uncaught gaps),
+  `cmd/relay-server/trailing_log_window_test.go`
   (`TestTrailingLogWindowIsWiredIntoTheHandler`, the one to generalize, and the "Parse the package, not
   the file" constraint), `cmd/relay-server/counters_wiring_test.go` (`TestServerCountersIsWiredByMain`,
-  the second `main.go`-only parser and the working assignment-count check),
-  `internal/worker/handler.go` (the `Metrics` / `AllowAutoEnroll` / `TrailingLogWindow` field block)
+  the second `main.go`-only parser, the working assignment-count check, and the `wiredDep`
+  distinct-field cardinality check)
 - Existing structural guards to follow: `internal/store/incrementtaskretrycount_guard_test.go`,
   `internal/store/updatetaskstatusepoch_guard_test.go`
 - Why not a regex: `docs/retros/2026-08-13-narrow-viewport-overflow.md` (a compliant consumer reddened
   by one JSX comment; the guard was deleted and replaced with a required prop)
-- Why a guard must count a property rather than match a shape, with seven worked evasions:
+- Why a guard must count a property rather than match a shape, with worked evasions:
   `docs/retros/2026-08-21-grpc-admission-bounds.md`,
-  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice2.md` (three more, twelve total)
+- The item that adds the ninth copy: [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]]
 - The rule that says three copies is the trigger: `docs/retros/2026-08-14-cursor-pager-hook.md`
 - Origin: `docs/retros/2026-08-14-tasklog-terminal-append-bound.md` ("The conductor override")
 
@@ -200,3 +249,7 @@ the state all three of these were in until 2026-08-14.
 **2026-08-21: still low, but the copy count went from three to six in one slice and the file set went
 from one to two.** That is the shape of a guard that will be pasted a seventh time under time pressure.
 Reconsider the priority the next time somebody adds a post-construction field in `cmd/relay-server`.
+
+**2026-08-21, later: eight copies, and a ninth is scheduled.** Two of the eight are covered by executed
+tests rather than by parsing, which is the better answer where it is available and is the thing this
+item should be careful not to trade away for uniformity.

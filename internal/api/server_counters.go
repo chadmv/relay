@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"relay/internal/netlimit"
+	"relay/internal/worker"
 )
 
 // GET /v1/server/counters is relay's ONE process-lifetime counter surface. It
@@ -83,17 +84,48 @@ import (
 //   - internal/netlimit is a stdlib-only leaf, so this package imports it and
 //     the source interface can return netlimit.Stats directly.
 //   - internal/worker is already imported by this package (server.go), so a
-//     worker-side counters type works the same way.
+//     worker-side counters type works the same way. (ingest_log_budget is the
+//     live example: *worker.Handler satisfies IngestLogBudgetSource and returns
+//     worker.IngestLogDrops directly.)
 //   - internal/scheduler IMPORTS THIS PACKAGE (scheduler/dispatch.go), so this
 //     package can never import it. The watchdog section must therefore declare
 //     its snapshot type HERE, next to the response types, and scheduler.Watchdog
 //     returns that type. CounterSources is a struct of independent fields
 //     precisely so each section can make that choice separately.
+//
+// AND THE RULE THAT HOLDS FOR EVERY SECTION, WHICHEVER OF THOSE THREE SHAPES IT
+// TAKES: a section that copies a subsystem's snapshot into a response struct
+// FIELD BY FIELD needs a CARDINALITY CHECK between the two types, written in
+// this package, because this is the only place both are visible. A
+// field-by-field mapper is the one link in the chain the compiler says nothing
+// about - a field added on the subsystem side and not here compiles, vets and
+// tests clean while its number is counted on the hot path and published under no
+// JSON key. Every other link in ingest_log_budget's chain already had such a
+// check (kinds against the counters array, the array against
+// worker.IngestLogDropsByKind, CounterSources' fields against
+// cmd/relay-server's wiring table, the response against this handler's
+// branches); the mapper's was missed and is now
+// TestIngestLogKindCountsPublishesEveryWorkerSideField. Note what does NOT
+// substitute for it: counterPayloadLeaves is an ElementsMatch over this
+// package's OWN payload, so it reddens on an extra leaf here and is silent on a
+// missing one there.
 
 // GRPCAdmissionSource is whatever can report the agent-port admission
 // counters - in production, *netlimit.Listener.
 type GRPCAdmissionSource interface {
 	Stats() netlimit.Stats
+}
+
+// IngestLogBudgetSource is whatever can report what the per-connection agent log
+// budgets have dropped - in production, *worker.Handler.
+//
+// ONE METHOD, AND A SEPARATE FIELD FROM ANY FUTURE WORKER COUNTER. The task-log
+// fence-rejection counter (idea-2026-08-14) will live on the same *worker.Handler
+// and must get its OWN source field and its own section, so that "wired" stays a
+// per-SECTION fact. Widening this interface to carry both would make two
+// independent controls appear and disappear together.
+type IngestLogBudgetSource interface {
+	IngestLogDropCounts() worker.IngestLogDrops
 }
 
 // CounterSources is the set of subsystem counter sources the endpoint
@@ -113,17 +145,21 @@ type GRPCAdmissionSource interface {
 // { wd = ... }; CounterSources{Watchdog: wd}` is the natural shape and it
 // panics. Filter the typed nil where the CONCRETE type is still visible, at the
 // wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
-// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent is its guard. Do
+// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent plus
+// TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent are its
+// guards - one per wired source, because the filter is per FIELD. Do
 // not instead make the source's snapshot method nil-tolerant - returning a zero
 // snapshot turns an unwired control into a section of zeros, which is the one
 // distinction this payload exists to preserve.
 type CounterSources struct {
-	GRPCAdmission GRPCAdmissionSource
+	GRPCAdmission   GRPCAdmissionSource
+	IngestLogBudget IngestLogBudgetSource
 }
 
 type serverCountersResponse struct {
-	StartedAt     time.Time             `json:"started_at"`
-	GRPCAdmission *grpcAdmissionSection `json:"grpc_admission,omitempty"`
+	StartedAt       time.Time               `json:"started_at"`
+	GRPCAdmission   *grpcAdmissionSection   `json:"grpc_admission,omitempty"`
+	IngestLogBudget *ingestLogBudgetSection `json:"ingest_log_budget,omitempty"`
 }
 
 type grpcAdmissionSection struct {
@@ -147,6 +183,60 @@ type grpcAdmissionLevels struct {
 	MaxPerSource    uint64 `json:"max_per_source"`
 }
 
+// ingest_log_budget is COUNTS ONLY, and the absence of a levels half is a
+// decision rather than an omission: every ingestLogLimiter is a per-connection
+// stack local that dies with its frame, so there is no process-wide "current"
+// figure to report without building the shared registry that type explicitly
+// refuses to have.
+//
+// WHAT THE TWO ARMS MEAN, because summing them would be uninterpretable:
+// "deduped" is a repeating failure being collapsed to one line per five minutes
+// (healthy, and the number is how many chunks that one line represents);
+// "suppressed" is a line dropped ENTIRELY because the connection's token bucket
+// was empty (an attack or a misconfiguration).
+//
+// AND WHAT THEY DO NOT COUNT: these are LOG LINES THE BUDGET DROPPED, not
+// diagnostics lost. A handler that decides not to log without consulting the
+// budget contributes nothing - handleTaskStatus's pgx.ErrNoRows GetTask
+// short-circuits before the budget, and handleTaskLog's fence-rejection arm
+// never consults it at all (that one is its own item and its own section).
+type ingestLogBudgetSection struct {
+	Counts ingestLogBudgetCounts `json:"counts"`
+}
+
+type ingestLogBudgetCounts struct {
+	Deduped    ingestLogKindCounts `json:"deduped"`
+	Suppressed ingestLogKindCounts `json:"suppressed"`
+}
+
+// ingestLogKindCounts is a STRUCT rather than a map[string]uint64, and that is
+// the cardinality rule made structural: the kind set is closed at compile time,
+// so named fields make an unbounded key set impossible AND keep both payload
+// walks at full reach. A map would need a counterPayloadExemption whose
+// predicates descend into it themselves, because an exemption is shape-checked
+// but NON-DESCENDING - slice 1 demonstrated a map[string]string with a
+// newline-injected key passing both guards.
+//
+// THESE KEYS ARE A RESPONSE CONTRACT tied to worker's logKind names; see that
+// type's comment before renaming anything here.
+type ingestLogKindCounts struct {
+	TaskLogPersist  uint64 `json:"task_log_persist"`
+	BadTaskIDLog    uint64 `json:"bad_task_id_log"`
+	BadTaskIDStatus uint64 `json:"bad_task_id_status"`
+	StatusGetTask   uint64 `json:"status_get_task"`
+	Inventory       uint64 `json:"inventory"`
+}
+
+func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts {
+	return ingestLogKindCounts{
+		TaskLogPersist:  k.TaskLogPersist,
+		BadTaskIDLog:    k.BadTaskIDLog,
+		BadTaskIDStatus: k.BadTaskIDStatus,
+		StatusGetTask:   k.StatusGetTask,
+		Inventory:       k.Inventory,
+	}
+}
+
 // handleServerCounters assembles whichever sections are wired. It reads no
 // request body, so readJSON is not involved; the response goes through
 // writeJSON, matching handleGetWorkerMetrics.
@@ -165,6 +255,13 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 				MaxPerSource:    st.Levels.MaxPerSource,
 			},
 		}
+	}
+	if src := s.Counters.IngestLogBudget; src != nil {
+		d := src.IngestLogDropCounts()
+		resp.IngestLogBudget = &ingestLogBudgetSection{Counts: ingestLogBudgetCounts{
+			Deduped:    ingestLogKindCountsFrom(d.Deduped),
+			Suppressed: ingestLogKindCountsFrom(d.Suppressed),
+		}}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
