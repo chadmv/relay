@@ -1,9 +1,11 @@
 ---
 title: netlimit reports refusals but not occupancy, so a saturated connection cap is indistinguishable from fleet growth
 type: idea
-status: open
+status: closed
 created: 2026-08-21
 updated: 2026-08-21
+closed: 2026-08-21
+resolution: fixed
 priority: medium
 source: Phase 4 of the 2026-08-20-grpc-admission-bounds slice; the diagnosability cost that slice accepted
 ---
@@ -170,3 +172,60 @@ has no code fix worth filing. **What it does have is a detection story, and it i
 `MaxPerSource` plus `DistinctSources`.** Sixteen prefixes each holding 64 connections is a shape those
 two numbers show and `RefusedTotal` does not. If this item is specced, that case belongs in its test
 matrix.
+
+
+## Resolution
+
+Closed by the 2026-08-21 silent-drop-observability slice 1
+(`docs/superpowers/specs/2026-08-21-silent-drop-observability.md`,
+`docs/retros/2026-08-21-silent-drop-observability-slice1.md`). Filed by the previous day's admission
+slice and closed by this one, one day apart.
+
+`netlimit.Stats` now splits into `Counts` (monotonic refusals) and `Levels` (`LiveTotal`,
+`DistinctSources`, `MaxPerSource`), all five numbers read in a **single critical section** under
+`l.mu`, converted to `uint64` at the boundary. The two refusal counters became plain `uint64` guarded
+by that same mutex rather than atomics, so an unsynchronised read is now a data race `-race` can see -
+held by `TestStats_ConcurrentRefusalsAndReadsShareTheMutex`, which the review proved is the **sole**
+test in the package giving `-race` anything to see, and which is therefore marked load-bearing in
+source. `TestStats_IsOneCriticalSection` is the three-lock kill the item asked for by name.
+
+The trigger rule the item predicted is now **structural, not remembered**: `refusalReporter.last` is
+typed `netlimit.RefusalCounts`, so `s == r.last` is a compile error and a level cannot be dragged into
+the "did anything move" test by anybody adding a field. `TestRefusalSummaryLogsOnlyWhenCountersMove`
+passes with **no assertion changed**, and its `IsType(uint64(0))` arm now covers five arguments
+instead of two.
+
+The read surface the item deferred to its siblings is `GET /v1/server/counters`, `auth(admin(...))`,
+shipping the counts/levels contract and the absent-not-zero rule for all four sections at once.
+
+**Two halves closed by decision rather than by code, per the item's own framing** - both appear under
+"questions it cannot answer" rather than under acceptance:
+
+- **`RefusedPerIP`'s under-report.** Attribution is deliberately unchanged; re-attributing a
+  one-day-old counter is worse than explaining it. With occupancy present, `live_total` reaching the
+  configured `MaxTotal` tells the operator the total cap is binding and therefore that
+  `refused_per_source` is a **floor rather than a measurement**. Stated in `RefusalCounts`'s doc
+  comment, in the JSON field's comment and in README.
+- **The ceiling-with-no-attempts silence.** A fleet parked at exactly the ceiling with nobody being
+  refused produces no log line, so "pressure ended" and "settled at the ceiling" still look alike **in
+  the log**. That is the price of the counts-only trigger rule and it is disclosed in
+  `refusalReporter`'s comment. It is closed by the endpoint, which reports the level on demand at any
+  time - the main reason the endpoint is the primary surface.
+
+**One residual filed rather than closed**, and it is this endpoint's own subject one layer down: with
+both caps disabled, `Accept` returns connections unwrapped and does no accounting, so every level
+reads `0` however many are live. The section is present, so the payload affirmatively asserts "this
+control ran and stopped nothing" where the truth is "this control measured nothing". Disclosed in
+`netlimit.Stats`'s doc comment, in `server_counters.go` and in README, pinned by the pre-existing
+`TestLimitListener_ZeroDisables`, and tracked as
+[[idea-2026-08-21-counters-payload-cannot-say-not-measured]].
+
+The item's own IPv6-delegation detection story is in the test matrix as specified: sixteen `/64`s
+holding 64 each reads `live_total: 1024, distinct_sources: 16, max_per_source: 64` with
+`refused_total` still at **zero** - exactly the shape the refusal counters are blind to.
+
+The three siblings ([[idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced]],
+[[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]],
+[[idea-2026-08-15-ingest-log-suppression-is-uncounted]]) are **enabled only and remain open**; each has
+been amended with what the shared mechanism now provides and what it constrains. This slice closes
+exactly one item.
