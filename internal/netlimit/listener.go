@@ -184,12 +184,66 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 }
 
-// Stats returns a snapshot of the refusal counters.
+// Stats returns ONE snapshot of every counter and every level, taken in a
+// SINGLE critical section.
+//
+// THE SINGLE CRITICAL SECTION IS THE CONTRACT, not an implementation detail.
+// Three separate lock acquisitions let a caller observe a combination that never
+// existed - DistinctSources greater than LiveTotal is directly reachable while
+// connections are being admitted - and an operator would then draw a conclusion
+// from an arrangement the fleet was never in. Pinned by
+// TestStats_IsOneCriticalSection, which is RED under exactly that mutation.
+//
+// The refusal counters are atomics, but they are INCREMENTED under this same
+// mutex (see admit), so reading them here makes the whole five-field snapshot
+// consistent rather than merely each field individually atomic.
+//
+// COST: MaxPerSource is an O(len(perIP)) walk under l.mu. len(perIP) is bounded
+// by MaxTotal (1024 at the defaults) only while the TOTAL cap is enabled; with
+// RELAY_GRPC_MAX_CONNS=0 and a live per-source cap, admit still runs and perIP
+// is bounded only by the process file-descriptor limit, so this walk is
+// proportional to live connections. That is accepted rather than fixed: the
+// mutex's other holders are admit and release, which run once per TCP
+// connection rather than per message, and the only other caller is an
+// admin-authenticated HTTP handler whose own bearer-token check costs a Postgres
+// round trip. Maintaining the maximum incrementally is NOT cheaper - a
+// decremented maximum is not exactly recoverable without a scan, which would
+// move this walk onto release, a path much closer to hot than this one.
+//
+// WHEN BOTH CAPS ARE DISABLED, EVERY LEVEL READS ZERO NO MATTER HOW MANY
+// CONNECTIONS ARE LIVE. Accept returns the conn unwrapped in that configuration
+// and never calls admit, so nothing is counted. A zero here therefore means "not
+// measured", not "nothing there". Pinned by TestLimitListener_ZeroDisables.
 func (l *Listener) Stats() Stats {
-	return Stats{Counts: RefusalCounts{
-		RefusedTotal: l.refusedTotal.Load(),
-		RefusedPerIP: l.refusedPerIP.Load(),
-	}}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	maxPer := 0
+	for _, n := range l.perIP {
+		if n > maxPer {
+			maxPer = n
+		}
+	}
+	return Stats{
+		Counts: RefusalCounts{
+			RefusedTotal: l.refusedTotal.Load(),
+			RefusedPerIP: l.refusedPerIP.Load(),
+		},
+		// uint64 AT THE BOUNDARY, and this is load-bearing rather than tidy:
+		// the consumer's summary line asserts that every argument it carries is
+		// a uint64 (TestRefusalSummaryLogsOnlyWhenCountersMove), which is what
+		// keeps caller-supplied bytes out of an attacker-reachable log site. An
+		// int occupancy figure turns that shipped test RED.
+		//
+		// No clamp on the conversion. l.total cannot go negative - release runs
+		// exactly once per admitted conn, enforced by conn.once - and if an
+		// accounting bug ever made it negative, an absurd number here is a
+		// better signal than a zero that hides it.
+		Levels: Occupancy{
+			LiveTotal:       uint64(l.total),
+			DistinctSources: uint64(len(l.perIP)),
+			MaxPerSource:    uint64(maxPer),
+		},
+	}
 }
 
 // ipv6AggregationBits is the prefix length IPv6 peers are aggregated to. /64 is

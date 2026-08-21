@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -673,4 +674,224 @@ func TestLimitListener_BothCapsOffReturnsTheUnderlyingConnUnwrapped(t *testing.T
 	got2, err := l2.Accept()
 	require.NoError(t, err)
 	assert.NotSame(t, inner2, got2, "a live cap needs the wrapper, or Close can never release the slot")
+}
+// TestStats_ReportsOccupancy is the "how full is it right now" half of
+// idea-2026-08-21-netlimit-occupancy-is-unobservable. Cumulative refusals cannot
+// answer it: a RefusedTotal that stopped moving means either the pressure ended
+// or the fleet settled at exactly the ceiling, and those need opposite
+// responses.
+//
+// admit/release are driven directly rather than through Accept: they are the two
+// critical sections Stats reads, and driving them straight makes the arithmetic
+// the subject instead of the fake listener's plumbing.
+func TestStats_ReportsOccupancy(t *testing.T) {
+	l := Wrap(&fakeListener{}, Config{MaxTotal: 100, MaxPerIP: 100})
+	require.True(t, l.admit("10.0.0.1"))
+	require.True(t, l.admit("10.0.0.1"))
+	require.True(t, l.admit("10.0.0.2"))
+
+	s := l.Stats()
+	assert.Equal(t, uint64(3), s.Levels.LiveTotal)
+	assert.Equal(t, uint64(2), s.Levels.DistinctSources)
+	assert.Equal(t, uint64(2), s.Levels.MaxPerSource, "10.0.0.1 holds two of the three")
+
+	l.release("10.0.0.1")
+	s = l.Stats()
+	assert.Equal(t, uint64(2), s.Levels.LiveTotal, "a released slot must lower the level")
+	assert.Equal(t, uint64(2), s.Levels.DistinctSources, "10.0.0.1 still holds one, so it is still a source")
+	assert.Equal(t, uint64(1), s.Levels.MaxPerSource, "both sources now hold one each")
+
+	l.release("10.0.0.2")
+	s = l.Stats()
+	assert.Equal(t, uint64(1), s.Levels.LiveTotal)
+	assert.Equal(t, uint64(1), s.Levels.DistinctSources, "an emptied source leaves the map entirely")
+	assert.Equal(t, uint64(0), s.Counts.RefusedTotal, "nothing was refused; occupancy must not be confused with refusal")
+}
+
+// TestStats_DistinguishesDistributedFromNAT is the item's second acceptance
+// bullet AND the detection story for the IPv6 delegation residual the admission
+// slice disclosed and could not fix. A healthy fleet behind NAT is a few sources
+// holding many connections each; a distributed source pattern is many sources
+// holding one each. RefusedTotal cannot tell them apart, and neither can
+// LiveTotal - arrangements (a) and (b) below have IDENTICAL LiveTotal.
+func TestStats_DistinguishesDistributedFromNAT(t *testing.T) {
+	admitN := func(t *testing.T, l *Listener, key string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			require.True(t, l.admit(key), "admit %s #%d must not be refused by these caps", key, i)
+		}
+	}
+
+	// (a) The NAT shape: one source holding 64.
+	nat := Wrap(&fakeListener{}, Config{MaxTotal: 4096, MaxPerIP: 4096})
+	admitN(t, nat, "10.0.0.1", 64)
+	n := nat.Stats()
+	assert.Equal(t, uint64(64), n.Levels.LiveTotal)
+	assert.Equal(t, uint64(1), n.Levels.DistinctSources)
+	assert.Equal(t, uint64(64), n.Levels.MaxPerSource)
+
+	// (b) The distributed shape: 64 sources holding one each.
+	dist := Wrap(&fakeListener{}, Config{MaxTotal: 4096, MaxPerIP: 4096})
+	for i := 0; i < 64; i++ {
+		admitN(t, dist, fmt.Sprintf("10.1.0.%d", i), 1)
+	}
+	d := dist.Stats()
+	require.Equal(t, n.Levels.LiveTotal, d.Levels.LiveTotal,
+		"the two shapes must be indistinguishable by total occupancy alone - that is the premise of this test")
+	assert.Equal(t, uint64(64), d.Levels.DistinctSources)
+	assert.Equal(t, uint64(1), d.Levels.MaxPerSource)
+
+	// (c) The IPv6 delegation shape at relay's real defaults: 16 /64s x 64
+	//     connections fills the 1024 fleet cap with NOTHING refused. This is the
+	//     case the item's Notes section asks to be in the matrix.
+	deleg := Wrap(&fakeListener{}, Config{MaxTotal: 1024, MaxPerIP: 64})
+	for p := 0; p < 16; p++ {
+		admitN(t, deleg, fmt.Sprintf("2001:db8:0:%x::/64", p), 64)
+	}
+	g := deleg.Stats()
+	assert.Equal(t, uint64(1024), g.Levels.LiveTotal, "the fleet cap is exactly full")
+	assert.Equal(t, uint64(16), g.Levels.DistinctSources)
+	assert.Equal(t, uint64(64), g.Levels.MaxPerSource, "every source sits exactly on the per-source cap")
+	assert.Equal(t, uint64(0), g.Counts.RefusedTotal,
+		"nothing has been refused YET, which is exactly why the refusal counters cannot see this shape")
+	assert.Equal(t, uint64(0), g.Counts.RefusedPerIP)
+
+	// The seventeenth source - a legitimate agent - is now refused by the TOTAL cap.
+	require.False(t, deleg.admit("2001:db8:0:ff::/64"))
+	g = deleg.Stats()
+	assert.Equal(t, uint64(1), g.Counts.RefusedTotal)
+	assert.Equal(t, uint64(64), g.Levels.MaxPerSource, "a refusal must move no level at all")
+
+	// (d) The UNEQUAL arrangement, and the busiest source is deliberately in the
+	//     MIDDLE: a MaxPerSource implemented as "the first entry" or "the last
+	//     entry" must not be able to pass by position. 1 + 7 + 2 = 10 live, 3
+	//     sources, max 7 - four numbers, all different, so len(perIP) and
+	//     LiveTotal are both visibly wrong answers.
+	uneq := Wrap(&fakeListener{}, Config{MaxTotal: 100, MaxPerIP: 100})
+	admitN(t, uneq, "10.2.0.1", 1)
+	admitN(t, uneq, "10.2.0.2", 7)
+	admitN(t, uneq, "10.2.0.3", 2)
+	u := uneq.Stats()
+	assert.Equal(t, uint64(10), u.Levels.LiveTotal)
+	assert.Equal(t, uint64(3), u.Levels.DistinctSources)
+	assert.Equal(t, uint64(7), u.Levels.MaxPerSource,
+		"MaxPerSource is the LARGEST per-source count, not the number of sources and not the total")
+}
+
+// TestStats_IsOneCriticalSection is the test the backlog item asks for by name,
+// and its discriminating property is real rather than aspirational: with three
+// separate lock acquisitions, connections being admitted between the reads make
+// DistinctSources > LiveTotal directly observable.
+//
+// -race IS NOT THE INSTRUMENT HERE. The mutation this test exists to kill takes
+// the lock three times instead of once, so every read is still properly
+// synchronised and -race stays perfectly quiet under it. The INVARIANTS are the
+// instrument.
+//
+// The two "saw" counters are not decoration: a reader that only ever sampled an
+// empty listener would satisfy every invariant vacuously, which is the recorded
+// "measure the populated state" failure. They make the test fail when it proves
+// nothing.
+func TestStats_IsOneCriticalSection(t *testing.T) {
+	const (
+		sources = 128
+		rounds  = 40
+	)
+	l := Wrap(&fakeListener{}, Config{MaxTotal: 100000, MaxPerIP: 100000})
+
+	keys := make([]string, sources)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("10.9.%d.%d", i/256, i%256)
+	}
+
+	stop := make(chan struct{})
+	var churn sync.WaitGroup
+	churn.Add(1)
+	go func() {
+		defer churn.Done()
+		defer close(stop)
+		for r := 0; r < rounds; r++ {
+			for _, k := range keys {
+				l.admit(k)
+			}
+			for _, k := range keys {
+				l.release(k)
+			}
+		}
+	}()
+
+	var bad []Occupancy
+	reads, sawLive, sawManySources := 0, 0, 0
+	for done := false; !done; {
+		select {
+		case <-stop:
+			done = true
+		default:
+		}
+		s := l.Stats()
+		reads++
+		if s.Levels.LiveTotal > 0 {
+			sawLive++
+		}
+		if s.Levels.DistinctSources > 1 {
+			sawManySources++
+		}
+		if s.Levels.DistinctSources > s.Levels.LiveTotal || s.Levels.MaxPerSource > s.Levels.LiveTotal {
+			bad = append(bad, s.Levels)
+			done = true // one counter-example is the whole finding
+		}
+	}
+	churn.Wait()
+
+	t.Logf("%d snapshots; %d saw live connections; %d saw more than one source", reads, sawLive, sawManySources)
+	require.Positive(t, sawLive,
+		"the reader never observed a single live connection, so it proved nothing about a populated listener")
+	require.Positive(t, sawManySources,
+		"the reader never observed more than one source, so the DistinctSources invariant was never exercised")
+	require.Empty(t, bad,
+		"a snapshot reported more distinct sources (or a bigger per-source maximum) than it reported live "+
+			"connections. That arrangement never existed: the numbers were read in separate critical sections "+
+			"with connections opening and closing in between, and an operator would read it as a distributed "+
+			"source pattern that is not there.")
+}
+
+// TestStats_CarriesNoIdentifiers answers "which IP is it?" NO, on the record and
+// in code rather than in a comment. The refusal path is reachable by any
+// unauthenticated peer and this type is rendered into a periodic log line, so a
+// string field here would be an attacker-writable log site inside the control
+// that exists to bound attacker-driven log volume.
+//
+// The leaf-path assertion is what stops this being vacuous: a walk that visited
+// nothing would satisfy the type check trivially, and a NotEmpty check with a
+// stern message is not a check.
+func TestStats_CarriesNoIdentifiers(t *testing.T) {
+	st := reflect.TypeOf(Stats{})
+	require.Equal(t, 2, st.NumField(),
+		"Stats has exactly two halves, Counts and Levels. A field added directly to Stats is neither "+
+			"monotonic nor current, so no reporter can classify it and the trigger rule has no answer for it.")
+
+	var leaves []string
+	for i := 0; i < st.NumField(); i++ {
+		half := st.Field(i)
+		require.Equal(t, reflect.Struct, half.Type.Kind(), "Stats.%s must be a struct half", half.Name)
+		for j := 0; j < half.Type.NumField(); j++ {
+			f := half.Type.Field(j)
+			path := half.Name + "." + f.Name
+			leaves = append(leaves, path)
+			switch f.Type.Kind() {
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			default:
+				t.Fatalf("netlimit.Stats.%s is a %s. Every field of this type must be an UNSIGNED INTEGER: "+
+					"an address, a prefix, a hostname or any other caller-supplied byte reaches an "+
+					"attacker-driven log site through the refusal summary. More numbers, never identifiers.",
+					path, f.Type.Kind())
+			}
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"Counts.RefusedTotal", "Counts.RefusedPerIP",
+		"Levels.LiveTotal", "Levels.DistinctSources", "Levels.MaxPerSource",
+	}, leaves,
+		"the field set of netlimit.Stats changed. Adding a number is fine - update this list deliberately - "+
+			"but the list is here so the addition is a decision rather than a diff nobody read.")
 }
