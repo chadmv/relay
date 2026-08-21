@@ -167,9 +167,21 @@ func startTestGRPCServerWithCloseSignal(t *testing.T, b grpcBounds) (string, cha
 //
 // RED at HEAD: defaultMaxConnectionIdle is infinity (defaults.go:35), so the
 // connection is never reaped and this fails on its 5s bound. Without this
-// option, a connection cap is a PARKING PRIMITIVE: an attacker completes the
-// HTTP/2 preface, opens no stream, and holds RELAY_GRPC_MAX_CONNS_PER_IP slots
-// forever.
+// option, a peer that completes the HTTP/2 preface and opens no stream holds its
+// connection slots forever.
+//
+// WHAT THIS OPTION DOES NOT CLOSE, because the earlier version of this comment
+// implied otherwise. Setting MaxConnectionIdle does NOT stop a connection cap
+// being used as a parking primitive: a peer that opens a STREAM and then says
+// nothing is not idle by this option's definition (the first stream zeroes
+// t.idle, and a zero t.idle reschedules rather than reaps), so it parks its slot
+// with the option fully enabled. That case is bounded on relay's side of the
+// wire, by worker.DefaultRegistrationTimeout, which ends the stream and hands
+// the connection back to this option. Even then the CONNECTION survives, so a
+// peer opening a fresh stream once per idle window keeps its slot for the price
+// of a periodic round trip. MaxConnectionAge is the only arm that would close
+// that, and it is out of this slice. This option is one of three necessary
+// bounds, not a sufficient one.
 func TestGRPCServer_IdleConnectionWithNoStreamIsClosed(t *testing.T) {
 	addr, _, closed := startTestGRPCServerWithCloseSignal(t, grpcBounds{maxConnIdle: 200 * time.Millisecond})
 	cc := dialTestServer(t, addr)
@@ -187,10 +199,20 @@ func TestGRPCServer_IdleConnectionWithNoStreamIsClosed(t *testing.T) {
 // behind grpcKeepaliveParams and prices MaxConnectionIdle at zero for a
 // legitimate agent, which holds ONE silent stream for hours at a time. It is
 // also what catches MaxConnectionAge-style semantics slipping in under this name.
+// THERE IS DELIBERATELY NO waitReady HERE, unlike its two siblings, and that is
+// the fix for a real flake rather than a style choice. waitReady returns once the
+// server transport exists - which is also when its idle timer is ARMED - and the
+// stream then opens some scheduler quantum later. The whole 200ms window can
+// elapse inside that gap, and the test fails having reaped a connection that
+// never got the chance to hold a stream. Proved by inserting a 250ms sleep
+// between the two: it fails, and the message below then sends the reader hunting
+// MaxConnectionAge when the cause was a scheduler stall. Calling Connect on an
+// idle ClientConn forces dial, handshake and stream registration in one round
+// trip, which is the smallest gap achievable from here. Raising the window would
+// only have made the flake rarer.
 func TestGRPCServer_ConnectionHoldingAStreamIsNotIdle(t *testing.T) {
 	addr, entered, closed := startTestGRPCServerWithCloseSignal(t, grpcBounds{maxConnIdle: 200 * time.Millisecond})
 	cc := dialTestServer(t, addr)
-	waitReady(t, cc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -182,32 +182,21 @@ func main() {
 		httpServer.AllowSelfRegister = allow
 	}
 
-	// Start gRPC. Admission on this port is bounded three ways - one stream per
-	// connection, a total and per-source-IP connection cap at the listener, and
-	// an idle-transport reaper - because every per-connection control this
-	// server ships (worker.ingestLogLimiter above all) states its budget per a
-	// unit that was previously unbounded. See cmd/relay-server/grpc_config.go.
-	grpcMaxConns, maxConnsMsg := parseConnLimit(
-		"RELAY_GRPC_MAX_CONNS", os.Getenv("RELAY_GRPC_MAX_CONNS"), defaultGRPCMaxConns)
-	if maxConnsMsg != "" {
-		log.Printf("WARNING: %s", maxConnsMsg)
-	}
-	grpcMaxConnsPerIP, perIPMsg := parseConnLimit(
-		"RELAY_GRPC_MAX_CONNS_PER_IP", os.Getenv("RELAY_GRPC_MAX_CONNS_PER_IP"), defaultGRPCMaxConnsPerIP)
-	if perIPMsg != "" {
-		log.Printf("WARNING: %s", perIPMsg)
-	}
-	grpcConnIdle, connIdleMsg := parseGRPCConnIdle(
-		"RELAY_GRPC_MAX_CONN_IDLE", os.Getenv("RELAY_GRPC_MAX_CONN_IDLE"), defaultGRPCMaxConnIdle)
-	if connIdleMsg != "" {
-		log.Printf("WARNING: %s", connIdleMsg)
-	}
-	grpcBnds := grpcBounds{
-		maxConns:      grpcMaxConns,
-		maxConnsPerIP: grpcMaxConnsPerIP,
-		maxConnIdle:   grpcConnIdle,
+	// Start gRPC. Admission on this port is bounded four ways - one stream per
+	// connection, a total and per-source-prefix connection cap at the listener,
+	// an idle-transport reaper, and a deadline on the first RegisterRequest -
+	// because every per-connection control this server ships
+	// (worker.ingestLogLimiter above all) states its budget per a unit that was
+	// previously unbounded. See cmd/relay-server/grpc_config.go.
+	//
+	// Parsing lives in resolveGRPCBounds rather than here so that the value main
+	// hands to netlimit cannot be shadowed between its construction and its use.
+	grpcBnds, grpcBndsMsgs := resolveGRPCBounds(os.Getenv)
+	for _, m := range grpcBndsMsgs {
+		log.Printf("WARNING: %s", m)
 	}
 	log.Print(grpcBoundsLine(grpcBnds))
+	agentHandler.RegistrationTimeout = grpcBnds.registrationTimeout
 
 	grpcSrv := grpc.NewServer(grpcServerOptions(grpcBnds)...)
 	relayv1.RegisterAgentServiceServer(grpcSrv, agentHandler)

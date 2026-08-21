@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,20 @@ func TestAgentServiceHasExactlyOneStreamPerConnection(t *testing.T) {
 	assert.Error(t, oneStreamPerConnection(grpc.ServiceDesc{
 		ServiceName: "synthetic", Methods: []grpc.MethodDesc{{}}, Streams: []grpc.StreamDesc{{}}}),
 		"a unary method must be rejected")
+
+	// THE PROTO IS ONLY HALF OF IT. MaxConcurrentStreams is a per-CONNECTION
+	// limit across every service registered on the server, not a per-service one,
+	// so registering a SECOND service - health, reflection, channelz - makes 1
+	// too few with relay.proto untouched. The assertions above inspect
+	// AgentService_ServiceDesc and are structurally unable to see that.
+	srv := grpc.NewServer(grpcServerOptions(grpcBounds{})...)
+	t.Cleanup(srv.Stop)
+	relayv1.RegisterAgentServiceServer(srv, &blockingAgentService{})
+	assert.Len(t, srv.GetServiceInfo(), 1,
+		"a SECOND service is registered on the agent gRPC server. grpcMaxConcurrentStreams is 1 because "+
+			"AgentService needs one stream per connection, but that budget is shared across every service "+
+			"on the server - so a client using both will block on stream quota until its deadline with no "+
+			"error to explain why. Raise grpcMaxConcurrentStreams to the new total.")
 }
 
 // TestGRPCKeepaliveParamsKeepsTheLivenessProbe.
@@ -125,7 +140,15 @@ func TestParseConnLimit(t *testing.T) {
 	}{
 		{"unset keeps the default and is silent", "", def, ""},
 		{"a valid value is used as-is", "64", 64, ""},
-		{"1 is accepted without comment", "1", 1, ""},
+		// README says in bold "Do not set it to 1", and the parser used to accept
+		// it in silence. Both cannot be right. The race README names is real -
+		// internal/agent/agent.go:206 defers conn.Close, but the server releases
+		// the slot only on OBSERVING the FIN - so a reconnecting agent's new
+		// connection can arrive while its own previous one still holds the only
+		// slot, and it then backs off. The value is KEPT (narrowing a cap is the
+		// operator's prerogative) and warned about, matching parseGRPCConnIdle's
+		// sub-floor arm, which is the same fail-aggressive shape.
+		{"1 is KEPT but warns about the reconnect race", "1", 1, "reconnect"},
 		{"zero is ACCEPTED and disables the cap, with an informational line", "0", 0, "disabled"},
 		{"negative keeps the default and warns", "-5", def, "not a non-negative integer"},
 		{"unparseable keeps the default and warns", "lots", def, "not a non-negative integer"},
@@ -186,8 +209,15 @@ func TestParseGRPCConnIdle(t *testing.T) {
 // the caps are on, what they are, or that somebody switched them off.
 func TestGRPCBoundsLine(t *testing.T) {
 	all := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 64, maxConnIdle: 15 * time.Minute})
-	assert.Contains(t, all, "1024")
-	assert.Contains(t, all, "64")
+	// THE PHRASE, NOT THE NUMBER. Contains(all, "1024") and Contains(all, "64")
+	// hold just as well when the two caps are rendered into each other's slots,
+	// labels included - a mutation that swapped them left this test green while
+	// the startup line said "connections 64 total, 1024 per source IP" and named
+	// the WRONG knob as the disabled one in every single-off case below. Same
+	// substring-vacuity family as the Contains(all, "1") case already caught
+	// here.
+	assert.Contains(t, all, "1024 total")
+	assert.Contains(t, all, "64 per source IP")
 	assert.Contains(t, all, "15m")
 	// The plan asked for `Contains(all, "1")` here with the message below. That
 	// assertion is VACUOUS - "1024" already contains "1", so it holds under any
@@ -197,17 +227,25 @@ func TestGRPCBoundsLine(t *testing.T) {
 		"the stream cap is part of the admission story and must be named")
 	assert.NotContains(t, all, "DISABLED")
 
+	// Each single-off case must name the knob that is off AND leave the other
+	// two alone. Asserting only Contains(x, "DISABLED") cannot tell "the total
+	// cap is off" from "the per-source cap is off", which is the entire content
+	// of the line for an operator debugging refused agents.
 	noTotal := grpcBoundsLine(grpcBounds{maxConns: 0, maxConnsPerIP: 64, maxConnIdle: 15 * time.Minute})
-	assert.Contains(t, noTotal, "DISABLED")
-	assert.Contains(t, noTotal, "64", "one cap off is not both caps off; saying so sends an operator hunting the wrong thing")
+	assert.Contains(t, noTotal, "total DISABLED")
+	assert.NotContains(t, noTotal, "per-source-IP DISABLED",
+		"one cap off is not both caps off; saying so sends an operator hunting the wrong thing")
+	assert.Contains(t, noTotal, "64 per source IP")
 
 	noPerIP := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 0, maxConnIdle: 15 * time.Minute})
-	assert.Contains(t, noPerIP, "DISABLED")
-	assert.Contains(t, noPerIP, "1024")
+	assert.Contains(t, noPerIP, "per-source-IP DISABLED")
+	assert.NotContains(t, noPerIP, "total DISABLED")
+	assert.Contains(t, noPerIP, "1024 total")
 
 	noIdle := grpcBoundsLine(grpcBounds{maxConns: 1024, maxConnsPerIP: 64, maxConnIdle: 0})
-	assert.Contains(t, noIdle, "DISABLED")
-	assert.Contains(t, noIdle, "1024")
+	assert.Contains(t, noIdle, "idle reaping DISABLED")
+	assert.NotContains(t, noIdle, "total DISABLED")
+	assert.Contains(t, noIdle, "1024 total")
 
 	off := grpcBoundsLine(grpcBounds{})
 	assert.Equal(t, 3, strings.Count(off, "DISABLED"),
@@ -269,18 +307,30 @@ func TestRefusalSummaryLogsOnlyWhenCountersMove(t *testing.T) {
 // go/ast, NOT a regex: a source-scanning regex guard in this repo was proven
 // breakable by a single stray comment.
 //
-// WHAT IT CANNOT REACH, stated rather than overclaimed: it cannot tell that
-// `grpcBnds = grpcBounds{}` inserted just above the Wrap call disables both caps,
-// and it cannot tell that runRefusalReporter was handed a pre-cancelled context.
-// Both compile and both leave every package green.
+// CHECK 1 USED TO BE THE WHOLE OF IT, AND CHECK 1 ALONE IS NEARLY VACUOUS. It
+// asserts only that the identifier `Wrap` appears somewhere in the assignment
+// chain behind Serve's argument. It says nothing about the netlimit.Config that
+// Wrap was handed, and two mutations proved it: `MaxTotal: 0, MaxPerIP: 0`
+// disables the entire admission control and passed, and swapping the two fields
+// (total 64, per-source 1024 - capping the fleet at 64 AND letting one source
+// take every slot) also passed. Check 2 reads the literal.
+//
+// WHAT IT STILL CANNOT REACH, stated rather than overclaimed: it cannot tell that
+// runRefusalReporter was handed a pre-cancelled context. The
+// `grpcBnds = grpcBounds{}` blind spot named in the previous version of this
+// comment is closed twice over - the bounds now come from resolveGRPCBounds
+// rather than a literal main can shadow, and check 2 requires the identifier
+// feeding netlimit.Config to be assigned EXACTLY ONCE in this file.
 func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
 	require.NoError(t, err)
 
 	// name assigned -> identifiers its RHS mentions, so the walk can follow
-	// `x := netlimit.Wrap(...)` and then srv.Serve(x).
+	// `x := netlimit.Wrap(...)` and then srv.Serve(x). intoField is the same for
+	// `h.Field = x`, which is how check 5 follows the handler wiring.
 	from := map[string][]string{}
+	intoField := map[string][]string{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
 		if !ok {
@@ -296,8 +346,11 @@ func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 			})
 		}
 		for _, l := range as.Lhs {
-			if id, ok := l.(*ast.Ident); ok {
-				from[id.Name] = append(from[id.Name], rhs...)
+			switch lhs := l.(type) {
+			case *ast.Ident:
+				from[lhs.Name] = append(from[lhs.Name], rhs...)
+			case *ast.SelectorExpr:
+				intoField[lhs.Sel.Name] = append(intoField[lhs.Sel.Name], rhs...)
 			}
 		}
 		return true
@@ -351,7 +404,82 @@ func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 		"the listener passed to grpcSrv.Serve(%s) does not derive from netlimit.Wrap: the gRPC port has NO "+
 			"connection cap, in total or per source IP, and nothing else fails", serveArg)
 
-	// 2. grpc.NewServer must be built from grpcServerOptions, or the stream cap,
+	// 2. The netlimit.Config handed to Wrap must carry the RESOLVED caps, in the
+	//    right fields. `reaches(serveArg, "Wrap")` is true for
+	//    netlimit.Config{MaxTotal: 0, MaxPerIP: 0} and for a config with the two
+	//    fields swapped; both were run and both passed before this check existed.
+	var cfg *ast.CompositeLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if sel, ok := cl.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Config" {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "netlimit" {
+				cfg = cl
+			}
+		}
+		return true
+	})
+	require.NotNil(t, cfg, "main.go builds no netlimit.Config literal")
+
+	// field name -> the selector it is assigned from, e.g. MaxTotal -> maxConns.
+	wantField := map[string]string{"MaxTotal": "maxConns", "MaxPerIP": "maxConnsPerIP"}
+	gotField := map[string]string{}
+	var bases []string
+	for _, e := range cfg.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		sel, ok := kv.Value.(*ast.SelectorExpr)
+		require.True(t, ok,
+			"netlimit.Config.%s is not read out of the resolved bounds. A constant here (0 disables the "+
+				"cap entirely) compiles and leaves every package in this repo green.", key.Name)
+		gotField[key.Name] = sel.Sel.Name
+		if id, ok := sel.X.(*ast.Ident); ok {
+			bases = append(bases, id.Name)
+		}
+	}
+	for field, want := range wantField {
+		require.Equal(t, want, gotField[field],
+			"netlimit.Config.%s must come from grpcBounds.%s. Swapping the two caps compiles, is invisible "+
+				"to every other test, and produces a server that caps the whole fleet at the per-source "+
+				"number while letting a single source take every remaining slot.", field, want)
+	}
+
+	// The value they are read out of must derive from resolveGRPCBounds AND be
+	// assigned exactly once, or a later `x = grpcBounds{}` silently zeroes both
+	// caps while the selectors above still read the right field names.
+	require.NotEmpty(t, bases)
+	for _, base := range bases {
+		require.True(t, reaches(base, "resolveGRPCBounds"),
+			"netlimit.Config is built from %q, which does not derive from resolveGRPCBounds, so the "+
+				"RELAY_GRPC_MAX_CONNS* environment variables are no longer what reaches the listener", base)
+		assigned := 0
+		ast.Inspect(file, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, l := range as.Lhs {
+				if id, ok := l.(*ast.Ident); ok && id.Name == base {
+					assigned++
+				}
+			}
+			return true
+		})
+		require.Equal(t, 1, assigned,
+			"%q is assigned %d times in main.go. The admission bounds must be built once and not "+
+				"reassigned: a second assignment can zero both caps while every selector above still "+
+				"reads the correct field.", base, assigned)
+	}
+
+	// 3. grpc.NewServer must be built from grpcServerOptions, or the stream cap,
 	//    the keepalive policy and MaxConnectionIdle are all absent.
 	var newServer *ast.CallExpr
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -369,7 +497,7 @@ func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 		"grpc.NewServer must be built from grpcServerOptions(...): otherwise MaxConcurrentStreams, the "+
 			"keepalive enforcement policy and MaxConnectionIdle are all silently absent")
 
-	// 3. The refusal reporter must be started, and NOT from inside a conditional.
+	// 4. The refusal reporter must be started, and NOT from inside a conditional.
 	//    A `go` statement nested in an if-body would leave refusals unreported
 	//    while an ast.Inspect walk happily found it.
 	started := false
@@ -389,6 +517,24 @@ func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 		"main.go has no `go runRefusalReporter(...)` statement directly in a function body: refused "+
 			"connections are counted and never surfaced, so an operator sees agents fail to appear with "+
 			"nothing in the log")
+
+	// 5. The registration deadline must reach the handler. Deleting the one-line
+	//    assignment compiles, leaves every package green, and restores an
+	//    unbounded first Recv - the handler would keep falling back to
+	//    worker.DefaultRegistrationTimeout, so this guards the ENV VAR rather
+	//    than the bound. Same shape as TestTrailingLogWindowIsWiredIntoTheHandler.
+	seeds, ok := intoField["RegistrationTimeout"]
+	require.True(t, ok,
+		"main.go assigns nothing to a .RegistrationTimeout field: RELAY_GRPC_REGISTRATION_TIMEOUT is dead "+
+			"and nothing else fails")
+	found := false
+	for _, seed := range seeds {
+		if reaches(seed, "resolveGRPCBounds") {
+			found = true
+		}
+	}
+	require.True(t, found,
+		"main.go assigns to .RegistrationTimeout but the value does not derive from resolveGRPCBounds")
 }
 
 // TestGRPCServerOptionsHasExactlyOneKeepaliveParams.
@@ -458,4 +604,211 @@ func TestGRPCServerOptionsHasExactlyOneKeepaliveParams(t *testing.T) {
 		"grpc.KeepaliveParams must be handed grpcKeepaliveParams(...). An inline "+
 			"keepalive.ServerParameters literal here is the exact shape that drops Time and Timeout, and "+
 			"it is invisible to every test that calls grpcKeepaliveParams directly.")
+}
+
+// TestDefaultGRPCMaxConnIdleIsTheAttackersDutyCycle pins a DECISION, in the
+// spirit of TestGRPCEnforcementPolicyMatchesGRPCsOwnDefault, and the arithmetic
+// is the point rather than the number.
+//
+// This value is not "how long an idle connection is tolerated". It is the
+// attacker's DUTY CYCLE: a peer holding parked connections has to re-establish
+// each one once per window, and nothing else. At 15m, holding all 1024 slots
+// cost roughly 1024/900 = 1.14 new TCP connections per second, sustained, with
+// no credential, no stream and no database work - cheap enough that the option
+// meant to close parking was the cheapest parking route on the port. Worse, at
+// 15m a peer that completed the handshake parked a slot 7.5x LONGER than one
+// that said nothing at all, which grpc-go bounds at its 120s connectionTimeout.
+//
+// The floor is 1s and a legitimate agent's honest window - dial to first stream
+// - is sub-millisecond, so 60s leaves roughly four orders of magnitude of
+// headroom and costs a stream-holding connection exactly nothing (pinned by
+// TestGRPCServer_ConnectionHoldingAStreamIsNotIdle).
+func TestDefaultGRPCMaxConnIdleIsTheAttackersDutyCycle(t *testing.T) {
+	assert.LessOrEqual(t, defaultGRPCMaxConnIdle, time.Minute,
+		"this default IS the attacker's re-establishment period for a parked connection slot, not a "+
+			"tolerance for slow middleboxes. Raising it multiplies how long each parked slot is held for "+
+			"one TCP handshake. Do not raise it without redoing the arithmetic in README's row.")
+	assert.GreaterOrEqual(t, defaultGRPCMaxConnIdle, minGRPCConnIdleDur,
+		"the default must not sit below its own warned floor")
+	assert.Less(t, defaultGRPCMaxConnIdle, 120*time.Second,
+		"a peer that completes the handshake and opens no stream must not park a slot LONGER than one "+
+			"that says nothing at all, which grpc-go bounds at its 120s connectionTimeout - that would "+
+			"make the anti-parking control the cheapest parking route on the port")
+}
+
+// TestGRPCServerOptionNamesAreUniqueAcrossThePackage generalizes
+// TestGRPCServerOptionsHasExactlyOneKeepaliveParams, which was written from the
+// ONE instance a mutation run happened to produce and was therefore scoped to
+// one function and one option name. That is the recorded "a uniqueness claim is
+// a claim about the complement" mistake: the claim was about every way a second
+// option could reach grpc.NewServer, and it was checked by opening one function.
+// Two one-line escapes survived it, both proved by running them:
+//
+//   - CALL-SITE ESCAPE. `grpc.NewServer(append(grpcServerOptions(b),
+//     grpc.KeepaliveParams(...))...)` in main.go. The old guard parsed
+//     grpc_config.go only, and TestGRPCAdmissionIsWiredByMain needs NewServer
+//     merely to MENTION grpcServerOptions, which append still does. The 30s/10s
+//     liveness probe silently became grpc-go's 2h default.
+//   - SIBLING-OPTION ESCAPE. A second grpc.KeepaliveEnforcementPolicy. grpc-go
+//     stores that one wholesale too (server.go:336-340), and it is LITERALLY the
+//     regression grpcKeepaliveMinTime's own comment names - somebody adding a
+//     policy with MinTime: 10*time.Second "because that is what the internet
+//     suggests".
+//
+// So the rule is stated on the shape rather than on the instance: every
+// grpc.<Option> constructor appears AT MOST ONCE across the package's
+// non-test files. MaxConcurrentStreams and KeepaliveEnforcementPolicy are then
+// covered by construction, as is any option added later.
+//
+// NewServer is excluded because it is the constructor, not an option.
+func TestGRPCServerOptionNamesAreUniqueAcrossThePackage(t *testing.T) {
+	notAnOption := map[string]bool{"NewServer": true}
+
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	counts := map[string]int{}
+	where := map[string][]string{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue // tests build their own servers on purpose
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		ast.Inspect(file, func(n ast.Node) bool {
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := ce.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "grpc" || notAnOption[sel.Sel.Name] {
+				return true
+			}
+			counts[sel.Sel.Name]++
+			where[sel.Sel.Name] = append(where[sel.Sel.Name], name)
+			return true
+		})
+	}
+
+	require.NotEmpty(t, counts,
+		"no grpc.<Option> calls were found at all, so this guard is watching nothing - the package layout "+
+			"or the import alias must have changed")
+	for name, n := range counts {
+		assert.Equal(t, 1, n,
+			"grpc.%s is applied %d times, in %v. grpc-go stores each of these options WHOLESALE, so the "+
+				"last one silently discards every field the earlier one set - there is no merge and no "+
+				"error. Put every decision for an option inside the single call that builds it.",
+			name, n, where[name])
+	}
+
+	// The guard must reject what it exists to catch, or it is a green test that
+	// checks nothing: the failure above is driven by counts, so a synthetic
+	// double-count must be the failing case.
+	assert.Equal(t, 1, counts["KeepaliveParams"],
+		"grpc.KeepaliveParams specifically: this is the option whose duplication drops Time and Timeout")
+	assert.Equal(t, 1, counts["MaxConcurrentStreams"])
+	assert.Equal(t, 1, counts["KeepaliveEnforcementPolicy"])
+}
+
+// TestParseRegistrationTimeout mirrors TestParseGRPCConnIdle, WITH ONE
+// DELIBERATE DIVERGENCE that is the whole reason it is a separate function: zero
+// does not disable, it is rejected like any other non-positive value.
+//
+// Every other knob in this file can be switched off, because an operator may
+// have bounded the same thing somewhere else - a proxy can cap connections. No
+// proxy can enforce "send a RegisterRequest within N seconds", because that is
+// an application-layer property of relay's own protocol. A disable here would
+// have no substitute and would restore a free, permanent, fleet-wide denial: a
+// peer parks a connection slot by opening a stream and saying nothing, which
+// costs it no credential and no database round trip and which MaxConnectionIdle
+// structurally cannot reap.
+func TestParseRegistrationTimeout(t *testing.T) {
+	def := 30 * time.Second
+	cases := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantMsg string
+	}{
+		{"unset keeps the default and is silent", "", def, ""},
+		{"a valid value is used as-is", "10s", 10 * time.Second, ""},
+		{"the escape hatch for a very slow fleet is honoured", "1h", time.Hour, ""},
+		{"zero does NOT disable: it keeps the default and warns", "0s", def, "cannot be disabled"},
+		{"negative keeps the default and warns", "-5s", def, "not a positive Go duration"},
+		{"unparseable keeps the default and warns", "thirty", def, "not a positive Go duration"},
+		{"below the floor KEEPS the value and warns", "200ms", 200 * time.Millisecond, "below"},
+		{"exactly the floor is silent", "1s", time.Second, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := parseRegistrationTimeout("RELAY_GRPC_REGISTRATION_TIMEOUT", tc.raw, def)
+			assert.Equal(t, tc.want, got)
+			if tc.wantMsg == "" {
+				assert.Empty(t, msg, "a valid value must not produce startup noise")
+				return
+			}
+			require.Contains(t, msg, tc.wantMsg)
+			assert.Contains(t, msg, "RELAY_GRPC_REGISTRATION_TIMEOUT",
+				"the message must name the variable it is about")
+		})
+	}
+}
+
+// TestResolveGRPCBounds covers the seam that used to be inline in main() and so
+// had no test at all: which env var reaches which field, and that every warning
+// is RETURNED rather than swallowed. main() only logs what it is handed, so a
+// knob wired to the wrong field or a warning dropped on the floor was invisible.
+func TestResolveGRPCBounds(t *testing.T) {
+	t.Run("an empty environment yields exactly the documented defaults, silently", func(t *testing.T) {
+		b, msgs := resolveGRPCBounds(func(string) string { return "" })
+		assert.Empty(t, msgs, "the ordinary boot must produce no warnings at all")
+		assert.Equal(t, defaultGRPCMaxConns, b.maxConns)
+		assert.Equal(t, defaultGRPCMaxConnsPerIP, b.maxConnsPerIP)
+		assert.Equal(t, defaultGRPCMaxConnIdle, b.maxConnIdle)
+		assert.Equal(t, defaultGRPCRegistrationTimeout, b.registrationTimeout)
+	})
+
+	t.Run("each variable reaches its own field", func(t *testing.T) {
+		env := map[string]string{
+			"RELAY_GRPC_MAX_CONNS":            "500",
+			"RELAY_GRPC_MAX_CONNS_PER_IP":     "7",
+			"RELAY_GRPC_MAX_CONN_IDLE":        "90s",
+			"RELAY_GRPC_REGISTRATION_TIMEOUT": "12s",
+		}
+		b, msgs := resolveGRPCBounds(func(k string) string { return env[k] })
+		assert.Empty(t, msgs)
+		// The two connection caps are the pair that can be crossed silently, and
+		// distinct values are what makes a crossing visible.
+		assert.Equal(t, 500, b.maxConns)
+		assert.Equal(t, 7, b.maxConnsPerIP)
+		assert.Equal(t, 90*time.Second, b.maxConnIdle)
+		assert.Equal(t, 12*time.Second, b.registrationTimeout)
+	})
+
+	t.Run("every knob can speak, and all four messages come back", func(t *testing.T) {
+		env := map[string]string{
+			"RELAY_GRPC_MAX_CONNS":            "0",
+			"RELAY_GRPC_MAX_CONNS_PER_IP":     "nonsense",
+			"RELAY_GRPC_MAX_CONN_IDLE":        "0s",
+			"RELAY_GRPC_REGISTRATION_TIMEOUT": "0s",
+		}
+		b, msgs := resolveGRPCBounds(func(k string) string { return env[k] })
+		require.Len(t, msgs, 4,
+			"a warning dropped here is a security-relevant knob silently doing something other than what "+
+				"the operator asked for, and main() cannot notice because it only prints what it is given")
+		assert.Contains(t, msgs[0], "RELAY_GRPC_MAX_CONNS=")
+		assert.Contains(t, msgs[1], "RELAY_GRPC_MAX_CONNS_PER_IP=")
+		assert.Contains(t, msgs[2], "RELAY_GRPC_MAX_CONN_IDLE=")
+		assert.Contains(t, msgs[3], "RELAY_GRPC_REGISTRATION_TIMEOUT=")
+
+		assert.Zero(t, b.maxConns, "0 disables the total cap")
+		assert.Equal(t, defaultGRPCMaxConnsPerIP, b.maxConnsPerIP, "an unparseable value falls back")
+		assert.Zero(t, b.maxConnIdle, "0 disables idle reaping")
+		assert.Equal(t, defaultGRPCRegistrationTimeout, b.registrationTimeout,
+			"0 must NOT disable the registration deadline - it is the one bound with no substitute")
+	})
 }

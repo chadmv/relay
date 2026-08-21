@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"relay/internal/netlimit"
+	"relay/internal/worker"
 
 	"strconv"
 	"time"
@@ -20,10 +21,21 @@ import (
 // reconnect attempt (internal/agent/agent.go:202-209). "One stream per
 // connection" is therefore a property of the wire contract, not a convention.
 //
-// THERE IS DELIBERATELY NO ENV KNOB. The only legitimate reason for this to move
-// is a proto change, and TestAgentServiceHasExactlyOneStreamPerConnection catches
-// that with a message naming this constant. An operator knob here could only
-// LOOSEN a security control: the value multiplies worker.ingestLogLimiter's
+// THERE IS DELIBERATELY NO ENV KNOB. There are exactly TWO legitimate reasons for
+// this to move, and only the first has a guard.
+//
+//   - A PROTO CHANGE giving AgentService a second RPC.
+//     TestAgentServiceHasExactlyOneStreamPerConnection catches that with a
+//     message naming this constant.
+//   - REGISTERING A SECOND SERVICE on the same grpc.Server - health, reflection,
+//     channelz. MaxConcurrentStreams is a per-CONNECTION limit across every
+//     service registered on that server, not a per-service one, so a second
+//     service registration would make one stream too few with the proto
+//     untouched. The test above inspects AgentService_ServiceDesc alone and
+//     cannot see what else was registered, so this half is guarded by asserting
+//     the server hosts exactly one service.
+//
+// An operator knob here could only LOOSEN a security control: the value multiplies worker.ingestLogLimiter's
 // per-connection budget one-for-one, because that limiter is allocated once per
 // Connect call, i.e. once per STREAM (internal/worker/handler.go:172).
 //
@@ -36,8 +48,14 @@ const grpcMaxConcurrentStreams = 1
 // with a 200ms idle timeout and no env var, no global and no build tag.
 type grpcBounds struct {
 	maxConns      int           // total live connections; 0 disables
-	maxConnsPerIP int           // live connections per source IP; 0 disables
+	maxConnsPerIP int           // live connections per source PREFIX; 0 disables
 	maxConnIdle   time.Duration // reap a transport with no stream; 0 disables
+	// registrationTimeout bounds the first stream.Recv in worker.Handler.Connect.
+	// It is admission configuration and belongs in the startup line with the
+	// rest, even though grpcServerOptions has no use for it: it is the only one
+	// of the four that cannot be disabled, and an operator debugging agents that
+	// are dropped before they register needs to see it.
+	registrationTimeout time.Duration
 }
 
 // grpcServerOptions is the complete option list for the agent gRPC server.
@@ -65,9 +83,25 @@ func grpcServerOptions(b grpcBounds) []grpc.ServerOption {
 //   - A zero idle value is passed straight through: grpc-go maps it to infinity
 //     (:219-221), so "disabled" needs no branch here.
 //
-// Note what MaxConnectionIdle does NOT cover: a peer that completes TCP and then
-// says nothing at all never reaches transport construction, so it is bounded
-// instead by grpc-go's connectionTimeout, 120s by default (server.go:193).
+// NOTE WHAT MaxConnectionIdle DOES NOT COVER. Two cases, and the second is the
+// strictly cheaper one, so leaving it out of this list was the more dangerous
+// half of an otherwise accurate sentence:
+//
+//   - A peer that completes TCP and then says nothing at all never reaches
+//     transport construction, so it is bounded instead by grpc-go's
+//     connectionTimeout, 120s by default (server.go:193).
+//   - A peer that completes the preface AND OPENS A STREAM, then sends nothing
+//     on it. This is NOT reaped, for the same reason the option is safe for real
+//     agents: opening a stream zeroes t.idle, and a zero t.idle reschedules
+//     rather than reaps. The keepalive liveness probe does not reach it either,
+//     because any frame the peer reads re-stamps t.lastRead. Such a peer parks
+//     its connection slot for free and forever. That case is bounded on relay's
+//     side of the wire instead, by worker.DefaultRegistrationTimeout, which ends
+//     the STREAM and so hands the connection back to this option. It does not
+//     end the CONNECTION - MaxConnectionAge is the arm that would, and it is out
+//     of this slice - so a peer willing to open a fresh stream once per idle
+//     window still holds its slot, now at the cost of a periodic round trip
+//     rather than free.
 func grpcKeepaliveParams(idle time.Duration) keepalive.ServerParameters {
 	return keepalive.ServerParameters{
 		Time:              30 * time.Second, // ping after 30s of transport inactivity
@@ -104,17 +138,25 @@ func grpcEnforcementPolicy() keepalive.EnforcementPolicy {
 // nothing to say. It follows parseWatchdogDuration's three-outcome shape
 // (cmd/relay-server/watchdog_config.go:41), with its own prose:
 //
-//   - Unset, or a valid non-negative integer: used as-is, silently.
+//   - Unset, or a valid integer above 1: used as-is, silently.
 //   - Exactly zero: ACCEPTED, and the cap is disabled. Because disabling an
 //     admission control must never be silent, this returns an informational line
 //     naming what is now unbounded.
+//   - Exactly one: KEPT, and warned about. See below.
 //   - Negative or unparseable: the default is used and the message says so. A
 //     silently-ignored typo would leave an operator believing they had tightened
 //     a security-relevant knob they had not.
 //
-// There is deliberately NO floor outcome, unlike parseWatchdogDuration. A floor
-// catches units confusion, and a bare connection count has no units; any positive
-// value is a legitimate statement about fleet size or NAT topology.
+// There is no FLOOR outcome in parseWatchdogDuration's sense - a floor catches
+// units confusion, and a bare connection count has no units. But there is
+// exactly ONE positive value that is not a legitimate statement about fleet size
+// or NAT topology, and it is 1. An agent closes its old connection and dials the
+// new one from the client side (internal/agent/agent.go:206), while this server
+// releases the slot only on OBSERVING the close, so with a cap of 1 an agent can
+// be refused its own reconnect and back off. README says in bold not to set it
+// and this parser used to accept it in silence; one of the two had to give. The
+// value is KEPT, because narrowing a cap is the operator's prerogative, matching
+// parseGRPCConnIdle's sub-floor arm.
 //
 // Not a log.Fatalf, following parseTrailingLogWindow and parseWatchdogDuration:
 // a bad limit must not stop a server booting when a safe default exists.
@@ -131,6 +173,13 @@ func parseConnLimit(name, raw string, def int) (int, string) {
 			"%s=%q: this gRPC connection cap is disabled. Admission on the agent port is bounded only by "+
 				"the process file-descriptor limit, and every per-connection control (including "+
 				"worker.ingestLogLimiter's log budget) multiplies without a ceiling.", name, raw)
+	}
+	if n == 1 {
+		return n, fmt.Sprintf(
+			"%s=%q leaves no headroom for a reconnect. An agent closes its old connection and dials the "+
+				"new one itself, but this server releases the slot only when it observes the close, so an "+
+				"agent can be refused its own reconnect and back off. Using it anyway; 2 or more is "+
+				"strongly preferred.", name, raw)
 	}
 	return n, ""
 }
@@ -159,8 +208,11 @@ func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, stri
 	if d == 0 {
 		return 0, fmt.Sprintf(
 			"%s=%q: idle gRPC transport reaping is disabled. A peer that completes the HTTP/2 handshake "+
-				"and never opens a stream now holds its connection slot forever, which turns the "+
-				"connection caps into a parking primitive.", name, raw)
+				"and never opens a stream now holds its connection slot forever. Note that ENABLING it "+
+				"does not close connection parking either: a peer that opens a stream and then stays "+
+				"silent is not idle by this option's definition, and is bounded instead by "+
+				"RELAY_GRPC_REGISTRATION_TIMEOUT, which ends the stream and hands the connection back "+
+				"here.", name, raw)
 	}
 	if d < minGRPCConnIdleDur {
 		return d, fmt.Sprintf(
@@ -183,14 +235,105 @@ func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, stri
 //     (internal/agent/agent.go:184-212), so the legitimate maximum is "how many
 //     agent processes share a source address", which depends on NAT topology
 //     nothing here can see. 64 is chosen generously and is reversible.
-//   - defaultGRPCMaxConnIdle: a legitimate agent's idle window is the gap
-//     between dialing and opening its stream, sub-millisecond on a LAN, so this
-//     is bounded below only by paranoia about slow middleboxes.
+//   - defaultGRPCMaxConnIdle: THIS VALUE IS THE ATTACKER'S DUTY CYCLE, not a
+//     tolerance for slow middleboxes, and the direction that matters is the one
+//     the previous derivation did not multiply. A peer parking connection slots
+//     re-establishes each one once per window and pays nothing else: no
+//     credential, no stream, no database work. At 15m, holding all 1024 slots
+//     cost 1024/900 = 1.14 new TCP connections per second, sustained - so the
+//     option that exists to close parking was itself the cheapest parking route
+//     on the port, and a peer that completed the handshake parked a slot 7.5x
+//     LONGER than one that said nothing at all (grpc-go's 120s
+//     connectionTimeout). At 60s the same hold costs ~17/s and stays under that
+//     120s figure. A legitimate agent's honest window - dial to first stream -
+//     is sub-millisecond and the warned floor is 1s, so 60s still leaves about
+//     four orders of magnitude of headroom and costs a stream-holding connection
+//     exactly nothing.
+//   - defaultGRPCRegistrationTimeout: worker.DefaultRegistrationTimeout owns the
+//     reasoning; it is restated here only as this knob's default.
 const (
-	defaultGRPCMaxConns      = 1024
-	defaultGRPCMaxConnsPerIP = 64
-	defaultGRPCMaxConnIdle   = 15 * time.Minute
+	defaultGRPCMaxConns            = 1024
+	defaultGRPCMaxConnsPerIP       = 64
+	defaultGRPCMaxConnIdle         = 60 * time.Second
+	defaultGRPCRegistrationTimeout = worker.DefaultRegistrationTimeout
 )
+
+// minRegistrationTimeout is the point below which parseRegistrationTimeout says
+// out loud what the value costs. A legitimate agent sends its RegisterRequest
+// immediately after opening the stream, so the honest window is one network
+// round trip; a sub-second bound would start cutting off agents on a loaded host
+// or a slow link, and they would reconnect-loop with nothing to diagnose from.
+const minRegistrationTimeout = time.Second
+
+// parseRegistrationTimeout resolves RELAY_GRPC_REGISTRATION_TIMEOUT.
+//
+// ONE DELIBERATE DIVERGENCE FROM parseGRPCConnIdle, WHICH IT OTHERWISE MIRRORS:
+// zero does NOT disable. Every other knob here can be switched off because an
+// operator may have bounded the same thing elsewhere - a proxy can cap
+// connections. No proxy can enforce "send a RegisterRequest within N seconds",
+// because that is an application-layer property of relay's own protocol, so a
+// disable here would have no substitute and would restore a free, permanent,
+// fleet-wide denial. An operator who genuinely wants the old behaviour writes a
+// very large duration and can see in the startup line that they did.
+func parseRegistrationTimeout(name, raw string, def time.Duration) (time.Duration, string) {
+	if raw == "" {
+		return def, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def, fmt.Sprintf(
+			"%s=%q is not a positive Go duration; using %s. This bound cannot be disabled: an unbounded "+
+				"wait for the first RegisterRequest lets any peer park a connection slot for free.",
+			name, raw, def)
+	}
+	if d < minRegistrationTimeout {
+		return d, fmt.Sprintf(
+			"%s=%q resolves to %s, below the %s floor. Using it anyway, but an agent on a slow link or a "+
+				"loaded host may be disconnected before its RegisterRequest arrives and will "+
+				"reconnect-loop. Check the units (%s, not %s?).", name, raw, d, minRegistrationTimeout, def, d)
+	}
+	return d, ""
+}
+
+// resolveGRPCBounds parses all four gRPC admission knobs out of getenv and
+// returns the resolved bounds plus every startup message to log, in order.
+//
+// IT IS A FUNCTION RATHER THAN INLINE CODE IN main() FOR TWO REASONS, and only
+// the second is tidiness. First, a structural guard over main.go could see that
+// netlimit.Wrap was called but not that `grpcBnds = grpcBounds{}` had been
+// inserted just above it - a disclosed blind spot that disabled the entire
+// control while every package stayed green. Building the value in one place that
+// main cannot shadow removes that by construction. Second, the warning emissions
+// had no direct test; here they are ordinary return values.
+func resolveGRPCBounds(getenv func(string) string) (grpcBounds, []string) {
+	var msgs []string
+	add := func(m string) {
+		if m != "" {
+			msgs = append(msgs, m)
+		}
+	}
+
+	maxConns, m := parseConnLimit(
+		"RELAY_GRPC_MAX_CONNS", getenv("RELAY_GRPC_MAX_CONNS"), defaultGRPCMaxConns)
+	add(m)
+	maxConnsPerIP, m := parseConnLimit(
+		"RELAY_GRPC_MAX_CONNS_PER_IP", getenv("RELAY_GRPC_MAX_CONNS_PER_IP"), defaultGRPCMaxConnsPerIP)
+	add(m)
+	maxConnIdle, m := parseGRPCConnIdle(
+		"RELAY_GRPC_MAX_CONN_IDLE", getenv("RELAY_GRPC_MAX_CONN_IDLE"), defaultGRPCMaxConnIdle)
+	add(m)
+	registrationTimeout, m := parseRegistrationTimeout(
+		"RELAY_GRPC_REGISTRATION_TIMEOUT", getenv("RELAY_GRPC_REGISTRATION_TIMEOUT"),
+		defaultGRPCRegistrationTimeout)
+	add(m)
+
+	return grpcBounds{
+		maxConns:            maxConns,
+		maxConnsPerIP:       maxConnsPerIP,
+		maxConnIdle:         maxConnIdle,
+		registrationTimeout: registrationTimeout,
+	}, msgs
+}
 
 // grpcBoundsLine renders the unconditional startup line naming every effective
 // admission bound, in the shape of watchdogBoundsLine
@@ -209,8 +352,11 @@ func grpcBoundsLine(b grpcBounds) string {
 	if b.maxConnIdle <= 0 {
 		idle = "idle reaping DISABLED"
 	}
-	return fmt.Sprintf("gRPC admission: %d stream(s) per connection; connections %s, %s; %s",
-		grpcMaxConcurrentStreams, total, perIP, idle)
+	// No DISABLED arm for the last clause: registrationTimeout cannot be switched
+	// off (see parseRegistrationTimeout), so there is no off state to report.
+	return fmt.Sprintf(
+		"gRPC admission: %d stream(s) per connection; connections %s, %s; %s; register within %s",
+		grpcMaxConcurrentStreams, total, perIP, idle, b.registrationTimeout)
 }
 
 // grpcRefusalReportInterval is how often the refusal summary may speak. One line
