@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -141,4 +142,76 @@ func TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished(t *testing.T) {
 			"logKey{kind: %s} names something that is not a logKind constant declared inside the "+
 				"sentinel run. Its drops are counted into no cell and published under no JSON key.", name)
 	}
+}
+
+// kindFieldValues returns the by-kind struct's fields by name, so the mapping
+// test below asserts on a SET of values rather than on five hand-written
+// equalities that a crossed assignment could satisfy in pairs.
+func kindFieldValues(t *testing.T, v IngestLogDropsByKind) []uint64 {
+	t.Helper()
+	rv := reflect.ValueOf(v)
+	out := make([]uint64, 0, rv.NumField())
+	for i := 0; i < rv.NumField(); i++ {
+		out = append(out, rv.Field(i).Uint())
+	}
+	return out
+}
+
+// TestIngestLogCounters_EveryKindIsPublishedDistinctly drives every (kind, arm)
+// cell a DIFFERENT number of times and then requires the published struct to
+// carry exactly those numbers, per arm.
+//
+// Distinct values per cell are what make this discriminating. Equal values would
+// pass under a crossed field assignment, an off-by-one index, or a snapshot that
+// read the same arm twice. Asserting the two arms SEPARATELY is what catches an
+// arm swap: the combined multiset is identical either way.
+func TestIngestLogCounters_EveryKindIsPublishedDistinctly(t *testing.T) {
+	var c ingestLogCounters
+
+	var wantDeduped, wantSuppressed []uint64
+	n := uint64(1)
+	for k := logKind(1); k < kindCount; k++ {
+		for _, arm := range []int{ingestDropDeduped, ingestDropSuppressed} {
+			for i := uint64(0); i < n; i++ {
+				c.record(k, arm)
+			}
+			if arm == ingestDropDeduped {
+				wantDeduped = append(wantDeduped, n)
+			} else {
+				wantSuppressed = append(wantSuppressed, n)
+			}
+			n++
+		}
+	}
+
+	snap := c.snapshot()
+	require.ElementsMatch(t, wantDeduped, kindFieldValues(t, snap.Deduped),
+		"every kind must publish its OWN deduped cell. A missing value means a kind is counted but "+
+			"never published; a duplicated value means two fields read one cell; a shifted set means "+
+			"the array is indexed off by one.")
+	require.ElementsMatch(t, wantSuppressed, kindFieldValues(t, snap.Suppressed),
+		"the suppressed half must read the suppressed arm. Swapping the two arms leaves the COMBINED "+
+			"multiset unchanged, which is why this assertion is per half.")
+	require.Len(t, wantDeduped, reflect.TypeOf(IngestLogDropsByKind{}).NumField(),
+		"there are %d kinds inside the sentinel and %d published fields. A kind with no field is "+
+			"counted into a cell nobody reads.", len(wantDeduped),
+		reflect.TypeOf(IngestLogDropsByKind{}).NumField())
+}
+
+// TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked. record's bounds
+// check exists because the alternative on the gRPC recv goroutine is a panic
+// that kills the process (Connect has no recover; grpc-go does not recover
+// handler panics). It is unreachable while the two kind guards above are green,
+// and this test exists so that "unreachable" does not mean "untested".
+func TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked(t *testing.T) {
+	var c ingestLogCounters
+	require.NotPanics(t, func() {
+		c.record(logKind(0), ingestDropDeduped)
+		c.record(kindCount, ingestDropDeduped)
+		c.record(logKind(200), ingestDropSuppressed)
+		c.record(kindInventory, 7)
+		c.record(kindInventory, -1)
+	})
+	require.Equal(t, IngestLogDrops{}, c.snapshot(),
+		"an out-of-range kind or arm must be dropped, not folded into some other cell")
 }
