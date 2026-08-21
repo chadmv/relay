@@ -84,8 +84,29 @@ type ingestLogLimiter struct {
 	now    func() time.Time // injectable for the deterministic refill tests only
 }
 
-// logKind partitions the budget's dedupe keys. Values are never persisted or
-// sent anywhere, so they may be renumbered freely.
+// logKind partitions the budget's dedupe keys.
+//
+// TWO PROPERTIES OF THESE CONSTANTS ARE LOAD-BEARING, and the sentence this
+// paragraph replaces - "Values are never persisted or sent anywhere, so they may
+// be renumbered freely" - became false in BOTH directions on 2026-08-21, when
+// the drops started being counted and published.
+//
+//   - THE VALUES ARE ARRAY INDICES. ingestLogCounters is a [kindCount][2] array
+//     indexed by these constants, so they must stay a DENSE RUN starting at 1
+//     with kindCount immediately after the last one. A gap, an explicit
+//     out-of-run value, or a kind declared after the sentinel makes
+//     ingestLogCounters.record drop that kind's counts SILENTLY - it fails
+//     closed rather than panicking, because a panic on the recv goroutine kills
+//     the process. Pinned by TestIngestLogKindsAreADenseRunFromOne and
+//     TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished, which are the
+//     only things keeping that branch unreachable.
+//   - THE NAMES ARE A RESPONSE CONTRACT. GET /v1/server/counters publishes one
+//     JSON key per kind under ingest_log_budget.counts.deduped and
+//     .counts.suppressed. RENAMING A KIND RENAMES AN OPERATOR-VISIBLE KEY and a
+//     field of worker.IngestLogDropsByKind; ADDING one that nothing publishes is
+//     a hole with no error. Pinned by
+//     TestIngestLogCounters_EveryKindIsPublishedDistinctly here and by
+//     counterPayloadLeaves in internal/api.
 type logKind uint8
 
 // The two bad-task-id kinds are deliberately SEPARATE, and the history is worth
@@ -102,6 +123,12 @@ const (
 	kindBadTaskIDStatus                    // an unparseable task id on the STATUS path
 	kindStatusGetTask                      // handleTaskStatus's non-ErrNoRows GetTask failure
 	kindInventory                          // handleInventoryUpdate's persist failure
+
+	// kindCount MUST STAY LAST and is NOT a kind. It is the length of
+	// ingestLogCounters' array. A kind added after it is not counted at all;
+	// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what makes
+	// that a RED test rather than a silent hole.
+	kindCount
 )
 
 // logKey is the dedupe key. Only kindTaskLogPersist populates id and epoch; the
