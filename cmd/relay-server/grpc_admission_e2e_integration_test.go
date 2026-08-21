@@ -370,3 +370,112 @@ func ingestCount(t *testing.T, srv *http.Server, arm, kind string) uint64 {
 	require.Contains(t, section.Counts[arm], kind)
 	return section.Counts[arm][kind]
 }
+
+// TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers is
+// the FORWARDING guard for the third section, and it is the top rung of the
+// ladder: a real registered gRPC stream, real fence rejections on the recv
+// goroutine, read back through the real admin-gated route on a server built by
+// buildHTTPServer.
+//
+// The gap it closes is the one slice 2 shipped and had to be told about.
+// Substituting a freshly constructed worker.NewHandler inside buildHTTPServer -
+//
+//	s.Counters.TaskLogFence = worker.NewHandler(d.q, d.pool, d.registry, d.broker, func() {})
+//
+// compiles, vets clean under both tag sets and leaves every package green,
+// including TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection, which
+// asserts the section exists with the right shape - and a fresh Handler's section
+// does. In production that serves a permanently zero rejection count while real
+// output is being dropped: a CONFIDENT ZERO, which is worse than no endpoint.
+//
+// NO TASK NEEDS SEEDING. A well-formed uuid naming no task parses (so the bad-id
+// arm is not involved), matches no fence row, and returns pgx.ErrNoRows - which
+// is the arm under test.
+//
+// WHY THE INTEGRATION LANE: reaching the fence arm requires Connect's message
+// loop, which is past authenticateAndRegister, which is a Postgres round trip. Note
+// what is NOT here for that reason - the counter's own behaviour is proved in the
+// DEFAULT lane by internal/worker/tasklog_fence_counter_test.go, which drives the
+// real AppendTaskLog call through a stub store.DBTX. Only the wiring needs a
+// container.
+func TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers(t *testing.T) {
+	pool, q := newTestPoolAndQueries(t)
+	ctx := context.Background()
+	rawToken := seedE2EWorker(t, ctx, q, "e2e-fence-counters")
+
+	addr, handler := startProductionGRPCServerWithHandler(t, pool, q,
+		netlimit.Config{MaxTotal: 10, MaxPerIP: 10},
+		grpcBounds{maxConns: 10, maxConnsPerIP: 10, maxConnIdle: 0})
+
+	// Built exactly as main builds it, from the handler already serving gRPC above.
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: handler,
+	})
+
+	require.Zero(t, taskLogFenceRejectedTotal(t, srv),
+		"fixture: nothing rejected yet, so the section is present and zero")
+
+	cc := dialE2E(t, addr)
+	stream, _ := registerOverRealConnection(t, cc, "e2e-fence-counters", rawToken)
+
+	const unknownTask = "3f1c0a2e-7b64-4d8a-9c31-0e5b6a7d8c90"
+	const chunks = 5
+	for i := 0; i < chunks; i++ {
+		require.NoError(t, stream.Send(&relayv1.AgentMessage{
+			Payload: &relayv1.AgentMessage_TaskLog{TaskLog: &relayv1.TaskLogChunk{
+				TaskId: unknownTask, Content: []byte("x"), Epoch: 1,
+			}},
+		}))
+	}
+
+	// The recv loop is asynchronous, so poll rather than sleep, and target an EXACT
+	// number: "non-zero" would pass on a partially drained stream while proving less
+	// than it claims.
+	deadline := time.Now().Add(30 * time.Second)
+	var got uint64
+	for time.Now().Before(deadline) {
+		got = taskLogFenceRejectedTotal(t, srv)
+		if got == uint64(chunks) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, uint64(chunks), got,
+		"GET /v1/server/counters must report the rejections of the Handler that ran this connection's "+
+			"recv loop. Zero here means buildHTTPServer served some OTHER source - a second Handler, a "+
+			"stub, or nothing.")
+
+	// THE SIBLING SECTION MUST NOT MOVE. The fence arm never consults the log
+	// budget, so these are different nouns and neither covers any part of the other.
+	require.Zero(t, ingestDedupedCount(t, srv, "task_log_persist"),
+		"a fence rejection is not a dropped log line: it never reaches the budget at all")
+	require.Zero(t, ingestSuppressedCount(t, srv, "task_log_persist"))
+
+	// AND THE NUMBER MUST SURVIVE THE DISCONNECT THAT PRODUCED IT. This is the
+	// metrics.Store refutation made executable: that type's Clear DELETES a worker's
+	// entry at teardown, so a counter parked there would read zero here.
+	require.NoError(t, stream.CloseSend())
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, uint64(chunks), taskLogFenceRejectedTotal(t, srv),
+		"the count is process-lifetime, not per connection: a worker that floods and then drops must "+
+			"still be visible to the operator who goes looking afterwards")
+}
+
+// taskLogFenceRejectedTotal reads the section back through the real admin-gated
+// route, the way an operator's poller would, rather than reaching into the Handler.
+func taskLogFenceRejectedTotal(t *testing.T, srv *http.Server) uint64 {
+	t.Helper()
+	top := countersAsAdmin(t, srv)
+	raw, ok := top["task_log_fence"]
+	require.True(t, ok, "the task_log_fence section is ABSENT, so the handler was never wired at all")
+
+	var section struct {
+		Counts struct {
+			RejectedTotal uint64 `json:"rejected_total"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &section))
+	return section.Counts.RejectedTotal
+}
