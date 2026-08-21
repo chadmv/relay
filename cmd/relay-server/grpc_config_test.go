@@ -1167,3 +1167,41 @@ func TestRefusalSummaryIsSilentWhenOnlyOccupancyMoves(t *testing.T) {
 				"forever and the bound would be a bound in name only.", i)
 	}
 }
+
+// TestRefusalSummaryLineCarriesOccupancyWhenItSpeaks. The trigger reads counts
+// only; the LINE must still answer "how full is it, and is this one source or
+// many", or the operator gets a refusal count with no context and has to go
+// looking for the endpoint to interpret it.
+//
+// FIVE DISTINCT VALUES, IN A FIXED ORDER. Equal values would make a crossed
+// argument invisible, which is half of what this test is for.
+func TestRefusalSummaryLineCarriesOccupancyWhenItSpeaks(t *testing.T) {
+	var format string
+	var args []any
+	r := &refusalReporter{logf: func(f string, a ...any) { format, args = f, a }}
+
+	r.tick(netlimit.Stats{
+		Counts: netlimit.RefusalCounts{RefusedTotal: 7, RefusedPerIP: 2},
+		Levels: netlimit.Occupancy{LiveTotal: 1024, DistinctSources: 16, MaxPerSource: 64},
+	})
+
+	require.Len(t, args, 5,
+		"the line must carry both refusal counts AND all three occupancy figures: MaxPerSource with "+
+			"DistinctSources is what separates a distributed source pattern from a NAT gateway, and "+
+			"RefusedTotal alone cannot")
+	assert.Equal(t, []any{uint64(7), uint64(2), uint64(1024), uint64(16), uint64(64)}, args,
+		"the arguments must be counts-then-levels in that order; five distinct values make a crossed "+
+			"argument visible")
+	for i, a := range args {
+		assert.IsType(t, uint64(0), a,
+			"argument %d is not a uint64. Every argument of this line must be a count or a level - a "+
+				"caller-supplied byte here would make an attacker-reachable log site out of the control "+
+				"that bounds attacker-driven log volume.", i)
+	}
+	assert.Equal(t, 5, strings.Count(format, "%d"), "the template must consume all five numbers")
+
+	rendered := fmt.Sprintf(format, args...)
+	assert.Contains(t, rendered, "1024")
+	assert.Contains(t, rendered, "16")
+	assert.Contains(t, rendered, "64")
+}

@@ -453,8 +453,10 @@ func (r *refusalReporter) tick(s netlimit.Stats) {
 	if s.Counts == r.last {
 		return
 	}
-	r.logf("gRPC admission: %d connection(s) refused over the total cap and %d over the per-source-IP cap since startup",
-		s.Counts.RefusedTotal, s.Counts.RefusedPerIP)
+	r.logf("gRPC admission: %d connection(s) refused over the total cap and %d over the per-source-IP cap "+
+		"since startup; %d live connection(s) held from %d source(s), busiest source holds %d",
+		s.Counts.RefusedTotal, s.Counts.RefusedPerIP,
+		s.Levels.LiveTotal, s.Levels.DistinctSources, s.Levels.MaxPerSource)
 	r.last = s.Counts
 }
 
