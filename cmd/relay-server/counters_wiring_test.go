@@ -201,11 +201,22 @@ func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
 // Handler main REGISTERS ON. Feeding buildHTTPServer a second, otherwise
 // identical worker.Handler compiles and passes every other check, and the
 // endpoint then reports a permanently empty log budget while the real one fills
-// up. Nothing executable can answer that from cmd/relay-server, because moving
-// an ingest counter needs the gRPC recv goroutine and a registered agent; the
-// numbers themselves are proved in internal/worker's integration lane by
-// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections, and this
-// identifier check is the join between the two.
+// up.
+//
+// WHAT IS STILL ONLY SYNTACTIC HERE is the main.go half of that: whether the
+// identifier main passes is the identifier main registered. Nothing in the
+// DEFAULT lane can answer it, because moving an ingest counter needs Connect's
+// message loop and therefore a Postgres round trip. An earlier version of this
+// comment stopped there and said "nothing executable can answer that from
+// cmd/relay-server", which quietly covered a second question it does not ask:
+// whether buildHTTPServer forwards the handler it was handed. That one IS
+// executable and was unguarded - substituting a fresh worker.NewHandler inside
+// buildHTTPServer left every package green - and is now
+// TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers in the
+// integration lane. The numbers' own proof is
+// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in
+// internal/worker. Three guards, three questions; this identifier check is the
+// join between them.
 //
 // The old version asked eight, six of them re-derived from individual evasions,
 // and four evasions still got past it. Returning *http.Server took some of those
@@ -310,18 +321,46 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
 	}
 
-	// COUNT THE ROWS AGAINST THE SOURCE FIELDS, because "every wired source has
-	// a row" is a completeness claim and a completeness claim cannot be checked
-	// by reading the rows. The mapping is not mechanical - api.CounterSources'
-	// IngestLogBudget is fed by httpServerDeps.agentHandler - so a name match is
-	// not available, but the CARDINALITIES must agree: a third section added to
-	// CounterSources and wired through a new deps field, with no row added here,
-	// would be guarded by nothing at all while every assertion below still
-	// passed.
-	require.Len(t, deps, reflect.TypeOf(api.CounterSources{}).NumField(),
-		"api.CounterSources has %d source fields and this table has %d rows. Every wired source needs "+
-			"a row, or its section can be silently unwired on some deployments with this guard green.",
-		reflect.TypeOf(api.CounterSources{}).NumField(), len(deps))
+	// COUNT THE DISTINCT FIELDS AGAINST THE SOURCE FIELDS, because "every wired
+	// source has a row" is a completeness claim and a completeness claim cannot
+	// be checked by reading the rows. The mapping is not mechanical -
+	// api.CounterSources' IngestLogBudget is fed by httpServerDeps.agentHandler -
+	// so a name match is not available, but the CARDINALITIES must agree: a third
+	// section added to CounterSources and wired through a new deps field, with no
+	// row added here, would be guarded by nothing at all while every assertion
+	// below still passed.
+	//
+	// DISTINCT FIELDS, NOT ROWS, and the difference is the cheapest path to
+	// green rather than a hypothetical. Counting rows was PROVED evadable in two
+	// steps: `agentHandler = nil` inside an if in main is correctly RED here
+	// ("assigned 2 times"), and replacing the agentHandler ROW with a second
+	// grpcAdmission row makes the whole package green again - two rows, NumField
+	// is 2, and agentHandler is now outside chainNames, losing the
+	// plain-identifier check, the derives-from check and the assigned-exactly-
+	// once check at a stroke. The next section makes that path more inviting,
+	// not less: server_counters.go says the fence counter will live on the SAME
+	// *worker.Handler with its own CounterSources field, so NumField goes to 3
+	// while the natural table still has 2 rows.
+	//
+	// The field-exists check is here for the same reason: a typo'd row leaves
+	// depArg[d.field] nil and fails several assertions down with a message about
+	// wiring rather than about the typo.
+	depsType := reflect.TypeOf(httpServerDeps{})
+	distinct := map[string]bool{}
+	for _, d := range deps {
+		_, ok := depsType.FieldByName(d.field)
+		require.True(t, ok,
+			"this table has a row for httpServerDeps.%s, which does not exist. A row naming no field "+
+				"guards nothing and makes the count below pass on a table that is short one section.",
+			d.field)
+		distinct[d.field] = true
+	}
+	require.Len(t, distinct, reflect.TypeOf(api.CounterSources{}).NumField(),
+		"api.CounterSources has %d source fields and this table names %d DISTINCT httpServerDeps "+
+			"fields (in %d rows). Every wired source needs its own row, or its section can be silently "+
+			"unwired on some deployments with this guard green - and a duplicated row satisfies a row "+
+			"count while dropping the field it displaced out of every check below.",
+		reflect.TypeOf(api.CounterSources{}).NumField(), len(distinct), len(deps))
 
 	depArg := map[string]*ast.Ident{}
 	for _, st := range body.List {
@@ -496,12 +535,20 @@ func keysOf(m map[string]bool) []string {
 // the server the way main does and reads the section back through the real
 // admin-gated route.
 //
-// SAY WHAT IT DOES NOT BUY. It proves the section is served from a Handler that
-// buildHTTPServer was given; it does NOT prove the numbers move, because moving
-// them requires the gRPC recv goroutine and a registered agent. That proof is
+// SAY WHAT IT DOES NOT BUY, and the first sentence here used to overstate it. It
+// proves the section is PRESENT, with the right shape, whenever a non-nil
+// Handler is passed. It does NOT prove the section is served from THAT Handler:
+// a fresh worker.NewHandler substituted inside buildHTTPServer produces an
+// identical five-key-per-arm section of zeros and leaves this test green
+// (measured). Nor does it prove the numbers move, which needs the gRPC recv
+// goroutine and a registered agent.
+//
+// Those two live in integration lanes:
+// TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers drives
+// real drops through a real stream and reads them back through this route, and
 // TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in
-// internal/worker's integration lane, and the join between the two - "the
-// Handler serving gRPC is the Handler reporting counts" - is the identifier
+// internal/worker proves the counts outlive the connection. The main.go half -
+// "the Handler serving gRPC is the Handler reporting counts" - is the identifier
 // property checked in TestServerCountersIsWiredByMain below.
 func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
 	h := worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {})

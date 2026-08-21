@@ -92,6 +92,23 @@ import (
 //     its snapshot type HERE, next to the response types, and scheduler.Watchdog
 //     returns that type. CounterSources is a struct of independent fields
 //     precisely so each section can make that choice separately.
+//
+// AND THE RULE THAT HOLDS FOR EVERY SECTION, WHICHEVER OF THOSE THREE SHAPES IT
+// TAKES: a section that copies a subsystem's snapshot into a response struct
+// FIELD BY FIELD needs a CARDINALITY CHECK between the two types, written in
+// this package, because this is the only place both are visible. A
+// field-by-field mapper is the one link in the chain the compiler says nothing
+// about - a field added on the subsystem side and not here compiles, vets and
+// tests clean while its number is counted on the hot path and published under no
+// JSON key. Every other link in ingest_log_budget's chain already had such a
+// check (kinds against the counters array, the array against
+// worker.IngestLogDropsByKind, CounterSources' fields against
+// cmd/relay-server's wiring table, the response against this handler's
+// branches); the mapper's was missed and is now
+// TestIngestLogKindCountsPublishesEveryWorkerSideField. Note what does NOT
+// substitute for it: counterPayloadLeaves is an ElementsMatch over this
+// package's OWN payload, so it reddens on an extra leaf here and is silent on a
+// missing one there.
 
 // GRPCAdmissionSource is whatever can report the agent-port admission
 // counters - in production, *netlimit.Listener.

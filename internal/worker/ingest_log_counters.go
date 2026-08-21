@@ -96,6 +96,23 @@ type ingestLogCounters struct {
 // bounds check - and the kind guards in ingest_log_counters_test.go are what
 // keep that branch unreachable.
 func (c *ingestLogCounters) record(k logKind, arm int) {
+	// A NIL COUNTER SET IS ITS OWN CASE, and the bounds check below does not
+	// cover it however much it looks like it does: len(c.n) has an ARRAY-typed
+	// operand, so it is a compile-time constant that never dereferences c. An
+	// out-of-range kind on a nil receiver therefore returns harmlessly while an
+	// IN-RANGE one - the shape production takes - panics on the recv goroutine.
+	//
+	// Unreachable today (Connect, newIngestLogLimiter and shimLimiterFor all pass
+	// &h.ingestDrops, and Handler's field is a value so its zero value works), but
+	// newIngestLogLimiterAt(now, nil) and a bare &ingestLogLimiter{...} both
+	// compile, and allow already guards `l == nil` without guarding
+	// `l.drops == nil`. One register compare on a path whose standing constraint
+	// is no new lock, queue, goroutine or round trip.
+	// TestIngestLogCounters_ANilCounterSetIsDroppedNotPanicked pins it.
+	if c == nil {
+		return
+	}
+
 	// FAIL CLOSED, DO NOT PANIC. An out-of-range index here would panic on the
 	// gRPC recv goroutine, which Connect does not recover and grpc-go does not
 	// recover either, so it would kill the whole server process. Losing a count

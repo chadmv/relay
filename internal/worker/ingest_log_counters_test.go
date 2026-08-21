@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
 
@@ -43,9 +44,20 @@ func TestIngestLogKindsAreADenseRunFromOne(t *testing.T) {
 			"kind #%d is %d. The kinds index ingestLogCounters' array, so they must stay a DENSE RUN "+
 				"starting at 1: a gap makes record() drop that kind's counts silently.", i, k)
 	}
+	// THE MESSAGE NAMES THE TEST'S OWN LIST FIRST, because that is the likelier
+	// cause and the one a correctly-added sixth kind produces. A kind added
+	// properly - inside the sentinel, with kindCount still immediately after it -
+	// fails HERE with 6 != 7 under a message that says "kindCount must be the
+	// sentinel immediately after the last kind", which it is. The list above is
+	// hardcoded and is what actually went stale. It is kept hardcoded rather than
+	// derived from kindCount because deriving it would delete the only thing that
+	// pins each NAME to its VALUE.
 	require.Equal(t, logKind(len(run)+1), kindCount,
-		"kindCount must be the sentinel immediately after the last kind: it is the LENGTH of the "+
-			"counters array, so a kind at or beyond it is never counted")
+		"this test's `run` list has %d entries and kindCount is %d. IF YOU JUST ADDED A KIND, ADD IT "+
+			"TO `run` ABOVE - this assertion compares the hardcoded list's length to the sentinel, so "+
+			"a correctly-added kind fails here first. OTHERWISE kindCount is no longer the sentinel "+
+			"immediately after the last kind: it is the LENGTH of the counters array, so a kind at or "+
+			"beyond it is never counted.", len(run), int(kindCount))
 }
 
 // TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished counts a PROPERTY
@@ -119,14 +131,38 @@ func TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished(t *testing.T) {
 				if id, ok := cl.Type.(*ast.Ident); !ok || id.Name != "logKey" {
 					return true
 				}
+				// EVERY ELEMENT MUST BE KEYED, AND `kind` MUST BE ONE OF THEM.
+				// This loop used to `continue` past anything that was not a
+				// KeyValueExpr, which made the whole walk blind to the
+				// POSITIONAL form: `logKey{someLocalVar, "", 0}` has plain
+				// expressions for elements, so every assertion below was
+				// skipped and the site was never checked at all. Measured -
+				// that literal with an uncounted kind compiled, vetted clean
+				// and left the package green, while consuming the shared
+				// per-connection token bucket and having every drop it caused
+				// discarded by record's fail-closed branch.
+				//
+				// require.NotEmpty on literalKinds does not save it: the four
+				// untouched keyed sites satisfy that on their own.
+				//
+				// An ABSENT kind key is the same hole one step quieter -
+				// `logKey{id: x}` leaves kind at 0, which record drops - so it
+				// is required rather than merely checked when present.
+				sawKind := false
 				for _, e := range cl.Elts {
 					kv, ok := e.(*ast.KeyValueExpr)
-					if !ok {
+					require.True(t, ok,
+						"a logKey literal at %s uses the POSITIONAL form (%T). Write it keyed - "+
+							"logKey{kind: ...} - or this guard cannot see which kind it names, and an "+
+							"uncounted kind there spends the connection's token bucket while every drop "+
+							"it causes is discarded by record's fail-closed branch.",
+						fset.Position(e.Pos()), e)
+					k, ok := kv.Key.(*ast.Ident)
+					require.True(t, ok, "a logKey literal at %s keys a field as %T", fset.Position(kv.Pos()), kv.Key)
+					if k.Name != "kind" {
 						continue
 					}
-					if k, ok := kv.Key.(*ast.Ident); !ok || k.Name != "kind" {
-						continue
-					}
+					sawKind = true
 					id, ok := kv.Value.(*ast.Ident)
 					require.True(t, ok,
 						"a logKey literal names its kind as %T. It must name one of the logKind "+
@@ -134,6 +170,10 @@ func TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished(t *testing.T) {
 						kv.Value)
 					literalKinds = append(literalKinds, id.Name)
 				}
+				require.True(t, sawKind,
+					"a logKey literal at %s names no kind, so the field defaults to 0 - which is not a "+
+						"kind, is published under no JSON key, and is exactly what record's `i <= 0` "+
+						"branch drops in silence.", fset.Position(cl.Pos()))
 				return true
 			})
 		}
@@ -192,12 +232,21 @@ func TestIngestLogCounters_EveryKindIsPublishedDistinctly(t *testing.T) {
 		}
 	}
 
+	// ORDERED, NOT ElementsMatch. wantDeduped is built in KIND order and
+	// kindFieldValues returns FIELD order, so the association each field reads
+	// its own kind's cell is exactly the pairing of the two orders - and an
+	// order-insensitive match discards it. Measured: swapping the StatusGetTask
+	// and Inventory lines in byKind so each reads the other's cell left this test
+	// GREEN under ElementsMatch. (The package still reddened, via
+	// TwoLimitersOnOneHandlerAggregate and TwoHandlersDoNotShareCounts, so there
+	// was no shipped hole - but the test named for the property was not the one
+	// catching it, and its comment said otherwise.)
 	snap := c.snapshot()
-	require.ElementsMatch(t, wantDeduped, kindFieldValues(t, snap.Deduped),
-		"every kind must publish its OWN deduped cell. A missing value means a kind is counted but "+
-			"never published; a duplicated value means two fields read one cell; a shifted set means "+
-			"the array is indexed off by one.")
-	require.ElementsMatch(t, wantSuppressed, kindFieldValues(t, snap.Suppressed),
+	require.Equal(t, wantDeduped, kindFieldValues(t, snap.Deduped),
+		"every kind must publish its OWN deduped cell, IN ORDER: field i of IngestLogDropsByKind must "+
+			"read kind i+1. A missing value means a kind is counted but never published; a duplicated "+
+			"value means two fields read one cell; a permutation means two fields are crossed.")
+	require.Equal(t, wantSuppressed, kindFieldValues(t, snap.Suppressed),
 		"the suppressed half must read the suppressed arm. Swapping the two arms leaves the COMBINED "+
 			"multiset unchanged, which is why this assertion is per half.")
 	require.Len(t, wantDeduped, reflect.TypeOf(IngestLogDropsByKind{}).NumField(),
@@ -238,6 +287,44 @@ func TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked(t *testing.T) {
 					"therefore invisible to the snapshot assertion above.", k, arm)
 		}
 	}
+}
+
+// TestIngestLogCounters_ANilCounterSetIsDroppedNotPanicked. record's bounds
+// check does NOT cover a nil receiver, and it reads as though it does: len(c.n)
+// has an ARRAY-typed operand, so it is a compile-time constant and never
+// dereferences c. An out-of-range kind on a nil receiver therefore returns
+// harmlessly while an IN-RANGE one panics - the guard's own comment says "fail
+// closed, do not panic", and the shape it fails on is the shape production takes.
+//
+// UNREACHABLE TODAY AND STILL WORTH THE REGISTER COMPARE. Connect,
+// newIngestLogLimiter and shimLimiterFor all pass &h.ingestDrops, and Handler's
+// field is a VALUE so its zero value works. But both shapes below compile:
+// newIngestLogLimiterAt(now, nil) is an exported-to-the-package constructor with
+// a nil-able parameter, and allow already guards `l == nil` without guarding
+// `l.drops == nil`, which sets the reader expectation that this type tolerates
+// being unwired. The failure it would produce is a nil dereference on the gRPC
+// recv goroutine, which Connect does not recover and grpc-go does not recover -
+// the single failure mode the whole file is written against.
+func TestIngestLogCounters_ANilCounterSetIsDroppedNotPanicked(t *testing.T) {
+	var c *ingestLogCounters
+	require.NotPanics(t, func() {
+		c.record(kindInventory, ingestDropDeduped)
+		c.record(logKind(200), ingestDropSuppressed)
+	}, "a nil counter set must lose the count, not kill the recv goroutine. The IN-RANGE kind is the "+
+		"one that matters: the out-of-range one already survived, because len(c.n) is a constant and "+
+		"the bounds check returns before any dereference.")
+
+	// The limiter reached through a nil counter set must still BUDGET normally:
+	// losing a count may not cost a diagnostic.
+	l := newIngestLogLimiterAt(time.Now, nil)
+	var first, second bool
+	require.NotPanics(t, func() {
+		first = l.allow(logKey{kind: kindInventory})
+		second = l.allow(logKey{kind: kindInventory})
+	}, "allow guards `l == nil` but not `l.drops == nil`; the second call takes the dedupe arm, which "+
+		"is the arm that records")
+	require.True(t, first, "an unwired counter set must not change what the budget allows")
+	require.False(t, second, "the dedupe decision is independent of whether the drop can be counted")
 }
 
 // TestIngestLogLimiter_TheDedupeArmCountsDeduped. One key logged twice inside
@@ -432,24 +519,39 @@ func TestHandleTaskStatus_ADroppedLineUnderAnEmptyBudgetCountsSuppressed(t *test
 // WHAT KILLS WHAT, MEASURED RATHER THAN ASSUMED, because a test can be robust
 // and inert on the same machine. Every figure below is against the mutation this
 // test exists for - ingestLogCounters.n changed from atomic.Uint64 to a plain
-// uint64 with `++` - run in the golang:1.26 Linux container:
+// uint64 with `++`, WITH the .Load() calls in this file dropped to match - run in
+// the golang:1.26 Linux container. That last detail is load-bearing: leaving the
+// .Load() calls in place makes every "kill" a COMPILE ERROR rather than a
+// behavioural one, which measures nothing about this test.
+//
+// THE FIRST VERSION OF THIS PARAGRAPH GOT THE -race ROW BACKWARDS and is
+// corrected here rather than quietly replaced, because the wrong version
+// licensed a maintainer on a constrained runner to treat this test as proving
+// nothing. It claimed 1/10 at -cpu=1 and called the test "very nearly INERT"
+// there. Re-measured, that does not reproduce:
 //
 //   - THE -race RUN IS THE LOAD-BEARING HALF, and it is the one CI executes. It
-//     kills the mutation through happens-before analysis: 10/10 at -cpu=2,
-//     10/10 at -cpu=4, and only 1/10 at -cpu=1. The last number is the
-//     uncomfortable one and it is stated rather than glossed: at GOMAXPROCS=1
-//     this test is very nearly INERT, so green there means "did not detect", not
-//     "verified".
-//   - THE EXACTNESS ASSERTION is the weaker half everywhere. It catches a lost
-//     update only when two goroutines interleave inside the read-modify-write:
-//     8/20 at -cpu=2, 5/20 at -cpu=4, 0/20 at -cpu=1. It is kept because it is
-//     the only half that fails with a NUMBER an operator would care about, but
-//     it is not what makes the decision checked.
+//     kills the mutation through happens-before analysis, and it does NOT need
+//     true parallelism to do it: 10/10 at -cpu=1, 10/10 at -cpu=2, and 10/10 at
+//     -cpu=1 again inside `docker run --cpus=1 --cpuset-cpus=0`, every one of
+//     them a WARNING: DATA RACE. TSan's vector clocks see two sibling goroutines
+//     writing one word with no happens-before edge between them whether or not
+//     the writes ever overlap in real time.
+//   - THE EXACTNESS ASSERTION is the weaker half, and it is the half that is
+//     inert at one CPU. It catches a lost update only when two goroutines
+//     interleave inside the read-modify-write: 0/20 at -cpu=1, 12/20 at -cpu=2,
+//     13/20 at -cpu=4. Green at GOMAXPROCS=1 means "did not detect", not
+//     "verified" - FOR THIS ASSERTION ONLY. It is kept because it is the only
+//     half that fails with a NUMBER an operator would care about.
+//
+// The battery has a green baseline: unmutated, the same harness gives 0/10 data
+// races and 0/20 exactness failures, so the numbers above are discrimination
+// rather than a broken harness.
 //
 // go-ci runs `go test -race ./... -timeout 180s` on ubuntu-latest with no -cpu
 // flag and no build tag, and a GitHub-hosted runner has 2 or 4 vCPUs - the
-// -race kill was measured at 10/10 for BOTH, so it is live there either way.
-// Locally, -race must be run in a Linux container: ThreadSanitizer cannot
+// -race kill is 10/10 at every core count measured, so it is live there either
+// way. Locally, -race must be run in a Linux container: ThreadSanitizer cannot
 // allocate its shadow memory on the Windows authoring host and fails on
 // untouched packages too.
 //

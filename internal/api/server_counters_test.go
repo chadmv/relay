@@ -700,6 +700,47 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 			"passes there and fails here.")
 }
 
+// TestIngestLogKindCountsPublishesEveryWorkerSideField is the completeness guard
+// on the ONE boundary in this chain that had none, and this package is the one
+// place both types are visible.
+//
+// EVERY OTHER LINK IS ALREADY COUNTED: the kinds against the counters array
+// (TestIngestLogKindsAreADenseRunFromOne), the array against
+// worker.IngestLogDropsByKind
+// (TestIngestLogCounters_EveryKindIsPublishedDistinctly's final require.Len),
+// api.CounterSources' fields against the wiring table
+// (TestServerCountersIsWiredByMain), the response against the handler's
+// branches (counterPayloadLeaves). ingestLogKindCountsFrom was the gap: it is
+// five hand-written assignments and NOTHING compared its arity to its source's.
+// Measured - a fully correct sixth kind (const inside the sentinel, a real
+// lim.allow call site, an IngestLogDropsByKind field, a byKind line, the dense-
+// run test's list updated) left internal/worker, internal/api AND
+// cmd/relay-server green with `go vet -tags integration` clean, while that kind
+// was counted on the recv path and published under no JSON key. That is this
+// slice's own defect class one layer up: a counter that silently stops counting,
+// inside the mechanism built because controls silently stop reporting.
+//
+// counterPayloadLeaves cannot cover it. It is an ElementsMatch against a fixed
+// list, so it reddens on an EXTRA api-side leaf and never on a MISSING
+// worker-side one - it is a contract check on this package's own payload, and
+// the missing field is not in the payload to be noticed.
+//
+// CARDINALITY IS ENOUGH, and the reason is worth stating so nobody "improves"
+// this into a name comparison it does not need: ingestLogKindCountsFrom assigns
+// BY NAME, so a worker-side rename is already a compile error here. Only the
+// arity can drift silently.
+func TestIngestLogKindCountsPublishesEveryWorkerSideField(t *testing.T) {
+	src := reflect.TypeOf(worker.IngestLogDropsByKind{})
+	pub := reflect.TypeOf(ingestLogKindCounts{})
+	require.Equal(t, src.NumField(), pub.NumField(),
+		"worker.IngestLogDropsByKind has %d fields and api.ingestLogKindCounts has %d. Every kind the "+
+			"recv path counts must reach a JSON key: ingestLogKindCountsFrom is hand-written, so a "+
+			"field added on one side and not the other is counted into a number nobody can read (or, "+
+			"the other way, published as a permanent zero). Add the field, its json tag, its line in "+
+			"ingestLogKindCountsFrom, and its name to the kinds list in "+
+			"TestServerCounters_ReportsTheIngestLogSnapshot.", src.NumField(), pub.NumField())
+}
+
 // fakeIngestLogSource returns a fixed snapshot. TEN DISTINCT VALUES: the mapping
 // from worker.IngestLogDrops into the response types is ten hand-written
 // assignments, and equal values would hide a crossed one.

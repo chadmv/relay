@@ -57,8 +57,26 @@ type httpServerDeps struct {
 	// RegisterAgentServiceServer. A second Handler would count its own
 	// (permanently zero) drops while the real ones went unread - an endpoint
 	// reporting that a log budget has suppressed nothing is worse than no
-	// endpoint. TestServerCountersIsWiredByMain checks the identifier; nothing
-	// executable can check it from here.
+	// endpoint.
+	//
+	// TWO SEPARATE QUESTIONS, TWO SEPARATE GUARDS, and an earlier version of
+	// this comment ("TestServerCountersIsWiredByMain checks the identifier;
+	// nothing executable can check it from here") ran them together and left the
+	// second one unguarded:
+	//
+	//   - Does main pass the handler it registered? That is about main.go's
+	//     identifiers and is checked syntactically, by
+	//     TestServerCountersIsWiredByMain.
+	//   - Does buildHTTPServer forward what it was GIVEN? That is executable and
+	//     was not checked. Replacing the assignment below with a freshly
+	//     constructed worker.NewHandler compiled, vetted clean and left all three
+	//     packages green. It is now
+	//     TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers,
+	//     which floods a real registered stream and reads the numbers back
+	//     through the real route - the same treatment
+	//     TestBuildHTTPServer_ServesTheRealListenersCounters gives grpcAdmission.
+	//     It is in the INTEGRATION lane, because moving an ingest counter needs
+	//     Connect's message loop and therefore a Postgres round trip.
 	agentHandler *worker.Handler
 }
 
