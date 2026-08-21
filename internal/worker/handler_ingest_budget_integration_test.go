@@ -412,6 +412,42 @@ func TestConnect_TwoConnectionsDoNotShareTheLogBudget(t *testing.T) {
 			"and one agent can suppress another's diagnostics")
 }
 
+// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections is the
+// property the item exists for and the one no unit test can reach: the numbers
+// OUTLIVE the connection that produced them, and they come from the Handler
+// Connect was called on rather than from a set allocated per stream.
+//
+// It is the sibling of TestConnect_TwoConnectionsDoNotShareTheLogBudget above:
+// that one proves the BUDGET is per connection, this one proves the COUNTERS are
+// not. Both must hold at once, and that pair is the whole design.
+//
+// Per connection: 64 unpersistable inventory updates, one key (kindInventory
+// carries no wire value), so 1 logged line and 63 deduped drops.
+func TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, tokenA := seedWorkerWithAgentToken(t, ctx, q, "drops-a")
+	_, tokenB := seedWorkerWithAgentToken(t, ctx, q, "drops-b")
+
+	require.NoError(t, h.Connect(inventoryFloodStream(ctx, "drops-a", tokenA, 64)))
+	afterA := h.IngestLogDropCounts()
+	assert.Equal(t, uint64(63), afterA.Deduped.Inventory,
+		"the counts must be readable AFTER the connection has ended. Accumulating in the limiter and "+
+			"flushing at teardown was refuted at spec time precisely because it reports nothing while "+
+			"the flood is happening; a count that died with the frame would report nothing at all.")
+
+	require.NoError(t, h.Connect(inventoryFloodStream(ctx, "drops-b", tokenB, 64)))
+	afterB := h.IngestLogDropCounts()
+	assert.Equal(t, uint64(126), afterB.Deduped.Inventory,
+		"a second connection's drops must ADD to the first's. A per-stream counter set would report "+
+			"63 here, and the endpoint would then show one connection's worth of a fleet-wide flood.")
+	assert.Zero(t, afterB.Suppressed.Inventory,
+		"one repeating key costs one token per dedupe window, so nothing is budget-suppressed")
+	assert.Zero(t, afterB.Deduped.TaskLogPersist, "attributed to the right kind")
+}
+
 // The existing PersistFailure test's "a stale-epoch drop must stay silent" leg
 // counts one marker string, so it cannot see a DIFFERENTLY WORDED log line added
 // to the pgx.ErrNoRows arm. This one asserts the whole captured buffer is empty,
