@@ -486,3 +486,133 @@ func TestLimitListener_PerIPRefusalConsumesNoTotalSlot(t *testing.T) {
 	}
 }
 
+// newFakeConnAddr builds a fakeConn from an already-split host, so an IPv6
+// literal needs no bracket bookkeeping in the test body.
+func newFakeConnAddr(host string, port int) *fakeConn {
+	return &fakeConn{remote: &net.TCPAddr{IP: net.ParseIP(host), Port: port}}
+}
+
+// TestLimitListener_PerIPCapAggregatesAnIPv6Prefix.
+//
+// KEYING IPv6 ON THE EXACT /128 DOES NOT WEAKEN THE PER-IP CAP, IT VOIDS IT. The
+// smallest IPv6 allocation anybody gets - residential, cloud, colo - is a /64,
+// and every address in it is bindable by its holder at no cost. An attacker
+// keyed per /128 therefore presents 1024 distinct "source IPs" from ONE host,
+// each landing in its own bucket at count 1, so MaxPerIP never fires at all and
+// MaxTotal fills. RefusedPerIP stays at zero throughout, so the operator's
+// once-a-minute summary points at "the fleet outgrew the total cap" rather than
+// at the one host doing it.
+//
+// This matters more than it would for a rate limiter, because the per-IP cap is
+// the ONLY thing standing between MaxTotal and a fleet-wide denial: a total cap
+// with no working per-source cap is a shared bucket any single peer can drain.
+func TestLimitListener_PerIPCapAggregatesAnIPv6Prefix(t *testing.T) {
+	c1 := newFakeConnAddr("2001:db8:1:2::1", 1001)
+	c2 := newFakeConnAddr("2001:db8:1:2::2", 1002)
+	c3 := newFakeConnAddr("2001:db8:1:2:dead:beef:0:1", 1003) // same /64, third address
+	c4 := newFakeConnAddr("2001:db8:9:9::1", 1004)            // a DIFFERENT /64
+	l := Wrap(&fakeListener{conns: []net.Conn{c1, c2, c3, c4}}, Config{MaxTotal: 100, MaxPerIP: 2})
+
+	for i := 0; i < 2; i++ {
+		_, err := l.Accept()
+		require.NoError(t, err)
+	}
+
+	got, err := l.Accept()
+	require.NoError(t, err)
+	assert.Equal(t, c4.remote.String(), got.RemoteAddr().String(),
+		"three addresses out of ONE /64 must count as one source: they cost their holder nothing, so a "+
+			"/128 key makes the per-source cap unreachable and leaves the total cap as a shared bucket")
+	assert.Equal(t, int32(1), c3.closes.Load())
+	assert.Equal(t, uint64(1), l.Stats().RefusedPerIP,
+		"the refusal must be ATTRIBUTED to the per-source cap, or the operator summary blames fleet growth")
+	assert.Equal(t, int32(0), c4.closes.Load(),
+		"a genuinely different /64 is a genuinely different source and must still be admitted")
+}
+
+// TestLimitListener_PerIPCapDoesNotAggregateIPv4 pins the other side of the
+// asymmetry. IPv4 stays keyed on the exact /32: v4 addresses are scarce and
+// already shared through NAT, so aggregating them would collapse unrelated
+// operators onto one bucket. Prefix aggregation is a response to prefix
+// DELEGATION, which has no v4 equivalent.
+func TestLimitListener_PerIPCapDoesNotAggregateIPv4(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1001")
+	c2 := newFakeConn("10.0.0.2:1002")
+	c3 := newFakeConn("10.0.0.3:1003")
+	l := Wrap(&fakeListener{conns: []net.Conn{c1, c2, c3}}, Config{MaxTotal: 100, MaxPerIP: 1})
+
+	for i := 0; i < 3; i++ {
+		_, err := l.Accept()
+		require.NoError(t, err, "three DISTINCT v4 addresses are three distinct sources under a per-IP cap of 1")
+	}
+	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP)
+}
+
+// TestLimitListener_IPv4MappedIPv6KeysAsIPv4 keeps a dual-stack listener from
+// handing one host two buckets. Go normalises this before it reaches hostKey, so
+// this pins the Unmap rather than reproducing a live defect.
+func TestLimitListener_IPv4MappedIPv6KeysAsIPv4(t *testing.T) {
+	assert.Equal(t, hostKey(&net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 1}),
+		hostKey(&net.TCPAddr{IP: net.ParseIP("::ffff:10.0.0.1"), Port: 2}),
+		"a v4-mapped v6 peer is the same host as the v4 peer and must share its bucket")
+}
+
+// TestLimitListener_HostKeyFallsBackForANonIPAddress. Accept must key SOMETHING
+// for a listener whose addresses are not IP - a Unix socket, or a test fake -
+// rather than parsing its way to an empty key that silently merges every peer
+// into one bucket.
+func TestLimitListener_HostKeyFallsBackForANonIPAddress(t *testing.T) {
+	assert.Equal(t, "/run/relay.sock", hostKey(&net.UnixAddr{Name: "/run/relay.sock", Net: "unix"}))
+	assert.Equal(t, "", hostKey(nil))
+}
+
+// TestLimitListener_NilConnFromTheUnderlyingListenerDoesNotPanic.
+//
+// A net.Listener returning (nil, nil) is out of contract and no stdlib listener
+// does it - but Wrap is EXPORTED, and netlimit must not be the place a
+// misbehaving listener turns into a panic. grpc.Server.Serve does not recover
+// its accept goroutine, so a panic here kills the process. hostKey already
+// guards a nil net.Addr; this guards the conn that carries it.
+//
+// The nil is passed through untouched and consumes no accounting: it is not a
+// connection, so it cannot hold a slot and there is nothing to release.
+func TestLimitListener_NilConnFromTheUnderlyingListenerDoesNotPanic(t *testing.T) {
+	l := Wrap(&fakeListener{conns: []net.Conn{nil}}, Config{MaxTotal: 10, MaxPerIP: 10})
+
+	got, err := l.Accept()
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	l.mu.Lock()
+	total, size := l.total, len(l.perIP)
+	l.mu.Unlock()
+	assert.Equal(t, 0, total, "a nil conn is not a connection and must consume no slot")
+	assert.Equal(t, 0, size)
+}
+
+// TestLimitListener_BothCapsOffReturnsTheUnDERLYINGConnUnwrapped.
+//
+// README tells an operator fronting :9090 with a proxy to set both caps to 0.
+// Wrapping is not free: Accept returns a WRAPPING net.Conn, and grpc-go's
+// SetTCPUserTimeout type-asserts conn.(*net.TCPConn), so a wrapped conn silently
+// loses TCP_USER_TIMEOUT on Linux (see this package's doc comment). With both
+// caps disabled there is no slot to release, so the wrapper buys nothing and
+// costs that. Hand the real conn back instead.
+func TestLimitListener_BothCapsOffReturnsTheUnderlyingConnUnwrapped(t *testing.T) {
+	inner := newFakeConn("10.0.0.1:1001")
+	l := Wrap(&fakeListener{conns: []net.Conn{inner}}, Config{MaxTotal: 0, MaxPerIP: 0})
+
+	got, err := l.Accept()
+	require.NoError(t, err)
+	assert.Same(t, inner, got,
+		"with both caps disabled the accounting wrapper is pure cost: it cannot release a slot that was "+
+			"never reserved, and it hides the concrete *net.TCPConn that grpc-go needs to set "+
+			"TCP_USER_TIMEOUT on Linux")
+
+	// One cap on is enough to need the wrapper back.
+	inner2 := newFakeConn("10.0.0.1:1002")
+	l2 := Wrap(&fakeListener{conns: []net.Conn{inner2}}, Config{MaxTotal: 0, MaxPerIP: 1})
+	got2, err := l2.Accept()
+	require.NoError(t, err)
+	assert.NotSame(t, inner2, got2, "a live cap needs the wrapper, or Close can never release the slot")
+}

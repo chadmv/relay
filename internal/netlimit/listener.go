@@ -21,10 +21,14 @@
 // A real error from the underlying listener still propagates unchanged, or the
 // accept loop would spin on a dead socket.
 //
-// # Known consequence: TCP_USER_TIMEOUT is not set on Linux
+// # Known consequences of wrapping the conn: there are TWO
 //
 // Accept returns a WRAPPING net.Conn, because that Close is the only hook that
-// can release a slot. grpc-go's transport calls
+// can release a slot. Two things type-assert their way past an interface, so
+// both are lost. Neither is lost when both caps are disabled, because Accept
+// then returns the underlying conn unwrapped.
+//
+// FIRST, TCP_USER_TIMEOUT is not set on Linux. grpc-go's transport calls
 // internal/syscall.SetTCPUserTimeout(rawConn, kp.Timeout) on the conn it was
 // handed (internal/transport/http2_server.go:236-240); that function
 // type-asserts conn.(*net.TCPConn) and silently returns nil when the assertion
@@ -36,10 +40,18 @@
 // than from whether a write succeeded, so relay's Time=30s/Timeout=10s still
 // tears a dead peer down at 40s. Restoring TCP_USER_TIMEOUT means a build-tagged
 // file duplicating a grpc-go internal; that is its own slice.
+//
+// SECOND, channelz socket metrics go empty. channelz.GetSocketOption asserts
+// socket.(syscall.Conn), which this wrapper does not forward, so the per-socket
+// options it reports are absent. This is diagnostics-only and relay registers no
+// channelz service, so it costs nothing today. Forwarding SyscallConn would
+// restore it - and would NOT restore TCP_USER_TIMEOUT, which needs the concrete
+// *net.TCPConn and so cannot be recovered through any interface.
 package netlimit
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 )
@@ -88,6 +100,23 @@ func (l *Listener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A net.Listener returning (nil, nil) is out of contract and no stdlib
+		// listener does it, but Wrap is exported. Pass it through untouched
+		// rather than dereferencing it: grpc.Server.Serve does not recover its
+		// accept goroutine, so a panic here would kill the process. A nil conn
+		// is not a connection, so it holds no slot and has nothing to release.
+		if c == nil {
+			return c, nil
+		}
+		// Both caps disabled: there is no slot to reserve, so the accounting
+		// wrapper is pure cost. Returning the conn UNWRAPPED is what lets
+		// grpc-go's conn.(*net.TCPConn) assertion succeed and keeps
+		// TCP_USER_TIMEOUT on Linux for an operator who caps connections in a
+		// proxy instead (see the package doc). cfg is immutable after Wrap, so
+		// this branch cannot change under a live connection.
+		if l.cfg.MaxTotal <= 0 && l.cfg.MaxPerIP <= 0 {
+			return c, nil
+		}
 		key := hostKey(c.RemoteAddr())
 		if l.admit(key) {
 			return &conn{Conn: c, lis: l, key: key}, nil
@@ -101,11 +130,38 @@ func (l *Listener) Stats() Stats {
 	return Stats{RefusedTotal: l.refusedTotal.Load(), RefusedPerIP: l.refusedPerIP.Load()}
 }
 
-// hostKey is the HOST part of a peer address, never host:port. Every TCP
-// connection has a distinct source port, so keying on the full address would
-// make the per-IP cap a no-op that still passes a naive test. Same rule and same
-// fallback as api.clientIP (internal/api/ratelimit.go:66-72), so relay has one
-// notion of "peer" rather than two.
+// ipv6AggregationBits is the prefix length IPv6 peers are aggregated to. /64 is
+// not a tuning choice: it is the smallest allocation anybody receives, so it is
+// the smallest unit whose addresses are not all free to their holder.
+const ipv6AggregationBits = 64
+
+// hostKey is the SOURCE identity a per-source cap counts against. Never
+// host:port - every TCP connection has a distinct source port, so keying on the
+// full address would make the cap a no-op that still passes a naive test.
+//
+// IPv6 is aggregated to a /64; IPv4 is keyed on the exact address. The asymmetry
+// is the whole point. A /128 key is not a weaker per-source cap for IPv6, it is
+// no cap at all: the smallest IPv6 delegation is a /64, every address in it is
+// bindable by its holder for free, and each one lands in its own bucket at count
+// 1. MaxPerIP then never fires, RefusedPerIP stays at zero, and the operator
+// summary reports fleet growth rather than the single host responsible. IPv4 has
+// no equivalent - addresses are scarce and already shared through NAT - so
+// aggregating it would collapse unrelated operators into one bucket instead.
+//
+// THIS DELIBERATELY DIFFERS FROM api.clientIP (internal/api/ratelimit.go:66-72),
+// which keys on the exact address for both families, and the difference is not
+// an inconsistency to be tidied away. A login rate limiter and a connection cap
+// face different adversaries: the limiter meters a cost that is already bounded
+// per request and whose worst case is guessing attempts, while this bounds a
+// held resource whose worst case is a fleet-wide denial that persists for as
+// long as the attacker cares to hold it. Aggregation also has a cost - one
+// prefix's honest agents share one budget - and that cost is worth paying here
+// and not there.
+//
+// A v4-mapped v6 address is unmapped first, so a dual-stack listener cannot give
+// one host two buckets. Anything that is not an IP address at all (a Unix
+// socket, a test fake) falls back to the host string, which is a stable key even
+// though it is not an address.
 func hostKey(a net.Addr) string {
 	if a == nil {
 		return ""
@@ -113,9 +169,21 @@ func hostKey(a net.Addr) string {
 	s := a.String()
 	host, _, err := net.SplitHostPort(s)
 	if err != nil {
-		return s
+		host = s
 	}
-	return host
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	p, err := addr.Prefix(ipv6AggregationBits)
+	if err != nil {
+		return addr.String()
+	}
+	return p.String()
 }
 
 // admit reserves a slot, or counts a refusal. The total is checked first, so a
@@ -139,6 +207,15 @@ func (l *Listener) admit(key string) bool {
 // conn is the accounting wrapper. Close is the ONLY release hook, and grpc-go
 // never unwraps: the value Accept returns is stored as http2Server.conn and
 // every close path goes through it.
+//
+// ONE grpc-go PATH BYPASSES IT, by design: handleRawConn skips c.Close() when
+// the handshake returns credentials.ErrConnDispatched, because the credential
+// implementation has taken ownership of the conn (grpc@v1.80.0/server.go:
+// 1024-1026). That path is unreachable today - relay sets no grpc.Creds at all -
+// and ordinary TLS would be safe anyway, since tls.Conn.Close closes what it
+// wrapped. It matters only if a DISPATCHING handshaker is ever added here, and
+// it matters a lot: a slot leaked that way is never released, so the cap
+// ratchets down to a permanent lockout.
 type conn struct {
 	net.Conn
 	lis  *Listener
@@ -155,9 +232,18 @@ type conn struct {
 // (server.go:1027-1033) on the same conn. Without the once, that over-releases
 // and the counter drifts until the cap stops firing.
 //
-// The decrement happens AFTER the underlying Close returns: end the generation
-// before releasing the resource, so a slot is never handed out while its
-// predecessor's file descriptor is still open.
+// The decrement happens AFTER the underlying Close returns, and that ordering is
+// deliberate but is NOT an instance of CLAUDE.md's "end the generation before
+// releasing the resource". That rule is about a generation counter guarding
+// whether an async continuation is still current; there is no generation here
+// and no staleness guard, and this counter is a capacity semaphore, for which
+// releasing last is simply the fail-closed order: a slot is never handed out
+// while its predecessor's file descriptor is still open. Fewer live connections
+// than the cap says is safe; more is not.
+//
+// The invariant this type does satisfy is identity-checked teardown: the once
+// plus the captured c.key mean a Close releases exactly the slot this conn
+// reserved, exactly once, and can never decrement another key's count.
 func (c *conn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(func() { c.lis.release(c.key) })
