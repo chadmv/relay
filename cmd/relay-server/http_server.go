@@ -70,13 +70,25 @@ type httpServerDeps struct {
 	//   - Does buildHTTPServer forward what it was GIVEN? That is executable and
 	//     was not checked. Replacing the assignment below with a freshly
 	//     constructed worker.NewHandler compiled, vetted clean and left all three
-	//     packages green. It is now
+	//     packages green. It is now guarded TWICE, and the two are not the same
+	//     strength. The DEFAULT lane rejects the crude form: the wiredDep table's
+	//     countersAssignmentSources walk requires every s.Counters assignment
+	//     here to be spelled `d.<field>`, so a substituted local or a helper call
+	//     is RED with no container (measured). What that cannot see is a
+	//     substitution that still LOOKS like a deps field, and the numbers not
+	//     moving at all; that is
 	//     TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers,
 	//     which floods a real registered stream and reads the numbers back
 	//     through the real route - the same treatment
 	//     TestBuildHTTPServer_ServesTheRealListenersCounters gives grpcAdmission.
 	//     It is in the INTEGRATION lane, because moving an ingest counter needs
 	//     Connect's message loop and therefore a Postgres round trip.
+	//
+	// IT FEEDS TWO SECTIONS, ingest_log_budget and task_log_fence, which are
+	// different nouns counted on different branches of the same `if` in
+	// handleTaskLog. counters_wiring_test.go's table names both against this one
+	// field; that is why its cardinality relation counts SECTIONS rather than deps
+	// fields.
 	agentHandler *worker.Handler
 }
 
@@ -131,8 +143,16 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	if d.grpcAdmission != nil {
 		s.Counters.GRPCAdmission = d.grpcAdmission
 	}
+	// TWO SECTIONS, ONE OBJECT, AND THAT IS NOT THE WIDENED INTERFACE
+	// IngestLogBudgetSource's comment forbids. api.CounterSources keeps a separate
+	// nil-able field per section, so each is a per-SECTION fact in the payload and
+	// a future source could satisfy one and not the other. What is shared here is
+	// the WIRING: both controls live on this one *worker.Handler and neither exists
+	// without it, so one nil filter is the honest shape and two identical `if`s
+	// would imply an independence this deployment does not have.
 	if d.agentHandler != nil {
 		s.Counters.IngestLogBudget = d.agentHandler
+		s.Counters.TaskLogFence = d.agentHandler
 	}
 
 	return &http.Server{Addr: d.addr, Handler: s.Handler()}

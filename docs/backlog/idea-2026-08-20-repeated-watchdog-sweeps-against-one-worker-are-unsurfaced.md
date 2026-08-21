@@ -60,7 +60,7 @@ with a wedged task can be handed more work"); this item is the observability hal
 
 - [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]] is scoped to `handleTaskLog`'s
   `pgx.ErrNoRows` arm - a **chunk rejected by the fence** - and its acceptance criteria are about a
-  rejection counter.
+  rejection counter. (**Closed 2026-08-21** by slice 3.)
 - [[idea-2026-08-15-ingest-log-suppression-is-uncounted]] is scoped to `ingestLogLimiter.allow`'s two
   `return false` paths - a **log line dropped** - across five kinds and three handlers.
   (**Closed 2026-08-21** by slice 2.)
@@ -200,15 +200,9 @@ item should read for.
    failed. **This section has the same problem and worse**, because `swept_by_worker` is a map: copy
    `TestServerCounters_WiredButZeroIngestSectionIsStillPresent`, not the `grpc_admission` one.
 
-**THE CARDINALITY CHECK WILL BE RED BEFORE ANYTHING ELSE IS.** `counters_wiring_test.go` asserts that
-the number of **distinct** `httpServerDeps` fields named by the `wiredDep` table equals
-`reflect.TypeOf(api.CounterSources{}).NumField()`. Slice 3 lands a third `CounterSources` field on the
-**same** `*worker.Handler`, so that relation is already under pressure before this item is reached; by
-slice 4 the table's shape may have changed. **Read the check's own comment first** - it records that
-counting rows rather than distinct fields was proved evadable in two steps, and that a duplicated row
-drops the field it displaces out of the plain-identifier check, the derives-from check and the
-assigned-exactly-once check at a stroke. Whatever slice 3 does with it, this slice inherits and must
-not relax it.
+**THE CARDINALITY CHECK WILL BE RED BEFORE ANYTHING ELSE IS.** (Superseded in mechanism by the slice 3
+section below - the relation was rewritten and the RED now comes from an EXECUTED test. The rule "do not
+relax it, and do not satisfy it by padding a list" is unchanged and is what carries forward.)
 
 **The two gaps slice 2 shipped and had to be told about. Neither may recur here:**
 
@@ -244,6 +238,112 @@ decision and the entire fence-rejection arm, and the section documents that in t
 equivalent sentence here is that a **watchdog** sweep count says nothing about agent-written
 `timed_out` rows, which is the writer ambiguity this item has carried since it was filed - the counter
 does not resolve it, it side-steps it, and the payload has to say so.
+
+## 2026-08-21 (slice 3): the forward guidance the last review produced. THIS IS THE MOST IMPORTANT SECTION FOR SCOPING.
+
+`docs/retros/2026-08-21-silent-drop-observability-slice3.md` and
+`docs/superpowers/plans/2026-08-21-silent-drop-observability-slice3.md`. Slice 3 shipped
+`task_log_fence`, so **three of four sections exist and this item is the last one.** Nothing in it is
+blocked. Four things changed that this item must scope around, and the first is the one that will cost
+an afternoon if it is discovered during implementation.
+
+### 1. `swept_by_worker` reddens the payload guard by CONSTRUCTION, and the allow-list entry needs a hard cardinality bound
+
+`TestCounterPayloadCarriesNoIdentifiers` (`internal/api/server_counters_test.go`) walks
+`serverCountersResponse`'s type tree and calls **`t.Fatalf` on any leaf that is not a struct and not an
+unsigned integer**. Its message names the reason:
+
+> a string, a map key, a slice element or a signed value is where a caller-supplied byte or an
+> unbounded cardinality gets in - this repo has already shipped an attacker-keyed counter once
+
+**A `worker_id`-keyed section is a `map`. There is no version of it that passes without an explicit
+`counterPayloadAllowList` entry**, and the same is true of the JSON-bytes walk next door. So this is not
+a risk to manage, it is a required, argued artifact that ships in the same commit. Budget for it.
+
+**The security question to settle BEFORE implementation, because it splits in two and only one half is
+satisfied:**
+
+- **The caller-supplied-byte half is SATISFIED.** Worker ids are server-assigned UUIDs, re-encoded
+  canonically; a peer does not choose their bytes. `typeOK`/`jsonOK` should still *check* that (key
+  parses as a canonical uuid) rather than assert it - the exemption is granted to a SHAPE, and slice 1's
+  finding was that an exemption granted to a name is an exemption from every question.
+- **The unbounded-cardinality half is NOT.** With `RELAY_ALLOW_AUTO_ENROLL` on, a peer can cause
+  **worker rows to be created** ([[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]], open),
+  and therefore can drive the number of distinct keys in a map that an admin-facing payload serialises on
+  every request. Server-assigned does not mean server-limited. The 256-cap plus `sweptOverflow` design
+  above is the answer to this and it must be presented as such - **a hard bound argued inside
+  `typeOK`/`jsonOK`, not a comment beside them** - because the exemption predicates are the only thing
+  in the payload machinery that will still be checking this in a year.
+- Remember the residual: exemptions are **non-descending**. A predicate that merely accepts
+  `map[string]uint64` inspects nothing inside it. Descend, check key shape, check value kind, check
+  `len`.
+
+### 2. README already says "there is no per-worker split and there will not be one" - and its REASON does not transfer
+
+`README.md:1288`, scoped to `ingest_log_budget`:
+
+> The five keys name the log site, not the worker: **there is no per-worker split and there will not be
+> one**, because keying these counters on anything the recv goroutine would have to look up needs a
+> shared map write on the one path that must stay lock-free.
+
+That sentence is correct **and its reason is specific to the gRPC recv goroutine**. This item's counter
+is written by `SweepOnce` on the **scheduler goroutine**, under the `Watchdog`'s own mutex, on a periodic
+path with a Postgres round trip already in it. None of the stated reason applies.
+
+**Slice 4 must say so explicitly, in README, next to whichever bullet it adds** - or a reader lands on
+two adjacent sections of one payload where one says per-worker keying will never happen and the other
+does it, with nothing reconciling them. That is precisely the "wrong prose about correct code" class
+this project has recorded for fourteen consecutive iterations, and it would be self-inflicted by the
+slice that had the most warning.
+
+### 3. The wiring relation was rewritten AGAIN, and the shape of the predicted RED changed
+
+The `wiredDep` `sections []string` column that slice 3's plan introduced was **proved decorative by both
+review lenses** and has been removed. Nothing ever read those strings against any code. Two measured
+evasions: swapping which row claimed which section left the package `ok`, and **a fourth
+`CounterSources` field wired end to end EXCEPT for the `s.Counters.X = d.x` assignment went green
+module-wide once one string was appended to an existing row.** That failure scenario was, literally,
+this slice.
+
+What replaced it, and what this item now hits:
+
+- **`TestBuildHTTPServer_EverySourceFieldProducesAServedSection` (EXECUTED).** Builds a real server with
+  every deps source wired and counts served top-level keys against `1 + NumField(api.CounterSources)`.
+  A fourth `CounterSources` field makes this RED, and **it cannot be satisfied by editing a fixture
+  alone**: the source must be passed, `buildHTTPServer` must assign it, and `handleServerCounters` must
+  render it, before the count comes out right. That is the check to expect first.
+- **`countersAssignmentSources` inside `TestServerCountersIsWiredByMain`.** It reads
+  `buildHTTPServer`'s own assignments and requires every deps field reaching `s.Counters` to have a
+  `wiredDep` row. It **fails closed**: the assignment must be spelled `d.<field>` exactly, so reaching a
+  section through a local, a helper or a conversion is RED. This item adds a real new deps field
+  (`*scheduler.Watchdog`), so it needs a real new row - `{"watchdog", "<constructor>", "..."}` - and the
+  `distinct == len(deps)` equality still forbids a duplicated row.
+
+**Do not relax either.** And take the lesson with them: **a guard's failure message must be read as an
+instruction, and the cheapest compliance with it must not be the defect.** The removed relation's message
+said "EVERY SECTION needs to be named by exactly one row", and following that literally *was* the
+evasion.
+
+### 4. Two prose rules that apply directly to this section's own comments
+
+- **Write "declined, and here is the price", never "impossible".** Slice 3's headline finding: the item
+  and the joint spec both said per-reason splitting was "structurally impossible"; the premise was true
+  and the word was false, and a one-round-trip variant existed at a stated price. **This item has the
+  exact same shape waiting for it** - the DB-query route is *rejected with a revisit condition*, not
+  impossible, and the writer ambiguity is *side-stepped*, not unresolvable. Write both that way, with
+  the price, in the code comment where the counter is declared.
+- **Say what the number does NOT cover in the same place it says what it does**, and make sure a negative
+  assertion in a test is provable through a projection only the claimed path produces. Slice 3 shipped a
+  success leg that established nothing because every other arm produced the same observation.
+
+### 5. A new sibling counts the OTHER END of the same event
+
+[[idea-2026-08-21-handletaskstatus-fence-rejections-are-uncounted]] proposes counting fence rejections
+in `handleTaskStatus`, whose live non-adversarial cause **is this watchdog bumping the epoch**. A sweep
+counted here and a discarded terminal report counted there are the coordinator's view and the agent's
+view of one event. **They will not reconcile** - the watchdog also sweeps tasks whose agents are gone and
+never report at all - so whichever ships second must say how the two numbers relate, or an operator will
+try to subtract them.
 
 ## Proposal
 
@@ -310,6 +410,20 @@ against the code rather than inheriting it.
   `grpc_admission` scalar loop, because this section's `counts` half contains a map and an object.
 - **(2026-08-21, from slice 2) The section documents what it does NOT count** - specifically that an
   agent-written `timed_out` contributes nothing - in the payload's own documentation and in README.
+- **(2026-08-21, from slice 3) The `swept_by_worker` allow-list entry carries a HARD CARDINALITY BOUND
+  enforced inside `typeOK`/`jsonOK`**, not merely described beside them, and the entry's `why` states
+  both halves of the security question: worker ids are server-assigned (so no caller-supplied bytes) but
+  their COUNT is peer-drivable under `RELAY_ALLOW_AUTO_ENROLL` (so the bound is the control).
+- **(2026-08-21, from slice 3) README reconciles this section with the `ingest_log_budget` bullet's
+  "there is no per-worker split and there will not be one"**, by naming why that reason (a shared map
+  write on the lock-free recv goroutine) does not apply to a scheduler-goroutine counter.
+- **(2026-08-21, from slice 3) The new `httpServerDeps.watchdog` field gets its own `wiredDep` row**,
+  and `TestBuildHTTPServer_EverySourceFieldProducesAServedSection` goes green only because the source is
+  passed, assigned AND rendered - never by editing a fixture or padding a list. Neither guard is
+  relaxed.
+- **(2026-08-21, from slice 3) The DB-query rejection and the writer ambiguity are written as
+  "declined, and here is the price", never as "impossible"**, in the comment where the counter is
+  declared.
 
 ## Related
 
@@ -320,26 +434,35 @@ against the code rather than inheriting it.
   operator remedy)
 - **The read surface, shipped 2026-08-21**: `internal/api/server_counters.go` (the payload contract for
   all four sections, the import-direction note, the typed-nil note),
-  `internal/api/server_counters_test.go` (`counterPayloadExemption` and the two payload walks),
-  `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (`buildHTTPServer`, the wiring
-  boundary)
-- **The section pattern, established by two consumers**: `internal/worker/ingest_log_counters.go`,
-  `internal/api/server_counters.go` (`IngestLogBudgetSource`),
+  `internal/api/server_counters_test.go` (`counterPayloadAllowList`, `counterPayloadExemption`, and the
+  two payload walks - read `TestCounterPayloadCarriesNoIdentifiers`'s `default:` branch before designing
+  the map), `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (`buildHTTPServer`,
+  the wiring boundary)
+- **The section pattern, established by three consumers**: `internal/worker/ingest_log_counters.go`,
+  `internal/api/server_counters.go` (`IngestLogBudgetSource`, `TaskLogFenceSource`),
   `internal/api/server_counters_test.go` (`TestIngestLogKindCountsPublishesEveryWorkerSideField`,
-  `TestServerCounters_WiredButZeroIngestSectionIsStillPresent`),
-  `cmd/relay-server/counters_wiring_test.go` (the `wiredDep` table and its DISTINCT-FIELDS block),
+  `TestServerCounters_WiredButZeroIngestSectionIsStillPresent`,
+  `TestTaskLogFenceSourceReturnsAScalar`),
+  `cmd/relay-server/counters_wiring_test.go`
+  (`TestBuildHTTPServer_EverySourceFieldProducesAServedSection` - the EXECUTED completeness relation that
+  will be this item's first RED - the `wiredDep` table, and `countersAssignmentSources`),
   `cmd/relay-server/grpc_admission_e2e_integration_test.go`
-- Siblings on the same shape, to be shipped separately:
-  [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]],
+- Siblings on the same shape, both now shipped:
+  [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]] (**closed 2026-08-21**),
   [[idea-2026-08-15-ingest-log-suppression-is-uncounted]] (**closed 2026-08-21**)
+- The other end of the same event, filed 2026-08-21:
+  [[idea-2026-08-21-handletaskstatus-fence-rejections-are-uncounted]]
 - Adjacent, on what one sweep should say, and **to be folded into this slice**:
   [[bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick]]
 - Why the per-worker map must be capped: [[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]]
+- The wiring guard this section adds a row to, and its own open generalization:
+  [[idea-2026-08-14-generalize-the-env-to-field-wiring-guard]]
 - The joint spec and the slices that settled the mechanism:
   `docs/superpowers/specs/2026-08-21-silent-drop-observability.md` (sections 3.1, 7.2, 10.4),
   `docs/superpowers/plans/2026-08-21-silent-drop-observability-slice1.md` (R2, the import direction),
   `docs/retros/2026-08-21-silent-drop-observability-slice1.md`,
-  `docs/retros/2026-08-21-silent-drop-observability-slice2.md`
+  `docs/retros/2026-08-21-silent-drop-observability-slice2.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice3.md`
 - The slice that created this gap: `docs/superpowers/specs/2026-08-20-coordinator-stale-task-watchdog.md`
   (section 11, "the freed slot is optimistic"),
   `docs/retros/2026-08-20-coordinator-stale-task-watchdog.md`
@@ -366,3 +489,10 @@ reporting shipped a counter that could silently stop counting - a correct new ki
 side and published under no JSON key on the other, with every package green. This section has the same
 shape with the packages swapped and one extra hazard: `sweptOverflow` exists precisely to make a loss
 visible, so a `sweptOverflow` that reaches no JSON key is the defect eating its own remedy.
+
+**2026-08-21 third addendum, from slice 3:** this is now the only slice left and it remains the hardest
+one. Nothing is blocked - the read surface, the section pattern, the typed-nil filter and the wiring
+relation are all settled and none of them needs designing. What is untouched by all three shipped slices
+is exactly what this item has always carried: the inverted import direction, the legitimately-disabled
+control, the writer ambiguity, and the only unbounded-in-principle key in the cluster. Scope the
+`swept_by_worker` exemption BEFORE writing code; it is a required artifact, not a risk.
