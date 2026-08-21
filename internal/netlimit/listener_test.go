@@ -392,3 +392,97 @@ func TestLimitListener_ConcurrentAcceptAndCloseKeepsTheCountersConsistent(t *tes
 			"lost and the cap has become a permanent lockout")
 	assert.Equal(t, 0, size, "every per-IP entry must be gone once its count reaches zero")
 }
+
+// TestLimitListener_PerIPRefusalConsumesNoPerIPSlot.
+//
+// A REFUSAL MUST COST THE REFUSED PEER NOTHING BUT THE REFUSAL. If the per-IP
+// refusal branch also incremented the map it guards, the first peer to hit its
+// cap would be locked out FOREVER - the count could never fall back below the
+// cap, because a release only ever happens for a conn that was admitted. That is
+// strictly worse than having no cap, and it is also unbounded memory growth
+// keyed on attacker-chosen source addresses, which is the very defect
+// TestLimitListener_ReleasedIPIsRemovedFromTheMap claims to prevent.
+//
+// The mirror of this on the TOTAL branch was already pinned, by the trailing
+// total assertion in TestLimitListener_TotalCapRefusesAcrossDistinctIPs. This
+// arm was not, and `l.perIP[key]++` in the per-IP refusal branch survived the
+// entire suite.
+//
+// MaxTotal is deliberately far above MaxPerIP: the total is checked FIRST, so a
+// tight total would shadow the per-IP branch and this test would never reach the
+// code it exists to cover.
+func TestLimitListener_PerIPRefusalConsumesNoPerIPSlot(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1001")
+	c2 := newFakeConn("10.0.0.1:1002")
+	c3 := newFakeConn("10.0.0.1:1003") // over the per-IP cap
+	c4 := newFakeConn("10.0.0.1:1004")
+	fl := &fakeListener{conns: []net.Conn{c1, c2, c3}}
+	l := Wrap(fl, Config{MaxTotal: 100, MaxPerIP: 2})
+
+	got1, err := l.Accept()
+	require.NoError(t, err)
+	_, err = l.Accept()
+	require.NoError(t, err)
+
+	_, err = l.Accept()
+	require.ErrorIs(t, err, errDrained, "c3 is over the per-IP cap, so the fake drains behind it")
+	require.Equal(t, uint64(1), l.Stats().RefusedPerIP)
+
+	// White-box: the refusal moved no accounting at all.
+	l.mu.Lock()
+	total, perIP := l.total, l.perIP["10.0.0.1"]
+	l.mu.Unlock()
+	assert.Equal(t, 2, perIP,
+		"a REFUSED conn must not be counted against its source IP: it will never be released, so the "+
+			"count could never fall back under the cap and that host would be locked out permanently")
+	assert.Equal(t, 2, total, "a per-IP refusal must not consume a slot in the fleet-wide total either")
+
+	// Behavioural: that is what "locked out permanently" means. Releasing an
+	// admitted slot must let the same host straight back in.
+	require.NoError(t, got1.Close())
+	fl.conns = append(fl.conns, c4)
+	got4, err := l.Accept()
+	require.NoError(t, err)
+	require.NotNil(t, got4)
+	assert.Equal(t, c4.remote.String(), got4.RemoteAddr().String(),
+		"after a refusal AND a release, the same source IP must be admitted again - if it is not, hitting "+
+			"the cap once is a permanent lockout for that host")
+	assert.Equal(t, int32(0), c4.closes.Load())
+}
+
+// TestLimitListener_PerIPRefusalConsumesNoTotalSlot is the other half: a peer
+// refused by the PER-IP cap must not eat the FLEET budget, or one noisy host
+// ratchets the total cap down to zero and refuses every other source.
+//
+// MaxTotal is tight here on purpose, but still loose enough that the per-IP
+// branch is the one that fires for c3.
+func TestLimitListener_PerIPRefusalConsumesNoTotalSlot(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1001")
+	c2 := newFakeConn("10.0.0.1:1002")
+	c3 := newFakeConn("10.0.0.1:1003") // refused: per-IP cap, NOT the total
+	c4 := newFakeConn("10.0.0.2:1004")
+	c5 := newFakeConn("10.0.0.3:1005")
+	fl := &fakeListener{conns: []net.Conn{c1, c2, c3}}
+	l := Wrap(fl, Config{MaxTotal: 4, MaxPerIP: 2})
+
+	for i := 0; i < 2; i++ {
+		_, err := l.Accept()
+		require.NoError(t, err)
+	}
+	_, err := l.Accept()
+	require.ErrorIs(t, err, errDrained)
+	require.Equal(t, uint64(1), l.Stats().RefusedPerIP, "c3 must be refused by the PER-IP cap, not the total")
+	require.Equal(t, uint64(0), l.Stats().RefusedTotal)
+
+	// Two slots were consumed, not three, so two remain under MaxTotal: 4.
+	fl.conns = append(fl.conns, c4, c5)
+	for _, want := range []*fakeConn{c4, c5} {
+		got, err := l.Accept()
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, want.remote.String(), got.RemoteAddr().String(),
+			"a per-IP refusal must leave the fleet budget untouched; if it charged the total, this "+
+				"unrelated source would be refused and one host could ratchet the total cap to zero")
+	}
+}
+
