@@ -1100,7 +1100,7 @@ func (q *Queries) RequeueTask(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
-const requeueTaskByID = `-- name: RequeueTaskByID :exec
+const requeueTaskByID = `-- name: RequeueTaskByID :execrows
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -1108,22 +1108,78 @@ SET status = 'pending',
     started_at = NULL,
     finished_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status IN ('dispatched', 'running')
+WHERE id = $1
+  AND assignment_epoch = $2
+  AND worker_id = $3
+  AND status IN ('dispatched', 'running')
 `
 
-// Revert a single ASSIGNED task back to 'pending': the WHERE clause matches only
-// `dispatched` and `running`, so a task that has already finished - or that was
-// already requeued by someone else - is left exactly as it is.
+type RequeueTaskByIDParams struct {
+	ID              pgtype.UUID `json:"id"`
+	AssignmentEpoch int32       `json:"assignment_epoch"`
+	WorkerID        pgtype.UUID `json:"worker_id"`
+}
+
+// Revert a single ASSIGNED task back to 'pending', on FOUR predicates. Each
+// answers a different question, none is redundant with the others, and none may
+// be deleted:
+//   - id               - WHICH ROW.
+//   - assignment_epoch - IS THE CALLER'S VIEW STILL CURRENT? (currency)
+//   - worker_id        - IS THIS THE CALLER'S OWN ASSIGNMENT? (identity)
+//   - status           - IS THE ROW STILL ASSIGNED AT ALL, i.e. not terminal.
+//
 // Used by the reconcile path when the coordinator has a task assigned that the
-// agent didn't report as running. Candidates come from GetActiveTasksForWorker,
-// which filters on the same two statuses, so the predicate is normally redundant
-// with the caller; it is the backstop for the window between that read and this
-// write, and it is what keeps reconcile from being able to resurrect a terminal
-// task.
-// Bumps assignment_epoch so a late update from the prior assignment is fenced out.
-// The bump is inside the same UPDATE as the WHERE, so it happens only for rows
-// that actually matched - the "conditionally end the assignment" branch of the
-// epoch fence, never an unconditional bump.
+// agent didn't report as running (internal/worker/handler.go,
+// reconcileRunningTasks). Candidates come from GetActiveTasksForWorker, which
+// reads the id and the epoch under one snapshot; the worker id is the
+// connection's own, resolved at registration and never taken from the wire.
+//
+// WHAT THE STATUS ALLOW-LIST ALONE DOES NOT COVER, and what this comment used to
+// claim it did. It called the allow-list "the backstop for the window between
+// that read and this write". It is the backstop for exactly ONE thing that can
+// happen in that window - the task FINISHING - and it was silent about the more
+// damaging one: the task being requeued by somebody else and RE-DISPATCHED to a
+// second worker. A fresh assignment is 'dispatched', which the allow-list
+// admits, so a reconcile walking a stale snapshot used to tear a live task off a
+// worker that had only just been given it, bump the epoch, and leave the first
+// agent's subprocess running with every message it sent afterwards fenced out in
+// silence - duplicate execution, with no log line anywhere. Two overlapping
+// registrations of one worker reach that, and so does a grace timer firing just
+// before finishRegister cancels it. See
+// bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence.
+//
+// The epoch predicate closes it: a re-dispatch bumps assignment_epoch, so the
+// stale caller's epoch no longer matches and zero rows move. The worker
+// predicate closes it independently AND closes what the epoch cannot, because
+// THE EPOCH ESTABLISHES CURRENCY, NOT IDENTITY: a matching epoch proves the
+// caller's generation is current, never that the caller was entitled to end it.
+// Keep all four.
+//
+// The worker_id comparison must stay a plain `=`, never IS NOT DISTINCT FROM,
+// for exactly the reason spelled out at UpdateTaskStatus: tasks.worker_id is
+// NULLABLE and a zero-value pgtype.UUID binds SQL NULL, so `=` makes a caller
+// that lost its identity fail CLOSED instead of matching an unassigned row. Do
+// not "fix the NULL bug" here either. The status allow-list happens to make that
+// state unreachable today - a row with a NULL worker_id is 'pending' or terminal,
+// and neither is admitted - which is why
+// TestRequeueTaskByID_NullWorkerIDDoesNotMatchANullArgument has to PLANT the row
+// it tests. That is a second guarantee behind the first, not a reason to relax
+// the first.
+//
+// Bumps assignment_epoch so a late update from the prior assignment is fenced
+// out. The bump is inside the same UPDATE as the WHERE, so it happens only for
+// rows that actually matched - the "conditionally end the assignment" branch of
+// the epoch fence, never an unconditional bump.
+//
+// :execrows, not :exec, so the caller counts MATCHES rather than ATTEMPTS. Zero
+// rows is a NORMAL, CORRECT outcome here - it means another writer ended this
+// assignment first - and it is deliberately neither logged nor counted: this
+// runs inside finishRegister, ahead of the connection's ingestLogLimiter, so the
+// site has no budget to spend, and Handler.Metrics is a utilization ring buffer
+// that is not even Activated yet at that point. The general gap is tracked by
+// idea-2026-08-14-tasklog-fence-rejection-is-unobservable; do not close it here
+// with a one-off.
+//
 // assigned_at is nulled alongside worker_id. Every statement in this file that
 // nulls worker_id does the same, and ClaimTaskForWorker is the only statement
 // that sets either.
@@ -1146,10 +1202,16 @@ WHERE id = $1 AND status IN ('dispatched', 'running')
 //	    started_at = NULL,
 //	    finished_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE id = $1 AND status IN ('dispatched', 'running')
-func (q *Queries) RequeueTaskByID(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, requeueTaskByID, id)
-	return err
+//	WHERE id = $1
+//	  AND assignment_epoch = $2
+//	  AND worker_id = $3
+//	  AND status IN ('dispatched', 'running')
+func (q *Queries) RequeueTaskByID(ctx context.Context, arg RequeueTaskByIDParams) (int64, error) {
+	result, err := q.db.Exec(ctx, requeueTaskByID, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const requeueWorkerTasks = `-- name: RequeueWorkerTasks :many

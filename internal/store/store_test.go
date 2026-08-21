@@ -486,7 +486,7 @@ func TestReconciliationQueries(t *testing.T) {
 		Env: []byte(`{}`), Requires: []byte(`{}`),
 	})
 	require.NoError(t, err)
-	_, err = q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
+	claimedA, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: taskA.ID, WorkerID: pgtype.UUID{Bytes: w1.ID.Bytes, Valid: true},
 	})
 	require.NoError(t, err)
@@ -524,7 +524,11 @@ func TestReconciliationQueries(t *testing.T) {
 	assert.Len(t, candidates, 2)
 
 	// RequeueTaskByID: requeue task A; it should be pending with worker_id cleared.
-	require.NoError(t, q.RequeueTaskByID(ctx, taskA.ID))
+	requeuedA, err := q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+		ID: taskA.ID, AssignmentEpoch: claimedA.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), requeuedA, "the assignee's own requeue at the current epoch must match")
 	a, err := q.GetTask(ctx, taskA.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "pending", a.Status)
@@ -708,7 +712,11 @@ func TestRequeueTaskByID_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	require.NoError(t, q.RequeueTaskByID(ctx, task.ID))
+	n, err := q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "the fenced requeue must move exactly one row")
 
 	got, err := q.GetTask(ctx, task.ID)
 	require.NoError(t, err)

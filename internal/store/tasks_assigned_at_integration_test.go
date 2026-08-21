@@ -134,7 +134,10 @@ func TestAssignedAtIsClearedWhereverWorkerIDIs(t *testing.T) {
 	t.Run("RequeueTaskByID", func(t *testing.T) {
 		f := newAssignedFixture(t)
 		task := f.claimedAt(t, "rqid", old)
-		require.NoError(t, f.q.RequeueTaskByID(f.ctx, task.ID))
+		_, err := f.q.RequeueTaskByID(f.ctx, store.RequeueTaskByIDParams{
+			ID: task.ID, AssignmentEpoch: task.AssignmentEpoch, WorkerID: f.w.ID,
+		})
+		require.NoError(t, err)
 		after := f.get(t, task.ID)
 		assert.False(t, after.WorkerID.Valid)
 		assert.False(t, after.AssignedAt.Valid, "RequeueTaskByID must clear assigned_at")

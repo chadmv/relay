@@ -511,8 +511,20 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 	}
 
 	// Anything server has but agent didn't report → requeue.
+	//
+	// BOTH FENCES ARE ALREADY IN HAND HERE, which is why the statement can demand
+	// them. serverSet's VALUE is the assignment_epoch GetActiveTasksForWorker read
+	// under the same snapshot as the id, and workerID is this connection's own
+	// authenticated worker, resolved at registration and never taken from the
+	// wire. Passing them is what stops a reconcile walking a STALE snapshot from
+	// tearing a task off the worker it was re-dispatched to in the meantime - see
+	// the statement's own comment in query/tasks.sql.
+	//
+	// The int32 conversion is lossless: serverSet widened tasks.assignment_epoch
+	// (int32) to int64 above only so the reported-task loop can compare it against
+	// proto's int64 RunningTask.Epoch.
 	requeued := 0
-	for taskIDStr := range serverSet {
+	for taskIDStr, srvEpoch := range serverSet {
 		if agentSet[taskIDStr] {
 			continue
 		}
@@ -520,8 +532,21 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 		if err := tID.Scan(taskIDStr); err != nil {
 			continue
 		}
-		_ = h.q.RequeueTaskByID(ctx, tID)
-		requeued++
+		// n counts MATCHES, not attempts. Zero is normal and CORRECT post-fence: it
+		// means another writer ended this assignment first, and whoever did that
+		// already woke the dispatcher, so there is nothing left here to wake it for.
+		//
+		// THE ERROR IS DROPPED ON PURPOSE, exactly as it was before this fence
+		// existed. This runs inside finishRegister, BEFORE Connect allocates this
+		// connection's ingestLogLimiter, so the site has no log budget at all -
+		// the same rule as the unparseable-id branch above. n is 0 on error, so a
+		// failed statement can neither inflate the count nor fake a dispatch wake.
+		n, _ := h.q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+			ID:              tID,
+			AssignmentEpoch: int32(srvEpoch),
+			WorkerID:        workerID,
+		})
+		requeued += int(n)
 	}
 
 	// Wake the scheduler so requeued tasks are dispatched immediately.

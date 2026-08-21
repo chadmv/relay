@@ -58,8 +58,13 @@ func TestRequeueTaskByID_DoesNotTearOffAFreshAssignment(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	// B requeues first. This is the LEGITIMATE call and it must succeed.
-	require.NoError(t, q.RequeueTaskByID(ctx, task.ID))
+	// B requeues first, carrying the epoch and worker it read. This is the
+	// LEGITIMATE call and it must succeed.
+	nB, err := q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), nB, "B's requeue is current and must move the row")
 
 	// The dispatcher claims it for a DIFFERENT worker.
 	redispatched, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
@@ -68,8 +73,13 @@ func TestRequeueTaskByID_DoesNotTearOffAFreshAssignment(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int32(3), redispatched.AssignmentEpoch)
 
-	// C writes, still holding epoch 1 and worker W1. It must move nothing.
-	require.NoError(t, q.RequeueTaskByID(ctx, task.ID))
+	// C writes, still holding epoch 1 and worker W1 from its own snapshot. It must
+	// move nothing: the epoch is stale AND the task belongs to somebody else now.
+	nC, err := q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), nC, "a stale reconcile must move zero rows")
 
 	after, err := q.GetTask(ctx, task.ID)
 	require.NoError(t, err)
