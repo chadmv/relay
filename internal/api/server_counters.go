@@ -1,0 +1,170 @@
+package api
+
+import (
+	"net/http"
+	"time"
+
+	"relay/internal/netlimit"
+)
+
+// GET /v1/server/counters is relay's ONE process-lifetime counter surface. It
+// exists because relay ships several controls that stop something bad quietly -
+// a connection cap that refuses, a fence that drops a forged log chunk, a
+// limiter that suppresses a repeating line, a watchdog that ends an assignment -
+// and the operator-visible signature of an attack against a silent control is
+// FEWER log lines than normal, which is indistinguishable from a healthy fleet.
+// See docs/superpowers/specs/2026-08-21-silent-drop-observability.md.
+//
+// THE CONTRACT, fixed for all four sections before the first one shipped so that
+// no later slice reshapes a payload that is already in the wild:
+//
+//   - "counts" are MONOTONIC since started_at. "levels" are CURRENT. A reporter
+//     may consult counts to decide whether to speak and may NEVER consult
+//     levels: a level moves constantly, so a reporter that compared one would
+//     speak every interval forever.
+//   - An unwired section is ABSENT, never zero-valued. A section of zeros means
+//     "this control ran and stopped nothing"; an absent section means "this
+//     build or this replica does not have that control wired". Collapsing the
+//     two reintroduces the very defect this payload exists to fix, inside the
+//     payload.
+//   - started_at is ALWAYS present, including when every section is absent. A
+//     restart zeroes everything, so "the counter stopped moving" and "the
+//     process restarted" are otherwise identical.
+//   - PER REPLICA, per process, best effort, zeroed by a restart. Counts from
+//     two replicas may be added; levels may NOT (max_per_source in particular
+//     does not sum into anything meaningful). No persistence, no history, no
+//     rates, no alerting - a poller derives rates itself.
+//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. started_at is the ONE
+//     exemption today, and it is the whole allow-list:
+//     TestCounterPayloadCarriesNoIdentifiers enforces that, so the SECOND
+//     non-integer value anywhere in the payload goes RED and forces an argument.
+//     "watchdog.counts.swept_by_worker" was written into that allow-list in
+//     slice 1, against code nobody had written, and has been DELIBERATELY
+//     DE-AUTHORIZED: a map keyed on server-resolved worker UUIDs may well be
+//     the right answer for slice 4, but it is a design decision, and
+//     pre-blessing it in slice 1 reduced its only forcing function to a
+//     one-line edit with the justification already supplied. Adding it back
+//     means adding a counterPayloadExemption with its own typeOK and jsonOK
+//     predicates, argued in the same commit that can be read against the code -
+//     including whether unbounded key cardinality is acceptable here. The
+//     admin-authentication argument (this route is not an attacker-writable
+//     site, so a worker UUID admissible HERE stays inadmissible in any log line
+//     reachable from the gRPC recv path) is one input to that decision, not a
+//     standing grant.
+//
+// WHAT THIS ENDPOINT DOES NOT BUY, stated next to what it does:
+//
+//   - A zero level is not necessarily an empty control. When BOTH gRPC
+//     connection caps are disabled (RELAY_GRPC_MAX_CONNS=0 and
+//     RELAY_GRPC_MAX_CONNS_PER_IP=0) netlimit.Listener.Accept returns the
+//     connection unwrapped and does no accounting at all, so every field of
+//     grpc_admission.levels reads 0 with thousands of live connections. "Not
+//     measured" and "nothing there" are the same payload there, which is this
+//     endpoint's own subject one layer down. Not fixed in this slice: closing it
+//     needs either a boolean (banned by the counts-only rule) or the configured
+//     caps as extra fields, and "max_per_source" as an observed maximum next to
+//     "max_per_source" as a configured cap is a naming trap. Documented in
+//     netlimit.Stats, in README and here.
+//   - Serving grpc_admission is not free at every configuration. max_per_source
+//     is an O(len(perIP)) walk under the listener's mutex, and len(perIP) is
+//     bounded by RELAY_GRPC_MAX_CONNS only while that cap is enabled; with the
+//     total cap disabled and the per-source cap live, it is bounded by the
+//     process file-descriptor limit instead. What the walk delays is the gRPC
+//     ACCEPT PATH, not this request: this route's BearerAuth is paid in a
+//     different goroutine and completes before the handler runs, so it never
+//     overlaps holding that mutex, and cmd/relay-server's runRefusalReporter
+//     takes the same walk once a minute whether or not anybody polls here.
+//     Nothing rate-limits this route. Measured and priced in
+//     netlimit.Listener.Stats.
+//
+// HOW A FUTURE SECTION ATTACHES ITSELF, because the answer is NOT the same for
+// every package and getting it wrong shows up as an import cycle:
+//
+//   - internal/netlimit is a stdlib-only leaf, so this package imports it and
+//     the source interface can return netlimit.Stats directly.
+//   - internal/worker is already imported by this package (server.go), so a
+//     worker-side counters type works the same way.
+//   - internal/scheduler IMPORTS THIS PACKAGE (scheduler/dispatch.go), so this
+//     package can never import it. The watchdog section must therefore declare
+//     its snapshot type HERE, next to the response types, and scheduler.Watchdog
+//     returns that type. CounterSources is a struct of independent fields
+//     precisely so each section can make that choice separately.
+
+// GRPCAdmissionSource is whatever can report the agent-port admission
+// counters - in production, *netlimit.Listener.
+type GRPCAdmissionSource interface {
+	Stats() netlimit.Stats
+}
+
+// CounterSources is the set of subsystem counter sources the endpoint
+// assembles. Every field is nil-able and nil means the section is ABSENT from
+// the payload, not zero.
+//
+// "NIL" HERE MEANS A NIL INTERFACE, AND A TYPED NIL IS NOT ONE. Storing a
+// (*scheduler.Watchdog)(nil) - or any other typed nil pointer - in one of these
+// fields produces an interface that is NOT == nil, so handleServerCounters'
+// `src != nil` is true and the method call below it dereferences a nil receiver.
+// Per admin request, that is a goroutine stack trace to the log, inside the
+// feature whose subject is bounding log volume.
+//
+// This is not hypothetical for the next section to land. The watchdog is
+// legitimately disable-able (RELAY_TASK_WATCHDOG_MARGIN=0 and
+// RELAY_TASK_MAX_ASSIGNMENT=0), so `var wd *scheduler.Watchdog; if enabled
+// { wd = ... }; CounterSources{Watchdog: wd}` is the natural shape and it
+// panics. Filter the typed nil where the CONCRETE type is still visible, at the
+// wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
+// TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent is its guard. Do
+// not instead make the source's snapshot method nil-tolerant - returning a zero
+// snapshot turns an unwired control into a section of zeros, which is the one
+// distinction this payload exists to preserve.
+type CounterSources struct {
+	GRPCAdmission GRPCAdmissionSource
+}
+
+type serverCountersResponse struct {
+	StartedAt     time.Time             `json:"started_at"`
+	GRPCAdmission *grpcAdmissionSection `json:"grpc_admission,omitempty"`
+}
+
+type grpcAdmissionSection struct {
+	Counts grpcAdmissionCounts `json:"counts"`
+	Levels grpcAdmissionLevels `json:"levels"`
+}
+
+type grpcAdmissionCounts struct {
+	RefusedTotal uint64 `json:"refused_total"`
+	// refused_per_source, not refused_per_ip: the cap is keyed on a SOURCE,
+	// which is an exact IPv4 address but an aggregated /64 for IPv6. It also
+	// under-reports whenever the fleet cap is saturated, because the total is
+	// checked first - read it as a floor when live_total has reached the
+	// configured maximum.
+	RefusedPerSource uint64 `json:"refused_per_source"`
+}
+
+type grpcAdmissionLevels struct {
+	LiveTotal       uint64 `json:"live_total"`
+	DistinctSources uint64 `json:"distinct_sources"`
+	MaxPerSource    uint64 `json:"max_per_source"`
+}
+
+// handleServerCounters assembles whichever sections are wired. It reads no
+// request body, so readJSON is not involved; the response goes through
+// writeJSON, matching handleGetWorkerMetrics.
+func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
+	resp := serverCountersResponse{StartedAt: s.startedAt}
+	if src := s.Counters.GRPCAdmission; src != nil {
+		st := src.Stats()
+		resp.GRPCAdmission = &grpcAdmissionSection{
+			Counts: grpcAdmissionCounts{
+				RefusedTotal:     st.Counts.RefusedTotal,
+				RefusedPerSource: st.Counts.RefusedPerIP,
+			},
+			Levels: grpcAdmissionLevels{
+				LiveTotal:       st.Levels.LiveTotal,
+				DistinctSources: st.Levels.DistinctSources,
+				MaxPerSource:    st.Levels.MaxPerSource,
+			},
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}

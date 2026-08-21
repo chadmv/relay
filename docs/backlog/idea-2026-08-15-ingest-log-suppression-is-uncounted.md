@@ -3,6 +3,7 @@ title: Nothing counts what the ingest log budget dropped, so a flood is now invi
 type: idea
 status: open
 created: 2026-08-15
+updated: 2026-08-21
 priority: medium
 source: Phase 6 of the 2026-08-15-tasklog-err-limiter-keying slice; the diagnosability cost that slice accepted
 ---
@@ -56,35 +57,108 @@ three handlers, and would falsify its own Done-When ("a rejected chunk increment
 handler-layer test that reads the counter across a rejection and a success"). This project keeps finding
 items that are wrong about their own scope; growing one by amendment is how that happens.
 
-**What the two genuinely share, and it is the expensive part:** a read surface. Verified at `ee88de0`
-and unchanged: `internal/api/server.go` routes `GET /v1/config`, `GET /v1/jobs/stats`,
-`GET /v1/workers/stats` and `GET /v1/workers/{id}/metrics`, and nothing that would carry a server-wide
-counter. Both items therefore either extend `GET /v1/workers/stats` or depend on
-[[feature-2026-08-09-server-info-allowlist-endpoint]]. **They should be specced in one sitting and
-shipped as two slices**, so the read surface is designed once.
+**What the two genuinely share, and it is the expensive part:** a read surface. **(2026-08-21: it now
+exists. See below.)**
+
+### Update 2026-08-21 - the read surface exists, and this item's own preferred option is REFUTED
+
+`docs/superpowers/specs/2026-08-21-silent-drop-observability.md` specced this item with its three
+siblings in one sitting, and **slice 1 shipped the shared mechanism**
+(`docs/retros/2026-08-21-silent-drop-observability-slice1.md`). This item is **slice 2 of four** - the
+first consumer to add a counter - and it stays open: slice 1 added no counter anywhere in
+`internal/worker`, so none of the acceptance criteria below is met.
+
+**What now exists and must be extended, not reinvented:**
+
+- **`GET /v1/server/counters`**, `auth(admin(...))`, in `internal/api/server_counters.go`. Admin-only
+  deliberately: these numbers describe adversary activity and internal control state, so it is NOT
+  modelled on `/v1/jobs/stats` or `/v1/workers/stats`, which are `auth`-only database censuses.
+- **`api.CounterSources`** - a struct of nil-able per-subsystem source fields, set at the wiring
+  boundary (`cmd/relay-server`'s `buildHTTPServer`). A **nil field means the section is ABSENT from the
+  payload, never zero-valued.** A wired section of zeros means "this control ran and stopped nothing";
+  an absent one means "not wired on this build or this replica". Do not collapse them, and do not make
+  a snapshot method nil-tolerant to dodge a typed-nil panic - filter the typed nil at the wiring
+  boundary where the concrete type is still visible.
+- **The counts/levels contract.** `counts` are monotonic since `started_at`; `levels` are current. This
+  section is counts only, in the shape the spec fixed:
+  `{"ingest_log_budget": {"counts": {"deduped": {<kind>: N, ...}, "suppressed": {<kind>: N, ...}}}}`.
+- **Per replica, per process, zeroed by a restart**, with `started_at` always present.
+- **The import direction is FREE for this item.** `internal/api` already imports `internal/worker`
+  (`server.go`), so the source interface may return the worker package's own snapshot type. That is
+  **not** true for the watchdog sibling, which is why `CounterSources` is a struct of independent
+  fields.
+
+**REFUTED, and it is this item's own preferred option: "(b) accumulate in the limiter and flush once at
+teardown ... is probably right".** Read it against this item's own Repro, which is a single **open**
+stream sending 100,000 chunks. Under option (b) the operator sees **nothing at all for as long as the
+attack continues**, and the numbers appear only after the attacker chooses to disconnect. An
+observability control that is blind exactly during the attack it exists to reveal is not a control. It
+would also add the one thing the limiter's comment is proud of not having: a teardown to get wrong.
+
+**The shape, settled: `[5][2]atomic.Uint64` package-level in `internal/worker`** - five kinds, two arms
+(deduped, budget-suppressed) - indexed by `logKind`, with a pointer threaded into `ingestLogLimiter`.
+This item is right that "a `[5]uint64` is free, do not add a map" and **wrong about the location**: the
+array belongs on a process-lifetime home, not on a stack local that dies with the connection. An atomic
+add is not a lock - one locked exchange-add, no allocation, no map, no scheduling - so the limiter keeps
+its documented **no-mutex** property verbatim, and cross-connection cache-line contention is bounded by
+`RELAY_GRPC_MAX_CONNS` writers each doing far more expensive work on the same call.
+
+**REFUTED on a detail that will otherwise be got wrong: `allow` has THREE `return false` paths, not
+two.** The third is a `l == nil` fail-closed guard, deliberately unreachable in production (one
+allocation site). **It must NOT be counted**: no event was suppressed on that path, because there was no
+limiter. Counting it counts a phantom, and it is exactly the kind of thing an implementer adds while
+"covering all the return-false arms".
+
+**CONFIRMED: `ingestLogBurst = 16` and `ingestLogRefill = 10s` give 6 lines/min.** The Repro's "16 lines
+immediately and then 6 per minute" is exact.
+
+**ONE CONSEQUENCE TO HANDLE IN THIS SLICE, or it becomes wrong prose about correct code - the defect
+class this project has led with for a dozen consecutive iterations.** `logKind`'s comment currently says
+"Values are never persisted or sent anywhere, so they may be renumbered freely". Publishing per-kind
+counts makes the **names** part of a response contract. Values may still be renumbered; **renaming a
+kind changes a JSON key.** Amend that comment and pin the name mapping with a test in the same commit.
+
+**Per worker or global: ANSWERED, globally, for all four items.** Per-worker keying is rejected **at the
+increment site**: it needs a map write behind a shared lock on the recv goroutine, which is the thing
+the standing constraint forbids, and it buys attribution the aggregate plus the existing per-connection
+log lines already approximate. Note also that `metrics.Store` is the wrong home for any of these
+counters - `Append` no-ops for an untracked worker and `Clear` deletes the entry on teardown, so a
+counter there is destroyed by the disconnect that caused it. The `Metrics` **wiring** pattern is the
+precedent; the type is not.
+
+**One payload constraint to inherit.** Every non-integer value anywhere in the counters payload needs a
+`counterPayloadExemption{why, typeOK, jsonOK}` argued in the same commit; `started_at` is the only
+exemption today, and the pre-blessed `watchdog.counts.swept_by_worker` entry was deliberately
+de-authorized. **This section is the first to ship a keyed object**, so read the residual carefully:
+exemptions are shape-checked but **NON-DESCENDING** - both payload walks stop at an exempted path once
+the predicate passes. If the `deduped`/`suppressed` objects are modelled as Go structs with one field
+per kind (the recommended shape, since the kind set is compile-time closed), no exemption is needed at
+all and the guards keep full reach. If they are modelled as a `map[string]uint64`, the exemption must do
+the descending itself inside `typeOK`/`jsonOK` - checking key shape, value shape and cardinality. Slice
+1 proved the difference is not theoretical: a `map[string]string` at an exempted path, with a
+newline-injected RTL-override key and an IP-address value, passed both guards with zero failures.
+**Prefer the struct.**
 
 ## Proposal
 
-To be argued at spec time rather than adopted as written.
+To be argued at spec time rather than adopted as written. **Superseded in part by the 2026-08-21
+section above**; where the two disagree, verify the later reasoning against the code rather than
+inheriting either.
 
 - **Counters, not log lines.** Stating the obvious because the next person will "improve" a counter into
   a `log.Printf`, which hands back the exact vector [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]]
   closed. Put that sentence in the code.
 - **Count both arms separately.** "Deduped" and "budget-suppressed" mean different things: the first is
   a healthy repeating failure, the second is either an attack or a misconfiguration. One number for both
-  would be uninterpretable.
-- **Where the counter lives is the hard part.** `ingestLogLimiter` is a **stack local in `Connect` with
-  no mutex**, by design, and that is the property that lets it be lock-free on the recv goroutine.
-  Counters that survive the connection must therefore be either (a) atomics on a shared struct that the
-  limiter is handed a pointer to, which adds the first cross-connection write to this path, or (b)
-  accumulated in the limiter and flushed **once at teardown**, which costs nothing on the hot path but
-  loses the numbers for a connection that is still open. Option (b) is probably right and is worth
-  arguing explicitly; option (a) must not reintroduce a shared mutex.
-- **Per worker or global?** Per worker is the useful diagnostic ("worker X is dropping 40k lines/min")
-  and matches where `metrics.Store` already keys. Global is cheaper. Note the same open question in the
-  sibling item and answer it once for both.
+  would be uninterpretable. **(2026-08-21: confirmed, and it is the `[2]` in `[5][2]`.)**
+- **Where the counter lives is the hard part.** **(2026-08-21: option (b) REFUTED - blind for the whole
+  duration of an ongoing flood. Option (a) taken, in the form that adds no mutex: package-level
+  `atomic.Uint64`s, a pointer threaded in. The limiter's no-mutex property is preserved verbatim.)**
+- **Per worker or global?** **(2026-08-21: ANSWERED - global at the increment site, for all four items.
+  Per-worker keying needs a shared-map write on the recv goroutine.)**
 - **Consider counting by kind.** Five kinds, and which one is flooding is exactly what an operator needs
-  to know. A `[5]uint64` on the limiter is free. Do not add a map.
+  to know. A `[5]uint64` on the limiter is free. Do not add a map. **(2026-08-21: right about the array,
+  wrong about the location - it must survive the connection.)**
 - **Do not add a round trip, a goroutine, a queue or a lock to the recv path.** Standing constraint on
   this handler, unchanged.
 
@@ -92,30 +166,49 @@ To be argued at spec time rather than adopted as written.
 
 - A dropped log line increments a counter, split at minimum into deduped versus budget-suppressed,
   proven by a handler-layer test that drives a flood and reads the counters.
-- The counters are readable by an operator through an endpoint, not only from a test.
+- The counters are readable by an operator through an endpoint, not only from a test. **(2026-08-21: the
+  endpoint exists; this bullet now means the `ingest_log_budget` section is populated and served.)**
 - `ingestLogLimiter` keeps its no-mutex, no-shared-state property on the hot path, or the change of that
   property is a deliberate, documented decision with a `-race` run behind it.
 - No new log line anywhere on the ingest path, and no new DB round trip, goroutine, queue or lock on the
   recv goroutine.
 - The counters cannot be read by an agent (server-side observability, never a response).
 - The read surface is the same one [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]] uses, or
-  the divergence is deliberate and written down.
+  the divergence is deliberate and written down. **(2026-08-21: it is `GET /v1/server/counters`. The
+  divergence budget is spent.)**
+- **(2026-08-21) The `l == nil` arm is NOT counted**, and the reason is stated where the counter is
+  incremented.
+- **(2026-08-21) `logKind`'s "may be renumbered freely" comment is amended in the same commit**, and the
+  kind-name-to-JSON-key mapping is pinned by a test, because the names become a response contract.
+- **(2026-08-21) The per-kind objects are Go structs with a field per kind**, or - if a map is used
+  instead - a `counterPayloadExemption` whose predicates DESCEND into it ships in the same commit.
+- **(2026-08-21) An unwired section is ABSENT from the payload, not zero-valued**, matching the contract
+  slice 1 fixed.
 
 ## Related
 
-- Source: `internal/worker/ingest_log_limiter.go` (`allow`'s two `return false` paths, and the type
-  comment explaining why it is lock-free), `internal/worker/handler.go` (`Connect`'s allocation site and
-  the five `lim.allow` call sites), `internal/api/server.go` (the route table, which has no server-wide
-  counters endpoint), `internal/metrics/store.go` (the existing per-worker seam)
-- Sibling on the complementary arm, to be specced together and shipped separately:
+- Source: `internal/worker/ingest_log_limiter.go` (`allow`'s three `return false` paths - only two of
+  which are events - and the type comment explaining why it is lock-free),
+  `internal/worker/handler.go` (`Connect`'s allocation site and the five `lim.allow` call sites),
+  `internal/metrics/store.go` (the existing per-worker seam, and the `Append`/`Clear` semantics that
+  rule it out as a home)
+- **The read surface, shipped 2026-08-21**: `internal/api/server_counters.go` (the payload contract for
+  all four sections), `internal/api/server_counters_test.go` (`counterPayloadExemption` and the two
+  payload walks), `internal/api/server.go` (the route), `cmd/relay-server/http_server.go` (the wiring
+  boundary)
+- Sibling on the complementary arm, to be shipped separately, and AFTER this one:
   [[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]]
-- Possible dependency for the read surface: [[feature-2026-08-09-server-info-allowlist-endpoint]]
+- Siblings on the same shape: [[idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced]]
+- The joint spec and the slice that settled the mechanism:
+  `docs/superpowers/specs/2026-08-21-silent-drop-observability.md` (sections 3.3, 7.3, 10.2),
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
 - The slice that created this gap: `docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md`,
   `docs/retros/2026-08-15-tasklog-err-limiter-keying.md`
 - Must not regress: the closed [[bug-2026-08-12-tasklog-err-limiter-attacker-keyed]] - the reason this
   is a counter and not a log line
 - The bound that makes the counters interpretable per fleet rather than per connection:
-  [[bug-2026-08-15-grpc-connection-admission-is-unbounded]]
+  [[bug-2026-08-15-grpc-connection-admission-is-unbounded]] (**closed 2026-08-21**; the caps now exist,
+  and `idea-2026-08-21-per-stream-log-budget-renewal-is-unpriced` records what they do not bound)
 
 ## Notes
 
@@ -126,4 +219,7 @@ other trade it makes and say nothing about this one.
 
 Filed at medium rather than low because the numbers are cheap and because the sibling item is already
 waiting on the same endpoint decision. If the endpoint work happens for any other reason, both of these
-become small.
+become small. **(2026-08-21: the endpoint work has happened, and this item genuinely did become small -
+it is one array, one pointer, two increments and one comment amendment. It is sequenced FIRST of the
+three remaining consumers because it establishes the array cardinality class and creates the
+`internal/worker` counters home the fence-rejection sibling then reuses.)**

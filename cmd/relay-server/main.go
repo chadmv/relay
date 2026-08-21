@@ -170,16 +170,13 @@ func main() {
 		log.Fatalf("parse RELAY_REGISTER_RATE_LIMIT: %v", err)
 	}
 
-	httpServer := api.New(pool, q, broker, registry, corsOrigins, loginN, loginWin, registerN, registerWin)
-	httpServer.Metrics = metricsStore
-	httpServer.StaticHandler = webui.Handler()
-
+	allowSelfRegister := false
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
 		if err != nil {
 			log.Fatalf("parse RELAY_ALLOW_SELF_REGISTER: %v", err)
 		}
-		httpServer.AllowSelfRegister = allow
+		allowSelfRegister = allow
 	}
 
 	// Start gRPC. Admission on this port is bounded four ways - one stream per
@@ -207,6 +204,29 @@ func main() {
 	grpcLis := netlimit.Wrap(grpcRawLis, netlimit.Config{
 		MaxTotal: grpcBnds.maxConns,
 		MaxPerIP: grpcBnds.maxConnsPerIP,
+	})
+	// The HTTP server is built HERE, after the bounded gRPC listener exists,
+	// because the counters endpoint reads that listener's snapshot on demand and
+	// buildHTTPServer is the only place the api.Server is constructed. Building
+	// it here rather than assigning to a field later is what removes the whole
+	// class of ordering and mutation mistakes the old wiring had: main never
+	// holds the api.Server, so there is nothing to unwire after the fact and no
+	// "must come before serving" constraint left to get wrong.
+	srv := buildHTTPServer(httpServerDeps{
+		addr:              httpAddr,
+		pool:              pool,
+		q:                 q,
+		broker:            broker,
+		registry:          registry,
+		corsOrigins:       corsOrigins,
+		loginLimitN:       loginN,
+		loginLimitWin:     loginWin,
+		registerLimitN:    registerN,
+		registerLimitWin:  registerWin,
+		allowSelfRegister: allowSelfRegister,
+		metrics:           metricsStore,
+		static:            webui.Handler(),
+		grpcAdmission:     grpcLis,
 	})
 	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
 	go func() {
@@ -249,8 +269,8 @@ func main() {
 	// Purge expired enrollment tokens hourly.
 	go runEnrollmentJanitor(ctx, q)
 
-	// Start HTTP.
-	srv := &http.Server{Addr: httpAddr, Handler: httpServer.Handler()}
+	// Start HTTP. srv was assembled above, next to the gRPC listener it reports
+	// counters for.
 	go func() {
 		log.Printf("HTTP listening on %s", httpAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -53,7 +53,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 )
 
 // Config bounds a Listener. A non-positive value DISABLES that cap; it does not
@@ -64,13 +63,58 @@ type Config struct {
 	MaxPerIP int
 }
 
-// Stats is a snapshot of refusal counters. Counts only - never addresses. The
-// consumer reports these as a periodic summary, and a summary that could carry
-// caller-supplied bytes would be a new attacker-driven log site inside the very
-// control that bounds attacker-driven log volume.
-type Stats struct {
+// RefusalCounts are MONOTONIC totals since process start. They only ever
+// increase, which is what makes them safe to compare: a consumer that wants to
+// know whether anything happened can compare two snapshots of this half.
+//
+// Comparable by == deliberately. cmd/relay-server's refusalReporter stores one
+// of these and compares, and that must keep compiling.
+type RefusalCounts struct {
 	RefusedTotal uint64
+
+	// RefusedPerIP UNDER-REPORTS whenever the fleet cap is also saturated:
+	// admit checks the total first, so a connection over BOTH caps is counted
+	// here as zero and against RefusedTotal only. That is deliberate and is not
+	// being changed. What makes it interpretable is Occupancy: when LiveTotal
+	// has reached the configured MaxTotal, read this number as a FLOOR rather
+	// than as a measurement.
 	RefusedPerIP uint64
+}
+
+// Occupancy is the CURRENT state of the two caps. Every field is a level, not a
+// count: it goes down as well as up.
+//
+// LEVELS ARE NEVER CONSULTED TO DECIDE WHETHER A REPORTER SPEAKS. Occupancy
+// changes on essentially every connection, so a periodic summary that included
+// it in its "did anything move" test would emit a line every single interval
+// forever - which is the property TestRefusalSummaryLogsOnlyWhenCountersMove
+// exists to protect. Levels are carried IN the line when it speaks. Splitting
+// them from RefusalCounts is what makes that structural: refusalReporter.last
+// is typed RefusalCounts, so comparing a whole Stats does not compile.
+type Occupancy struct {
+	LiveTotal       uint64
+	DistinctSources uint64
+	MaxPerSource    uint64
+}
+
+// Stats is a snapshot of this listener's counters and levels.
+//
+// RULE, NOT DESCRIPTION: nothing in this type may ever carry an address, a
+// prefix, a hostname, or any other caller-supplied byte. The refusal path is
+// reachable by any unauthenticated peer, and the consumer reports these as a
+// periodic log summary, so a field carrying caller-supplied bytes would be a new
+// attacker-driven log site inside the very control that bounds attacker-driven
+// log volume. Counts and levels only, forever - "which IP is it?" is answered
+// NO on the record, and TestStats_CarriesNoIdentifiers enforces it by walking
+// this type with reflection rather than by trusting this paragraph.
+//
+// PER REPLICA. These are in-process numbers about ONE listener. A two-server
+// deployment splits its connections arbitrarily; an operator must read both
+// endpoints and add the counts, and must NOT add the levels - MaxPerSource in
+// particular does not sum into anything meaningful.
+type Stats struct {
+	Counts RefusalCounts
+	Levels Occupancy
 }
 
 // Listener is a net.Listener that admits at most Config.MaxTotal live
@@ -80,12 +124,31 @@ type Listener struct {
 
 	cfg Config
 
-	mu    sync.Mutex
-	total int
-	perIP map[string]int
-
-	refusedTotal atomic.Uint64
-	refusedPerIP atomic.Uint64
+	// EVERYTHING BELOW mu IS GUARDED BY mu, INCLUDING THE TWO COUNTERS. They
+	// were atomic.Uint64 incremented under this same mutex, which made Stats a
+	// consistent five-field snapshot - and nothing except a comment held that
+	// true. Deciding over-cap under the lock, unlocking, then Add(1) outside
+	// left netlimit, cmd/relay-server and internal/api all green, and a poller
+	// would then see refused_total climbing while live_total sat BELOW the
+	// configured cap: an arrangement the fleet was never in.
+	//
+	// WHAT ENFORCES THAT NOW IS -race PLUS ONE NAMED TEST, and nothing else.
+	// The compiler does not help: Go has no mutex-guard analysis, and adding
+	// `func (l *Listener) unlockedRead() uint64 { return l.refusedTotal +
+	// l.refusedPerIP }` to this file builds clean AND vets clean. What plain
+	// fields buy over atomics is only that an unsynchronised access is a DATA
+	// RACE rather than a legal-but-inconsistent read - which -race can see, but
+	// only where some test drives both sides at once.
+	// TestStats_ConcurrentRefusalsAndReadsShareTheMutex is that test, and it is
+	// the ONLY one in this package that is: with the increments moved back
+	// outside the lock, every other test here still reports ok under -race. It
+	// is LOAD-BEARING and must not be deleted; without it this coupling is once
+	// again held by nothing but a comment.
+	mu           sync.Mutex
+	total        int
+	perIP        map[string]int
+	refusedTotal uint64
+	refusedPerIP uint64
 }
 
 // Wrap returns inner bounded by cfg. Close on the result closes inner, so
@@ -139,9 +202,93 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 }
 
-// Stats returns a snapshot of the refusal counters.
+// Stats returns ONE snapshot of every counter and every level, taken in a
+// SINGLE critical section.
+//
+// THE SINGLE CRITICAL SECTION IS THE CONTRACT, not an implementation detail.
+// Three separate lock acquisitions let a caller observe a combination that never
+// existed - DistinctSources greater than LiveTotal is directly reachable while
+// connections are being admitted - and an operator would then draw a conclusion
+// from an arrangement the fleet was never in. Pinned by
+// TestStats_IsOneCriticalSection, which is RED under exactly that mutation.
+//
+// All five fields are read from state guarded by l.mu (see the Listener type),
+// so this is one consistent snapshot rather than five individually-correct
+// numbers taken at five different moments. TestStats_IsOneCriticalSection pins
+// the level-to-level half by invariant. The count-to-level half has NO test that
+// can pin it - counts are monotonic and levels move freely, so no single
+// snapshot is impossible enough to assert on - which is exactly why the counters
+// are plain fields under this mutex rather than atomics. The enforcement is
+// -race plus TestStats_ConcurrentRefusalsAndReadsShareTheMutex, the sole test in
+// this package that gives -race anything to see on those two fields. NOT the
+// compiler: an unlocked read of them builds and vets clean. Delete that test and
+// the count-to-level coupling is enforced by this paragraph and nothing more.
+//
+// COST, PRICED AS A LOCK HOLD AND NOT AS A REQUEST. MaxPerSource is an
+// O(len(perIP)) walk under l.mu. len(perIP) is bounded by MaxTotal (1024 at the
+// defaults) only while the TOTAL cap is enabled; with RELAY_GRPC_MAX_CONNS=0 and
+// a live per-source cap, admit still runs and perIP is bounded only by the
+// process file-descriptor limit, so the walk is proportional to live
+// connections.
+//
+// THERE ARE TWO CALLERS, NOT ONE. cmd/relay-server's runRefusalReporter calls
+// this on a 60s ticker (grpc_config.go), unauthenticated, on EVERY deployment
+// whether or not anybody polls the endpoint - it is the caller that always runs.
+// The other is the admin-authenticated GET /v1/server/counters handler. Pricing
+// the walk against that handler's BearerAuth round trip, as this paragraph used
+// to, is wrong twice over: it omits the reporter, and BearerAuth is paid by the
+// poller in a different goroutine and has completed before the handler runs, so
+// it never overlaps holding l.mu. What the walk actually delays is the ACCEPT
+// PATH, whose other holders are admit and release - once per TCP connection, not
+// per message.
+//
+// Measured on a 24-core dev box, ns per Stats() call: ~7us at 1024 entries,
+// ~0.6ms at 100k, ~8ms at 1M. At the defaults the hold is negligible against a
+// once-per-connection mutex. At a million live sources every accept queues
+// behind an ~8ms hold, once a minute for the reporter plus once per admin
+// request - and nothing rate-limits the route, since RateLimit is applied to
+// POST /v1/auth/register and POST /v1/auth/login only (server.go). That
+// configuration is the one README tells an operator to cap in a proxy instead;
+// this is what it costs if they do not.
+//
+// Maintaining the maximum incrementally is NOT cheaper - a decremented maximum
+// is not exactly recoverable without a scan, which would move this walk onto
+// release, a path much closer to hot than this one.
+//
+// WHEN BOTH CAPS ARE DISABLED, EVERY LEVEL READS ZERO NO MATTER HOW MANY
+// CONNECTIONS ARE LIVE. Accept returns the conn unwrapped in that configuration
+// and never calls admit, so nothing is counted. A zero here therefore means "not
+// measured", not "nothing there". Pinned by TestLimitListener_ZeroDisables.
 func (l *Listener) Stats() Stats {
-	return Stats{RefusedTotal: l.refusedTotal.Load(), RefusedPerIP: l.refusedPerIP.Load()}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	maxPer := 0
+	for _, n := range l.perIP {
+		if n > maxPer {
+			maxPer = n
+		}
+	}
+	return Stats{
+		Counts: RefusalCounts{
+			RefusedTotal: l.refusedTotal,
+			RefusedPerIP: l.refusedPerIP,
+		},
+		// uint64 AT THE BOUNDARY, and this is load-bearing rather than tidy:
+		// the consumer's summary line asserts that every argument it carries is
+		// a uint64 (TestRefusalSummaryLogsOnlyWhenCountersMove), which is what
+		// keeps caller-supplied bytes out of an attacker-reachable log site. An
+		// int occupancy figure turns that shipped test RED.
+		//
+		// No clamp on the conversion. l.total cannot go negative - release runs
+		// exactly once per admitted conn, enforced by conn.once - and if an
+		// accounting bug ever made it negative, an absurd number here is a
+		// better signal than a zero that hides it.
+		Levels: Occupancy{
+			LiveTotal:       uint64(l.total),
+			DistinctSources: uint64(len(l.perIP)),
+			MaxPerSource:    uint64(maxPer),
+		},
+	}
 }
 
 // ipv6AggregationBits is the prefix length IPv6 peers are aggregated to. /64 is
@@ -235,11 +382,11 @@ func (l *Listener) admit(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.cfg.MaxTotal > 0 && l.total >= l.cfg.MaxTotal {
-		l.refusedTotal.Add(1)
+		l.refusedTotal++
 		return false
 	}
 	if l.cfg.MaxPerIP > 0 && l.perIP[key] >= l.cfg.MaxPerIP {
-		l.refusedPerIP.Add(1)
+		l.refusedPerIP++
 		return false
 	}
 	l.total++

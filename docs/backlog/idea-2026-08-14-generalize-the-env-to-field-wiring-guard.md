@@ -3,6 +3,7 @@ title: Generalize the env-to-field wiring guard - Metrics, AllowAutoEnroll and t
 type: idea
 status: open
 created: 2026-08-14
+updated: 2026-08-21
 priority: low
 source: Phase 4 of the 2026-08-14-tasklog-terminal-append-bound slice; the new guard's own comment names this item and says "do not generalize here"
 ---
@@ -56,24 +57,80 @@ Three points that shape the design, all verified:
   the guard in favour of something the compiler enforces. The new guard uses `go/ast` for that reason
   and any generalization must keep that property.
 
+### Update 2026-08-21 - PARSE THE PACKAGE, NOT THE FILE. This is no longer a `main.go` problem.
+
+The `2026-08-21-silent-drop-observability` slice 1 moved the **`api.Server`'s own after-construction
+wiring - `Metrics`, `StaticHandler`, `AllowSelfRegister` - out of `main` and into `buildHTTPServer` in
+the new `cmd/relay-server/http_server.go`.** Both structural guards in this package call
+`parser.ParseFile(fset, "main.go", nil, 0)`:
+
+- `TestTrailingLogWindowIsWiredIntoTheHandler` (`trailing_log_window_test.go`)
+- `TestServerCountersIsWiredByMain` (`counters_wiring_test.go`)
+
+**A generalization written against `main.go` alone would report clean while covering none of those
+three assignments.** Use `parser.ParseDir` (or `packages.Load`) over `cmd/relay-server` and walk every
+non-test file, or the guard's own name becomes the wrong prose about correct code that this project
+keeps finding. The constraint is already recorded in `trailing_log_window_test.go`'s comment; it is
+repeated here so the item carries it.
+
+**Measured, not assumed, in the same slice: deleting ANY of `s.Metrics = d.metrics`,
+`s.StaticHandler = d.static` or `s.AllowSelfRegister = d.allowSelfRegister` from `buildHTTPServer`
+leaves all three packages green today.** That is the same seam as the three `agentHandler` fields, now
+in a second file, which raises the copy count from three to six and makes the "generalize rather than
+paste" argument stronger rather than weaker.
+
+**A second, harder gap in the same function, discovered by the same slice and NOT covered by any guard
+this item proposes.** `api.New` is positional and takes **four same-typed arguments in a row**:
+
+```go
+s := api.New(d.pool, d.q, d.broker, d.registry, d.corsOrigins,
+    d.loginLimitN, d.loginLimitWin, d.registerLimitN, d.registerLimitWin)
+```
+
+Swapping the login pair with the register pair **compiles, and every package stays green**; login would
+then be rate-limited at the registration budget. The named fields on `httpServerDeps` make the CALL SITE
+in `main` readable and do nothing for the four positions inside `buildHTTPServer`. A derivation guard
+cannot see this at all - both values ARE derived from something plausible. **This is the strongest
+argument yet for the constructor-argument or functional-options route below**, and it should be weighed
+as part of this item rather than filed separately, because the two remedies are alternatives to each
+other.
+
+**And a shape lesson from that slice worth applying to whatever this item ships.** Seven separate
+evasions of two structural guards were run to green across the 2026-08-20 and 2026-08-21 slices. The
+form that finally held is generic rather than shape-matching: **count `AssignStmt`s per identifier
+across the whole function subtree and require exactly one for every name on the reachability chain.**
+A guard that matches a spelling is evadable by respelling; a guard that counts a property is not. In
+particular, a derivation walk that only asks "was this name EVER assigned something mentioning X" is
+defeated by a later `name = nil` inside an `if`. Prefer executing the code to parsing it; where you
+must parse, count properties. See `TestServerCountersIsWiredByMain`'s "EVERY NAME ON THAT CHAIN" block
+for the working implementation, and `docs/retros/2026-08-21-silent-drop-observability-slice1.md` for the
+seven evasions.
+
 ## Proposal
 
 One table-driven guard in `cmd/relay-server` covering every post-construction wiring the binary
 depends on, replacing the single-purpose one rather than sitting beside it:
 
 ```go
-cases := []struct{ field, derivedFrom string }{
-    {"Metrics",           "metricsStore"},       // or NewStore, whichever names the source
-    {"AllowAutoEnroll",   "RELAY_ALLOW_AUTO_ENROLL"},
-    {"TrailingLogWindow", "parseTrailingLogWindow"},
+cases := []struct{ file, field, derivedFrom string }{
+    {"main.go",        "Metrics",           "metricsStore"},       // or NewStore, whichever names the source
+    {"main.go",        "AllowAutoEnroll",   "RELAY_ALLOW_AUTO_ENROLL"},
+    {"main.go",        "TrailingLogWindow", "parseTrailingLogWindow"},
+    {"http_server.go", "Metrics",           "d.metrics"},          // 2026-08-21: api.Server, not worker.Handler
+    {"http_server.go", "StaticHandler",     "d.static"},
+    {"http_server.go", "AllowSelfRegister", "d.allowSelfRegister"},
 }
 ```
 
 Points to settle at spec time:
 
+- **Parse the package, not the file** (2026-08-21). The `file` column above is illustrative; the guard
+  should discover non-test files rather than hardcode two names, or the next extraction repeats this.
 - **What "derived from" should mean per row.** The shipped guard walks assignments transitively: it
   collects `name -> identifiers its RHS mentions`, then follows `x := f(...)` into `h.Field = x`. That
-  is the right shape and it should be lifted verbatim rather than reinvented.
+  is the right shape and it should be lifted verbatim rather than reinvented. **(2026-08-21: lift the
+  assignment-count check with it. Derivation alone is defeated by a later conditional reassignment, and
+  that was a live green evasion, not a hypothetical.)**
 - **The two limitations the shipped guard has, which a generalization should decide about rather than
   inherit silently.** (1) It proves *derivation*, not *fidelity* - `TrailingLogWindow =
   trailingLogWindow / 2` passes. (2) It keys on the field **name** only, so an assignment to any
@@ -81,37 +138,55 @@ Points to settle at spec time:
   neither is stated in the test's own name, which claims `...IsWiredIntoTheHandler`. Either tighten
   (match the receiver identifier too) or say so in the comment.
 - **Whether the guard should also cover `internal/api`'s equivalent seams.** `Server` has several
-  exported knobs (`RegisterLimitN`, `LoginLimitWin`, and friends) set the same way in `main.go`. If
-  the answer is yes, the guard is about `main.go` rather than about `worker.Handler`, which is a
-  better framing and changes the file it lives in.
+  exported knobs (`RegisterLimitN`, `LoginLimitWin`, and friends) set the same way. **(2026-08-21:
+  answered by events - three of them now live in `buildHTTPServer`, so the guard is about the
+  cmd/relay-server PACKAGE rather than about `worker.Handler`, which is the better framing and changes
+  the file it lives in.)**
 - **Whether a constructor-argument refactor would be better than any guard.** Passing these as
   arguments to `NewHandlerWithGrace` would make the compiler enforce them and delete the guard
   entirely. It was rejected in the trailing-window slice as pure churn (every test in
   `internal/worker` constructs a handler), and that reasoning is still sound - but it should be
   re-checked once, deliberately, rather than assumed forever. A functional-options constructor is the
-  middle path and has its own cost.
+  middle path and has its own cost. **(2026-08-21: re-weigh this HARDER. `buildHTTPServer` closed four
+  guard evasions by changing its return type so the evasions became unwritable, which is the same move
+  one level up. And `api.New`'s four same-typed positional arguments are a defect class NO derivation
+  guard can see, so a guard cannot be the whole answer here anyway.)**
 
 ## Acceptance / Done When
 
-- One guard test covers all three (or more) post-construction assignments in
-  `cmd/relay-server/main.go`; the single-purpose `TestTrailingLogWindowIsWiredIntoTheHandler` is
-  removed rather than left as a fourth copy.
+- One guard test covers every post-construction assignment in the `cmd/relay-server` package - both
+  `main.go`'s three `agentHandler` fields and `http_server.go`'s three `api.Server` fields - and the
+  single-purpose `TestTrailingLogWindowIsWiredIntoTheHandler` is removed rather than left as a fourth
+  copy.
+- **The guard parses the PACKAGE, not one named file**, and adding a seventh wiring in a new file of the
+  same package is covered without editing the guard's file list.
 - Each row is proven by deleting its wiring line and observing that guard row - and only that row -
   go RED. A guard that passes with the wiring deleted is worse than no guard.
+- **Each row is also proven against a later conditional reassignment** (`name = nil` inside an `if`),
+  not only against deletion. Derivation without an assignment count is defeated by exactly that shape.
 - The guard is structural (`go/ast`), never a regex or a string scan.
 - Its stated claim matches what it checks: whatever it does not prove (fidelity of the value, identity
   of the receiver) is written in its comment.
 - It stays untagged, so it runs under `make test`.
+- **`api.New`'s four same-typed positional arguments are either covered or explicitly declared out of
+  scope with the reason**, since no derivation guard can see a swap between them.
 
 ## Related
 
-- Source: `cmd/relay-server/main.go` (the three assignments), `cmd/relay-server/trailing_log_window_test.go`
-  (`TestTrailingLogWindowIsWiredIntoTheHandler`, the one to generalize), `internal/worker/handler.go`
-  (the `Metrics` / `AllowAutoEnroll` / `TrailingLogWindow` field block)
+- Source: `cmd/relay-server/main.go` (the three `agentHandler` assignments),
+  `cmd/relay-server/http_server.go` (`buildHTTPServer`'s three `api.Server` assignments and its comment
+  naming both uncaught gaps), `cmd/relay-server/trailing_log_window_test.go`
+  (`TestTrailingLogWindowIsWiredIntoTheHandler`, the one to generalize, and the "Parse the package, not
+  the file" constraint), `cmd/relay-server/counters_wiring_test.go` (`TestServerCountersIsWiredByMain`,
+  the second `main.go`-only parser and the working assignment-count check),
+  `internal/worker/handler.go` (the `Metrics` / `AllowAutoEnroll` / `TrailingLogWindow` field block)
 - Existing structural guards to follow: `internal/store/incrementtaskretrycount_guard_test.go`,
   `internal/store/updatetaskstatusepoch_guard_test.go`
 - Why not a regex: `docs/retros/2026-08-13-narrow-viewport-overflow.md` (a compliant consumer reddened
   by one JSX comment; the guard was deleted and replaced with a required prop)
+- Why a guard must count a property rather than match a shape, with seven worked evasions:
+  `docs/retros/2026-08-21-grpc-admission-bounds.md`,
+  `docs/retros/2026-08-21-silent-drop-observability-slice1.md`
 - The rule that says three copies is the trigger: `docs/retros/2026-08-14-cursor-pager-hook.md`
 - Origin: `docs/retros/2026-08-14-tasklog-terminal-append-bound.md` ("The conductor override")
 
@@ -121,3 +196,7 @@ Filed at **low** priority on purpose. Nothing is broken today; all three assignm
 correct. The value is that the next knob added to `Handler` gets its wiring covered for free instead
 of arriving with a fourth copy of the same test or - much likelier - with no test at all, which is
 the state all three of these were in until 2026-08-14.
+
+**2026-08-21: still low, but the copy count went from three to six in one slice and the file set went
+from one to two.** That is the shape of a guard that will be pasted a seventh time under time pressure.
+Reconsider the priority the next time somebody adds a post-construction field in `cmd/relay-server`.

@@ -332,14 +332,14 @@ func TestRefusalSummaryLogsOnlyWhenCountersMove(t *testing.T) {
 	r.tick(netlimit.Stats{})
 	assert.Empty(t, lines, "a quiet interval must produce no line at all")
 
-	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedPerIP: 3}})
 	require.Len(t, lines, 1, "the first movement must be reported")
 
-	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedPerIP: 3}})
 	assert.Len(t, lines, 1,
 		"an unchanged counter must not re-log: a sustained attack must cost ONE line per interval, not one per tick")
 
-	r.tick(netlimit.Stats{RefusedTotal: 2, RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedTotal: 2, RefusedPerIP: 3}})
 	require.Len(t, lines, 2, "a movement on the OTHER counter must also be reported")
 
 	for i, l := range lines {
@@ -1131,4 +1131,77 @@ func TestResolveGRPCBounds(t *testing.T) {
 				"says exactly that. A second line adding a finite-looking sum would understate it.")
 		assert.Contains(t, msgs[0], "idle gRPC transport reaping is disabled")
 	})
+}
+
+// TestRefusalSummaryIsSilentWhenOnlyOccupancyMoves is the discriminating test for
+// the trap idea-2026-08-21-netlimit-occupancy-is-unobservable identified before
+// any code was written: occupancy changes on essentially every connection, so a
+// reporter that consulted it to decide whether to speak would emit a line every
+// single interval forever - permanently destroying the "one line per interval,
+// and only when something moved" property that
+// TestRefusalSummaryLogsOnlyWhenCountersMove exists to protect.
+//
+// The counts are held STATIC across every tick here. The only thing moving is
+// the half that must never be consulted.
+func TestRefusalSummaryIsSilentWhenOnlyOccupancyMoves(t *testing.T) {
+	lines := 0
+	r := &refusalReporter{logf: func(string, ...any) { lines++ }}
+
+	counts := netlimit.RefusalCounts{RefusedTotal: 7, RefusedPerIP: 2}
+	r.tick(netlimit.Stats{
+		Counts: counts,
+		Levels: netlimit.Occupancy{LiveTotal: 10, DistinctSources: 3, MaxPerSource: 5},
+	})
+	require.Equal(t, 1, lines, "the first tick after a counter moved must speak")
+
+	for i, lv := range []netlimit.Occupancy{
+		{LiveTotal: 900, DistinctSources: 16, MaxPerSource: 64},
+		{LiveTotal: 1, DistinctSources: 1, MaxPerSource: 1},
+		{LiveTotal: 1024, DistinctSources: 1024, MaxPerSource: 1},
+		{},
+	} {
+		r.tick(netlimit.Stats{Counts: counts, Levels: lv})
+		require.Equal(t, 1, lines,
+			"occupancy move %d produced a line. A level must never take part in the 'did anything move' "+
+				"test: on a live fleet it moves constantly, so this reporter would speak every interval "+
+				"forever and the bound would be a bound in name only.", i)
+	}
+}
+
+// TestRefusalSummaryLineCarriesOccupancyWhenItSpeaks. The trigger reads counts
+// only; the LINE must still answer "how full is it, and is this one source or
+// many", or the operator gets a refusal count with no context and has to go
+// looking for the endpoint to interpret it.
+//
+// FIVE DISTINCT VALUES, IN A FIXED ORDER. Equal values would make a crossed
+// argument invisible, which is half of what this test is for.
+func TestRefusalSummaryLineCarriesOccupancyWhenItSpeaks(t *testing.T) {
+	var format string
+	var args []any
+	r := &refusalReporter{logf: func(f string, a ...any) { format, args = f, a }}
+
+	r.tick(netlimit.Stats{
+		Counts: netlimit.RefusalCounts{RefusedTotal: 7, RefusedPerIP: 2},
+		Levels: netlimit.Occupancy{LiveTotal: 1024, DistinctSources: 16, MaxPerSource: 64},
+	})
+
+	require.Len(t, args, 5,
+		"the line must carry both refusal counts AND all three occupancy figures: MaxPerSource with "+
+			"DistinctSources is what separates a distributed source pattern from a NAT gateway, and "+
+			"RefusedTotal alone cannot")
+	assert.Equal(t, []any{uint64(7), uint64(2), uint64(1024), uint64(16), uint64(64)}, args,
+		"the arguments must be counts-then-levels in that order; five distinct values make a crossed "+
+			"argument visible")
+	for i, a := range args {
+		assert.IsType(t, uint64(0), a,
+			"argument %d is not a uint64. Every argument of this line must be a count or a level - a "+
+				"caller-supplied byte here would make an attacker-reachable log site out of the control "+
+				"that bounds attacker-driven log volume.", i)
+	}
+	assert.Equal(t, 5, strings.Count(format, "%d"), "the template must consume all five numbers")
+
+	rendered := fmt.Sprintf(format, args...)
+	assert.Contains(t, rendered, "1024")
+	assert.Contains(t, rendered, "16")
+	assert.Contains(t, rendered, "64")
 }

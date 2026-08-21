@@ -85,6 +85,14 @@ func TestParseTrailingLogWindow(t *testing.T) {
 // (both are set by main() after construction and nothing fails if the line
 // goes away), so this guard is worth generalizing rather than pasting a third
 // time. The conductor is filing that as its own item - do not generalize here.
+//
+// ONE CONSTRAINT FOR WHOEVER TAKES THAT ITEM: it is no longer a main.go
+// problem. Both structural guards in this package call
+// parser.ParseFile(fset, "main.go", ...), and the counters slice moved the
+// api.Server's own after-construction wiring - Metrics, StaticHandler,
+// AllowSelfRegister - out of main and into buildHTTPServer in http_server.go.
+// A generalization written against main.go alone would report clean while
+// silently covering none of those three. Parse the package, not the file.
 func TestTrailingLogWindowIsWiredIntoTheHandler(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)

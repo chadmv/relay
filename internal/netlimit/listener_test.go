@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,8 +97,8 @@ func TestLimitListener_RefusesBeyondPerIPCap(t *testing.T) {
 		"the third Accept must skip the over-limit peer and return the next admissible one")
 	assert.Equal(t, int32(1), c3.closes.Load(), "the refused conn must be closed, not leaked")
 	assert.Equal(t, int32(0), c1.closes.Load(), "an admitted conn must not be closed by the limiter")
-	assert.Equal(t, uint64(1), l.Stats().RefusedPerIP)
-	assert.Equal(t, uint64(0), l.Stats().RefusedTotal)
+	assert.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedTotal)
 }
 
 // TestLimitListener_PerIPCapIsKeyedOnHostNotHostPort is the discriminating test
@@ -246,8 +247,8 @@ func TestLimitListener_TotalCapRefusesAcrossDistinctIPs(t *testing.T) {
 	assert.Nil(t, got)
 	assert.Equal(t, int32(1), c4.closes.Load())
 	assert.Equal(t, int32(1), c5.closes.Load())
-	assert.Equal(t, uint64(2), l.Stats().RefusedTotal)
-	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP,
+	assert.Equal(t, uint64(2), l.Stats().Counts.RefusedTotal)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedPerIP,
 		"a conn over BOTH caps is counted against the total only; the total is checked first")
 
 	require.NoError(t, first.Close())
@@ -272,7 +273,10 @@ func TestLimitListener_ZeroDisables(t *testing.T) {
 		require.NoError(t, err, "conn %d must be admitted when both caps are disabled", i)
 		require.NotNil(t, c)
 	}
-	assert.Equal(t, Stats{}, l.Stats(), "nothing may be counted as refused when both caps are off")
+	assert.Equal(t, Stats{}, l.Stats(),
+		"with both caps off the listener does no accounting at all, so EVERY field stays zero - not just "+
+			"the refusal counts. That is what makes a zero level here mean 'not measured' rather than "+
+			"'nothing there', which README and Stats both have to state because the payload cannot.")
 }
 
 // TestLimitListener_RefusalWritesNothingToTheLog.
@@ -302,7 +306,7 @@ func TestLimitListener_RefusalWritesNothingToTheLog(t *testing.T) {
 			break
 		}
 	}
-	require.Equal(t, uint64(n-1), l.Stats().RefusedPerIP, "99 of the 100 must have been refused")
+	require.Equal(t, uint64(n-1), l.Stats().Counts.RefusedPerIP, "99 of the 100 must have been refused")
 	assert.Equal(t, 0, buf.Len(),
 		"netlimit must write NOTHING to the log on the refusal path. Got: %q", buf.String())
 }
@@ -426,7 +430,7 @@ func TestLimitListener_PerIPRefusalConsumesNoPerIPSlot(t *testing.T) {
 
 	_, err = l.Accept()
 	require.ErrorIs(t, err, errDrained, "c3 is over the per-IP cap, so the fake drains behind it")
-	require.Equal(t, uint64(1), l.Stats().RefusedPerIP)
+	require.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP)
 
 	// White-box: the refusal moved no accounting at all.
 	l.mu.Lock()
@@ -471,8 +475,8 @@ func TestLimitListener_PerIPRefusalConsumesNoTotalSlot(t *testing.T) {
 	}
 	_, err := l.Accept()
 	require.ErrorIs(t, err, errDrained)
-	require.Equal(t, uint64(1), l.Stats().RefusedPerIP, "c3 must be refused by the PER-IP cap, not the total")
-	require.Equal(t, uint64(0), l.Stats().RefusedTotal)
+	require.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP, "c3 must be refused by the PER-IP cap, not the total")
+	require.Equal(t, uint64(0), l.Stats().Counts.RefusedTotal)
 
 	// Two slots were consumed, not three, so two remain under MaxTotal: 4.
 	fl.conns = append(fl.conns, c4, c5)
@@ -524,7 +528,7 @@ func TestLimitListener_PerIPCapAggregatesAnIPv6Prefix(t *testing.T) {
 		"three addresses out of ONE /64 must count as one source: they cost their holder nothing, so a "+
 			"/128 key makes the per-source cap unreachable and leaves the total cap as a shared bucket")
 	assert.Equal(t, int32(1), c3.closes.Load())
-	assert.Equal(t, uint64(1), l.Stats().RefusedPerIP,
+	assert.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP,
 		"the refusal must be ATTRIBUTED to the per-source cap, or the operator summary blames fleet growth")
 	assert.Equal(t, int32(0), c4.closes.Load(),
 		"a genuinely different /64 is a genuinely different source and must still be admitted")
@@ -545,7 +549,7 @@ func TestLimitListener_PerIPCapDoesNotAggregateIPv4(t *testing.T) {
 		_, err := l.Accept()
 		require.NoError(t, err, "three DISTINCT v4 addresses are three distinct sources under a per-IP cap of 1")
 	}
-	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedPerIP)
 }
 
 // textAddr is a net.Addr that renders EXACTLY the string it is given. hostKey
@@ -673,4 +677,350 @@ func TestLimitListener_BothCapsOffReturnsTheUnderlyingConnUnwrapped(t *testing.T
 	got2, err := l2.Accept()
 	require.NoError(t, err)
 	assert.NotSame(t, inner2, got2, "a live cap needs the wrapper, or Close can never release the slot")
+}
+
+// TestStats_ReportsOccupancy is the "how full is it right now" half of
+// idea-2026-08-21-netlimit-occupancy-is-unobservable. Cumulative refusals cannot
+// answer it: a RefusedTotal that stopped moving means either the pressure ended
+// or the fleet settled at exactly the ceiling, and those need opposite
+// responses.
+//
+// admit/release are driven directly rather than through Accept: they are the two
+// critical sections Stats reads, and driving them straight makes the arithmetic
+// the subject instead of the fake listener's plumbing.
+func TestStats_ReportsOccupancy(t *testing.T) {
+	l := Wrap(&fakeListener{}, Config{MaxTotal: 100, MaxPerIP: 100})
+	require.True(t, l.admit("10.0.0.1"))
+	require.True(t, l.admit("10.0.0.1"))
+	require.True(t, l.admit("10.0.0.2"))
+
+	s := l.Stats()
+	assert.Equal(t, uint64(3), s.Levels.LiveTotal)
+	assert.Equal(t, uint64(2), s.Levels.DistinctSources)
+	assert.Equal(t, uint64(2), s.Levels.MaxPerSource, "10.0.0.1 holds two of the three")
+
+	l.release("10.0.0.1")
+	s = l.Stats()
+	assert.Equal(t, uint64(2), s.Levels.LiveTotal, "a released slot must lower the level")
+	assert.Equal(t, uint64(2), s.Levels.DistinctSources, "10.0.0.1 still holds one, so it is still a source")
+	assert.Equal(t, uint64(1), s.Levels.MaxPerSource, "both sources now hold one each")
+
+	l.release("10.0.0.2")
+	s = l.Stats()
+	assert.Equal(t, uint64(1), s.Levels.LiveTotal)
+	assert.Equal(t, uint64(1), s.Levels.DistinctSources, "an emptied source leaves the map entirely")
+	assert.Equal(t, uint64(0), s.Counts.RefusedTotal, "nothing was refused; occupancy must not be confused with refusal")
+}
+
+// TestStats_DistinguishesDistributedFromNAT is the item's second acceptance
+// bullet AND the detection story for the IPv6 delegation residual the admission
+// slice disclosed and could not fix. A healthy fleet behind NAT is a few sources
+// holding many connections each; a distributed source pattern is many sources
+// holding one each. RefusedTotal cannot tell them apart, and neither can
+// LiveTotal - arrangements (a) and (b) below have IDENTICAL LiveTotal.
+func TestStats_DistinguishesDistributedFromNAT(t *testing.T) {
+	admitN := func(t *testing.T, l *Listener, key string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			require.True(t, l.admit(key), "admit %s #%d must not be refused by these caps", key, i)
+		}
+	}
+
+	// (a) The NAT shape: one source holding 64.
+	nat := Wrap(&fakeListener{}, Config{MaxTotal: 4096, MaxPerIP: 4096})
+	admitN(t, nat, "10.0.0.1", 64)
+	n := nat.Stats()
+	assert.Equal(t, uint64(64), n.Levels.LiveTotal)
+	assert.Equal(t, uint64(1), n.Levels.DistinctSources)
+	assert.Equal(t, uint64(64), n.Levels.MaxPerSource)
+
+	// (b) The distributed shape: 64 sources holding one each.
+	dist := Wrap(&fakeListener{}, Config{MaxTotal: 4096, MaxPerIP: 4096})
+	for i := 0; i < 64; i++ {
+		admitN(t, dist, fmt.Sprintf("10.1.0.%d", i), 1)
+	}
+	d := dist.Stats()
+	require.Equal(t, n.Levels.LiveTotal, d.Levels.LiveTotal,
+		"the two shapes must be indistinguishable by total occupancy alone - that is the premise of this test")
+	assert.Equal(t, uint64(64), d.Levels.DistinctSources)
+	assert.Equal(t, uint64(1), d.Levels.MaxPerSource)
+
+	// (c) The IPv6 delegation shape at relay's real defaults: 16 /64s x 64
+	//     connections fills the 1024 fleet cap with NOTHING refused. This is the
+	//     case the item's Notes section asks to be in the matrix.
+	deleg := Wrap(&fakeListener{}, Config{MaxTotal: 1024, MaxPerIP: 64})
+	for p := 0; p < 16; p++ {
+		admitN(t, deleg, fmt.Sprintf("2001:db8:0:%x::/64", p), 64)
+	}
+	g := deleg.Stats()
+	assert.Equal(t, uint64(1024), g.Levels.LiveTotal, "the fleet cap is exactly full")
+	assert.Equal(t, uint64(16), g.Levels.DistinctSources)
+	assert.Equal(t, uint64(64), g.Levels.MaxPerSource, "every source sits exactly on the per-source cap")
+	assert.Equal(t, uint64(0), g.Counts.RefusedTotal,
+		"nothing has been refused YET, which is exactly why the refusal counters cannot see this shape")
+	assert.Equal(t, uint64(0), g.Counts.RefusedPerIP)
+
+	// The seventeenth source - a legitimate agent - is now refused by the TOTAL cap.
+	require.False(t, deleg.admit("2001:db8:0:ff::/64"))
+	g = deleg.Stats()
+	assert.Equal(t, uint64(1), g.Counts.RefusedTotal)
+	assert.Equal(t, uint64(64), g.Levels.MaxPerSource, "a refusal must move no level at all")
+
+	// (d) The UNEQUAL arrangement, and the busiest source is deliberately in the
+	//     MIDDLE: a MaxPerSource implemented as "the first entry" or "the last
+	//     entry" must not be able to pass by position. 1 + 7 + 2 = 10 live, 3
+	//     sources, max 7 - four numbers, all different, so len(perIP) and
+	//     LiveTotal are both visibly wrong answers.
+	uneq := Wrap(&fakeListener{}, Config{MaxTotal: 100, MaxPerIP: 100})
+	admitN(t, uneq, "10.2.0.1", 1)
+	admitN(t, uneq, "10.2.0.2", 7)
+	admitN(t, uneq, "10.2.0.3", 2)
+	u := uneq.Stats()
+	assert.Equal(t, uint64(10), u.Levels.LiveTotal)
+	assert.Equal(t, uint64(3), u.Levels.DistinctSources)
+	assert.Equal(t, uint64(7), u.Levels.MaxPerSource,
+		"MaxPerSource is the LARGEST per-source count, not the number of sources and not the total")
+}
+
+// TestStats_IsOneCriticalSection is the test the backlog item asks for by name,
+// and its discriminating property is real rather than aspirational: with three
+// separate lock acquisitions, connections being admitted between the reads make
+// DistinctSources > LiveTotal directly observable.
+//
+// -race IS NOT THE INSTRUMENT HERE. The mutation this test exists to kill takes
+// the lock three times instead of once, so every read is still properly
+// synchronised and -race stays perfectly quiet under it. The INVARIANTS are the
+// instrument.
+//
+// THE INVARIANT HALF NEEDS MORE THAN ONE CPU AND THE VACUITY HALF NO LONGER
+// DOES, which is why they are made positive by different means. Measured: the
+// three-lock mutation is caught 10/10 at default GOMAXPROCS (`[{2 3 1}]` - two
+// live connections reported alongside three distinct sources) and 0/10 under
+// -cpu=1, where the reader is never preempted between the three acquisitions.
+// CI runs on a 2-4 vCPU runner, so the kill is live there; a 1-CPU cgroup would
+// merely stop detecting the mutation rather than fail, now that the two "saw"
+// counters are structural.
+//
+// The two "saw" counters are not decoration: a reader that only ever sampled an
+// empty listener would satisfy every invariant vacuously, which is the recorded
+// "measure the populated state" failure. They make the test fail when it proves
+// nothing.
+func TestStats_IsOneCriticalSection(t *testing.T) {
+	const (
+		sources = 128
+		rounds  = 40
+	)
+	l := Wrap(&fakeListener{}, Config{MaxTotal: 100000, MaxPerIP: 100000})
+
+	keys := make([]string, sources)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("10.9.%d.%d", i/256, i%256)
+	}
+
+	// THE POPULATED STATE IS STRUCTURAL, NOT HOPED FOR. The two "saw" counters
+	// below are the vacuity guard, and leaving them to interleaving made this
+	// test fail 30/30 under GOMAXPROCS=1 and 6/6 under -cpu=1 ("412628
+	// snapshots; 0 saw live connections"): the reader is an unsynchronised
+	// busy-spin, so on one CPU the churn goroutine runs its entire loop inside a
+	// single scheduling slice and every snapshot the reader takes is of an empty
+	// listener. CI runs -race on a 2-4 vCPU runner and any 1-CPU cgroup fails it
+	// every time. Admitting two sources BEFORE the churn starts and releasing
+	// them after it finishes puts a floor of LiveTotal>=2, DistinctSources>=2
+	// under every snapshot, so the guard is positive by construction while the
+	// churn still supplies the interleaving the invariant needs.
+	//
+	// AND THAT IS PRECISELY WHY THE GUARD NO LONGER INSTRUMENTS ANYTHING. With
+	// the floor pinned, sawLive == sawManySources == reads in every run, so the
+	// two counters cannot go to zero any more: deleting the churn goroutine
+	// outright would leave them satisfied. They now assert that the FLOOR is
+	// still in place, not that the churn populated anything - a constant, not a
+	// measurement. That is the accepted trade (the alternative was a test that
+	// fails 30/30 on one CPU), but it means the churn's own liveness is
+	// unguarded, and it is the mutation invariant below - MaxPerSource <=
+	// LiveTotal and friends - that has to earn its keep on a >=2 CPU host.
+	const (
+		pinnedA = "10.8.0.1"
+		pinnedB = "10.8.0.2"
+	)
+	require.True(t, l.admit(pinnedA))
+	require.True(t, l.admit(pinnedB))
+
+	stop := make(chan struct{})
+	var churn sync.WaitGroup
+	churn.Add(1)
+	go func() {
+		defer churn.Done()
+		defer close(stop)
+		for r := 0; r < rounds; r++ {
+			for _, k := range keys {
+				l.admit(k)
+			}
+			for _, k := range keys {
+				l.release(k)
+			}
+		}
+	}()
+
+	var bad []Occupancy
+	reads, sawLive, sawManySources := 0, 0, 0
+	for done := false; !done; {
+		select {
+		case <-stop:
+			done = true
+		default:
+		}
+		s := l.Stats()
+		reads++
+		if s.Levels.LiveTotal > 0 {
+			sawLive++
+		}
+		if s.Levels.DistinctSources > 1 {
+			sawManySources++
+		}
+		if s.Levels.DistinctSources > s.Levels.LiveTotal || s.Levels.MaxPerSource > s.Levels.LiveTotal {
+			bad = append(bad, s.Levels)
+			done = true // one counter-example is the whole finding
+		}
+	}
+	churn.Wait()
+	l.release(pinnedA)
+	l.release(pinnedB)
+
+	t.Logf("%d snapshots; %d saw live connections; %d saw more than one source", reads, sawLive, sawManySources)
+	require.Positive(t, sawLive,
+		"the reader never observed a single live connection, so it proved nothing about a populated listener")
+	require.Positive(t, sawManySources,
+		"the reader never observed more than one source, so the DistinctSources invariant was never exercised")
+	require.Empty(t, bad,
+		"a snapshot reported more distinct sources (or a bigger per-source maximum) than it reported live "+
+			"connections. That arrangement never existed: the numbers were read in separate critical sections "+
+			"with connections opening and closing in between, and an operator would read it as a distributed "+
+			"source pattern that is not there.")
+}
+
+// TestStats_ConcurrentRefusalsAndReadsShareTheMutex is the CONCURRENT EXPOSURE
+// that makes -race able to see an unlocked counter, and that is its whole job.
+//
+// listener.go used to assert the coupling in prose: the refusal counters were
+// atomics "INCREMENTED under this same mutex (see admit), so reading them here
+// makes the whole five-field snapshot consistent". True, and nothing held it
+// true - rewriting admit to decide over-cap under the lock, Unlock, then Add(1)
+// outside left netlimit, cmd/relay-server AND internal/api all green, and a
+// poller would then see refused_total climbing while live_total sat BELOW the
+// configured cap, an arrangement the fleet was never in. The counters are now
+// plain uint64 guarded by l.mu, so that refactor is a DATA RACE rather than a
+// silent regression - but only if some test actually refuses connections while
+// another goroutine reads Stats, and before this one none did.
+//
+// PROVED, exactly that way: with the split-increment mutation applied,
+// `go test ./internal/netlimit/` is ok and
+// `go test -race ./internal/netlimit/` reports WARNING: DATA RACE and fails
+// here.
+//
+// THE INLINE INVARIANT IS A CHEAP CONSISTENCY CHECK, NOT THE KILL, and saying so
+// is the point: nothing is released, so LiveTotal is pinned at the cap and
+// "refusals reported alongside a listener that is not full" cannot arise from a
+// split read either. The discriminating kills for miscounting a refusal live in
+// TestLimitListener_RefusesBeyondPerIPCap, TestLimitListener_TotalCapRefuses-
+// AcrossDistinctIPs, TestLimitListener_PerIPRefusalConsumesNoTotalSlot and
+// TestStats_ReportsOccupancy, all four of which go RED on an unconditional
+// increment. Do not read the require.Empty below as covering that.
+//
+// The populated state is structural, for the reason recorded on
+// TestStats_IsOneCriticalSection: the listener is filled and one refusal forced
+// BEFORE the reader starts, so sawRefusals cannot be zero however the scheduler
+// behaves - including at GOMAXPROCS=1.
+func TestStats_ConcurrentRefusalsAndReadsShareTheMutex(t *testing.T) {
+	const maxTotal = 8
+	l := Wrap(&fakeListener{}, Config{MaxTotal: maxTotal})
+
+	for i := 0; i < maxTotal; i++ {
+		require.True(t, l.admit(fmt.Sprintf("10.6.0.%d", i)))
+	}
+	require.False(t, l.admit("10.6.9.9"), "the fleet cap must already be reached before the reader starts")
+
+	stop := make(chan struct{})
+	var writers sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		writers.Add(1)
+		go func(w int) {
+			defer writers.Done()
+			for i := 0; i < 2000; i++ {
+				// Every one of these is refused: the total cap is full and
+				// nothing releases.
+				l.admit(fmt.Sprintf("10.7.%d.%d", w, i%256))
+			}
+		}(w)
+	}
+	go func() { writers.Wait(); close(stop) }()
+
+	var bad []Stats
+	reads, sawRefusals := 0, 0
+	for done := false; !done; {
+		select {
+		case <-stop:
+			done = true
+		default:
+		}
+		s := l.Stats()
+		reads++
+		if s.Counts.RefusedTotal == 0 {
+			continue
+		}
+		sawRefusals++
+		if s.Levels.LiveTotal != maxTotal {
+			bad = append(bad, s)
+			done = true // one counter-example is the whole finding
+		}
+	}
+	writers.Wait()
+
+	t.Logf("%d snapshots; %d saw refusals", reads, sawRefusals)
+	require.Positive(t, sawRefusals, "the reader never observed a refusal, so it proved nothing")
+	require.Empty(t, bad,
+		"a snapshot reported refusals alongside a listener that is NOT full (%v). Nothing is ever "+
+			"released here, so live_total cannot fall back below the cap: the count and the level were "+
+			"read at different moments. An operator reads that pair as 'we are refusing while under the "+
+			"cap', an arrangement the fleet was never in.", bad)
+}
+
+// TestStats_CarriesNoIdentifiers answers "which IP is it?" NO, on the record and
+// in code rather than in a comment. The refusal path is reachable by any
+// unauthenticated peer and this type is rendered into a periodic log line, so a
+// string field here would be an attacker-writable log site inside the control
+// that exists to bound attacker-driven log volume.
+//
+// The leaf-path assertion is what stops this being vacuous: a walk that visited
+// nothing would satisfy the type check trivially, and a NotEmpty check with a
+// stern message is not a check.
+func TestStats_CarriesNoIdentifiers(t *testing.T) {
+	st := reflect.TypeOf(Stats{})
+	require.Equal(t, 2, st.NumField(),
+		"Stats has exactly two halves, Counts and Levels. A field added directly to Stats is neither "+
+			"monotonic nor current, so no reporter can classify it and the trigger rule has no answer for it.")
+
+	var leaves []string
+	for i := 0; i < st.NumField(); i++ {
+		half := st.Field(i)
+		require.Equal(t, reflect.Struct, half.Type.Kind(), "Stats.%s must be a struct half", half.Name)
+		for j := 0; j < half.Type.NumField(); j++ {
+			f := half.Type.Field(j)
+			path := half.Name + "." + f.Name
+			leaves = append(leaves, path)
+			switch f.Type.Kind() {
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			default:
+				t.Fatalf("netlimit.Stats.%s is a %s. Every field of this type must be an UNSIGNED INTEGER: "+
+					"an address, a prefix, a hostname or any other caller-supplied byte reaches an "+
+					"attacker-driven log site through the refusal summary. More numbers, never identifiers.",
+					path, f.Type.Kind())
+			}
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"Counts.RefusedTotal", "Counts.RefusedPerIP",
+		"Levels.LiveTotal", "Levels.DistinctSources", "Levels.MaxPerSource",
+	}, leaves,
+		"the field set of netlimit.Stats changed. Adding a number is fine - update this list deliberately - "+
+			"but the list is here so the addition is a decision rather than a diff nobody read.")
 }
