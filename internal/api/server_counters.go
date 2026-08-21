@@ -128,6 +128,26 @@ type IngestLogBudgetSource interface {
 	IngestLogDropCounts() worker.IngestLogDrops
 }
 
+// TaskLogFenceSource is whatever can report how many task-log chunks the
+// AppendTaskLog fence has rejected - in production, *worker.Handler.
+//
+// ITS OWN SOURCE FIELD, NOT A WIDENED IngestLogBudgetSource, exactly as that
+// interface's comment demands. The two counters live on the same *worker.Handler
+// and are wired together today, but they are independent CONTROLS counting
+// different nouns, and an interface carrying both would make them appear and
+// disappear together as a matter of TYPE rather than as a matter of wiring.
+//
+// A SCALAR, NOT A STRUCT, and that is load-bearing rather than minimal: a
+// section whose payload struct restates fields owned by another package needs a
+// cardinality check between the two types (see
+// TestIngestLogKindCountsPublishesEveryWorkerSideField). This section restates
+// nothing, so it needs no such check - a property pinned by
+// TestTaskLogFenceSourceReturnsAScalar, which reddens if this return type is ever
+// widened.
+type TaskLogFenceSource interface {
+	TaskLogFenceRejections() uint64
+}
+
 // CounterSources is the set of subsystem counter sources the endpoint
 // assembles. Every field is nil-able and nil means the section is ABSENT from
 // the payload, not zero.
@@ -154,12 +174,14 @@ type IngestLogBudgetSource interface {
 type CounterSources struct {
 	GRPCAdmission   GRPCAdmissionSource
 	IngestLogBudget IngestLogBudgetSource
+	TaskLogFence    TaskLogFenceSource
 }
 
 type serverCountersResponse struct {
 	StartedAt       time.Time               `json:"started_at"`
 	GRPCAdmission   *grpcAdmissionSection   `json:"grpc_admission,omitempty"`
 	IngestLogBudget *ingestLogBudgetSection `json:"ingest_log_budget,omitempty"`
+	TaskLogFence    *taskLogFenceSection    `json:"task_log_fence,omitempty"`
 }
 
 type grpcAdmissionSection struct {
@@ -199,7 +221,8 @@ type grpcAdmissionLevels struct {
 // diagnostics lost. A handler that decides not to log without consulting the
 // budget contributes nothing - handleTaskStatus's pgx.ErrNoRows GetTask
 // short-circuits before the budget, and handleTaskLog's fence-rejection arm
-// never consults it at all (that one is its own item and its own section).
+// never consults it at all (that one is counted in task_log_fence, and the two
+// numbers are disjoint).
 type ingestLogBudgetSection struct {
 	Counts ingestLogBudgetCounts `json:"counts"`
 }
@@ -237,6 +260,33 @@ func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts 
 	}
 }
 
+// task_log_fence is COUNTS ONLY and it is ONE NUMBER, both by decision.
+//
+// rejected_total counts task-log chunks that AppendTaskLog's three-predicate
+// fence refused: the sender is not the task's assignee, or its generation is
+// stale, or the task finished longer ago than RELAY_TASKLOG_TRAILING_WINDOW.
+// THE THIRD IS LEGITIMATE and is the one an operator who set that knob too small
+// hits constantly, which is why this number exists at all - before it there was
+// no runtime signal of any kind that task output was being dropped.
+//
+// WHY THE THREE ARE NOT SPLIT: the fence yields no row when any predicate fails,
+// so there is nothing to carry a reason on. Recovering it needs a second round
+// trip (forbidden on the recv goroutine) or a rewrite of AppendTaskLog's result
+// contract. DECLINED WITH THE PRICE WRITTEN DOWN - not impossible; see the
+// pgx.ErrNoRows arm in internal/worker/handler.go. Do not "improve" this into
+// three fields without reading that first.
+//
+// AND WHAT IT DOES NOT COVER: it is not a subset or a superset of
+// ingest_log_budget. That arm never consults the log budget, so no input moves
+// both numbers and neither explains any part of the other.
+type taskLogFenceSection struct {
+	Counts taskLogFenceCounts `json:"counts"`
+}
+
+type taskLogFenceCounts struct {
+	RejectedTotal uint64 `json:"rejected_total"`
+}
+
 // handleServerCounters assembles whichever sections are wired. It reads no
 // request body, so readJSON is not involved; the response goes through
 // writeJSON, matching handleGetWorkerMetrics.
@@ -262,6 +312,11 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 			Deduped:    ingestLogKindCountsFrom(d.Deduped),
 			Suppressed: ingestLogKindCountsFrom(d.Suppressed),
 		}}
+	}
+	if src := s.Counters.TaskLogFence; src != nil {
+		resp.TaskLogFence = &taskLogFenceSection{
+			Counts: taskLogFenceCounts{RejectedTotal: src.TaskLogFenceRejections()},
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

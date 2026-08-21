@@ -317,50 +317,73 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	// the endpoint as a typed nil and vanishes on every deployment that takes the
 	// branch, which reads exactly like a control that has never stopped anything.
 	deps := []wiredDep{
-		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
-		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
+		{"grpcAdmission", []string{"GRPCAdmission"}, "Wrap", "the netlimit listener bound in main's body"},
+		{"agentHandler", []string{"IngestLogBudget", "TaskLogFence"}, "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
 	}
 
-	// COUNT THE DISTINCT FIELDS AGAINST THE SOURCE FIELDS, because "every wired
-	// source has a row" is a completeness claim and a completeness claim cannot
-	// be checked by reading the rows. The mapping is not mechanical -
-	// api.CounterSources' IngestLogBudget is fed by httpServerDeps.agentHandler -
-	// so a name match is not available, but the CARDINALITIES must agree: a third
-	// section added to CounterSources and wired through a new deps field, with no
-	// row added here, would be guarded by nothing at all while every assertion
-	// below still passed.
+	// COUNT THE SECTIONS AGAINST api.CounterSources, because "every wired source
+	// has a row" is a completeness claim and a completeness claim cannot be checked
+	// by reading the rows.
 	//
-	// DISTINCT FIELDS, NOT ROWS, and the difference is the cheapest path to
-	// green rather than a hypothetical. Counting rows was PROVED evadable in two
-	// steps: `agentHandler = nil` inside an if in main is correctly RED here
-	// ("assigned 2 times"), and replacing the agentHandler ROW with a second
-	// grpcAdmission row makes the whole package green again - two rows, NumField
-	// is 2, and agentHandler is now outside chainNames, losing the
-	// plain-identifier check, the derives-from check and the assigned-exactly-
-	// once check at a stroke. The next section makes that path more inviting,
-	// not less: server_counters.go says the fence counter will live on the SAME
-	// *worker.Handler with its own CounterSources field, so NumField goes to 3
-	// while the natural table still has 2 rows.
+	// THE DENOMINATOR CHANGED, AND THE REASON IS WORTH THE PARAGRAPH. This block
+	// used to compare the number of DISTINCT httpServerDeps fields to
+	// NumField(api.CounterSources), which held only while the two were in bijection.
+	// The task-log fence counter broke that: it is a third CounterSources field fed
+	// by the SAME *worker.Handler, so distinct deps fields stayed at 2 while NumField
+	// went to 3. The two available repairs were a second deps field for the same
+	// object, or this. The second deps field was REJECTED on merit rather than on
+	// taste: only agentHandler is compared against the identifier passed to
+	// RegisterAgentServiceServer below, so a sibling field could legitimately be fed
+	// a DIFFERENT worker.Handler with every check here green, and the endpoint would
+	// then report a permanently zero fence count while the real one climbed - the
+	// confident zero this whole file exists to prevent, created in order to satisfy
+	// an arithmetic check.
 	//
-	// The field-exists check is here for the same reason: a typo'd row leaves
-	// depArg[d.field] nil and fails several assertions down with a message about
-	// wiring rather than about the typo.
+	// DISTINCT FIELDS, NOT ROWS, is kept and strengthened into an equality: counting
+	// rows was PROVED evadable (replacing the agentHandler row with a second
+	// grpcAdmission row made the package green while dropping agentHandler out of the
+	// plain-identifier check, the derives-from check and the assigned-exactly-once
+	// check at a stroke). A duplicated row is now RED on its own, before any section
+	// arithmetic is reached.
 	depsType := reflect.TypeOf(httpServerDeps{})
+	sourcesType := reflect.TypeOf(api.CounterSources{})
 	distinct := map[string]bool{}
+	sections := map[string]bool{}
 	for _, d := range deps {
 		_, ok := depsType.FieldByName(d.field)
 		require.True(t, ok,
 			"this table has a row for httpServerDeps.%s, which does not exist. A row naming no field "+
-				"guards nothing and makes the count below pass on a table that is short one section.",
+				"guards nothing and makes the counts below pass on a table that is short one section.",
 			d.field)
 		distinct[d.field] = true
+
+		require.NotEmpty(t, d.sections,
+			"the row for httpServerDeps.%s names no api.CounterSources field. A row that feeds no "+
+				"section is a dependency nothing reads; a section fed by no row is guarded by nothing.",
+			d.field)
+		for _, sec := range d.sections {
+			_, ok := sourcesType.FieldByName(sec)
+			require.True(t, ok,
+				"this table's %s row names api.CounterSources.%s, which does not exist. Fix the typo: a "+
+					"row naming a phantom section satisfies the count below while a real section goes "+
+					"unguarded.", d.field, sec)
+			require.False(t, sections[sec],
+				"api.CounterSources.%s is named by two rows. Each section is fed by exactly one deps "+
+					"field, and two rows naming the same one lets the count below pass on a table that is "+
+					"short a different section.", sec)
+			sections[sec] = true
+		}
 	}
-	require.Len(t, distinct, reflect.TypeOf(api.CounterSources{}).NumField(),
-		"api.CounterSources has %d source fields and this table names %d DISTINCT httpServerDeps "+
-			"fields (in %d rows). Every wired source needs its own row, or its section can be silently "+
-			"unwired on some deployments with this guard green - and a duplicated row satisfies a row "+
-			"count while dropping the field it displaced out of every check below.",
-		reflect.TypeOf(api.CounterSources{}).NumField(), len(distinct), len(deps))
+	require.Len(t, distinct, len(deps),
+		"this table has %d rows naming %d DISTINCT httpServerDeps fields. Do not resolve a cardinality "+
+			"failure by repeating a row: that was proved to drop the displaced field out of every check "+
+			"below while every count still passed.", len(deps), len(distinct))
+	require.Len(t, sections, sourcesType.NumField(),
+		"api.CounterSources has %d source fields and this table names %d of them. EVERY SECTION needs to "+
+			"be named by exactly one row, or it is wired by code nothing checks and can be silently "+
+			"unwired on some deployments with this guard green. A deps field may feed more than one "+
+			"section (agentHandler feeds two); a section may not be fed by more than one row.",
+		sourcesType.NumField(), len(sections))
 
 	depArg := map[string]*ast.Ident{}
 	for _, st := range body.List {
@@ -575,6 +598,40 @@ func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
 	require.Len(t, section.Counts.Suppressed, 5, "one key per kind")
 }
 
+// TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection is EXECUTED, and
+// it says what it does not buy.
+//
+// It proves the section is PRESENT with the right shape whenever a non-nil
+// Handler is passed, which is what kills a dropped assignment inside
+// buildHTTPServer. It does NOT prove the section is served from THAT Handler: a
+// fresh worker.NewHandler substituted there produces an identical zero section
+// and leaves this green. That question is executable only past Connect's message
+// loop, so it lives in
+// TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers,
+// which is INTEGRATION-tagged - go-ci runs `go test -race ./...` with no tag, so
+// CI compiles it and never runs it.
+func TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection(t *testing.T) {
+	h := worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {})
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: h,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.Contains(t, top, "task_log_fence",
+		"a wired Handler must produce the section from the moment the server is built. An absent "+
+			"section reads as 'this build has no task-log fence', which is false.")
+
+	var section struct {
+		Counts struct {
+			RejectedTotal uint64 `json:"rejected_total"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(top["task_log_fence"], &section))
+	require.Zero(t, section.Counts.RejectedTotal, "nothing has been rejected on a fresh handler")
+}
+
 // TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent. `var h
 // *worker.Handler` conditionally assigned stores a TYPED nil in the interface,
 // which is not == nil, so the handler's `src != nil` is true and the method call
@@ -595,15 +652,26 @@ func TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent(t *testing.T
 	top := countersAsAdmin(t, srv)
 	require.NotContains(t, top, "ingest_log_budget",
 		"a nil handler must leave the section ABSENT, never present-and-zero, and must never panic")
+	require.NotContains(t, top, "task_log_fence",
+		"the same nil filter covers BOTH sections fed by this handler. One deps field, one `if`, two "+
+			"sections: a separate typed-nil test would copy this fixture to assert the same branch.")
 	require.Contains(t, top, "started_at")
 }
 
 // wiredDep names one httpServerDeps field whose source must be a plain,
-// unconditionally-bound local in main's body, and the constructor that local has
-// to derive from. One row per SECTION of the counters payload: "wired" is a
-// per-section fact, so a new section adds a row here rather than widening one.
+// unconditionally-bound local in main's body, the constructor that local has to
+// derive from, and the api.CounterSources fields it feeds.
+//
+// ONE ROW PER DEPS FIELD, AND EACH ROW NAMES ITS SECTIONS. It used to be one row
+// per SECTION, on the assumption that the two were the same thing. They are not:
+// agentHandler feeds BOTH IngestLogBudget and TaskLogFence, because both controls
+// live on the same *worker.Handler and neither exists without it. The completeness
+// relation below therefore counts SECTIONS, which is the claim being made ("every
+// section is wired through a checked field"), and counts deps fields only to
+// reject a duplicated row.
 type wiredDep struct {
 	field     string
+	sections  []string
 	mustReach string
 	what      string
 }

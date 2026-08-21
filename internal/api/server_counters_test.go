@@ -531,6 +531,7 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.suppressed.bad_task_id_status",
 	"ingest_log_budget.counts.suppressed.status_get_task",
 	"ingest_log_budget.counts.suppressed.inventory",
+	"task_log_fence.counts.rejected_total",
 }
 
 // TestCounterPayloadCarriesNoIdentifiers is the cardinality rule of the
@@ -650,6 +651,7 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 				Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
 			}},
 			IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()},
+			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
 		},
 	}
 	rec := httptest.NewRecorder()
@@ -862,4 +864,100 @@ func TestServerCounters_OneWiredSectionDoesNotDragInTheOther(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
 	assert.ElementsMatch(t, []string{"started_at", "ingest_log_budget"}, counterKeys(top),
 		"an unwired section stays ABSENT even when a sibling section is wired")
+}
+
+// fakeTaskLogFenceSource returns a fixed count.
+type fakeTaskLogFenceSource struct{ n uint64 }
+
+func (f fakeTaskLogFenceSource) TaskLogFenceRejections() uint64 { return f.n }
+
+// TestTaskLogFenceSourceReturnsAScalar is a forcing function on an ANTECEDENT,
+// not on today's code.
+//
+// The rule this package learned in the ingest slice is that any section whose
+// payload struct RESTATES fields owned by another package needs a NumField
+// assertion between the two types, written here because this is the only place
+// both are visible (TestIngestLogKindCountsPublishesEveryWorkerSideField).
+// task_log_fence restates NOTHING: its source returns a bare uint64, there is no
+// hand-written field-by-field mapper, and so that rule does not apply - which is
+// only true while the return type stays a scalar. Widening it to a struct is a
+// one-line edit that would silently move this section into the class that needs
+// the arity check.
+//
+// THE ANTECEDENT IS WHAT IS GUARDED HERE, deliberately: there is nothing to
+// count today, so the only honest guard is one that reddens the moment counting
+// becomes necessary, and whose message names what must ship alongside.
+func TestTaskLogFenceSourceReturnsAScalar(t *testing.T) {
+	iface := reflect.TypeOf((*TaskLogFenceSource)(nil)).Elem()
+	require.Equal(t, 1, iface.NumMethod(),
+		"TaskLogFenceSource must stay a ONE-METHOD interface. A second method is a second thing to "+
+			"restate, and the reasoning below only covers the one.")
+	m, ok := iface.MethodByName("TaskLogFenceRejections")
+	require.True(t, ok, "TaskLogFenceSource must declare TaskLogFenceRejections")
+	require.Equal(t, 1, m.Type.NumOut(), "one return value")
+	require.Equal(t, reflect.Uint64, m.Type.Out(0).Kind(),
+		"TaskLogFenceRejections returns %s. While it returns a SCALAR this section restates no "+
+			"worker-side field and needs no cardinality check. If it now returns a struct, an arity "+
+			"assertion between the worker-side type and the api-side type must ship IN THIS COMMIT - see "+
+			"TestIngestLogKindCountsPublishesEveryWorkerSideField, which exists because a fully correct "+
+			"sixth kind was counted on the recv path and published under no JSON key with all three "+
+			"packages green.", m.Type.Out(0).Kind())
+}
+
+func TestServerCounters_ReportsTheTaskLogFenceSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskLogFence: fakeTaskLogFenceSource{n: 77}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		TaskLogFence *struct {
+			Counts map[string]any `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"task_log_fence"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.TaskLogFence, "a wired section must be present")
+	require.Nil(t, body.TaskLogFence.Levels,
+		"COUNTS ONLY. There is no current 'level' of fence rejections to report - the number is a "+
+			"monotonic total since started_at.")
+
+	// Key-set equality, not a per-key assertion alone: a renamed key would decode
+	// as a missing value and read as zero.
+	assert.ElementsMatch(t, []string{"rejected_total"}, counterMapKeys(body.TaskLogFence.Counts))
+	assert.Equal(t, float64(77), body.TaskLogFence.Counts["rejected_total"])
+}
+
+// TestServerCounters_WiredButZeroTaskLogFenceSectionIsStillPresent. A server
+// whose fence has rejected nothing is the COMMON case and must still emit its
+// section: zeros mean "this control ran and stopped nothing", absence means "not
+// wired on this build". This section's counts half is SCALARS, so unlike
+// ingest_log_budget the shipped one-level loop is the right shape here.
+func TestServerCounters_WiredButZeroTaskLogFenceSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskLogFence: fakeTaskLogFenceSource{}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "task_log_fence"}, counterKeys(top),
+		"a WIRED source whose counter is zero must still emit its section, and no OTHER section may "+
+			"appear: each source is nil-able on its own")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["task_log_fence"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section), "counts only; no levels half")
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &fields))
+	require.Len(t, fields, 1, "counts must be an object with the one key, not an empty object")
+	assert.Equal(t, "0", string(fields["rejected_total"]),
+		"rejected_total must serialise as an explicit zero, never be elided by omitempty")
 }
