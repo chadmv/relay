@@ -10,11 +10,13 @@ import (
 	"log"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	relayv1 "relay/internal/proto/relayv1"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -404,4 +406,74 @@ func TestHandleTaskStatus_ADroppedLineUnderAnEmptyBudgetCountsSuppressed(t *test
 		"a line dropped for lack of a token is the arm that means attack or misconfiguration, and it "+
 			"must be counted under the kind that lost it")
 	require.Zero(t, got.Deduped.BadTaskIDStatus)
+}
+
+// TestIngestLogCounters_ConcurrentDropsFromManyLimitersAreExact is what makes
+// "atomics, not a mutex" a checked decision rather than a comment. Every
+// goroutine owns its own limiter, exactly as every connection does, and all of
+// them write the same cells.
+//
+// WHAT KILLS WHAT, MEASURED RATHER THAN ASSUMED, because a test can be robust
+// and inert on the same machine. Every figure below is against the mutation this
+// test exists for - ingestLogCounters.n changed from atomic.Uint64 to a plain
+// uint64 with `++` - run in the golang:1.26 Linux container:
+//
+//   - THE -race RUN IS THE LOAD-BEARING HALF, and it is the one CI executes. It
+//     kills the mutation through happens-before analysis: 10/10 at -cpu=2,
+//     10/10 at -cpu=4, and only 1/10 at -cpu=1. The last number is the
+//     uncomfortable one and it is stated rather than glossed: at GOMAXPROCS=1
+//     this test is very nearly INERT, so green there means "did not detect", not
+//     "verified".
+//   - THE EXACTNESS ASSERTION is the weaker half everywhere. It catches a lost
+//     update only when two goroutines interleave inside the read-modify-write:
+//     8/20 at -cpu=2, 5/20 at -cpu=4, 0/20 at -cpu=1. It is kept because it is
+//     the only half that fails with a NUMBER an operator would care about, but
+//     it is not what makes the decision checked.
+//
+// go-ci runs `go test -race ./... -timeout 180s` on ubuntu-latest with no -cpu
+// flag and no build tag, and a GitHub-hosted runner has 2 or 4 vCPUs - the
+// -race kill was measured at 10/10 for BOTH, so it is live there either way.
+// Locally, -race must be run in a Linux container: ThreadSanitizer cannot
+// allocate its shadow memory on the Windows authoring host and fails on
+// untouched packages too.
+//
+// A busy-spin reader bounded by a done channel, rather than the fixed 5000
+// iterations below, was tried and is WORSE: it starves the writers and drops the
+// -cpu=2 race kill from 10/10 to 4/10. Do not "improve" it that way.
+//
+// The fixture assertions inside the goroutines are assert, NOT require: require
+// calls t.FailNow, which is runtime.Goexit on whatever goroutine reaches it, and
+// testify documents that as unsupported off the test goroutine.
+func TestIngestLogCounters_ConcurrentDropsFromManyLimitersAreExact(t *testing.T) {
+	var h Handler
+	const conns, perConn = 8, 200
+	k := logKey{kind: kindInventory}
+
+	var wg sync.WaitGroup
+	for c := 0; c < conns; c++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l := newIngestLogLimiter(&h.ingestDrops)
+			assert.True(t, l.allow(k), "fixture: a fresh budget allows the first line of a kind")
+			for i := 0; i < perConn; i++ {
+				l.allow(k)
+			}
+		}()
+	}
+
+	// A concurrent READER as well, so -race sees both sides of the access.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 5000; i++ {
+			_ = h.IngestLogDropCounts()
+		}
+	}()
+	wg.Wait()
+	<-done
+
+	require.Equal(t, uint64(conns*perConn), h.IngestLogDropCounts().Deduped.Inventory,
+		"every drop must land exactly once. A short count here is a lost update, which is what a "+
+			"plain uint64 increment produces under concurrency.")
 }
