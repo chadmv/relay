@@ -215,3 +215,114 @@ func TestIngestLogCounters_AnOutOfRangeKindIsDroppedNotPanicked(t *testing.T) {
 	require.Equal(t, IngestLogDrops{}, c.snapshot(),
 		"an out-of-range kind or arm must be dropped, not folded into some other cell")
 }
+
+// TestIngestLogLimiter_TheDedupeArmCountsDeduped. One key logged twice inside
+// the dedupe window: the second call is folded into the first, and that is the
+// arm an operator reads as "a repeating failure is being collapsed".
+func TestIngestLogLimiter_TheDedupeArmCountsDeduped(t *testing.T) {
+	l, _ := newFrozen()
+	k := logKey{kind: kindTaskLogPersist, id: "task-a", epoch: 1}
+
+	require.True(t, l.allow(k), "fixture: the first line is allowed")
+	require.False(t, l.allow(k), "fixture: the second is deduped")
+
+	got := l.drops.snapshot()
+	require.Equal(t, uint64(1), got.Deduped.TaskLogPersist,
+		"a deduped occurrence must increment the DEDUPED arm of its own kind")
+	require.Equal(t, IngestLogDropsByKind{}, got.Suppressed,
+		"a deduped occurrence must not touch the suppressed arm: the two mean different things - "+
+			"one is a healthy collapse, the other is an attack or a misconfiguration")
+}
+
+// TestIngestLogLimiter_TheEmptyBucketCountsSuppressed. Distinct keys, so the
+// dedupe arm never fires: the burst is spent and every later line is dropped
+// entirely.
+func TestIngestLogLimiter_TheEmptyBucketCountsSuppressed(t *testing.T) {
+	l, _ := newFrozen()
+	key := func(i int) logKey {
+		return logKey{kind: kindTaskLogPersist, id: "task", epoch: int64(i)}
+	}
+	for i := 0; i < ingestLogBurst; i++ {
+		require.True(t, l.allow(key(i)), "fixture: the burst must be spendable")
+	}
+	require.False(t, l.allow(key(ingestLogBurst)), "fixture: the bucket is now empty")
+	require.False(t, l.allow(key(ingestLogBurst+1)))
+
+	got := l.drops.snapshot()
+	require.Equal(t, uint64(2), got.Suppressed.TaskLogPersist,
+		"a line dropped for lack of a token must increment the SUPPRESSED arm")
+	require.Equal(t, IngestLogDropsByKind{}, got.Deduped,
+		"none of these keys repeated, so nothing was deduped")
+}
+
+// TestIngestLogLimiter_AnAllowedLineCountsNothing. The counter is a DROP
+// counter. An increment on the allowed path would make every number here the
+// message count, which is the one thing the log line already tells you.
+func TestIngestLogLimiter_AnAllowedLineCountsNothing(t *testing.T) {
+	l, _ := newFrozen()
+	for k := logKind(1); k < kindCount; k++ {
+		require.True(t, l.allow(logKey{kind: k}), "fixture: first line of each kind is allowed")
+	}
+	require.Equal(t, IngestLogDrops{}, l.drops.snapshot(),
+		"an ALLOWED line is not a drop")
+}
+
+// TestIngestLogLimiter_TheNilArmCountsNothing.
+//
+// SAY WHAT THIS DOES AND DOES NOT BUY. The nil arm is fail-closed and
+// deliberately unreachable in production, and NO EVENT WAS SUPPRESSED there
+// because there was no limiter - counting it would count a phantom. What
+// actually prevents the count is structural: the counters are reached through
+// the limiter, so a nil receiver has nothing to increment. This test therefore
+// kills exactly one mutation - adding a package-level fallback counter that the
+// snapshot also reads - and NOT the general claim. Keep it for that one.
+func TestIngestLogLimiter_TheNilArmCountsNothing(t *testing.T) {
+	var h Handler
+	var l *ingestLogLimiter
+	require.False(t, l.allow(logKey{kind: kindBadTaskIDLog}))
+	require.Equal(t, IngestLogDrops{}, h.IngestLogDropCounts(),
+		"the l == nil arm suppressed no event and must count nothing anywhere")
+}
+
+// TestIngestLogCounters_TwoLimitersOnOneHandlerAggregate is the item's headline
+// property at the cheapest layer that can express it: THE COUNT OUTLIVES THE
+// CONNECTION. Two independent budgets, one Handler, one set of numbers.
+//
+// It does NOT prove that Connect passes the Handler's counters rather than a
+// fresh set - that needs a real stream and lives in
+// TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in the
+// integration lane.
+func TestIngestLogCounters_TwoLimitersOnOneHandlerAggregate(t *testing.T) {
+	var h Handler
+	a := newIngestLogLimiter(&h.ingestDrops)
+	b := newIngestLogLimiter(&h.ingestDrops)
+	k := logKey{kind: kindInventory}
+
+	for _, l := range []*ingestLogLimiter{a, b} {
+		require.True(t, l.allow(k))
+		require.False(t, l.allow(k))
+		require.False(t, l.allow(k))
+	}
+
+	require.Equal(t, uint64(4), h.IngestLogDropCounts().Deduped.Inventory,
+		"two connections' drops must land in ONE process-lifetime counter. Per-connection "+
+			"accumulation flushed at teardown was refuted at spec time: it reports nothing at all "+
+			"for as long as the flood continues.")
+}
+
+// TestIngestLogCounters_TwoHandlersDoNotShareCounts pins the choice of home
+// against the one the spec proposed (a package-level array). A global would make
+// every exact-count assertion in this package order-dependent on every other
+// test in the binary.
+func TestIngestLogCounters_TwoHandlersDoNotShareCounts(t *testing.T) {
+	var a, b Handler
+	l := newIngestLogLimiter(&a.ingestDrops)
+	k := logKey{kind: kindStatusGetTask}
+	require.True(t, l.allow(k))
+	require.False(t, l.allow(k))
+
+	require.Equal(t, uint64(1), a.IngestLogDropCounts().Deduped.StatusGetTask)
+	require.Equal(t, IngestLogDrops{}, b.IngestLogDropCounts(),
+		"counters are per Handler. Production has exactly one Handler, so that is process-wide "+
+			"there; a package-level array would make every test in this binary share these numbers.")
+}

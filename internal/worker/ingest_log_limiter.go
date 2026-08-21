@@ -82,6 +82,14 @@ type ingestLogLimiter struct {
 	tokens int
 	last   time.Time
 	now    func() time.Time // injectable for the deterministic refill tests only
+
+	// drops is the process-lifetime counter home, shared with every other
+	// connection's limiter. IT IS THE ONE THING IN THIS TYPE THAT IS SHARED, and
+	// that is deliberate: a count of what was dropped has to outlive the
+	// connection that caused it, or an operator reads zero after the attacker
+	// disconnects. Every write to it is an atomic add - see ingestLogCounters -
+	// so this type keeps its no-mutex property verbatim.
+	drops *ingestLogCounters
 }
 
 // logKind partitions the budget's dedupe keys.
@@ -203,7 +211,9 @@ const (
 	ingestLogIDClip = 64
 )
 
-func newIngestLogLimiter() *ingestLogLimiter { return newIngestLogLimiterAt(time.Now) }
+func newIngestLogLimiter(drops *ingestLogCounters) *ingestLogLimiter {
+	return newIngestLogLimiterAt(time.Now, drops)
+}
 
 // newIngestLogLimiterAt is newIngestLogLimiter with the clock injected. Every
 // time this type reads comes through `now`, INCLUDING the initial `last` stamp:
@@ -211,12 +221,13 @@ func newIngestLogLimiter() *ingestLogLimiter { return newIngestLogLimiterAt(time
 // only the field would hand that test a real-vs-fake skew of however far apart
 // the two clocks happen to be, and the first allow would silently refill by
 // hours. There is no way to half-use the seam from here.
-func newIngestLogLimiterAt(now func() time.Time) *ingestLogLimiter {
+func newIngestLogLimiterAt(now func() time.Time, drops *ingestLogCounters) *ingestLogLimiter {
 	return &ingestLogLimiter{
 		seen:   make(map[logKey]time.Time),
 		tokens: ingestLogBurst,
 		last:   now(),
 		now:    now,
+		drops:  drops,
 	}
 }
 
@@ -247,6 +258,12 @@ func (l *ingestLogLimiter) allow(k logKey) bool {
 	// recover handler panics, so a nil dereference here would kill the whole
 	// server process. Losing a diagnostic is the cheaper failure. Production has
 	// exactly one allocation site (Connect) so this is unreachable there.
+	//
+	// NOTHING IS COUNTED HERE, and it is not an oversight: no event was
+	// suppressed on this path, because there was no limiter. It is also
+	// unreachable to count - the counters live behind l - and adding a
+	// package-level fallback to reach them would be a visible diff, not an
+	// accident.
 	if l == nil {
 		return false
 	}
@@ -283,6 +300,9 @@ func (l *ingestLogLimiter) allow(k logKey) bool {
 	// one an operator needs to keep hearing about, and an idle-based reset would
 	// go permanently silent under a failure that never stops.
 	if at, ok := l.seen[k]; ok && now.Sub(at) < ingestLogDedupeWindow {
+		// COUNTED, NOT LOGGED. A log line here would be caller-driven volume on
+		// the recv goroutine, which is the vector this whole type closes.
+		l.drops.record(k.kind, ingestDropDeduped)
 		return false
 	}
 
@@ -290,6 +310,11 @@ func (l *ingestLogLimiter) allow(k logKey) bool {
 	// recorded, so the diagnostic reappears when tokens refill rather than being
 	// swallowed for the connection's whole lifetime.
 	if l.tokens == 0 {
+		// The other arm, kept separate because they mean opposite things: this
+		// one is a line dropped ENTIRELY, and a non-zero number here is either
+		// an attack or a misconfiguration, while a deduped line is a healthy
+		// collapse. One number for both would be uninterpretable.
+		l.drops.record(k.kind, ingestDropSuppressed)
 		return false
 	}
 
