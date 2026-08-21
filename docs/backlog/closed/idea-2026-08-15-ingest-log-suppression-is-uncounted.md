@@ -1,8 +1,10 @@
 ---
 title: Nothing counts what the ingest log budget dropped, so a flood is now invisible rather than noisy
 type: idea
-status: open
+status: closed
 created: 2026-08-15
+closed: 2026-08-21
+resolution: fixed
 updated: 2026-08-21
 priority: medium
 source: Phase 6 of the 2026-08-15-tasklog-err-limiter-keying slice; the diagnosability cost that slice accepted
@@ -223,3 +225,57 @@ become small. **(2026-08-21: the endpoint work has happened, and this item genui
 it is one array, one pointer, two increments and one comment amendment. It is sequenced FIRST of the
 three remaining consumers because it establishes the array cardinality class and creates the
 `internal/worker` counters home the fence-rejection sibling then reuses.)**
+
+
+## Resolution
+
+Closed by the 2026-08-21 silent-drop-observability slice 2 (see
+`docs/retros/2026-08-21-silent-drop-observability-slice2.md`).
+`internal/worker/ingest_log_counters.go` (new) holds a `[kindCount][2]atomic.Uint64` as a value field
+on `*worker.Handler`; `Connect` threads a pointer into each connection's stack-local
+`ingestLogLimiter`, which records on both suppression arms - deduped and budget-suppressed, kept
+separate because they mean opposite things - and nothing on its `l == nil` arm. `*worker.Handler`
+satisfies `api.IngestLogBudgetSource`, and `buildHTTPServer` wires the same handler identifier
+`RegisterAgentServiceServer` is called with, publishing
+`ingest_log_budget.counts.{deduped,suppressed}` with one JSON key per kind on the admin-only
+`GET /v1/server/counters`.
+
+All ten Done-When bullets are met. The flood proof is a handler-layer test in the **default lane**
+(`TestHandleTaskLog_ABadTaskIDFloodCountsTheDedupedArm`, 100 chunks, 1 log line, 99 counted drops)
+because the bad-id arms return before `h.q` is touched; the counts are read back through the real
+admin route; the numbers survive the connection and aggregate across connections, proven against a
+real registered stream in the integration lane.
+
+**Three of the item's own claims were refuted before any code was written.** The `[5]` array indexed
+by `logKind` would have **panicked on the gRPC recv goroutine** - the constants are `iota + 1`, so
+`kindInventory == 5` is out of range, and the obvious repair `kind - 1` is worse because `logKind` is
+`uint8` and kind 0 wraps to 255; shipped as `[kindCount][2]` with a sentinel and a fail-closed bounds
+check. The package-level home was refuted on test isolation and on there being no object for
+`CounterSources` to hold. And "values may still be renumbered freely" was wrong in **both**
+directions, not just the names half - the values are array indices now, so they must stay a dense run.
+
+**`ingestLogLimiter`'s no-mutex property is preserved verbatim; its no-shared-state property is not,
+and that is the deliberate change this item required.** The `drops` pointer is the one shared thing in
+the type, written only by atomic adds, documented at the type, at the field and at the allocation
+site, with `-race` green module-wide in a Linux container and a dedicated concurrency test whose
+`-race` half kills the plain-`uint64` mutation 10/10 at every core count measured.
+
+**What this section does NOT cover, stated because a counter that reads zero is worse than no
+counter.** (1) It counts *log lines the budget dropped*, never *diagnostics lost*: `handleTaskStatus`'s
+`pgx.ErrNoRows` `GetTask` is `&&`-short-circuited **before** `allow` and is therefore never counted -
+correctly, because the decision not to log was made upstream of the budget. (2) The `AppendTaskLog`
+fence-rejection arm never consults the budget at all; that counter is
+[[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]], slice 3. (3) Six reachable `log.Printf`
+sites on the recv goroutine are outside the budget entirely - three registration-time
+([[bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget]]) and three inside
+`handleTaskStatus` with the limiter already in scope
+([[bug-2026-08-21-handletaskstatus-db-error-lines-bypass-the-in-scope-budget]], filed by this slice
+after its own README claimed the opposite). README now names all three exclusions. (4) No `levels`
+half, no per-worker split, per replica, zeroed by a restart, and never reachable by an agent.
+
+One consequence to carry forward: **the kind names are now a response contract.** Adding a kind means
+a const inside the sentinel, an array cell, a `worker.IngestLogDropsByKind` field, a `byKind` line, an
+`api.ingestLogKindCounts` field and tag, a line in `ingestLogKindCountsFrom`, two
+`counterPayloadLeaves` entries and the kinds list in `TestServerCounters_ReportsTheIngestLogSnapshot`.
+A fully correct sixth kind was measured to leave all three packages green while being published under
+no JSON key; `TestIngestLogKindCountsPublishesEveryWorkerSideField` is what makes that RED.
