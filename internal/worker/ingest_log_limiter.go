@@ -75,6 +75,13 @@ import "time"
 // appears off that goroutine, that caller is the finding, not the missing lock.
 // It is a stack local in Connect, so it dies with the frame: there is no
 // teardown to get wrong and no way for one connection to reach another's.
+//
+// ONE FIELD IS THE EXCEPTION AND IT IS DELIBERATE: `drops` points at the
+// Handler's process-lifetime counters, which every connection shares, because a
+// count of what was dropped that died with the frame would read zero exactly
+// when an operator went looking for it. That pointer is written only by atomic
+// adds, so the no-mutex property above holds verbatim. The BUDGET is private;
+// the COUNTERS are process-wide. Do not merge the two.
 type ingestLogLimiter struct {
 	// seen maps a key to the instant it was last LOGGED. An entry older than
 	// ingestLogDedupeWindow is treated as absent, which is what re-arms the key.
