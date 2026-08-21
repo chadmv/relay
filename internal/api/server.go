@@ -37,6 +37,16 @@ type Server struct {
 	// cmd/relay-server after construction.
 	Metrics *metrics.Store
 
+	// Counters, when its fields are non-nil, supplies process-lifetime counters
+	// for GET /v1/server/counters. Set by cmd/relay-server after construction.
+	// A nil field means the section is ABSENT from the payload, not zero.
+	Counters CounterSources
+
+	// startedAt is when this server object was constructed, i.e. process start.
+	// It is in the payload because a restart zeroes every counter, so a stalled
+	// counter and a restart are otherwise identical.
+	startedAt time.Time
+
 	// StaticHandler, when non-nil, serves the embedded web UI for any path not
 	// matched by a /v1 API route. Set by cmd/relay-server from package webui.
 	StaticHandler http.Handler
@@ -64,6 +74,7 @@ func New(
 		LoginLimitWin:    loginLimitWin,
 		RegisterLimitN:   registerLimitN,
 		RegisterLimitWin: registerLimitWin,
+		startedAt:        time.Now().UTC(),
 	}
 }
 
@@ -136,6 +147,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/workers/{id}", auth(http.HandlerFunc(s.handleGetWorker)))
 	mux.Handle("GET /v1/workers/{id}/metrics", auth(http.HandlerFunc(s.handleGetWorkerMetrics)))
 	mux.Handle("PATCH /v1/workers/{id}", auth(admin(http.HandlerFunc(s.handleUpdateWorker))))
+
+	// Server-wide counters (admin-only). NOT auth-only like /v1/workers/stats:
+	// that is a database census of the fleet, while these are process-lifetime
+	// in-memory numbers describing adversary activity and internal control
+	// state.
+	mux.Handle("GET /v1/server/counters", auth(admin(http.HandlerFunc(s.handleServerCounters))))
 
 	// Reservations (admin-only)
 	mux.Handle("GET /v1/reservations", auth(admin(http.HandlerFunc(s.handleListReservations))))
