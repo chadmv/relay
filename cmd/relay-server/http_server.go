@@ -46,6 +46,20 @@ type httpServerDeps struct {
 	// volume. Filtering it here, at the concrete type, is the only place the
 	// distinction is still visible.
 	grpcAdmission *netlimit.Listener
+
+	// agentHandler is the worker.Handler that serves gRPC, and it is typed
+	// CONCRETELY rather than as api.IngestLogBudgetSource for the same reason
+	// grpcAdmission is: a (*worker.Handler)(nil) stored in that interface is NOT
+	// nil, so the counters handler's `src != nil` would be true and the snapshot
+	// call would dereference a nil receiver.
+	//
+	// IT MUST BE THE SAME HANDLER main REGISTERS WITH
+	// RegisterAgentServiceServer. A second Handler would count its own
+	// (permanently zero) drops while the real ones went unread - an endpoint
+	// reporting that a log budget has suppressed nothing is worse than no
+	// endpoint. TestServerCountersIsWiredByMain checks the identifier; nothing
+	// executable can check it from here.
+	agentHandler *worker.Handler
 }
 
 // buildHTTPServer assembles the api.Server AND the http.Server that serves it,
@@ -89,14 +103,18 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	s.StaticHandler = d.static
 	s.AllowSelfRegister = d.allowSelfRegister
 
-	// A nil listener leaves the section ABSENT, which is the payload's own
+	// A nil source leaves its section ABSENT, which is the payload's own
 	// vocabulary for "this control is not wired on this replica". It is
-	// deliberately NOT collapsed into a section of zeros, and Stats() is
-	// deliberately not made nil-tolerant: zeros mean "the control ran and
-	// stopped nothing", and merging the two is the exact defect the endpoint
-	// exists to fix.
+	// deliberately NOT collapsed into a section of zeros, and no snapshot method
+	// is made nil-tolerant: zeros mean "the control ran and stopped nothing", and
+	// merging the two is the exact defect the endpoint exists to fix.
+	//
+	// PER SECTION, not per struct: each control is wired or not on its own.
 	if d.grpcAdmission != nil {
-		s.Counters = api.CounterSources{GRPCAdmission: d.grpcAdmission}
+		s.Counters.GRPCAdmission = d.grpcAdmission
+	}
+	if d.agentHandler != nil {
+		s.Counters.IngestLogBudget = d.agentHandler
 	}
 
 	return &http.Server{Addr: d.addr, Handler: s.Handler()}
