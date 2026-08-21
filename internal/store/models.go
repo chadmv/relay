@@ -95,6 +95,7 @@ type Task struct {
 	AssignmentEpoch int32              `json:"assignment_epoch"`
 	Source          []byte             `json:"source"`
 	Commands        []byte             `json:"commands"`
+	AssignedAt      pgtype.Timestamptz `json:"assigned_at"`
 }
 
 type TaskDependency struct {

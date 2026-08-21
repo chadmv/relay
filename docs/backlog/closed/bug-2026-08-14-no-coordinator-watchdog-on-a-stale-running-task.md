@@ -1,7 +1,9 @@
 ---
 title: A task's timeout is enforced only by the agent, so a connected agent that never reports terminal holds its assignment forever
 type: bug
-status: open
+status: closed
+closed: 2026-08-20
+resolution: fixed
 created: 2026-08-14
 updated: 2026-08-20
 priority: medium
@@ -170,3 +172,57 @@ would add a second, periodic, non-agent-driven caller**, converting that race in
 unfenced write. Filed as [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]]; treat it
 as a prerequisite, not an adjacent nicety, if this item goes that way. The "fail it" shape does not
 depend on it.
+
+## Resolution
+
+Fixed 2026-08-20 by the `coordinator-stale-task-watchdog` slice. The coordinator now has a timer of
+its own: `internal/scheduler/watchdog.go` sweeps every 60s and ends an over-due assignment.
+
+**Shape chosen: FAIL (`timed_out`), not requeue**, and the decisive argument was not the one the item
+expected. `handleCancelJob` is *already* a server-side terminal writer over live `dispatched`/`running`
+rows, mitigated by best-effort `sendCancelSignals` - so the watchdog copies a reviewed design rather
+than inventing risk. Requeue, independently, does not terminate (no retry is burned, so a hanging agent
+yields an unbounded requeue loop) and makes duplicate execution automatic instead of operator-gated.
+That choice also meant [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]] never became a
+prerequisite; its promotion condition is explicitly not triggered.
+
+**The design needed a migration nobody anticipated.** Nothing timestamped a `dispatched` row: `tasks`
+carried only `started_at`, `finished_at` and `created_at`, and `ClaimTaskForWorker` wrote no timestamp
+at all. Migration `000021` adds `tasks.assigned_at`, written exactly where `worker_id` is written -
+stamped by `ClaimTaskForWorker` from the dispatcher Go clock, nulled by all seven statements that null
+`worker_id`, untouched by `UpdateTaskStatus`. That is what lets the scan key on **non-terminal**
+**duration** rather than on a `running` status, which the 2026-08-20 amendment required.
+
+**The first implementation was defeatable by the exact adversary it was built to stop, and a Phase 4**
+**lens caught it.** The execution arm keys on `started_at`, and `handleTaskStatus` re-stamps that
+column on *every* `TASK_STATUS_RUNNING` - an allowed transition, unbudgeted on the recv path. An agent
+emitting one RUNNING every ten minutes never tripped the arm. The SQL comment defended it with a
+sentence that was **true** ("started_at is written by a relay-server Go clock and by nothing else"):
+provenance of the value says nothing about who controls the timing of the write. Fixed by
+`started_at = COALESCE(started_at, $2)` in `UpdateTaskStatus`, making the column write-once per
+assignment. The same one-line change closed the opposite defect a second lens found and proved against
+live Postgres - the watchdog binding the NULL it read at scan time over a `started_at` the agent had
+legitimately stamped inside the scan-to-write window.
+
+**Every acceptance criterion is covered by a test, including the amendment's.**
+`TestWatchdog_SweepsAHungTaskOnAConnectedWorker` (connected worker, backdated clock - the disconnected
+case is `GraceRegistry`'s and would be vacuous), `TestWatchdog_SweepsADispatchedOrphan` (the
+amendment's `dispatched`-with-no-holder case), the within-bound and `timeout_sec = 0` controls, and the
+late-terminal-report-is-a-silent-no-op case. `TestTasksStatusVocabularyIsExactly` gained
+`ListOverdueAssignedTasks` as its **second inverted** allow-list site, alongside `AppendTaskLog` -
+omitting a new *non-terminal* status there means it is never swept, which silently reopens this hole
+for that status. CLAUDE.md's Epoch fence bullet was amended to say so.
+
+The write satisfies branch one of the epoch fence: it binds the `assignment_epoch` and `worker_id` read
+off its own scan and does **not** bump the epoch, because a terminal transition must not - the
+assignment surviving completion is load-bearing for the trailing-log flush. Both bounds are
+env-configurable (`RELAY_TASK_WATCHDOG_MARGIN` 30m, `RELAY_TASK_MAX_ASSIGNMENT` 24h) with sanity floors
+mirroring `parseTrailingLogWindow`, because a units slip in the too-small direction destroys live work
+rather than merely failing to protect it, and the effective bounds are now logged at every boot.
+
+The agent IS told: `Registry.SendCancel` (now the single `CancelTask` construction site in the tree)
+sends per row as it is swept, so the coordinator does not do bookkeeping while an orphan subprocess
+keeps running against a workspace.
+
+Unit 491 -> 510 top-level. Integration green across store, scheduler, worker, api, schedrunner and cmd.
+Retro: docs/retros/2026-08-20-coordinator-stale-task-watchdog.md.

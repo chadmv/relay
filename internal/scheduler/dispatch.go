@@ -278,8 +278,9 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	// pass has already claimed it, ClaimTaskForWorker returns pgx.ErrNoRows and
 	// we skip silently — this is the critical race guard.
 	claimed, err := d.q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
-		ID:       task.ID,
-		WorkerID: w.ID,
+		ID:         task.ID,
+		WorkerID:   w.ID,
+		AssignedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
 	})
 	if err != nil {
 		// pgx.ErrNoRows is the benign claim race (another dispatcher won) and
@@ -339,6 +340,55 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	return true
 }
 
+// terminalTailStore is the subset of *store.Queries the shared terminal tail
+// needs. *store.Queries satisfies it; the watchdog's own store interface embeds
+// it so both callers reach the same code.
+type terminalTailStore interface {
+	FailDependentTasks(ctx context.Context, failedTaskID pgtype.UUID) error
+	RecomputeJobStatus(ctx context.Context, id pgtype.UUID) (string, error)
+}
+
+// finalizeTerminalTask runs the tail every coordinator-side terminal writer
+// shares: cascade to dependents, recompute the job, publish the task event, and
+// publish a job event if the job itself went terminal. `task` must be the row
+// UpdateTaskStatus RETURNED, not the row that was read before it - calling this
+// for a write the fence rejected would cascade a failure the database refused.
+//
+// NotifyTaskCompleted is deliberately NOT here. Dispatcher.failClaimedTask has
+// never called it and this extraction must not change that; the watchdog calls
+// it itself.
+//
+// logPrefix keeps each caller's log lines byte-identical to what it emitted
+// before the extraction.
+func finalizeTerminalTask(
+	ctx context.Context,
+	q terminalTailStore,
+	broker *events.Broker,
+	logPrefix string,
+	task store.Task,
+	status string,
+) {
+	if err := q.FailDependentTasks(ctx, task.ID); err != nil {
+		log.Printf("%s: FailDependentTasks for task %s: %v", logPrefix, uuidStr(task.ID), err)
+	}
+	jobStatus, err := q.RecomputeJobStatus(ctx, task.JobID)
+	if err != nil {
+		log.Printf("%s: RecomputeJobStatus for job %s: %v", logPrefix, uuidStr(task.JobID), err)
+	}
+	broker.Publish(events.Event{
+		Type:  "task",
+		JobID: uuidStr(task.JobID),
+		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(task.ID), status)),
+	})
+	if jobStatus == "done" || jobStatus == "failed" {
+		broker.Publish(events.Event{
+			Type:  "job",
+			JobID: uuidStr(task.JobID),
+			Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(task.JobID), jobStatus)),
+		})
+	}
+}
+
 // failClaimedTask marks an already-claimed task terminally 'failed' and cascades
 // to its dependents. It is the single path the dispatcher uses when a claimed
 // task carries poison persistent data (unparseable commands or source JSON):
@@ -364,25 +414,7 @@ func (d *Dispatcher) failClaimedTask(ctx context.Context, claimed store.Task, re
 		log.Printf("dispatch: UpdateTaskStatus(failed) for task %s: %v", uuidStr(claimed.ID), err)
 		return
 	}
-	if err := d.q.FailDependentTasks(ctx, claimed.ID); err != nil {
-		log.Printf("dispatch: FailDependentTasks for task %s: %v", uuidStr(claimed.ID), err)
-	}
-	jobStatus, err := d.q.RecomputeJobStatus(ctx, updated.JobID)
-	if err != nil {
-		log.Printf("dispatch: RecomputeJobStatus for job %s: %v", uuidStr(updated.JobID), err)
-	}
-	d.broker.Publish(events.Event{
-		Type:  "task",
-		JobID: uuidStr(updated.JobID),
-		Data:  []byte(fmt.Sprintf(`{"id":%q,"status":"failed"}`, uuidStr(updated.ID))),
-	})
-	if jobStatus == "done" || jobStatus == "failed" {
-		d.broker.Publish(events.Event{
-			Type:  "job",
-			JobID: uuidStr(updated.JobID),
-			Data:  []byte(fmt.Sprintf(`{"id":%q,"status":%q}`, uuidStr(updated.JobID), jobStatus)),
-		})
-	}
+	finalizeTerminalTask(ctx, d.q, d.broker, "dispatch", updated, "failed")
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.

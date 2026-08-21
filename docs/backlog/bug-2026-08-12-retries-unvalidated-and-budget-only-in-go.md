@@ -3,6 +3,7 @@ title: "`retries` is unvalidated end to end, and the retry budget is enforced on
 type: bug
 status: open
 created: 2026-08-12
+updated: 2026-08-20
 priority: medium
 source: Phase 4 review of the retry-resurrect status-guard iteration (2026-08-12)
 ---
@@ -12,6 +13,9 @@ source: Phase 4 review of the retry-resurrect status-guard iteration (2026-08-12
 Two halves of one defect on the retry path. They are **separable** - either can ship without the
 other - but they are filed together because each one alone leaves the other's failure mode reachable,
 and because the second is the part the 2026-08-12 retry hardening did not close.
+
+**(2026-08-20) Half A now also claims `timeout_seconds`. See the amendment at the end of this file
+before scoping.**
 
 ## Summary
 
@@ -110,7 +114,7 @@ asking for a different feature. Follow the file's existing error style - a named
 range - and consider a matching check constraint on `tasks.retries` in a migration, so the bound is
 enforced for any future writer the way `tasks_status_check` is. `timeout_seconds` sits in the same
 struct with the same absence of bounds and should be looked at in the same pass, but is not claimed
-by this item.
+by this item. **(2026-08-20: it is now. See the amendment.)**
 
 **B. Either add the predicate, or pin the Go gate with a test.** Both are defensible; pick one
 deliberately rather than by omission:
@@ -131,6 +135,10 @@ for it.
   per-task error, proven by a `jobspec` unit test (RED against today's code) and asserted through at
   least one real entry point so the rejection is not merely a library property. A spec at the
   boundary value is still accepted.
+- **A (added 2026-08-20):** A job spec with `timeout_seconds` outside the accepted range - negative,
+  or above the cap - is rejected the same way and by the same function, with the same positive
+  control at the boundary. A spec omitting the field entirely is still accepted, since the field is a
+  `*int32` and nil is the documented "no deadline".
 - **B:** A task whose retry budget is exhausted cannot burn another retry, proven by a test that is
   RED against today's code - at the store layer if the predicate lands, at the handler layer if the
   Go gate stays.
@@ -142,8 +150,8 @@ for it.
 
 ## Related
 
-- Source: `internal/jobspec/jobspec.go` (the `Retries` field and `Validate`),
-  `internal/jobcreate/jobcreate.go` (the two `Retries: ts.Retries` bindings),
+- Source: `internal/jobspec/jobspec.go` (the `Retries` field, the `TimeoutSeconds` field and
+  `Validate`), `internal/jobcreate/jobcreate.go` (the two `Retries: ts.Retries` bindings),
   `internal/store/query/tasks.sql` (`CreateTask`, `IncrementTaskRetryCount`),
   `internal/worker/handler.go` (the sole budget check, `task.RetryCount < task.Retries`)
 - The iteration that fenced everything else on this path:
@@ -152,6 +160,10 @@ for it.
   `docs/backlog/closed/bug-2026-06-26-retry-resurrects-cancelled-task.md`)
 - Interacts with: [[feature-2026-06-26-web-enabler-backend-endpoints]] (the operator retry endpoint
   and its `retry_count` decision), [[feature-2026-07-01-job-retry-action]] (its frontend)
+- **(2026-08-20)** The consumer that gave `timeout_seconds` a second, live consequence:
+  `internal/scheduler/watchdog.go` and `ListOverdueAssignedTasks`'s execution arm, shipped by
+  `docs/superpowers/specs/2026-08-20-coordinator-stale-task-watchdog.md`, closing
+  [[bug-2026-08-14-no-coordinator-watchdog-on-a-stale-running-task]]
 - Invariant in contact: Single job-spec pipeline (CLAUDE.md) - a bound added in `jobspec.Validate` is
   inherited by REST, CLI, MCP and schedrunner for free, which is why it belongs there and not in a
   handler.
@@ -162,3 +174,59 @@ Half A is cheap and self-contained; half B is a one-line predicate plus a test, 
 reason to keep them on one item is the framing: the retry path was audited end to end on 2026-08-12
 and this is what the audit left, at both ends - an unvalidated input at the front and an unenforced
 budget at the back. Splitting them would lose that, and each half alone reads like a nit.
+
+## Amendment 2026-08-20 - half A now claims `timeout_seconds`
+
+**Scope change, deliberate and narrow: half A covers one more field in the same function.** Half B is
+untouched, the priority is unchanged, and no acceptance criterion was removed.
+
+**Why amend rather than file a sibling.** This project's standing rule (from the 2026-08-15 ingest
+slice) is to file a sibling when amending would silently widen an item's scope and falsify its own
+Done-When. That test does not bite here: half A is *one check in `jobspec.Validate`*, the new field's
+bound is adjacent lines in the same function, and this item already said the two "should be looked at
+in the same pass". Two items pointing at one four-line change would both be closed by a single commit
+while only one gets the `git mv`. The original "not claimed by this item" sentence is left in place
+above with a pointer, per the convention of leaving refuted text visible.
+
+**What changed since the disclaimer was written.** On 2026-08-12, `timeout_seconds` was unbounded and
+the only consequence was that the *agent* built a very long `context.WithTimeout`. The coordinator
+watchdog shipped on 2026-08-20 and made the field the input to a **coordinator-side** bound, so a
+user now chooses the ceiling on their own task's execution arm with nothing checking it.
+
+**The field, verified at HEAD:**
+
+- `jobspec.TaskSpec.TimeoutSeconds *int32` is never examined by `jobspec.Validate`, which checks
+  name, task names, duplicates, command form, `depends_on`, cycles, priority and source, and nothing
+  else.
+- The column is `timeout_seconds INT` with no `CHECK` constraint (migration `000001`).
+- Single job-spec pipeline means REST, CLI, MCP and schedrunner all inherit the gap, exactly as with
+  `Retries`.
+
+**The two consequences, both new as of the watchdog:**
+
+1. **A ceiling nobody set.** `timeout_seconds: 2147483647` is roughly 68 years, so that task is
+   exempt from the execution arm and bounded only by `RELAY_TASK_MAX_ASSIGNMENT`. That is not a
+   regression - before the watchdog the task was unbounded in both directions - but it is a ceiling
+   on the new feature's effectiveness that a user picks unilaterally.
+2. **A negative value is a silent synonym for "no deadline", on both sides.** `newRunner` sets a
+   deadline only `if timeoutSec > 0`; `ListOverdueAssignedTasks`'s execution arm requires
+   `timeout_seconds IS NOT NULL AND timeout_seconds > 0`. So `-1` disables the agent's timer *and*
+   exempts the row from the coordinator's execution arm, identically to `0`. Nothing documents that:
+   the README's job-spec table says only "Kill task after this many seconds", and the "0 means no
+   deadline" behaviour lives in `newRunner`'s doc comment. Whatever bound lands should settle whether
+   negatives are rejected (recommended) or documented as equivalent to `0`.
+
+**Checked and found NOT to be a problem, recorded so nobody re-derives it:** there is no overflow on
+either side today. In SQL, `timeout_seconds + sqlc.arg(margin_seconds)::bigint` promotes `int` to
+`bigint`, so the maximum sum is ~1.1e10 against a bigint range. In Go, `overdueReason` computes
+`time.Duration(*t.TimeoutSeconds)*time.Second`, which peaks at ~2.1e18 ns against a `time.Duration`
+limit of ~9.2e18. **Both margins depend on the column staying `INT`** - a future migration widening
+it to `BIGINT` breaks the Go side silently, which is one more argument for bounding the value at
+ingest rather than relying on the column's width.
+
+**Suggested bound, to be argued rather than adopted:** reject `< 0`, and cap at something well above
+the longest legitimate task. Seven days is a defensible starting point and is comfortably below
+`RELAY_TASK_MAX_ASSIGNMENT`'s 24h default in the sense that matters - a task whose own timeout exceeds
+the absolute cap is simply swept by the other arm, so the cap here is about rejecting nonsense at
+submission, not about making the two knobs agree. Say that explicitly in the error message or the
+next reader will try to couple them.

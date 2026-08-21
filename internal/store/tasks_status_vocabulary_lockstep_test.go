@@ -22,7 +22,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // It reads the live tasks_status_check constraint and fails if the vocabulary is
 // anything other than the six values migration 000019 pinned.
 //
-// It exists because six statements in this repo hard-code a slice of that
+// It exists because the statements listed below hard-code a slice of that
 // vocabulary, and adding a seventh status silently desynchronizes all of them at
 // once. A task-level `cancelled` is the concrete near-term candidate:
 // CancelJobTasks squashes cancellation onto `failed` today, so somebody will
@@ -76,13 +76,26 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     must stay OUT and is then bounded by finished_at like done/failed/
 //     timed_out. Never conjoin this arm with the rest of the fence: that closes
 //     the trailing flush.
+//   - ListOverdueAssignedTasks (query/tasks.sql) - `status IN ('dispatched',
+//     'running')`, the "currently assigned" partition the coordinator's
+//     stale-task watchdog scans. READ THIS SITE BACKWARDS TOO: it is the SECOND
+//     inverted one. A new NON-TERMINAL status omitted here is NEVER SWEPT, which
+//     silently reopens the unbounded-assignment hole this statement exists to
+//     close, for that status - a task in it could hold its worker slot and its
+//     job forever with no error and no log line. `preparing` is the same live
+//     candidate as for AppendTaskLog and would need adding to BOTH. A new
+//     TERMINAL status must stay OUT - but NOT because it would resurrect
+//     anything: this statement is read-only, and UpdateTaskStatus's own
+//     allow-list would reject the write regardless. Including one simply buys a
+//     guaranteed zero-row round trip on every sweep, forever.
 //
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
 // equivalent deny-list a new status would be writable and retryable by default,
-// and this test would be the last chance to notice. AppendTaskLog is the one
-// site where the allow-list points the other way, which is why it is spelled out
-// at length above rather than folded into the list.
+// and this test would be the last chance to notice. AppendTaskLog and
+// ListOverdueAssignedTasks are the two sites where the allow-list points the
+// other way, which is why both are spelled out at length above rather than
+// folded into the list.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -100,9 +113,10 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 
 	want := []string{"dispatched", "done", "failed", "pending", "running", "timed_out"}
 	require.Equal(t, want, got,
-		"tasks.status vocabulary changed - read this test's comment before updating it. Six statements slice "+
+		"tasks.status vocabulary changed - read this test's comment before updating it. These statements slice "+
 			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
-			"SelectRetryableTaskIDs and AppendTaskLog. Revisit ALL SIX. AppendTaskLog is the one that "+
-			"fails OPEN in the damaging direction: a new NON-TERMINAL status omitted from its first arm "+
-			"silently discards 100% of that state's log output, with no error and no log line anywhere")
+			"SelectRetryableTaskIDs, AppendTaskLog and ListOverdueAssignedTasks. Revisit ALL OF THEM. The last "+
+			"two fail OPEN in the damaging direction: a new NON-TERMINAL status omitted from AppendTaskLog's "+
+			"first arm silently discards 100% of that state's log output, and one omitted from "+
+			"ListOverdueAssignedTasks means a task in that state is never swept and holds its assignment forever")
 }

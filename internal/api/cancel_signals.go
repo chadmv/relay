@@ -2,8 +2,6 @@ package api
 
 import (
 	"sync"
-
-	relayv1 "relay/internal/proto/relayv1"
 )
 
 // cancelSignal is one best-effort CancelTask to deliver to a connected agent.
@@ -29,14 +27,9 @@ func (s *Server) sendCancelSignals(cancels []cancelSignal) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = s.registry.Send(c.workerID, &relayv1.CoordinatorMessage{
-				Payload: &relayv1.CoordinatorMessage_CancelTask{
-					CancelTask: &relayv1.CancelTask{
-						TaskId: c.taskID,
-						Force:  c.force,
-					},
-				},
-			})
+			// Registry.SendCancel is the single construction site for CancelTask;
+			// it wraps the same bounded registry.Send this used to call inline.
+			_ = s.registry.SendCancel(c.workerID, c.taskID, c.force)
 		}()
 	}
 	wg.Wait()
