@@ -1,14 +1,20 @@
 package worker
 
 import (
+	"bytes"
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"log"
 	"reflect"
 	"strings"
 	"testing"
 
+	relayv1 "relay/internal/proto/relayv1"
+
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -325,4 +331,77 @@ func TestIngestLogCounters_TwoHandlersDoNotShareCounts(t *testing.T) {
 	require.Equal(t, IngestLogDrops{}, b.IngestLogDropCounts(),
 		"counters are per Handler. Production has exactly one Handler, so that is process-wide "+
 			"there; a package-level array would make every test in this binary share these numbers.")
+}
+
+// captureUnitLog redirects the standard logger for one test. The package's
+// integration lane has its own captureLog in package worker_test; this is the
+// default-lane twin. No test in this package calls t.Parallel, which is what
+// makes a process-global redirect safe here.
+func captureUnitLog(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return buf.String
+}
+
+// TestHandleTaskLog_ABadTaskIDFloodCountsTheDedupedArm drives the item's own
+// Repro through the REAL handler: one connection, a flood of chunks whose task
+// id does not parse. The operator-visible signature is 1 log line and 99 silent
+// drops, and until this slice nothing anywhere said so.
+//
+// NO DATABASE AND NO BUILD TAG. handleTaskLog's bad-id arm returns before h.q is
+// touched, so a bare &Handler{} is a complete fixture and this proof runs in the
+// lane CI actually executes (go-ci runs `go test -race ./...` with no tag).
+func TestHandleTaskLog_ABadTaskIDFloodCountsTheDedupedArm(t *testing.T) {
+	h := &Handler{}
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	logged := captureUnitLog(t)
+
+	const flood = 100
+	for i := 0; i < flood; i++ {
+		h.handleTaskLog(context.Background(), pgtype.UUID{}, lim, &relayv1.TaskLogChunk{
+			TaskId:  "not-a-uuid",
+			Content: []byte("x"),
+		})
+	}
+
+	require.Equal(t, 1, strings.Count(logged(), "handleTaskLog bad task id"),
+		"fixture: this kind carries no wire value, so the flood is ONE key and one line")
+
+	got := h.IngestLogDropCounts()
+	require.Equal(t, uint64(flood-1), got.Deduped.BadTaskIDLog,
+		"the 99 chunks folded into that one line must be counted. That number is the whole point of "+
+			"this slice: without it, a flood is indistinguishable from a healthy fleet.")
+	require.Zero(t, got.Suppressed.BadTaskIDLog, "nothing was budget-suppressed: the key repeated")
+	require.Zero(t, got.Deduped.TaskLogPersist, "the count must be attributed to the RIGHT kind")
+}
+
+// TestHandleTaskStatus_ADroppedLineUnderAnEmptyBudgetCountsSuppressed is the
+// other arm at the handler layer, and it is the arm that matters under attack.
+// The bucket is drained by a DIFFERENT kind first, which is the realistic shape:
+// the budget is per connection and shared across all five kinds, so one flooding
+// site silences the others.
+func TestHandleTaskStatus_ADroppedLineUnderAnEmptyBudgetCountsSuppressed(t *testing.T) {
+	h := &Handler{}
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	for i := 0; i < ingestLogBurst; i++ {
+		require.True(t, lim.allow(logKey{kind: kindTaskLogPersist, id: "t", epoch: int64(i)}),
+			"fixture: drain the whole burst through another kind")
+	}
+
+	logged := captureUnitLog(t)
+	h.handleTaskStatus(context.Background(), pgtype.UUID{}, lim, &relayv1.TaskStatusUpdate{
+		TaskId: "also-not-a-uuid",
+	})
+
+	require.Equal(t, "", logged(),
+		"fixture: with an empty bucket the line is dropped entirely")
+	got := h.IngestLogDropCounts()
+	require.Equal(t, uint64(1), got.Suppressed.BadTaskIDStatus,
+		"a line dropped for lack of a token is the arm that means attack or misconfiguration, and it "+
+			"must be counted under the kind that lost it")
+	require.Zero(t, got.Deduped.BadTaskIDStatus)
 }
