@@ -885,6 +885,92 @@ func TestStats_IsOneCriticalSection(t *testing.T) {
 			"source pattern that is not there.")
 }
 
+// TestStats_ConcurrentRefusalsAndReadsShareTheMutex is the CONCURRENT EXPOSURE
+// that makes -race able to see an unlocked counter, and that is its whole job.
+//
+// listener.go used to assert the coupling in prose: the refusal counters were
+// atomics "INCREMENTED under this same mutex (see admit), so reading them here
+// makes the whole five-field snapshot consistent". True, and nothing held it
+// true - rewriting admit to decide over-cap under the lock, Unlock, then Add(1)
+// outside left netlimit, cmd/relay-server AND internal/api all green, and a
+// poller would then see refused_total climbing while live_total sat BELOW the
+// configured cap, an arrangement the fleet was never in. The counters are now
+// plain uint64 guarded by l.mu, so that refactor is a DATA RACE rather than a
+// silent regression - but only if some test actually refuses connections while
+// another goroutine reads Stats, and before this one none did.
+//
+// PROVED, exactly that way: with the split-increment mutation applied,
+// `go test ./internal/netlimit/` is ok and
+// `go test -race ./internal/netlimit/` reports WARNING: DATA RACE and fails
+// here.
+//
+// THE INLINE INVARIANT IS A CHEAP CONSISTENCY CHECK, NOT THE KILL, and saying so
+// is the point: nothing is released, so LiveTotal is pinned at the cap and
+// "refusals reported alongside a listener that is not full" cannot arise from a
+// split read either. The discriminating kills for miscounting a refusal live in
+// TestLimitListener_RefusesBeyondPerIPCap, TestLimitListener_TotalCapRefuses-
+// AcrossDistinctIPs, TestLimitListener_PerIPRefusalConsumesNoTotalSlot and
+// TestStats_ReportsOccupancy, all four of which go RED on an unconditional
+// increment. Do not read the require.Empty below as covering that.
+//
+// The populated state is structural, for the reason recorded on
+// TestStats_IsOneCriticalSection: the listener is filled and one refusal forced
+// BEFORE the reader starts, so sawRefusals cannot be zero however the scheduler
+// behaves - including at GOMAXPROCS=1.
+func TestStats_ConcurrentRefusalsAndReadsShareTheMutex(t *testing.T) {
+	const maxTotal = 8
+	l := Wrap(&fakeListener{}, Config{MaxTotal: maxTotal})
+
+	for i := 0; i < maxTotal; i++ {
+		require.True(t, l.admit(fmt.Sprintf("10.6.0.%d", i)))
+	}
+	require.False(t, l.admit("10.6.9.9"), "the fleet cap must already be reached before the reader starts")
+
+	stop := make(chan struct{})
+	var writers sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		writers.Add(1)
+		go func(w int) {
+			defer writers.Done()
+			for i := 0; i < 2000; i++ {
+				// Every one of these is refused: the total cap is full and
+				// nothing releases.
+				l.admit(fmt.Sprintf("10.7.%d.%d", w, i%256))
+			}
+		}(w)
+	}
+	go func() { writers.Wait(); close(stop) }()
+
+	var bad []Stats
+	reads, sawRefusals := 0, 0
+	for done := false; !done; {
+		select {
+		case <-stop:
+			done = true
+		default:
+		}
+		s := l.Stats()
+		reads++
+		if s.Counts.RefusedTotal == 0 {
+			continue
+		}
+		sawRefusals++
+		if s.Levels.LiveTotal != maxTotal {
+			bad = append(bad, s)
+			done = true // one counter-example is the whole finding
+		}
+	}
+	writers.Wait()
+
+	t.Logf("%d snapshots; %d saw refusals", reads, sawRefusals)
+	require.Positive(t, sawRefusals, "the reader never observed a refusal, so it proved nothing")
+	require.Empty(t, bad,
+		"a snapshot reported refusals alongside a listener that is NOT full (%v). Nothing is ever "+
+			"released here, so live_total cannot fall back below the cap: the count and the level were "+
+			"read at different moments. An operator reads that pair as 'we are refusing while under the "+
+			"cap', an arrangement the fleet was never in.", bad)
+}
+
 // TestStats_CarriesNoIdentifiers answers "which IP is it?" NO, on the record and
 // in code rather than in a comment. The refusal path is reachable by any
 // unauthenticated peer and this type is rendered into a periodic log line, so a

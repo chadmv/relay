@@ -53,7 +53,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"sync/atomic"
 )
 
 // Config bounds a Listener. A non-positive value DISABLES that cap; it does not
@@ -125,12 +124,20 @@ type Listener struct {
 
 	cfg Config
 
-	mu    sync.Mutex
-	total int
-	perIP map[string]int
-
-	refusedTotal atomic.Uint64
-	refusedPerIP atomic.Uint64
+	// EVERYTHING BELOW mu IS GUARDED BY mu, INCLUDING THE TWO COUNTERS. They
+	// were atomic.Uint64 incremented under this same mutex, which made Stats a
+	// consistent five-field snapshot - and nothing except a comment held that
+	// true. Deciding over-cap under the lock, unlocking, then Add(1) outside
+	// left netlimit, cmd/relay-server and internal/api all green, and a poller
+	// would then see refused_total climbing while live_total sat BELOW the
+	// configured cap: an arrangement the fleet was never in. As plain fields the
+	// compiler forbids a read outside the lock and -race catches a write outside
+	// it, so the coupling is a type-level fact rather than a paragraph.
+	mu           sync.Mutex
+	total        int
+	perIP        map[string]int
+	refusedTotal uint64
+	refusedPerIP uint64
 }
 
 // Wrap returns inner bounded by cfg. Close on the result closes inner, so
@@ -194,21 +201,46 @@ func (l *Listener) Accept() (net.Conn, error) {
 // from an arrangement the fleet was never in. Pinned by
 // TestStats_IsOneCriticalSection, which is RED under exactly that mutation.
 //
-// The refusal counters are atomics, but they are INCREMENTED under this same
-// mutex (see admit), so reading them here makes the whole five-field snapshot
-// consistent rather than merely each field individually atomic.
+// All five fields are read from state guarded by l.mu (see the Listener type),
+// so this is one consistent snapshot rather than five individually-correct
+// numbers taken at five different moments. TestStats_IsOneCriticalSection pins
+// the level-to-level half by invariant. The count-to-level half has NO test that
+// can pin it - counts are monotonic and levels move freely, so no single
+// snapshot is impossible enough to assert on - which is exactly why the counters
+// are plain fields under this mutex rather than atomics: the enforcement is the
+// compiler plus -race, and TestStats_ConcurrentRefusalsAndReadsShareTheMutex is
+// the concurrent exposure that gives -race something to see.
 //
-// COST: MaxPerSource is an O(len(perIP)) walk under l.mu. len(perIP) is bounded
-// by MaxTotal (1024 at the defaults) only while the TOTAL cap is enabled; with
-// RELAY_GRPC_MAX_CONNS=0 and a live per-source cap, admit still runs and perIP
-// is bounded only by the process file-descriptor limit, so this walk is
-// proportional to live connections. That is accepted rather than fixed: the
-// mutex's other holders are admit and release, which run once per TCP
-// connection rather than per message, and the only other caller is an
-// admin-authenticated HTTP handler whose own bearer-token check costs a Postgres
-// round trip. Maintaining the maximum incrementally is NOT cheaper - a
-// decremented maximum is not exactly recoverable without a scan, which would
-// move this walk onto release, a path much closer to hot than this one.
+// COST, PRICED AS A LOCK HOLD AND NOT AS A REQUEST. MaxPerSource is an
+// O(len(perIP)) walk under l.mu. len(perIP) is bounded by MaxTotal (1024 at the
+// defaults) only while the TOTAL cap is enabled; with RELAY_GRPC_MAX_CONNS=0 and
+// a live per-source cap, admit still runs and perIP is bounded only by the
+// process file-descriptor limit, so the walk is proportional to live
+// connections.
+//
+// THERE ARE TWO CALLERS, NOT ONE. cmd/relay-server's runRefusalReporter calls
+// this on a 60s ticker (grpc_config.go), unauthenticated, on EVERY deployment
+// whether or not anybody polls the endpoint - it is the caller that always runs.
+// The other is the admin-authenticated GET /v1/server/counters handler. Pricing
+// the walk against that handler's BearerAuth round trip, as this paragraph used
+// to, is wrong twice over: it omits the reporter, and BearerAuth is paid by the
+// poller in a different goroutine and has completed before the handler runs, so
+// it never overlaps holding l.mu. What the walk actually delays is the ACCEPT
+// PATH, whose other holders are admit and release - once per TCP connection, not
+// per message.
+//
+// Measured on a 24-core dev box, ns per Stats() call: ~7us at 1024 entries,
+// ~0.6ms at 100k, ~8ms at 1M. At the defaults the hold is negligible against a
+// once-per-connection mutex. At a million live sources every accept queues
+// behind an ~8ms hold, once a minute for the reporter plus once per admin
+// request - and nothing rate-limits the route, since RateLimit is applied to
+// POST /v1/auth/register and POST /v1/auth/login only (server.go). That
+// configuration is the one README tells an operator to cap in a proxy instead;
+// this is what it costs if they do not.
+//
+// Maintaining the maximum incrementally is NOT cheaper - a decremented maximum
+// is not exactly recoverable without a scan, which would move this walk onto
+// release, a path much closer to hot than this one.
 //
 // WHEN BOTH CAPS ARE DISABLED, EVERY LEVEL READS ZERO NO MATTER HOW MANY
 // CONNECTIONS ARE LIVE. Accept returns the conn unwrapped in that configuration
@@ -225,8 +257,8 @@ func (l *Listener) Stats() Stats {
 	}
 	return Stats{
 		Counts: RefusalCounts{
-			RefusedTotal: l.refusedTotal.Load(),
-			RefusedPerIP: l.refusedPerIP.Load(),
+			RefusedTotal: l.refusedTotal,
+			RefusedPerIP: l.refusedPerIP,
 		},
 		// uint64 AT THE BOUNDARY, and this is load-bearing rather than tidy:
 		// the consumer's summary line asserts that every argument it carries is
@@ -337,11 +369,11 @@ func (l *Listener) admit(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.cfg.MaxTotal > 0 && l.total >= l.cfg.MaxTotal {
-		l.refusedTotal.Add(1)
+		l.refusedTotal++
 		return false
 	}
 	if l.cfg.MaxPerIP > 0 && l.perIP[key] >= l.cfg.MaxPerIP {
-		l.refusedPerIP.Add(1)
+		l.refusedPerIP++
 		return false
 	}
 	l.total++

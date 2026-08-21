@@ -60,9 +60,13 @@ import (
 //     is an O(len(perIP)) walk under the listener's mutex, and len(perIP) is
 //     bounded by RELAY_GRPC_MAX_CONNS only while that cap is enabled; with the
 //     total cap disabled and the per-source cap live, it is bounded by the
-//     process file-descriptor limit instead. Priced and accepted in
-//     netlimit.Listener.Stats: this route's own BearerAuth costs a Postgres
-//     round trip, which dominates the walk by orders of magnitude.
+//     process file-descriptor limit instead. What the walk delays is the gRPC
+//     ACCEPT PATH, not this request: this route's BearerAuth is paid in a
+//     different goroutine and completes before the handler runs, so it never
+//     overlaps holding that mutex, and cmd/relay-server's runRefusalReporter
+//     takes the same walk once a minute whether or not anybody polls here.
+//     Nothing rate-limits this route. Measured and priced in
+//     netlimit.Listener.Stats.
 //
 // HOW A FUTURE SECTION ATTACHES ITSELF, because the answer is NOT the same for
 // every package and getting it wrong shows up as an import cycle:
