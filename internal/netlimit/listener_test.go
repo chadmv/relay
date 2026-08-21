@@ -134,11 +134,6 @@ func TestLimitListener_AcceptErrorFromUnderlyingListenerPropagates(t *testing.T)
 	assert.ErrorIs(t, err, boom, "a real Accept error must propagate unchanged")
 }
 
-// Keep the compiler honest about imports used only by Tasks 2 and 3.
-var _ = bytes.MinRead
-var _ = fmt.Sprintf
-var _ = log.Flags
-
 // TestLimitListener_CloseReleasesTheSlot. A leak here converts the limiter from
 // a cap into a permanent lockout, which is strictly worse than no cap at all.
 func TestLimitListener_CloseReleasesTheSlot(t *testing.T) {
@@ -225,4 +220,97 @@ func TestLimitListener_ReleasedIPIsRemovedFromTheMap(t *testing.T) {
 	l.mu.Unlock()
 	assert.Equal(t, 0, size, "every per-IP entry must be deleted when its count reaches zero")
 	assert.Equal(t, 0, total)
+}
+
+// TestLimitListener_TotalCapRefusesAcrossDistinctIPs. The total cap is the only
+// one that yields a fleet-wide number, and ingestLogLimiter's doc comment cites
+// that number, so it is load-bearing rather than a nicety.
+func TestLimitListener_TotalCapRefusesAcrossDistinctIPs(t *testing.T) {
+	c1 := newFakeConn("10.0.0.1:1")
+	c2 := newFakeConn("10.0.0.2:1")
+	c3 := newFakeConn("10.0.0.3:1")
+	c4 := newFakeConn("10.0.0.4:1") // over the TOTAL cap, though its own IP has none
+	c5 := newFakeConn("10.0.0.5:1")
+	l := Wrap(&fakeListener{conns: []net.Conn{c1, c2, c3, c4, c5}}, Config{MaxTotal: 3, MaxPerIP: 100})
+
+	first, err := l.Accept()
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		_, err = l.Accept()
+		require.NoError(t, err)
+	}
+
+	got, err := l.Accept()
+	assert.ErrorIs(t, err, errDrained, "c4 and c5 are both over the total cap, so the fake drains")
+	assert.Nil(t, got)
+	assert.Equal(t, int32(1), c4.closes.Load())
+	assert.Equal(t, int32(1), c5.closes.Load())
+	assert.Equal(t, uint64(2), l.Stats().RefusedTotal)
+	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP,
+		"a conn over BOTH caps is counted against the total only; the total is checked first")
+
+	require.NoError(t, first.Close())
+	l.mu.Lock()
+	total := l.total
+	l.mu.Unlock()
+	assert.Equal(t, 2, total, "releasing one slot must re-open the total budget")
+}
+
+// TestLimitListener_ZeroDisables. 0 means "no bound", not "no connections". An
+// operator who prefers the kernel's ceiling must be able to say so.
+func TestLimitListener_ZeroDisables(t *testing.T) {
+	const n = 200
+	conns := make([]net.Conn, 0, n)
+	for i := 0; i < n; i++ {
+		conns = append(conns, newFakeConn(fmt.Sprintf("10.0.0.1:%d", 1000+i)))
+	}
+	l := Wrap(&fakeListener{conns: conns}, Config{MaxTotal: 0, MaxPerIP: 0})
+
+	for i := 0; i < n; i++ {
+		c, err := l.Accept()
+		require.NoError(t, err, "conn %d must be admitted when both caps are disabled", i)
+		require.NotNil(t, c)
+	}
+	assert.Equal(t, Stats{}, l.Stats(), "nothing may be counted as refused when both caps are off")
+}
+
+// TestLimitListener_RefusalWritesNothingToTheLog.
+//
+// A log.Printf per refusal would be a new, unbounded, ATTACKER-DRIVEN log site
+// inside the very control that exists to bound attacker-driven log volume - the
+// 2026-08-15 lesson one layer down. Refusals are surfaced by the consumer as a
+// periodic summary of counts (cmd/relay-server's refusalReporter); this package
+// must stay silent. Asserting this in the reporter's own test would prove
+// nothing: adding a line HERE leaves the reporter perfectly correct.
+func TestLimitListener_RefusalWritesNothingToTheLog(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	const n = 100
+	conns := make([]net.Conn, 0, n)
+	for i := 0; i < n; i++ {
+		conns = append(conns, newFakeConn(fmt.Sprintf("10.0.0.1:%d", 1000+i)))
+	}
+	l := Wrap(&fakeListener{conns: conns}, Config{MaxTotal: 1000, MaxPerIP: 1})
+
+	for {
+		if _, err := l.Accept(); err != nil {
+			break
+		}
+	}
+	require.Equal(t, uint64(n-1), l.Stats().RefusedPerIP, "99 of the 100 must have been refused")
+	assert.Equal(t, 0, buf.Len(),
+		"netlimit must write NOTHING to the log on the refusal path. Got: %q", buf.String())
+}
+
+// TestLimitListener_CloseClosesTheUnderlyingListener keeps GracefulStop working:
+// Serve's deferred ls.Close() must reach the real socket.
+func TestLimitListener_CloseClosesTheUnderlyingListener(t *testing.T) {
+	inner := &fakeListener{}
+	l := Wrap(inner, Config{MaxTotal: 1, MaxPerIP: 1})
+	require.NoError(t, l.Close())
+	assert.Equal(t, int32(1), inner.closed.Load())
 }
