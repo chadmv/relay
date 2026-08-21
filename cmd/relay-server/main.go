@@ -217,15 +217,18 @@ func main() {
 	// otherwise enforced only by the agent, so a wedged or lying agent holds its
 	// task - and its worker slot, and its job - forever.
 	watchdogMargin, marginWarning := parseWatchdogDuration(
-		"RELAY_TASK_WATCHDOG_MARGIN", os.Getenv("RELAY_TASK_WATCHDOG_MARGIN"), scheduler.DefaultWatchdogMargin)
+		"RELAY_TASK_WATCHDOG_MARGIN", os.Getenv("RELAY_TASK_WATCHDOG_MARGIN"),
+		scheduler.DefaultWatchdogMargin, minWatchdogMarginDur)
 	if marginWarning != "" {
 		log.Printf("WARNING: %s", marginWarning)
 	}
 	maxAssignment, maxAssignmentWarning := parseWatchdogDuration(
-		"RELAY_TASK_MAX_ASSIGNMENT", os.Getenv("RELAY_TASK_MAX_ASSIGNMENT"), scheduler.DefaultMaxAssignment)
+		"RELAY_TASK_MAX_ASSIGNMENT", os.Getenv("RELAY_TASK_MAX_ASSIGNMENT"),
+		scheduler.DefaultMaxAssignment, minMaxAssignmentDur)
 	if maxAssignmentWarning != "" {
 		log.Printf("WARNING: %s", maxAssignmentWarning)
 	}
+	log.Print(watchdogBoundsLine(watchdogMargin, maxAssignment))
 	go scheduler.NewWatchdog(q, registry, broker, watchdogMargin, maxAssignment).Run(ctx)
 
 	// Purge expired enrollment tokens hourly.
