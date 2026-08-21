@@ -4,6 +4,38 @@ import "time"
 
 // ingestLogLimiter bounds caller-driven log volume for ONE agent connection.
 //
+// WHAT BOUNDS THE UNIT THIS BUDGET IS STATED PER. A bound stated per connection
+// is only a bound if connections are bounded, and until 2026-08-20 they were not.
+// They are now, in three places:
+//
+//   - grpcMaxConcurrentStreams = 1 (cmd/relay-server/grpc_config.go) means one
+//     connection carries at most ONE of these AT A TIME, not MaxUint32 of them -
+//     this type is allocated per Connect call, i.e. per STREAM (handler.go:172).
+//   - RELAY_GRPC_MAX_CONNS (default 1024) bounds live connections fleet-wide.
+//   - RELAY_GRPC_MAX_CONNS_PER_IP (default 64) bounds them per source address.
+//
+// The arithmetic, out loud, because a bound nobody has multiplied is not yet a
+// claim. What those three knobs bound exactly is the number of these limiters
+// ALIVE AT ONCE, so the honest figure is the BURST: at the defaults, 1024 x 16 =
+// 16384 lines fleet-wide and 64 x 16 = 1024 lines per source address. RAISING
+// RELAY_GRPC_MAX_CONNS SCALES THAT LINEARLY, so those two knobs are part of this
+// control's threat model and not merely capacity settings. Setting either to 0
+// disables that cap and removes the corresponding ceiling entirely.
+//
+// WHAT IS NOT BOUNDED, STATED RATHER THAN GLOSSED. The steady-state rate - 6
+// lines per minute per limiter - is a per-STREAM figure, and it holds only while
+// a stream stays open. grpc.MaxConcurrentStreams caps CONCURRENT streams, not
+// how many a connection may open over its life, so a caller that repeatedly
+// opens a stream, spends its 16-token burst and closes it gets a fresh burst
+// every cycle without ever needing a second connection. Multiplying 1024 by 6
+// and calling the result a lines-per-minute ceiling would therefore be wrong.
+// What actually prices that attack is not this file: reaching any of these log
+// sites requires passing authenticateAndRegister first (handler.go:140, which
+// runs BEFORE the allocation at :172), so each cycle costs the caller a valid
+// credential and a round trip to Postgres. That is a real cost, not a bound.
+//
+// See docs/superpowers/specs/2026-08-20-grpc-admission-bounds.md.
+//
 // It is two things stacked, and the split is the whole point.
 //
 //   - `seen` is a DEDUPLICATOR. It collapses a repeating failure to one line per
