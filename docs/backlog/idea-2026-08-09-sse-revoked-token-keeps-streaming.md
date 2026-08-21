@@ -3,6 +3,7 @@ title: A revoked token keeps receiving SSE events for the life of the held conne
 type: idea
 status: open
 created: 2026-08-09
+updated: 2026-08-21
 priority: low
 source: Phase 4 review of the SSE task-log publishing iteration (2026-08-09)
 ---
@@ -30,6 +31,16 @@ self-service one - `DELETE /v1/auth/tokens` destroys every token the caller has,
 that authenticated any stream they currently hold. So the user most likely to hit this is now the
 user who just deliberately signed themselves out everywhere, which raises how surprising the
 behaviour is without changing its severity.
+
+**Update, 2026-08-21: the same defect now has a filed sibling on the agent gRPC transport**,
+[[idea-2026-08-21-revoked-agent-credential-survives-on-a-held-connection]]. Nothing about this item's
+scope, severity or acceptance criteria changes. The cross-link is here because **the two should agree
+on one staleness tolerance** rather than each picking a mechanism independently, and that requirement
+is stated as an acceptance criterion in the sibling so that this item's own Done-When is not widened.
+Note that the gRPC side has a mechanism this side does not: `worker.Registry` already holds every
+connected sender and supports identity-checked removal, so an immediate close is available there and
+has no equivalent here. That asymmetry is an argument for deciding the tolerance together and the
+mechanisms separately.
 
 ## Proposal
 Options, roughly in increasing cost:
@@ -65,8 +76,11 @@ in practice for the only current consumer - worth checking before assuming it is
   found in the same review)
 - The client-side half of the same revocation story, and the other consumer of the 401 fire site
   (`web/src/lib/api.ts:127-129` is `apiStream`'s): [[bug-2026-08-13-cross-generation-401-clears-a-new-session]]
+- **The same defect on the agent gRPC transport, to be decided against the same staleness tolerance:**
+  [[idea-2026-08-21-revoked-agent-credential-survives-on-a-held-connection]]
 
 ## Notes
 Filed as an idea rather than a bug because the current behavior is a conscious consequence of
 per-request auth on a long-lived stream, not an oversight in a specific handler, and because the
 right bound is a product decision rather than an obvious fix.
+</content>
