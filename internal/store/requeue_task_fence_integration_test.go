@@ -20,20 +20,35 @@ import (
 // THAT CLAIM IS FALSE: RequeueTask, three statements away in the same file, had
 // exactly the same WHERE.
 //
-// Its trigger CORRELATES WITH THE HAZARD, which makes it at least as reachable
-// as its sibling. Its only production caller is the dispatcher's send-failure
-// path (internal/scheduler/dispatch.go), reached precisely when the worker has
-// disappeared or is wedged - and a disconnected worker is what arms its own
-// grace timer. registry.Send is bounded by a 5s sendTimeout, so up to five
-// seconds separate ClaimTaskForWorker returning `claimed` from RequeueTask
-// firing on that now-stale snapshot:
+// Its only production caller is the dispatcher's send-failure path
+// (internal/scheduler/dispatch.go), and the window there is up to the 5s
+// sendTimeout between ClaimTaskForWorker returning `claimed` and RequeueTask
+// firing on that now-stale snapshot.
+//
+// BE PRECISE ABOUT WHICH SEND FAILURE, because the first framing of this test
+// said "a disconnected worker is what arms its own grace timer" and that is
+// WRONG - the two halves cannot co-occur (internal/worker/sender.go):
+//   - Worker gone from the registry: Registry.Send returns before
+//     workerSender.Send is reached. No window at all.
+//   - Worker disconnected: sender.closed is closed when the send loop returns,
+//     so a blocked Send takes `case <-sender.closed` and returns immediately -
+//     and teardownConnection closes the sender BEFORE arming the grace timer.
+//   - Worker WEDGED BUT STILL REGISTERED: `case <-timeout.C` on a full queue is
+//     the only branch that burns the 5s, and in that state the worker is online
+//     with no grace timer armed.
+//
+// So the release that races the wedged goroutine comes from somewhere else. Two
+// real ones, neither needing a grace timer:
 //
 //  1. Dispatcher claims T for W1: dispatched, epoch 1.
-//  2. Send blocks and fails because W1 is gone.
-//  3. W1's grace timer returns T to pending, epoch 2.
+//  2. Send blocks: W1 is wedged but still registered.
+//  3. EITHER an admin disables W1 (handleDisableWorker -> RequeueWorkerTasks),
+//     OR the same agent opens a SECOND Connect whose reconcile requeues T via
+//     the sibling statement - nothing serializes Connect per worker. T is
+//     pending at epoch 2.
 //  4. The dispatcher claims T for W2: dispatched, epoch 3.
-//  5. The original goroutine calls RequeueTask on its epoch-1 snapshot. On the
-//     id and 'dispatched' alone it MATCHED, tearing T off W2 mid-run.
+//  5. The original goroutine finally calls RequeueTask on its epoch-1 snapshot.
+//     On the id and 'dispatched' alone it MATCHED, tearing T off W2 mid-run.
 //
 // Same end state as the sibling bug: duplicate execution, no log line.
 func TestRequeueTask_DoesNotTearOffAFreshAssignment(t *testing.T) {
@@ -251,5 +266,42 @@ func TestRequeueTask_TerminalTaskIsNotResurrected(t *testing.T) {
 	after, err := f.q.GetTask(f.ctx, claimed.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "done", after.Status)
+	assert.Equal(t, int32(1), after.AssignmentEpoch)
+}
+
+// F: THE NARROW LIST, PINNED AGAINST BEING WIDENED. RequeueTaskByID's allow-list
+// admits 'running'; this statement's deliberately does not, and until this test
+// existed a mutation adding 'running' here left the whole suite green despite the
+// paragraph in query/tasks.sql explaining why it must not be added.
+//
+// Kept as its own test rather than a line on the terminal-task one: the two pin
+// opposite halves of the same predicate for different reasons, and a single test
+// asserting both would not say which one broke.
+func TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath(t *testing.T) {
+	f := newRequeueFence(t)
+
+	claimed := f.claimedBy(t, "rqt-f", f.w1)
+
+	running, err := f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: claimed.ID, Status: "running", WorkerID: f.w1.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+		StartedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", running.Status)
+	require.Equal(t, claimed.AssignmentEpoch, running.AssignmentEpoch,
+		"precondition: reporting running must not bump the epoch")
+
+	// Both fence predicates PASS here, so only the status predicate can reject.
+	n, err := f.q.RequeueTask(f.ctx, store.RequeueTaskParams{
+		ID: claimed.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: f.w1.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n,
+		"the send-failure requeue must stay 'dispatched'-only: a running task got its dispatch, so this caller cannot be the one requeueing it")
+
+	after, err := f.q.GetTask(f.ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", after.Status)
 	assert.Equal(t, int32(1), after.AssignmentEpoch)
 }

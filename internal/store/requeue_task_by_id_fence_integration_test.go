@@ -321,3 +321,52 @@ func TestRequeueTaskByID_TerminalTaskIsNotResurrected(t *testing.T) {
 	assert.Equal(t, "done", after.Status)
 	assert.Equal(t, int32(1), after.AssignmentEpoch)
 }
+
+// F: THE POSITIVE ARM OF THE STATUS ALLOW-LIST, AND RECONCILE'S DOMINANT CASE.
+// A through E all pin what the fence REJECTS. Nothing pinned what it must
+// ACCEPT, and the hole was in the arm that matters most: narrowing the emitted
+// predicate from IN ('dispatched','running') to IN ('dispatched') left the
+// store, worker, scheduler and api suites ALL GREEN.
+//
+// That is not a cosmetic gap. GetActiveTasksForWorker returns dispatched AND
+// running, so a task the agent was genuinely executing and no longer reports on
+// reconnect is 'running' in the database - the single most common thing this
+// statement exists to requeue. Drop 'running' and every one of them silently
+// stays 'running' against a worker that is not executing it: no requeue, no log
+// line, left for the watchdog, with CI green.
+//
+// TestRegisterWorker_ReconcilesRunningTasks does NOT cover this despite its
+// name - all three of its fixture tasks are left 'dispatched' by
+// ClaimTaskForWorker and none is ever transitioned to 'running'.
+func TestRequeueTaskByID_RequeuesARunningTaskForItsAssignee(t *testing.T) {
+	f := newRequeueFence(t)
+
+	claimed := f.claimedBy(t, "rqid-f", f.w1)
+	require.Equal(t, int32(1), claimed.AssignmentEpoch)
+
+	// The agent picked it up and reported running. Note this bumps NOTHING: the
+	// epoch and the assignee are unchanged, so the assignee's own reconcile still
+	// carries two matching fences and only the status arm decides.
+	running, err := f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: claimed.ID, Status: "running", WorkerID: f.w1.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+		StartedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "running", running.Status)
+	require.Equal(t, claimed.AssignmentEpoch, running.AssignmentEpoch,
+		"precondition: reporting running must not bump the epoch")
+
+	n, err := f.q.RequeueTaskByID(f.ctx, store.RequeueTaskByIDParams{
+		ID: claimed.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: f.w1.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n,
+		"a RUNNING task the agent no longer reports must still be requeued - this is reconcile's dominant case")
+
+	after, err := f.q.GetTask(f.ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", after.Status)
+	assert.False(t, after.WorkerID.Valid, "the assignment must be released")
+	assert.Equal(t, int32(2), after.AssignmentEpoch, "a matched requeue bumps the epoch")
+}

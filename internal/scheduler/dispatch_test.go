@@ -646,9 +646,13 @@ func TestDispatcher_BadSourceJSON_FailsTaskNoLeak(t *testing.T) {
 	require.Empty(t, sender.sent, "poison task must never be sent to the worker")
 }
 
-// failingSender is a registered stream whose Send always fails, which is what
-// workerSender.Send does on every one of its error returns: the worker is not
-// connected, ErrWorkerDisconnected, or ErrSendTimeout after 5s of a full queue.
+// failingSender is a registered stream whose Send always fails, standing in for
+// workerSender.Send's two error values: ErrWorkerDisconnected, and ErrSendTimeout
+// after 5s of a full queue. (The third way a dispatch send fails - "worker is not
+// connected" - is Registry.Send's own error, returned before workerSender.Send is
+// reached, so it is not one of the sender's returns.) Only the ErrSendTimeout
+// branch leaves a window wide enough to race: a disconnected sender unblocks
+// immediately.
 type failingSender struct {
 	attempts int
 }

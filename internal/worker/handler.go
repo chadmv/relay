@@ -533,8 +533,11 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 			continue
 		}
 		// n counts MATCHES, not attempts. Zero is normal and CORRECT post-fence: it
-		// means another writer ended this assignment first, and whoever did that
-		// already woke the dispatcher, so there is nothing left here to wake it for.
+		// means another writer ended this assignment first. Counting matches loses
+		// no legitimate wake - see the gate below for why, which is NOT the
+		// "whoever did that already woke the dispatcher" argument this comment used
+		// to make: that is true for a grace-path release but false when n is 0
+		// because the statement ERRORED, which the next paragraph relies on.
 		//
 		// THE ERROR IS DROPPED ON PURPOSE, exactly as it was before this fence
 		// existed. This runs inside finishRegister, BEFORE Connect allocates this
@@ -550,6 +553,17 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 	}
 
 	// Wake the scheduler so requeued tasks are dispatched immediately.
+	//
+	// THIS GATE IS NEARLY ALWAYS REDUNDANT, and knowing why is what makes
+	// counting matches instead of attempts safe. finishRegister fires
+	// `go h.triggerDispatch()` UNCONDITIONALLY once registration completes, so
+	// every path that reaches reconcile and then finishes registering gets a wake
+	// regardless of what this gate decides. The gate is load-bearing on exactly
+	// one path: the RegisterResponse send fails and finishRegister returns early,
+	// never reaching its own trigger. On that path zero matches means zero rows
+	// were actually requeued, so there is nothing to wake for - which is precisely
+	// why switching from attempts to matches cannot drop a needed wake, including
+	// when n is 0 because the statement errored.
 	if requeued > 0 {
 		go h.triggerDispatch()
 	}

@@ -1110,26 +1110,58 @@ type RequeueTaskParams struct {
 // exactly that WHERE. The sweep is finished - do not re-derive it.
 //
 // Used when the registry send fails after the task has been claimed
-// (internal/scheduler/dispatch.go). ITS TRIGGER CORRELATES WITH THE HAZARD,
-// which is what made it at least as reachable as its sibling: it fires exactly
-// when the worker has disappeared or is wedged, and a disconnected worker is
-// what arms its own grace timer. registry.Send is bounded by a 5s sendTimeout,
-// so up to five seconds separate ClaimTaskForWorker returning the caller's
-// snapshot from this write landing on it. In that window the grace timer can
-// requeue the task and the dispatcher can re-dispatch it to a second worker; a
-// fresh assignment is 'dispatched', so on the id and the status alone this
-// statement MATCHED and tore a live task off that second worker - duplicate
-// execution with no log line anywhere, the same end state as its sibling.
+// (internal/scheduler/dispatch.go).
 //
-// THE STATUS PREDICATE STAYS 'dispatched' ONLY. Do not widen it to include
-// 'running' for symmetry with RequeueTaskByID: at this caller's own (epoch,
-// worker) pair the task CANNOT have reported running, because the Send that
-// would have delivered the dispatch is the thing that just failed. All three of
-// workerSender.Send's error returns - not connected, ErrWorkerDisconnected,
-// ErrSendTimeout - are select branches mutually exclusive with the enqueue, so
-// on any error the DispatchTask was never queued, never written to the stream,
-// and never seen by the agent; and the agent is the only writer of 'running'.
-// Widening would only admit a state unreachable for this caller.
+// WHICH SEND FAILURE ACTUALLY LEAVES A WINDOW. An earlier version of this
+// comment said the window is reachable because "a disconnected worker is what
+// arms its own grace timer". THAT WAS WRONG and it is written down so nobody
+// reinstates it: the two halves cannot co-occur. If the worker is gone from the
+// registry, Registry.Send returns before workerSender.Send is ever reached, so
+// there is no window at all. If the worker DISCONNECTED, sender.closed is closed
+// when the send loop returns, so a blocked Send takes `case <-sender.closed` and
+// returns IMMEDIATELY - and teardownConnection closes the sender before it calls
+// h.grace.Start, so this requeue is unblocked strictly before the grace timer is
+// even armed, which then waits its full window on top.
+//
+// The only branch that burns the 5s sendTimeout is `case <-timeout.C` on a full
+// 64-slot queue, which requires the send loop alive inside stream.Send: the
+// worker is WEDGED BUT STILL REGISTERED, online, and has no grace timer armed.
+// Two mechanisms reach the race from there, and neither involves a grace timer:
+//   - ADMIN DISABLE. handleDisableWorker (internal/api/workers.go) calls
+//     RequeueWorkerTasks, which returns T to 'pending' and bumps the epoch; the
+//     dispatcher re-claims it for W2; the still-wedged goroutine then fires this
+//     statement on its stale snapshot.
+//   - A SECOND Connect FROM THE SAME AGENT while the first stream is wedged.
+//     Nothing serializes Connect per worker. The new stream's reconcile sees T
+//     as 'dispatched', the agent does not report it (it never received it), the
+//     SIBLING statement requeues it, triggerDispatch fires, W2 gets it, and the
+//     wedged goroutine tears it off. No admin, no grace timer.
+//
+// In both, a fresh assignment is 'dispatched', so on the id and the status alone
+// this statement MATCHED and tore a live task off W2 - duplicate execution with
+// no log line anywhere, the same end state as its sibling.
+//
+// THE STATUS PREDICATE STAYS 'dispatched' ONLY, pinned by
+// TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath. Do not widen it
+// to include 'running' for symmetry with RequeueTaskByID: at this caller's own
+// (epoch, worker) pair the task cannot have reported running - for any agent
+// that only reports epochs it was actually dispatched - because the Send that
+// would have delivered the dispatch is the thing that just failed.
+// BE PRECISE ABOUT WHAT THAT PROOF COVERS, because the next reader will use this
+// paragraph to decide whether the epoch is coordinator-side or agent-side.
+// workerSender.Send has exactly TWO error values, ErrWorkerDisconnected and
+// ErrSendTimeout, and both are select branches mutually exclusive with the
+// enqueue, so on either the DispatchTask was never queued, never written to the
+// stream, and never seen by the agent. The third case, "worker is not
+// connected", is Registry.Send's own error, returned before workerSender.Send is
+// reached - so it never enqueues either, but it is NOT a select branch and the
+// mutual-exclusion argument does not cover it. The residual gap is that
+// handleTaskStatus takes the epoch OFF THE WIRE and compares it to the DB's
+// current value, so a connected agent that is the current assignee could report
+// 'running' at an epoch it was never dispatched. That needs a task id it would
+// not otherwise know, and the watchdog bounds it, so the decision here is
+// unaffected - but it is why this says "cannot for a well-behaved agent" rather
+// than "cannot".
 //
 // The worker_id comparison must stay a plain `=`, never IS NOT DISTINCT FROM:
 // tasks.worker_id is NULLABLE and a zero-value pgtype.UUID binds SQL NULL, so

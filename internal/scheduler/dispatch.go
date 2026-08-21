@@ -328,12 +328,22 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		// Worker disappeared or is wedged between claim and send; revert so
 		// another pass (or another worker) can pick the task up.
 		log.Printf("dispatch: send to worker %s failed: %v; requeueing task %s", uuidStr(w.ID), err, claimed.ID)
-		// BOTH FENCES ARE ALREADY IN HAND: claimed is the row ClaimTaskForWorker
-		// just returned, so it carries this assignment's epoch, and w.ID is the
-		// worker we picked. Passing them is what stops this goroutine - which has
-		// been sitting in Send for up to sendTimeout - from requeueing a task the
-		// grace timer already released and the dispatcher already handed to
-		// somebody else. See the statement's own comment in query/tasks.sql.
+		// BOTH FENCES ARE ALREADY IN HAND, and both are read off the SAME
+		// RETURNING row: claimed.AssignmentEpoch and claimed.WorkerID come from the
+		// one ClaimTaskForWorker result, so the pair is provably consistent -
+		// failClaimedTask below binds the same two the same way. Do not substitute
+		// w.ID: it is equal today, but ClaimTaskForWorker does not reject a NULL
+		// worker_id argument and tasks.worker_id is nullable, so sourcing the two
+		// facts from one row is what keeps them from drifting apart.
+		//
+		// Passing them is what stops this goroutine - which has been sitting in
+		// Send for up to sendTimeout - from requeueing a task that was released and
+		// re-dispatched to another worker while it was blocked. The window belongs
+		// to ErrSendTimeout on a WEDGED-BUT-REGISTERED sender; a disconnected
+		// sender unblocks immediately and a missing one never reaches here at all.
+		// The releases that reach it are an admin disable and a second Connect from
+		// the same agent - NOT a grace timer, which is armed only after the sender
+		// is already closed. See the statement's own comment in query/tasks.sql.
 		//
 		// The rowcount is discarded on purpose. Zero rows is the correct outcome
 		// (another writer ended this assignment first), dispatchOne returns false
@@ -342,7 +352,7 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		_, _ = d.q.RequeueTask(ctx, store.RequeueTaskParams{
 			ID:              claimed.ID,
 			AssignmentEpoch: claimed.AssignmentEpoch,
-			WorkerID:        w.ID,
+			WorkerID:        claimed.WorkerID,
 		})
 		return false
 	}
