@@ -1,7 +1,9 @@
 ---
 title: RequeueTaskByID has neither an epoch fence nor a worker_id predicate, so a stale reconcile view can tear a fresh assignment off a live worker
 type: bug
-status: open
+status: closed
+closed: 2026-08-20
+resolution: fixed
 created: 2026-08-20
 priority: medium
 source: Phase 4 of the 2026-08-20-reconcile-canonical-task-ids slice; found independently by the invariants lens and the security lens
@@ -191,3 +193,55 @@ Worth keeping even if the SQL looks obvious, because the transferable part is th
 patch: **a statement can satisfy the epoch-fence invariant's "conditionally end the assignment"
 branch and still be an unauthenticated write.** Bumping the epoch proves the caller ended *a*
 generation. It says nothing about whether the caller was entitled to end *this* one.
+
+## Resolution
+
+Fixed 2026-08-20. Both statements now carry four predicates - id, `assignment_epoch`,
+`worker_id` (plain `=`, NULL-rejecting) and a status allow-list - and both moved to `:execrows`
+so callers count matches rather than attempts.
+
+**BOTH statements. The item was wrong that there was only one, and that is the finding.** It
+asserted `RequeueTaskByID` was "the only requeue statement in the tree whose `WHERE` clause names
+nothing but the task id and a status allow-list". `RequeueTask`, three statements away, was
+`WHERE id = $1 AND status = 'dispatched'` - exactly that shape. It went unnoticed by the item, by
+the planner (whose verification section carries seven rows and five refutations, none touching any
+statement but `RequeueTaskByID`), and by the implementer. A conductor-run `/code-review` found it.
+
+It is arguably the **more** reachable of the two: its caller is the `registry.Send` failure path in
+`internal/scheduler/dispatch.go`, so it fires precisely when a worker is gone or wedged, acting on a
+`claimed` snapshot up to `sendTimeout` old. An admin disable, or a concurrent `Connect` while the
+first stream is wedged, requeues and re-dispatches the task inside that window; the pre-fix
+statement then matched on id and `'dispatched'` alone and tore it off the second worker.
+
+**A caller-side fence can ship inert, and one of these nearly did.** Adding a required field to a
+generated params struct binds a zero value at every keyed literal that omits it. Before this slice,
+`dispatch.go`'s `RequeueTask` call had **no test coverage at all**: zeroing either fence argument
+left the entire scheduler suite green. `TestDispatcher_SendFailureRequeuesWithRealFenceValues` now
+catches both, and it is the sole thing that does. The reconcile call site was already covered by
+pre-existing tests. Note the split deliberately: that test guards the CALLER's arguments; the
+lettered store series guards the statement.
+
+**Testing that a predicate rejects is not testing that it accepts.** The lettered series pinned the
+epoch, the assignee three ways, and the status predicate's *negative* arm - and narrowing
+`IN ('dispatched','running')` to `IN ('dispatched')` left store, worker, scheduler and api all
+green. That is reconcile's dominant case: a task the agent was executing and no longer reports is
+`running`. Test F now pins the positive arm, and a sibling pins `RequeueTask`'s deliberately narrow
+list against being widened.
+
+Two settled questions, both decided against the item's suggestions. **Zero rows: do nothing** -
+`Handler.Metrics` is a utilization ring buffer with no counter, not `Activate`d until after
+reconcile runs, so it is the wrong shape and the wrong lifecycle; the observability gap stays with
+[[idea-2026-08-14-tasklog-fence-rejection-is-unobservable]]. **The `t.ID` cleanup was not taken** -
+the epoch comes free from ranging over `serverSet`'s values, while holding `t.ID` drags in the
+raw-bytes re-keying tracked by [[idea-2026-08-20-key-reconcile-task-maps-on-raw-uuid-bytes]].
+
+Also corrected: a reachability mechanism the conductor supplied and that shipped into three files
+before a lens caught it (`ErrWorkerDisconnected` returns immediately and teardown closes the sender
+before arming grace, so the grace timer cannot use the send window); the claim that
+`workerSender.Send` has three error returns (it has two); the reconcile wake justification; and
+CLAUDE.md's epoch-fence bullet, which named three identity-fenced statements when there are now
+five. `TestTasksStatusVocabularyIsExactly` grew from seven statements to thirteen and now marks the
+`('dispatched','running')` group as inverted.
+
+Unit 510 top-level, 0 failures. Integration green across store, worker, scheduler, api, schedrunner
+and cmd. Retro: docs/retros/2026-08-20-requeue-task-by-id-fence.md.
