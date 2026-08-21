@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
+	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/netlimit"
 	"relay/internal/store"
@@ -307,6 +309,19 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
 		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
 	}
+
+	// COUNT THE ROWS AGAINST THE SOURCE FIELDS, because "every wired source has
+	// a row" is a completeness claim and a completeness claim cannot be checked
+	// by reading the rows. The mapping is not mechanical - api.CounterSources'
+	// IngestLogBudget is fed by httpServerDeps.agentHandler - so a name match is
+	// not available, but the CARDINALITIES must agree: a third section added to
+	// CounterSources and wired through a new deps field, with no row added here,
+	// would be guarded by nothing at all while every assertion below still
+	// passed.
+	require.Len(t, deps, reflect.TypeOf(api.CounterSources{}).NumField(),
+		"api.CounterSources has %d source fields and this table has %d rows. Every wired source needs "+
+			"a row, or its section can be silently unwired on some deployments with this guard green.",
+		reflect.TypeOf(api.CounterSources{}).NumField(), len(deps))
 
 	depArg := map[string]*ast.Ident{}
 	for _, st := range body.List {
