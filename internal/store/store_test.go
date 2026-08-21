@@ -1204,9 +1204,14 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 		"a rejected update must not restamp finished_at")
 
 	// Case 6: the same shape with timed_out over failed, because that is the
-	// ordering a reviewer will ask about. There is no server-side timeout writer
-	// in the tree at all - the agent picks one finalStatus and sends it once - so
-	// this pins the vocabulary rather than a live path.
+	// ordering a reviewer will ask about. This USED to pin the vocabulary rather
+	// than a live path, on the grounds that there was no server-side timeout
+	// writer in the tree at all. That stopped being true on 2026-08-20: the
+	// coordinator stale-task watchdog (internal/scheduler/watchdog.go) is now a
+	// second writer of timed_out, and it writes through this very statement. So
+	// the ordering below is live - a swept task is timed_out, and the agent's own
+	// late report of failed must not reclassify it. That rejection is this
+	// allow-list, and nothing else.
 	timedOutTask, err := q.CreateTask(ctx, store.CreateTaskParams{
 		JobID: job.ID, Name: "t-timed-out", Commands: []byte(`[["true"]]`),
 		Env: []byte(`{}`), Requires: []byte(`{}`),

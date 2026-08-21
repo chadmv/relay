@@ -105,8 +105,9 @@ func TestParseWatchdogDuration(t *testing.T) {
 // go/ast, NOT a regex. A source-scanning regex guard in this repo was proven
 // breakable by a single stray comment.
 //
-// IT CHECKS EXACTLY THREE THINGS, and the earlier version of it silently passed
-// on three of the four ways a reviewer broke the wiring:
+// IT CHECKS EXACTLY TWO THINGS, and the earlier version of it silently passed
+// on all four ways a reviewer broke the wiring - two of which are fixed below
+// and two of which no scanner can reach (see WHAT IT CANNOT REACH):
 //
 //  1. A `go` statement mentioning NewWatchdog exists and is a DIRECT child of a
 //     function body. Wrapping it in `if watchdogMargin < 0 { ... }` leaves the
