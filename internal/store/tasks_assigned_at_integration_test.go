@@ -109,11 +109,16 @@ func (f *assignedFixture) get(t *testing.T, id pgtype.UUID) store.Task {
 
 // TestAssignedAtIsClearedWhereverWorkerIDIs pins the rule this column lives by:
 // assigned_at is written exactly where worker_id is written. Correctness does not
-// depend on the clearing half (ClaimTaskForWorker is the only route back into the
-// scanned partition and it always overwrites), but the property "assigned_at IS
-// NOT NULL means currently assigned" does, and that is what the next reader will
-// rely on. Every arm asserts BOTH columns so a statement that clears one and not
-// the other is a failure, not silent drift.
+// depend on the clearing half - ClaimTaskForWorker is the only route back into
+// the scanned partition and it always overwrites - so what this buys is a
+// readable ONE-DIRECTIONAL property: `assigned_at IS NULL` means the row holds no
+// assignment.
+// THE CONVERSE IS FALSE and the last sub-test here is what proves it: after a
+// terminal transition through UpdateTaskStatus both assigned_at and worker_id are
+// still set, deliberately, so a non-NULL assigned_at does NOT mean "currently
+// assigned". Anything that means that must carry the status predicate too.
+// Every arm asserts BOTH columns so a statement that clears one and not the other
+// is a failure, not silent drift.
 func TestAssignedAtIsClearedWhereverWorkerIDIs(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour)
 

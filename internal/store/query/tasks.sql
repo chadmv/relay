@@ -24,6 +24,35 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- column at all. It does not bump assignment_epoch either, so a terminal task
 -- keeps its assignee and trailing log chunks from the agent that just finished
 -- still pass AppendTaskLog's fence.
+-- started_at is WRITE-ONCE PER ASSIGNMENT, via COALESCE, and that is a fence in
+-- its own right rather than a tidiness choice. It closes a hole in BOTH
+-- directions:
+--   * The agent could reset the coordinator's own clock. handleTaskStatus stamps
+--     startedAt = time.Now() on EVERY TASK_STATUS_RUNNING, this allow-list admits
+--     'running', and both other predicates pass trivially for the assignee - it
+--     is its own worker id, at its own epoch. AgentMessage_TaskStatus is
+--     dispatched unbudgeted (only log chunks go through ingestLogLimiter), so an
+--     agent with timeout_seconds=60 emitting one RUNNING every ten minutes kept
+--     `now - started_at` under the watchdog's execution bound forever. The VALUE
+--     was always a relay-server clock; the TRIGGER was the agent's, and that is
+--     what a bound measured from this column cannot survive. "A timeout the agent
+--     is free not to honour is a suggestion, not a timeout" applies to the
+--     coordinator's own timeout too.
+--   * The coordinator could clobber a start time it never read. The watchdog binds
+--     the started_at its scan read; for a `dispatched` row that is NULL. If the
+--     agent reports running inside the scan-to-write window - a transition that
+--     legitimately passes all three fences, since 'running' does not bump the
+--     epoch - the stale NULL used to overwrite the real value, leaving a
+--     `timed_out` row with a finished_at and no start time.
+-- COALESCE makes both a no-op. NO CALLER NEEDS TO CLEAR started_at THROUGH THIS
+-- STATEMENT: every path that legitimately needs a fresh one returns the task to
+-- `pending` and NULLs the column in its own SET clause first - RequeueTask,
+-- RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch,
+-- IncrementTaskRetryCount, RetryJobTasks. CancelJobTasks keeps it deliberately: a
+-- cancelled task that really did start has a real start time. If a future caller
+-- needs to clear it, give that caller its own statement; do not delete the
+-- COALESCE. TestUpdateTaskStatus_RunningDoesNotRestampStartedAt and
+-- TestUpdateTaskStatus_DoesNotClobberAStartedAtItDidNotRead pin both directions.
 -- The worker_id comparison must stay a plain `=`. tasks.worker_id is NULLABLE,
 -- so `=` makes a never-claimed task reject every update, which is the hole this
 -- predicate closes, and makes a caller that lost its identity (a zero-value
@@ -91,7 +120,7 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- with the other, but do not oversell the Go one either.
 UPDATE tasks
 SET status = sqlc.arg(status),
-    started_at = sqlc.arg(started_at),
+    started_at = COALESCE(started_at, sqlc.arg(started_at)),
     finished_at = sqlc.arg(finished_at)
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
@@ -366,9 +395,18 @@ WHERE t.status IN ('dispatched', 'running');
 -- epoch fence, never an unconditional bump.
 -- assigned_at is nulled alongside worker_id. Every statement in this file that
 -- nulls worker_id does the same, and ClaimTaskForWorker is the only statement
--- that sets either - so `assigned_at IS NOT NULL` means exactly "currently
--- assigned". The watchdog's correctness does not depend on this (the claim
--- overwrites on the way back in); the readable invariant does.
+-- that sets either.
+-- THE CLAIM IS ONE-DIRECTIONAL, and it is worth being precise because the
+-- tempting shorthand is false: `assigned_at IS NULL` means the row holds no
+-- assignment, but the CONVERSE DOES NOT HOLD. UpdateTaskStatus deliberately
+-- writes neither column, so every `done`, every `timed_out` and every `failed`
+-- row that got there through it still carries a non-NULL assigned_at - which is
+-- correct, since the assignment must outlive the task for the trailing-log
+-- flush. (CancelJobTasks nulls it, so the column does not even mean one
+-- consistent thing across terminal rows.) Anything that means "CURRENTLY
+-- assigned" must say so with the status predicate, exactly as
+-- ListOverdueAssignedTasks does; a query keying on `assigned_at IS NOT NULL`
+-- alone would select every task ever dispatched.
 UPDATE tasks
 SET status = 'pending',
     worker_id = NULL,
@@ -433,9 +471,15 @@ GROUP BY worker_id;
 -- second arm.
 --
 -- Both cutoffs are computed in Go and bound as parameters, never NOW() -
--- interval. started_at is written by a relay-server Go clock and by nothing
--- else (handleTaskStatus); assigned_at is written by a relay-server Go clock and
--- by nothing else except migration 000021's one-time backfill. Cross-replica
+-- interval. started_at and assigned_at are both written by a relay-server Go
+-- clock and by nothing else, except migration 000021's one-time backfill of
+-- assigned_at.
+-- BEING A SERVER CLOCK IS NOT THE SAME AS BEING BEYOND THE AGENT'S REACH, and
+-- an earlier version of this comment conflated them. handleTaskStatus stamps
+-- started_at from the server's clock, but the agent chooses WHEN by sending
+-- TASK_STATUS_RUNNING, and it may send it repeatedly. What makes the execution
+-- arm survive that is UpdateTaskStatus's COALESCE, which makes started_at
+-- write-once per assignment - not the provenance of the value. Cross-replica
 -- that is app-vs-app NTP skew (milliseconds) against bounds measured in hours,
 -- whereas NOW() would put app-vs-database skew on every comparison.
 --
@@ -444,6 +488,14 @@ GROUP BY worker_id;
 -- EXTRACT(EPOCH FROM ...) is preferred over make_interval so only a timestamptz
 -- and a bigint are bound - sqlc's handling of interval parameters is exactly the
 -- kind of thing that emits a surprising Go type.
+--
+-- THE LIMIT IS NOT ONLY ABOUT VOLUME. Every row a sweep returns is written
+-- against this one snapshot, so without a bound the scan-to-write window for the
+-- LAST row is the whole loop rather than an instant - and that window is where a
+-- concurrent agent transition can land. Capping the batch caps the window; the
+-- watchdog re-scans on its next tick and drains the remainder, oldest first,
+-- which is what the ORDER BY is for. The caller logs when a sweep comes back
+-- full, so a truncated sweep is never mistaken for a complete one.
 SELECT * FROM tasks
 WHERE status IN ('dispatched', 'running')
   AND worker_id IS NOT NULL
@@ -457,7 +509,8 @@ WHERE status IN ('dispatched', 'running')
           AND EXTRACT(EPOCH FROM (sqlc.arg(now)::timestamptz - started_at))
               > timeout_seconds + sqlc.arg(margin_seconds)::bigint )
       )
-ORDER BY assigned_at NULLS LAST, id;
+ORDER BY assigned_at NULLS LAST, id
+LIMIT sqlc.arg(max_rows)::int;
 
 -- name: CreateTaskWithSource :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries, source)

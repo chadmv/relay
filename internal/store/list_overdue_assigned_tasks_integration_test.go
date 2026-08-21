@@ -97,6 +97,13 @@ func (f *overdueFixture) terminal(t *testing.T, name, status string, timeoutSec 
 }
 
 // bothArms is the ordinary production parameter set: 30m margin, 24h cap.
+//
+// MaxRows is NOT optional and omitting it is not harmless: an unset int32 binds
+// 0, which is LIMIT 0, which returns nothing at all. That is fail-closed - the
+// watchdog sweeps nobody rather than sweeping the wrong rows - but it is silent,
+// so the production caller is guarded separately by
+// TestWatchdog_ScanIsBounded, which asserts the bound it binds is
+// WatchdogMaxRowsPerSweep.
 func (f *overdueFixture) bothArms() store.ListOverdueAssignedTasksParams {
 	return store.ListOverdueAssignedTasksParams{
 		AbsoluteEnabled: true,
@@ -104,6 +111,7 @@ func (f *overdueFixture) bothArms() store.ListOverdueAssignedTasksParams {
 		ExecEnabled:     true,
 		Now:             ts(f.now),
 		MarginSeconds:   int64((30 * time.Minute) / time.Second),
+		MaxRows:         100,
 	}
 }
 
@@ -133,10 +141,18 @@ func TestListOverdueAssignedTasks_ExecutionArm(t *testing.T) {
 	assert.False(t, got[under.ID], "a task inside timeout+margin must be left alone")
 }
 
-// TestListOverdueAssignedTasks_ActivityDoesNotCount proves the bound is on
-// assignment age and NOT on last activity. A MAX(task_logs.created_at) liveness
-// signal is tempting and wrong: it is agent-controlled, so a hung-but-chatty
-// agent would look healthy forever.
+// TestListOverdueAssignedTasks_ActivityDoesNotCount is a TRIPWIRE, not coverage,
+// and saying so is the point of this comment. No predicate in the statement
+// consults task_logs, so deleting the AppendTaskLog call below leaves this test
+// reading exactly the same - it does not exercise the execution arm, which
+// _ExecutionArm covers.
+//
+// It is kept deliberately, because "use last activity as the liveness signal" is
+// the single most tempting wrong turn available here: a MAX(task_logs.created_at)
+// bound is AGENT-CONTROLLED, so a hung-but-chatty agent would look healthy
+// forever - the same shape of hole as the started_at re-stamp that COALESCE now
+// closes, and the volume needed to exploit it is itself still unbounded. This
+// test goes RED the moment somebody wires activity into the scan.
 func TestListOverdueAssignedTasks_ActivityDoesNotCount(t *testing.T) {
 	f := newOverdueFixture(t)
 
@@ -276,4 +292,44 @@ func TestListOverdueAssignedTasks_ArmsAreIndependentlyDisablable(t *testing.T) {
 	got = f.list(t, p)
 	assert.True(t, got[execOnly.ID], "disabling the absolute arm must leave the execution arm firing")
 	assert.False(t, got[absOnly.ID], "and must silence the absolute arm")
+}
+
+// TestListOverdueAssignedTasks_LimitTruncatesOldestFirst proves the LIMIT is
+// actually wired and that the ORDER BY decides WHICH rows a truncated sweep
+// takes. The cap exists to bound the scan-to-write window as much as the batch
+// size, and taking the oldest assignments first is what makes the leftovers
+// drain deterministically on the next tick instead of starving.
+func TestListOverdueAssignedTasks_LimitTruncatesOldestFirst(t *testing.T) {
+	f := newOverdueFixture(t)
+
+	oldest := f.dispatched(t, "oldest", i32(0), f.now.Add(-40*time.Hour))
+	middle := f.dispatched(t, "middle", i32(0), f.now.Add(-35*time.Hour))
+	newest := f.dispatched(t, "newest", i32(0), f.now.Add(-30*time.Hour))
+
+	all := f.list(t, f.bothArms())
+	require.Len(t, all, 3, "precondition: all three are overdue")
+
+	p := f.bothArms()
+	p.MaxRows = 2
+	got := f.list(t, p)
+	require.Len(t, got, 2, "the LIMIT must actually bind")
+	assert.True(t, got[oldest.ID], "a truncated sweep must take the oldest assignment first")
+	assert.True(t, got[middle.ID], "and then the next oldest")
+	assert.False(t, got[newest.ID], "and leave the newest for the next tick")
+}
+
+// TestListOverdueAssignedTasks_ZeroLimitReturnsNothing pins the failure DIRECTION
+// of a caller that forgets MaxRows. LIMIT 0 returns nothing, so the watchdog
+// sweeps nobody - fail-closed, which is the right direction, but silent, which is
+// why the production call site has its own assertion.
+func TestListOverdueAssignedTasks_ZeroLimitReturnsNothing(t *testing.T) {
+	f := newOverdueFixture(t)
+	f.dispatched(t, "overdue", i32(0), f.now.Add(-30*time.Hour))
+
+	require.Len(t, f.list(t, f.bothArms()), 1, "precondition")
+
+	p := f.bothArms()
+	p.MaxRows = 0
+	assert.Empty(t, f.list(t, p),
+		"an unset MaxRows binds LIMIT 0 and sweeps nobody: fail-closed, but silent")
 }

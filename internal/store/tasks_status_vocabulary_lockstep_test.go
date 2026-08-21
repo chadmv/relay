@@ -84,8 +84,10 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     close, for that status - a task in it could hold its worker slot and its
 //     job forever with no error and no log line. `preparing` is the same live
 //     candidate as for AppendTaskLog and would need adding to BOTH. A new
-//     TERMINAL status must stay OUT: sweeping a finished task is exactly the
-//     resurrection every other predicate here exists to prevent.
+//     TERMINAL status must stay OUT - but NOT because it would resurrect
+//     anything: this statement is read-only, and UpdateTaskStatus's own
+//     allow-list would reject the write regardless. Including one simply buys a
+//     guaranteed zero-row round trip on every sweep, forever.
 //
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
