@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -313,4 +314,81 @@ func TestLimitListener_CloseClosesTheUnderlyingListener(t *testing.T) {
 	l := Wrap(inner, Config{MaxTotal: 1, MaxPerIP: 1})
 	require.NoError(t, l.Close())
 	assert.Equal(t, int32(1), inner.closed.Load())
+}
+
+// concurrentFakeListener is a thread-safe fake, kept SEPARATE from fakeListener
+// so the ordinary tests keep the unsynchronised version whose races would be a
+// bug in the test rather than in the code under test. It blocks nowhere: once
+// drained it returns errDrained like its sibling.
+type concurrentFakeListener struct {
+	mu    sync.Mutex
+	conns []net.Conn
+	i     int
+}
+
+func (f *concurrentFakeListener) Accept() (net.Conn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.i >= len(f.conns) {
+		return nil, errDrained
+	}
+	c := f.conns[f.i]
+	f.i++
+	return c, nil
+}
+func (f *concurrentFakeListener) Close() error { return nil }
+func (f *concurrentFakeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9090}
+}
+
+// TestLimitListener_ConcurrentAcceptAndCloseKeepsTheCountersConsistent.
+//
+// NOT IN THE PLAN - added because every other test in this file is
+// single-goroutine, so `go test -race` over them proves nothing about the one
+// piece of shared mutable state this package has (the per-IP map and the two
+// counters under l.mu). Production's shape is exactly this one: grpc.Server.Serve
+// calls Accept from ONE goroutine, while Close arrives from every connection's
+// own transport goroutines, concurrently and repeatedly (grpc-go double-closes
+// routinely - see conn.Close).
+//
+// The assertion is that the accounting is EXACT after the storm, not merely that
+// -race is quiet: a lost update under the mutex would leave l.total above zero
+// and permanently consume slots, which is the lockout failure mode.
+func TestLimitListener_ConcurrentAcceptAndCloseKeepsTheCountersConsistent(t *testing.T) {
+	const (
+		hosts    = 8
+		perHost  = 50
+		capPerIP = 4
+	)
+	conns := make([]net.Conn, 0, hosts*perHost)
+	for i := 0; i < hosts*perHost; i++ {
+		conns = append(conns, newFakeConn(fmt.Sprintf("10.0.0.%d:%d", i%hosts, 1000+i)))
+	}
+	l := Wrap(&concurrentFakeListener{conns: conns}, Config{MaxTotal: 16, MaxPerIP: capPerIP})
+
+	var wg sync.WaitGroup
+	var admitted atomic.Int64
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			break
+		}
+		admitted.Add(1)
+		// Two goroutines racing to Close the SAME conn, which is the double-close
+		// grpc-go performs, run concurrently with the next Accept.
+		wg.Add(2)
+		for i := 0; i < 2; i++ {
+			go func() { defer wg.Done(); _ = c.Close() }()
+		}
+	}
+	wg.Wait()
+
+	assert.Positive(t, admitted.Load(), "the storm must actually have admitted something")
+	l.mu.Lock()
+	total, size := l.total, len(l.perIP)
+	l.mu.Unlock()
+	assert.Equal(t, 0, total,
+		"every admitted conn was closed, so the total must be exactly 0: a non-zero value means slots were "+
+			"lost and the cap has become a permanent lockout")
+	assert.Equal(t, 0, size, "every per-IP entry must be gone once its count reaches zero")
 }
