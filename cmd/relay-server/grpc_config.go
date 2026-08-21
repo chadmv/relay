@@ -22,7 +22,7 @@ import (
 // connection" is therefore a property of the wire contract, not a convention.
 //
 // THERE IS DELIBERATELY NO ENV KNOB. There are exactly TWO legitimate reasons for
-// this to move, and only the first has a guard.
+// this to move, and each has its own guard, in a different file.
 //
 //   - A PROTO CHANGE giving AgentService a second RPC.
 //     TestAgentServiceHasExactlyOneStreamPerConnection catches that with a
@@ -32,8 +32,13 @@ import (
 //     service registered on that server, not a per-service one, so a second
 //     service registration would make one stream too few with the proto
 //     untouched. The test above inspects AgentService_ServiceDesc alone and
-//     cannot see what else was registered, so this half is guarded by asserting
-//     the server hosts exactly one service.
+//     cannot see what else was registered. That half is guarded by parsing
+//     main.go: TestGRPCAdmissionIsWiredByMain check 6 requires the gRPC server
+//     value to be passed to exactly one call. This sentence used to claim the
+//     guard was "asserting the server hosts exactly one service", which was
+//     true of a server the TEST built and registered one service on - vacuous by
+//     construction, and proved so by adding reflection.Register(grpcSrv) to
+//     main.go with the package still green.
 //
 // An operator knob here could only LOOSEN a security control: the value multiplies worker.ingestLogLimiter's
 // per-connection budget one-for-one, because that limiter is allocated once per
@@ -243,20 +248,40 @@ func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, stri
 //     cost 1024/900 = 1.14 new TCP connections per second, sustained - so the
 //     option that exists to close parking was itself the cheapest parking route
 //     on the port, and a peer that completed the handshake parked a slot 7.5x
-//     LONGER than one that said nothing at all (grpc-go's 120s
-//     connectionTimeout). At 60s the same hold costs ~17/s and stays under that
-//     120s figure. A legitimate agent's honest window - dial to first stream -
-//     is sub-millisecond and the warned floor is 1s, so 60s still leaves about
-//     four orders of magnitude of headroom and costs a stream-holding connection
+//     LONGER than one that said nothing at all (grpcConnectionTimeout). A
+//     legitimate agent's honest window - dial to first stream - is
+//     sub-millisecond and the warned floor is 1s, so 60s still leaves about four
+//     orders of magnitude of headroom and costs a stream-holding connection
 //     exactly nothing.
 //   - defaultGRPCRegistrationTimeout: worker.DefaultRegistrationTimeout owns the
 //     reasoning; it is restated here only as this knob's default.
+//
+// THE LAST TWO NUMBERS ARE NOT INDEPENDENT, and pricing the idle window alone
+// understated the cheapest hold available on this port. A peer that opens a
+// stream and never registers is cut off at defaultGRPCRegistrationTimeout, which
+// ends the STREAM and hands the connection back to the idle reaper, and only
+// then reaped at defaultGRPCMaxConnIdle: it holds its slot for the SUM, 90s,
+// measured at 701ms for 300ms + 400ms in
+// TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose. Holding all 1024
+// slots therefore costs 1024/90 = 11.4 new TCP connections per second, not the
+// ~17/s the idle window alone advertised - so the composite is the CHEAPER of
+// the two routes, and the earlier comparison to grpc-go's 120s pointed the wrong
+// way. 90s is still under that 120s, which is the property that matters, and
+// resolveGRPCBounds warns when an operator's values stop satisfying it.
 const (
 	defaultGRPCMaxConns            = 1024
 	defaultGRPCMaxConnsPerIP       = 64
 	defaultGRPCMaxConnIdle         = 60 * time.Second
 	defaultGRPCRegistrationTimeout = worker.DefaultRegistrationTimeout
 )
+
+// grpcConnectionTimeout is grpc-go's OWN defaultServerOptions.connectionTimeout
+// (grpc@v1.80.0/server.go:193), restated here because it is the benchmark every
+// parking bound on this port is measured against: it is how long a peer that
+// completes TCP and then says NOTHING AT ALL holds its slot, for free. Any
+// relay-side bound whose hold exceeds it has made saying something cheaper than
+// saying nothing, which inverts the control.
+const grpcConnectionTimeout = 120 * time.Second
 
 // minRegistrationTimeout is the point below which parseRegistrationTimeout says
 // out loud what the value costs. A legitimate agent sends its RegisterRequest
@@ -326,6 +351,38 @@ func resolveGRPCBounds(getenv func(string) string) (grpcBounds, []string) {
 		"RELAY_GRPC_REGISTRATION_TIMEOUT", getenv("RELAY_GRPC_REGISTRATION_TIMEOUT"),
 		defaultGRPCRegistrationTimeout)
 	add(m)
+
+	// THE LAST TWO BOUNDS COMPOSE, AND THIS IS THE ONLY PLACE THAT SEES BOTH.
+	// Every parse function above can only price its own knob, and each of these
+	// two is individually reasonable at values whose SUM is not. A peer that
+	// opens a stream and never registers is disconnected at registrationTimeout -
+	// which ends the STREAM, handing the connection back to the idle window - and
+	// only then reaped at maxConnIdle. It holds its slot for the sum. Measured,
+	// not assumed: 300ms + 400ms held a slot for 704ms
+	// (TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose).
+	//
+	// grpcConnectionTimeout is what the same slot costs a peer that says NOTHING
+	// at all. Once the sum exceeds it, completing the handshake and opening a
+	// stream is the CHEAPER way to park - so the two controls that exist to close
+	// parking become the cheapest parking route on the port, with nothing red and
+	// nothing logged. That is reachable from documented settings: README's
+	// RELAY_GRPC_REGISTRATION_TIMEOUT row sanctions a large value for a slow
+	// fleet, and 2m at the default 60s idle window is 180s.
+	//
+	// Guarded on maxConnIdle > 0 because a DISABLED idle window makes the hold
+	// unbounded rather than merely long, and parseGRPCConnIdle already says
+	// exactly that. A second line quoting a finite sum would understate it.
+	if maxConnIdle > 0 && registrationTimeout+maxConnIdle > grpcConnectionTimeout {
+		add(fmt.Sprintf(
+			"RELAY_GRPC_REGISTRATION_TIMEOUT=%s and RELAY_GRPC_MAX_CONN_IDLE=%s COMPOSE to %s. A peer "+
+				"that opens a stream and never registers holds its connection slot for that whole time: "+
+				"the registration deadline ends the STREAM and hands the connection back to the idle "+
+				"reaper. That is longer than the %s grpc-go allows a peer that says nothing at all, so "+
+				"opening a stream is now the CHEAPEST way to park a slot on this port - which is the "+
+				"denial these two bounds exist to close. Lower either value until the sum is under %s.",
+			registrationTimeout, maxConnIdle, registrationTimeout+maxConnIdle,
+			grpcConnectionTimeout, grpcConnectionTimeout))
+	}
 
 	return grpcBounds{
 		maxConns:            maxConns,

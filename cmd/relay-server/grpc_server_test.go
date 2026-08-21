@@ -149,6 +149,86 @@ func (c *signalConn) Close() error {
 	return err
 }
 
+// deadlineAgentService stands in for worker.Handler.Connect's registration
+// deadline: it returns after d without reading anything. That is the whole of
+// the behaviour this file needs from the real handler, which cannot be used here
+// because registering a worker takes a database.
+type deadlineAgentService struct {
+	relayv1.UnimplementedAgentServiceServer
+	d       time.Duration
+	entered chan struct{}
+}
+
+func (s *deadlineAgentService) Connect(grpc.BidiStreamingServer[relayv1.AgentMessage, relayv1.CoordinatorMessage]) error {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	time.Sleep(s.d)
+	return status.Error(codes.DeadlineExceeded, "no RegisterRequest in time")
+}
+
+// TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose MEASURES the composite
+// hold, because the arithmetic behind both defaults was done on ONE of the two
+// numbers and the conclusion was reported as if it covered the peer.
+//
+// The registration deadline ends the STREAM, not the connection. Ending the last
+// stream re-stamps t.idle (http2_server.go:1299-1306), which is what ARMS the
+// idle reaper - so the two windows run one after the other and a stream-opening
+// peer holds its slot for the SUM. At the shipped defaults that is 30s + 60s =
+// 90s per TCP handshake, i.e. 1024/90 = 11.4 connections per second to hold the
+// entire fleet cap - CHEAPER than the ~17/s that the idle window alone was
+// priced at, and cheaper still than grpc-go's 120s for a peer that says nothing.
+//
+// resolveGRPCBounds warns when the resolved sum crosses that 120s figure, and
+// TestDefaultGRPCMaxConnIdleIsTheAttackersDutyCycle asserts the defaults do not.
+// Both of those are arithmetic on constants; this is the one place the composite
+// is observed against a real grpc.Server.
+func TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose(t *testing.T) {
+	const registration = 300 * time.Millisecond
+	const idle = 400 * time.Millisecond
+
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closed := make(chan struct{}, 16)
+	stub := &deadlineAgentService{d: registration, entered: make(chan struct{}, 8)}
+	srv := grpc.NewServer(grpcServerOptions(grpcBounds{maxConnIdle: idle})...)
+	relayv1.RegisterAgentServiceServer(srv, stub)
+	go func() { _ = srv.Serve(&signalListener{Listener: raw, ch: closed}) }()
+	t.Cleanup(srv.Stop)
+
+	cc := dialTestServer(t, raw.Addr().String())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	_, err = relayv1.NewAgentServiceClient(cc).Connect(ctx)
+	require.NoError(t, err)
+	select {
+	case <-stub.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server handler never entered")
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection was never closed: the registration deadline must hand it back to the " +
+			"idle reaper, and the idle reaper must then take it")
+	}
+	held := time.Since(start)
+
+	assert.Greater(t, held, idle+registration/2,
+		"the registration deadline and the idle window must be measured as COMPOSING, not overlapping: "+
+			"the deadline ends the STREAM, and ending the last stream is what re-stamps t.idle and arms "+
+			"the reaper. If this ever holds for only the idle window, the arithmetic in "+
+			"TestDefaultGRPCMaxConnIdleIsTheAttackersDutyCycle and README's rows can be simplified back "+
+			"to one knob - until then, both count.")
+	assert.Less(t, held, 10*time.Second,
+		"the slot must be released by these two bounds, not by some unrelated timer")
+	t.Logf("slot held for %s (registration %s + idle %s)", held, registration, idle)
+}
+
 func startTestGRPCServerWithCloseSignal(t *testing.T, b grpcBounds) (string, chan struct{}, chan struct{}) {
 	t.Helper()
 	raw, err := net.Listen("tcp", "127.0.0.1:0")

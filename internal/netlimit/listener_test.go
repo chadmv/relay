@@ -548,13 +548,54 @@ func TestLimitListener_PerIPCapDoesNotAggregateIPv4(t *testing.T) {
 	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP)
 }
 
+// textAddr is a net.Addr that renders EXACTLY the string it is given. hostKey
+// reads a.String() and nothing else, so this is the only way to hand it a
+// spelling that net.IP.String() would otherwise normalise away.
+type textAddr string
+
+func (a textAddr) Network() string { return "tcp" }
+func (a textAddr) String() string  { return string(a) }
+
 // TestLimitListener_IPv4MappedIPv6KeysAsIPv4 keeps a dual-stack listener from
-// handing one host two buckets. Go normalises this before it reaches hostKey, so
-// this pins the Unmap rather than reproducing a live defect.
+// handing one host two buckets.
+//
+// THE LITERAL STRING FORM IS THE TEST. The &net.TCPAddr{IP:
+// net.ParseIP("::ffff:10.0.0.1")} spelling this used to assert on is VACUOUS:
+// net.IP.String() already renders a 16-byte v4-mapped address as "10.0.0.1", so
+// hostKey's Unmap never sees a mapped address at all on that input, and DELETING
+// the Unmap left the old assertion green - run and confirmed. The comment that
+// went with it ("Go normalises this before it reaches hostKey, so this pins the
+// Unmap") therefore described the reason the assertion could not pin anything.
+//
+// An addr whose String() IS the mapped literal is the discriminating input, and
+// it is not exotic: hostKey takes whatever a net.Addr renders. With the Unmap it
+// keys as 10.0.0.1; without it, ::ffff:10.0.0.1 aggregates to ::/64 and EVERY
+// v4-mapped peer on the port collapses into that one bucket - a per-source cap
+// that fires on unrelated hosts and a total cap any one of them can drain.
 func TestLimitListener_IPv4MappedIPv6KeysAsIPv4(t *testing.T) {
+	assert.Equal(t, "10.0.0.1", hostKey(textAddr("[::ffff:10.0.0.1]:99")),
+		"a v4-mapped v6 source must key as the v4 address it is. Without the Unmap this is ::/64, which "+
+			"is the bucket every OTHER v4-mapped peer also lands in")
 	assert.Equal(t, hostKey(&net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 1}),
-		hostKey(&net.TCPAddr{IP: net.ParseIP("::ffff:10.0.0.1"), Port: 2}),
+		hostKey(textAddr("[::ffff:10.0.0.1]:99")),
 		"a v4-mapped v6 peer is the same host as the v4 peer and must share its bucket")
+}
+
+// TestLimitListener_HostKeyDiscardsTheIPv6Zone pins a DISCLOSED imprecision, not
+// a desired property, and exists so the disclosure in hostKey's comment cannot
+// drift away from the code. netip.Prefix drops the zone (PrefixFrom calls
+// withoutZone), so every link-local peer keys to fe80::/64 whatever interface it
+// arrived on - and fe80::/64 is the entire link-local space, so the "smallest
+// allocation anybody receives" argument for /64 does not hold there. A
+// dual-homed server whose agents reach it over link-local on two separate LANs
+// charges all of them to one 64-slot budget. Availability-only, and not a relay
+// topology: agents dial a routable coordinator address.
+func TestLimitListener_HostKeyDiscardsTheIPv6Zone(t *testing.T) {
+	assert.Equal(t, "fe80::/64", hostKey(textAddr("[fe80::1%eth0]:99")))
+	assert.Equal(t, hostKey(textAddr("[fe80::1%eth0]:99")), hostKey(textAddr("[fe80::1%eth1]:99")),
+		"the zone is discarded, so two interfaces are one bucket - disclosed in hostKey, not fixed")
+	assert.Equal(t, hostKey(textAddr("[fe80::1%eth0]:99")),
+		hostKey(textAddr("[fe80::dead:beef:1:2%eth9]:99")))
 }
 
 // TestLimitListener_HostKeyFallsBackForANonIPAddress. Accept must key SOMETHING
@@ -564,33 +605,50 @@ func TestLimitListener_IPv4MappedIPv6KeysAsIPv4(t *testing.T) {
 func TestLimitListener_HostKeyFallsBackForANonIPAddress(t *testing.T) {
 	assert.Equal(t, "/run/relay.sock", hostKey(&net.UnixAddr{Name: "/run/relay.sock", Net: "unix"}))
 	assert.Equal(t, "", hostKey(nil))
+	// An addr that renders no host at all keys the same as a nil addr. Not
+	// reachable from a real listener; asserted so hostKey's enumeration of its
+	// fallbacks is complete rather than nearly complete.
+	assert.Equal(t, "", hostKey(&net.TCPAddr{IP: nil}))
 }
 
-// TestLimitListener_NilConnFromTheUnderlyingListenerDoesNotPanic.
+// TestLimitListener_NilConnFromTheUnderlyingListenerIsSkipped.
 //
 // A net.Listener returning (nil, nil) is out of contract and no stdlib listener
 // does it - but Wrap is EXPORTED, and netlimit must not be the place a
 // misbehaving listener turns into a panic. grpc.Server.Serve does not recover
-// its accept goroutine, so a panic here kills the process. hostKey already
-// guards a nil net.Addr; this guards the conn that carries it.
+// its accept goroutine, so a panic here kills the process.
 //
-// The nil is passed through untouched and consumes no accounting: it is not a
-// connection, so it cannot hold a slot and there is nothing to release.
-func TestLimitListener_NilConnFromTheUnderlyingListenerDoesNotPanic(t *testing.T) {
-	l := Wrap(&fakeListener{conns: []net.Conn{nil}}, Config{MaxTotal: 10, MaxPerIP: 10})
+// NOT PANICKING HERE IS NOT ENOUGH, AND THE PREVIOUS VERSION OF THIS TEST
+// ASSERTED EXACTLY THAT AND NO MORE. Handing the nil back to the caller only
+// MOVES the panic one frame: grpc-go's handleRawConn calls rawConn.SetDeadline
+// with no nil check, from a goroutine it does not recover
+// (grpc@v1.80.0/server.go:960-974), so the process dies there instead of here.
+// This test could not see that, because it never involves a grpc.Server. The
+// nil must be SKIPPED instead - the accept loop already supports that, it is how
+// a refused peer is handled - and the next real peer returned in its place.
+//
+// RED before the fix: Accept returns (nil, nil) and never reaches the real conn.
+func TestLimitListener_NilConnFromTheUnderlyingListenerIsSkipped(t *testing.T) {
+	real1 := newFakeConn("10.0.0.1:1001")
+	l := Wrap(&fakeListener{conns: []net.Conn{nil, real1}}, Config{MaxTotal: 10, MaxPerIP: 10})
 
 	got, err := l.Accept()
 	require.NoError(t, err)
-	assert.Nil(t, got)
+	require.NotNil(t, got,
+		"a nil conn must be skipped, not handed on: grpc-go dereferences whatever Accept returns, from a "+
+			"goroutine it does not recover, so passing the nil through relocates the panic rather than "+
+			"preventing it")
+	assert.Equal(t, real1.remote.String(), got.RemoteAddr().String(),
+		"Accept must carry on to the next peer, exactly as it does for a refused one")
 
 	l.mu.Lock()
 	total, size := l.total, len(l.perIP)
 	l.mu.Unlock()
-	assert.Equal(t, 0, total, "a nil conn is not a connection and must consume no slot")
-	assert.Equal(t, 0, size)
+	assert.Equal(t, 1, total, "the nil must consume no slot and the real conn must consume exactly one")
+	assert.Equal(t, 1, size)
 }
 
-// TestLimitListener_BothCapsOffReturnsTheUnDERLYINGConnUnwrapped.
+// TestLimitListener_BothCapsOffReturnsTheUnderlyingConnUnwrapped.
 //
 // README tells an operator fronting :9090 with a proxy to set both caps to 0.
 // Wrapping is not free: Accept returns a WRAPPING net.Conn, and grpc-go's

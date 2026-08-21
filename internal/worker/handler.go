@@ -110,6 +110,16 @@ const DefaultTrailingLogWindow = 15 * time.Minute
 // their job. This bound turns "free and permanent" into "requires a periodic
 // round trip", which is a real reduction and not a fix.
 //
+// IT ALSO ADDS TO THE IDLE WINDOW RATHER THAN OVERLAPPING IT, which is what
+// makes RAISING it a security change and not only a compatibility one. The
+// deadline ends the stream and the idle reaper then takes the connection, so a
+// stream-opening peer holds its slot for the SUM - 90s at relay's defaults,
+// measured in TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose. Once that
+// sum passes grpc-go's 120s connectionTimeout, opening a stream becomes a
+// CHEAPER way to park a slot than saying nothing at all, which inverts both
+// controls; resolveGRPCBounds (cmd/relay-server/grpc_config.go) warns at startup
+// when an operator's two values cross that line.
+//
 // 30s IS GENEROUS BY ORDERS OF MAGNITUDE, AND THE GAP WAS MEASURED RATHER THAN
 // ASSUMED, because this is the knob's fail-aggressive direction: too short and
 // healthy agents are cut off before they register and reconnect-loop forever.
@@ -248,6 +258,17 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 // and a deadline there would disconnect the entire fleet on a timer. That is
 // what makes this a separate function called exactly once rather than a wrapper
 // around Recv.
+//
+// THAT PARAGRAPH USED TO BE THE ONLY THING ENFORCING IT. Replacing the message
+// loop's stream.Recv() with h.recvRegistration(stream) - one token, three lines
+// below a comment saying not to - compiled and left `go test ./internal/worker`
+// entirely green, while cutting every healthy agent at 30s of stream silence,
+// fleet-wide and permanently. The wrapped error means `err == io.EOF` stops
+// matching too, and nothing objected to that either.
+// TestHandler_MessageLoopRecvIsNotBoundedByTheRegistrationDeadline is the check
+// behind the principle now, and it is RED under exactly that edit. It lives in
+// the integration lane because Connect only reaches the message loop after
+// authenticateAndRegister, and every credential path there goes to the store.
 //
 // The Recv runs in a goroutine because there is no other way to bound it -
 // grpc-go's ServerStream takes its deadline from the stream context, which the

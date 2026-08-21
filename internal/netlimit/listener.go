@@ -101,12 +101,26 @@ func (l *Listener) Accept() (net.Conn, error) {
 			return nil, err
 		}
 		// A net.Listener returning (nil, nil) is out of contract and no stdlib
-		// listener does it, but Wrap is exported. Pass it through untouched
-		// rather than dereferencing it: grpc.Server.Serve does not recover its
-		// accept goroutine, so a panic here would kill the process. A nil conn
-		// is not a connection, so it holds no slot and has nothing to release.
+		// listener does it, but Wrap is exported. SKIP it and accept the next
+		// peer: grpc.Server.Serve does not recover its accept goroutine, so a
+		// panic on this path kills the process. A nil conn is not a connection,
+		// so it holds no slot and has nothing to release.
+		//
+		// SKIPPING RATHER THAN RETURNING IT IS THE WHOLE POINT. Handing the nil
+		// back only MOVES the panic one frame: grpc-go's handleRawConn calls
+		// rawConn.SetDeadline with no nil check, from a goroutine it does not
+		// recover either (grpc@v1.80.0/server.go:960-974), so the process dies
+		// there instead of here. This guard is only a guard because the loop
+		// carries on.
+		//
+		// IT DOES NOT COVER A TYPED NIL, and that is the likelier shape: a
+		// (*net.TCPConn)(nil) stored in a net.Conn is not == nil, so it reaches
+		// hostKey(c.RemoteAddr()) and panics exactly as before. Distinguishing
+		// it needs reflection on every accepted connection, on the hottest path
+		// this package has, for a shape no listener in this repo produces. The
+		// case is disclosed rather than handled.
 		if c == nil {
-			return c, nil
+			continue
 		}
 		// Both caps disabled: there is no slot to reserve, so the accounting
 		// wrapper is pure cost. Returning the conn UNWRAPPED is what lets
@@ -133,6 +147,18 @@ func (l *Listener) Stats() Stats {
 // ipv6AggregationBits is the prefix length IPv6 peers are aggregated to. /64 is
 // not a tuning choice: it is the smallest allocation anybody receives, so it is
 // the smallest unit whose addresses are not all free to their holder.
+//
+// WHAT IT RAISES THE BAR TO, RATHER THAN WHAT IT CLOSES. "/64 is the smallest
+// delegation" is a correct floor argument for CHOOSING the prefix length and
+// says nothing about how much an attacker has to hold. Aggregation moves the
+// cost from "one host, one address" to "one host per /64 the attacker holds",
+// and no further: at relay's defaults each distinct /64 buys MaxPerIP=64 slots,
+// which is 6.25% of MaxTotal=1024, so SIXTEEN distinct /64s fill the fleet cap.
+// Providers routinely delegate a /56 (256 /64s) or a /48 (65536), and cheap VPS
+// estates hand out a /64 per instance, so a larger delegation escapes this cap
+// in exact proportion to its size. The per-source cap is a bar, not a wall; what
+// bounds the absolute worst case is MaxTotal, and what makes THAT survivable is
+// that a refused peer is closed before any handshake, goroutine or query.
 const ipv6AggregationBits = 64
 
 // hostKey is the SOURCE identity a per-source cap counts against. Never
@@ -161,7 +187,24 @@ const ipv6AggregationBits = 64
 // A v4-mapped v6 address is unmapped first, so a dual-stack listener cannot give
 // one host two buckets. Anything that is not an IP address at all (a Unix
 // socket, a test fake) falls back to the host string, which is a stable key even
-// though it is not an address.
+// though it is not an address. A net.Addr that parses but carries no host at all
+// (net.TCPAddr{IP: nil}) falls out as the empty string, the same key a nil
+// net.Addr gets; that is unreachable from a real listener and is listed here so
+// the fallback enumeration is complete rather than nearly complete.
+//
+// TWO DISCLOSED IMPRECISIONS, both availability-only and neither fixed:
+//
+//   - THE IPv6 ZONE IS DISCARDED. netip.Prefix drops it (PrefixFrom calls
+//     withoutZone), so fe80::1%eth0, fe80::1%eth1 and fe80::dead:beef:1:2%eth9
+//     all key to fe80::/64 - and fe80::/64 is the ENTIRE link-local space, so
+//     the "smallest allocation anybody receives" reasoning above does not hold
+//     for it. A dual-homed server whose agents reach it over link-local on two
+//     separate LANs charges every one of them to a single 64-slot budget. Not
+//     an expected relay topology (agents dial a routable coordinator address),
+//     and keying link-local with its zone would make the key interface-specific
+//     on one side of a connection only, so this is disclosed rather than fixed.
+//   - Aggregation is per /64 and an attacker holding a larger delegation gets
+//     one bucket per /64 in it. See ipv6AggregationBits.
 func hostKey(a net.Addr) string {
 	if a == nil {
 		return ""
