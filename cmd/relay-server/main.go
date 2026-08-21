@@ -208,6 +208,12 @@ func main() {
 		MaxTotal: grpcBnds.maxConns,
 		MaxPerIP: grpcBnds.maxConnsPerIP,
 	})
+	// The counters endpoint reads the listener's snapshot on demand. This
+	// assignment cannot sit next to httpServer.Metrics above - grpcLis does not
+	// exist yet at that point - and must come before httpServer.Handler() is
+	// built below. A nil field here means the section is ABSENT from the
+	// payload, never zero.
+	httpServer.Counters = api.CounterSources{GRPCAdmission: grpcLis}
 	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
 	go func() {
 		log.Printf("gRPC listening on %s", grpcAddr)
