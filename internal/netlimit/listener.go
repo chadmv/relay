@@ -64,13 +64,58 @@ type Config struct {
 	MaxPerIP int
 }
 
-// Stats is a snapshot of refusal counters. Counts only - never addresses. The
-// consumer reports these as a periodic summary, and a summary that could carry
-// caller-supplied bytes would be a new attacker-driven log site inside the very
-// control that bounds attacker-driven log volume.
-type Stats struct {
+// RefusalCounts are MONOTONIC totals since process start. They only ever
+// increase, which is what makes them safe to compare: a consumer that wants to
+// know whether anything happened can compare two snapshots of this half.
+//
+// Comparable by == deliberately. cmd/relay-server's refusalReporter stores one
+// of these and compares, and that must keep compiling.
+type RefusalCounts struct {
 	RefusedTotal uint64
+
+	// RefusedPerIP UNDER-REPORTS whenever the fleet cap is also saturated:
+	// admit checks the total first, so a connection over BOTH caps is counted
+	// here as zero and against RefusedTotal only. That is deliberate and is not
+	// being changed. What makes it interpretable is Occupancy: when LiveTotal
+	// has reached the configured MaxTotal, read this number as a FLOOR rather
+	// than as a measurement.
 	RefusedPerIP uint64
+}
+
+// Occupancy is the CURRENT state of the two caps. Every field is a level, not a
+// count: it goes down as well as up.
+//
+// LEVELS ARE NEVER CONSULTED TO DECIDE WHETHER A REPORTER SPEAKS. Occupancy
+// changes on essentially every connection, so a periodic summary that included
+// it in its "did anything move" test would emit a line every single interval
+// forever - which is the property TestRefusalSummaryLogsOnlyWhenCountersMove
+// exists to protect. Levels are carried IN the line when it speaks. Splitting
+// them from RefusalCounts is what makes that structural: refusalReporter.last
+// is typed RefusalCounts, so comparing a whole Stats does not compile.
+type Occupancy struct {
+	LiveTotal       uint64
+	DistinctSources uint64
+	MaxPerSource    uint64
+}
+
+// Stats is a snapshot of this listener's counters and levels.
+//
+// RULE, NOT DESCRIPTION: nothing in this type may ever carry an address, a
+// prefix, a hostname, or any other caller-supplied byte. The refusal path is
+// reachable by any unauthenticated peer, and the consumer reports these as a
+// periodic log summary, so a field carrying caller-supplied bytes would be a new
+// attacker-driven log site inside the very control that bounds attacker-driven
+// log volume. Counts and levels only, forever - "which IP is it?" is answered
+// NO on the record, and TestStats_CarriesNoIdentifiers enforces it by walking
+// this type with reflection rather than by trusting this paragraph.
+//
+// PER REPLICA. These are in-process numbers about ONE listener. A two-server
+// deployment splits its connections arbitrarily; an operator must read both
+// endpoints and add the counts, and must NOT add the levels - MaxPerSource in
+// particular does not sum into anything meaningful.
+type Stats struct {
+	Counts RefusalCounts
+	Levels Occupancy
 }
 
 // Listener is a net.Listener that admits at most Config.MaxTotal live
@@ -141,7 +186,10 @@ func (l *Listener) Accept() (net.Conn, error) {
 
 // Stats returns a snapshot of the refusal counters.
 func (l *Listener) Stats() Stats {
-	return Stats{RefusedTotal: l.refusedTotal.Load(), RefusedPerIP: l.refusedPerIP.Load()}
+	return Stats{Counts: RefusalCounts{
+		RefusedTotal: l.refusedTotal.Load(),
+		RefusedPerIP: l.refusedPerIP.Load(),
+	}}
 }
 
 // ipv6AggregationBits is the prefix length IPv6 peers are aggregated to. /64 is

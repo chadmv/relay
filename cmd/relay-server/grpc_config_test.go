@@ -332,14 +332,14 @@ func TestRefusalSummaryLogsOnlyWhenCountersMove(t *testing.T) {
 	r.tick(netlimit.Stats{})
 	assert.Empty(t, lines, "a quiet interval must produce no line at all")
 
-	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedPerIP: 3}})
 	require.Len(t, lines, 1, "the first movement must be reported")
 
-	r.tick(netlimit.Stats{RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedPerIP: 3}})
 	assert.Len(t, lines, 1,
 		"an unchanged counter must not re-log: a sustained attack must cost ONE line per interval, not one per tick")
 
-	r.tick(netlimit.Stats{RefusedTotal: 2, RefusedPerIP: 3})
+	r.tick(netlimit.Stats{Counts: netlimit.RefusalCounts{RefusedTotal: 2, RefusedPerIP: 3}})
 	require.Len(t, lines, 2, "a movement on the OTHER counter must also be reported")
 
 	for i, l := range lines {

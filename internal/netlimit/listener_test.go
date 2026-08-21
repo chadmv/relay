@@ -96,8 +96,8 @@ func TestLimitListener_RefusesBeyondPerIPCap(t *testing.T) {
 		"the third Accept must skip the over-limit peer and return the next admissible one")
 	assert.Equal(t, int32(1), c3.closes.Load(), "the refused conn must be closed, not leaked")
 	assert.Equal(t, int32(0), c1.closes.Load(), "an admitted conn must not be closed by the limiter")
-	assert.Equal(t, uint64(1), l.Stats().RefusedPerIP)
-	assert.Equal(t, uint64(0), l.Stats().RefusedTotal)
+	assert.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedTotal)
 }
 
 // TestLimitListener_PerIPCapIsKeyedOnHostNotHostPort is the discriminating test
@@ -246,8 +246,8 @@ func TestLimitListener_TotalCapRefusesAcrossDistinctIPs(t *testing.T) {
 	assert.Nil(t, got)
 	assert.Equal(t, int32(1), c4.closes.Load())
 	assert.Equal(t, int32(1), c5.closes.Load())
-	assert.Equal(t, uint64(2), l.Stats().RefusedTotal)
-	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP,
+	assert.Equal(t, uint64(2), l.Stats().Counts.RefusedTotal)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedPerIP,
 		"a conn over BOTH caps is counted against the total only; the total is checked first")
 
 	require.NoError(t, first.Close())
@@ -302,7 +302,7 @@ func TestLimitListener_RefusalWritesNothingToTheLog(t *testing.T) {
 			break
 		}
 	}
-	require.Equal(t, uint64(n-1), l.Stats().RefusedPerIP, "99 of the 100 must have been refused")
+	require.Equal(t, uint64(n-1), l.Stats().Counts.RefusedPerIP, "99 of the 100 must have been refused")
 	assert.Equal(t, 0, buf.Len(),
 		"netlimit must write NOTHING to the log on the refusal path. Got: %q", buf.String())
 }
@@ -426,7 +426,7 @@ func TestLimitListener_PerIPRefusalConsumesNoPerIPSlot(t *testing.T) {
 
 	_, err = l.Accept()
 	require.ErrorIs(t, err, errDrained, "c3 is over the per-IP cap, so the fake drains behind it")
-	require.Equal(t, uint64(1), l.Stats().RefusedPerIP)
+	require.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP)
 
 	// White-box: the refusal moved no accounting at all.
 	l.mu.Lock()
@@ -471,8 +471,8 @@ func TestLimitListener_PerIPRefusalConsumesNoTotalSlot(t *testing.T) {
 	}
 	_, err := l.Accept()
 	require.ErrorIs(t, err, errDrained)
-	require.Equal(t, uint64(1), l.Stats().RefusedPerIP, "c3 must be refused by the PER-IP cap, not the total")
-	require.Equal(t, uint64(0), l.Stats().RefusedTotal)
+	require.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP, "c3 must be refused by the PER-IP cap, not the total")
+	require.Equal(t, uint64(0), l.Stats().Counts.RefusedTotal)
 
 	// Two slots were consumed, not three, so two remain under MaxTotal: 4.
 	fl.conns = append(fl.conns, c4, c5)
@@ -524,7 +524,7 @@ func TestLimitListener_PerIPCapAggregatesAnIPv6Prefix(t *testing.T) {
 		"three addresses out of ONE /64 must count as one source: they cost their holder nothing, so a "+
 			"/128 key makes the per-source cap unreachable and leaves the total cap as a shared bucket")
 	assert.Equal(t, int32(1), c3.closes.Load())
-	assert.Equal(t, uint64(1), l.Stats().RefusedPerIP,
+	assert.Equal(t, uint64(1), l.Stats().Counts.RefusedPerIP,
 		"the refusal must be ATTRIBUTED to the per-source cap, or the operator summary blames fleet growth")
 	assert.Equal(t, int32(0), c4.closes.Load(),
 		"a genuinely different /64 is a genuinely different source and must still be admitted")
@@ -545,7 +545,7 @@ func TestLimitListener_PerIPCapDoesNotAggregateIPv4(t *testing.T) {
 		_, err := l.Accept()
 		require.NoError(t, err, "three DISTINCT v4 addresses are three distinct sources under a per-IP cap of 1")
 	}
-	assert.Equal(t, uint64(0), l.Stats().RefusedPerIP)
+	assert.Equal(t, uint64(0), l.Stats().Counts.RefusedPerIP)
 }
 
 // textAddr is a net.Addr that renders EXACTLY the string it is given. hostKey
