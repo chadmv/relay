@@ -110,12 +110,20 @@ const DefaultTrailingLogWindow = 15 * time.Minute
 // their job. This bound turns "free and permanent" into "requires a periodic
 // round trip", which is a real reduction and not a fix.
 //
-// 30s is generous by three orders of magnitude: a legitimate agent sends its
-// RegisterRequest immediately after opening the stream (internal/agent/
-// agent.go:202-215), so the honest window is a network round trip. The value is
-// large enough that a wedged middlebox or a badly stalled host still registers,
-// small enough that parking costs something. Override with
-// RELAY_GRPC_REGISTRATION_TIMEOUT.
+// 30s IS GENEROUS BY ORDERS OF MAGNITUDE, AND THE GAP WAS MEASURED RATHER THAN
+// ASSUMED, because this is the knob's fail-aggressive direction: too short and
+// healthy agents are cut off before they register and reconnect-loop forever.
+// Between client.Connect and stream.Send the agent runs buildRegisterRequest,
+// which is a lock-protected copy of its in-memory runner list plus, for a
+// workspace provider, ListInventory. That last one is the only I/O, and it is a
+// read of the small local .relay-registry.json - cached after the first call, no
+// p4 subprocess, no walk of the workspace tree - so a 1 TB workspace does not
+// make it slow. The honest window is therefore a network round trip plus one
+// small local file read. Anything that changes ListInventory into real work on
+// this path has to revisit this number.
+//
+// Override with RELAY_GRPC_REGISTRATION_TIMEOUT; it can be raised but not
+// disabled.
 const DefaultRegistrationTimeout = 30 * time.Second
 
 // Handler implements relayv1.AgentServiceServer.
