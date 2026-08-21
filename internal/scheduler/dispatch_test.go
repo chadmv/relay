@@ -645,3 +645,83 @@ func TestDispatcher_BadSourceJSON_FailsTaskNoLeak(t *testing.T) {
 		"poison source must fail the task, not leave it dispatched (slot leak)")
 	require.Empty(t, sender.sent, "poison task must never be sent to the worker")
 }
+
+// failingSender is a registered stream whose Send always fails, which is what
+// workerSender.Send does on every one of its error returns: the worker is not
+// connected, ErrWorkerDisconnected, or ErrSendTimeout after 5s of a full queue.
+type failingSender struct {
+	attempts int
+}
+
+func (f *failingSender) Send(*relayv1.CoordinatorMessage) error {
+	f.attempts++
+	return fmt.Errorf("worker is wedged")
+}
+
+// TestDispatcher_SendFailureRequeuesWithRealFenceValues guards the ONE
+// production call site of RequeueTask, which had no coverage at all before this
+// test: mutating either fence argument in dispatch.go to a zero value left the
+// whole scheduler suite green.
+//
+// THAT IS THE "SHIPS INERT" HAZARD, and it is specific to adding a required
+// field to a generated params struct. store.RequeueTaskParams{ID: claimed.ID}
+// still compiles; it binds AssignmentEpoch 0 and a NULL WorkerID, the fence then
+// matches nothing, and the dispatcher silently stops requeueing tasks whose
+// dispatch failed - they sit 'dispatched' forever against a worker that never
+// received them, with no log line beyond the send failure itself. No store-level
+// test can see that, because the store statement is perfectly correct.
+//
+// The epoch assertion is what discriminates. A broken fence leaves the task
+// 'dispatched' at epoch 1; a working one returns it to 'pending' at epoch 2
+// (claim bumps 0 -> 1, requeue bumps 1 -> 2).
+func TestDispatcher_SendFailureRequeuesWithRealFenceValues(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "sendfail", Email: "sendfail@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "sendfail-job", Priority: "normal", SubmittedBy: user.ID,
+		Labels: []byte(`{}`), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "sendfail-task", Commands: []byte(`[["echo","hi"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 0,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), task.AssignmentEpoch)
+
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "worker-sendfail", Hostname: "worker-sendfail", CpuCores: 4, RamGb: 8,
+		GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online",
+		LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &failingSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d.Trigger()
+	d.RunOnce(ctx)
+
+	require.Equal(t, 1, sender.attempts, "fixture: the dispatcher must have attempted the send")
+
+	after, err := q.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", after.Status,
+		"a task whose dispatch could not be sent must be requeued, not left dispatched")
+	assert.False(t, after.WorkerID.Valid, "the failed assignment must be cleared")
+	assert.Equal(t, int32(2), after.AssignmentEpoch,
+		"claim bumps 0 -> 1 and the requeue bumps 1 -> 2; a fence bound to zero values would stop at 1")
+}
