@@ -261,8 +261,9 @@ func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, stri
 // stream and never registers is cut off at defaultGRPCRegistrationTimeout, which
 // ends the STREAM and hands the connection back to the idle reaper, and only
 // then reaped at defaultGRPCMaxConnIdle: it holds its slot for the SUM, 90s,
-// measured at 701ms for 300ms + 400ms in
-// TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose. Holding all 1024
+// measured for a 300ms + 400ms pair by
+// TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose, which logs the
+// figure rather than restating it here where it would go stale. Holding all 1024
 // slots therefore costs 1024/90 = 11.4 new TCP connections per second, not the
 // ~17/s the idle window alone advertised - so the composite is the CHEAPER of
 // the two routes, and the earlier comparison to grpc-go's 120s pointed the wrong
@@ -358,8 +359,8 @@ func resolveGRPCBounds(getenv func(string) string) (grpcBounds, []string) {
 	// opens a stream and never registers is disconnected at registrationTimeout -
 	// which ends the STREAM, handing the connection back to the idle window - and
 	// only then reaped at maxConnIdle. It holds its slot for the sum. Measured,
-	// not assumed: 300ms + 400ms held a slot for 704ms
-	// (TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose).
+	// not assumed: TestGRPCServer_RegistrationDeadlineAndIdleWindowCompose holds a
+	// slot for the sum of a 300ms + 400ms pair and logs what it measured.
 	//
 	// grpcConnectionTimeout is what the same slot costs a peer that says NOTHING
 	// at all. Once the sum exceeds it, completing the handshake and opening a
