@@ -271,7 +271,9 @@ func TestClaimTaskForWorker_IsAtomic(t *testing.T) {
 	assert.ErrorIs(t, err, pgx.ErrNoRows)
 
 	// Revert with RequeueTask restores the task to pending.
-	err = q.RequeueTask(ctx, task.ID)
+	_, err = q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w.ID,
+	})
 	require.NoError(t, err)
 	reread, err := q.GetTask(ctx, task.ID)
 	require.NoError(t, err)

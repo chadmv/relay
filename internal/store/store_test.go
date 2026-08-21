@@ -193,7 +193,11 @@ func TestClaimTaskForWorker_IncrementsEpoch(t *testing.T) {
 	assert.Equal(t, int32(1), claimed1.AssignmentEpoch)
 
 	// Requeue so we can claim again.
-	require.NoError(t, q.RequeueTask(ctx, task.ID))
+	_, err = q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: task.ID, AssignmentEpoch: claimed1.AssignmentEpoch,
+		WorkerID: pgtype.UUID{Bytes: w.ID.Bytes, Valid: true},
+	})
+	require.NoError(t, err)
 
 	// RequeueTask bumped 1 -> 2; second claim: epoch goes 2 -> 3. Epoch never decreases.
 	claimed2, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
@@ -669,7 +673,10 @@ func TestRequeueTask_BumpsEpochAndFencesStaleUpdates(t *testing.T) {
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
 	// Requeue: status -> 'pending', epoch 1 -> 2.
-	require.NoError(t, q.RequeueTask(ctx, task.ID))
+	_, err = q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: task.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w.ID,
+	})
+	require.NoError(t, err)
 
 	got, err := q.GetTask(ctx, task.ID)
 	require.NoError(t, err)
@@ -1390,7 +1397,10 @@ func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
 	// pending and evicts the agent that is genuinely running it. Matrix row M2.
 	staleJob := newJob("j-stale-epoch")
 	stale := newClaimedTask(staleJob.ID, "t-stale-epoch")
-	require.NoError(t, q.RequeueTask(ctx, stale.ID))
+	_, err = q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: stale.ID, AssignmentEpoch: stale.AssignmentEpoch, WorkerID: w1.ID,
+	})
+	require.NoError(t, err)
 	reclaimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: stale.ID, WorkerID: w1.ID,
 	})

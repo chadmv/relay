@@ -352,14 +352,71 @@ SET status = 'dispatched',
 WHERE id = sqlc.arg(id) AND status = 'pending'
 RETURNING *;
 
--- name: RequeueTask :exec
--- Revert a single task from 'dispatched' back to 'pending'.
--- Used when the registry send fails after the task has been claimed.
--- Bumps assignment_epoch so a late update from the prior assignment is fenced out.
+-- name: RequeueTask :execrows
+-- Revert a single task from 'dispatched' back to 'pending', on the SAME FOUR
+-- predicates as RequeueTaskByID: id (which row), assignment_epoch (is the
+-- caller's view still current), worker_id (is this the caller's own
+-- assignment), status (is the row still dispatched at all).
+--
+-- THIS IS THE SECOND OF TWO STATEMENTS THAT HAD THE UNFENCED SHAPE, AND BOTH ARE
+-- NOW FENCED. Recorded here because
+-- bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence says
+-- RequeueTaskByID was "the only requeue statement in the tree whose WHERE clause
+-- names nothing but the task id and a status allow-list". That was FALSE when it
+-- was written: this statement, three statements away in this same file, had
+-- exactly that WHERE. The sweep is finished - do not re-derive it.
+--
+-- Used when the registry send fails after the task has been claimed
+-- (internal/scheduler/dispatch.go). ITS TRIGGER CORRELATES WITH THE HAZARD,
+-- which is what made it at least as reachable as its sibling: it fires exactly
+-- when the worker has disappeared or is wedged, and a disconnected worker is
+-- what arms its own grace timer. registry.Send is bounded by a 5s sendTimeout,
+-- so up to five seconds separate ClaimTaskForWorker returning the caller's
+-- snapshot from this write landing on it. In that window the grace timer can
+-- requeue the task and the dispatcher can re-dispatch it to a second worker; a
+-- fresh assignment is 'dispatched', so on the id and the status alone this
+-- statement MATCHED and tore a live task off that second worker - duplicate
+-- execution with no log line anywhere, the same end state as its sibling.
+--
+-- THE STATUS PREDICATE STAYS 'dispatched' ONLY. Do not widen it to include
+-- 'running' for symmetry with RequeueTaskByID: at this caller's own (epoch,
+-- worker) pair the task CANNOT have reported running, because the Send that
+-- would have delivered the dispatch is the thing that just failed. All three of
+-- workerSender.Send's error returns - not connected, ErrWorkerDisconnected,
+-- ErrSendTimeout - are select branches mutually exclusive with the enqueue, so
+-- on any error the DispatchTask was never queued, never written to the stream,
+-- and never seen by the agent; and the agent is the only writer of 'running'.
+-- Widening would only admit a state unreachable for this caller.
+--
+-- The worker_id comparison must stay a plain `=`, never IS NOT DISTINCT FROM:
+-- tasks.worker_id is NULLABLE and a zero-value pgtype.UUID binds SQL NULL, so
+-- `=` makes a caller that lost its identity fail CLOSED instead of matching an
+-- unassigned row. TestRequeueTask_NullWorkerIDDoesNotMatchANullArgument PLANTS
+-- the row it tests, because the status predicate makes that state unreachable
+-- through production statements - a second guarantee behind the first, not a
+-- reason to relax the first.
+--
+-- Bumps assignment_epoch so a late update from the prior assignment is fenced
+-- out. The bump is inside the same UPDATE as the WHERE, so it happens only for
+-- rows that actually matched - the "conditionally end the assignment" branch of
+-- the epoch fence, never an unconditional bump.
+--
+-- :execrows, not :exec, matching its sibling, so the fence tests can assert a
+-- rowcount rather than infer rejection from row state. THE CALLER DISCARDS THE
+-- COUNT DELIBERATELY and that is not copied reasoning: unlike the reconcile
+-- path, this site is in the dispatcher and DOES have a log budget - it already
+-- logs the send failure unconditionally on the line above. A second line saying
+-- the requeue moved nothing would add no information that line does not already
+-- carry, and would double the volume of an already-unbudgeted path. Zero rows is
+-- the CORRECT outcome anyway: another writer ended this assignment first, and
+-- dispatchOne returns false either way.
 UPDATE tasks
 SET status = 'pending', worker_id = NULL, assigned_at = NULL, started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE id = $1 AND status = 'dispatched';
+WHERE id = sqlc.arg(id)
+  AND assignment_epoch = sqlc.arg(assignment_epoch)
+  AND worker_id = sqlc.arg(worker_id)
+  AND status = 'dispatched';
 
 -- name: GetActiveTasksForWorker :many
 -- Returns all non-terminal tasks currently assigned to a given worker.

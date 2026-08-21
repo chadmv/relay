@@ -128,7 +128,10 @@ func TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished(t *testing.T) {
 	// worker_id bumps the epoch, and ClaimTaskForWorker is the only statement that
 	// sets one, so an epoch an agent holds always arrived with an assignment to
 	// that same agent. Requeue-then-redispatch is the reachable equivalent.
-	require.NoError(t, q.RequeueTask(ctx, taskID))
+	_, err := q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: taskID, AssignmentEpoch: epoch, WorkerID: workerID,
+	})
+	require.NoError(t, err)
 	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: taskID, WorkerID: workerID,
 	})
@@ -325,7 +328,10 @@ func TestHandleTaskLog_PersistFailureIsLoggedOncePerTaskPerEpoch(t *testing.T) {
 	// UNADDRESSABLE by a real agent: every statement that clears worker_id bumps
 	// the epoch, and only ClaimTaskForWorker sets one, so no agent ever holds a
 	// matching epoch for it.
-	require.NoError(t, q.RequeueTask(ctx, taskID))
+	_, err = q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: taskID, AssignmentEpoch: epoch, WorkerID: workerID,
+	})
+	require.NoError(t, err)
 	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: taskID, WorkerID: workerID,
 	})

@@ -40,9 +40,13 @@ func TestRequeueTask_DoesNotTearOffAFreshAssignment(t *testing.T) {
 	claimed := f.claimedBy(t, "rqt-repro", f.w1)
 	require.Equal(t, int32(1), claimed.AssignmentEpoch)
 
-	// The grace timer returns it to pending. This is the LEGITIMATE requeue and
-	// it must succeed.
-	require.NoError(t, f.q.RequeueTask(f.ctx, claimed.ID))
+	// The grace timer returns it to pending, carrying the epoch and worker it
+	// read. This is the LEGITIMATE requeue and it must succeed.
+	nB, err := f.q.RequeueTask(f.ctx, store.RequeueTaskParams{
+		ID: claimed.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: f.w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), nB, "a current requeue must move the row")
 
 	// The dispatcher hands it to a DIFFERENT worker.
 	redispatched, err := f.q.ClaimTaskForWorker(f.ctx, store.ClaimTaskForWorkerParams{
@@ -52,7 +56,12 @@ func TestRequeueTask_DoesNotTearOffAFreshAssignment(t *testing.T) {
 	require.Equal(t, int32(3), redispatched.AssignmentEpoch)
 
 	// Send finally fails and the original goroutine requeues its stale snapshot.
-	require.NoError(t, f.q.RequeueTask(f.ctx, claimed.ID))
+	// It must move nothing: the epoch is stale AND the task belongs to W2 now.
+	nC, err := f.q.RequeueTask(f.ctx, store.RequeueTaskParams{
+		ID: claimed.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: f.w1.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), nC, "a stale send-failure requeue must move zero rows")
 
 	after, err := f.q.GetTask(f.ctx, claimed.ID)
 	require.NoError(t, err)

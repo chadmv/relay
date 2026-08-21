@@ -328,7 +328,22 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 		// Worker disappeared or is wedged between claim and send; revert so
 		// another pass (or another worker) can pick the task up.
 		log.Printf("dispatch: send to worker %s failed: %v; requeueing task %s", uuidStr(w.ID), err, claimed.ID)
-		_ = d.q.RequeueTask(ctx, claimed.ID)
+		// BOTH FENCES ARE ALREADY IN HAND: claimed is the row ClaimTaskForWorker
+		// just returned, so it carries this assignment's epoch, and w.ID is the
+		// worker we picked. Passing them is what stops this goroutine - which has
+		// been sitting in Send for up to sendTimeout - from requeueing a task the
+		// grace timer already released and the dispatcher already handed to
+		// somebody else. See the statement's own comment in query/tasks.sql.
+		//
+		// The rowcount is discarded on purpose. Zero rows is the correct outcome
+		// (another writer ended this assignment first), dispatchOne returns false
+		// either way, and the unconditional log line above already reports the
+		// failure that brought us here - a second line would add nothing.
+		_, _ = d.q.RequeueTask(ctx, store.RequeueTaskParams{
+			ID:              claimed.ID,
+			AssignmentEpoch: claimed.AssignmentEpoch,
+			WorkerID:        w.ID,
+		})
 		return false
 	}
 
