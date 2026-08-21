@@ -58,11 +58,17 @@ func TestAgentServiceHasExactlyOneStreamPerConnection(t *testing.T) {
 // TestGRPCKeepaliveParamsKeepsTheLivenessProbe.
 //
 // MaxConnectionIdle lives in the SAME keepalive.ServerParameters struct as the
-// existing Time/Timeout liveness probe. Appending a second
-// grpc.KeepaliveParams(...) option compiles, is the obvious way to write this
-// diff, and silently discards Time and Timeout because the later option
-// overwrites o.keepaliveParams wholesale (grpc@v1.80.0/server.go:330-332). This
-// is the test that makes that regression red.
+// existing Time/Timeout liveness probe, and this pins the VALUES that struct
+// carries.
+//
+// IT DOES NOT CATCH THE SECOND-OPTION REGRESSION, contrary to what the plan for
+// this slice claimed. Appending a second grpc.KeepaliveParams(...) with an
+// inline literal compiles, silently discards Time and Timeout (grpc-go
+// overwrites o.keepaliveParams wholesale, grpc@v1.80.0/server.go:330-332), and
+// leaves this test perfectly green - because this test calls
+// grpcKeepaliveParams directly and never looks at the option list. A mutation
+// run proved exactly that. The option list is guarded by
+// TestGRPCServerOptionsHasExactlyOneKeepaliveParams; the two are complements.
 func TestGRPCKeepaliveParamsKeepsTheLivenessProbe(t *testing.T) {
 	kp := grpcKeepaliveParams(15 * time.Minute)
 	assert.Equal(t, 30*time.Second, kp.Time, "the 30s inactivity ping must survive")
@@ -383,4 +389,73 @@ func TestGRPCAdmissionIsWiredByMain(t *testing.T) {
 		"main.go has no `go runRefusalReporter(...)` statement directly in a function body: refused "+
 			"connections are counted and never surfaced, so an operator sees agents fail to appear with "+
 			"nothing in the log")
+}
+
+// TestGRPCServerOptionsHasExactlyOneKeepaliveParams.
+//
+// NOT IN THE PLAN, AND IT EXISTS BECAUSE THE PLAN WAS WRONG HERE. The plan
+// asserted that appending a second grpc.KeepaliveParams(...) to the option list
+// would be caught by TestGRPCKeepaliveParamsKeepsTheLivenessProbe. It is not,
+// and the mutation battery proved it in both directions:
+//
+//   - Appending grpc.KeepaliveParams(grpcKeepaliveParams(b.maxConnIdle)) a
+//     SECOND time is idempotent - the same struct overwrites itself - so it is
+//     not a defect at all and killing it would prove nothing.
+//   - Appending an INLINE keepalive.ServerParameters{MaxConnectionIdle: ...} IS
+//     the defect: grpc-go stores keepaliveParams wholesale
+//     (grpc@v1.80.0/server.go:330-332), so the later option silently discards
+//     Time and Timeout and the 30s/10s liveness probe becomes grpc-go's 2h
+//     default. Every test in this package stayed green under it, because they
+//     all call grpcKeepaliveParams directly and never look at the option LIST.
+//
+// So this guard reads the option list itself. go/ast, not a regex, matching
+// TestGRPCAdmissionIsWiredByMain: a source-scanning regex guard in this repo was
+// proven breakable by a single stray comment.
+//
+// WHAT IT CANNOT REACH, stated rather than overclaimed: it is structural, so it
+// cannot tell that grpcKeepaliveParams itself returned the wrong numbers. That
+// half is TestGRPCKeepaliveParamsKeepsTheLivenessProbe's job. The two are
+// complements, and neither alone covers the option.
+func TestGRPCServerOptionsHasExactlyOneKeepaliveParams(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "grpc_config.go", nil, 0)
+	require.NoError(t, err)
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "grpcServerOptions" {
+			fn = d
+		}
+	}
+	require.NotNil(t, fn, "grpc_config.go no longer declares grpcServerOptions")
+
+	var args []ast.Expr
+	ast.Inspect(fn, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := ce.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "KeepaliveParams" {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "grpc" {
+			args = append(args, ce.Args...)
+		}
+		return true
+	})
+
+	require.Len(t, args, 1,
+		"grpcServerOptions must contain EXACTLY ONE grpc.KeepaliveParams option. grpc-go stores "+
+			"keepaliveParams wholesale (server.go:330-332), so a second one silently discards Time and "+
+			"Timeout and the 30s/10s liveness probe becomes grpc-go's 2h default. Put every keepalive "+
+			"decision inside grpcKeepaliveParams instead.")
+
+	call, ok := args[0].(*ast.CallExpr)
+	require.True(t, ok, "the grpc.KeepaliveParams argument must be a call to grpcKeepaliveParams, not a literal")
+	id, ok := call.Fun.(*ast.Ident)
+	require.True(t, ok && id.Name == "grpcKeepaliveParams",
+		"grpc.KeepaliveParams must be handed grpcKeepaliveParams(...). An inline "+
+			"keepalive.ServerParameters literal here is the exact shape that drops Time and Timeout, and "+
+			"it is invisible to every test that calls grpcKeepaliveParams directly.")
 }
