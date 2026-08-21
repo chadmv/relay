@@ -96,3 +96,75 @@ func TestGRPCEnforcementPolicyMatchesGRPCsOwnDefault(t *testing.T) {
 			"from true needs a client pinging slower than MinTime with no stream, i.e. over five minutes. "+
 			"This assertion pins the decision, not the behaviour.")
 }
+
+// TestParseConnLimit mirrors TestParseWatchdogDuration's table. Three outcomes,
+// not two, which is why the second return is a message and not an ok bool.
+//
+// ONE DELIBERATE DEVIATION FROM parseWatchdogDuration: there is no `floor`
+// outcome. A floor exists to catch units confusion (`24m` for `24h`), and a bare
+// connection count has no units to confuse. Any positive value is a legitimate
+// operator choice about fleet size or NAT topology.
+func TestParseConnLimit(t *testing.T) {
+	const def = 1024
+	cases := []struct {
+		name    string
+		raw     string
+		want    int
+		wantMsg string
+	}{
+		{"unset keeps the default and is silent", "", def, ""},
+		{"a valid value is used as-is", "64", 64, ""},
+		{"1 is accepted without comment", "1", 1, ""},
+		{"zero is ACCEPTED and disables the cap, with an informational line", "0", 0, "disabled"},
+		{"negative keeps the default and warns", "-5", def, "not a non-negative integer"},
+		{"unparseable keeps the default and warns", "lots", def, "not a non-negative integer"},
+		{"a float keeps the default and warns", "64.5", def, "not a non-negative integer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := parseConnLimit("RELAY_GRPC_MAX_CONNS", tc.raw, def)
+			assert.Equal(t, tc.want, got)
+			if tc.wantMsg == "" {
+				assert.Empty(t, msg, "a valid value must not produce startup noise")
+				return
+			}
+			require.Contains(t, msg, tc.wantMsg,
+				"the message is the only signal an operator gets; it must name the consequence")
+			assert.Contains(t, msg, "RELAY_GRPC_MAX_CONNS", "the message must name the variable it is about")
+		})
+	}
+}
+
+// TestParseGRPCConnIdle keeps parseWatchdogDuration's four-outcome shape,
+// INCLUDING the floor - unlike the integer knob, this one has a fail-aggressive
+// direction (a sub-second value reaps a legitimate agent between its dial and its
+// first stream, so it reconnect-loops forever).
+func TestParseGRPCConnIdle(t *testing.T) {
+	def := 15 * time.Minute
+	cases := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantMsg string
+	}{
+		{"unset keeps the default and is silent", "", def, ""},
+		{"a valid value is used as-is", "5m", 5 * time.Minute, ""},
+		{"zero is ACCEPTED and disables reaping, with an informational line", "0s", 0, "disabled"},
+		{"negative keeps the default and warns", "-5m", def, "not a Go duration"},
+		{"unparseable keeps the default and warns", "fifteen", def, "not a Go duration"},
+		{"below the floor KEEPS the value and warns", "200ms", 200 * time.Millisecond, "below"},
+		{"exactly the floor is silent", "1s", time.Second, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, msg := parseGRPCConnIdle("RELAY_GRPC_MAX_CONN_IDLE", tc.raw, def)
+			assert.Equal(t, tc.want, got)
+			if tc.wantMsg == "" {
+				assert.Empty(t, msg)
+				return
+			}
+			require.Contains(t, msg, tc.wantMsg)
+			assert.Contains(t, msg, "RELAY_GRPC_MAX_CONN_IDLE")
+		})
+	}
+}

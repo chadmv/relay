@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -90,4 +92,76 @@ func grpcEnforcementPolicy() keepalive.EnforcementPolicy {
 		MinTime:             grpcKeepaliveMinTime,
 		PermitWithoutStream: false,
 	}
+}
+
+// parseConnLimit resolves one of the two gRPC connection caps into the value
+// handed to netlimit.Config, plus a startup message to log, empty when there is
+// nothing to say. It follows parseWatchdogDuration's three-outcome shape
+// (cmd/relay-server/watchdog_config.go:41), with its own prose:
+//
+//   - Unset, or a valid non-negative integer: used as-is, silently.
+//   - Exactly zero: ACCEPTED, and the cap is disabled. Because disabling an
+//     admission control must never be silent, this returns an informational line
+//     naming what is now unbounded.
+//   - Negative or unparseable: the default is used and the message says so. A
+//     silently-ignored typo would leave an operator believing they had tightened
+//     a security-relevant knob they had not.
+//
+// There is deliberately NO floor outcome, unlike parseWatchdogDuration. A floor
+// catches units confusion, and a bare connection count has no units; any positive
+// value is a legitimate statement about fleet size or NAT topology.
+//
+// Not a log.Fatalf, following parseTrailingLogWindow and parseWatchdogDuration:
+// a bad limit must not stop a server booting when a safe default exists.
+func parseConnLimit(name, raw string, def int) (int, string) {
+	if raw == "" {
+		return def, ""
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return def, fmt.Sprintf("%s=%q is not a non-negative integer; using %d", name, raw, def)
+	}
+	if n == 0 {
+		return 0, fmt.Sprintf(
+			"%s=%q: this gRPC connection cap is disabled. Admission on the agent port is bounded only by "+
+				"the process file-descriptor limit, and every per-connection control (including "+
+				"worker.ingestLogLimiter's log budget) multiplies without a ceiling.", name, raw)
+	}
+	return n, ""
+}
+
+// minGRPCConnIdleDur is the floor for RELAY_GRPC_MAX_CONN_IDLE. A legitimate
+// agent's idle window is the gap between grpc.NewClient dialing and
+// client.Connect opening its stream (internal/agent/agent.go:202-209), which is
+// sub-millisecond on a LAN. The floor is not that number - it is the point below
+// which a scheduling stall on a loaded host could plausibly exceed the window,
+// GOAWAYing agents before they ever open a stream and leaving them
+// reconnect-looping. One second is three orders above the real window and still
+// well inside "obviously a mistake" territory.
+const minGRPCConnIdleDur = time.Second
+
+// parseGRPCConnIdle resolves RELAY_GRPC_MAX_CONN_IDLE. Same contract as
+// parseWatchdogDuration, floor included: this knob DOES have a fail-aggressive
+// direction, so a sub-floor value is KEPT and warned about rather than rejected.
+func parseGRPCConnIdle(name, raw string, def time.Duration) (time.Duration, string) {
+	if raw == "" {
+		return def, ""
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return def, fmt.Sprintf("%s=%q is not a Go duration (or is negative); using %s", name, raw, def)
+	}
+	if d == 0 {
+		return 0, fmt.Sprintf(
+			"%s=%q: idle gRPC transport reaping is disabled. A peer that completes the HTTP/2 handshake "+
+				"and never opens a stream now holds its connection slot forever, which turns the "+
+				"connection caps into a parking primitive.", name, raw)
+	}
+	if d < minGRPCConnIdleDur {
+		return d, fmt.Sprintf(
+			"%s=%q resolves to %s, below the %s floor. Using it anyway, but a legitimate agent may be "+
+				"disconnected between dialing and opening its stream and will reconnect-loop. Check the "+
+				"units (%s, not %s?).", name, raw, d, minGRPCConnIdleDur, def, d)
+	}
+	return d, ""
 }
