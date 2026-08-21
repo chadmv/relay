@@ -3,6 +3,7 @@ title: Key reconcile's task maps on the raw [16]byte rather than a rendered stri
 type: idea
 status: open
 created: 2026-08-20
+updated: 2026-08-20
 priority: low
 source: Phase 4 security lens of the 2026-08-20-reconcile-canonical-task-ids slice
 ---
@@ -39,6 +40,49 @@ zero-value UUID to `Valid: true` and requeue whatever task id is all zeroes. Not
 `tasks.id` is a NOT NULL primary key and `GetActiveTasksForWorker` selects it directly - but the
 replacement must carry an explicit `if !t.ID.Valid { continue }` so it fails closed **on purpose**.
 
+### Evidence added 2026-08-20 - `serverSet` now has a second consumer and a narrowing conversion
+
+No scope change: the loop still holds a string and still re-`Scan`s it, so the proposal above is
+intact and un-narrowed. What changed is the strength of the case.
+
+The 2026-08-20 requeue-fence slice made `serverSet`'s **value** load-bearing. It was already
+`map[string]int64`; the requeue loop used to range over keys only and throw the value away, and now
+reads it:
+
+```go
+for taskIDStr, srvEpoch := range serverSet {
+    ...
+    n, _ := h.q.RequeueTaskByID(ctx, store.RequeueTaskByIDParams{
+        ID:              tID,
+        AssignmentEpoch: int32(srvEpoch),
+        WorkerID:        workerID,
+    })
+```
+
+So there are now **two** consumers of the map - the reported loop's epoch comparison against proto's
+`int64 RunningTask.Epoch`, and this fence argument, which needs the `int32` the column actually is.
+That is the point at which a two-field map value should become a struct carrying `pgtype.UUID` and
+`int32` rather than a string and an `int64`, and doing so subsumes this item's change rather than
+competing with it. Taken together the refactor now removes **three** things instead of two:
+
+- the `int32(srvEpoch)` narrowing conversion at the fence call, which exists only because the map
+  widened an `int32` column to `int64` for the *other* consumer (this is new since the item was
+  filed, and it is commented in place as lossless, which it is - but a struct makes the comment
+  unnecessary rather than merely true);
+- the `tID.Scan(taskIDStr)` that re-parses a string this same function rendered from a `pgtype.UUID`
+  ninety lines earlier;
+- that `Scan`'s `continue` branch, which is the accidental fail-closed described above and is
+  unreachable in practice.
+
+**The two-consumer fact also sharpens the trap.** With one consumer, a wrong key was a missed match.
+With two, the value carried alongside the key is now an argument to a *fenced write*, so a struct that
+lets the id and the epoch be populated independently would be a way to pass a mismatched pair. Keep
+them in one struct built at one place from one `GetActiveTasksForWorker` row - the same rule
+`dispatchOne` states at its own call site, where both fence values are read off a single `RETURNING`
+row and the comment forbids substituting an equal-looking value from elsewhere.
+
+Source: `docs/retros/2026-08-20-requeue-task-by-id-fence.md`.
+
 ## Acceptance / Done When
 
 - `reconcileRunningTasks` contains no UUID string as a map key or map lookup.
@@ -51,6 +95,11 @@ replacement must carry an explicit `if !t.ID.Valid { continue }` so it fails clo
   decorative for six of seven re-wirings until each was mutated. Mutate the new `t.ID.Valid` guard
   and confirm something reddens, or add the test that makes it load-bearing.
 - The `cancelIDs` echo behaviour is unchanged for every input, parseable or not.
+- **Added 2026-08-20:** the id and the epoch handed to `RequeueTaskByID` are built from one
+  `GetActiveTasksForWorker` row and cannot be populated independently, and the `int32(srvEpoch)`
+  narrowing conversion is gone rather than moved. Mutating the epoch argument to a zero value must
+  still redden `TestRegisterWorker_ReconcilesRunningTasks` afterwards - that mutation is the only
+  coverage the production wiring has.
 
 ## Related
 
@@ -58,8 +107,9 @@ replacement must carry an explicit `if !t.ID.Valid { continue }` so it fails clo
 - The bug this would have made unrepresentable:
   [[bug-2026-08-15-reconcile-compares-wire-task-ids-against-canonical-ones]] (closed),
   `docs/retros/2026-08-20-reconcile-canonical-task-ids.md`
-- The natural companion, which also wants the loop to hold `t.ID` rather than a string:
-  [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]]
+- The slice that gave `serverSet`'s value a second consumer and added the narrowing conversion:
+  [[bug-2026-08-20-requeuetaskbyid-has-no-epoch-or-assignee-fence]],
+  `docs/retros/2026-08-20-requeue-task-by-id-fence.md`
 - The real bound on the cost figures below:
   [[bug-2026-08-15-grpc-connection-admission-is-unbounded]]
 - The zero-diff-refactor-gate lesson: `docs/retros/2026-08-14-cursor-pager-hook.md`
@@ -77,7 +127,8 @@ bounds this.
 If the structural change is judged not worth the churn, the one-line alternative is `tID.String()`
 in place of `uuidStr(tID)`: byte-identical output, one allocation instead of ten. It does not delete
 the bug class, so it is the lesser option, and it is recorded only so the next reader does not think
-it was missed.
+it was missed. **Note as of 2026-08-20 that this alternative no longer addresses the second half of
+the case** - it does nothing about the map value, the narrowing conversion, or the id/epoch pairing.
 
 Filed at **low**. The bug is closed, the tests hold it closed, and this is about making the closure
 structural rather than behavioural.
