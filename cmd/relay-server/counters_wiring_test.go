@@ -27,9 +27,14 @@ import (
 // netlimit.Wrap", and it was attacked with five evasions before it was called
 // done: deletion, an empty literal, an explicit nil field, a field assignment on
 // the following line, and a named intermediate variable mutated before the
-// assignment. A sixth evasion is blocked by the TYPE SYSTEM rather than by this
-// guard and so is not checked here: GRPCAdmission: grpcRawLis does not compile,
-// because a raw net.Listener has no Stats method.
+// assignment. Searching past those five for the SHAPE found three more, and one
+// of them SURVIVED the first version of this guard: a conditional wrapper (see
+// the unconditional check below). The other two were already covered - wiring a
+// second api.Server and serving the original, and feeding a typed-nil
+// *netlimit.Listener declared with var. One further evasion is blocked by the
+// TYPE SYSTEM rather than by this guard and so is not checked here:
+// GRPCAdmission: grpcRawLis does not compile, because a raw net.Listener has no
+// Stats method.
 func TestServerCountersIsWiredByMain(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -39,10 +44,29 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	// `grpcLis := netlimit.Wrap(...)`.
 	from := map[string][]string{}
 	type selAssign struct {
-		lhs string
-		rhs ast.Expr
+		lhs  string
+		rhs  ast.Expr
+		stmt *ast.AssignStmt
 	}
 	var sels []selAssign
+
+	// Statements that run UNCONDITIONALLY, once, in main's own body. Everything
+	// else - an if, a switch, a for, a closure, a goroutine - is a place the
+	// assignment can sit while never executing, or executing twice.
+	unconditional := map[*ast.AssignStmt]bool{}
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "main" || fd.Recv != nil || fd.Body == nil {
+			continue
+		}
+		for _, st := range fd.Body.List {
+			if as, ok := st.(*ast.AssignStmt); ok {
+				unconditional[as] = true
+			}
+		}
+	}
+	require.NotEmpty(t, unconditional, "main.go no longer declares func main with a body of statements")
+
 	ast.Inspect(file, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
 		if !ok {
@@ -67,7 +91,7 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 			// A SELECTOR on the left. Keyed by the rendered path, so that
 			// `httpServer.Counters.GRPCAdmission = nil` on the next line is
 			// visible as a mutation rather than invisible as "not an *ast.Ident".
-			sels = append(sels, selAssign{lhs: exprString(l), rhs: rhs})
+			sels = append(sels, selAssign{lhs: exprString(l), rhs: rhs, stmt: as})
 		}
 		return true
 	})
@@ -111,6 +135,17 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 		"main.go mutates the counter sources after building them (%v). `httpServer.Counters.GRPCAdmission "+
 			"= nil` on the following line compiles and silently unwires the section: this is the exact "+
 			"evasion that beat the netlimit.Config guard one slice ago.", mutations)
+
+	// NOT IN THE PLAN, AND IT IS AN EVASION THE PLAN'S FIVE MISSED. Wrapping the
+	// assignment in `if os.Getenv("RELAY_ENABLE_COUNTERS") != "" { ... }` -
+	// exactly the shape somebody reaches for to make a section opt-in - compiles,
+	// leaves this whole guard green, and unwires the section on every deployment
+	// that does not set the variable. Proved by running it. The assignment must
+	// therefore be an unconditional statement in main's own body.
+	require.True(t, unconditional[target.stmt],
+		"the assignment to %s is nested inside a conditional, a loop, a closure or a goroutine rather "+
+			"than sitting unconditionally in main's body. Every check below still passes in that shape, "+
+			"and the section is silently absent on any run that does not take the branch.", target.lhs)
 
 	base := strings.TrimSuffix(target.lhs, ".Counters")
 	cl, ok := target.rhs.(*ast.CompositeLit)

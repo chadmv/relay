@@ -210,8 +210,11 @@ func main() {
 	})
 	// The counters endpoint reads the listener's snapshot on demand. This
 	// assignment cannot sit next to httpServer.Metrics above - grpcLis does not
-	// exist yet at that point - and must come before httpServer.Handler() is
-	// built below. A nil field here means the section is ABSENT from the
+	// exist yet at that point. What it must come before is the HTTP server
+	// SERVING, not Handler() being built: handleServerCounters is a method value
+	// on this pointer, so it reads Counters per request rather than at
+	// registration, and the ordering constraint is the unsynchronised write, not
+	// the route table. A nil field here means the section is ABSENT from the
 	// payload, never zero.
 	httpServer.Counters = api.CounterSources{GRPCAdmission: grpcLis}
 	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
