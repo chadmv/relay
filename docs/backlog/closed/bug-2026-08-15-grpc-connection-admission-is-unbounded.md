@@ -1,8 +1,10 @@
 ---
 title: gRPC connection and stream admission is unbounded, so every per-connection bound is a soft bound
 type: bug
-status: open
+status: closed
 created: 2026-08-15
+closed: 2026-08-21
+resolution: fixed
 priority: medium
 source: Phase 4 security lens of the 2026-08-15-tasklog-err-limiter-keying slice; the residual that slice named rather than implied
 ---
@@ -140,3 +142,71 @@ Filed deliberately with the residual stated rather than the fix assumed. The sin
 `MaxConcurrentStreams` change is tempting to do opportunistically, and it would be a real improvement -
 but it does not close the multiplication, which is per *connection*, not per stream. Do not let the
 cheap half close the item.
+
+## Resolution
+
+Closed by the 2026-08-20-grpc-admission-bounds slice. Four controls now bound admission on the agent
+gRPC port: `grpc.MaxConcurrentStreams(1)`, an explicit `keepalive.EnforcementPolicy`, `MaxConnectionIdle`
+(60s), and `internal/netlimit` - a bounding `net.Listener` with a total cap (`RELAY_GRPC_MAX_CONNS`,
+1024) and a per-source cap (`RELAY_GRPC_MAX_CONNS_PER_IP`, 64) that refuses by accept-then-close and
+never by returning an error. A fifth control the item did not anticipate was required to make the
+others safe: `RELAY_GRPC_REGISTRATION_TIMEOUT` bounds the first `stream.Recv`, because a peer that
+opens a stream and says nothing zeroes grpc-go's `t.idle` and is invisible to idle reaping - with a
+1024-slot cap in place, that turned a file-descriptor nuisance into a cheap, permanent, fleet-wide
+denial. `ingestLogLimiter`'s doc comment now cites all three connection bounds and does the
+arithmetic out loud.
+
+**Correction to acceptance criterion 2, which could not be met as written.** The criterion asked for
+a keepalive policy whose `MinTime` is "derived from the agent's configured keepalive rather than
+picked", plus a test that a legitimate agent's cadence is not terminated. Three things make that
+impossible rather than merely awkward, each verified against `google.golang.org/grpc v1.80.0` in the
+module cache:
+
+1. **grpc-go already enforces a policy whether one is set or not.** `http2_server.go:241-244`
+   defaults `MinTime` to `defaultKeepalivePolicyMinTime` = 5 minutes, and `PermitWithoutStream` is
+   decided at `false`. The item's premise that "a client may ping as often as it likes without being
+   terminated" is false, and no explicit value can be a tightening - only identical or looser.
+   **No RED-at-HEAD test is possible for this criterion**, because the behaviour already exists.
+2. **There is no agent cadence to derive from.** `internal/agent/agent.go` sets no
+   `grpc.WithKeepaliveParams`, so `defaultClientKeepaliveTime` is infinity and the agent sends no
+   keepalive pings, ever. The proposed test is vacuous twice over: a non-pinging client survives any
+   policy. The derived answer is therefore "match grpc-go's own default and never go above it", which
+   is what shipped (`grpcKeepaliveMinTime = 5 * time.Minute`) - not picked, but the unique
+   non-regressive value.
+3. **The characterization tests proposed as a substitute could not be written either.**
+   `WithKeepaliveParams` clamps the client ping interval to 10s and `internal.KeepaliveMinPingTime`
+   is unimportable, so an abusive-pinger client cannot be constructed from outside grpc-go.
+
+The criterion is therefore closed as follows: the policy is set explicitly with its derivation
+written into `grpcKeepaliveMinTime`'s comment, including the sentence that lowering it is the only
+way to make it matter and is a regression. It is guarded by a constant-lockstep assertion
+(`TestGRPCEnforcementPolicyMatchesGRPCsOwnDefault`) and by a package-wide structural guard that no
+`grpc.<Option>` constructor appears twice. **It ships with no behavioural test at all, and that
+residual is accepted rather than papered over**: the shipped value is behaviourally identical to
+grpc-go's default, so the worst case of the guard failing is that relay keeps the behaviour it
+already has.
+
+**Criteria closed by written decision, as the item permitted.** The per-peer cap belongs in-process
+at the listener rather than at a proxy, because nothing in relay's deployment story fronts `:9090`
+and the agent dials `insecure`; README states the assumption and tells an operator who does front it
+to set the caps there and `0` here. Auto-enroll `workers`-row creation stays unbounded, and README's
+auto-enrollment section now states the cost in this item's own terms - one persistent row per
+distinct hostname claimed, surviving the connection and a restart, appearing in every
+`GET /v1/workers` page, with nothing bounding the total - while leading with the larger cost, which
+is hostname takeover.
+
+**The item was substantially right and its central rule holds: a bound stated per unit is only a
+bound if the unit is bounded.** Three of its four proposed mechanisms were refuted at spec time (see
+above, plus: a stream interceptor is the wrong seam, since it runs per stream after the transport
+exists and refuses nothing that has not already been paid for), and one narrowing was added that the
+item did not state - the enrollment-token path is already bounded, because the worker upsert and the
+single-use consume share one transaction, so the unbounded-rows exposure is specific to
+`RELAY_ALLOW_AUTO_ENROLL`.
+
+Follow-on items filed: [[bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded]],
+[[idea-2026-08-21-revoked-agent-credential-survives-on-a-held-connection]],
+[[bug-2026-08-21-netlimit-conn-wrapper-drops-tcp-user-timeout]],
+[[idea-2026-08-21-netlimit-occupancy-is-unobservable]],
+[[idea-2026-08-21-per-stream-log-budget-renewal-is-unpriced]].
+See `docs/superpowers/specs/2026-08-20-grpc-admission-bounds.md` and
+`docs/retros/2026-08-21-grpc-admission-bounds.md`.
