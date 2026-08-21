@@ -70,7 +70,13 @@ type httpServerDeps struct {
 	//   - Does buildHTTPServer forward what it was GIVEN? That is executable and
 	//     was not checked. Replacing the assignment below with a freshly
 	//     constructed worker.NewHandler compiled, vetted clean and left all three
-	//     packages green. It is now
+	//     packages green. It is now guarded TWICE, and the two are not the same
+	//     strength. The DEFAULT lane rejects the crude form: the wiredDep table's
+	//     countersAssignmentSources walk requires every s.Counters assignment
+	//     here to be spelled `d.<field>`, so a substituted local or a helper call
+	//     is RED with no container (measured). What that cannot see is a
+	//     substitution that still LOOKS like a deps field, and the numbers not
+	//     moving at all; that is
 	//     TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers,
 	//     which floods a real registered stream and reads the numbers back
 	//     through the real route - the same treatment

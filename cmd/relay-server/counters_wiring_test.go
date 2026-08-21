@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"testing"
 
 	"relay/internal/api"
@@ -183,19 +184,81 @@ func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
 		"started_at is present even when every section is absent")
 }
 
+// TestBuildHTTPServer_EverySourceFieldProducesAServedSection is the completeness
+// relation, and it is EXECUTED. It builds a server with every deps source wired
+// and counts the sections that come back out through the real route.
+//
+// IT REPLACES A RELATION THAT WAS PURE BOOKKEEPING. The previous version of that
+// claim lived in TestServerCountersIsWiredByMain as a `sections []string` column
+// on each wiredDep row, counted against NumField(api.CounterSources). Nothing
+// ever read those strings against the code: the AST walk consults only `field`
+// and `mustReach`, and never looks at buildHTTPServer's body at all. Two measured
+// consequences, both green module-wide:
+//
+//   - swapping which row claimed which section (grpcAdmission claiming
+//     TaskLogFence, agentHandler not) left the package ok;
+//   - adding a FOURTH CounterSources field with its response field and its
+//     handleServerCounters branch, and satisfying the count by appending one
+//     string to the existing agentHandler row - no new deps field, no call-site
+//     argument, NO `s.Counters.X = ...` ANYWHERE - left `go test ./...` green.
+//
+// The second is the live failure: a new section costs one token in a string
+// literal and inherits none of the checks a new deps field used to inherit. The
+// old message ("EVERY SECTION needs to be named by exactly one row") made it
+// worse, because following it literally IS the evasion.
+//
+// This test cannot be satisfied that way. Passing the source in the fixture
+// without assigning it in buildHTTPServer still leaves the section absent, and
+// assigning it without a handleServerCounters branch does too, so both halves of
+// "wired" have to be real before the count comes out right. It also catches the
+// reverse mistake - a source field whose section is rendered but never assigned -
+// which is the shape that ships a permanently absent section reading as "not
+// wired on this build".
+//
+// WHAT IT DOES NOT ANSWER is anything about main.go's identifiers, which is what
+// TestServerCountersIsWiredByMain below is for.
+func TestBuildHTTPServer_EverySourceFieldProducesAServedSection(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer raw.Close()
+
+	srv := buildHTTPServer(httpServerDeps{
+		addr:          "127.0.0.1:0",
+		q:             store.New(stubAdminDB{}),
+		grpcAdmission: netlimit.Wrap(raw, netlimit.Config{MaxTotal: 8, MaxPerIP: 8}),
+		agentHandler:  worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {}),
+	})
+
+	// keysOfRaw rather than the map itself, so the failure prints section NAMES
+	// instead of every section's body as a byte slice.
+	served := keysOfRaw(countersAsAdmin(t, srv))
+	fields := reflect.TypeOf(api.CounterSources{}).NumField()
+	require.Len(t, served, 1+fields, // +1 for started_at
+		"api.CounterSources has %d source fields, so a build with every source wired must serve %d "+
+			"top-level keys (started_at plus one section each). This one served %d: %v. At least one "+
+			"source field is not carried end to end - buildHTTPServer does not assign it, or "+
+			"handleServerCounters does not render it, or this fixture does not pass it. Fixing the "+
+			"fixture alone will NOT make this pass, which is the point: the count comes from a real "+
+			"response.",
+		fields, 1+fields, len(served), served)
+}
+
 // TestServerCountersIsWiredByMain is what remains of the syntactic guard, and it
 // is deliberately THIN: four questions execution cannot answer from inside
 // buildHTTPServer.
 //
 // IT IS A TABLE, ONE ROW PER WIRED SOURCE, and the generalization from one row
-// to two is the point rather than a tidy-up. "Wired" is a per-SECTION fact - each
-// control is on or off on its own - so every new section adds a row here and
-// inherits the whole walk: the plain-identifier check, the derives-from-an-
-// unconditional-assignment check, and the assignments-per-identifier count over
-// main's entire subtree. Adding a section WITHOUT adding a row leaves it guarded
-// by nothing, which is why the row list and CounterSources' field list have to
-// be read against each other. All six evasions that beat this guard's
-// predecessors were re-run against the table form and all six still fail.
+// to two is the point rather than a tidy-up. Every deps field that feeds a
+// section adds a row here and inherits the whole walk: the plain-identifier
+// check, the derives-from-an-unconditional-assignment check, and the
+// assignments-per-identifier count over main's entire subtree. A deps field that
+// feeds a section with NO row is guarded by nothing, which is why the rows are
+// checked against buildHTTPServer's OWN ASSIGNMENTS below rather than against a
+// hand-maintained list of section names - that list was the finding this
+// rewrite is answering, and the completeness half now lives in
+// TestBuildHTTPServer_EverySourceFieldProducesAServedSection above. All six
+// evasions that beat this guard's predecessors were re-run against the table
+// form and all six still fail.
 //
 // THE FOURTH QUESTION IS NEW WITH agentHandler: the counters must come from the
 // Handler main REGISTERS ON. Feeding buildHTTPServer a second, otherwise
@@ -211,7 +274,11 @@ func TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent(t *testing.T) {
 // cmd/relay-server", which quietly covered a second question it does not ask:
 // whether buildHTTPServer forwards the handler it was handed. That one IS
 // executable and was unguarded - substituting a fresh worker.NewHandler inside
-// buildHTTPServer left every package green - and is now
+// buildHTTPServer left every package green - and is now guarded twice. The crude
+// form dies in the DEFAULT lane, on countersAssignmentSources below: a
+// s.Counters assignment fed by anything other than `d.<field>` is RED there
+// (measured against exactly that substitution). The form that still reads as a
+// deps field, and the question of whether the numbers move at all, is
 // TestGRPCAdmissionEndToEnd_TheServedIngestCountersAreTheServingHandlers in the
 // integration lane. The numbers' own proof is
 // TestConnect_IngestDropCountsSurviveAndAggregateAcrossConnections in
@@ -317,73 +384,52 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	// the endpoint as a typed nil and vanishes on every deployment that takes the
 	// branch, which reads exactly like a control that has never stopped anything.
 	deps := []wiredDep{
-		{"grpcAdmission", []string{"GRPCAdmission"}, "Wrap", "the netlimit listener bound in main's body"},
-		{"agentHandler", []string{"IngestLogBudget", "TaskLogFence"}, "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
+		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
+		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
 	}
 
-	// COUNT THE SECTIONS AGAINST api.CounterSources, because "every wired source
-	// has a row" is a completeness claim and a completeness claim cannot be checked
-	// by reading the rows.
-	//
-	// THE DENOMINATOR CHANGED, AND THE REASON IS WORTH THE PARAGRAPH. This block
-	// used to compare the number of DISTINCT httpServerDeps fields to
-	// NumField(api.CounterSources), which held only while the two were in bijection.
-	// The task-log fence counter broke that: it is a third CounterSources field fed
-	// by the SAME *worker.Handler, so distinct deps fields stayed at 2 while NumField
-	// went to 3. The two available repairs were a second deps field for the same
-	// object, or this. The second deps field was REJECTED on merit rather than on
-	// taste: only agentHandler is compared against the identifier passed to
-	// RegisterAgentServiceServer below, so a sibling field could legitimately be fed
-	// a DIFFERENT worker.Handler with every check here green, and the endpoint would
-	// then report a permanently zero fence count while the real one climbed - the
-	// confident zero this whole file exists to prevent, created in order to satisfy
-	// an arithmetic check.
-	//
-	// DISTINCT FIELDS, NOT ROWS, is kept and strengthened into an equality: counting
-	// rows was PROVED evadable (replacing the agentHandler row with a second
-	// grpcAdmission row made the package green while dropping agentHandler out of the
-	// plain-identifier check, the derives-from check and the assigned-exactly-once
-	// check at a stroke). A duplicated row is now RED on its own, before any section
-	// arithmetic is reached.
 	depsType := reflect.TypeOf(httpServerDeps{})
-	sourcesType := reflect.TypeOf(api.CounterSources{})
 	distinct := map[string]bool{}
-	sections := map[string]bool{}
 	for _, d := range deps {
 		_, ok := depsType.FieldByName(d.field)
 		require.True(t, ok,
 			"this table has a row for httpServerDeps.%s, which does not exist. A row naming no field "+
-				"guards nothing and makes the counts below pass on a table that is short one section.",
+				"guards nothing and makes the counts below pass on a table that is short one field.",
 			d.field)
 		distinct[d.field] = true
-
-		require.NotEmpty(t, d.sections,
-			"the row for httpServerDeps.%s names no api.CounterSources field. A row that feeds no "+
-				"section is a dependency nothing reads; a section fed by no row is guarded by nothing.",
-			d.field)
-		for _, sec := range d.sections {
-			_, ok := sourcesType.FieldByName(sec)
-			require.True(t, ok,
-				"this table's %s row names api.CounterSources.%s, which does not exist. Fix the typo: a "+
-					"row naming a phantom section satisfies the count below while a real section goes "+
-					"unguarded.", d.field, sec)
-			require.False(t, sections[sec],
-				"api.CounterSources.%s is named by two rows. Each section is fed by exactly one deps "+
-					"field, and two rows naming the same one lets the count below pass on a table that is "+
-					"short a different section.", sec)
-			sections[sec] = true
-		}
 	}
 	require.Len(t, distinct, len(deps),
 		"this table has %d rows naming %d DISTINCT httpServerDeps fields. Do not resolve a cardinality "+
 			"failure by repeating a row: that was proved to drop the displaced field out of every check "+
 			"below while every count still passed.", len(deps), len(distinct))
-	require.Len(t, sections, sourcesType.NumField(),
-		"api.CounterSources has %d source fields and this table names %d of them. EVERY SECTION needs to "+
-			"be named by exactly one row, or it is wired by code nothing checks and can be silently "+
-			"unwired on some deployments with this guard green. A deps field may feed more than one "+
-			"section (agentHandler feeds two); a section may not be fed by more than one row.",
-		sourcesType.NumField(), len(sections))
+
+	// EVERY DEPS FIELD buildHTTPServer FEEDS A SECTION FROM MUST HAVE A ROW, read
+	// off buildHTTPServer's OWN ASSIGNMENTS rather than off a list of section
+	// names maintained by hand.
+	//
+	// THAT LIST WAS THE DEFECT. Each row used to carry a `sections []string`
+	// column counted against NumField(api.CounterSources), and nothing ever read
+	// those strings against any code - the walk here consults only `field` and
+	// `mustReach`. Measured: swapping which row claimed which section left the
+	// package ok, and a fourth CounterSources field wired end-to-end EXCEPT for
+	// the assignment went green module-wide once one string was appended to the
+	// agentHandler row. The section-completeness half is now executed, in
+	// TestBuildHTTPServer_EverySourceFieldProducesAServedSection; what is left
+	// here is the direction only this test can answer: a deps field that reaches
+	// s.Counters must be one whose identifier in main.go is checked below.
+	//
+	// IT FAILS CLOSED because it demands the assignment be spelled `d.<field>`
+	// exactly. Reaching a section through a local, a helper or a conversion is RED
+	// here rather than invisible, which is the failure mode the string list had.
+	for depField := range countersAssignmentSources(t) {
+		_, wired := lookupWiredDep(deps, depField)
+		require.True(t, wired,
+			"buildHTTPServer feeds an api.CounterSources field from httpServerDeps.%s, which has no row "+
+				"in this table. That section's source therefore gets NONE of main.go's identifier checks "+
+				"below: it may be bound conditionally, rebound later, or passed as an expression, and "+
+				"this guard would stay green while the section vanished on some deployments. Add the "+
+				"row.", depField)
+	}
 
 	depArg := map[string]*ast.Ident{}
 	for _, st := range body.List {
@@ -659,21 +705,84 @@ func TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent(t *testing.T
 }
 
 // wiredDep names one httpServerDeps field whose source must be a plain,
-// unconditionally-bound local in main's body, the constructor that local has to
-// derive from, and the api.CounterSources fields it feeds.
+// unconditionally-bound local in main's body, and the constructor that local has
+// to derive from.
 //
-// ONE ROW PER DEPS FIELD, AND EACH ROW NAMES ITS SECTIONS. It used to be one row
-// per SECTION, on the assumption that the two were the same thing. They are not:
-// agentHandler feeds BOTH IngestLogBudget and TaskLogFence, because both controls
-// live on the same *worker.Handler and neither exists without it. The completeness
-// relation below therefore counts SECTIONS, which is the claim being made ("every
-// section is wired through a checked field"), and counts deps fields only to
-// reject a duplicated row.
+// ONE ROW PER DEPS FIELD. It used to be one row per SECTION, on the assumption
+// that the two were the same thing; they are not, since agentHandler feeds BOTH
+// IngestLogBudget and TaskLogFence. It then carried a `sections []string` column
+// to bridge the difference, which was measured to be bookkeeping no check ever
+// read - see countersAssignmentSources, which replaced it with the same relation
+// taken off buildHTTPServer's real assignments.
 type wiredDep struct {
 	field     string
-	sections  []string
 	mustReach string
 	what      string
+}
+
+// countersAssignmentSources returns the httpServerDeps field name behind every
+// `s.Counters.<Section> = ...` assignment in buildHTTPServer, as a set.
+//
+// It parses http_server.go rather than main.go, because that is where the
+// deps-field-to-section edge actually lives. It is deliberately STRICT about the
+// right-hand side: anything other than a plain `<ident>.<field>` selector fails
+// here rather than being skipped, so the set it returns is complete by
+// construction and a caller may treat "not in this set" as "does not feed a
+// section".
+func countersAssignmentSources(t *testing.T) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "http_server.go", nil, 0)
+	require.NoError(t, err)
+
+	var body *ast.BlockStmt
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "buildHTTPServer" && fd.Body != nil {
+			body = fd.Body
+		}
+	}
+	require.NotNil(t, body, "http_server.go no longer declares func buildHTTPServer with a body")
+
+	out := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != len(as.Rhs) {
+			return true
+		}
+		for i, l := range as.Lhs {
+			sel, ok := l.(*ast.SelectorExpr)
+			if !ok {
+				continue
+			}
+			inner, ok := sel.X.(*ast.SelectorExpr)
+			if !ok || inner.Sel.Name != "Counters" {
+				continue
+			}
+			rhs, ok := as.Rhs[i].(*ast.SelectorExpr)
+			require.True(t, ok,
+				"buildHTTPServer assigns Counters.%s from a %T. It must be assigned from a plain "+
+					"httpServerDeps field - `d.<field>` - so that the section's source is traceable to "+
+					"a row in the wiredDep table and thence to an identifier in main. An expression "+
+					"here hides which dependency feeds the section.", sel.Sel.Name, as.Rhs[i])
+			out[rhs.Sel.Name] = true
+		}
+		return true
+	})
+	require.NotEmpty(t, out,
+		"buildHTTPServer assigns no api.CounterSources field at all, so every section is absent and the "+
+			"endpoint reports nothing about any control that IS running")
+	return out
+}
+
+// keysOfRaw names the top-level keys of a counters payload, for a failure message
+// that says WHICH section is missing rather than only how many there are.
+func keysOfRaw(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func lookupWiredDep(deps []wiredDep, name string) (wiredDep, bool) {

@@ -215,7 +215,9 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 
 // TaskLogFenceRejections reports how many task-log chunks this server's
 // AppendTaskLog fence has rejected since process start, across every worker and
-// all three rejection reasons.
+// all FOUR rejection reasons, including the one that reads as a lookup rather
+// than a predicate: a well-formed uuid naming no task is refused by the same
+// statement and lands in this number too.
 //
 // It satisfies api.TaskLogFenceSource. ONE NUMBER, AND THE REASON IS NOT
 // AVAILABLE - see the pgx.ErrNoRows arm in handleTaskLog for why, and do not add
@@ -1144,8 +1146,16 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			// pgx.ErrNoRows means the fence rejected the chunk, for any of three
-			// independent reasons: the sender is not the task's current assignee (a
+			// pgx.ErrNoRows means the fence rejected the chunk, for any of FOUR
+			// independent reasons, and the count is FOUR rather than three because
+			// the statement's WHERE has four conjuncts: `t.id = task_id` is one of
+			// them, and it is easy to read past as a lookup. A well-formed uuid
+			// naming no task at all lands here while being none of the other three
+			// (TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers
+			// drives exactly that), and it belongs with the first of the three
+			// below - an unwelcome sender - so an operator reading rejected_total
+			// still concludes correctly. The other three: the sender is not the
+			// task's current assignee (a
 			// forged or misrouted chunk - workerID comes from the authenticated
 			// registration, never from the wire); the sender's generation is stale
 			// because the task was requeued or cancelled (both bump
@@ -1155,7 +1165,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 			// SUSPECT FIRST WHEN OUTPUT IS MISSING RATHER THAN SPURIOUS: it is the
 			// only cause that is operator-configurable, time-dependent, and triggered
 			// by a perfectly legitimate sender, so a window set too small truncates
-			// the tail of real task output with no other symptom anywhere. The three
+			// the tail of real task output with no other symptom anywhere. All four
 			// are deliberately indistinguishable here; see the comment on
 			// AppendTaskLog. Expected - drop it silently, and in
 			// particular do NOT publish it: a zombie agent's output would otherwise
@@ -1182,14 +1192,14 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 			// task_log_fence.counts.rejected_total on the admin-only
 			// GET /v1/server/counters. Never returned to an agent.
 			//
-			// IT IS ONE NUMBER AND NOT THREE, AND THAT IS A PRICED DECISION RATHER
-			// THAN AN IMPOSSIBILITY. The three cases are not recoverable from this
+			// IT IS ONE NUMBER AND NOT FOUR, AND THAT IS A PRICED DECISION RATHER
+			// THAN AN IMPOSSIBILITY. The four cases are not recoverable from this
 			// statement's RESULT: the fence is a CTE that yields no row at all when
 			// any predicate fails, so there is nothing to carry a reason column on
 			// (see AppendTaskLog's comment). Recovering the reason needs either a
 			// SECOND query, which the top of this function forbids, or a rewrite of
 			// AppendTaskLog to return a row on the rejection path - a LEFT JOIN over
-			// the task row exposing the three predicates as booleans, which IS
+			// the task row exposing the four predicates as booleans, which IS
 			// expressible in one round trip. That rewrite is DECLINED, and here is
 			// its price: it deletes the pgx.ErrNoRows signal that every caller,
 			// every comment and every test of this fence is written against; it

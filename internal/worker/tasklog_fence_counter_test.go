@@ -90,6 +90,37 @@ func fenceChunk() *relayv1.TaskLogChunk {
 	return &relayv1.TaskLogChunk{TaskId: fenceTaskID, Content: []byte("x"), Epoch: 7}
 }
 
+// fenceSubscribe tails fenceTaskID's log events, and SUBSCRIBING IS LOAD-BEARING
+// TWICE rather than being fixture noise.
+//
+// It is the only way "nothing was published" is observable at all: Publish on an
+// unsubscribed broker is a map lookup that finds nothing, so an added
+// h.broker.Publish on the rejection arm is invisible without a subscriber. And it
+// is what defeats handleTaskLog's HasLogSubscriber short-circuit, so the SUCCESS
+// leg really reaches the publish rather than returning one line above it - which
+// is what makes the count below a positive proof that the chunk was ACCEPTED
+// rather than an assertion that could be satisfied by any arm that does nothing.
+//
+// The drain is non-blocking because it can be: Publish is synchronous, under the
+// broker's own mutex, and completes before handleTaskLog returns, so anything
+// this call is going to see is already in the 64-slot buffer by the time it runs.
+func fenceSubscribe(t *testing.T, h *Handler) func() []events.Event {
+	t.Helper()
+	ch, cancel := h.broker.Subscribe(events.Filter{TaskID: fenceTaskID})
+	t.Cleanup(cancel)
+	return func() []events.Event {
+		var got []events.Event
+		for {
+			select {
+			case e := <-ch:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+}
+
 // TestHandleTaskLog_AFenceRejectionIsCountedAndASuccessIsNot is the item's own
 // Done-When: read the counter across a rejection AND across a success.
 //
@@ -97,11 +128,32 @@ func fenceChunk() *relayv1.TaskLogChunk {
 // only checks the total at the end cannot tell "the success incremented" from
 // "the second rejection did not", and a poisoned input observed only at the end
 // cannot detect an early-exit mutation.
+//
+// IT ALSO CARRIES THE NO-PUBLISH PROPERTY, WHICH USED TO BE GUARDED ONLY BEHIND
+// A BUILD TAG. "Gate any side effect on the fence having actually matched"
+// (CLAUDE.md, epoch fence) names publishing as the consequence: a rejected chunk
+// that reaches the broker puts a zombie or forged sender's output into another
+// user's live SSE view, where it then vanishes on refresh because it was
+// correctly never stored. The only guard was
+// TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished, whose file is
+// //go:build integration, and go-ci runs `go test -race ./...` with no tag -
+// inserting an h.broker.Publish into the rejection arm left `go test
+// ./internal/worker/...` ok (measured). The subscription below closes that.
+//
+// AND THE SUCCESS LEG NOW ESTABLISHES ACCEPTANCE POSITIVELY. It used to assert a
+// negative - the counter did not move - through a projection that cannot see the
+// claim: a run in which the third call fell into the PERSIST-FAILURE arm produces
+// the same counter and the same db.calls, so the leg would have passed while
+// testing the wrong arm entirely. Nothing today can make stubFenceRow.Scan fail
+// with err == nil, so that was assertion strength rather than a live defect, but
+// the fix is one line: with a subscriber attached, an accepted chunk publishes and
+// a chunk that took any other path does not.
 func TestHandleTaskLog_AFenceRejectionIsCountedAndASuccessIsNot(t *testing.T) {
 	ctx := context.Background()
 	h, db := newFenceHandler(pgx.ErrNoRows)
 	lim := newIngestLogLimiter(&h.ingestDrops)
 	logged := captureUnitLog(t)
+	published := fenceSubscribe(t, h)
 
 	require.Zero(t, h.TaskLogFenceRejections(), "fixture: nothing has been rejected yet")
 
@@ -119,6 +171,12 @@ func TestHandleTaskLog_AFenceRejectionIsCountedAndASuccessIsNot(t *testing.T) {
 		"the arm must stay side-effect-free apart from the count: NO log line of any wording, including "+
 			"a budgeted one. Its integration twin is TestHandleTaskLog_AFenceRejectionEmitsNoLogLineAtAll; "+
 			"this is the half CI can see.")
+	require.Empty(t, published(),
+		"a REJECTED chunk must never be published. It was correctly not stored, so publishing it puts a "+
+			"zombie or forged sender's output into a live SSE view that vanishes on the next refresh - "+
+			"the epoch fence's own named consequence. A subscriber is attached here precisely so this "+
+			"assertion can fail; without one the broker drops the event on the floor and any Publish "+
+			"added to that arm is invisible.")
 	drops := h.IngestLogDropCounts()
 	require.Zero(t, drops.Deduped.TaskLogPersist,
 		"DIFFERENT NOUNS: this arm never consults the log budget, so a fence rejection must not appear "+
@@ -132,6 +190,21 @@ func TestHandleTaskLog_AFenceRejectionIsCountedAndASuccessIsNot(t *testing.T) {
 	require.Equal(t, uint64(2), h.TaskLogFenceRejections(),
 		"an ACCEPTED chunk must not be counted as a rejection. This number is what an operator reads as "+
 			"'output is being dropped'; incrementing it on the happy path makes it noise.")
+
+	// THE CHUNK WAS ACCEPTED, and this is what says so. Without it the leg above
+	// asserts a negative through a projection shared by every other arm: a call
+	// that fell into the persist-failure arm leaves the counter at 2 and db.calls
+	// at 3 too.
+	accepted := published()
+	require.Len(t, accepted, 1,
+		"an accepted chunk must be published exactly once, which is what proves this leg exercised the "+
+			"SUCCESS arm rather than some other arm that also leaves the rejection counter alone")
+	require.Equal(t, events.TypeTaskLog, accepted[0].Type)
+	require.Equal(t, fenceTaskID, accepted[0].TaskID)
+	assert.Equal(t, "", logged(),
+		"the success arm logs nothing either. Re-checked AFTER the success leg on purpose: the earlier "+
+			"check cannot see a line this call emitted, and a persist-failure fall-through would leave "+
+			"one here.")
 
 	require.Equal(t, int64(3), db.calls.Load(),
 		"exactly one DB round trip per chunk, unchanged. The standing constraint on this handler is one "+

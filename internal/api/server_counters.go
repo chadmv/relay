@@ -167,7 +167,10 @@ type TaskLogFenceSource interface {
 // wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
 // TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent plus
 // TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent are its
-// guards - one per wired source, because the filter is per FIELD. Do
+// guards - one per wired source, because the filter is per httpServerDeps
+// FIELD. Not per CounterSources field: one deps field may feed several sections
+// (agentHandler feeds two), and they are covered by that field's single `if` -
+// see the comment on buildHTTPServer's nil filter. Do
 // not instead make the source's snapshot method nil-tolerant - returning a zero
 // snapshot turns an unwired control into a section of zeros, which is the one
 // distinction this payload exists to preserve.
@@ -262,14 +265,20 @@ func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts 
 
 // task_log_fence is COUNTS ONLY and it is ONE NUMBER, both by decision.
 //
-// rejected_total counts task-log chunks that AppendTaskLog's three-predicate
+// rejected_total counts task-log chunks that AppendTaskLog's FOUR-predicate
 // fence refused: the sender is not the task's assignee, or its generation is
-// stale, or the task finished longer ago than RELAY_TASKLOG_TRAILING_WINDOW.
-// THE THIRD IS LEGITIMATE and is the one an operator who set that knob too small
-// hits constantly, which is why this number exists at all - before it there was
-// no runtime signal of any kind that task output was being dropped.
+// stale, or the task finished longer ago than RELAY_TASKLOG_TRAILING_WINDOW, or
+// the task id matches no row at all. THE THIRD IS LEGITIMATE and is the one an
+// operator who set that knob too small hits constantly, which is why this number
+// exists at all - before it there was no runtime signal of any kind that task
+// output was being dropped. THE FOURTH is `t.id = task_id`, and it is easy to
+// forget because it looks like a lookup rather than a fence: a well-formed uuid
+// naming no task yields pgx.ErrNoRows while being none of the other three, which
+// TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers
+// drives directly. An operator reading this number still concludes correctly,
+// since that case is a forged or badly confused sender like the first two.
 //
-// WHY THE THREE ARE NOT SPLIT: the fence yields no row when any predicate fails,
+// WHY THEY ARE NOT SPLIT: the fence yields no row when any predicate fails,
 // so there is nothing to carry a reason on. Recovering it needs a second round
 // trip (forbidden on the recv goroutine) or a rewrite of AppendTaskLog's result
 // contract. DECLINED WITH THE PRICE WRITTEN DOWN - not impossible; see the
