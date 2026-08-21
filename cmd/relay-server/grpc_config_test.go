@@ -1132,3 +1132,38 @@ func TestResolveGRPCBounds(t *testing.T) {
 		assert.Contains(t, msgs[0], "idle gRPC transport reaping is disabled")
 	})
 }
+
+// TestRefusalSummaryIsSilentWhenOnlyOccupancyMoves is the discriminating test for
+// the trap idea-2026-08-21-netlimit-occupancy-is-unobservable identified before
+// any code was written: occupancy changes on essentially every connection, so a
+// reporter that consulted it to decide whether to speak would emit a line every
+// single interval forever - permanently destroying the "one line per interval,
+// and only when something moved" property that
+// TestRefusalSummaryLogsOnlyWhenCountersMove exists to protect.
+//
+// The counts are held STATIC across every tick here. The only thing moving is
+// the half that must never be consulted.
+func TestRefusalSummaryIsSilentWhenOnlyOccupancyMoves(t *testing.T) {
+	lines := 0
+	r := &refusalReporter{logf: func(string, ...any) { lines++ }}
+
+	counts := netlimit.RefusalCounts{RefusedTotal: 7, RefusedPerIP: 2}
+	r.tick(netlimit.Stats{
+		Counts: counts,
+		Levels: netlimit.Occupancy{LiveTotal: 10, DistinctSources: 3, MaxPerSource: 5},
+	})
+	require.Equal(t, 1, lines, "the first tick after a counter moved must speak")
+
+	for i, lv := range []netlimit.Occupancy{
+		{LiveTotal: 900, DistinctSources: 16, MaxPerSource: 64},
+		{LiveTotal: 1, DistinctSources: 1, MaxPerSource: 1},
+		{LiveTotal: 1024, DistinctSources: 1024, MaxPerSource: 1},
+		{},
+	} {
+		r.tick(netlimit.Stats{Counts: counts, Levels: lv})
+		require.Equal(t, 1, lines,
+			"occupancy move %d produced a line. A level must never take part in the 'did anything move' "+
+				"test: on a live fleet it moves constantly, so this reporter would speak every interval "+
+				"forever and the bound would be a bound in name only.", i)
+	}
+}

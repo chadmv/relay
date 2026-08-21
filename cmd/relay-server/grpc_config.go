@@ -427,20 +427,35 @@ const grpcRefusalReportInterval = time.Minute
 // attacker-driven log volume. The line names counts and never addresses, so no
 // caller-supplied byte can reach the log through it.
 //
+// THE TRIGGER READS MONOTONIC COUNTS ONLY, AND THE TYPE IS WHAT ENFORCES IT.
+// last is a netlimit.RefusalCounts rather than a netlimit.Stats, so `s == r.last`
+// no longer compiles and a level cannot be dragged into the "did anything move"
+// test by somebody adding a field. Levels are CARRIED in the line when it speaks
+// and never consulted to decide whether it speaks.
+//
+// THE HONEST RESIDUAL, because it is the price of that rule: a fleet parked at
+// exactly the ceiling with no further connection attempts produces no line at
+// all, so "the pressure ended" and "we settled at the ceiling" still look alike
+// IN THE LOG. That is closed by GET /v1/server/counters, which reports the level
+// on demand at any time, and it is the main reason the endpoint is the primary
+// surface. Note the ambiguity only persists while nobody is being refused: the
+// instant a legitimate agent is turned away, the counts move, this speaks, and
+// the line carries the occupancy that explains why.
+//
 // tick is separate from runRefusalReporter so the "only when counters move"
 // property can be driven directly, with no timer and no sleeping.
 type refusalReporter struct {
-	last netlimit.Stats
+	last netlimit.RefusalCounts
 	logf func(format string, args ...any)
 }
 
 func (r *refusalReporter) tick(s netlimit.Stats) {
-	if s == r.last {
+	if s.Counts == r.last {
 		return
 	}
 	r.logf("gRPC admission: %d connection(s) refused over the total cap and %d over the per-source-IP cap since startup",
 		s.Counts.RefusedTotal, s.Counts.RefusedPerIP)
-	r.last = s
+	r.last = s.Counts
 }
 
 // runRefusalReporter logs a refusal summary at most once per interval, in the
