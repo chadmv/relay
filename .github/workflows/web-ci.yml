@@ -1,0 +1,108 @@
+name: web-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: unit + typecheck + build + browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # Same image, user, password and port as the relay-postgres container
+      # scripts/dev.ps1:84-96 manages locally, so
+      # postgres://relay:relay@127.0.0.1:5432 is one string in both environments.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      # The next three steps have NEVER run in CI before this workflow existed.
+      # They are listed separately rather than folded into `npm run build` (which
+      # runs tsc -b again) so a failure names which gate broke.
+      - name: Type check
+        run: npx tsc -b
+        working-directory: web
+
+      - name: Unit tests (vitest)
+        run: npm test
+        working-directory: web
+
+      - name: Production SPA build
+        run: npm run build
+        working-directory: web
+
+      # MUST come after the SPA build: web/embed.go snapshots web/dist at compile
+      # time (//go:embed all:dist). Reordering these two ships the placeholder.
+      - name: Build relay-server (embeds web/dist)
+        run: go build -o bin/relay-server ./cmd/relay-server
+
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('./web/node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      # Runs even on a cache hit: --with-deps installs apt packages that the
+      # ~/.cache/ms-playwright cache does not contain. It is a no-op download when
+      # the browsers are already cached.
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium webkit
+        working-directory: web
+
+      - name: Browser end-to-end (Playwright)
+        run: npm run test:e2e
+        working-directory: web
+
+      # D6: screenshots are ARTIFACTS, not assertions. layout.spec.ts writes one
+      # full-page PNG per surface per width on every run, pass or fail, and the
+      # merge of this slice includes one human pass over them. An artifact nobody
+      # opens is worth nothing.
+      - name: Upload Playwright report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ github.run_id }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 14
