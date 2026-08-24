@@ -208,3 +208,58 @@ func TestGraceRegistry_StartAtTheSameEpochStillResetsTheWindow(t *testing.T) {
 		"the second Start at the same epoch must have reset the 40ms window; if it were refused "+
 			"like a stale one, the first timer would have fired by now")
 }
+
+// TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt pins the ABA
+// guard inside the AfterFunc closure. Deleting that guard leaves every other
+// test in this package green, and the monotonicity rule documented on
+// StartWithDuration leans on it: refusing a stale epoch is worthless if a timer
+// that already fired can walk in afterwards and delete whatever entry won.
+//
+// THE WINDOW IS REPRODUCED, NOT RACED FOR. A real expiry reaches this state by
+// firing microseconds before a replacing Start takes g.mu, which no test can
+// schedule deterministically. Resetting the FIRST entry's timer to zero AFTER
+// the replacement has landed runs the very same closure, capturing the very same
+// entry, against the very same map state - and it does so on every run rather
+// than on the unlucky ones. Note that StartWithDuration DID call Stop on that
+// timer; Stop is exactly the call that cannot help once the timer has fired,
+// which is why the closure needs a guard of its own.
+func TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(time.Hour, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	// An hour so neither generation's timer can fire on its own during the test:
+	// anything that fires here fires because the closure was re-armed below.
+	g.StartWithDuration("w1", 1, time.Hour)
+	g.mu.Lock()
+	first := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotNil(t, first, "fixture: the first generation must have a pending entry")
+
+	g.StartWithDuration("w1", 2, time.Hour)
+	g.mu.Lock()
+	second := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotSame(t, first, second,
+		"fixture: the second generation must have installed a NEW entry, or there is no ABA to test")
+
+	first.timer.Reset(0)
+
+	select {
+	case epoch := <-fired:
+		t.Fatalf("a timer belonging to a replaced entry fired, at epoch %d. Its generation ended "+
+			"when the newer Start replaced it; firing now requeues against an epoch "+
+			"RequeueWorkerTasksIfEpoch will not match, so it moves zero tasks.", epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	g.mu.Lock()
+	still := g.timers["w1"]
+	g.mu.Unlock()
+	assert.Same(t, second, still,
+		"the replaced entry's closure deleted the LIVE entry on its way past. That is the worse "+
+			"half: the live generation now has no pending requeue at all, so when its connection "+
+			"really does end there is nothing scheduled to free its tasks.")
+}

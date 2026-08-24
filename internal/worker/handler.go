@@ -1515,6 +1515,15 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) (int64, error)
 		// Unreachable in practice and deliberately silent: workerID is uuidStr()
 		// over a UUID Postgres just RETURNed, and Connect logs loudly about the
 		// same impossibility on the paths that get that far.
+		//
+		// IT DOES CHANGE WHAT THE CALLER DOES, and the change is deliberate: an
+		// error makes releaseWorkerGeneration's `err == nil && rows == 0` false, so
+		// it proceeds to grace.Start (or requeueWorkerTasks) with a workerID that
+		// both continuations parse themselves and both reject the same way. The
+		// residue is one grace entry that deletes itself when the window elapses.
+		// Returning (0, nil) instead would skip that, at the cost of spelling an
+		// unparseable id as 'the fence said no' - the exact conflation this
+		// signature exists to prevent.
 		return 0, err
 	}
 	ctx := context.Background()

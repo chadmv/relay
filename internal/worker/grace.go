@@ -79,7 +79,9 @@ func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.D
 		g.mu.Lock()
 		// Guard against ABA: only fire if this specific entry is still the
 		// active one. A concurrent Start may have replaced it between timer
-		// expiry and lock acquisition.
+		// expiry and lock acquisition - Stop cannot recall a timer that has
+		// already fired, so the refusal above is worthless without this. Pinned by
+		// TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt.
 		if g.timers[workerID] != entry {
 			g.mu.Unlock()
 			return
@@ -96,6 +98,16 @@ func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.D
 // preserve the ABA-safety invariant. No-op if the registry has been Stopped.
 // Used by startup reconciliation when persisted grace has already expired
 // during downtime.
+//
+// IT IS DELIBERATELY EXEMPT FROM StartWithDuration'S MONOTONICITY RULE. It
+// cancels and fires whatever epoch it is handed without comparing it against a
+// pending entry's, and what makes that safe is WHERE it is called from rather
+// than anything about the method. Its only caller is
+// cmd/relay-server's seedGraceTimersFromActiveTasks, which runs on the main
+// goroutine before the gRPC server is constructed and walks a registry built
+// moments earlier - so the map is empty, there is no live entry to displace and
+// no concurrent Start to race. A SECOND caller would not inherit that argument;
+// give this the same `old.epoch > epoch` refusal before adding one.
 func (g *GraceRegistry) ExpireNow(workerID string, epoch int32) {
 	g.mu.Lock()
 	if g.stopped {
