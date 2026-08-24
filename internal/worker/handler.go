@@ -267,8 +267,11 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	// still fail after that acquisition. Those are released by finishRegister's
 	// OWN deferred release (see its handedOff block), not here, because this
 	// defer cannot be armed without a sender that a failed registration never
-	// creates. Between the two, every path that acquires the generation releases
-	// it exactly once.
+	// creates. Between the two, every path that acquires the generation ATTEMPTS
+	// a release exactly once - and the attempt is authoritative only where the
+	// epoch fence is actually evaluated. When the write itself errors the fence
+	// answers nothing, so releaseWorkerGeneration proceeds on its own initiative;
+	// see its doc comment for why that is the safe direction.
 	defer h.teardownConnection(workerID, sender)
 
 	// This UUID is the identity every task_log write from this connection is
@@ -620,13 +623,28 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	}()
 
 	// Agent reconnected within its grace window - stop the requeue timer. THIS IS
-	// THE SECOND HALF OF THE ACQUISITION, and is why the release above is armed
-	// before it rather than after: the cancelled timer is not recoverable
+	// THE SECOND HALF OF THE ACQUISITION: the cancelled timer is not recoverable
 	// (GraceRegistry.Cancel stops it and deletes the entry), so a failure below
 	// has to arm a FRESH one at the epoch RegisterWorkerConnection just created.
 	// Restoring the OLD epoch's timer would be a silent no-op -
 	// RequeueWorkerTasksIfEpoch fences on workers.connection_epoch and the row has
 	// moved on.
+	//
+	// ARMING THE RELEASE ABOVE THIS RATHER THAN BELOW IT IS DEFENSIVE, NOT
+	// REQUIRED - and saying which it is matters, because the opposite claim
+	// invites someone to rely on it. GraceRegistry.Cancel cannot fail and cannot
+	// return early, so moving the flag and its defer below this block is
+	// behaviour-preserving today and mutation confirms it. Keep the order anyway:
+	// the rule that survives is "arm the release in the same breath as the
+	// acquisition", and it stops being merely defensive the moment anything
+	// fallible is added here.
+	//
+	// THIS COVERS THE SINGLE-SHOT CASE. An agent that crash-loops faster than
+	// RELAY_WORKER_GRACE_WINDOW gets a Cancel and a fresh Start every cycle, so
+	// the requeue is pushed out indefinitely and its tasks sit until the 24h
+	// stale-task watchdog fails them as timed_out. That is not a regression - the
+	// same was true before any of this existed, and worse, because nothing armed
+	// a fresh timer at all - but it is the limit of what this release buys.
 	if h.grace != nil {
 		h.grace.Cancel(workerID)
 	}
@@ -663,15 +681,37 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 
 	// OWNERSHIP HANDOFF. From this instant the release belongs to Connect's
 	// `defer h.teardownConnection(workerID, sender)`, which Connect arms the
-	// moment this function returns a nil error. Setting this flag any EARLIER
-	// reopens the strand for the RegisterResponse send; setting it any LATER
-	// makes a successful registration release its own generation.
+	// moment this function returns a nil error.
+	//
+	// THE CONSTRAINT IS A RANGE, NOT A POINT. The semantic requirement is only
+	// this: after the send has succeeded, and before this function returns.
+	// Earlier than that reopens the strand for the RegisterResponse send. LATER
+	// cannot break it at all - the deferred closure reads the flag after the
+	// return value has been evaluated - so every position inside the range is
+	// semantically identical, including the two statements below and above
+	// registry.Register, and mutation confirms it.
+	//
+	// It is shipped at the TIGHTEST point in the range, immediately after the
+	// sender becomes reachable, so that a fallible statement inserted anywhere in
+	// the range is still covered by the release rather than by nothing.
+	// TestFinishRegisterHandsOffOwnershipInsideTheWindow pins that tightest point
+	// rather than the looser semantic range - there is no reason to permit drift
+	// within it - and it lives in the default lane because no default-lane test
+	// can drive a successful registration at all.
 	//
 	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
 	// on a nil error, so a future statement here that returns an error would be
 	// covered by neither release and would additionally strand a live sender in
 	// the registry. If such a statement is ever needed, it must log and continue
 	// (as applyInventory does), not return.
+	//
+	// THAT RULE IS ENFORCED AGAINST ERROR RETURNS ONLY. A panic below this line
+	// escapes the same way: this function's own deferred release has already been
+	// waived, and Connect's teardown defer is not armed until this function
+	// returns - so the sender stays in the registry and the generation stays
+	// unreleased while the goroutine unwinds. Nothing below can panic today
+	// (Metrics and broker are nil-checked or non-nil by construction), which is
+	// why this is a rule to keep rather than a defect to fix.
 	handedOff = true
 
 	if h.Metrics != nil {
