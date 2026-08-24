@@ -82,19 +82,15 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	})
 
 	// The upper bound: the one return that reports success.
+	rets := returnStmts(fn.Body)
 	var successReturn token.Pos
 	var successReturns int
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		ret, ok := n.(*ast.ReturnStmt)
-		if !ok || len(ret.Results) == 0 {
-			return true
-		}
-		if id, ok := ret.Results[len(ret.Results)-1].(*ast.Ident); ok && id.Name == "nil" {
+	for _, ret := range rets {
+		if returnsNil(ret) {
 			successReturns++
 			successReturn = ret.Pos()
 		}
-		return true
-	})
+	}
 	if successReturns != 1 {
 		t.Fatalf("finishRegister has %d returns whose last result is nil; the handoff window closes "+
 			"at the success return, and with more than one there is no single position to order "+
@@ -189,6 +185,53 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"all and the deferred release runs against a live connection",
 			flag, fset.Position(successReturn))
 	}
+
+	// Everything below the flip must stay infallible. handler.go states that as a
+	// rule; this is what makes it a check.
+	var lateErrorReturns []token.Pos
+	for _, ret := range rets {
+		if ret.Pos() > handoff && !returnsNil(ret) {
+			lateErrorReturns = append(lateErrorReturns, ret.Pos())
+		}
+	}
+	if len(lateErrorReturns) > 0 {
+		t.Fatalf("finishRegister returns an error at %s, below the %s flip. That exit is covered by "+
+			"NEITHER release and leaves worse state than the strand this guard closes: the sender is "+
+			"already in the registry, the flag has waived this function's own deferred release, and "+
+			"Connect arms `defer h.teardownConnection` only on a nil error - so the generation stays "+
+			"unreleased, the worker row stays 'online' at a live epoch, and the send goroutine is "+
+			"never Closed. A statement needed here must log and continue, as applyInventory does.",
+			fset.Position(lateErrorReturns[0]), flag)
+	}
+}
+
+// returnStmts returns every return that exits body's own function - nested
+// function literals are skipped, because a return inside a closure exits the
+// closure and is not part of finishRegister's exit set.
+func returnStmts(body *ast.BlockStmt) []*ast.ReturnStmt {
+	var out []*ast.ReturnStmt
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.ReturnStmt:
+			out = append(out, v)
+		}
+		return true
+	})
+	return out
+}
+
+// returnsNil reports whether ret's last result is the predeclared nil, which is
+// how finishRegister's success exit is told apart from its error exits. A bare
+// `return` counts as an error exit: it cannot compile here today, and treating
+// it as success would be the fail-open reading.
+func returnsNil(ret *ast.ReturnStmt) bool {
+	if len(ret.Results) == 0 {
+		return false
+	}
+	id, ok := ret.Results[len(ret.Results)-1].(*ast.Ident)
+	return ok && id.Name == "nil"
 }
 
 // directBodyStmt reports whether stmt is one of body's own statements, as

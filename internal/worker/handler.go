@@ -704,8 +704,11 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// covered by neither release and would additionally strand a live sender in
 	// the registry. If such a statement is ever needed, it must log and continue
 	// (as applyInventory does), not return.
+	// TestFinishRegisterHandsOffOwnershipInsideTheWindow is what enforces it: it
+	// fails on any return positioned below the flip whose last result is not the
+	// predeclared nil.
 	//
-	// THAT RULE IS ENFORCED AGAINST ERROR RETURNS ONLY. A panic below this line
+	// THAT CHECK REACHES ERROR RETURNS AND NOTHING ELSE. A panic below this line
 	// escapes the same way: this function's own deferred release has already been
 	// waived, and Connect's teardown defer is not armed until this function
 	// returns - so the sender stays in the registry and the generation stays
