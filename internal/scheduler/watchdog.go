@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
 
@@ -102,7 +103,17 @@ type Watchdog struct {
 	margin        time.Duration
 	maxAssignment time.Duration
 	now           func() time.Time // injectable clock; defaults to time.Now
+
+	// counters is a VALUE field, so the zero value works and a bare &Watchdog{}
+	// in a test has a working counter set with no nil case to get wrong.
+	counters watchdogCounters
 }
+
+// CounterSnapshot satisfies api.WatchdogSource. The interface is declared in
+// internal/api rather than here because internal/scheduler imports internal/api
+// (dispatch.go) and the reverse import is impossible - so for this section, and
+// unlike every other, the CONSUMER owns the type.
+func (w *Watchdog) CounterSnapshot() api.WatchdogCounters { return w.counters.snapshot() }
 
 // NewWatchdog constructs a Watchdog. A zero margin disables the execution arm
 // and a zero maxAssignment disables the absolute arm; both zero disables the
@@ -201,6 +212,11 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 			}
 			continue
 		}
+
+		// COUNTED ONLY WHEN THE WRITE MATCHED. A fence-rejected write ended
+		// nothing, and counting it would inflate the one number an operator uses
+		// to decide whether to disable a machine.
+		w.counters.record(uuidStr(t.WorkerID))
 
 		// One line per SWEPT task, unbudgeted, and that is safe: the count per
 		// sweep is bounded by WatchdogMaxRowsPerSweep, each task can be swept at
