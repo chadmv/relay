@@ -36,6 +36,7 @@ import (
 type strandDB struct {
 	mu       sync.Mutex
 	queryErr error // returned by Query, i.e. by GetActiveTasksForWorker
+	execErr  error // returned by Exec, i.e. by MarkWorkerOfflineIfEpoch
 	execTag  string
 	execs    []strandExec
 }
@@ -49,6 +50,9 @@ func (d *strandDB) Exec(_ context.Context, sql string, args ...any) (pgconn.Comm
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.execs = append(d.execs, strandExec{sql: sql, args: args})
+	if d.execErr != nil {
+		return pgconn.CommandTag{}, d.execErr
+	}
 	return pgconn.NewCommandTag(d.execTag), nil
 }
 
@@ -263,5 +267,58 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 			"the only thing then standing between this timer and a requeue of a healthy agent's "+
 			"running tasks is RequeueWorkerTasksIfEpoch's own fence.", f.workerID, f.epoch)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS is the
+// correlated-failure case, and it is why markWorkerOffline reports "I could not
+// tell" separately from "the fence said no".
+//
+// THE TWO FAILURES ARE CORRELATED, which is what makes this sharp rather than
+// theoretical. The reconcile arm this fixture drives fails for exactly two
+// reasons - a cancelled peer context, or a database fault - and in the second
+// case the release's OWN write goes to the same unhealthy pool. Reading a query
+// error as "a fresher connection holds the epoch" therefore re-creates the exact
+// strand this whole change exists to close, silently, in one of its two trigger
+// scenarios.
+//
+// PROCEEDING IS SAFE BECAUSE BOTH CONTINUATIONS CARRY THEIR OWN FENCE.
+// grace.Start's expiry runs RequeueWorkerTasksIfEpoch, which has its own
+// workers.connection_epoch EXISTS guard, and requeueWorkerTasks calls that
+// statement directly. If we really had been superseded, the worst case is a
+// fenced no-op; today's worst case is a permanent strand.
+func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *testing.T) {
+	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
+	db.execErr = errors.New("failed to connect to `host=localhost`: dial error")
+
+	offline, unsubscribe := h.broker.Subscribe(events.Filter{})
+	defer unsubscribe()
+
+	err := h.Connect(strandStream(t))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
+
+	require.Len(t, db.execsSeen(), 1, "the release must still be attempted")
+
+	select {
+	case f := <-fired:
+		assert.Equal(t, uuidStr(strandWorkerID), f.workerID)
+		assert.Equal(t, strandEpoch, f.epoch,
+			"the timer must be armed at the epoch THIS registration created")
+	case <-time.After(3 * time.Second):
+		t.Fatal("the offline write ERRORED and the release gave up. A query error is not evidence " +
+			"that a fresher connection holds the epoch - it is evidence of nothing, and it is the " +
+			"correlated symptom of the very database fault that failed the registration. grace.Start " +
+			"is independently fenced, so proceeding costs at worst a no-op; stopping costs a worker " +
+			"stranded 'online' with its running tasks requeued by nobody.")
+	}
+
+	select {
+	case ev := <-offline:
+		t.Fatalf("an offline worker event was published even though the offline write never landed: "+
+			"%s. The broker publish and Metrics.Clear are UNFENCED side effects - they must stay "+
+			"gated on the write actually having applied, or a UI shows a worker offline that Postgres "+
+			"still calls online.", ev.Data)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

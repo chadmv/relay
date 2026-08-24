@@ -832,9 +832,13 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 	// accordingly. finishRegister now releases the generation it acquired when it
 	// returns early (see its handedOff defer), and that release ends in either
 	// grace.Start - whose expiry calls dispatcher.Trigger in cmd/relay-server -
-	// or requeueWorkerTasks, which triggers dispatch itself. So a wake DOES
-	// arrive on that path now even with this gate deleted. What the gate still
-	// buys is PROMPTNESS for the rows this loop moved to pending here and now,
+	// or requeueWorkerTasks, which triggers dispatch itself. So on that path a
+	// wake now arrives eventually even with this gate deleted, EXCEPT when the
+	// release's epoch fence is evaluated and rejects us: a superseded release
+	// returns before arming anything. That exception is not a hole - a fresher
+	// connection owning this worker will do its own dispatch trigger - but it is
+	// why the sentence needs the qualifier. What the gate buys on the non-excepted
+	// path is PROMPTNESS for the rows this loop moved to pending here and now,
 	// which would otherwise wait out RELAY_WORKER_GRACE_WINDOW (2m by default).
 	// Keep it, and keep it counting matches rather than attempts: the paragraph
 	// above is still the reason that switch is safe.
@@ -1403,13 +1407,30 @@ func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
 // ONLY ONE. It is compared, inside MarkWorkerOfflineIfEpoch's WHERE clause,
 // against workers.connection_epoch as it stands right now; a caller whose
 // generation has been superseded by a fresher RegisterWorkerConnection matches
-// zero rows, gets 0 back, and returns having touched nothing. That early return
-// is load-bearing rather than an optimisation: without it a superseded caller
-// arms a grace timer against a LIVE worker, and the timer's own
-// RequeueWorkerTasksIfEpoch fence becomes the only thing between it and a
-// requeue of a healthy agent's running tasks.
-// TestConnect_ASupersededFailedRegistrationReleasesNothing is what holds it, in
-// the default lane.
+// zero rows and returns having touched nothing.
+// TestConnect_ASupersededFailedRegistrationReleasesNothing is what holds that,
+// in the default lane.
+//
+// A ZERO IS ONLY BELIEVED WHEN THE FENCE WAS ACTUALLY EVALUATED, which is why
+// markWorkerOffline reports an error separately from a row count. The two
+// failures are correlated: finishRegister's reconcile arm fails for exactly two
+// reasons - a cancelled peer context or a database fault - and in the second
+// case this release's own write goes to the same unhealthy pool. Reading that
+// error as "a fresher connection holds the epoch" would silently re-create the
+// strand this release exists to close, in one of its two trigger scenarios. So
+// on an error we PROCEED: grace.Start's expiry runs RequeueWorkerTasksIfEpoch
+// and requeueWorkerTasks calls it directly, both carrying their own
+// workers.connection_epoch guard, so a release that was in fact superseded costs
+// a fenced no-op while giving up costs a permanent strand.
+//
+// WHAT THE EARLY RETURN BUYS IS NARROWER THAN IT LOOKS, and GraceRegistry
+// carries the rest. The fence is evaluated inside Postgres and grace.Start is
+// called on the result, a round trip later with nothing held across the gap, so
+// this return cannot by itself stop a delayed superseded caller from arming a
+// timer against a live worker. GraceRegistry.StartWithDuration refuses a
+// strictly older epoch for that reason. This return is what keeps the common,
+// promptly-superseded case from touching shared state at all - including the
+// h.grace == nil branch, which has no registry to refuse it.
 //
 // teardownConnection's registry.UnregisterIf gate is a SECOND, EARLIER check
 // that this function deliberately does not duplicate and the failed-registration
@@ -1420,8 +1441,8 @@ func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
 // unregistering a sender this caller never registered is the clobber the
 // invariant forbids.
 func (h *Handler) releaseWorkerGeneration(workerID string, epoch int32) {
-	if h.markWorkerOffline(workerID, epoch) == 0 {
-		return // a fresher connection holds the epoch; leave grace/requeue alone
+	if rows, err := h.markWorkerOffline(workerID, epoch); err == nil && rows == 0 {
+		return // the fence was evaluated and a fresher connection holds the epoch
 	}
 	if h.grace != nil {
 		h.grace.Start(workerID, epoch)
@@ -1436,11 +1457,21 @@ func (h *Handler) releaseWorkerGeneration(workerID string, epoch int32) {
 // - in which case no stream ever carried traffic at all. It is fenced on
 // connection_epoch: if a fresher connection has bumped the epoch, the write
 // affects zero rows and the offline broker event / metrics-clear are skipped.
-// Returns the number of rows updated (0 = fence superseded, 1 = applied).
-func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
+//
+// Returns (rows, err). A (0, nil) means the fence WAS evaluated and rejected us;
+// a non-nil error means we could not tell, and the row count that comes with it
+// says nothing. Keeping those apart is the whole point of the signature: they
+// are the same value and opposite conclusions, and collapsing them re-creates
+// the strand releaseWorkerGeneration exists to close. The two unfenced side
+// effects below - the offline broker event and Metrics.Clear - stay gated on the
+// write having actually applied either way.
+func (h *Handler) markWorkerOffline(workerID string, epoch int32) (int64, error) {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
-		return 0
+		// Unreachable in practice and deliberately silent: workerID is uuidStr()
+		// over a UUID Postgres just RETURNed, and Connect logs loudly about the
+		// same impossibility on the paths that get that far.
+		return 0, err
 	}
 	ctx := context.Background()
 	now := time.Now()
@@ -1450,8 +1481,19 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 		DisconnectedAt:  pgtype.Timestamptz{Time: now, Valid: true},
 		ConnectionEpoch: epoch,
 	})
-	if err != nil || rows == 0 {
-		return 0
+	if err != nil {
+		// THIS LOG IS BOUNDED BY DATABASE HEALTH, NOT BY PEER VOLUME, which is why
+		// it is allowed on a frame that has no ingest budget. Nothing here is
+		// peer-drivable: workerID is uuidStr() over a RETURNING UUID, the statement
+		// runs on context.Background() so a dead peer cannot cancel it into an
+		// error, and no code path deletes a worker row. An agent reconnect loop
+		// cannot make this line fire; only a broken pool can, and then the volume
+		// is the pool's, not the fleet's.
+		log.Printf("worker: could not mark %s offline at epoch %d, releasing anyway: %v", workerID, epoch, err)
+		return 0, err
+	}
+	if rows == 0 {
+		return 0, nil
 	}
 	h.broker.Publish(events.Event{
 		Type: "worker",
@@ -1460,15 +1502,14 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 	if h.Metrics != nil {
 		h.Metrics.Clear(workerID)
 	}
-	return rows
+	return rows, nil
 }
 
 // requeueWorkerTasks requeues dispatched/running tasks for a worker whose
 // generation has ended - a disconnect, or a registration that acquired the
 // generation and then failed - fenced on connection_epoch: if a fresher
-// connection has bumped the
-// epoch, the EXISTS guard fails and zero tasks move. Bumps assignment_epoch on
-// each requeued task (task-level fence preserved).
+// connection has bumped the epoch, the EXISTS guard fails and zero tasks move.
+// Bumps assignment_epoch on each requeued task (task-level fence preserved).
 func (h *Handler) requeueWorkerTasks(workerID string, epoch int32) {
 	var id pgtype.UUID
 	if err := id.Scan(workerID); err != nil {
