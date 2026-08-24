@@ -1,9 +1,11 @@
 ---
 title: Repeated watchdog sweeps against one worker are unsurfaced, so a wedged worker becomes a silent sink for queued work
 type: idea
-status: open
+status: closed
 created: 2026-08-20
 updated: 2026-08-21
+closed: 2026-08-24
+resolution: fixed
 priority: medium
 source: Phase 4 security lens of the 2026-08-20-coordinator-stale-task-watchdog slice; the diagnosability cost that slice accepted
 ---
@@ -496,3 +498,36 @@ relation are all settled and none of them needs designing. What is untouched by 
 is exactly what this item has always carried: the inverted import direction, the legitimately-disabled
 control, the writer ambiguity, and the only unbounded-in-principle key in the cluster. Scope the
 `swept_by_worker` exemption BEFORE writing code; it is a required artifact, not a risk.
+
+## Resolution
+
+Shipped as slice 4 of 4 of the silent-drop observability cluster (2026-08-24,
+silent-drop-observability-slice4).
+
+`internal/scheduler/watchdogCounters` records one entry per assignment the coordinator watchdog
+ended, keyed by worker uuid, capped first-come at `api.WatchdogSweptWorkerMax` (256) with a
+`swept_overflow` total for what the cap and any non-canonical key displaced. The reconciliation
+`swept_total == sum(swept_by_worker) + swept_overflow` holds on every branch and is read in one
+critical section. It is published as the fourth `watchdog` section of admin-only
+`GET /v1/server/counters`, and aggregated once per sweep into a single log line.
+
+Two design points differ from this item's proposal, both argued in the plan
+(`docs/superpowers/plans/2026-08-24-silent-drop-observability-slice4.md`):
+
+- The counter type is declared in `internal/api`, not `internal/scheduler` - `internal/scheduler`
+  imports `internal/api`, so the reverse import is impossible. That inverts slice 2's arity rule and
+  removes the mapper on both sides, which is what closes the counted-but-unpublished gap by
+  construction rather than by assertion.
+- The section ships counts-only. This item's `levels` half was refuted: `swept_workers_max` is a
+  compile-time constant that would have to move when a `limits` classification is added, and
+  `swept_workers_tracked` restates `len(swept_by_worker)`.
+
+Verification found, and the slice fixed, a defect in its own deliverable: the aggregate line asserted
+an unqualified "worst since process start" while never reading `swept_overflow`, so a real offender
+displaced into overflow left the line naming an innocent worker as worst. The line now stays silent
+below two sweeps and names the worst TRACKED worker with the unattributed count when attribution is
+incomplete. The lesson generalises and is recorded in the retro: a lossy aggregate must disclose its
+loss wherever it is READ, not only where it is published.
+
+Closed alongside `bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick`, folded in per the
+joint spec's D12 - one aggregate line covers both the swept set and the failed-write set.
