@@ -1,4 +1,13 @@
-.PHONY: build test test-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev
+.PHONY: build test test-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
+
+# `go build -o` writes exactly the name it is given, and Windows shells will not
+# execute an extensionless file. web/playwright.config.ts picks the same two names
+# from process.platform - the two must agree.
+ifeq ($(OS),Windows_NT)
+RELAY_SERVER_BIN := bin/relay-server.exe
+else
+RELAY_SERVER_BIN := bin/relay-server
+endif
 
 # Install web dependencies
 web-install:
@@ -11,6 +20,35 @@ web-build:
 # Run the Vite dev server (proxies /v1 to :8080)
 web-dev:
 	cd web && npm run dev
+
+# Run the browser end-to-end suite (Playwright) against the PRODUCTION-EMBEDDED
+# SPA - not the Vite dev server. Tailwind v4 scans source statically, so a
+# computed class string emits no CSS and a no-op fix is indistinguishable from a
+# working one to every other test in this repo; only a production bundle can tell
+# them apart. web/embed.go's SPA fallback is server code with its own semantics,
+# and embedded serving is same-origin where the dev server is :5173 proxying
+# :8080.
+#
+# Requires: node, go, and a Postgres reachable at
+# postgres://relay:relay@127.0.0.1:5432 - the relay-postgres container
+# scripts/dev.ps1 already manages. Install the browsers once with:
+#   cd web && npx playwright install chromium webkit
+#
+# THE BUILD ORDER IS LOAD-BEARING. web/embed.go snapshots web/dist at COMPILE
+# time (//go:embed all:dist), so relay-server must be rebuilt AFTER web-build or
+# it serves the previous bundle - or, from a clean checkout, the 7-line "has not
+# been built" placeholder, which makes every spec fail with no #root and no
+# obvious cause.
+#
+# web/dist/index.html is a TRACKED placeholder while everything else under
+# web/dist/ is gitignored (.gitignore:6-8), so a build replaces exactly one
+# tracked file with an index referencing hashed assets nobody else has.
+# Restoring it here, pass or fail, makes that a step instead of a rule people
+# have to remember. Uses sh syntax, like `clean` above - run make from Git Bash
+# on Windows, not from cmd.
+test-e2e: web-build
+	go build -o $(RELAY_SERVER_BIN) ./cmd/relay-server
+	cd web && npm run test:e2e; rc=$$?; cd .. && git checkout -- web/dist/index.html; exit $$rc
 
 # Build all binaries into bin/ (web UI is embedded into relay-server)
 build: web-build
