@@ -532,6 +532,9 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.suppressed.status_get_task",
 	"ingest_log_budget.counts.suppressed.inventory",
 	"task_log_fence.counts.rejected_total",
+	"watchdog.counts.swept_total",
+	"watchdog.counts.swept_overflow",
+	"watchdog.counts.swept_by_worker",
 }
 
 // TestCounterPayloadCarriesNoIdentifiers is the cardinality rule of the
@@ -960,4 +963,54 @@ func TestServerCounters_WiredButZeroTaskLogFenceSectionIsStillPresent(t *testing
 	require.Len(t, fields, 1, "counts must be an object with the one key, not an empty object")
 	assert.Equal(t, "0", string(fields["rejected_total"]),
 		"rejected_total must serialise as an explicit zero, never be elided by omitempty")
+}
+
+// fakeWatchdogSource returns a fixed snapshot. THREE DISTINCT VALUES and a
+// REAL-SHAPED uuid key: equal values would hide a crossed field, and a key that
+// is not a canonical uuid would not exercise the allow-list predicate that
+// admits this map into a payload of integers.
+type fakeWatchdogSource struct{ c WatchdogCounters }
+
+func (f fakeWatchdogSource) CounterSnapshot() WatchdogCounters { return f.c }
+
+func threeDistinctSweeps() WatchdogCounters {
+	return WatchdogCounters{Counts: WatchdogCounts{
+		SweptTotal:    37,
+		SweptOverflow: 4,
+		SweptByWorker: map[string]uint64{
+			"00000000-0000-0000-0000-0000000000c8": 33,
+		},
+	}}
+}
+
+func TestServerCounters_ReportsTheWatchdogSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{Watchdog: fakeWatchdogSource{c: threeDistinctSweeps()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Watchdog *struct {
+			Counts map[string]any `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"watchdog"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Watchdog, "a wired section must be present")
+	require.Nil(t, body.Watchdog.Levels,
+		"COUNTS ONLY. The two candidate levels were len(swept_by_worker), which is the map restated, "+
+			"and the 256 cap, which is a configured constant and belongs in a limits half nobody has "+
+			"designed yet - putting it in levels now would mean moving it later.")
+
+	// Key-set equality, not per-key assertions alone: a renamed key would decode
+	// as a missing value and a per-key check would report zero.
+	assert.ElementsMatch(t, []string{"swept_total", "swept_overflow", "swept_by_worker"},
+		counterMapKeys(body.Watchdog.Counts))
+	assert.Equal(t, float64(37), body.Watchdog.Counts["swept_total"])
+	assert.Equal(t, float64(4), body.Watchdog.Counts["swept_overflow"])
+	assert.Equal(t, map[string]any{"00000000-0000-0000-0000-0000000000c8": float64(33)},
+		body.Watchdog.Counts["swept_by_worker"])
 }

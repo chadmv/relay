@@ -292,6 +292,11 @@ type serverCountersResponse struct {
 	GRPCAdmission   *grpcAdmissionSection   `json:"grpc_admission,omitempty"`
 	IngestLogBudget *ingestLogBudgetSection `json:"ingest_log_budget,omitempty"`
 	TaskLogFence    *taskLogFenceSection    `json:"task_log_fence,omitempty"`
+
+	// *WatchdogCounters, not a *watchdogSection restating it. The source's own
+	// type IS the response type, so there is no hand-written mapper and no arity
+	// to drift. TestWatchdogSectionRestatesNothing keeps it that way.
+	Watchdog *WatchdogCounters `json:"watchdog,omitempty"`
 }
 
 type grpcAdmissionSection struct {
@@ -433,6 +438,15 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 		resp.TaskLogFence = &taskLogFenceSection{
 			Counts: taskLogFenceCounts{RejectedTotal: src.TaskLogFenceRejections()},
 		}
+	}
+	if src := s.Counters.Watchdog; src != nil {
+		// ONE ASSIGNMENT, NOT A FIELD-BY-FIELD COPY, and that is the whole
+		// point: the source's type is the response type, so a counter added on
+		// the scheduler side reaches a JSON key with no edit here. Slice 2's
+		// mapper needed TestIngestLogKindCountsPublishesEveryWorkerSideField
+		// precisely because it was five hand-written assignments.
+		snap := src.CounterSnapshot()
+		resp.Watchdog = &snap
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
