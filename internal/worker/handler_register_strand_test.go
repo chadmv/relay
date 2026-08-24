@@ -104,8 +104,8 @@ var strandWorkerID = pgtype.UUID{
 // store.Worker comes back DISTINCT.
 //
 // IT USED TO BE ONE CONSTANT FOR ALL OF THEM, and that made the epoch
-// assertions below vacuous rather than merely loose. store.Worker has five int32
-// columns, so a single fill meant `releaseWorkerGeneration(workerID,
+// assertions below vacuous rather than merely loose. store.Worker has several
+// int32 columns, so a single fill meant `releaseWorkerGeneration(workerID,
 // updated.MaxSlots)` produced byte-identical behaviour to the real
 // `updated.ConnectionEpoch` and the mutation survived the whole lane. What is
 // under test on this path is not "some epoch was used" but "the epoch THIS
@@ -233,9 +233,9 @@ func strandStream(t *testing.T) *scriptedStream {
 // is the item's own first acceptance step, and it had never been run.
 //
 // By the time reconcile fails, RegisterWorkerConnection has flipped the row to
-// 'online', bumped connection_epoch to 7 and cleared disconnected_at, and
-// grace.Cancel has thrown away the requeue timer the PREVIOUS disconnect armed.
-// At HEAD nothing happens next: Connect's `defer h.teardownConnection` is armed
+// 'online', bumped connection_epoch past the value the previous generation held
+// and cleared disconnected_at, and grace.Cancel has thrown away the requeue
+// timer the PREVIOUS disconnect armed. At HEAD nothing happens next: Connect's `defer h.teardownConnection` is armed
 // only AFTER finishRegister returns and needs the sender only the success path
 // creates, so on this path it is never armed at all.
 //
@@ -261,16 +261,16 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 	execs := db.execsSeen()
 	require.Len(t, execs, 1,
 		"a registration that failed after RegisterWorkerConnection must release the generation it "+
-			"acquired. Nothing else will: the worker row is status='online' at connection_epoch 7 "+
-			"with no connection behind it, the previous disconnect's requeue timer was destroyed by "+
-			"grace.Cancel, and the liveness sweeper walks past this worker because Metrics.Activate "+
-			"is never reached.")
+			"acquired. Nothing else will: the worker row is status='online' at the epoch this "+
+			"registration created, with no connection behind it, the previous disconnect's requeue "+
+			"timer destroyed by grace.Cancel, and the liveness sweeper walking past it because "+
+			"Metrics.Activate is never reached.")
 	assert.Contains(t, execs[0].sql, "status = 'offline'",
 		"the one statement must be MarkWorkerOfflineIfEpoch")
 	assert.Contains(t, execs[0].sql, "connection_epoch = $4",
 		"and it must carry its epoch fence")
 	assert.Contains(t, execs[0].args, strandEpoch,
-		"it must be fenced on the epoch THIS registration created (7). That fence is the WHOLE of "+
+		"it must be fenced on the epoch THIS registration created. That fence is the WHOLE of "+
 			"the ownership check on this path: a failed registration has no sender in the registry "+
 			"to compare against, so there is no second gate behind it.")
 
@@ -280,8 +280,8 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 		assert.Equal(t, strandEpoch, f.epoch,
 			"the timer must be armed at the epoch this registration created. Re-arming at the "+
 				"PREVIOUS epoch - trying to restore the timer grace.Cancel discarded - is a silent "+
-				"no-op: RequeueWorkerTasksIfEpoch fences on workers.connection_epoch and the row now "+
-				"holds 7.")
+				"no-op: RequeueWorkerTasksIfEpoch fences on workers.connection_epoch and the row has "+
+				"already moved past it.")
 	case <-time.After(3 * time.Second):
 		t.Fatal("no grace timer was armed after the failed registration. grace.Cancel destroyed the " +
 			"previous disconnect's pending requeue, so without a fresh timer these tasks are not " +
@@ -299,10 +299,10 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 //
 // Arming a release earlier widens the window in which a DEAD registration's
 // cleanup can run against a LIVE one. The scenario: our RegisterWorkerConnection
-// made epoch 7 and our reconcile then failed, but by the time our deferred
-// release runs a fresher connection has registered and the row holds 8. Postgres
-// answers that with zero rows affected - which is what "UPDATE 0" below stands
-// for - and the release must stop there. Arming a grace timer anyway would leave
+// acquired an epoch and our reconcile then failed, but by the time our deferred
+// release runs a fresher connection has registered and the row has moved past
+// it. Postgres answers that with zero rows affected - which is what "UPDATE 0"
+// below stands for - and the release must stop there. Arming a grace timer anyway would leave
 // a live agent's running tasks one fence away from being requeued out from under
 // it.
 //
