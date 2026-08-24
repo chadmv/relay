@@ -660,3 +660,53 @@ verification is named in each.
   instance; neither closes the other item.
 - Also record that the substitute cost is now measured: a ~500-line parser guard, evaded twice, one of
   those evasions being production-only.
+
+## Addendum: rounds 4 and 5, written after this retro was first committed
+
+This retro was drafted at the end of round 3. Two more verification rounds followed, and both found a
+HIGH. The record is corrected here rather than left to imply the slice ended at three.
+
+**Round 4 - the adjacency assertion was bypassed by nesting.** `stmtIndexContaining` located the
+direct body statement whose source range *contained* `registry.Register`. When the call stops being a
+top-level `ExprStmt` and moves inside a compound direct-body statement, the index points at the
+enclosing statement and adjacency still holds - so arbitrarily many fallible statements can live
+between the register and the flip, which is the exact region the check's own comment said could not
+exist. Four spellings survived, including the plausible-refactor shape
+`if h.registry != nil { Register; if err := ...; err != nil { return } }`, plus a fifth that stranded
+the other direction. Closed by requiring the statement at that index to *be* the call: identity, not
+containment - a distinction the file already argued for on the closure body and had simply not applied
+to this anchor.
+
+**Round 5 - one pair of parentheses defeated the whole write-set analysis.** Four expression sites
+type-asserted straight to `*ast.Ident`, so an `*ast.ParenExpr` wrapper made the flag invisible to all
+of them. `(handedOff) = false` after the flip needs no pointer, no closure and no indirection, and it
+is the total defeat: the flag is false at every return, so every SUCCESSFUL registration takes the
+deferred release. Measured with `go vet` clean and the **whole repo** green. `gofmt` does not
+normalise it away, and this tree has no fmt gate - CRLF makes `gofmt -l` flag every file at baseline.
+Closed with `ast.Unparen` at all four sites.
+
+**The comment beside it was the real defect, and it is the same shape three rounds running.** It said a
+local bool has "exactly one other way to be written: through a pointer to it". That is a uniqueness
+claim - a claim about the complement - and CLAUDE.md already warns that such a claim cannot be checked
+by opening its subject. It was false, and the failure message a reader sees at failure time repeated
+it. Both now say what is actually checked: writes counted by name after dropping parens, plus any
+address-of.
+
+### Why the hunt stopped at five, stated as a judgement rather than a conclusion
+
+Every round found one more shape, so a sixth probably would too. The decision to stop is not a claim
+that the guard is exhaustive - it demonstrably has not been, five times. The reasoning:
+
+- The shipped `internal/worker/handler.go` was confirmed correct by five independent passes, and needed
+  no behavioural change after round 1. Every later commit was a guard or a comment.
+- Every residual finding is in the guard, which protects against a **future** regression to a line that
+  is currently correct and is additionally covered by an integration test.
+- The last two fixes were at the property level (identity rather than containment; paren normalisation)
+  rather than another spelling patch, which is the right rung to stop on.
+
+**The honest residual**: this guard exists only because the default lane structurally cannot drive a
+successful worker registration. That is filed as
+[[idea-2026-08-24-handler-pool-has-no-seam]] and promoted into Next. When that seam lands, the right
+move is to replace most of this guard with a behavioural test and delete what the behavioural test
+covers - not to harden it a sixth time. Five evasions of one parser guard is the measurement that
+argues for the seam, and it is the most useful number this slice produced.
