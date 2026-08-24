@@ -258,6 +258,17 @@ func (h *Handler) Connect(stream relayv1.AgentService_ConnectServer) error {
 	// Registered above, so the teardown defer must be armed BEFORE any path that
 	// can return early below, or a failed connection leaves its sender in the
 	// registry (identity-checked teardown).
+	//
+	// IT COVERS EVERYTHING BELOW AND NOTHING ABOVE, which is the half this
+	// comment used to leave unsaid and which cost a HIGH-severity strand.
+	// finishRegister acquires the worker's generation - status 'online', a bumped
+	// connection_epoch, a cancelled grace timer - several statements before it
+	// returns the sender this defer needs, and two of its own statements can
+	// still fail after that acquisition. Those are released by finishRegister's
+	// OWN deferred release (see its handedOff block), not here, because this
+	// defer cannot be armed without a sender that a failed registration never
+	// creates. Between the two, every path that acquires the generation releases
+	// it exactly once.
 	defer h.teardownConnection(workerID, sender)
 
 	// This UUID is the identity every task_log write from this connection is
@@ -816,6 +827,17 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 	// were actually requeued, so there is nothing to wake for - which is precisely
 	// why switching from attempts to matches cannot drop a needed wake, including
 	// when n is 0 because the statement errored.
+	//
+	// THAT PATH IS NO LONGER A DEAD END, and the gate's job on it narrowed
+	// accordingly. finishRegister now releases the generation it acquired when it
+	// returns early (see its handedOff defer), and that release ends in either
+	// grace.Start - whose expiry calls dispatcher.Trigger in cmd/relay-server -
+	// or requeueWorkerTasks, which triggers dispatch itself. So a wake DOES
+	// arrive on that path now even with this gate deleted. What the gate still
+	// buys is PROMPTNESS for the rows this loop moved to pending here and now,
+	// which would otherwise wait out RELAY_WORKER_GRACE_WINDOW (2m by default).
+	// Keep it, and keep it counting matches rather than attempts: the paragraph
+	// above is still the reason that switch is safe.
 	if requeued > 0 {
 		go h.triggerDispatch()
 	}
@@ -1408,7 +1430,10 @@ func (h *Handler) releaseWorkerGeneration(workerID string, epoch int32) {
 	}
 }
 
-// markWorkerOffline is called in a defer after the stream ends. It is fenced on
+// markWorkerOffline is called only from releaseWorkerGeneration, which reaches
+// it from two places: a defer after a registered stream ends, and a registration
+// that failed after RegisterWorkerConnection had already acquired the generation
+// - in which case no stream ever carried traffic at all. It is fenced on
 // connection_epoch: if a fresher connection has bumped the epoch, the write
 // affects zero rows and the offline broker event / metrics-clear are skipped.
 // Returns the number of rows updated (0 = fence superseded, 1 = applied).
@@ -1438,8 +1463,10 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) int64 {
 	return rows
 }
 
-// requeueWorkerTasks requeues dispatched/running tasks for a disconnected
-// worker, fenced on connection_epoch: if a fresher connection has bumped the
+// requeueWorkerTasks requeues dispatched/running tasks for a worker whose
+// generation has ended - a disconnect, or a registration that acquired the
+// generation and then failed - fenced on connection_epoch: if a fresher
+// connection has bumped the
 // epoch, the EXISTS guard fails and zero tasks move. Bumps assignment_epoch on
 // each requeued task (task-level fence preserved).
 func (h *Handler) requeueWorkerTasks(workerID string, epoch int32) {
