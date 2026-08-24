@@ -35,23 +35,16 @@ import (
 //     two replicas may be added; levels may NOT (max_per_source in particular
 //     does not sum into anything meaningful). No persistence, no history, no
 //     rates, no alerting - a poller derives rates itself.
-//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. started_at is the ONE
-//     exemption today, and it is the whole allow-list:
-//     TestCounterPayloadCarriesNoIdentifiers enforces that, so the SECOND
-//     non-integer value anywhere in the payload goes RED and forces an argument.
-//     "watchdog.counts.swept_by_worker" was written into that allow-list in
-//     slice 1, against code nobody had written, and has been DELIBERATELY
-//     DE-AUTHORIZED: a map keyed on server-resolved worker UUIDs may well be
-//     the right answer for slice 4, but it is a design decision, and
-//     pre-blessing it in slice 1 reduced its only forcing function to a
-//     one-line edit with the justification already supplied. Adding it back
-//     means adding a counterPayloadExemption with its own typeOK and jsonOK
-//     predicates, argued in the same commit that can be read against the code -
-//     including whether unbounded key cardinality is acceptable here. The
-//     admin-authentication argument (this route is not an attacker-writable
-//     site, so a worker UUID admissible HERE stays inadmissible in any log line
-//     reachable from the gRPC recv path) is one input to that decision, not a
-//     standing grant.
+//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. Two paths are exempt
+//     today and each was argued in the commit that added it: started_at, as an
+//     RFC 3339 instant; and watchdog.counts.swept_by_worker, as a map from
+//     server-assigned worker uuids to counts, bounded by
+//     WatchdogSweptWorkerMax. The second was written into slice 1's allow-list
+//     against code nobody had written, DE-AUTHORIZED during slice 1's review
+//     because pre-blessing it reduced its only forcing function to a one-line
+//     edit, and re-added in slice 4 with predicates that DESCEND into the map
+//     and enforce the cap - see counterPayloadExemption. Anything else
+//     non-integer goes RED and forces the same argument.
 //
 // WHAT THIS ENDPOINT DOES NOT BUY, stated next to what it does:
 //
