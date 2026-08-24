@@ -109,11 +109,14 @@ func TestParseWatchdogDuration(t *testing.T) {
 // on all four ways a reviewer broke the wiring - two of which are fixed below
 // and two of which no scanner can reach (see WHAT IT CANNOT REACH):
 //
-//  1. NewWatchdog is called in an assignment that is a DIRECT child of a
-//     function body, binding a plain identifier. Wrapping the construction in
+//  1. NewWatchdog is called in EXACTLY ONE assignment that is a DIRECT child of
+//     a function body, binding a plain identifier. Wrapping the construction in
 //     `if watchdogMargin > 0 { ... }` leaves the watchdog a typed nil, and a
 //     plain ast.Inspect walk cannot tell the difference because it descends into
-//     the if-body.
+//     the if-body. EXACTLY ONE rather than at-least-one because (2) below
+//     otherwise has no unambiguous subject: a second construction, started while
+//     the first is the one buildHTTPServer reports on, was MEASURED to pass a
+//     last-wins version of this walk.
 //  2. A `go` statement calling Run on THAT SAME identifier exists and is a
 //     DIRECT child of a function body. Wrapping it in
 //     `if watchdogMargin < 0 { ... }` leaves the goroutine unreachable, and
@@ -197,8 +200,13 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 	// `if cond { go watchdog.Run(ctx) }` fail: ast.Inspect would happily find
 	// either node inside the if-body, and the watchdog would still be a typed nil
 	// or the goroutine would still never start.
-	var call *ast.CallExpr
-	var bound string // the identifier NewWatchdog's result is assigned to
+	// EVERY unconditional construction, not the last one seen. Collecting them
+	// all is what lets the count below be asserted: with last-wins, adding a
+	// SECOND `other := scheduler.NewWatchdog(...)` and starting THAT one passes
+	// every other check here while the watchdog buildHTTPServer reports on never
+	// runs - measured, and the reason this is a slice rather than a variable.
+	var calls []*ast.CallExpr
+	var bounds []string // the identifiers NewWatchdog's results are assigned to
 	started := map[string]bool{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -213,7 +221,8 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 						continue
 					}
 					if ce := newWatchdogCall(as.Rhs[i]); ce != nil {
-						call, bound = ce, id.Name
+						calls = append(calls, ce)
+						bounds = append(bounds, id.Name)
 					}
 				}
 			}
@@ -233,11 +242,18 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 			}
 		}
 	}
-	require.NotNil(t, call,
-		"main.go has no `x := ...NewWatchdog(...)` assignment directly in a function body: either the "+
-			"stale-task watchdog is never constructed, or it is nested inside a conditional that may never "+
-			"execute - in which case it reaches buildHTTPServer as a typed nil and the coordinator silently "+
-			"has no bound on task duration again, and nothing else fails")
+	require.Len(t, calls, 1,
+		"main.go must contain EXACTLY ONE `x := ...NewWatchdog(...)` assignment directly in a function "+
+			"body, and has %d (bound to %v). None means the stale-task watchdog is never constructed, or "+
+			"is nested inside a conditional that may never execute - in which case it reaches "+
+			"buildHTTPServer as a typed nil and the coordinator silently has no bound on task duration "+
+			"again. More than one means this test cannot say WHICH watchdog the `go ... .Run(...)` below "+
+			"starts, and a second watchdog that is run while the FIRST is the one buildHTTPServer reports "+
+			"on publishes a permanent zero for a control that is working - a confident zero, which is "+
+			"worse than an absent section. If a second watchdog is legitimate, this guard can no longer "+
+			"answer the question it asks and needs REPLACING, not its count bumped.",
+		len(calls), bounds)
+	call, bound := calls[0], bounds[0]
 	require.True(t, started[bound],
 		"main.go constructs the watchdog as %q but has no `go %s.Run(...)` statement directly in a function "+
 			"body. Constructing it is not running it: the counters section would report an honest zero "+
