@@ -517,9 +517,15 @@ var counterPayloadAllowList = map[string]counterPayloadExemption{
 			"persistent workers row per hostname it claims " +
 			"(bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded, open), so a peer CAN drive " +
 			"the number of distinct keys an admin-facing document serialises on every request. The " +
-			"control is therefore the producer's hard cap, WatchdogSweptWorkerMax, which is ENFORCED " +
-			"in jsonOK below rather than described beside it. DO NOT cite the workers row count as the " +
-			"bound - that is the quantity that is unbounded.",
+			"control is therefore the producer's hard cap, WatchdogSweptWorkerMax, which is ENFORCED in " +
+			"scheduler.watchdogCounters.record and CHECKED in jsonOK below rather than described beside " +
+			"it. Note what jsonOK can and cannot see: it runs against fakeWatchdogSource, whose keys are " +
+			"literals in this file, so it says this FIXTURE is well-formed and nothing about the real " +
+			"producer - internal/scheduler imports this package, so the import that would let this test " +
+			"drive it is impossible. The same two predicates against REAL producer bytes are " +
+			"cmd/relay-server's TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, " +
+			"which exists because that package can import both sides. DO NOT cite the workers row count " +
+			"as the bound - that is the quantity that is unbounded.",
 		typeOK: func(t reflect.Type) bool {
 			return t.Kind() == reflect.Map &&
 				t.Key().Kind() == reflect.String &&
