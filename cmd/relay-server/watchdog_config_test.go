@@ -105,20 +105,36 @@ func TestParseWatchdogDuration(t *testing.T) {
 // go/ast, NOT a regex. A source-scanning regex guard in this repo was proven
 // breakable by a single stray comment.
 //
-// IT CHECKS EXACTLY TWO THINGS, and the earlier version of it silently passed
+// IT CHECKS EXACTLY THREE THINGS, and the earlier version of it silently passed
 // on all four ways a reviewer broke the wiring - two of which are fixed below
 // and two of which no scanner can reach (see WHAT IT CANNOT REACH):
 //
-//  1. A `go` statement mentioning NewWatchdog exists and is a DIRECT child of a
-//     function body. Wrapping it in `if watchdogMargin < 0 { ... }` leaves the
-//     goroutine unreachable, and a plain ast.Inspect walk cannot tell the
-//     difference because it descends into the if-body.
-//  2. TWO DISTINCT arguments of that NewWatchdog call each trace back to
+//  1. NewWatchdog is called in an assignment that is a DIRECT child of a
+//     function body, binding a plain identifier. Wrapping the construction in
+//     `if watchdogMargin > 0 { ... }` leaves the watchdog a typed nil, and a
+//     plain ast.Inspect walk cannot tell the difference because it descends into
+//     the if-body.
+//  2. A `go` statement calling Run on THAT SAME identifier exists and is a
+//     DIRECT child of a function body. Wrapping it in
+//     `if watchdogMargin < 0 { ... }` leaves the goroutine unreachable, and
+//     naming a different identifier runs some other watchdog.
+//  3. TWO DISTINCT arguments of that NewWatchdog call each trace back to
 //     parseWatchdogDuration. One is not enough: hardcoding only
 //     scheduler.DefaultMaxAssignment while leaving the margin parsed silently
 //     ignores RELAY_TASK_MAX_ASSIGNMENT, and a BFS that stops at the first seed
 //     reaching parseWatchdogDuration reports success while this test's own
 //     failure message names both variables.
+//
+// (1) AND (2) WERE ONE CHECK UNTIL SLICE 4 SPLIT THE STATEMENT, and the split is
+// why they are now two. main used to write `go scheduler.NewWatchdog(...).Run(ctx)`,
+// so one `go` statement carried both the construction and the start. The
+// counters endpoint reports this watchdog's sweeps and buildHTTPServer is the
+// only place the api.Server is built, so the watchdog now has to exist as a
+// BOUND LOCAL above that call. Nothing was relaxed: "constructed
+// unconditionally" and "started unconditionally" are each still required, on
+// statements that must each be a direct child of a function body, and the two
+// are now additionally required to name the SAME watchdog - a question the
+// single-statement form could not pose.
 //
 // WHAT IT CANNOT REACH, stated rather than overclaimed: a scanner cannot tell
 // that `watchdogMargin, maxAssignment = 0, 0` inserted just above the call
@@ -156,51 +172,76 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 		return true
 	})
 
-	mentions := func(n ast.Node, want string) bool {
-		found := false
+	newWatchdogCall := func(n ast.Node) *ast.CallExpr {
+		var found *ast.CallExpr
 		ast.Inspect(n, func(m ast.Node) bool {
-			if id, ok := m.(*ast.Ident); ok && id.Name == want {
-				found = true
+			ce, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-			return !found
+			if sel, ok := ce.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewWatchdog" {
+				found = ce
+				return false
+			}
+			if id, ok := ce.Fun.(*ast.Ident); ok && id.Name == "NewWatchdog" {
+				found = ce
+				return false
+			}
+			return true
 		})
 		return found
 	}
 
-	// Only statements that are DIRECT elements of a function body count. This is
-	// what makes `if cond { go ... }` fail: ast.Inspect would happily find the
-	// GoStmt inside the if-body, and the goroutine would still never start.
+	// Only statements that are DIRECT elements of a function body count, for BOTH
+	// halves. That is what makes `if cond { watchdog = ... }` and
+	// `if cond { go watchdog.Run(ctx) }` fail: ast.Inspect would happily find
+	// either node inside the if-body, and the watchdog would still be a typed nil
+	// or the goroutine would still never start.
 	var call *ast.CallExpr
+	var bound string // the identifier NewWatchdog's result is assigned to
+	started := map[string]bool{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Body == nil {
 			continue
 		}
 		for _, stmt := range fn.Body.List {
+			if as, ok := stmt.(*ast.AssignStmt); ok && len(as.Lhs) == len(as.Rhs) {
+				for i, l := range as.Lhs {
+					id, ok := l.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					if ce := newWatchdogCall(as.Rhs[i]); ce != nil {
+						call, bound = ce, id.Name
+					}
+				}
+			}
 			gs, ok := stmt.(*ast.GoStmt)
-			if !ok || !mentions(gs.Call, "NewWatchdog") {
+			if !ok {
 				continue
 			}
-			ast.Inspect(gs.Call, func(m ast.Node) bool {
-				ce, ok := m.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if sel, ok := ce.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewWatchdog" {
-					call = ce
-					return false
-				}
-				if id, ok := ce.Fun.(*ast.Ident); ok && id.Name == "NewWatchdog" {
-					call = ce
-					return false
-				}
-				return true
-			})
+			// `go <ident>.Run(...)` only. A Run reached through a field, an
+			// index or a helper call is not an identifier this test can tie back
+			// to the construction above, so it does not count.
+			sel, ok := gs.Call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Run" {
+				continue
+			}
+			if recv, ok := sel.X.(*ast.Ident); ok {
+				started[recv.Name] = true
+			}
 		}
 	}
 	require.NotNil(t, call,
-		"main.go has no `go ...NewWatchdog(...)` statement directly in a function body: either the stale-task "+
-			"watchdog never runs, or it is nested inside a conditional that may never execute - and nothing else fails")
+		"main.go has no `x := ...NewWatchdog(...)` assignment directly in a function body: either the "+
+			"stale-task watchdog is never constructed, or it is nested inside a conditional that may never "+
+			"execute - in which case it reaches buildHTTPServer as a typed nil and the coordinator silently "+
+			"has no bound on task duration again, and nothing else fails")
+	require.True(t, started[bound],
+		"main.go constructs the watchdog as %q but has no `go %s.Run(...)` statement directly in a function "+
+			"body. Constructing it is not running it: the counters section would report an honest zero "+
+			"forever while no assignment was ever bounded. Started: %v", bound, bound, keysOf(started))
 
 	reaches := func(seed string) bool {
 		seen := map[string]bool{}

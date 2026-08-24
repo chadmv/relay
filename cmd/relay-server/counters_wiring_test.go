@@ -13,15 +13,18 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/netlimit"
+	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -227,6 +230,7 @@ func TestBuildHTTPServer_EverySourceFieldProducesAServedSection(t *testing.T) {
 		q:             store.New(stubAdminDB{}),
 		grpcAdmission: netlimit.Wrap(raw, netlimit.Config{MaxTotal: 8, MaxPerIP: 8}),
 		agentHandler:  worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {}),
+		watchdog:      scheduler.NewWatchdog(nil, nil, nil, 0, 0),
 	})
 
 	// keysOfRaw rather than the map itself, so the failure prints section NAMES
@@ -386,6 +390,7 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	deps := []wiredDep{
 		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
 		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
+		{"watchdog", "NewWatchdog", "the scheduler.Watchdog bound in main's body"},
 	}
 
 	depsType := reflect.TypeOf(httpServerDeps{})
@@ -792,4 +797,115 @@ func lookupWiredDep(deps []wiredDep, name string) (wiredDep, bool) {
 		}
 	}
 	return wiredDep{}, false
+}
+
+// sweepableStore is a Postgres-free watchdogStore. internal/scheduler's
+// watchdogStore is an UNEXPORTED INTERFACE WHOSE METHODS ARE ALL EXPORTED, so
+// this package can implement it - which is what puts this proof in the DEFAULT
+// lane rather than behind //go:build integration. A sweep needs a store, not a
+// gRPC recv goroutine and not a container, which is something neither slice 2's
+// nor slice 3's forwarding proof could say.
+type sweepableStore struct{ overdue []store.Task }
+
+func (s *sweepableStore) ListOverdueAssignedTasks(context.Context, store.ListOverdueAssignedTasksParams) ([]store.Task, error) {
+	return s.overdue, nil
+}
+
+func (s *sweepableStore) UpdateTaskStatus(_ context.Context, p store.UpdateTaskStatusParams) (store.Task, error) {
+	return store.Task{ID: p.ID, JobID: p.ID, Status: p.Status, WorkerID: p.WorkerID,
+		AssignmentEpoch: p.AssignmentEpoch}, nil
+}
+
+func (s *sweepableStore) NotifyTaskCompleted(context.Context) error             { return nil }
+func (s *sweepableStore) FailDependentTasks(context.Context, pgtype.UUID) error { return nil }
+func (s *sweepableStore) RecomputeJobStatus(context.Context, pgtype.UUID) (string, error) {
+	return "failed", nil
+}
+
+// nopCanceller: the watchdog's cancel fan-out is best-effort and irrelevant here.
+type nopCanceller struct{}
+
+func (nopCanceller) SendCancel(string, string, bool) error { return nil }
+
+func countersTestUUID(b byte) pgtype.UUID {
+	var raw [16]byte
+	raw[15] = b
+	return pgtype.UUID{Bytes: raw, Valid: true}
+}
+
+// TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters is EXECUTED, and it
+// moves a REAL number through the REAL route.
+//
+// It is the strongest forwarding proof any section in this cluster has: a
+// substituted scheduler.NewWatchdog inside buildHTTPServer produces a section of
+// zeros here and this test FAILS on the count, with no container. The two
+// remaining questions live elsewhere - whether main passes the watchdog it runs
+// is TestServerCountersIsWiredByMain (syntactic), and whether the assignment is
+// spelled d.<field> is countersAssignmentSources.
+func TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters(t *testing.T) {
+	wid := countersTestUUID(200)
+	q := &sweepableStore{overdue: []store.Task{{
+		ID: countersTestUUID(1), JobID: countersTestUUID(99), Status: "running", WorkerID: wid,
+		AssignmentEpoch: 7,
+		AssignedAt:      pgtype.Timestamptz{Time: time.Now().Add(-48 * time.Hour), Valid: true},
+	}}}
+	wd := scheduler.NewWatchdog(q, nopCanceller{}, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: wd,
+	})
+
+	before := countersAsAdmin(t, srv)
+	require.Contains(t, before, "watchdog",
+		"a wired watchdog must produce the section from the moment the server is built. An absent "+
+			"section reads as 'this build has no watchdog', which is false.")
+
+	require.NoError(t, wd.SweepOnce(context.Background()))
+
+	after := countersAsAdmin(t, srv)
+	var section struct {
+		Counts struct {
+			SweptTotal    uint64            `json:"swept_total"`
+			SweptOverflow uint64            `json:"swept_overflow"`
+			SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(after["watchdog"], &section))
+	require.Equal(t, uint64(1), section.Counts.SweptTotal,
+		"the served endpoint must report THIS watchdog's sweeps. A stub, a second watchdog or an "+
+			"unwired section cannot produce this number.")
+	require.Equal(t, uint64(0), section.Counts.SweptOverflow)
+	require.Len(t, section.Counts.SweptByWorker, 1,
+		"and the sweep must be attributed to the worker the row named")
+}
+
+// TestBuildHTTPServer_TypedNilWatchdogLeavesTheSectionAbsent.
+//
+// SAY WHAT THIS GUARDS, because the item that asked for it overstated the case.
+// `var wd *scheduler.Watchdog` conditionally assigned stores a TYPED nil in
+// api.WatchdogSource, which is not == nil, so the handler's `src != nil` is true
+// and CounterSnapshot dereferences a nil receiver. That shape is NOT what main
+// writes and cannot be: TestServerCountersIsWiredByMain requires exactly one
+// unconditional assignment on the chain, so the watchdog is constructed
+// unconditionally even when both its bounds are zero. This test guards the SHAPE
+// against a future caller, not a live panic.
+//
+// The fix belongs at the wiring boundary where the concrete type is still
+// visible, and NOT in a nil-tolerant CounterSnapshot: returning a zero snapshot
+// would turn an unwired control into a section of zeros, and "not wired" versus
+// "ran and stopped nothing" is the one distinction this payload exists to keep.
+func TestBuildHTTPServer_TypedNilWatchdogLeavesTheSectionAbsent(t *testing.T) {
+	var unwired *scheduler.Watchdog
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: unwired,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.NotContains(t, top, "watchdog",
+		"a nil watchdog must leave the section ABSENT, never present-and-zero, and must never panic")
+	require.Contains(t, top, "started_at")
 }

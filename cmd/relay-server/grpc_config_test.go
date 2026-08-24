@@ -355,7 +355,9 @@ func TestRefusalSummaryLogsOnlyWhenCountersMove(t *testing.T) {
 }
 
 // TestGRPCAdmissionIsWiredByMain is a structural guard in the same spirit as
-// TestWatchdogIsStartedByMain (watchdog_config_test.go:129). Deleting the
+// TestWatchdogIsStartedByMain (in watchdog_config_test.go; named rather than
+// cited by line, because the line moved the first time that guard was edited and
+// a stale pointer is the defect class this repo records most often). Deleting the
 // netlimit.Wrap call from main.go compiles and leaves `go test ./...` fully
 // green - netlimit keeps its own passing unit tests, grpc_config keeps its own,
 // and the agent port silently has no connection bound again, which is the entire

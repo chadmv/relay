@@ -8,6 +8,7 @@ import (
 	"relay/internal/events"
 	"relay/internal/metrics"
 	"relay/internal/netlimit"
+	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/worker"
 
@@ -90,6 +91,27 @@ type httpServerDeps struct {
 	// field; that is why its cardinality relation counts SECTIONS rather than deps
 	// fields.
 	agentHandler *worker.Handler
+
+	// watchdog is the coordinator stale-task watchdog main runs, typed
+	// CONCRETELY rather than as api.WatchdogSource for the same reason
+	// grpcAdmission and agentHandler are: a (*scheduler.Watchdog)(nil) stored in
+	// that interface is NOT nil, so the counters handler's `src != nil` would be
+	// true and CounterSnapshot would dereference a nil receiver.
+	//
+	// IT MUST BE THE SAME Watchdog main RUNS. A second one would count its own
+	// (permanently zero) sweeps while the real ones went unread - a confident
+	// zero, which is worse than an absent section.
+	//
+	// NOTE WHAT IS AND IS NOT GUARDED, so nobody trims one of the three. That
+	// main passes the watchdog it runs is syntactic
+	// (TestServerCountersIsWiredByMain). That the assignment below is spelled
+	// d.<field> is countersAssignmentSources. That buildHTTPServer forwards what
+	// it was GIVEN is EXECUTED and, unlike the other two sections, in the
+	// DEFAULT lane: scheduler's watchdogStore is an unexported interface with
+	// exported methods, so a sweep can be driven from here with no Postgres and
+	// no gRPC stream - see
+	// TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters.
+	watchdog *scheduler.Watchdog
 }
 
 // buildHTTPServer assembles the api.Server AND the http.Server that serves it,
@@ -153,6 +175,12 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	if d.agentHandler != nil {
 		s.Counters.IngestLogBudget = d.agentHandler
 		s.Counters.TaskLogFence = d.agentHandler
+	}
+	// ITS OWN `if`, because it is its own deps field. agentHandler feeds two
+	// sections under one filter because both controls live on one object; the
+	// watchdog is a separate object with a separate lifetime.
+	if d.watchdog != nil {
+		s.Counters.Watchdog = d.watchdog
 	}
 
 	return &http.Server{Addr: d.addr, Handler: s.Handler()}

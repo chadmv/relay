@@ -205,6 +205,34 @@ func main() {
 		MaxTotal: grpcBnds.maxConns,
 		MaxPerIP: grpcBnds.maxConnsPerIP,
 	})
+	// Bound how long a task may hold an assignment. tasks.timeout_sec is
+	// otherwise enforced only by the agent, so a wedged or lying agent holds its
+	// task - and its worker slot, and its job - forever.
+	//
+	// CONSTRUCTED HERE, ABOVE buildHTTPServer, because the counters endpoint
+	// reports this watchdog's sweeps and buildHTTPServer is the only place the
+	// api.Server is built. It is constructed UNCONDITIONALLY even when both
+	// bounds are zero (SweepOnce then returns before the round trip): a
+	// `var wd *scheduler.Watchdog` assigned inside an `if` is a typed nil in the
+	// source interface AND is RED under TestServerCountersIsWiredByMain, which
+	// requires exactly one unconditional assignment on the chain. A disabled
+	// watchdog therefore serves an honest section of zeros rather than
+	// vanishing, which would say "this build has no watchdog".
+	watchdogMargin, marginWarning := parseWatchdogDuration(
+		"RELAY_TASK_WATCHDOG_MARGIN", os.Getenv("RELAY_TASK_WATCHDOG_MARGIN"),
+		scheduler.DefaultWatchdogMargin, minWatchdogMarginDur)
+	if marginWarning != "" {
+		log.Printf("WARNING: %s", marginWarning)
+	}
+	maxAssignment, maxAssignmentWarning := parseWatchdogDuration(
+		"RELAY_TASK_MAX_ASSIGNMENT", os.Getenv("RELAY_TASK_MAX_ASSIGNMENT"),
+		scheduler.DefaultMaxAssignment, minMaxAssignmentDur)
+	if maxAssignmentWarning != "" {
+		log.Printf("WARNING: %s", maxAssignmentWarning)
+	}
+	log.Print(watchdogBoundsLine(watchdogMargin, maxAssignment))
+	watchdog := scheduler.NewWatchdog(q, registry, broker, watchdogMargin, maxAssignment)
+
 	// The HTTP server is built HERE, after the bounded gRPC listener exists,
 	// because the counters endpoint reads that listener's snapshot on demand and
 	// buildHTTPServer is the only place the api.Server is constructed. Building
@@ -228,6 +256,7 @@ func main() {
 		static:            webui.Handler(),
 		grpcAdmission:     grpcLis,
 		agentHandler:      agentHandler,
+		watchdog:          watchdog,
 	})
 	go runRefusalReporter(ctx, grpcLis, grpcRefusalReportInterval)
 	go func() {
@@ -249,23 +278,9 @@ func main() {
 	// Mark connected-but-silent workers stale based on telemetry age.
 	go metrics.NewSweeper(q, broker, metricsStore, staleAfter).Run(ctx)
 
-	// Bound how long a task may hold an assignment. tasks.timeout_sec is
-	// otherwise enforced only by the agent, so a wedged or lying agent holds its
-	// task - and its worker slot, and its job - forever.
-	watchdogMargin, marginWarning := parseWatchdogDuration(
-		"RELAY_TASK_WATCHDOG_MARGIN", os.Getenv("RELAY_TASK_WATCHDOG_MARGIN"),
-		scheduler.DefaultWatchdogMargin, minWatchdogMarginDur)
-	if marginWarning != "" {
-		log.Printf("WARNING: %s", marginWarning)
-	}
-	maxAssignment, maxAssignmentWarning := parseWatchdogDuration(
-		"RELAY_TASK_MAX_ASSIGNMENT", os.Getenv("RELAY_TASK_MAX_ASSIGNMENT"),
-		scheduler.DefaultMaxAssignment, minMaxAssignmentDur)
-	if maxAssignmentWarning != "" {
-		log.Printf("WARNING: %s", maxAssignmentWarning)
-	}
-	log.Print(watchdogBoundsLine(watchdogMargin, maxAssignment))
-	go scheduler.NewWatchdog(q, registry, broker, watchdogMargin, maxAssignment).Run(ctx)
+	// The watchdog itself is constructed above, next to buildHTTPServer, because
+	// the counters endpoint reports its sweeps.
+	go watchdog.Run(ctx)
 
 	// Purge expired enrollment tokens hourly.
 	go runEnrollmentJanitor(ctx, q)
