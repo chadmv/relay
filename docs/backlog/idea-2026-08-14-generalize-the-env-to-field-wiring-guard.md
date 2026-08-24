@@ -341,3 +341,32 @@ item should be careful not to trade away for uniformity.
 nothing is broken and the `srv.Handler` shape is latent rather than present - but the `srv.Handler`
 bullet is the cheapest thing on this item's list and the only one that guards against a whole endpoint
 disappearing rather than one knob. If this item keeps deferring, ship that bullet alone.
+
+## 2026-08-24: a tenth copy, and slice 4 found a fail-open in the pattern itself
+
+Slice 4 added the `watchdog` wiring and with it another copy of this guard family, plus two
+structural changes worth folding into whatever generalization this item produces:
+
+- **Construction and start split.** `main` used to write `go scheduler.NewWatchdog(...).Run(ctx)`,
+  one statement carrying both. The counters endpoint needs the watchdog as a bound local above
+  `buildHTTPServer`, so `TestWatchdogIsStartedByMain` now checks three things instead of two:
+  exactly one unconditional construction binding a plain identifier, a `go <sameIdent>.Run(...)`
+  that is a direct child of a function body, and both naming the same watchdog. "Exactly one"
+  rather than "at least one" was forced by measurement - a last-wins walk passed a second
+  construction started in place of the one `buildHTTPServer` reports on.
+
+- **A positional check, because the guard was FAIL-OPEN on argument order.** `NewWatchdog`'s last
+  two parameters are both `time.Duration`, so transposing them compiles and - measured - left
+  `go test ./cmd/relay-server/...` **green**. In production that is margin 24h and maxAssignment
+  30m: every assignment older than half an hour stamped `timed_out` within one tick, dependents
+  cascaded to `failed`. The fix collects `*ast.BasicLit` string values alongside idents, so
+  `Args[3]` must reach `parseWatchdogDuration` **and** `"RELAY_TASK_WATCHDOG_MARGIN"`, `Args[4]` the
+  same plus `"RELAY_TASK_MAX_ASSIGNMENT"`, and neither may reach the other's name.
+
+**The generalization must handle same-typed adjacent parameters**, or it regresses this. Any
+env-to-field guard that proves "both bounds are wired" without proving *which is which* is fail-open
+wherever two parameters share a type - and that is the common case for durations, sizes and counts.
+
+Two evasions remain disclosed rather than closed in the slice-4 copy, and a generalization should
+decide whether to close them: a `go func() { wd.Run(ctx) }()` wrapper is a false positive, and
+reassignment of the bound variables between parse and call is unreachable by any scanner.

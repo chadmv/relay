@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
 
@@ -102,7 +103,17 @@ type Watchdog struct {
 	margin        time.Duration
 	maxAssignment time.Duration
 	now           func() time.Time // injectable clock; defaults to time.Now
+
+	// counters is a VALUE field, so the zero value works and a bare &Watchdog{}
+	// in a test has a working counter set with no nil case to get wrong.
+	counters watchdogCounters
 }
+
+// CounterSnapshot satisfies api.WatchdogSource. The interface is declared in
+// internal/api rather than here because internal/scheduler imports internal/api
+// (dispatch.go) and the reverse import is impossible - so for this section, and
+// unlike every other, the CONSUMER owns the type.
+func (w *Watchdog) CounterSnapshot() api.WatchdogCounters { return w.counters.snapshot() }
 
 // NewWatchdog constructs a Watchdog. A zero margin disables the execution arm
 // and a zero maxAssignment disables the absolute arm; both zero disables the
@@ -172,6 +183,22 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	// ONE AGGREGATE LINE PER SWEEP, covering BOTH the swept set and the
+	// failed-write set. Two items wanted a once-per-sweep summary
+	// (idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced
+	// and bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick) and
+	// shipping them separately would have produced two lines and a third item to
+	// reconcile them.
+	//
+	// SAY WHAT THIS SWEEP CAN STILL EMIT, so "one line" is not read as more than
+	// it is: the row-cap line above (once per sweep, only when the cap binds),
+	// one line per SWEPT task (see its own comment), and this summary. Three
+	// kinds, each with its own bound.
+	var swept, failedWrites int
+	sweptWorkers := make(map[string]struct{}) // bounded by WatchdogMaxRowsPerSweep
+	var firstFailID pgtype.UUID
+	var firstFailErr error
+
 	for _, t := range overdue {
 		// The clock is read PER ROW. Sharing one reading across a batch stamps
 		// every row with a finished_at from the start of the loop, and - now that
@@ -193,14 +220,31 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		if err != nil {
 			// pgx.ErrNoRows means somebody else got there first - the agent
 			// finished, a cancel landed, a grace expiry requeued, or a sibling
-			// replica swept it. That is the CORRECT outcome, not a failure, so it
-			// is not logged. Any other error is real. Either way, continue to the
-			// next row: one bad row must never end the sweep.
+			// replica swept it. That is the CORRECT outcome, not a failure, so
+			// it is neither logged nor counted. Any other error is real, and is
+			// AGGREGATED rather than logged here: the write did not land, so the
+			// row stays in the scan partition and the very next tick returns it,
+			// which made the old per-row line repeat every 60 seconds per row
+			// for as long as the failure persisted - in exactly the conditions
+			// (a database already under stress) where log volume is least
+			// welcome. Either way, continue to the next row: one bad row must
+			// never end the sweep.
 			if !errors.Is(err, pgx.ErrNoRows) {
-				log.Printf("watchdog: UpdateTaskStatus(timed_out) for task %s: %v", uuidStr(t.ID), err)
+				failedWrites++
+				if firstFailErr == nil {
+					// FIRST, not last. The first error is the one closest to the
+					// cause; "last" is whichever row the loop happened to end
+					// on.
+					firstFailID, firstFailErr = t.ID, err
+				}
 			}
 			continue
 		}
+
+		// COUNTED ONLY WHEN THE WRITE MATCHED. A fence-rejected write ended
+		// nothing, and counting it would inflate the one number an operator uses
+		// to decide whether to disable a machine.
+		w.counters.record(uuidStr(t.WorkerID))
 
 		// One line per SWEPT task, unbudgeted, and that is safe: the count per
 		// sweep is bounded by WatchdogMaxRowsPerSweep, each task can be swept at
@@ -208,9 +252,20 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		// caller-supplied. A watchdog that kills somebody's work without saying
 		// why it decided to is worse than no watchdog - which is also why the line
 		// must never assert something false; see watchdogSweptLine.
+		//
+		// THAT ARGUMENT COVERS THIS LINE AND ONLY THIS LINE. It was read once as
+		// covering the error branch above, and it does not: the "swept at most
+		// once" clause is precisely what a row whose write FAILED does not get,
+		// because that row stayed non-terminal and comes back next tick. The
+		// failed set is aggregated into the summary below instead. A correctness
+		// argument written next to one of two branches will be read as covering
+		// the pair; say which branch.
 		log.Printf("watchdog: task %s (job %s, worker %s) %s",
 			uuidStr(updated.ID), uuidStr(updated.JobID), uuidStr(t.WorkerID),
 			watchdogSweptLine(t, now, w.margin, w.maxAssignment))
+
+		swept++
+		sweptWorkers[uuidStr(t.WorkerID)] = struct{}{}
 
 		finalizeTerminalTask(ctx, w.q, w.broker, "watchdog", updated, "timed_out")
 		if err := w.q.NotifyTaskCompleted(ctx); err != nil {
@@ -223,6 +278,54 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 			defer wg.Done()
 			w.sendCancel(workerID, taskID)
 		}()
+	}
+
+	// GATED ON SOMETHING HAVING HAPPENED. An ungated summary would print
+	// "0 task(s) swept" every WatchdogSweepInterval forever on a healthy fleet -
+	// 1440 lines a day - which is the very bug this line closes, wearing the
+	// fix's clothes. TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll is the
+	// guard.
+	if swept > 0 || failedWrites > 0 {
+		msg := fmt.Sprintf("watchdog: sweep ended: %d task(s) swept across %d worker(s)",
+			swept, len(sweptWorkers))
+		// GATED ON swept BEFORE worst() IS CALLED, not inside the same `if`:
+		// worst() takes the counters mutex and walks up to
+		// api.WatchdogSweptWorkerMax entries, and on a sweep that only had
+		// failed writes the result was discarded.
+		if swept > 0 {
+			worstID, worstN, overflow := w.counters.worst()
+			switch {
+			case worstN <= 1:
+				// Nothing said. "worst: worker X with 1" beside "256 swept
+				// across 256 workers" names an arbitrary member of a set in
+				// which nothing stands out, which is the opposite of the
+				// repeating-uuid signal this clause exists for. worstID == ""
+				// (nothing tracked at all) is the same case and needs no
+				// separate arm.
+			case overflow > 0:
+				// THE MAXIMUM IS OVER THE TRACKED SET ONLY, and at capacity a
+				// never-before-seen worker's sweeps go to SweptOverflow however
+				// many there are - so the real offender can be entirely absent
+				// from the map while an innocent worker with 2 is named. Say
+				// both, or the sentence asserts a maximum it cannot establish
+				// and points a disable decision at the wrong machine.
+				msg += fmt.Sprintf(
+					"; worst TRACKED worker since process start: %s with %d "+
+						"(%d sweep(s) unattributed - per-worker attribution is incomplete)",
+					worstID, worstN, overflow)
+			default:
+				// CUMULATIVE, and the line says so: the pattern is the
+				// actionable part and one sweep does not show it. Attribution
+				// is complete here, so the maximum is over every sweep this
+				// process has made and the clause can be unqualified.
+				msg += fmt.Sprintf("; worst since process start: worker %s with %d", worstID, worstN)
+			}
+		}
+		if failedWrites > 0 {
+			msg += fmt.Sprintf("; %d write(s) FAILED, first: task %s: %v",
+				failedWrites, uuidStr(firstFailID), firstFailErr)
+		}
+		log.Print(msg)
 	}
 	return nil
 }

@@ -424,10 +424,33 @@ func finalizeTerminalTask(
 // assignment_epoch (a real, non-zero value from ClaimTaskForWorker). 'failed' is
 // terminal, so the assignment ends and the epoch is intentionally NOT bumped. If
 // another path ended the assignment between claim and here, UpdateTaskStatus
-// affects zero rows (pgx.ErrNoRows); we log and stop without retry or requeue.
+// affects zero rows (pgx.ErrNoRows); we stop SILENTLY, without retry, requeue or
+// a log line - the race is expected, and the attempt is already reported by the
+// unconditional line at the top of this function.
 func (d *Dispatcher) failClaimedTask(ctx context.Context, claimed store.Task, reason string) {
+	failClaimedTask(ctx, d.q, d.broker, claimed, reason)
+}
+
+// failClaimedStore is the subset of *store.Queries the terminal-fail path needs,
+// narrowed exactly as terminalTailStore already was when that tail was
+// extracted. Dispatcher.q is a concrete *store.Queries, so this is what makes
+// the fence-rejection branch drivable by a fake - without Postgres, and
+// therefore in the DEFAULT lane.
+type failClaimedStore interface {
+	terminalTailStore
+	UpdateTaskStatus(ctx context.Context, arg store.UpdateTaskStatusParams) (store.Task, error)
+}
+
+// failClaimedTask is the body of the method above; see its doc comment.
+func failClaimedTask(
+	ctx context.Context,
+	q failClaimedStore,
+	broker *events.Broker,
+	claimed store.Task,
+	reason string,
+) {
 	log.Printf("dispatch: failing task %s terminally: %s", uuidStr(claimed.ID), reason)
-	updated, err := d.q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+	updated, err := q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
 		ID:              claimed.ID,
 		Status:          "failed",
 		WorkerID:        claimed.WorkerID,
@@ -436,10 +459,48 @@ func (d *Dispatcher) failClaimedTask(ctx context.Context, claimed store.Task, re
 		AssignmentEpoch: claimed.AssignmentEpoch,
 	})
 	if err != nil {
-		log.Printf("dispatch: UpdateTaskStatus(failed) for task %s: %v", uuidStr(claimed.ID), err)
+		// A FENCE-REJECTION SITE OF THE `:one` KIND, and until now the only one
+		// of that kind that did not distinguish pgx.ErrNoRows.
+		//
+		// NAME THE PARTITION, NOT A COUNT. A bare "the fifth of five" is a
+		// uniqueness claim, and a uniqueness claim is a claim about the
+		// COMPLEMENT - it cannot be checked by opening its subject, only by
+		// searching for the shape (CLAUDE.md says exactly this about
+		// RequeueTaskByID, which is where the rule was learned). The earlier
+		// wording here said "the other four" and missed ClaimTaskForWorker in
+		// Dispatcher.sendTask, earlier in this same file.
+		//
+		// Go-side sites where an epoch fence rejects, split by HOW the
+		// rejection arrives:
+		//
+		//   - As pgx.ErrNoRows from a `:one` statement, which is the only shape
+		//     an `err != nil` arm can tell apart: handleTaskLog's AppendTaskLog
+		//     arm, handleTaskStatus's IncrementTaskRetryCount and
+		//     UpdateTaskStatus arms, Watchdog.SweepOnce, this one, and
+		//     Dispatcher.sendTask's ClaimTaskForWorker - which CLAUDE.md
+		//     names as the canonical "conditionally end the assignment" branch
+		//     of the epoch fence.
+		//   - As a rowcount or an empty slice, where there is no error to
+		//     inspect at all: RequeueTask and RequeueTaskByID (`:execrows`) and
+		//     RequeueWorkerTasksIfEpoch (`:many`). A rejection there is
+		//     indistinguishable from "there was nothing to requeue", so those
+		//     sites do not have this branch to get right and cannot grow one
+		//     without a statement change.
+		//
+		// ErrNoRows means another path ended this assignment between the claim
+		// and here - a cancel, a grace requeue, a sibling replica. That is the
+		// CORRECT outcome, not a failure, so it is not logged. Any other error
+		// is real.
+		//
+		// THE SILENCE COSTS NO SIGNAL: the unconditional "failing task ...
+		// terminally" line above is emitted before this write on every attempt,
+		// so a poison task being re-claimed in a loop stays visible through it.
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("dispatch: UpdateTaskStatus(failed) for task %s: %v", uuidStr(claimed.ID), err)
+		}
 		return
 	}
-	finalizeTerminalTask(ctx, d.q, d.broker, "dispatch", updated, "failed")
+	finalizeTerminalTask(ctx, q, broker, "dispatch", updated, "failed")
 }
 
 // uuidStr converts a pgtype.UUID to its canonical string representation.

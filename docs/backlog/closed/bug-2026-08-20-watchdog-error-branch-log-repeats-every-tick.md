@@ -1,9 +1,11 @@
 ---
 title: The watchdog's error-branch log line repeats every tick for as long as a write failure persists
 type: bug
-status: open
+status: closed
 created: 2026-08-20
 priority: low
+closed: 2026-08-24
+resolution: fixed
 source: Phase 4 security lens of the 2026-08-20-coordinator-stale-task-watchdog slice
 ---
 
@@ -131,3 +133,34 @@ a comment is not a check"**, arriving in its milder form: here the comment is no
 anything it claims, it is just **scoped to the adjacent branch** and reads as if it covered both. A
 correctness argument written next to one of two branches will be read as covering the pair. Say which
 branch, or move the argument.
+
+## Resolution
+
+Fixed as part of slice 4 of 4 of the silent-drop observability cluster (2026-08-24,
+silent-drop-observability-slice4), folded in per the joint spec's decision D12.
+
+`Watchdog.SweepOnce`'s per-row `UpdateTaskStatus(timed_out)` error line is gone. A failed write now
+increments a per-sweep `failedWrites` counter and records the FIRST failing task id and error; after
+the loop, one aggregate line reports the swept set and the failed set together. The two items wanted
+a once-per-sweep summary each, and shipping them separately would have produced two lines plus a
+third item to reconcile them - hence one line covering both.
+
+The volume argument this item made is what the fix acts on: a failed write leaves the row
+non-terminal, so it stays in the scan partition and the very next tick returns it, which made the old
+line repeat every 60 seconds per row for as long as the failure persisted - in exactly the conditions
+(a database already under stress) where log volume is least welcome.
+
+Two things verification added:
+
+- The summary is GATED on `swept > 0 || failedWrites > 0`. An ungated summary would print
+  "0 task(s) swept" every sweep interval forever on a healthy fleet - 1440 lines a day - which is
+  this same bug wearing the fix's clothes. `TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll` pins it.
+- "FIRST, not last" was initially unguarded: the fixture gave all five poisoned rows identical error
+  text, so capturing the last error instead of the first passed the whole suite, as did zeroing the
+  reported task id. The rows now carry distinct texts and the test asserts the first row's text is
+  present, a later row's absent, and the first row's uuid named.
+
+Note for whoever reads this next: the per-SWEPT-task line is unchanged and still emitted once per
+swept task. Its "swept at most once" safety argument covers that line only - a row whose write FAILED
+is precisely the row that does come back next tick, which is why the failed set is aggregated rather
+than logged per row.

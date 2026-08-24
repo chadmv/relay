@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -466,14 +467,16 @@ func routeIdentName(e ast.Expr) string {
 // started_at is exempt AS A time.Time serialising as an RFC 3339 instant, and
 // nothing else at that path is exempt from anything.
 //
-// AND THE LIST NAMES ONLY PATHS THAT EXIST. It previously carried
-// "watchdog.counts.swept_by_worker" - an entry written in slice 1 against code
-// nobody had written, pre-authorizing a map of UUID keys whose only remaining
-// forcing function was a one-line edit to counterPayloadLeaves with its
-// justification already supplied. An unbounded-cardinality map keyed on a
-// server-resolved identifier may well be the right answer for that section, but
-// the argument has to be made in the commit that can be read against the code,
-// not inherited from one that could not.
+// AND THE LIST NAMES ONLY PATHS THAT EXIST. "watchdog.counts.swept_by_worker"
+// was first written here in slice 1 against code nobody had written,
+// pre-authorizing a map of UUID keys whose only remaining forcing function was a
+// one-line edit to counterPayloadLeaves with its justification already supplied;
+// it was taken out for that reason. It is BACK, in slice 4, in the commit that
+// shipped the map - with an argument that can be read against the producer, and
+// with predicates that do the descending themselves (key shape, value shape and
+// the WatchdogSweptWorkerMax cardinality bound) rather than accepting a
+// container and stopping. TestWatchdogSweptByWorkerExemptionRejectsHostileShapes
+// is that entry's own test, and it is where the exemption's real content lives.
 //
 // THE RESIDUAL, STATED SO THE NEXT ENTRY IS WRITTEN KNOWING IT: both walks
 // still stop at an exempted path - the JSON walk `return`s and the type walk
@@ -495,7 +498,67 @@ type counterPayloadExemption struct {
 	jsonOK func(any) bool
 }
 
+// canonicalUUIDRe is exactly what internal/scheduler's uuidStr emits: lowercase
+// hex, 8-4-4-4-12, anchored. Anchored and hex-only is what makes the
+// newline-injection and RTL-override class unrepresentable rather than merely
+// unlikely.
+var canonicalUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 var counterPayloadAllowList = map[string]counterPayloadExemption{
+	"watchdog.counts.swept_by_worker": {
+		why: "a map from SERVER-ASSIGNED worker uuids to how many of that worker's assignments the " +
+			"coordinator watchdog ended. THE SECURITY QUESTION SPLITS IN TWO AND ONLY ONE HALF IS " +
+			"ANSWERED BY 'server-assigned'. (1) CALLER-SUPPLIED BYTES: no. The keys are uuidStr() of a " +
+			"worker_id the coordinator's own scan returned, and this route is admin-authenticated, so a " +
+			"uuid admissible HERE is still inadmissible in any log line reachable from the gRPC recv " +
+			"path. The predicates below CHECK that shape rather than assert it, because an exemption " +
+			"granted to a NAME is an exemption from every question. (2) CARDINALITY: server-assigned is " +
+			"NOT server-limited. With RELAY_ALLOW_AUTO_ENROLL on, a reachable host creates one " +
+			"persistent workers row per hostname it claims " +
+			"(bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded, open), so a peer CAN drive " +
+			"the number of distinct keys an admin-facing document serialises on every request. The " +
+			"control is therefore the producer's hard cap, WatchdogSweptWorkerMax, which is ENFORCED in " +
+			"scheduler.watchdogCounters.record and CHECKED in jsonOK below rather than described beside " +
+			"it. Note what jsonOK can and cannot see: it runs against fakeWatchdogSource, whose keys are " +
+			"literals in this file, so it says this FIXTURE is well-formed and nothing about the real " +
+			"producer - internal/scheduler imports this package, so the import that would let this test " +
+			"drive it is impossible. The same two predicates against REAL producer bytes are " +
+			"cmd/relay-server's TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, " +
+			"which exists because that package can import both sides. DO NOT cite the workers row count " +
+			"as the bound - that is the quantity that is unbounded.",
+		typeOK: func(t reflect.Type) bool {
+			return t.Kind() == reflect.Map &&
+				t.Key().Kind() == reflect.String &&
+				t.Elem().Kind() == reflect.Uint64
+		},
+		jsonOK: func(v any) bool {
+			// DESCEND. Both walks stop here, so anything this function does not
+			// look at is unexamined for the life of the payload.
+			m, ok := v.(map[string]any)
+			if !ok {
+				// nil lands here: a nil Go map serialises as null, and the
+				// producer must always allocate so the section reads {} on a
+				// watchdog that has swept nothing.
+				return false
+			}
+			if len(m) > WatchdogSweptWorkerMax {
+				return false
+			}
+			for k, val := range m {
+				if !canonicalUUIDRe.MatchString(k) {
+					return false
+				}
+				n, ok := val.(json.Number)
+				if !ok {
+					return false
+				}
+				if _, err := strconv.ParseUint(n.String(), 10, 64); err != nil {
+					return false
+				}
+			}
+			return true
+		},
+	},
 	"started_at": {
 		why: "a timestamp, server-generated, and the one field that makes a zeroed counter " +
 			"distinguishable from a restart",
@@ -532,6 +595,9 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.suppressed.status_get_task",
 	"ingest_log_budget.counts.suppressed.inventory",
 	"task_log_fence.counts.rejected_total",
+	"watchdog.counts.swept_total",
+	"watchdog.counts.swept_overflow",
+	"watchdog.counts.swept_by_worker",
 }
 
 // TestCounterPayloadCarriesNoIdentifiers is the cardinality rule of the
@@ -652,6 +718,7 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 			}},
 			IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()},
 			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
+			Watchdog:        fakeWatchdogSource{c: threeDistinctSweeps()},
 		},
 	}
 	rec := httptest.NewRecorder()
@@ -960,4 +1027,208 @@ func TestServerCounters_WiredButZeroTaskLogFenceSectionIsStillPresent(t *testing
 	require.Len(t, fields, 1, "counts must be an object with the one key, not an empty object")
 	assert.Equal(t, "0", string(fields["rejected_total"]),
 		"rejected_total must serialise as an explicit zero, never be elided by omitempty")
+}
+
+// fakeWatchdogSource returns a fixed snapshot. THREE DISTINCT VALUES and a
+// REAL-SHAPED uuid key: equal values would hide a crossed field, and a key that
+// is not a canonical uuid would not exercise the allow-list predicate that
+// admits this map into a payload of integers.
+type fakeWatchdogSource struct{ c WatchdogCounters }
+
+func (f fakeWatchdogSource) CounterSnapshot() WatchdogCounters { return f.c }
+
+func threeDistinctSweeps() WatchdogCounters {
+	return WatchdogCounters{Counts: WatchdogCounts{
+		SweptTotal:    37,
+		SweptOverflow: 4,
+		SweptByWorker: map[string]uint64{
+			"00000000-0000-0000-0000-0000000000c8": 33,
+		},
+	}}
+}
+
+func TestServerCounters_ReportsTheWatchdogSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{Watchdog: fakeWatchdogSource{c: threeDistinctSweeps()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Watchdog *struct {
+			Counts map[string]any `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"watchdog"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.Watchdog, "a wired section must be present")
+	require.Nil(t, body.Watchdog.Levels,
+		"COUNTS ONLY. The two candidate levels were len(swept_by_worker), which is the map restated, "+
+			"and the 256 cap, which is a configured constant and belongs in a limits half nobody has "+
+			"designed yet - putting it in levels now would mean moving it later.")
+
+	// Key-set equality, not per-key assertions alone: a renamed key would decode
+	// as a missing value and a per-key check would report zero.
+	assert.ElementsMatch(t, []string{"swept_total", "swept_overflow", "swept_by_worker"},
+		counterMapKeys(body.Watchdog.Counts))
+	assert.Equal(t, float64(37), body.Watchdog.Counts["swept_total"])
+	assert.Equal(t, float64(4), body.Watchdog.Counts["swept_overflow"])
+	assert.Equal(t, map[string]any{"00000000-0000-0000-0000-0000000000c8": float64(33)},
+		body.Watchdog.Counts["swept_by_worker"])
+}
+
+// TestWatchdogSweptByWorkerExemptionRejectsHostileShapes is the descent made
+// executable.
+//
+// An exemption is shape-checked but NON-DESCENDING: both walks stop at an
+// exempted path once the predicate passes. That is right for started_at, whose
+// predicate examines the whole value. It is WRONG for a container - a jsonOK
+// that merely accepted map[string]any would leave every key and every value
+// uninspected, which is the total exemption the predicate mechanism replaced,
+// re-entered through the predicate. Slice 1 proved that is not theoretical: a
+// map[string]string at an exempted path, with a newline-injected RTL-override
+// key and an IP-address value, passed both guards with zero failures.
+//
+// So this table is the exemption's real content. Each row is a value that must
+// NOT be admitted, and the positive rows prove the predicate is not simply
+// `false`.
+func TestWatchdogSweptByWorkerExemptionRejectsHostileShapes(t *testing.T) {
+	ex, ok := counterPayloadAllowList["watchdog.counts.swept_by_worker"]
+	require.True(t, ok, "the watchdog map must be admitted by an ARGUED exemption, not by a walk that "+
+		"stopped looking")
+
+	tooMany := map[string]any{}
+	for i := 0; i <= WatchdogSweptWorkerMax; i++ {
+		tooMany[fmt.Sprintf("00000000-0000-0000-0000-%012x", i)] = json.Number("1")
+	}
+	require.Len(t, tooMany, WatchdogSweptWorkerMax+1)
+
+	atCap := map[string]any{}
+	for i := 0; i < WatchdogSweptWorkerMax; i++ {
+		atCap[fmt.Sprintf("00000000-0000-0000-0000-%012x", i)] = json.Number("1")
+	}
+
+	cases := []struct {
+		name string
+		v    any
+		want bool
+	}{
+		// The hostile rows come FIRST. A poisoned input placed last cannot
+		// detect an early-exit mutation.
+		{"a key that is not a uuid", map[string]any{
+			"worker-one": json.Number("1")}, false},
+		{"a uuid with an injected newline", map[string]any{
+			"00000000-0000-0000-0000-0000000000c8\n10.0.0.7": json.Number("1")}, false},
+		{"an uppercase uuid", map[string]any{
+			"00000000-0000-0000-0000-0000000000C8": json.Number("1")}, false},
+		{"a hostname-shaped key", map[string]any{
+			"build-agent-07.corp.example": json.Number("1")}, false},
+		{"a string value", map[string]any{
+			"00000000-0000-0000-0000-0000000000c8": "33"}, false},
+		{"a negative value", map[string]any{
+			"00000000-0000-0000-0000-0000000000c8": json.Number("-1")}, false},
+		{"a nested object as a value", map[string]any{
+			"00000000-0000-0000-0000-0000000000c8": map[string]any{"n": json.Number("1")}}, false},
+		{"one over the cap", tooMany, false},
+		{"nil (a nil Go map serialises as null)", nil, false},
+		{"not an object at all", json.Number("3"), false},
+
+		{"a canonical uuid key with a count", map[string]any{
+			"00000000-0000-0000-0000-0000000000c8": json.Number("33")}, true},
+		{"empty", map[string]any{}, true},
+		{"exactly at the cap", atCap, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ex.jsonOK(c.v))
+		})
+	}
+
+	// The type half. A cap cannot be read off a type, so typeOK checks the only
+	// thing a type carries: that the container is a map of string to unsigned.
+	assert.False(t, ex.typeOK(reflect.TypeOf(map[string]string{})),
+		"a map of strings at this path is where an address or a hostname gets in")
+	assert.False(t, ex.typeOK(reflect.TypeOf(map[string]int64{})),
+		"signed values are inadmissible everywhere in this payload")
+	assert.False(t, ex.typeOK(reflect.TypeOf("")))
+	assert.True(t, ex.typeOK(reflect.TypeOf(map[string]uint64{})))
+}
+
+// TestWatchdogSectionRestatesNothing is a forcing function on an ANTECEDENT, in
+// the shape of TestTaskLogFenceSourceReturnsAScalar.
+//
+// The rule this package learned in the ingest slice is that a section whose
+// payload struct RESTATES fields owned by another package needs a NumField
+// assertion between the two types. The watchdog section restates nothing: the
+// source's own return type IS the response type, so handleServerCounters
+// assigns it whole and a field added on either side is published for free.
+//
+// That is only true while the two are the SAME type. Introducing a
+// watchdogSection that copies WatchdogCounts field by field is a small,
+// reasonable-looking edit that would silently move this section into the class
+// that needs the arity check - which is exactly how slice 2 shipped a counted
+// but unpublishable log kind with all three packages green.
+func TestWatchdogSectionRestatesNothing(t *testing.T) {
+	iface := reflect.TypeOf((*WatchdogSource)(nil)).Elem()
+	require.Equal(t, 1, iface.NumMethod(),
+		"WatchdogSource must stay a ONE-METHOD interface: a second method is a second thing that could "+
+			"be restated, and the reasoning below covers only the one")
+	m, ok := iface.MethodByName("CounterSnapshot")
+	require.True(t, ok, "WatchdogSource must declare CounterSnapshot")
+	require.Equal(t, 1, m.Type.NumOut())
+
+	f, ok := reflect.TypeOf(serverCountersResponse{}).FieldByName("Watchdog")
+	require.True(t, ok, "serverCountersResponse must carry a Watchdog field")
+
+	require.Equal(t, m.Type.Out(0), f.Type.Elem(),
+		"serverCountersResponse.Watchdog is %s and CounterSnapshot returns %s. They must be the SAME "+
+			"type. The moment this section restates the source's fields instead of carrying its type, "+
+			"a NumField assertion between the two must ship IN THIS COMMIT - see "+
+			"TestIngestLogKindCountsPublishesEveryWorkerSideField, which exists because a fully correct "+
+			"sixth kind was counted on one side and published under no JSON key on the other, with "+
+			"every package green.", f.Type.Elem(), m.Type.Out(0))
+}
+
+// TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent. A watchdog that
+// has swept nothing is the HEALTHY case and the common one; it must not read as
+// "this build has no watchdog".
+//
+// It walks the section's FULL DEPTH, and the depth is the point: counts carries
+// an object (swept_by_worker), so the shipped scalar loop in
+// TestServerCounters_WiredButZeroSectionIsStillPresent would fail here. Do not
+// copy that loop.
+func TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters: CounterSources{Watchdog: fakeWatchdogSource{c: WatchdogCounters{
+			// An ALLOCATED empty map, which is what CounterSnapshot must always
+			// return: a nil map serialises as null, and null is not an object.
+			Counts: WatchdogCounts{SweptByWorker: map[string]uint64{}},
+		}}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "watchdog"}, counterKeys(top),
+		"a WIRED source whose every counter is zero must still emit its section, and no OTHER section "+
+			"may appear: each source is nil-able on its own")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["watchdog"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section), "counts only; no levels half")
+
+	var counts map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &counts))
+	require.ElementsMatch(t, []string{"swept_total", "swept_overflow", "swept_by_worker"}, counterKeys(counts))
+	assert.Equal(t, "0", string(counts["swept_total"]))
+	assert.Equal(t, "0", string(counts["swept_overflow"]))
+	assert.Equal(t, "{}", string(counts["swept_by_worker"]),
+		"an empty map must serialise as {} and never as null or be elided by omitempty. null is not an "+
+			"object, so the payload's own JSON walk has nothing to descend into and the allow-list "+
+			"predicate rejects it - which is the check that keeps the producer allocating.")
 }

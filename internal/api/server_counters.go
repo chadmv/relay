@@ -35,23 +35,16 @@ import (
 //     two replicas may be added; levels may NOT (max_per_source in particular
 //     does not sum into anything meaningful). No persistence, no history, no
 //     rates, no alerting - a poller derives rates itself.
-//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. started_at is the ONE
-//     exemption today, and it is the whole allow-list:
-//     TestCounterPayloadCarriesNoIdentifiers enforces that, so the SECOND
-//     non-integer value anywhere in the payload goes RED and forces an argument.
-//     "watchdog.counts.swept_by_worker" was written into that allow-list in
-//     slice 1, against code nobody had written, and has been DELIBERATELY
-//     DE-AUTHORIZED: a map keyed on server-resolved worker UUIDs may well be
-//     the right answer for slice 4, but it is a design decision, and
-//     pre-blessing it in slice 1 reduced its only forcing function to a
-//     one-line edit with the justification already supplied. Adding it back
-//     means adding a counterPayloadExemption with its own typeOK and jsonOK
-//     predicates, argued in the same commit that can be read against the code -
-//     including whether unbounded key cardinality is acceptable here. The
-//     admin-authentication argument (this route is not an attacker-writable
-//     site, so a worker UUID admissible HERE stays inadmissible in any log line
-//     reachable from the gRPC recv path) is one input to that decision, not a
-//     standing grant.
+//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. Two paths are exempt
+//     today and each was argued in the commit that added it: started_at, as an
+//     RFC 3339 instant; and watchdog.counts.swept_by_worker, as a map from
+//     server-assigned worker uuids to counts, bounded by
+//     WatchdogSweptWorkerMax. The second was written into slice 1's allow-list
+//     against code nobody had written, DE-AUTHORIZED during slice 1's review
+//     because pre-blessing it reduced its only forcing function to a one-line
+//     edit, and re-added in slice 4 with predicates that DESCEND into the map
+//     and enforce the cap - see counterPayloadExemption. Anything else
+//     non-integer goes RED and forces the same argument.
 //
 // WHAT THIS ENDPOINT DOES NOT BUY, stated next to what it does:
 //
@@ -148,6 +141,142 @@ type TaskLogFenceSource interface {
 	TaskLogFenceRejections() uint64
 }
 
+// WatchdogSweptWorkerMax bounds how many distinct workers watchdog.counts.
+// swept_by_worker will ever name. IT IS DECLARED HERE, IN internal/api, AND
+// THAT IS NOT WHERE IT LOOKS LIKE IT BELONGS.
+//
+// The producer is internal/scheduler, so the constant "wants" to live beside the
+// map. It cannot: this package's own counterPayloadAllowList predicate has to
+// read it (an exemption is shape-checked but NON-DESCENDING, so a predicate that
+// did not check the cap itself would leave the map's key count unchecked in this
+// package entirely), and that test file is package api - importing
+// internal/scheduler from it is the same cycle that forces WatchdogCounts to be
+// declared here. One constant read by both the producer and the guard means the
+// two cannot drift; two constants would.
+//
+// WHERE THE BOUND IS ACTUALLY ENFORCED IS watchdogCounters.record, in
+// internal/scheduler: it refuses a NEW key at capacity and counts the sweep
+// against SweptOverflow instead. Nothing in this package enforces anything at
+// runtime - counterPayloadAllowList is a test predicate, and it runs against a
+// fake source whose keys are literals in server_counters_test.go, so it can only
+// ever say that THAT fixture is well-formed. The one place the real producer's
+// keys are read back through the real route is cmd/relay-server's
+// TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, which
+// exists because that package can import both sides and this one structurally
+// cannot.
+//
+// 256 is a policy number, not a measurement: it comfortably exceeds any fleet
+// this project has seen, and the design is FIRST-COME rather than top-K because
+// top-K needs a comparison on every increment to buy an ordering that
+// swept_overflow already discloses the absence of.
+const WatchdogSweptWorkerMax = 256
+
+// WatchdogCounts is what the coordinator stale-task watchdog has ended since
+// started_at. It is declared HERE rather than in internal/scheduler because
+// internal/scheduler imports this package (scheduler/dispatch.go), so the
+// reverse import is impossible - which INVERTS the shape ingest_log_budget uses,
+// where the producing package owned the type.
+//
+// THAT INVERSION IS WHY THERE IS NO MAPPER ANYWHERE. This type is the response
+// type: serverCountersResponse carries *WatchdogCounters directly and
+// handleServerCounters assigns it whole, and scheduler.Watchdog stores a
+// WatchdogCounts as its OWN counter state and returns a struct copy. A field
+// added here is published by both sides for free. That matters because slice 2
+// shipped a fully correct sixth log kind that was counted on one side and
+// published under no JSON key on the other, with all three packages green; the
+// remedy there was an arity assertion between two restated types, and the better
+// remedy is not to restate. TestWatchdogSectionRestatesNothing guards the
+// antecedent, and TestWatchdogCountersLiveOnlyInThePublishedStruct guards the
+// only remaining way a counter can go unpublished.
+//
+// WHAT THESE NUMBERS DO NOT COVER, said here because it is the question an
+// operator will get wrong: they count assignments THE COORDINATOR ended. An
+// agent that honours its own timeout writes the same 'timed_out' status
+// (worker/handler.go maps TASK_STATUS_TIMED_OUT straight through) and
+// contributes NOTHING here, which is deliberate - the two mean opposite things
+// about a worker's health and this counter SIDE-STEPS the ambiguity rather than
+// resolving it.
+//
+// WHY NOT A DATABASE QUERY, which would be better on every other axis - no
+// process state, survives restarts, correct across replicas: DECLINED, WITH THE
+// PRICE, NOT IMPOSSIBLE. Telling a watchdog-written 'timed_out' from an
+// agent-written one needs either a new terminal status (threaded through every
+// status allow-list, including the two that must be read BACKWARDS -
+// AppendTaskLog's first arm and ListOverdueAssignedTasks - plus
+// TestTasksStatusVocabularyIsExactly) or a nullable writer column plus a
+// migration on a write path that sits under the epoch fence. That is a larger
+// and riskier slice than the observability it buys. IF SUCH A COLUMN IS EVER
+// ADDED FOR ANOTHER REASON, REVISIT THIS: the query route is genuinely better.
+//
+// PER REPLICA. The watchdog is multi-replica-safe by first-write-wins, so a
+// sweep of worker X may be counted on either replica; add the counts across
+// replicas, and expect neither replica's swept_by_worker to be the whole story.
+type WatchdogCounts struct {
+	// SweptTotal counts every assignment this process's watchdog ended,
+	// including the ones attributed to SweptOverflow. It is what makes the
+	// section reconcile: SweptTotal == sum(SweptByWorker) + SweptOverflow,
+	// always, which is also why these three fields are read in ONE critical
+	// section rather than as three independent atomics.
+	SweptTotal uint64 `json:"swept_total"`
+
+	// SweptOverflow counts sweeps attributable to a worker the map is not
+	// tracking, either because the map was already at WatchdogSweptWorkerMax
+	// when that worker was first swept, or because the row's worker id was not
+	// renderable as a uuid. NON-ZERO MEANS PER-WORKER ATTRIBUTION IS INCOMPLETE
+	// and the worst tracked worker may not be the worst worker. This field
+	// exists to make a loss visible; a version of it that were counted and
+	// unpublished would be the defect eating its own remedy.
+	SweptOverflow uint64 `json:"swept_overflow"`
+
+	// SweptByWorker maps a server-assigned worker uuid to how many of its
+	// assignments this process's watchdog ended. NEVER nil - it serialises as
+	// {} on a watchdog that has swept nothing, because null is not an object
+	// and the payload's walks would have nothing to descend into. Capped at
+	// WatchdogSweptWorkerMax; see counterPayloadAllowList for the argument that
+	// admits it into a payload where every other leaf is an integer.
+	SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+}
+
+// WatchdogCounters is the watchdog section. COUNTS ONLY, and the absence of a
+// levels half is a decision: the only candidates were len(SweptByWorker), which
+// is the map itself restated and can only ever agree or be a bug, and the 256
+// cap, which is a CONFIGURED CONSTANT rather than a level. A constant in a
+// levels half would have to MOVE when a limits classification is added
+// (idea-2026-08-21-counters-payload-cannot-say-not-measured), and that is a
+// breaking change to a published payload. It is documented in README instead,
+// and swept_overflow is the runtime signal that it bound.
+type WatchdogCounters struct {
+	Counts WatchdogCounts `json:"counts"`
+}
+
+// WatchdogSource is whatever can report the coordinator watchdog's sweep
+// counters - in production, *scheduler.Watchdog.
+//
+// ITS OWN SOURCE FIELD, like every other section. And note the direction: this
+// interface is declared here and SATISFIED over there, because internal/api can
+// never name internal/scheduler.
+//
+// AN IMPLEMENTATION MUST RETURN A VALUE NOBODY ELSE STILL WRITES TO. This is the
+// first section source whose snapshot type carries a MUTABLE container
+// (SweptByWorker), and that changes what "return a snapshot" costs. Every other
+// source returns a struct of integers, where a copy is what the return statement
+// already does; here a plausible one-line implementation - `func (x X)
+// CounterSnapshot() WatchdogCounters { return x.c }` - hands this handler a map
+// the producer's own goroutine keeps writing, and a single admin GET then ends
+// the process with `fatal error: concurrent map read and map write` (that one is
+// not recoverable, and -race is not needed to see it). It is also CLAUDE.md's
+// "no interior pointers across locks" with the lock left implicit.
+//
+// scheduler.watchdogCounters.snapshot is the reference implementation: it clones
+// the map inside the same critical section that reads the scalars, and
+// TestWatchdogCounters_SnapshotIsACopy is its guard. TestWatchdogSectionRestatesNothing
+// asserts that this section needs no mapper, which makes reusing WatchdogCounts
+// as a source's own storage the natural shape - so read that as "share the
+// type", never as "share the map".
+type WatchdogSource interface {
+	CounterSnapshot() WatchdogCounters
+}
+
 // CounterSources is the set of subsystem counter sources the endpoint
 // assembles. Every field is nil-able and nil means the section is ABSENT from
 // the payload, not zero.
@@ -178,6 +307,7 @@ type CounterSources struct {
 	GRPCAdmission   GRPCAdmissionSource
 	IngestLogBudget IngestLogBudgetSource
 	TaskLogFence    TaskLogFenceSource
+	Watchdog        WatchdogSource
 }
 
 type serverCountersResponse struct {
@@ -185,6 +315,11 @@ type serverCountersResponse struct {
 	GRPCAdmission   *grpcAdmissionSection   `json:"grpc_admission,omitempty"`
 	IngestLogBudget *ingestLogBudgetSection `json:"ingest_log_budget,omitempty"`
 	TaskLogFence    *taskLogFenceSection    `json:"task_log_fence,omitempty"`
+
+	// *WatchdogCounters, not a *watchdogSection restating it. The source's own
+	// type IS the response type, so there is no hand-written mapper and no arity
+	// to drift. TestWatchdogSectionRestatesNothing keeps it that way.
+	Watchdog *WatchdogCounters `json:"watchdog,omitempty"`
 }
 
 type grpcAdmissionSection struct {
@@ -326,6 +461,15 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 		resp.TaskLogFence = &taskLogFenceSection{
 			Counts: taskLogFenceCounts{RejectedTotal: src.TaskLogFenceRejections()},
 		}
+	}
+	if src := s.Counters.Watchdog; src != nil {
+		// ONE ASSIGNMENT, NOT A FIELD-BY-FIELD COPY, and that is the whole
+		// point: the source's type is the response type, so a counter added on
+		// the scheduler side reaches a JSON key with no edit here. Slice 2's
+		// mapper needed TestIngestLogKindCountsPublishesEveryWorkerSideField
+		// precisely because it was five hand-written assignments.
+		snap := src.CounterSnapshot()
+		resp.Watchdog = &snap
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

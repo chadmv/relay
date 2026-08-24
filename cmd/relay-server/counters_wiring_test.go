@@ -7,21 +7,27 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"sort"
 	"testing"
+	"time"
 
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/netlimit"
+	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -227,6 +233,7 @@ func TestBuildHTTPServer_EverySourceFieldProducesAServedSection(t *testing.T) {
 		q:             store.New(stubAdminDB{}),
 		grpcAdmission: netlimit.Wrap(raw, netlimit.Config{MaxTotal: 8, MaxPerIP: 8}),
 		agentHandler:  worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {}),
+		watchdog:      scheduler.NewWatchdog(nil, nil, nil, 0, 0),
 	})
 
 	// keysOfRaw rather than the map itself, so the failure prints section NAMES
@@ -386,6 +393,7 @@ func TestServerCountersIsWiredByMain(t *testing.T) {
 	deps := []wiredDep{
 		{"grpcAdmission", "Wrap", "the netlimit listener bound in main's body"},
 		{"agentHandler", "NewHandlerWithGrace", "the worker.Handler bound in main's body"},
+		{"watchdog", "NewWatchdog", "the scheduler.Watchdog bound in main's body"},
 	}
 
 	depsType := reflect.TypeOf(httpServerDeps{})
@@ -792,4 +800,218 @@ func lookupWiredDep(deps []wiredDep, name string) (wiredDep, bool) {
 		}
 	}
 	return wiredDep{}, false
+}
+
+// sweepableStore is a Postgres-free watchdogStore. internal/scheduler's
+// watchdogStore is an UNEXPORTED INTERFACE WHOSE METHODS ARE ALL EXPORTED, so
+// this package can implement it - which is what puts this proof in the DEFAULT
+// lane rather than behind //go:build integration. A sweep needs a store, not a
+// gRPC recv goroutine and not a container, which is something neither slice 2's
+// nor slice 3's forwarding proof could say.
+type sweepableStore struct{ overdue []store.Task }
+
+func (s *sweepableStore) ListOverdueAssignedTasks(context.Context, store.ListOverdueAssignedTasksParams) ([]store.Task, error) {
+	return s.overdue, nil
+}
+
+func (s *sweepableStore) UpdateTaskStatus(_ context.Context, p store.UpdateTaskStatusParams) (store.Task, error) {
+	return store.Task{ID: p.ID, JobID: p.ID, Status: p.Status, WorkerID: p.WorkerID,
+		AssignmentEpoch: p.AssignmentEpoch}, nil
+}
+
+func (s *sweepableStore) NotifyTaskCompleted(context.Context) error             { return nil }
+func (s *sweepableStore) FailDependentTasks(context.Context, pgtype.UUID) error { return nil }
+func (s *sweepableStore) RecomputeJobStatus(context.Context, pgtype.UUID) (string, error) {
+	return "failed", nil
+}
+
+// nopCanceller: the watchdog's cancel fan-out is best-effort and irrelevant here.
+type nopCanceller struct{}
+
+func (nopCanceller) SendCancel(string, string, bool) error { return nil }
+
+func countersTestUUID(b byte) pgtype.UUID {
+	var raw [16]byte
+	raw[15] = b
+	return pgtype.UUID{Bytes: raw, Valid: true}
+}
+
+// TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters is EXECUTED, and it
+// moves a REAL number through the REAL route.
+//
+// It is the strongest forwarding proof any section in this cluster has: a
+// substituted scheduler.NewWatchdog inside buildHTTPServer produces a section of
+// zeros here and this test FAILS on the count, with no container. The two
+// remaining questions live elsewhere - whether main passes the watchdog it runs
+// is TestServerCountersIsWiredByMain (syntactic), and whether the assignment is
+// spelled d.<field> is countersAssignmentSources.
+func TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters(t *testing.T) {
+	wid := countersTestUUID(200)
+	q := &sweepableStore{overdue: []store.Task{{
+		ID: countersTestUUID(1), JobID: countersTestUUID(99), Status: "running", WorkerID: wid,
+		AssignmentEpoch: 7,
+		AssignedAt:      pgtype.Timestamptz{Time: time.Now().Add(-48 * time.Hour), Valid: true},
+	}}}
+	wd := scheduler.NewWatchdog(q, nopCanceller{}, events.NewBroker(), 30*time.Minute, 24*time.Hour)
+
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: wd,
+	})
+
+	before := countersAsAdmin(t, srv)
+	require.Contains(t, before, "watchdog",
+		"a wired watchdog must produce the section from the moment the server is built. An absent "+
+			"section reads as 'this build has no watchdog', which is false.")
+
+	require.NoError(t, wd.SweepOnce(context.Background()))
+
+	after := countersAsAdmin(t, srv)
+	var section struct {
+		Counts struct {
+			SweptTotal    uint64            `json:"swept_total"`
+			SweptOverflow uint64            `json:"swept_overflow"`
+			SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(after["watchdog"], &section))
+	require.Equal(t, uint64(1), section.Counts.SweptTotal,
+		"the served endpoint must report THIS watchdog's sweeps. A stub, a second watchdog or an "+
+			"unwired section cannot produce this number.")
+	require.Equal(t, uint64(0), section.Counts.SweptOverflow)
+	require.Len(t, section.Counts.SweptByWorker, 1,
+		"and the sweep must be attributed to the worker the row named")
+}
+
+// TestBuildHTTPServer_TypedNilWatchdogLeavesTheSectionAbsent.
+//
+// SAY WHAT THIS GUARDS, because the item that asked for it overstated the case.
+// `var wd *scheduler.Watchdog` conditionally assigned stores a TYPED nil in
+// api.WatchdogSource, which is not == nil, so the handler's `src != nil` is true
+// and CounterSnapshot dereferences a nil receiver. That shape is NOT what main
+// writes and cannot be: TestServerCountersIsWiredByMain requires exactly one
+// unconditional assignment on the chain, so the watchdog is constructed
+// unconditionally even when both its bounds are zero. This test guards the SHAPE
+// against a future caller, not a live panic.
+//
+// The fix belongs at the wiring boundary where the concrete type is still
+// visible, and NOT in a nil-tolerant CounterSnapshot: returning a zero snapshot
+// would turn an unwired control into a section of zeros, and "not wired" versus
+// "ran and stopped nothing" is the one distinction this payload exists to keep.
+func TestBuildHTTPServer_TypedNilWatchdogLeavesTheSectionAbsent(t *testing.T) {
+	var unwired *scheduler.Watchdog
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: unwired,
+	})
+
+	top := countersAsAdmin(t, srv)
+	require.NotContains(t, top, "watchdog",
+		"a nil watchdog must leave the section ABSENT, never present-and-zero, and must never panic")
+	require.Contains(t, top, "started_at")
+}
+
+// canonicalWorkerKeyRe is internal/api's canonicalUUIDRe, restated here because
+// that one is unexported in a package this test cannot reach into. It is the
+// shape internal/scheduler's uuidStr emits and the shape
+// counterPayloadAllowList's swept_by_worker predicate demands.
+var canonicalWorkerKeyRe = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// distinctWorkerUUID makes more distinct worker uuids than countersTestUUID's
+// single byte can express, which this test has to do to cross the cap.
+func distinctWorkerUUID(n int) pgtype.UUID {
+	var raw [16]byte
+	raw[14] = byte(n >> 8)
+	raw[15] = byte(n)
+	return pgtype.UUID{Bytes: raw, Valid: true}
+}
+
+// TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap is the
+// only place in the repo where the payload's key rule meets REAL PRODUCER
+// BYTES.
+//
+// internal/api's counterPayloadAllowList is the rule's home, and its jsonOK
+// predicate is exercised only against fakeWatchdogSource{c: threeDistinctSweeps()},
+// whose keys are string literals in that test file. So the predicate proves
+// things about a fixture, not about internal/scheduler - and internal/api
+// structurally cannot import internal/scheduler to fix that, because
+// internal/scheduler imports internal/api. This package can import both, which
+// is why the check lives here.
+//
+// MEASURED: mutating internal/scheduler's producer so that every key was
+// "build-agent-07.corp.example\n10.0.0.7" - a hostname with an injected
+// newline, exactly the payload the exemption's own argument cites as what must
+// never get in - left BOTH internal/api and cmd/relay-server fully green. The
+// only assertion that had ever touched these keys was a require.Len of 1 in
+// TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters: a count, never a
+// shape.
+//
+// It drives MORE workers than the cap on purpose, so the two halves of the
+// exemption's argument - a bounded key count and a server-rendered key shape -
+// are both read off one real response.
+func TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap(t *testing.T) {
+	// One line per swept task, and there are more than 256 of them.
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	const workers = api.WatchdogSweptWorkerMax + 4
+	rows := make([]store.Task, 0, workers)
+	for i := 0; i < workers; i++ {
+		rows = append(rows, store.Task{
+			ID: distinctWorkerUUID(1000 + i), JobID: countersTestUUID(99), Status: "running",
+			WorkerID:        distinctWorkerUUID(i),
+			AssignmentEpoch: 7,
+			AssignedAt:      pgtype.Timestamptz{Time: time.Now().Add(-48 * time.Hour), Valid: true},
+		})
+	}
+	require.Less(t, len(rows), scheduler.WatchdogMaxRowsPerSweep,
+		"the fixture must fit in ONE sweep, or the cap is never reached here")
+
+	wd := scheduler.NewWatchdog(&sweepableStore{overdue: rows}, nopCanceller{}, events.NewBroker(),
+		30*time.Minute, 24*time.Hour)
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: wd,
+	})
+	require.NoError(t, wd.SweepOnce(context.Background()))
+
+	var section struct {
+		Counts struct {
+			SweptTotal    uint64            `json:"swept_total"`
+			SweptOverflow uint64            `json:"swept_overflow"`
+			SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(countersAsAdmin(t, srv)["watchdog"], &section))
+
+	require.NotEmpty(t, section.Counts.SweptByWorker,
+		"the sweep populated no keys at all, so every assertion below would be vacuous")
+
+	// SHAPE FIRST, then the bound. A producer that has stopped rendering uuids
+	// usually collapses the key set too, so a cardinality assertion placed above
+	// this one would fire first and report the wrong defect.
+	for k := range section.Counts.SweptByWorker {
+		require.Regexp(t, canonicalWorkerKeyRe, k,
+			"the served payload carries the key %q, which is not a server-rendered uuid. This is half "+
+				"of counterPayloadAllowList's argument for swept_by_worker, and internal/api can only "+
+				"ever check it against a fake source whose keys are literals in its own test file - "+
+				"internal/scheduler imports internal/api, so the reverse import that would let it see "+
+				"the real producer is impossible. A newline in a key injects a line into every "+
+				"operator's log pipeline; a hostname in a key puts a caller-supplied byte in a payload "+
+				"whose contract says it carries none.", k)
+	}
+
+	require.LessOrEqual(t, len(section.Counts.SweptByWorker), api.WatchdogSweptWorkerMax,
+		"the served payload names %d workers, over the %d-key bound that is half of the argument "+
+			"admitting this map into a document of integers at all (see counterPayloadAllowList in "+
+			"internal/api). Worker ids are server-assigned but their COUNT is not server-limited - "+
+			"with RELAY_ALLOW_AUTO_ENROLL on, a reachable host creates one worker row per hostname it "+
+			"claims.", len(section.Counts.SweptByWorker), api.WatchdogSweptWorkerMax)
+	require.Equal(t, uint64(workers-api.WatchdogSweptWorkerMax), section.Counts.SweptOverflow,
+		"and the sweeps the cap refused must be counted, not dropped")
 }

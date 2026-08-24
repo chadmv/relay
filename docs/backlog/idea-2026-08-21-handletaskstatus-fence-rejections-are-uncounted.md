@@ -198,3 +198,27 @@ silent rejection path needs a counter the day a second reason to reject is added
 each acquired their second reason on 2026-08-20, when the coordinator watchdog became a writer that can
 end an assignment without the agent knowing. The moment to add the number has already passed, exactly as
 it had for `handleTaskLog`.
+
+## 2026-08-24: slice 4 made `failClaimedTask` a ready site, and deliberately did not count it
+
+`Dispatcher.failClaimedTask` was the fifth Go-side site where an epoch-fenced `:one` statement's
+rejection arrives as `pgx.ErrNoRows`, and the only one that did not distinguish it - it logged every
+error, including the benign fence rejection, as a database error. Slice 4 fixed that: the
+`ErrNoRows` arm is now silent, and the attempt is still reported by the unconditional
+"failing task ... terminally" line above the write.
+
+**It deliberately did NOT add a counter there**, because doing so would pre-empt this item's own
+design - the counter shape, the reason vocabulary and the publish path are this item's to decide, and
+a scheduler-side counter chosen in isolation is exactly how two subsystems end up with two
+incompatible answers. `failClaimedTask` now sits on the scheduler goroutine where slice 4's counter
+infrastructure already lives, so it is a cheap site to add once this item settles the shape.
+
+**Read the partition comment at `internal/scheduler/dispatch.go:462-497` before scoping this.** It
+now names the real division and is the enumeration to work from: the `:one` statements whose
+rejection surfaces as `pgx.ErrNoRows` (`AppendTaskLog`, `IncrementTaskRetryCount`,
+`UpdateTaskStatus`, `ClaimTaskForWorker`), versus `RequeueTask` / `RequeueTaskByID` (`:execrows`) and
+`RequeueWorkerTasksIfEpoch` (`:many`), where a rejection arrives as a rowcount with no error to
+inspect at all. An earlier version of that comment asserted a bare count of five and was wrong twice
+over - it omitted `ClaimTaskForWorker` and named a function that has never existed. If this item's
+scope is "count fence rejections", the rowcount sites are a genuinely different problem: there is no
+error value to classify, so counting them means reading `n`.
