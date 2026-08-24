@@ -314,6 +314,9 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 0")
 
+	offline, unsubscribe := h.broker.Subscribe(events.Filter{})
+	defer unsubscribe()
+
 	err := h.Connect(strandStream(t))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
@@ -330,6 +333,20 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 			"the only thing then standing between this timer and a requeue of a healthy agent's "+
 			"running tasks is RequeueWorkerTasksIfEpoch's own fence.", f.workerID, f.epoch)
 	case <-time.After(500 * time.Millisecond):
+	}
+
+	// The other half of "releases nothing", and the half no test held: the two
+	// UNFENCED side effects inside markWorkerOffline. Deleting its `rows == 0`
+	// early return leaves everything above this green, so without this assertion
+	// a superseded release publishes offline and wipes the metrics ring of a
+	// worker a FRESHER connection owns.
+	select {
+	case ev := <-offline:
+		t.Fatalf("a superseded release published a worker event: %s. Zero rows means a fresher "+
+			"connection holds this worker's epoch, so the broker publish and Metrics.Clear that sit "+
+			"below the row count are acting on a LIVE generation - the UI shows a connected agent as "+
+			"offline and its metrics ring is cleared out from under it.", ev.Data)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
