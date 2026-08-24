@@ -409,9 +409,14 @@ func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *te
 //
 // Without it, collapsing the fill back to a single constant is a green change
 // that quietly turns `assert.Equal(t, strandEpoch, f.epoch)` into an assertion
-// about nothing: five int32 columns all equal means passing max_slots,
-// cpu_cores, ram_gb or gpu_count where connection_epoch belongs is
+// about nothing: with every int32 column carrying the same value, passing
+// max_slots, cpu_cores, ram_gb or gpu_count where connection_epoch belongs is
 // indistinguishable from correct.
+//
+// HOW MANY THERE ARE IS DELIBERATELY NOT STATED, here or at strandInt32Base.
+// What this test asserts is DISTINCTNESS, not arity - it walks whatever the
+// scan produced - so a column added to store.Worker would falsify a number
+// written in this comment without failing anything that would catch it.
 func TestStrandFixture_EveryInt32ColumnScansDistinct(t *testing.T) {
 	var w store.Worker
 	require.NoError(t, strandWorkerRow{}.Scan(
