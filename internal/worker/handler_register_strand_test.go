@@ -414,9 +414,19 @@ func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *te
 // indistinguishable from correct.
 //
 // HOW MANY THERE ARE IS DELIBERATELY NOT STATED, here or at strandInt32Base.
-// What this test asserts is DISTINCTNESS, not arity - it walks whatever the
-// scan produced - so a column added to store.Worker would falsify a number
-// written in this comment without failing anything that would catch it.
+// What this test asserts is DISTINCTNESS, not arity, and the loop below reaches
+// the int32 fields of store.Worker by reflection so that stays true as sqlc's
+// output moves - a column added to store.Worker is walked without anyone
+// editing this test, and a number written in this comment would be falsified by
+// that same column with nothing here to catch it.
+//
+// THE LOOP USED TO BE A HAND-WRITTEN FIVE-ENTRY MAP, which is the arity-check
+// failure this file's own Scan default arm exists to prevent, one layer up: it
+// walked the five columns someone typed out, not the ones that exist. Measured
+// on that version - a sixth int32 column scanning the SAME value as
+// connection_epoch, with nobody having added it to the map, passed. The
+// assert.Equal below does not cover that either: connection_epoch itself still
+// scans correctly, so what is indistinguishable from it is invisible to both.
 func TestStrandFixture_EveryInt32ColumnScansDistinct(t *testing.T) {
 	var w store.Worker
 	require.NoError(t, strandWorkerRow{}.Scan(
@@ -427,20 +437,28 @@ func TestStrandFixture_EveryInt32ColumnScansDistinct(t *testing.T) {
 	), "the destination list mirrors store.Worker; a scan error here means the stub no longer "+
 		"models the struct sqlc generates")
 
+	rv := reflect.ValueOf(w)
+	rt := rv.Type()
 	seen := map[int32]string{}
-	for name, got := range map[string]int32{
-		"CpuCores":        w.CpuCores,
-		"RamGb":           w.RamGb,
-		"GpuCount":        w.GpuCount,
-		"MaxSlots":        w.MaxSlots,
-		"ConnectionEpoch": w.ConnectionEpoch,
-	} {
+	for i := 0; i < rt.NumField(); i++ {
+		if rt.Field(i).Type.Kind() != reflect.Int32 {
+			continue
+		}
+		name := rt.Field(i).Name
+		got := int32(rv.Field(i).Int())
 		if prev, dup := seen[got]; dup {
 			t.Fatalf("%s and %s both scan as %d. Every int32 column must be distinct, or a release "+
 				"fenced on the WRONG column is indistinguishable from one fenced on "+
 				"connection_epoch.", prev, name, got)
 		}
 		seen[got] = name
+	}
+	// Without this the loop above is silently satisfiable by walking nothing.
+	// Two is the arity at which distinctness starts saying anything, and the
+	// whole reason this test exists is that store.Worker has well more than two.
+	if len(seen) < 2 {
+		t.Fatalf("the scanned store.Worker has %d int32 fields; distinctness over fewer than two is "+
+			"vacuous, and the epoch assertions in this file rest on it saying something", len(seen))
 	}
 
 	assert.Equal(t, strandEpoch, w.ConnectionEpoch,
