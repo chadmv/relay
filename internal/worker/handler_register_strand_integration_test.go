@@ -85,6 +85,17 @@ func TestRegisterWorker_SendFailureReleasesTheGeneration(t *testing.T) {
 
 	wkID, rawToken := seedWorkerWithAgentToken(t, ctx, q, "strand-01")
 
+	// MAX_SLOTS IS MOVED OFF 1 SO THE EPOCH ASSERTIONS BELOW ARE ABOUT THE EPOCH.
+	// seedWorkerWithAgentToken leaves max_slots at its column default of 1, and
+	// one registration leaves connection_epoch at 1 too - so passing
+	// updated.MaxSlots where updated.ConnectionEpoch belongs was byte-identical
+	// here and survived this lane. It also survived the default lane, for an
+	// unrelated second coincidence. Anything but 1 restores the discrimination:
+	// the release then fences on 8, MarkWorkerOfflineIfEpoch matches zero rows,
+	// and the worker stays 'online'.
+	_, err := pool.Exec(ctx, "UPDATE workers SET max_slots = 8 WHERE id = $1", wkID)
+	require.NoError(t, err)
+
 	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
 		Name: "strand-user", Email: "strand-user@test.com", IsAdmin: false, PasswordHash: "x",
 	})

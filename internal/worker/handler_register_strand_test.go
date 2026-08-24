@@ -3,6 +3,8 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -84,22 +86,61 @@ var strandWorkerID = pgtype.UUID{
 	Valid: true,
 }
 
-// strandEpoch is what EVERY int32 column of the stub row scans as, including
-// connection_epoch - the only one finishRegister reads. Filling by DESTINATION
-// TYPE rather than by position means a reordered column list cannot turn a
-// success into a failure; the cost is that cpu_cores, ram_gb, gpu_count and
-// max_slots come back as 7 too, which nothing on this path looks at.
-const strandEpoch int32 = 7
+// strandInt32Base is the value the FIRST int32 column of the stub row scans as;
+// each subsequent one gets the next integer, so every int32 column of
+// store.Worker comes back DISTINCT.
+//
+// IT USED TO BE ONE CONSTANT FOR ALL OF THEM, and that made the epoch
+// assertions below vacuous rather than merely loose. store.Worker has five int32
+// columns, so a single fill meant `releaseWorkerGeneration(workerID,
+// updated.MaxSlots)` produced byte-identical behaviour to the real
+// `updated.ConnectionEpoch` and the mutation survived the whole lane. What is
+// under test on this path is not "some epoch was used" but "the epoch THIS
+// registration created was used", and only distinct values can tell those apart.
+const strandInt32Base int32 = 101
+
+// strandEpoch is what connection_epoch - the one int32 column finishRegister
+// reads - scans as.
+//
+// IT IS DERIVED, NOT WRITTEN DOWN, because the fill is positional and the
+// position is sqlc's to choose. sqlc emits row.Scan(&i.F1, &i.F2, ...) in
+// store.Worker's own field order, so counting int32 fields up to
+// ConnectionEpoch reproduces exactly what Scan will hand it - and a column added
+// or reordered in the migration moves both together instead of silently
+// re-pointing this constant at max_slots.
+var strandEpoch = strandInt32ColumnValue("ConnectionEpoch")
+
+// strandInt32ColumnValue returns the value strandWorkerRow.Scan gives the named
+// int32 field of store.Worker. It panics rather than returning an error: it runs
+// at package-var init, and a miss means the fixture no longer models the struct
+// it is standing in for.
+func strandInt32ColumnValue(field string) int32 {
+	rt := reflect.TypeOf(store.Worker{})
+	var seen int32
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if f.Type.Kind() != reflect.Int32 {
+			continue
+		}
+		if f.Name == field {
+			return strandInt32Base + seen
+		}
+		seen++
+	}
+	panic("strandInt32ColumnValue: store.Worker has no int32 field named " + field)
+}
 
 type strandWorkerRow struct{}
 
 func (strandWorkerRow) Scan(dest ...any) error {
+	var int32s int32
 	for _, d := range dest {
 		switch v := d.(type) {
 		case *pgtype.UUID:
 			*v = strandWorkerID
 		case *int32:
-			*v = strandEpoch
+			*v = strandInt32Base + int32s
+			int32s++
 		case *string:
 			*v = "strand-host"
 		case **string:
@@ -110,6 +151,15 @@ func (strandWorkerRow) Scan(dest ...any) error {
 			*v = false
 		case *pgtype.Timestamptz:
 			*v = pgtype.Timestamptz{Time: time.Unix(0, 0).UTC(), Valid: true}
+		default:
+			// A HAND-WRITTEN MAPPER NEEDS AN ARITY CHECK. Without this arm an
+			// unhandled destination type is left at its zero value and the scan
+			// reports success, so a column whose Go type changes - or a new column of
+			// a type this switch has never seen - silently feeds every test in this
+			// file a zero where it expects a fixture value. That failure mode is
+			// invisible: nothing errors, the assertions just start proving less.
+			return fmt.Errorf("strandWorkerRow: no fixture value for scan destination of type %T; "+
+				"store.Worker gained a column this stub does not model", d)
 		}
 	}
 	return nil
@@ -321,4 +371,44 @@ func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *te
 			"still calls online.", ev.Data)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestStrandFixture_EveryInt32ColumnScansDistinct pins the property the two
+// epoch assertions in this file rest on, in the one place a future edit to
+// strandWorkerRow.Scan would break it.
+//
+// Without it, collapsing the fill back to a single constant is a green change
+// that quietly turns `assert.Equal(t, strandEpoch, f.epoch)` into an assertion
+// about nothing: five int32 columns all equal means passing max_slots,
+// cpu_cores, ram_gb or gpu_count where connection_epoch belongs is
+// indistinguishable from correct.
+func TestStrandFixture_EveryInt32ColumnScansDistinct(t *testing.T) {
+	var w store.Worker
+	require.NoError(t, strandWorkerRow{}.Scan(
+		&w.ID, &w.Name, &w.Hostname, &w.CpuCores, &w.RamGb, &w.GpuCount, &w.GpuModel,
+		&w.Os, &w.MaxSlots, &w.Labels, &w.Status, &w.LastSeenAt, &w.CreatedAt,
+		&w.AgentTokenHash, &w.DisconnectedAt, &w.DisabledAt, &w.RevokedAt,
+		&w.ConnectionEpoch, &w.SupportsWorkspaces,
+	), "the destination list mirrors store.Worker; a scan error here means the stub no longer "+
+		"models the struct sqlc generates")
+
+	seen := map[int32]string{}
+	for name, got := range map[string]int32{
+		"CpuCores":        w.CpuCores,
+		"RamGb":           w.RamGb,
+		"GpuCount":        w.GpuCount,
+		"MaxSlots":        w.MaxSlots,
+		"ConnectionEpoch": w.ConnectionEpoch,
+	} {
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("%s and %s both scan as %d. Every int32 column must be distinct, or a release "+
+				"fenced on the WRONG column is indistinguishable from one fenced on "+
+				"connection_epoch.", prev, name, got)
+		}
+		seen[got] = name
+	}
+
+	assert.Equal(t, strandEpoch, w.ConnectionEpoch,
+		"strandEpoch is derived by counting int32 fields of store.Worker; if it no longer matches "+
+			"what a positional Scan produces, the derivation and sqlc's column order have diverged")
 }
