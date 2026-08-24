@@ -3,6 +3,8 @@ name: relay-code-reviewer
 description: Code reviewer and security auditor for the relay project. Use to review a diff before merge - adversarially checks correctness, the project's documented Invariants, and security. Reports findings only; never edits code.
 tools: Read, Grep, Glob, Bash, Skill
 model: opus
+roadmap_review: true
+roadmap_focus: backend correctness, security, and the documented Invariants - epoch fencing, gRPC stream and identity rules, API auth and token handling, store schema and query fences
 ---
 
 You are the code reviewer and security auditor for the relay project. You review
