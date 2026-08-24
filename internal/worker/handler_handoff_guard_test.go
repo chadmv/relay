@@ -36,12 +36,16 @@ import (
 // not reachable by moving the statement. The value of pinning the range is that
 // a fallible statement inserted anywhere inside it is caught by the release.
 //
-// NOTHING HERE MATCHES SOURCE TEXT. The flag is not named by this test: it is
-// whatever identifier the deferred release closure guards on, so a rename moves
-// the guard with the code instead of defeating it. The anchors are likewise
-// derived - the stream parameter is found by its type, the registry call by its
-// receiver, and the success return by its final result being the predeclared
-// nil.
+// THE FLAG IS NOT NAMED BY THIS TEST. It is whatever identifier the deferred
+// release closure guards on, so renaming it moves the guard with the code
+// instead of defeating it, and the stream parameter and the success return are
+// derived the same way - by type, and by the final result being the predeclared
+// nil. The remaining anchors ARE source text: the file name, "finishRegister",
+// the "AgentService_ConnectServer" type suffix, "releaseWorkerGeneration", and
+// at the registry anchor the receiver "h" and the field "registry". Renaming any
+// of those makes this test fail rather than pass vacuously - it is brittleness,
+// not a hole - but the message it fails with will describe a missing anchor
+// rather than the rename that moved it.
 func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", nil, 0)
@@ -98,7 +102,7 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 
 	// The flag itself: initialised false, flipped true exactly once.
-	var setTrue []token.Pos
+	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -121,7 +125,7 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			case as.Tok == token.DEFINE && rhs == "false":
 				initFalse++
 			case as.Tok == token.ASSIGN && rhs == "true":
-				setTrue = append(setTrue, as.Pos())
+				setTrue = append(setTrue, as)
 			default:
 				otherWrites++
 			}
@@ -147,7 +151,21 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"tasks of a healthy agent. With several, which one decided the outcome depends on the "+
 			"path taken.", flag, len(setTrue), successReturns)
 	}
-	handoff := setTrue[0]
+	// The flip must be a DIRECT element of the function body, not merely
+	// somewhere beneath it. Position alone cannot express "runs on every path":
+	// a flip nested inside an `if`, a closure or a `defer func(){}()` sits at a
+	// position inside the window and still leaves the success path unflipped.
+	if !directBodyStmt(fn.Body, setTrue[0]) {
+		t.Fatalf("%s is set to true at %s, but that assignment is nested inside another statement "+
+			"rather than being a statement of finishRegister's own body. Every position check below "+
+			"is about WHERE the flip is; this one is about whether it happens at all. A conditional "+
+			"wrap is the live hazard - `if h.Metrics != nil { %s = true }` compiles, and h.Metrics is "+
+			"nil for every handler NewHandler and NewHandlerWithGrace build, so a SUCCESSFUL "+
+			"registration would take the deferred release: its own worker marked offline, its metrics "+
+			"entry wiped, and a grace timer armed that requeues a healthy agent's running tasks.",
+			flag, fset.Position(setTrue[0].Pos()), flag)
+	}
+	handoff := setTrue[0].Pos()
 
 	if handoff < sendPos {
 		t.Fatalf("%s is set before the RegisterResponse is sent (%s vs %s). A send failure returns an "+
@@ -157,9 +175,13 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			flag, fset.Position(handoff), fset.Position(sendPos))
 	}
 	if handoff < registerPos {
-		t.Fatalf("%s is set before the sender is registered (%s vs %s). Ownership passes to Connect's "+
-			"teardown defer, and that defer identifies what it owns by the registry entry - so until "+
-			"the entry exists there is nothing for it to claim.",
+		t.Fatalf("%s is set before the sender is registered (%s vs %s). This is not a live hazard: "+
+			"the send has already succeeded by that point, and the deferred closure reads the flag "+
+			"after the return value is evaluated, so moving the flip across registry.Register is "+
+			"behaviour-preserving today and mutation confirms it. What this bound pins is the "+
+			"TIGHTEST point of a semantic range whose only real requirement is 'after the send, "+
+			"before the return' - so that a fallible statement inserted anywhere later in that range "+
+			"is still covered by the deferred release rather than by nothing.",
 			flag, fset.Position(handoff), fset.Position(registerPos))
 	}
 	if handoff > successReturn {
@@ -167,6 +189,19 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"all and the deferred release runs against a live connection",
 			flag, fset.Position(successReturn))
 	}
+}
+
+// directBodyStmt reports whether stmt is one of body's own statements, as
+// opposed to being nested inside one of them. Identity comparison, not position
+// comparison: a nested statement's position is inside the parent's range, so
+// nothing about an offset can distinguish the two.
+func directBodyStmt(body *ast.BlockStmt, stmt ast.Stmt) bool {
+	for _, s := range body.List {
+		if s == stmt {
+			return true
+		}
+	}
+	return false
 }
 
 // handoffFlagIdent returns the identifier the deferred release closure guards
