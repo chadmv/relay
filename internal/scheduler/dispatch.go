@@ -459,11 +459,33 @@ func failClaimedTask(
 		AssignmentEpoch: claimed.AssignmentEpoch,
 	})
 	if err != nil {
-		// THE FIFTH GO-SIDE FENCE-REJECTION SITE, and until now the only one
-		// that did not distinguish pgx.ErrNoRows. The other four are
-		// handleTaskLog's AppendTaskLog arm, handleTaskStatus's
-		// IncrementTaskRetryCount and UpdateTaskStatus arms, and
-		// Watchdog.SweepOnce.
+		// A FENCE-REJECTION SITE OF THE `:one` KIND, and until now the only one
+		// of that kind that did not distinguish pgx.ErrNoRows.
+		//
+		// NAME THE PARTITION, NOT A COUNT. A bare "the fifth of five" is a
+		// uniqueness claim, and a uniqueness claim is a claim about the
+		// COMPLEMENT - it cannot be checked by opening its subject, only by
+		// searching for the shape (CLAUDE.md says exactly this about
+		// RequeueTaskByID, which is where the rule was learned). The earlier
+		// wording here said "the other four" and missed ClaimTaskForWorker 170
+		// lines up in this same file.
+		//
+		// Go-side sites where an epoch fence rejects, split by HOW the
+		// rejection arrives:
+		//
+		//   - As pgx.ErrNoRows from a `:one` statement, which is the only shape
+		//     an `err != nil` arm can tell apart: handleTaskLog's AppendTaskLog
+		//     arm, handleTaskStatus's IncrementTaskRetryCount and
+		//     UpdateTaskStatus arms, Watchdog.SweepOnce, this one, and
+		//     Dispatcher.dispatchTask's ClaimTaskForWorker - which CLAUDE.md
+		//     names as the canonical "conditionally end the assignment" branch
+		//     of the epoch fence.
+		//   - As a rowcount or an empty slice, where there is no error to
+		//     inspect at all: RequeueTask and RequeueTaskByID (`:execrows`) and
+		//     RequeueWorkerTasksIfEpoch (`:many`). A rejection there is
+		//     indistinguishable from "there was nothing to requeue", so those
+		//     sites do not have this branch to get right and cannot grow one
+		//     without a statement change.
 		//
 		// ErrNoRows means another path ended this assignment between the claim
 		// and here - a cancel, a grace requeue, a sibling replica. That is the

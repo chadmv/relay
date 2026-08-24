@@ -44,10 +44,12 @@ func claimedFixture() store.Task {
 
 // TestFailClaimedTask_AFenceRejectionIsNotLoggedAsAnError.
 //
-// failClaimedTask is the FIFTH of relay's Go-side fence-rejection sites and was
-// the only one that did not distinguish pgx.ErrNoRows. The other four are
+// failClaimedTask was the only Go-side fence-rejection site of the `:one` kind
+// that did not distinguish pgx.ErrNoRows. The others of that kind are
 // handleTaskLog's AppendTaskLog arm, handleTaskStatus's IncrementTaskRetryCount
-// and UpdateTaskStatus arms, and Watchdog.SweepOnce.
+// and UpdateTaskStatus arms, Watchdog.SweepOnce, and dispatchTask's
+// ClaimTaskForWorker. The partition and why it is stated as a partition rather
+// than as a count are in the comment on the branch itself, in dispatch.go.
 //
 // ErrNoRows here means another writer ended this assignment between the claim
 // and this write. That is the correct outcome, not a failure, and logging it

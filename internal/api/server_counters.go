@@ -255,6 +255,24 @@ type WatchdogCounters struct {
 // ITS OWN SOURCE FIELD, like every other section. And note the direction: this
 // interface is declared here and SATISFIED over there, because internal/api can
 // never name internal/scheduler.
+//
+// AN IMPLEMENTATION MUST RETURN A VALUE NOBODY ELSE STILL WRITES TO. This is the
+// first section source whose snapshot type carries a MUTABLE container
+// (SweptByWorker), and that changes what "return a snapshot" costs. Every other
+// source returns a struct of integers, where a copy is what the return statement
+// already does; here a plausible one-line implementation - `func (x X)
+// CounterSnapshot() WatchdogCounters { return x.c }` - hands this handler a map
+// the producer's own goroutine keeps writing, and a single admin GET then ends
+// the process with `fatal error: concurrent map read and map write` (that one is
+// not recoverable, and -race is not needed to see it). It is also CLAUDE.md's
+// "no interior pointers across locks" with the lock left implicit.
+//
+// scheduler.watchdogCounters.snapshot is the reference implementation: it clones
+// the map inside the same critical section that reads the scalars, and
+// TestWatchdogCounters_SnapshotIsACopy is its guard. TestWatchdogSectionRestatesNothing
+// asserts that this section needs no mapper, which makes reusing WatchdogCounts
+// as a source's own storage the natural shape - so read that as "share the
+// type", never as "share the map".
 type WatchdogSource interface {
 	CounterSnapshot() WatchdogCounters
 }
