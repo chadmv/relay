@@ -154,3 +154,31 @@ the right doc comment will find it.
 across all four sections, so it is much cheaper before slices 2-4 ship than after. If it is going to be
 done at all, doing it as part of slice 2 costs almost nothing extra; doing it after slice 4 means
 reshaping a payload with four populated sections.
+
+## 2026-08-24: slice 4 shipped and DEFERRED this item deliberately. Its sequencing argument is now worth one section, not three.
+
+Slice 4 (`silent-drop-observability-slice4`) considered folding this in - the roadmap said it "rides
+cheapest here" - and declined, on two grounds recorded in
+`docs/superpowers/plans/2026-08-24-silent-drop-observability-slice4.md`:
+
+1. **The cheap window has largely closed.** The argument for doing it during slice 2 was that a
+   `limits` classification touches every section, so it is cheaper before the sections exist. With
+   three of four already shipped, the marginal saving of doing it during slice 4 rather than after is
+   **one section**, not three.
+2. **The watchdog does not reproduce the defect's sharp form.** `netlimit` publishing
+   `live_total: 0` on a busy server is an *affirmative false statement*. Every number a disabled
+   watchdog publishes is *literally true* - it swept nothing because it ran and found nothing, or
+   because it is disabled and the distinction is invisible. Weaker, so it is a second instance rather
+   than a second sharp case.
+
+**Slice 4 paid one forward cost to keep this deferral cheap**: the `watchdog` section ships
+**counts-only, with no `levels` half at all**. That was forced by the same reasoning this item makes
+- the only `levels` candidates were `swept_workers_max` (a compile-time constant, which would have to
+MOVE when a `limits` half is added, breaking a published payload) and `swept_workers_tracked` (a
+restatement of `len(swept_by_worker)`). So adding `limits` to this section later is **purely
+additive, with zero field moves**. Check the other three sections for constants sitting in a `levels`
+half before designing the migration; that is where the breaking changes will be.
+
+Note also that this item's own framing has a second instance now: with both gRPC caps disabled the
+payload cannot say "not measured", and a disabled watchdog cannot either. Two subsystems, one
+missing vocabulary.
