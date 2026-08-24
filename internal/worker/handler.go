@@ -688,8 +688,8 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// Earlier than that reopens the strand for the RegisterResponse send. LATER
 	// cannot break it at all - the deferred closure reads the flag after the
 	// return value has been evaluated - so every position inside the range is
-	// semantically identical, including the two statements below and above
-	// registry.Register, and mutation confirms it.
+	// semantically identical, the two flanking registry.Register included, and
+	// mutation confirms it.
 	//
 	// It is shipped at the TIGHTEST point in the range, immediately after the
 	// sender becomes reachable, so that a fallible statement inserted anywhere in
@@ -709,9 +709,10 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// escapes the same way: this function's own deferred release has already been
 	// waived, and Connect's teardown defer is not armed until this function
 	// returns - so the sender stays in the registry and the generation stays
-	// unreleased while the goroutine unwinds. Nothing below can panic today
-	// (Metrics and broker are nil-checked or non-nil by construction), which is
-	// why this is a rule to keep rather than a defect to fix.
+	// unreleased while the goroutine unwinds. Nothing below can panic today -
+	// Metrics is nil-checked, and the broker and the dispatch callback are
+	// supplied by the constructor - which is why this is a rule to keep rather
+	// than a defect to fix.
 	handedOff = true
 
 	if h.Metrics != nil {
