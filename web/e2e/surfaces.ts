@@ -17,6 +17,14 @@ export interface Surface {
   // STATE ONLY - do not read a pass here as a populated-state pass. Closing this
   // is slice 2 (an agent in the harness).
   population: 'populated' | 'empty'
+  // True only for /auth. Every project's storageState carries the seeded
+  // admin's token (playwright.config.ts), so a plain page.goto('/auth') lands
+  // an already-authenticated session and PublicOnlyRoute redirects straight to
+  // /jobs before "Sign in" ever renders - measured directly, not assumed.
+  // Consumers (layout.spec.ts) must strip the token before navigating when this
+  // is true, the same way auth.spec.ts's file-level test.use() does for the
+  // whole file.
+  anonymous?: boolean
 }
 
 const h1 = (name: string) => async (page: Page) => {
@@ -29,7 +37,7 @@ export function surfaces(seed: Seed): Surface[] {
     // wraps nothing), so it has never overflowed. Its presence is what makes a
     // header/main finding an attribution rather than a correlation - the
     // 2026-08-13 slice found its fourth cause exactly this way.
-    { name: 'auth', path: '/auth', population: 'populated', ready: h1('Sign in') },
+    { name: 'auth', path: '/auth', population: 'populated', anonymous: true, ready: h1('Sign in') },
 
     {
       name: 'jobs',
@@ -50,7 +58,12 @@ export function surfaces(seed: Seed): Surface[] {
       path: '/schedules',
       population: 'populated',
       ready: async (p) => {
-        await expect(p.getByRole('link', { name: seed.scheduleName })).toBeVisible()
+        // exact:true, unlike jobs' equivalent locator above: SchedulesTable.tsx
+        // ALSO renders an `aria-label="Edit ${name}"` link per row
+        // (SchedulesTable.tsx:104), which JobsTable does not, so the
+        // substring-matching default resolves two elements here. Measured, not
+        // assumed - the ambiguous form threw a strict-mode violation.
+        await expect(p.getByRole('link', { name: seed.scheduleName, exact: true })).toBeVisible()
       },
     },
     {
