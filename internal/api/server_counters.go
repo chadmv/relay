@@ -148,6 +148,112 @@ type TaskLogFenceSource interface {
 	TaskLogFenceRejections() uint64
 }
 
+// WatchdogSweptWorkerMax bounds how many distinct workers watchdog.counts.
+// swept_by_worker will ever name. IT IS DECLARED HERE, IN internal/api, AND
+// THAT IS NOT WHERE IT LOOKS LIKE IT BELONGS.
+//
+// The producer is internal/scheduler, so the constant "wants" to live beside the
+// map. It cannot: the bound has to be ENFORCED inside this payload's
+// counterPayloadAllowList predicates (an exemption is shape-checked but
+// non-descending, so the cap is checked there or nowhere), and that test file is
+// package api - importing internal/scheduler from it is the same cycle that
+// forces WatchdogCounts to be declared here. One constant read by both the
+// producer and the guard means the two cannot drift; two constants would.
+//
+// 256 is a policy number, not a measurement: it comfortably exceeds any fleet
+// this project has seen, and the design is FIRST-COME rather than top-K because
+// top-K needs a comparison on every increment to buy an ordering that
+// swept_overflow already discloses the absence of.
+const WatchdogSweptWorkerMax = 256
+
+// WatchdogCounts is what the coordinator stale-task watchdog has ended since
+// started_at. It is declared HERE rather than in internal/scheduler because
+// internal/scheduler imports this package (scheduler/dispatch.go), so the
+// reverse import is impossible - which INVERTS the shape ingest_log_budget uses,
+// where the producing package owned the type.
+//
+// THAT INVERSION IS WHY THERE IS NO MAPPER ANYWHERE. This type is the response
+// type: serverCountersResponse carries *WatchdogCounters directly and
+// handleServerCounters assigns it whole, and scheduler.Watchdog stores a
+// WatchdogCounts as its OWN counter state and returns a struct copy. A field
+// added here is published by both sides for free. That matters because slice 2
+// shipped a fully correct sixth log kind that was counted on one side and
+// published under no JSON key on the other, with all three packages green; the
+// remedy there was an arity assertion between two restated types, and the better
+// remedy is not to restate. TestWatchdogSectionRestatesNothing guards the
+// antecedent, and TestWatchdogCountersLiveOnlyInThePublishedStruct guards the
+// only remaining way a counter can go unpublished.
+//
+// WHAT THESE NUMBERS DO NOT COVER, said here because it is the question an
+// operator will get wrong: they count assignments THE COORDINATOR ended. An
+// agent that honours its own timeout writes the same 'timed_out' status
+// (worker/handler.go maps TASK_STATUS_TIMED_OUT straight through) and
+// contributes NOTHING here, which is deliberate - the two mean opposite things
+// about a worker's health and this counter SIDE-STEPS the ambiguity rather than
+// resolving it.
+//
+// WHY NOT A DATABASE QUERY, which would be better on every other axis - no
+// process state, survives restarts, correct across replicas: DECLINED, WITH THE
+// PRICE, NOT IMPOSSIBLE. Telling a watchdog-written 'timed_out' from an
+// agent-written one needs either a new terminal status (threaded through every
+// status allow-list, including the two that must be read BACKWARDS -
+// AppendTaskLog's first arm and ListOverdueAssignedTasks - plus
+// TestTasksStatusVocabularyIsExactly) or a nullable writer column plus a
+// migration on a write path that sits under the epoch fence. That is a larger
+// and riskier slice than the observability it buys. IF SUCH A COLUMN IS EVER
+// ADDED FOR ANOTHER REASON, REVISIT THIS: the query route is genuinely better.
+//
+// PER REPLICA. The watchdog is multi-replica-safe by first-write-wins, so a
+// sweep of worker X may be counted on either replica; add the counts across
+// replicas, and expect neither replica's swept_by_worker to be the whole story.
+type WatchdogCounts struct {
+	// SweptTotal counts every assignment this process's watchdog ended,
+	// including the ones attributed to SweptOverflow. It is what makes the
+	// section reconcile: SweptTotal == sum(SweptByWorker) + SweptOverflow,
+	// always, which is also why these three fields are read in ONE critical
+	// section rather than as three independent atomics.
+	SweptTotal uint64 `json:"swept_total"`
+
+	// SweptOverflow counts sweeps attributable to a worker the map is not
+	// tracking, either because the map was already at WatchdogSweptWorkerMax
+	// when that worker was first swept, or because the row's worker id was not
+	// renderable as a uuid. NON-ZERO MEANS PER-WORKER ATTRIBUTION IS INCOMPLETE
+	// and the worst tracked worker may not be the worst worker. This field
+	// exists to make a loss visible; a version of it that were counted and
+	// unpublished would be the defect eating its own remedy.
+	SweptOverflow uint64 `json:"swept_overflow"`
+
+	// SweptByWorker maps a server-assigned worker uuid to how many of its
+	// assignments this process's watchdog ended. NEVER nil - it serialises as
+	// {} on a watchdog that has swept nothing, because null is not an object
+	// and the payload's walks would have nothing to descend into. Capped at
+	// WatchdogSweptWorkerMax; see counterPayloadAllowList for the argument that
+	// admits it into a payload where every other leaf is an integer.
+	SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+}
+
+// WatchdogCounters is the watchdog section. COUNTS ONLY, and the absence of a
+// levels half is a decision: the only candidates were len(SweptByWorker), which
+// is the map itself restated and can only ever agree or be a bug, and the 256
+// cap, which is a CONFIGURED CONSTANT rather than a level. A constant in a
+// levels half would have to MOVE when a limits classification is added
+// (idea-2026-08-21-counters-payload-cannot-say-not-measured), and that is a
+// breaking change to a published payload. It is documented in README instead,
+// and swept_overflow is the runtime signal that it bound.
+type WatchdogCounters struct {
+	Counts WatchdogCounts `json:"counts"`
+}
+
+// WatchdogSource is whatever can report the coordinator watchdog's sweep
+// counters - in production, *scheduler.Watchdog.
+//
+// ITS OWN SOURCE FIELD, like every other section. And note the direction: this
+// interface is declared here and SATISFIED over there, because internal/api can
+// never name internal/scheduler.
+type WatchdogSource interface {
+	CounterSnapshot() WatchdogCounters
+}
+
 // CounterSources is the set of subsystem counter sources the endpoint
 // assembles. Every field is nil-able and nil means the section is ABSENT from
 // the payload, not zero.
@@ -178,6 +284,7 @@ type CounterSources struct {
 	GRPCAdmission   GRPCAdmissionSource
 	IngestLogBudget IngestLogBudgetSource
 	TaskLogFence    TaskLogFenceSource
+	Watchdog        WatchdogSource
 }
 
 type serverCountersResponse struct {
