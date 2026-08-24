@@ -45,8 +45,23 @@ func (g *GraceRegistry) Start(workerID string, epoch int32) {
 }
 
 // StartWithDuration schedules onExpire(workerID, epoch) to fire after d. If a
-// timer already exists for workerID, it is replaced. Used by startup
-// reconciliation to honor remaining grace from a persisted disconnect time.
+// timer already exists for workerID it is replaced, UNLESS its epoch is newer
+// than the incoming one, in which case this call is refused and the existing
+// timer left running. Used by startup reconciliation to honor remaining grace
+// from a persisted disconnect time.
+//
+// THE MONOTONICITY RULE IS THE REGISTRY'S OWN, because no caller can supply it.
+// releaseWorkerGeneration decides ownership with an epoch fence evaluated inside
+// Postgres and then calls Start on the result, so the check and the arming are a
+// round trip apart with nothing held across them: a superseded release can win
+// that race and evict a LIVE generation's entry. The stale entry it installs
+// then fires against RequeueWorkerTasksIfEpoch's own fence, matches zero rows,
+// and the live worker's tasks are requeued by nobody - they sit until the 24h
+// stale-task watchdog fails them as timed_out.
+//
+// ONLY A STRICTLY OLDER EPOCH IS REFUSED. An equal epoch still replaces, which
+// is what keeps Start idempotent-with-reset for repeated calls within one
+// generation.
 func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -54,6 +69,9 @@ func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.D
 		return
 	}
 	if old, ok := g.timers[workerID]; ok {
+		if old.epoch > epoch {
+			return // a newer generation owns this worker's timer
+		}
 		old.timer.Stop()
 	}
 	entry := &graceEntry{epoch: epoch}

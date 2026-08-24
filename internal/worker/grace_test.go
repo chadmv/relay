@@ -154,3 +154,57 @@ func TestGraceRegistry_ExpireNowReplacesPendingTimer(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	require.Equal(t, int32(1), fired.Load())
 }
+
+// TestGraceRegistry_AStaleEpochDoesNotDisplaceALiveTimer pins the registry as
+// epoch-MONOTONIC, which is a property releaseWorkerGeneration's caller cannot
+// supply for it.
+//
+// The scenario is a delayed superseded release. finishRegister's deferred
+// release checks the fence inside markWorkerOffline and then calls grace.Start
+// on the result, and those two steps are a DATABASE ROUND TRIP apart with no
+// lock held across them - so a fresher connection can register, disconnect and
+// arm its own timer in between. Without this rule the stale caller's Start
+// evicts the LIVE generation's entry and installs its own, whose epoch fence
+// then matches zero rows when it fires: that worker's tasks are never requeued
+// at all and sit until the 24h stale-task watchdog marks them timed_out.
+//
+// EQUAL EPOCHS MUST STILL REPLACE, or TestGraceRegistry_StartIsIdempotent's
+// reset-the-window behaviour is lost.
+func TestGraceRegistry_AStaleEpochDoesNotDisplaceALiveTimer(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(40*time.Millisecond, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	g.Start("w1", 8)
+	g.Start("w1", 7) // a superseded release, arriving late
+
+	select {
+	case epoch := <-fired:
+		assert.Equal(t, int32(8), epoch,
+			"the live generation's timer must survive a stale one. Firing at 7 means the entry for "+
+				"8 was evicted, and RequeueWorkerTasksIfEpoch will match zero rows at 7 - so the "+
+				"live worker's tasks are requeued by nobody.")
+	case <-time.After(2 * time.Second):
+		t.Fatal("no timer fired at all; the stale Start must leave the existing entry running")
+	}
+}
+
+// TestGraceRegistry_StartAtTheSameEpochStillResetsTheWindow is the other half of
+// the monotonicity rule: only a STRICTLY older epoch is refused.
+func TestGraceRegistry_StartAtTheSameEpochStillResetsTheWindow(t *testing.T) {
+	var fired atomic.Int32
+	g := NewGraceRegistry(40*time.Millisecond, func(workerID string, epoch int32) {
+		fired.Add(1)
+	})
+	defer g.Stop()
+
+	g.Start("w1", 3)
+	time.Sleep(25 * time.Millisecond)
+	g.Start("w1", 3)
+	time.Sleep(25 * time.Millisecond)
+	assert.Equal(t, int32(0), fired.Load(),
+		"the second Start at the same epoch must have reset the 40ms window; if it were refused "+
+			"like a stale one, the first timer would have fired by now")
+}
