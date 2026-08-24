@@ -574,7 +574,48 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 
 	workerID := uuidStr(updated.ID)
 
-	// Agent reconnected within its grace window — stop the requeue timer.
+	// THE GENERATION IS ACQUIRED, SO ITS RELEASE IS ARMED HERE AND NOT ONE
+	// STATEMENT LATER. RegisterWorkerConnection above has already flipped the row
+	// to 'online', bumped connection_epoch and cleared disconnected_at, and the
+	// grace.Cancel below is about to throw away the pending requeue from the
+	// PREVIOUS disconnect. Everything after this point can still fail -
+	// reconcileRunningTasks returns an error, and so does the RegisterResponse
+	// send - and until this defer existed those two returns left the worker
+	// 'online' at a live epoch with no connection behind it and no timer to clean
+	// up after it.
+	//
+	// CONNECT'S OWN DEFER CANNOT COVER THIS AND NEVER COULD. It is armed only
+	// after this function RETURNS, and it takes the *workerSender that only the
+	// success path below creates - so on a failed registration there is nothing
+	// to arm it with. The two defers partition the window rather than overlapping
+	// it.
+	//
+	// NOTHING ELSE CATCHES THE GAP EITHER, which is why this is a defer and not a
+	// backlog note. The metrics liveness sweeper skips any worker Metrics has not
+	// been told to track, and Metrics.Activate is below the failure points; the
+	// stale-task watchdog marks tasks timed_out at RELAY_TASK_MAX_ASSIGNMENT
+	// (24h) rather than requeueing them, and never writes workers.status at all.
+	//
+	// This is CLAUDE.md's "End the generation before releasing the resource" read
+	// in the acquire direction: take the state and arm its release in the same
+	// breath, so no future early return can be added that forgets to. handedOff
+	// is flipped at exactly ONE place, so the two releases are mutually exclusive
+	// by construction and neither can be skipped.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			h.releaseWorkerGeneration(workerID, updated.ConnectionEpoch)
+		}
+	}()
+
+	// Agent reconnected within its grace window - stop the requeue timer. THIS IS
+	// THE SECOND HALF OF THE ACQUISITION, and is why the release above is armed
+	// before it rather than after: the cancelled timer is not recoverable
+	// (GraceRegistry.Cancel stops it and deletes the entry), so a failure below
+	// has to arm a FRESH one at the epoch RegisterWorkerConnection just created.
+	// Restoring the OLD epoch's timer would be a silent no-op -
+	// RequeueWorkerTasksIfEpoch fences on workers.connection_epoch and the row has
+	// moved on.
 	if h.grace != nil {
 		h.grace.Cancel(workerID)
 	}
@@ -608,6 +649,19 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	sender := NewWorkerSender(stream)
 	sender.connEpoch = updated.ConnectionEpoch
 	h.registry.Register(workerID, sender)
+
+	// OWNERSHIP HANDOFF. From this instant the release belongs to Connect's
+	// `defer h.teardownConnection(workerID, sender)`, which Connect arms the
+	// moment this function returns a nil error. Setting this flag any EARLIER
+	// reopens the strand for the RegisterResponse send; setting it any LATER
+	// makes a successful registration release its own generation.
+	//
+	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
+	// on a nil error, so a future statement here that returns an error would be
+	// covered by neither release and would additionally strand a live sender in
+	// the registry. If such a statement is ever needed, it must log and continue
+	// (as applyInventory does), not return.
+	handedOff = true
 
 	if h.Metrics != nil {
 		h.Metrics.Activate(workerID, time.Now())
@@ -1312,7 +1366,38 @@ func (h *Handler) teardownConnection(workerID string, sender *workerSender) {
 	if !owned {
 		return // a newer connection owns this worker; leave shared state alone
 	}
-	epoch := sender.connEpoch
+	h.releaseWorkerGeneration(workerID, sender.connEpoch)
+}
+
+// releaseWorkerGeneration ends the worker generation identified by epoch: it
+// marks the worker offline and then either arms the grace timer or requeues the
+// worker's tasks directly. It is the ONE place shared worker state is released,
+// and it has exactly two callers - teardownConnection above, when a registered
+// stream ends, and finishRegister's deferred release, when a registration failed
+// after RegisterWorkerConnection had already acquired the generation. Keeping
+// one body is the point: those two paths must not be able to drift apart.
+//
+// THE EPOCH ARGUMENT IS THE OWNERSHIP CHECK, AND ON THE SECOND CALLER IT IS THE
+// ONLY ONE. It is compared, inside MarkWorkerOfflineIfEpoch's WHERE clause,
+// against workers.connection_epoch as it stands right now; a caller whose
+// generation has been superseded by a fresher RegisterWorkerConnection matches
+// zero rows, gets 0 back, and returns having touched nothing. That early return
+// is load-bearing rather than an optimisation: without it a superseded caller
+// arms a grace timer against a LIVE worker, and the timer's own
+// RequeueWorkerTasksIfEpoch fence becomes the only thing between it and a
+// requeue of a healthy agent's running tasks.
+// TestConnect_ASupersededFailedRegistrationReleasesNothing is what holds it, in
+// the default lane.
+//
+// teardownConnection's registry.UnregisterIf gate is a SECOND, EARLIER check
+// that this function deliberately does not duplicate and the failed-registration
+// caller deliberately does not have: that caller has no sender in the registry
+// to compare against - which is precisely what makes it a failed registration -
+// so sender identity is unavailable there and the epoch is the whole of the
+// question. Do NOT add a registry call here to "make the two paths symmetric";
+// unregistering a sender this caller never registered is the clobber the
+// invariant forbids.
+func (h *Handler) releaseWorkerGeneration(workerID string, epoch int32) {
 	if h.markWorkerOffline(workerID, epoch) == 0 {
 		return // a fresher connection holds the epoch; leave grace/requeue alone
 	}
