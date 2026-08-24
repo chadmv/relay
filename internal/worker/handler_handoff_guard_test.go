@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -28,13 +29,20 @@ import (
 //   - Set too early, and the RegisterResponse-send arm of the strand reopens -
 //     which only the integration lane covers.
 //
-// WHAT IS ACTUALLY PINNED IS A RANGE, because that is what the code needs and
-// claiming more would be false. The flag must be flipped after the send has
-// succeeded and after the sender is in the registry, and before the function
-// returns nil. Anywhere in that range is semantically identical - the deferred
-// closure reads the flag after the return value is evaluated, so "too late" is
-// not reachable by moving the statement. The value of pinning the range is that
-// a fallible statement inserted anywhere inside it is caught by the release.
+// WHAT IS PINNED IS A POINT; WHAT THE CODE NEEDS IS A RANGE. The semantic
+// requirement is only that the flag be flipped after the send has succeeded and
+// before the function returns nil. Every position in that range behaves
+// identically today - the deferred closure reads the flag after the return value
+// has been evaluated, so "too late" is not reachable by moving the statement -
+// and mutation confirms it. This test nevertheless pins ONE position, the
+// statement immediately after registry.Register, and the extra strictness is not
+// decoration: each statement that comes to sit between registry.Register and the
+// flip is a statement whose failure ends the DB generation correctly (the flag
+// is still false) and STILL strands the *workerSender in the registry, because
+// Connect arms `defer h.teardownConnection` only on a nil error. The
+// infallible-below-the-flip check further down looks at returns positioned BELOW
+// the flip only, so without adjacency the two checks would leave an unguarded
+// region between them instead of meeting.
 //
 // THE FLAG IS NOT NAMED BY THIS TEST. It is whatever identifier the deferred
 // release closure guards on, so renaming it moves the guard with the code
@@ -46,6 +54,19 @@ import (
 // of those makes this test fail rather than pass vacuously - it is brittleness,
 // not a hole - but the message it fails with will describe a missing anchor
 // rather than the rename that moved it.
+//
+// SPELLING IS NOT AN ANCHOR; SHAPE IS. Both ordinary ways of writing the guard
+// are accepted - `if !flag { release }` and `if flag { return }` followed by the
+// release - as are all three ordinary ways of declaring the flag false:
+// `flag := false`, `var flag bool` and `var flag = false`. Failing any of those
+// would mean reporting a structural loss that did not happen, with a message
+// ("0 deferred releases", "initialised to false 0 times") that names the wrong
+// thing. What IS constrained is that the deferred closure's body be exactly the
+// guard construct and nothing more. handoffFlagIdent carries the argument for
+// that, and it is the one place here where this test does dictate style on
+// purpose: any additional statement in that closure can skip the release on a
+// condition no structural test can evaluate, and the default lane cannot drive a
+// successful registration to notice at runtime.
 func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", nil, 0)
@@ -98,32 +119,49 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 
 	// The flag itself: initialised false, flipped true exactly once.
+	//
+	// BOTH SPELLINGS OF "INITIALISED FALSE" COUNT. `flag := false`, `var flag
+	// bool` and `var flag = false` are the same declaration, and a guard that
+	// accepted only the first would fail an ordinary rewrite with "initialised to
+	// false 0 times" - a message asserting a loss that did not happen. What
+	// actually has to hold is that the flag is declared exactly once and starts
+	// out false; how it is spelled is not this test's business.
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-		for i, lhs := range as.Lhs {
-			id, ok := lhs.(*ast.Ident)
-			if !ok || id.Name != flag {
-				continue
-			}
-			var rhs string
-			if i < len(as.Rhs) {
-				if r, ok := as.Rhs[i].(*ast.Ident); ok {
-					rhs = r.Name
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range v.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != flag {
+					continue
+				}
+				var rhs string
+				if i < len(v.Rhs) {
+					if r, ok := v.Rhs[i].(*ast.Ident); ok {
+						rhs = r.Name
+					}
+				}
+				switch {
+				case v.Tok == token.DEFINE && rhs == "false":
+					initFalse++
+				case v.Tok == token.ASSIGN && rhs == "true":
+					setTrue = append(setTrue, v)
+				default:
+					otherWrites++
 				}
 			}
-			switch {
-			case as.Tok == token.DEFINE && rhs == "false":
-				initFalse++
-			case as.Tok == token.ASSIGN && rhs == "true":
-				setTrue = append(setTrue, as)
-			default:
-				otherWrites++
+		case *ast.ValueSpec:
+			for i, name := range v.Names {
+				if name.Name != flag {
+					continue
+				}
+				if declaresFalseBool(v, i) {
+					initFalse++
+				} else {
+					otherWrites++
+				}
 			}
 		}
 		return true
@@ -173,14 +211,35 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"and the deferred release is the only thing that ends it.",
 			flag, fset.Position(handoff), fset.Position(sendPos))
 	}
-	if handoff < registerPos {
-		t.Fatalf("%s is set before the sender is registered (%s vs %s). This is not a live hazard: "+
-			"the send has already succeeded by that point, and the deferred closure reads the flag "+
-			"after the return value is evaluated, so moving the flip across registry.Register is "+
-			"behaviour-preserving today and mutation confirms it. What this bound pins is the "+
-			"TIGHTEST point of a semantic range whose only real requirement is 'after the send, "+
-			"before the return' - so that a fallible statement inserted anywhere later in that range "+
-			"is still covered by the deferred release rather than by nothing.",
+	// The flip must be the statement IMMEDIATELY AFTER registry.Register, not
+	// merely somewhere below it.
+	//
+	// AN ORDERING CHECK WOULD NOT BE ENOUGH, and the gap it leaves is not
+	// cosmetic. A `handoff > registerPos` bound admits every position down to the
+	// success return, and a fallible statement inserted in that drift is covered
+	// by finishRegister's own deferred release (the flag is still false, so the DB
+	// generation IS ended correctly) and by nothing at all for the registry:
+	// Connect arms `defer h.teardownConnection(workerID, sender)` only on a nil
+	// error, so the *workerSender that registry.Register just published stays in
+	// the registry forever, reachable by the dispatcher, wrapping a stream whose
+	// RPC has returned. The infallible-below-the-flip check further down cannot
+	// see that statement either - it only looks at returns positioned BELOW the
+	// flip. Adjacency is what makes the two checks meet with no unguarded region
+	// between them.
+	regIdx := stmtIndexContaining(fn.Body, registerPos)
+	if regIdx < 0 {
+		t.Fatalf("the registry.Register call at %s is not inside any statement of finishRegister's own "+
+			"body, so the handoff cannot be positioned against it", fset.Position(registerPos))
+	}
+	if regIdx+1 >= len(fn.Body.List) || fn.Body.List[regIdx+1] != setTrue[0] {
+		t.Fatalf("%s is set at %s, which is not the statement immediately after registry.Register at "+
+			"%s. Moving the flip later is behaviour-preserving TODAY - the deferred closure reads the "+
+			"flag after the return value is evaluated, and mutation confirms every position down to "+
+			"the success return behaves identically - so this is not a report of a live defect. What "+
+			"it stops is the drift: each statement that comes to sit between registry.Register and "+
+			"this flip is a statement whose failure ends the DB generation correctly and still leaves "+
+			"a live sender stranded in the registry, because Connect arms its teardown only on a nil "+
+			"error. Keep the flip adjacent and that region cannot exist.",
 			flag, fset.Position(handoff), fset.Position(registerPos))
 	}
 	if handoff > successReturn {
@@ -250,12 +309,78 @@ func directBodyStmt(body *ast.BlockStmt, stmt ast.Stmt) bool {
 	return false
 }
 
+// declaresFalseBool reports whether spec declares its i-th name as a bool that
+// starts out false - either `var flag bool` with no initialiser, or an explicit
+// `= false`. Anything else (another type, a computed initialiser) is a write
+// this guard cannot order, and is counted as one.
+func declaresFalseBool(spec *ast.ValueSpec, i int) bool {
+	if len(spec.Values) == 0 {
+		id, ok := spec.Type.(*ast.Ident)
+		return ok && id.Name == "bool"
+	}
+	if i >= len(spec.Values) {
+		return false
+	}
+	id, ok := spec.Values[i].(*ast.Ident)
+	return ok && id.Name == "false"
+}
+
+// stmtIndexContaining returns the index of body's own statement whose source
+// range contains pos, or -1 if pos falls outside all of them. Position is the
+// right tool here and identity is not: the call being located sits INSIDE a
+// statement rather than being one.
+func stmtIndexContaining(body *ast.BlockStmt, pos token.Pos) int {
+	for i, s := range body.List {
+		if s.Pos() <= pos && pos < s.End() {
+			return i
+		}
+	}
+	return -1
+}
+
+// releaseMethod is the method the deferred closure must call to end the
+// generation. It is source text: renaming the method makes this test fail
+// rather than pass vacuously.
+const releaseMethod = "releaseWorkerGeneration"
+
 // handoffFlagIdent returns the identifier the deferred release closure guards
-// on. Deriving it from the defer rather than naming it is what keeps this guard
-// attached to the mechanism instead of to a spelling.
+// on, after verifying that the closure IS that decision and nothing else.
+// Deriving the name from the defer keeps this guard attached to the mechanism
+// rather than to a spelling; verifying the shape is what makes the derivation
+// worth anything.
+//
+// handler.go claims the two releases are "mutually exclusive by construction and
+// neither can be skipped". Those are two claims, and each needs its own clause:
+//
+//   - THE DEFER IS A DIRECT STATEMENT of finishRegister's body, so it is armed on
+//     every path. `if h.grace != nil { defer func(){...}() }` leaves the closure
+//     verbatim and arms it for nobody.
+//   - THE CLOSURE CALLS THE RELEASE EXACTLY ONCE, which is the "mutually
+//     exclusive" half. An `else` arm that also releases fires on the SUCCESS
+//     path, where the fence matches: a live agent is published 'offline', the
+//     metrics entry Activate just created is wiped, and a grace timer requeues
+//     that healthy agent's running tasks a window later.
+//   - THE CLOSURE BODY IS EXACTLY THE GUARD CONSTRUCT, with the release at a
+//     fixed place inside it. Anything looser admits a skip on a condition this
+//     test cannot evaluate: `if h.pool != nil { return }` ahead of the release is
+//     false in every default-lane fixture (newStrandHandler leaves pool nil
+//     deliberately, and applyInventory's unconditional BeginTxFunc is why) and
+//     true under main.go, so every failed registration would release nothing in
+//     production while this whole package stayed green.
+//
+// BOTH SPELLINGS OF THE GUARD ARE ACCEPTED. `if !flag { release }` and
+// `if flag { return }; release` are the same decision written two ordinary ways.
+// Admitting one and failing the other with a message about a missing release
+// would be dictating style while reporting a defect.
 func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 	t.Helper()
-	var found []string
+
+	// Candidates are selected by REACHING the release anywhere inside the
+	// closure, never by matching the shape. A release moved somewhere the shape
+	// checks reject has to fail those checks and say what it lost; selecting on
+	// shape would drop it from the candidate set instead and report the opposite
+	// of what happened - "no release at all".
+	var candidates []*ast.DeferStmt
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		def, ok := n.(*ast.DeferStmt)
 		if !ok {
@@ -265,45 +390,148 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 		if !ok {
 			return true
 		}
-		ast.Inspect(lit.Body, func(inner ast.Node) bool {
-			ifStmt, ok := inner.(*ast.IfStmt)
-			if !ok || !callsMethodNamed(ifStmt.Body, "releaseWorkerGeneration") {
-				return true
-			}
-			unary, ok := ifStmt.Cond.(*ast.UnaryExpr)
-			if !ok || unary.Op != token.NOT {
-				return true
-			}
-			if id, ok := unary.X.(*ast.Ident); ok {
-				found = append(found, id.Name)
-			}
-			return true
-		})
+		if countCallsNamed(lit.Body, releaseMethod) > 0 {
+			candidates = append(candidates, def)
+		}
 		return true
 	})
-	if len(found) != 1 {
-		t.Fatalf("finishRegister has %d deferred releases guarded by a single negated flag, not one. "+
-			"The acquisition made by RegisterWorkerConnection is ended by exactly this construct on "+
-			"every failing exit; without it the worker stays 'online' at a live epoch with no "+
-			"connection behind it, and with more than one the release is no longer a single decision.",
-			len(found))
+	if len(candidates) != 1 {
+		t.Fatalf("finishRegister defers %d closures that reach %s, not one. The acquisition made by "+
+			"RegisterWorkerConnection is ended by exactly this construct on every failing exit; with "+
+			"none the worker stays 'online' at a live epoch with no connection behind it and no timer "+
+			"to clean up after it, and with several the release is no longer a single decision.",
+			len(candidates), releaseMethod)
 	}
-	return found[0]
+	def := candidates[0]
+	lit := def.Call.Fun.(*ast.FuncLit)
+
+	if !directBodyStmt(fn.Body, def) {
+		t.Fatalf("the deferred %s is nested inside another statement rather than being a statement of "+
+			"finishRegister's own body, so it is armed only on the paths that reach it. The release "+
+			"has to be armed in the same breath as the acquisition RegisterWorkerConnection already "+
+			"made - a conditional arm leaves every failed registration it does not cover with the "+
+			"worker row 'online' at a live epoch and the previous disconnect's requeue timer already "+
+			"cancelled.", releaseMethod)
+	}
+	if n := countCallsNamed(lit.Body, releaseMethod); n != 1 {
+		t.Fatalf("the deferred closure calls %s %d times, not once. The two releases - this one and "+
+			"Connect's `defer h.teardownConnection` - are only mutually exclusive if this one fires on "+
+			"exactly the not-handed-off branch. A second call reachable on the handed-off branch runs "+
+			"against a SUCCESSFUL registration, where the epoch fence matches: the live agent is "+
+			"published 'offline', its metrics entry is wiped, and a grace timer requeues its running "+
+			"tasks a grace window later.", releaseMethod, n)
+	}
+
+	// Rejections below share one message. The two accepted forms are spelled out
+	// in full because the useful thing to know at a failure is what the closure
+	// must look like, not which clause of this function noticed.
+	reject := func(reason string) {
+		t.Fatalf("finishRegister's deferred release closure is not a bare handoff guard: %s.\n"+
+			"Exactly two forms are accepted, and each must be the closure's WHOLE body:\n"+
+			"    defer func() { if !flag { h.%s(...) } }()\n"+
+			"    defer func() { if flag { return }; h.%s(...) }()\n"+
+			"The body is pinned that tightly because any additional statement can skip the release on "+
+			"a condition this test cannot evaluate, and the default lane cannot drive a successful "+
+			"registration to notice. Work that genuinely belongs on this path belongs inside %s, "+
+			"where the strand tests can see it.",
+			reason, releaseMethod, releaseMethod, releaseMethod)
+	}
+
+	switch len(lit.Body.List) {
+	case 1:
+		// defer func() { if !flag { release } }()
+		guard, ok := lit.Body.List[0].(*ast.IfStmt)
+		if !ok {
+			reject("its single statement is not an `if`")
+		}
+		if guard.Init != nil {
+			reject("the guarding `if` carries an init statement, so the branch depends on something " +
+				"evaluated inside the closure")
+		}
+		if guard.Else != nil {
+			reject("the guarding `if` has an else arm, which by definition runs on the handed-off " +
+				"branch")
+		}
+		unary, ok := guard.Cond.(*ast.UnaryExpr)
+		if !ok || unary.Op != token.NOT {
+			reject("the guarding `if` in the one-statement form does not test a negated identifier")
+		}
+		id, ok := unary.X.(*ast.Ident)
+		if !ok {
+			reject("the guarding `if` negates an expression rather than a plain flag identifier")
+		}
+		if len(guard.Body.List) != 1 || !isCallTo(guard.Body.List[0], releaseMethod) {
+			reject("the guarded branch is not exactly one call to " + releaseMethod)
+		}
+		return id.Name
+
+	case 2:
+		// defer func() { if flag { return }; release }()
+		guard, ok := lit.Body.List[0].(*ast.IfStmt)
+		if !ok {
+			reject("its first statement is not an `if`")
+		}
+		if guard.Init != nil {
+			reject("the guarding `if` carries an init statement, so the branch depends on something " +
+				"evaluated inside the closure")
+		}
+		if guard.Else != nil {
+			reject("the guarding `if` in the early-return form has an else arm")
+		}
+		id, ok := guard.Cond.(*ast.Ident)
+		if !ok {
+			reject("the guarding `if` in the early-return form does not test a plain flag identifier")
+		}
+		ret, isRet := guard.Body.List[0].(*ast.ReturnStmt)
+		if len(guard.Body.List) != 1 || !isRet || len(ret.Results) != 0 {
+			reject("the early-return branch is not exactly a bare `return`")
+		}
+		if !isCallTo(lit.Body.List[1], releaseMethod) {
+			reject("the statement after the early return is not exactly one call to " + releaseMethod)
+		}
+		return id.Name
+
+	default:
+		reject(fmt.Sprintf("its body has %d statements", len(lit.Body.List)))
+	}
+	return "" // unreachable: every branch above returns or fatals.
 }
 
-func callsMethodNamed(n ast.Node, name string) bool {
-	var hit bool
+// countCallsNamed counts the calls to a method named name anywhere beneath n,
+// nested positions included. Counting rather than reporting presence is what
+// makes "exactly one release" checkable, and recursing is what makes a release
+// hidden one level down visible to the shape checks rather than invisible to
+// them.
+func countCallsNamed(n ast.Node, name string) int {
+	var hits int
 	ast.Inspect(n, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-			hit = true
+			hits++
 		}
 		return true
 	})
-	return hit
+	return hits
+}
+
+// isCallTo reports whether stmt IS an expression statement calling a method
+// named name, as opposed to a statement that merely contains such a call. That
+// distinction is the whole point: `if h.pool != nil { return }` followed by the
+// release contains the call, and containment is what a recursive check accepts.
+func isCallTo(stmt ast.Stmt, name string) bool {
+	expr, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == name
 }
 
 // onlyCallOnReceiver returns the position of the single call in fn matching
