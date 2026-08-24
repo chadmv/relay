@@ -41,6 +41,7 @@ type strandDB struct {
 	execErr  error // returned by Exec, i.e. by MarkWorkerOfflineIfEpoch
 	execTag  string
 	execs    []strandExec
+	queries  []strandExec
 }
 
 type strandExec struct {
@@ -58,9 +59,13 @@ func (d *strandDB) Exec(_ context.Context, sql string, args ...any) (pgconn.Comm
 	return pgconn.NewCommandTag(d.execTag), nil
 }
 
-func (d *strandDB) Query(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+// Query records what it was asked as well as refusing it. RequeueWorkerTasksIfEpoch
+// is a :many, so the else arm of releaseWorkerGeneration lands here rather than
+// in Exec, and the statement it issues is the only evidence that arm ran.
+func (d *strandDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.queries = append(d.queries, strandExec{sql: sql, args: args})
 	return nil, d.queryErr
 }
 
@@ -73,6 +78,14 @@ func (d *strandDB) execsSeen() []strandExec {
 	defer d.mu.Unlock()
 	out := make([]strandExec, len(d.execs))
 	copy(out, d.execs)
+	return out
+}
+
+func (d *strandDB) queriesSeen() []strandExec {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]strandExec, len(d.queries))
+	copy(out, d.queries)
 	return out
 }
 
@@ -411,4 +424,96 @@ func TestStrandFixture_EveryInt32ColumnScansDistinct(t *testing.T) {
 	assert.Equal(t, strandEpoch, w.ConnectionEpoch,
 		"strandEpoch is derived by counting int32 fields of store.Worker; if it no longer matches "+
 			"what a positional Scan produces, the derivation and sqlc's column order have diverged")
+}
+
+// TestConnect_AFailedRegistrationReplacesThePreviousDisconnectsTimer is the
+// story both tests above narrate in their headers and neither exercised: the
+// worker already had a pending requeue from an EARLIER disconnect, this
+// registration threw it away, and the release has to put a fresh one in its
+// place at the epoch RegisterWorkerConnection just created.
+//
+// The pre-armed timer is given an hour so it cannot fire on its own during the
+// test - anything that fires here fires because the release armed it, and it
+// fires at the NEW epoch or the assertion catches it. Re-arming at the previous
+// epoch would be a silent no-op: RequeueWorkerTasksIfEpoch fences on
+// workers.connection_epoch and the row has moved on.
+//
+// DELETING grace.Cancel DOES NOT FAIL THIS TEST, and that is a fact about
+// grace.Cancel rather than a gap here. Two independent things make a surviving
+// stale entry harmless: RequeueWorkerTasksIfEpoch fences the stale fire to zero
+// rows, and GraceRegistry is epoch-monotonic in the direction that matters here
+// - the incoming epoch is strictly newer, so Start replaces the old entry
+// whether or not Cancel already removed it. Cancel buys promptness and a tidy
+// map, not correctness, and no test in this package should be written to claim
+// otherwise.
+func TestConnect_AFailedRegistrationReplacesThePreviousDisconnectsTimer(t *testing.T) {
+	h, _, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
+
+	previousEpoch := strandEpoch - 1
+	h.grace.StartWithDuration(uuidStr(strandWorkerID), previousEpoch, time.Hour)
+
+	require.Error(t, h.Connect(strandStream(t)))
+
+	select {
+	case f := <-fired:
+		assert.Equal(t, strandEpoch, f.epoch,
+			"the pending requeue from the previous disconnect must not be what fires. It is fenced "+
+				"on the epoch that was live when THAT connection ended, and RegisterWorkerConnection "+
+				"has moved the row past it - so a fire at the old epoch requeues nothing and the "+
+				"tasks this registration stranded stay stranded.")
+	case <-time.After(3 * time.Second):
+		t.Fatal("no timer fired within the window. The registration discarded the previous " +
+			"disconnect's pending requeue and then failed, so unless the release armed a fresh one " +
+			"these tasks have no requeue scheduled at all.")
+	}
+
+	select {
+	case f := <-fired:
+		t.Fatalf("a second timer fired, at epoch %d. One ended generation must schedule one requeue; "+
+			"two means an entry survived that should have been replaced.", f.epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestReleaseWorkerGeneration_WithoutAGraceRegistryRequeuesImmediately covers
+// the else arm, which no test reached: deleting it outright left the whole
+// default package green.
+//
+// IT IS NOT REACHABLE IN PRODUCTION TODAY - cmd/relay-server/main.go always
+// builds the handler through NewHandlerWithGrace - and it is covered anyway
+// rather than deleted, because it is the arm that decides what happens when the
+// grace window is configured away, and an untested branch that ends a worker's
+// generation is exactly the kind that comes back wrong. This calls
+// releaseWorkerGeneration directly: the arm is one level below the registration
+// path, and driving it through Connect would only re-test the level above.
+func TestReleaseWorkerGeneration_WithoutAGraceRegistryRequeuesImmediately(t *testing.T) {
+	// queryErr is set because the requeue is a :many and this stub returns no
+	// pgx.Rows. The handler discards that statement's result either way
+	// (`_, _ = h.q.RequeueWorkerTasksIfEpoch(...)`), so refusing it changes
+	// nothing about what this test observes: that the statement was issued at all,
+	// and with which fence.
+	db := &strandDB{execTag: "UPDATE 1", queryErr: errors.New("no rows fixture")}
+	h := &Handler{
+		q:               store.New(db),
+		registry:        NewRegistry(),
+		broker:          events.NewBroker(),
+		triggerDispatch: func() {},
+	}
+	require.Nil(t, h.grace, "fixture: this test is about the arm taken when there is no grace registry")
+
+	h.releaseWorkerGeneration(uuidStr(strandWorkerID), strandEpoch)
+
+	execs := db.execsSeen()
+	require.Len(t, execs, 1, "the offline mark")
+	assert.Contains(t, execs[0].sql, "status = 'offline'")
+
+	queries := db.queriesSeen()
+	require.Len(t, queries, 1,
+		"with no grace registry the release must requeue the worker's tasks itself. Marking the "+
+			"worker offline and stopping there leaves its dispatched and running tasks assigned to a "+
+			"connection that no longer exists, with nothing scheduled to free them.")
+	assert.Contains(t, queries[0].sql, "connection_epoch = $2",
+		"the requeue must carry the connection_epoch fence")
+	assert.Contains(t, queries[0].args, strandEpoch,
+		"and it must be fenced on the epoch whose generation is being ended")
 }
