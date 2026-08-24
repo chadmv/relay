@@ -1,6 +1,9 @@
 package store_test
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,13 +39,27 @@ import (
 // Known weakness, accepted: a rename defeats it. Same weakness and same trade as
 // TestUpdateTaskStatusEpochHasNoProductionCaller.
 //
-// The check is a substring match, so it also sees the identifier in PROSE. Every
-// generated internal/store/*.sql.go file is therefore exempt: tasks.sql.go
-// defines the statement, and jobs.sql.go carries the JobStatusCounts comment that
-// names it while explaining which statements keep a terminal task unwritable.
-// Those files are emitted by sqlc from query/*.sql and cannot contain a
-// hand-written call site, so exempting them costs the guard nothing - a real
-// caller would live in a hand-written file, which no exemption covers.
+// IT PARSES GO, AND IT USED TO BE A SUBSTRING MATCH. That is not a tidy-up: a
+// substring match asks "does this text appear", and the question this guard
+// exists to ask is "does this get CALLED". The two differ exactly where prose
+// mentions the statement, and the old version PAID FOR THE DIFFERENCE WITH
+// WHOLE-FILE EXEMPTIONS - internal/store/*.sql.go was skipped entirely because
+// tasks.sql.go defines the method and jobs.sql.go names it in a comment. An
+// exemption granted to a PATH is an exemption from every question, so those two
+// generated files were the one place in the module where a hand-added call site
+// would have been invisible to this guard. Both exemptions are now GONE, because
+// an AST walk skips the defining FuncDecl's own name and never visits a comment
+// at all.
+//
+// It went RED on a comment in internal/scheduler/dispatch.go that enumerates
+// relay's five Go-side fence-rejection sites by statement name - prose that is
+// correct, load-bearing, and not a call. Rewording that comment would have been
+// the cheap fix and would have left the guard's real defect in place, one file
+// exemption away from the next false positive.
+//
+// WHAT COUNTS AS A REFERENCE: any identifier in the syntax tree, not only a call
+// expression. `f := q.IncrementTaskRetryCount` takes a method value and invokes
+// it one line later, which a call-expression-only walk would miss.
 func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 	root := repoRoot(t)
 	const ident = "IncrementTaskRetryCount"
@@ -51,7 +68,6 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 	allowed := map[string]bool{
 		filepath.Join(root, "internal", "worker", "handler.go"): true,
 	}
-	storeDir := filepath.Join(root, "internal", "store")
 
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -74,15 +90,51 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 		if allowed[path] {
 			return nil
 		}
-		// sqlc-generated query files: definitions and comments, never call sites.
-		if filepath.Dir(path) == storeDir && strings.HasSuffix(path, ".sql.go") {
-			return nil
+		// parser.SkipObjectResolution and no parser.ParseComments: comments are
+		// not part of the tree that gets walked, which is the whole point.
+		file, perr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			return perr
 		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if strings.Contains(string(b), ident) {
+		found := false
+		ast.Inspect(file, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			// A FuncDecl's own NAME is the definition, not a use. sqlc emits
+			// `func (q *Queries) IncrementTaskRetryCount(...)` in tasks.sql.go,
+			// and that declaration is why the generated files used to be
+			// exempted wholesale. Skip the name and the receiver; the body is
+			// still walked, so a call hand-added inside a generated file is
+			// caught like any other.
+			if fd, ok := n.(*ast.FuncDecl); ok {
+				if fd.Recv != nil {
+					ast.Inspect(fd.Recv, func(m ast.Node) bool { return true })
+				}
+				if fd.Type != nil {
+					ast.Inspect(fd.Type, func(m ast.Node) bool {
+						if id, ok := m.(*ast.Ident); ok && id.Name == ident {
+							found = true
+						}
+						return !found
+					})
+				}
+				if fd.Body != nil {
+					ast.Inspect(fd.Body, func(m ast.Node) bool {
+						if id, ok := m.(*ast.Ident); ok && id.Name == ident {
+							found = true
+						}
+						return !found
+					})
+				}
+				return false
+			}
+			if id, ok := n.(*ast.Ident); ok && id.Name == ident {
+				found = true
+			}
+			return !found
+		})
+		if found {
 			rel, _ := filepath.Rel(root, path)
 			offenders = append(offenders, filepath.ToSlash(rel))
 		}
@@ -94,9 +146,11 @@ func TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath(t *testing.T) {
 
 	if len(offenders) > 0 {
 		t.Fatalf("%s is the AGENT-DRIVEN retry and must be called only from "+
-			"internal/worker/handler.go, but it appears in: %v\n"+
+			"internal/worker/handler.go, but it is REFERENCED IN CODE in: %v\n"+
 			"An operator re-run (POST /v1/jobs/{id}/retry) must use RetryJobTasks: every "+
 			"predicate on %s would reject it. See the note on the statement in "+
-			"internal/store/query/tasks.sql.", ident, offenders, ident)
+			"internal/store/query/tasks.sql.\n"+
+			"This walk parses Go and never sees comments, so a hit here is a real reference, "+
+			"not a mention.", ident, offenders, ident)
 	}
 }
