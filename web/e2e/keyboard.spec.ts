@@ -1,7 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { readSeed } from './fixtures'
-
-const seed = readSeed()
+import { readSeed, type Seed } from './fixtures'
 
 // WHY THESE TWO TABLES. EnrollmentsTable and InvitesTable have ZERO focusable
 // elements in any row (web/src/admin/enrollments/EnrollmentsTable.tsx:49-76,
@@ -44,15 +42,21 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
   // alive through the same whole-project scan.
   test.use({ viewport: { width: 480, height: 900 } })
 
+  // marker is a FUNCTION OF Seed, not a resolved value, for the same
+  // collection-vs-execution reason as surfaces.ts's path()/ready(): this array
+  // is built at collection time, before setup has written e2e/.run/seed.json.
+  // readSeed() is called inside each test body instead, after dependencies
+  // guarantee setup has actually run.
   const cases = [
-    { path: '/admin/enrollments', group: 'Agent enrollments, scrolls horizontally', marker: seed.enrollmentHostname },
-    { path: '/admin/invites', group: 'Invites, scrolls horizontally', marker: seed.inviteEmail },
+    { path: '/admin/enrollments', group: 'Agent enrollments, scrolls horizontally', marker: (seed: Seed) => seed.enrollmentHostname },
+    { path: '/admin/invites', group: 'Invites, scrolls horizontally', marker: (seed: Seed) => seed.inviteEmail },
   ]
 
   for (const c of cases) {
     test(`${c.path}: a real Tab press reaches the labelled scroll region`, async ({ page }) => {
+      const seed = readSeed()
       await page.goto(c.path)
-      await expect(page.getByText(c.marker)).toBeVisible()
+      await expect(page.getByText(c.marker(seed))).toBeVisible()
 
       // The accessible name is DERIVED from the table's own label
       // (Table.tsx:190), so this locator also pins that it has not drifted.
@@ -72,8 +76,9 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
     })
 
     test(`${c.path}: arrow keys scroll the clipped columns into view`, async ({ page }) => {
+      const seed = readSeed()
       await page.goto(c.path)
-      await expect(page.getByText(c.marker)).toBeVisible()
+      await expect(page.getByText(c.marker(seed))).toBeVisible()
       const group = page.getByRole('group', { name: c.group })
 
       // PRECONDITION, asserted rather than assumed, and it is the only gate in

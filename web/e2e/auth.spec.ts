@@ -5,11 +5,17 @@ import { fileURLToPath } from 'node:url'
 import { readSeed } from './fixtures'
 
 const runDir = join(dirname(fileURLToPath(import.meta.url)), '.run')
+// env.json is written by e2e/ensure-db.mjs, which runs BEFORE Playwright even
+// starts - not by the setup project - so it is safe to read at module (i.e.
+// collection-time) scope. seed.json is different: it is written by the setup
+// project's own test, and Playwright collects every spec file across every
+// project - including this one, which depends on setup - before it runs any
+// test in any project. readSeed() must therefore stay INSIDE the one test body
+// that needs it below, not up here.
 const runEnv = JSON.parse(readFileSync(join(runDir, 'env.json'), 'utf8')) as {
   adminEmail: string
   adminPassword: string
 }
-const seed = readSeed()
 
 // The whole file runs ANONYMOUS: it is about the unauthenticated state, and the
 // logout test in particular MUST own its own token. DELETE /v1/auth/token is
@@ -64,6 +70,7 @@ test('a deep link while logged out redirects to /auth', async ({ page }) => {
   // everywhere") while every test in this file goes red, because /auth itself
   // is also a path only the SPA fallback can answer. This is the one mutation
   // in this file that is genuinely browser-only.
+  const seed = readSeed()
   await page.goto(`/jobs/${seed.jobId}`)
   await expect(page).toHaveURL(/\/auth$/)
   await expect(page.getByRole('heading', { name: 'Sign in', level: 1 })).toBeVisible()
