@@ -298,10 +298,40 @@ func captureLog(t *testing.T) func() string {
 // (measured). Asserting the first row's text is PRESENT and a later row's is
 // ABSENT is what kills it. Same for the id: firstFailID was asserted nowhere in
 // the repo, so replacing it with a zero-value pgtype.UUID also passed.
+//
+// IT IS ALSO WHERE THE INNER `swept > 0` GATE IS PINNED - not a claim that it is
+// the only such place, which is unverifiable from here, but a statement of what
+// this fixture is built to catch. That gate exists so worst() is not called -
+// taking the counters mutex and walking up to api.WatchdogSweptWorkerMax
+// entries - on a sweep whose result would be discarded, and mutating it to
+// `if true` survived the whole scheduler suite until the NotContains below
+// existed. Re-run that mutation if you touch either half. A failed-writes-only sweep is the shape that distinguishes them, but
+// ONLY once a namable worst already exists: on virgin counters worst() returns
+// n == 0, the `worstN <= 1` arm says nothing, and the ungated code is
+// indistinguishable from the gated one. Hence the healthy sweep first.
 func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T) {
 	logged := captureLog(t)
 	now := time.Now()
 
+	// PHASE 1: one healthy sweep that puts a worker at 2, so the counters hold a
+	// worst the ungated code would have something to print. Asserted, not assumed:
+	// if this stops establishing a worst, the NotContains below goes vacuous
+	// silently, which is the failure mode this whole file is about.
+	hot := nthWorkerUUID(9)
+	q := &fakeWatchdogStore{overdue: []store.Task{
+		overdueRowForWorker(6, hot, now),
+		overdueRowForWorker(7, hot, now),
+	}}
+	w := newTestWatchdog(t, q, now)
+	require.NoError(t, w.SweepOnce(context.Background()))
+	require.Contains(t, logged(), "worst since process start: worker "+uuidStr(hot)+" with 2",
+		"phase 1 must leave a namable worst behind, or phase 2 asserts the gate vacuously")
+	before := len(logged())
+
+	// PHASE 2: the same watchdog, now sweeping rows whose writes all fail. Every
+	// sweep from here has swept == 0 while the counters still remember phase 1.
+	// Rewriting the fixture between sweeps is safe because SweepOnce does not
+	// return until its deferred wg.Wait() has joined every sendCancel goroutine.
 	rows := make([]store.Task, 0, 5)
 	errs := map[pgtype.UUID]error{}
 	for i := byte(1); i <= 5; i++ {
@@ -309,17 +339,17 @@ func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T
 		rows = append(rows, r)
 		errs[r.ID] = fmt.Errorf("connection reset by peer (row %d)", i)
 	}
-	q := &fakeWatchdogStore{overdue: rows, updateErr: errs}
-	w := newTestWatchdog(t, q, now)
+	q.overdue, q.updateErr = rows, errs
 
 	for i := 0; i < 3; i++ {
 		require.NoError(t, w.SweepOnce(context.Background()))
 	}
 
-	lines := strings.Split(strings.TrimSpace(logged()), "\n")
+	out := logged()[before:]
+	lines := strings.Split(strings.TrimSpace(out), "\n")
 	require.Len(t, lines, 3,
 		"three sweeps over five permanently failing rows must produce THREE lines, not fifteen. Got:\n%s",
-		logged())
+		out)
 	for _, l := range lines {
 		assert.Contains(t, l, "5 write(s) FAILED",
 			"the aggregate must say how many failed, because '5 of 5 failed' is a diagnosis and five "+
@@ -331,6 +361,10 @@ func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T
 				"to end on. A line carrying row 5's text means the capture is unconditional.")
 		assert.Contains(t, l, "first: task "+uuidStr(rows[0].ID),
 			"and it must name the FIRST failing row, not a zero-value uuid")
+		assert.NotContains(t, l, "worst",
+			"nothing was swept, so worst() must not even be CALLED, let alone reported. Phase 1 left a "+
+				"worst of 2 in the counters, so an ungated call would print it beside '0 task(s) swept' - "+
+				"a cumulative maximum with no sweep in this line to attach it to.")
 	}
 }
 
@@ -363,8 +397,18 @@ func TestWatchdog_AMixedSweepReportsBothHalvesInOneLine(t *testing.T) {
 	w := newTestWatchdog(t, q, now)
 	require.NoError(t, w.SweepOnce(context.Background()))
 
-	lines := strings.Split(strings.TrimSpace(logged()), "\n")
-	summary := lines[len(lines)-1]
+	// NOT lines[len(lines)-1]. SweepOnce defers wg.Wait(), so the sendCancel
+	// goroutines it spawned are still running while the summary is printed; the
+	// summary is last only because sendCancel happens to log nothing today. Select
+	// it by its own prefix instead, so adding a line there cannot make this flake.
+	var summaries []string
+	for _, l := range strings.Split(strings.TrimSpace(logged()), "\n") {
+		if strings.HasPrefix(l, "watchdog: sweep ended: ") {
+			summaries = append(summaries, l)
+		}
+	}
+	require.Len(t, summaries, 1, "one sweep emits exactly one summary line")
+	summary := summaries[0]
 	assert.Equal(t, fmt.Sprintf(
 		"watchdog: sweep ended: 2 task(s) swept across 1 worker(s); "+
 			"worst since process start: worker %s with 2; "+

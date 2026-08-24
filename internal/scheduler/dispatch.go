@@ -467,8 +467,8 @@ func failClaimedTask(
 		// COMPLEMENT - it cannot be checked by opening its subject, only by
 		// searching for the shape (CLAUDE.md says exactly this about
 		// RequeueTaskByID, which is where the rule was learned). The earlier
-		// wording here said "the other four" and missed ClaimTaskForWorker 170
-		// lines up in this same file.
+		// wording here said "the other four" and missed ClaimTaskForWorker in
+		// Dispatcher.sendTask, earlier in this same file.
 		//
 		// Go-side sites where an epoch fence rejects, split by HOW the
 		// rejection arrives:
@@ -477,7 +477,7 @@ func failClaimedTask(
 		//     an `err != nil` arm can tell apart: handleTaskLog's AppendTaskLog
 		//     arm, handleTaskStatus's IncrementTaskRetryCount and
 		//     UpdateTaskStatus arms, Watchdog.SweepOnce, this one, and
-		//     Dispatcher.dispatchTask's ClaimTaskForWorker - which CLAUDE.md
+		//     Dispatcher.sendTask's ClaimTaskForWorker - which CLAUDE.md
 		//     names as the canonical "conditionally end the assignment" branch
 		//     of the epoch fence.
 		//   - As a rowcount or an empty slice, where there is no error to

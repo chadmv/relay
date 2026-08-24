@@ -141,14 +141,25 @@ func (w *watchdogCounters) worst() (string, uint64, uint64) {
 // emits. Anchored and hex-only, so nothing that is not a server-rendered uuid
 // can become a key in a document an operator reads.
 //
-// IT HAS A TWIN IT CANNOT SHARE: internal/api's canonicalUUIDRe, in
-// server_counters_test.go, is the same rule spelled as a regexp and is what the
-// payload guard checks these keys against. Neither package can import the other
-// (internal/scheduler imports internal/api, which is also why
-// WatchdogSweptWorkerMax had to be hoisted over there), so the constant is
-// shared and this predicate is not. Change one and change the other: a producer
-// stricter than the guard is harmless, a producer looser than it ships a key
-// the guard will reject.
+// IT HAS RESTATEMENTS IT CANNOT SHARE, AND THIS SENTENCE MUST NOT COUNT THEM.
+// It read "IT HAS A TWIN" when there was one; a third copy landed two commits
+// later and nobody came back here. That is the uniqueness-claim shape CLAUDE.md
+// warns about - a claim about the COMPLEMENT, which cannot be checked by opening
+// its subject - so what is stated instead is the PROPERTY: every restatement is
+// this same rule spelled as an anchored regexp, and every one of them lives in a
+// test file. At the time of writing they are internal/api's canonicalUUIDRe
+// (server_counters_test.go), which is what the payload guard checks these keys
+// against, and cmd/relay-server's canonicalWorkerKeyRe
+// (counters_wiring_test.go), which restates it AGAIN because internal/api's is
+// unexported. Read the current set off the code, not off that list:
+//
+//	grep -rn 'canonicalWorkerKey\|canonicalUUIDRe' --include=*.go .
+//
+// Neither package can import the other (internal/scheduler imports internal/api,
+// which is also why WatchdogSweptWorkerMax had to be hoisted over there), so the
+// constant is shared and this predicate is not. Change this one and change all
+// of them: a producer stricter than the guard is harmless, a producer looser
+// than it ships a key the guard will reject.
 func canonicalWorkerKey(s string) bool {
 	if len(s) != 36 {
 		return false
