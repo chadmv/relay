@@ -146,12 +146,24 @@ type TaskLogFenceSource interface {
 // THAT IS NOT WHERE IT LOOKS LIKE IT BELONGS.
 //
 // The producer is internal/scheduler, so the constant "wants" to live beside the
-// map. It cannot: the bound has to be ENFORCED inside this payload's
-// counterPayloadAllowList predicates (an exemption is shape-checked but
-// non-descending, so the cap is checked there or nowhere), and that test file is
-// package api - importing internal/scheduler from it is the same cycle that
-// forces WatchdogCounts to be declared here. One constant read by both the
-// producer and the guard means the two cannot drift; two constants would.
+// map. It cannot: this package's own counterPayloadAllowList predicate has to
+// read it (an exemption is shape-checked but NON-DESCENDING, so a predicate that
+// did not check the cap itself would leave the map's key count unchecked in this
+// package entirely), and that test file is package api - importing
+// internal/scheduler from it is the same cycle that forces WatchdogCounts to be
+// declared here. One constant read by both the producer and the guard means the
+// two cannot drift; two constants would.
+//
+// WHERE THE BOUND IS ACTUALLY ENFORCED IS watchdogCounters.record, in
+// internal/scheduler: it refuses a NEW key at capacity and counts the sweep
+// against SweptOverflow instead. Nothing in this package enforces anything at
+// runtime - counterPayloadAllowList is a test predicate, and it runs against a
+// fake source whose keys are literals in server_counters_test.go, so it can only
+// ever say that THAT fixture is well-formed. The one place the real producer's
+// keys are read back through the real route is cmd/relay-server's
+// TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, which
+// exists because that package can import both sides and this one structurally
+// cannot.
 //
 // 256 is a policy number, not a measurement: it comfortably exceeds any fleet
 // this project has seen, and the design is FIRST-COME rather than top-K because

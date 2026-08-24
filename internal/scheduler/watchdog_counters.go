@@ -55,12 +55,14 @@ type watchdogCounters struct {
 // A worker id that is not a canonical uuid goes to overflow rather than into the
 // map. That is not defensive noise: the payload's allow-list predicate rejects
 // the WHOLE map on one non-uuid key. Where that costs a RED is
-// cmd/relay-server, the only package that can read keys THIS function produced
-// back out through the real route; internal/api's own guard cannot see this
-// function at all, since it drives a fake source whose keys are literals in its
-// test file. ListOverdueAssignedTasks requires worker_id IS NOT NULL, so this
-// branch is unreachable today - and it is what lets the payload guard be
-// written as a shape check rather than as a promise.
+// cmd/relay-server's
+// TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, the
+// only place keys THIS function produced are read back out through the real
+// route; internal/api's own guard cannot see this function at all, since it
+// drives a fake source whose keys are literals in its test file.
+// ListOverdueAssignedTasks requires worker_id IS NOT NULL, so this branch is
+// unreachable today - and it is what lets the payload guard be written as a
+// shape check rather than as a promise.
 func (w *watchdogCounters) record(workerID string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -7,10 +7,13 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"sort"
 	"testing"
 	"time"
@@ -908,4 +911,107 @@ func TestBuildHTTPServer_TypedNilWatchdogLeavesTheSectionAbsent(t *testing.T) {
 	require.NotContains(t, top, "watchdog",
 		"a nil watchdog must leave the section ABSENT, never present-and-zero, and must never panic")
 	require.Contains(t, top, "started_at")
+}
+
+// canonicalWorkerKeyRe is internal/api's canonicalUUIDRe, restated here because
+// that one is unexported in a package this test cannot reach into. It is the
+// shape internal/scheduler's uuidStr emits and the shape
+// counterPayloadAllowList's swept_by_worker predicate demands.
+var canonicalWorkerKeyRe = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// distinctWorkerUUID makes more distinct worker uuids than countersTestUUID's
+// single byte can express, which this test has to do to cross the cap.
+func distinctWorkerUUID(n int) pgtype.UUID {
+	var raw [16]byte
+	raw[14] = byte(n >> 8)
+	raw[15] = byte(n)
+	return pgtype.UUID{Bytes: raw, Valid: true}
+}
+
+// TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap is the
+// only place in the repo where the payload's key rule meets REAL PRODUCER
+// BYTES.
+//
+// internal/api's counterPayloadAllowList is the rule's home, and its jsonOK
+// predicate is exercised only against fakeWatchdogSource{c: threeDistinctSweeps()},
+// whose keys are string literals in that test file. So the predicate proves
+// things about a fixture, not about internal/scheduler - and internal/api
+// structurally cannot import internal/scheduler to fix that, because
+// internal/scheduler imports internal/api. This package can import both, which
+// is why the check lives here.
+//
+// MEASURED: mutating internal/scheduler's producer so that every key was
+// "build-agent-07.corp.example\n10.0.0.7" - a hostname with an injected
+// newline, exactly the payload the exemption's own argument cites as what must
+// never get in - left BOTH internal/api and cmd/relay-server fully green. The
+// only assertion that had ever touched these keys was a require.Len of 1 in
+// TestBuildHTTPServer_ServesTheWiredWatchdogsSweepCounters: a count, never a
+// shape.
+//
+// It drives MORE workers than the cap on purpose, so the two halves of the
+// exemption's argument - a bounded key count and a server-rendered key shape -
+// are both read off one real response.
+func TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap(t *testing.T) {
+	// One line per swept task, and there are more than 256 of them.
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	const workers = api.WatchdogSweptWorkerMax + 4
+	rows := make([]store.Task, 0, workers)
+	for i := 0; i < workers; i++ {
+		rows = append(rows, store.Task{
+			ID: distinctWorkerUUID(1000 + i), JobID: countersTestUUID(99), Status: "running",
+			WorkerID:        distinctWorkerUUID(i),
+			AssignmentEpoch: 7,
+			AssignedAt:      pgtype.Timestamptz{Time: time.Now().Add(-48 * time.Hour), Valid: true},
+		})
+	}
+	require.Less(t, len(rows), scheduler.WatchdogMaxRowsPerSweep,
+		"the fixture must fit in ONE sweep, or the cap is never reached here")
+
+	wd := scheduler.NewWatchdog(&sweepableStore{overdue: rows}, nopCanceller{}, events.NewBroker(),
+		30*time.Minute, 24*time.Hour)
+	srv := buildHTTPServer(httpServerDeps{
+		addr:     "127.0.0.1:0",
+		q:        store.New(stubAdminDB{}),
+		watchdog: wd,
+	})
+	require.NoError(t, wd.SweepOnce(context.Background()))
+
+	var section struct {
+		Counts struct {
+			SweptTotal    uint64            `json:"swept_total"`
+			SweptOverflow uint64            `json:"swept_overflow"`
+			SweptByWorker map[string]uint64 `json:"swept_by_worker"`
+		} `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(countersAsAdmin(t, srv)["watchdog"], &section))
+
+	require.NotEmpty(t, section.Counts.SweptByWorker,
+		"the sweep populated no keys at all, so every assertion below would be vacuous")
+
+	// SHAPE FIRST, then the bound. A producer that has stopped rendering uuids
+	// usually collapses the key set too, so a cardinality assertion placed above
+	// this one would fire first and report the wrong defect.
+	for k := range section.Counts.SweptByWorker {
+		require.Regexp(t, canonicalWorkerKeyRe, k,
+			"the served payload carries the key %q, which is not a server-rendered uuid. This is half "+
+				"of counterPayloadAllowList's argument for swept_by_worker, and internal/api can only "+
+				"ever check it against a fake source whose keys are literals in its own test file - "+
+				"internal/scheduler imports internal/api, so the reverse import that would let it see "+
+				"the real producer is impossible. A newline in a key injects a line into every "+
+				"operator's log pipeline; a hostname in a key puts a caller-supplied byte in a payload "+
+				"whose contract says it carries none.", k)
+	}
+
+	require.LessOrEqual(t, len(section.Counts.SweptByWorker), api.WatchdogSweptWorkerMax,
+		"the served payload names %d workers, over the %d-key bound that is half of the argument "+
+			"admitting this map into a document of integers at all (see counterPayloadAllowList in "+
+			"internal/api). Worker ids are server-assigned but their COUNT is not server-limited - "+
+			"with RELAY_ALLOW_AUTO_ENROLL on, a reachable host creates one worker row per hostname it "+
+			"claims.", len(section.Counts.SweptByWorker), api.WatchdogSweptWorkerMax)
+	require.Equal(t, uint64(workers-api.WatchdogSweptWorkerMax), section.Counts.SweptOverflow,
+		"and the sweeps the cap refused must be counted, not dropped")
 }
