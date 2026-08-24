@@ -77,11 +77,21 @@ func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.D
 	entry := &graceEntry{epoch: epoch}
 	entry.timer = time.AfterFunc(d, func() {
 		g.mu.Lock()
-		// Guard against ABA: only fire if this specific entry is still the
-		// active one. A concurrent Start may have replaced it between timer
-		// expiry and lock acquisition - Stop cannot recall a timer that has
-		// already fired, so the refusal above is worthless without this. Pinned by
-		// TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt.
+		// Guard against ABA: only fire if this specific ENTRY is still the active
+		// one. Identity, not epoch - an equal epoch still replaces (see above), so
+		// a same-epoch replacement is indistinguishable from this entry by epoch
+		// and an epoch comparison here would wave the fired timer through.
+		//
+		// A concurrent Start may have replaced this entry between timer expiry and
+		// lock acquisition, and Stop cannot recall a timer that has already fired.
+		// THE TWO CONTROLS ARE INDEPENDENT rather than one propping up the other:
+		// deleting the refusal above fails only
+		// TestGraceRegistry_AStaleEpochDoesNotDisplaceALiveTimer, deleting this
+		// fails only the two AFiredTimer tests. What this one covers is the window
+		// the refusal cannot reach - once a timer has fired there is no Start left
+		// to refuse. Pinned by
+		// TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt and
+		// TestGraceRegistry_AFiredTimerDoesNotEvictItsSameEpochReplacement.
 		if g.timers[workerID] != entry {
 			g.mu.Unlock()
 			return
@@ -102,12 +112,25 @@ func (g *GraceRegistry) StartWithDuration(workerID string, epoch int32, d time.D
 // IT IS DELIBERATELY EXEMPT FROM StartWithDuration'S MONOTONICITY RULE. It
 // cancels and fires whatever epoch it is handed without comparing it against a
 // pending entry's, and what makes that safe is WHERE it is called from rather
-// than anything about the method. Its only caller is
-// cmd/relay-server's seedGraceTimersFromActiveTasks, which runs on the main
-// goroutine before the gRPC server is constructed and walks a registry built
-// moments earlier - so the map is empty, there is no live entry to displace and
-// no concurrent Start to race. A SECOND caller would not inherit that argument;
-// give this the same `old.epoch > epoch` refusal before adding one.
+// than anything about the method.
+//
+// ITS ONLY NON-TEST CALLER is cmd/relay-server's
+// seedGraceTimersFromActiveTasks, which runs on the main goroutine before the
+// gRPC server is constructed, so no concurrent Start can race it.
+//
+// THAT IS ONLY HALF THE ARGUMENT, and the obvious other half - "the registry was
+// built moments earlier, so the map is empty" - is true of the FIRST candidate
+// only. The same loop calls Start and StartWithDuration for the others, so by
+// candidate N the map can hold up to N-1 entries. What actually holds is a
+// property of the query: ListGraceCandidates is a SELECT DISTINCT whose only
+// non-key columns come from the same single workers row, so distinct rows means
+// distinct worker ids and no id can appear twice in that loop. ExpireNow
+// therefore never finds an entry under its OWN key, and the cancel it performs
+// cancels nothing.
+//
+// A SECOND CALLER WOULD HAVE TO REPRODUCE THAT PROPERTY OF ITS INPUT, which is
+// not something this method can check. Give it the same `old.epoch > epoch`
+// refusal before adding one.
 func (g *GraceRegistry) ExpireNow(workerID string, epoch int32) {
 	g.mu.Lock()
 	if g.stopped {

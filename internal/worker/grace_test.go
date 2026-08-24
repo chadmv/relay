@@ -263,3 +263,60 @@ func TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt(t *testing.
 			"half: the live generation now has no pending requeue at all, so when its connection "+
 			"really does end there is nothing scheduled to free its tasks.")
 }
+
+// TestGraceRegistry_AFiredTimerDoesNotEvictItsSameEpochReplacement is the case
+// above with the two epochs made EQUAL, and it exists because the guard is about
+// entry IDENTITY and the case above cannot tell identity from epoch.
+//
+// Weakening `g.timers[workerID] != entry` to a comparison of epochs leaves the
+// differing-epoch case green: 2 != 1 refuses the stale closure just as the
+// identity check did. But StartWithDuration documents that an equal epoch STILL
+// replaces - that is what keeps Start idempotent-with-reset - so a same-epoch
+// replacement is an entry the epoch comparison cannot distinguish from the one
+// that fired. Under that weakening the fired timer walks past the guard, deletes
+// the replacement and calls onExpire, which requeues the live generation's tasks
+// a full grace window early and then leaves nothing scheduled behind it.
+//
+// The whole package stayed green under that weakening until this test existed.
+func TestGraceRegistry_AFiredTimerDoesNotEvictItsSameEpochReplacement(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(time.Hour, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	g.StartWithDuration("w1", 5, time.Hour)
+	g.mu.Lock()
+	first := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotNil(t, first, "fixture: the first call must have installed an entry")
+
+	// Same epoch as the first. StartWithDuration refuses only a STRICTLY older
+	// one, so this must replace - and TestGraceRegistry_StartAtTheSameEpochStill
+	// ResetsTheWindow is what holds that half.
+	g.StartWithDuration("w1", 5, time.Hour)
+	g.mu.Lock()
+	second := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotSame(t, first, second,
+		"fixture: an equal epoch must still install a NEW entry, or the ABA this test needs does "+
+			"not exist and it would pass for the wrong reason")
+
+	first.timer.Reset(0)
+
+	select {
+	case epoch := <-fired:
+		t.Fatalf("the replaced entry's timer fired at epoch %d. Its epoch is indistinguishable from "+
+			"the live entry's, so a guard that compares epochs instead of entry identity lets it "+
+			"through: the live generation's tasks are requeued a grace window early, while its "+
+			"connection is still up.", epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	g.mu.Lock()
+	still := g.timers["w1"]
+	g.mu.Unlock()
+	assert.Same(t, second, still,
+		"the replaced entry's closure deleted the live entry on its way past, so the generation "+
+			"that is actually pending has no timer left to requeue its tasks when it ends")
+}
