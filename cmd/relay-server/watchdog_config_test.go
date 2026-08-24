@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"testing"
 	"time"
 
@@ -105,7 +106,7 @@ func TestParseWatchdogDuration(t *testing.T) {
 // go/ast, NOT a regex. A source-scanning regex guard in this repo was proven
 // breakable by a single stray comment.
 //
-// IT CHECKS EXACTLY THREE THINGS, and the earlier version of it silently passed
+// IT CHECKS EXACTLY FOUR THINGS, and the earlier version of it silently passed
 // on all four ways a reviewer broke the wiring - two of which are fixed below
 // and two of which no scanner can reach (see WHAT IT CANNOT REACH):
 //
@@ -127,6 +128,24 @@ func TestParseWatchdogDuration(t *testing.T) {
 //     ignores RELAY_TASK_MAX_ASSIGNMENT, and a BFS that stops at the first seed
 //     reaching parseWatchdogDuration reports success while this test's own
 //     failure message names both variables.
+//  4. EACH BOUND IS IN ITS OWN PARAMETER POSITION. (3) says two parsed bounds
+//     arrive; it does not say which arrives where, and both trailing parameters
+//     of NewWatchdog are time.Duration, so swapping them compiles and was
+//     MEASURED to leave `go test ./cmd/relay-server/...` green - with margin 24h
+//     and the absolute cap 30m in production. The discriminator has to be the
+//     env var name each argument's chain was parsed from, which is why the
+//     assignment walk above collects string literals as well as identifiers.
+//
+// WHY THE POSITIONAL CHECK IS WORTH ITS COMPLEXITY, since the cheaper move was
+// to disclose the gap in WHAT IT CANNOT REACH: a transposition is not a wiring
+// mistake that leaves the watchdog dead, which is what every other check here
+// is about. It leaves the watchdog ALIVE and destroying work - within one 60s
+// tick it stamps every assignment older than half an hour timed_out and
+// cascades each one's transitive dependents to failed, with nothing retried.
+// That is precisely the catastrophe
+// TestParseWatchdogDuration_MaxAssignmentFloorIsItsOwn exists to prevent, and
+// leaving it reachable one argument-swap away at the call site would make that
+// test decorative.
 //
 // (1) AND (2) WERE ONE CHECK UNTIL SLICE 4 SPLIT THE STATEMENT, and the split is
 // why they are now two. main used to write `go scheduler.NewWatchdog(...).Run(ctx)`,
@@ -152,6 +171,12 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 
 	// name assigned -> identifiers its RHS mentions, so the walk can follow
 	// `x, warn := f(...)` and then NewWatchdog(..., x, ...).
+	//
+	// STRING LITERALS ARE COLLECTED ALONGSIDE IDENTIFIERS, unquoted, and that is
+	// what makes check (4) below possible at all. The two bounds are both
+	// time.Durations, so nothing about their TYPES distinguishes them; the only
+	// thing that does is the env var name each was parsed from, and that name
+	// exists in main.go solely as an *ast.BasicLit.
 	from := map[string][]string{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		as, ok := n.(*ast.AssignStmt)
@@ -163,6 +188,11 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 			ast.Inspect(e, func(m ast.Node) bool {
 				if id, ok := m.(*ast.Ident); ok {
 					rhs = append(rhs, id.Name)
+				}
+				if bl, ok := m.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+					if s, err := strconv.Unquote(bl.Value); err == nil {
+						rhs = append(rhs, s)
+					}
 				}
 				return true
 			})
@@ -259,7 +289,9 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 			"body. Constructing it is not running it: the counters section would report an honest zero "+
 			"forever while no assignment was ever bounded. Started: %v", bound, bound, keysOf(started))
 
-	reaches := func(seed string) bool {
+	// reachedFrom returns every name - identifier or unquoted string literal -
+	// reachable from seed through main's assignment graph.
+	reachedFrom := func(seed string) map[string]bool {
 		seen := map[string]bool{}
 		queue := []string{seed}
 		for len(queue) > 0 {
@@ -269,13 +301,11 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 				continue
 			}
 			seen[name] = true
-			if name == "parseWatchdogDuration" {
-				return true
-			}
 			queue = append(queue, from[name]...)
 		}
-		return false
+		return seen
 	}
+	reaches := func(seed string) bool { return reachedFrom(seed)["parseWatchdogDuration"] }
 
 	derived := map[string]bool{}
 	for _, arg := range call.Args {
@@ -291,4 +321,62 @@ func TestWatchdogIsStartedByMain(t *testing.T) {
 		"NewWatchdog must be handed TWO distinct arguments that each derive from parseWatchdogDuration, one per "+
 			"bound. Proving only one proves nothing about the other: hardcoding just the absolute cap leaves "+
 			"RELAY_TASK_MAX_ASSIGNMENT silently ignored while the margin still looks wired. Found: %v", derived)
+
+	// (4) EACH BOUND MUST BE IN ITS OWN PARAMETER POSITION.
+	//
+	// NewWatchdog(q, canceller, broker, margin, maxAssignment): both trailing
+	// parameters are time.Duration, so swapping them COMPILES, and check (3)
+	// above still finds two distinct arguments deriving from
+	// parseWatchdogDuration. Measured: the swap left `go test
+	// ./cmd/relay-server/...` fully green. In production it means margin 24h and
+	// maxAssignment 30m, so within one 60s tick every assignment older than half
+	// an hour is stamped timed_out and its transitive dependents cascade to
+	// failed - the exact catastrophe
+	// TestParseWatchdogDuration_MaxAssignmentFloorIsItsOwn exists to prevent,
+	// walked around at the call site.
+	//
+	// NewWatchdog's signature is fixed, so this is asserted POSITIONALLY, and
+	// the discriminator is the env var name each argument's chain was parsed
+	// from - the only thing about the two that differs, since their types do
+	// not. It is a two-sided check: the right name must be reachable AND the
+	// other must not, so an argument built from both is RED rather than passing
+	// on the half it happens to mention.
+	positions := []struct {
+		i    int
+		env  string
+		what string
+	}{
+		{3, "RELAY_TASK_WATCHDOG_MARGIN", "the execution-arm margin added to a task's own timeout_sec"},
+		{4, "RELAY_TASK_MAX_ASSIGNMENT", "the absolute cap on how long a task may hold an assignment"},
+	}
+	require.Len(t, call.Args, 5,
+		"NewWatchdog is called with %d arguments; this positional check is written against the "+
+			"5-parameter signature (q, canceller, broker, margin, maxAssignment). If the signature "+
+			"changed, update the positions below - do not delete the check.", len(call.Args))
+	for _, p := range positions {
+		id, ok := call.Args[p.i].(*ast.Ident)
+		require.True(t, ok,
+			"NewWatchdog argument %d must be a plain identifier so this test can trace which env var "+
+				"it was parsed from; got %T. It is %s.", p.i, call.Args[p.i], p.what)
+		r := reachedFrom(id.Name)
+		require.True(t, r["parseWatchdogDuration"],
+			"NewWatchdog argument %d is %q, which does not derive from parseWatchdogDuration. It is %s.",
+			p.i, id.Name, p.what)
+		require.True(t, r[p.env],
+			"NewWatchdog argument %d is %q, whose chain never mentions %s. That parameter is %s, and "+
+				"BOTH trailing parameters are time.Duration, so passing the other bound here compiles "+
+				"and every other check in this test still passes. In production a swap means the "+
+				"absolute cap is 30m: within one 60s tick every assignment older than half an hour is "+
+				"stamped timed_out and its transitive dependents cascade to failed, with nothing "+
+				"retried.", p.i, id.Name, p.env, p.what)
+		for _, other := range positions {
+			if other.env == p.env {
+				continue
+			}
+			require.False(t, r[other.env],
+				"NewWatchdog argument %d is %q, whose chain mentions BOTH %s and %s, so this test "+
+					"cannot say which bound it carries. Bind each bound to its own local from its own "+
+					"parseWatchdogDuration call.", p.i, id.Name, p.env, other.env)
+		}
+	}
 }
