@@ -126,11 +126,32 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	// false 0 times" - a message asserting a loss that did not happen. What
 	// actually has to hold is that the flag is declared exactly once and starts
 	// out false; how it is spelled is not this test's business.
+	//
+	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET. The counters below look at
+	// *ast.Ident on the left of an assignment, and a local bool has exactly one
+	// other way to be written: through a pointer to it. `resetHandoff :=
+	// &handedOff` beside the declaration and `*resetHandoff = false` after the
+	// flip releases the generation on every SUCCESSFUL registration and was
+	// measured passing this guard, `go vet` and the whole package. Checking
+	// *ast.StarExpr on the left would not have caught it either - the identifier
+	// there is the pointer's name, not the flag's. The address-of is the
+	// chokepoint, so that is what is counted: no alias, no indirect write. (A
+	// closure that writes the flag by name, `defer func(){ handedOff = false }()`,
+	// needs no alias and is already counted as otherWrites, because ast.Inspect
+	// descends into function literals.)
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
+	var aliases int
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
+		case *ast.UnaryExpr:
+			if v.Op != token.AND {
+				return true
+			}
+			if id, ok := v.X.(*ast.Ident); ok && id.Name == flag {
+				aliases++
+			}
 		case *ast.AssignStmt:
 			for i, lhs := range v.Lhs {
 				id, ok := lhs.(*ast.Ident)
@@ -176,6 +197,15 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 		t.Fatalf("%s is written %d times with something other than the literal true; the deferred "+
 			"release is a two-valued decision and a computed value makes the outcome depend on state "+
 			"this guard cannot order", flag, otherWrites)
+	}
+	if aliases != 0 {
+		t.Fatalf("finishRegister takes the address of %s %d times. Every other check here counts "+
+			"writes by name, and a pointer is the one way to write a local bool without naming it: "+
+			"`p := &%s` plus `*p = false` below the flip releases the generation on every SUCCESSFUL "+
+			"registration - the live agent published 'offline', its metrics entry wiped, a grace timer "+
+			"requeueing its running tasks - while every check above still sees one init, one flip and "+
+			"no other write. The flag has no reason to be aliased; keep it written by name so the "+
+			"counters above can see the whole write set.", flag, aliases, flag)
 	}
 	if len(setTrue) != 1 {
 		t.Fatalf("%s is set to true %d times, not once. Every one of the %d exits from this function "+
@@ -516,8 +546,17 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 		if !ok {
 			reject("the guarding `if` in the early-return form does not test a plain flag identifier")
 		}
+		// The length test comes FIRST because it is the one that makes the index
+		// below safe. Written after it, `if handedOff { }` followed by the release
+		// - a total defeat that releases the generation on every SUCCESSFUL
+		// registration - died as `panic: index out of range [0] with length 0`
+		// instead of with the message that says what was lost. Fail-closed either
+		// way, but a panic reports the guard as broken rather than the code.
+		if len(guard.Body.List) != 1 {
+			reject("the early-return branch is not exactly a bare `return`")
+		}
 		ret, isRet := guard.Body.List[0].(*ast.ReturnStmt)
-		if len(guard.Body.List) != 1 || !isRet || len(ret.Results) != 0 {
+		if !isRet || len(ret.Results) != 0 {
 			reject("the early-return branch is not exactly a bare `return`")
 		}
 		if !isCallTo(lit.Body.List[1], releaseMethod) {
