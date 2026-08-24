@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -287,6 +289,15 @@ func captureLog(t *testing.T) func() string {
 // entirely, or reports it only after a delay, is worse than the bug. So the
 // assertion is one line per SWEEP, present from the first sweep, and not one
 // line per row.
+//
+// EVERY ROW GETS A DISTINCT ERROR TEXT, AND THAT IS NOT COSMETIC. This test used
+// to give all five rows the identical string "connection reset by peer" and
+// assert Contains, which makes FIRST and LAST indistinguishable: mutating
+// `if firstFailErr == nil` to `if true` - capturing the last error, the exact
+// thing SweepOnce's comment forbids - passed the whole scheduler suite
+// (measured). Asserting the first row's text is PRESENT and a later row's is
+// ABSENT is what kills it. Same for the id: firstFailID was asserted nowhere in
+// the repo, so replacing it with a zero-value pgtype.UUID also passed.
 func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T) {
 	logged := captureLog(t)
 	now := time.Now()
@@ -296,7 +307,7 @@ func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T
 	for i := byte(1); i <= 5; i++ {
 		r := overdueRowForWorker(i, nthWorkerUUID(int(i)), now)
 		rows = append(rows, r)
-		errs[r.ID] = errors.New("connection reset by peer")
+		errs[r.ID] = fmt.Errorf("connection reset by peer (row %d)", i)
 	}
 	q := &fakeWatchdogStore{overdue: rows, updateErr: errs}
 	w := newTestWatchdog(t, q, now)
@@ -313,9 +324,54 @@ func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T
 		assert.Contains(t, l, "5 write(s) FAILED",
 			"the aggregate must say how many failed, because '5 of 5 failed' is a diagnosis and five "+
 				"separate lines are not")
-		assert.Contains(t, l, "connection reset by peer",
-			"the first error's text must survive aggregation, or the line reports a count with no cause")
+		assert.Contains(t, l, "connection reset by peer (row 1)",
+			"the FIRST error's text must survive aggregation, or the line reports a count with no cause")
+		assert.NotContains(t, l, "(row 5)",
+			"the first error is the one closest to the cause; 'last' is whichever row the loop happened "+
+				"to end on. A line carrying row 5's text means the capture is unconditional.")
+		assert.Contains(t, l, "first: task "+uuidStr(rows[0].ID),
+			"and it must name the FIRST failing row, not a zero-value uuid")
 	}
+}
+
+// TestWatchdog_AMixedSweepReportsBothHalvesInOneLine.
+//
+// THE ONLY SHAPE IN WHICH THE WHOLE LINE IS EMITTED. Every other test here
+// drives swept-only or failed-only, so both had a half of this format string
+// that no assertion had ever read end to end -
+// TestWatchdog_APoisonedFirstRowDoesNotStopTheSweep has this shape and asserts
+// only q.updates and q.cascaded.
+//
+// The order matters as much as the presence: swept first, then the failures,
+// because an operator scanning for "FAILED" must not have to read past a count
+// that is about the healthy half.
+func TestWatchdog_AMixedSweepReportsBothHalvesInOneLine(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+
+	hot := nthWorkerUUID(1)
+	rows := []store.Task{
+		overdueRowForWorker(1, hot, now),
+		overdueRowForWorker(2, hot, now),              // second sweep of hot, so a worst exists
+		overdueRowForWorker(3, nthWorkerUUID(2), now), // fails
+		overdueRowForWorker(4, nthWorkerUUID(3), now), // fails, and must NOT be named
+	}
+	q := &fakeWatchdogStore{overdue: rows, updateErr: map[pgtype.UUID]error{
+		rows[2].ID: errors.New("statement timeout on the third row"),
+		rows[3].ID: errors.New("statement timeout on the fourth row"),
+	}}
+	w := newTestWatchdog(t, q, now)
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	lines := strings.Split(strings.TrimSpace(logged()), "\n")
+	summary := lines[len(lines)-1]
+	assert.Equal(t, fmt.Sprintf(
+		"watchdog: sweep ended: 2 task(s) swept across 1 worker(s); "+
+			"worst since process start: worker %s with 2; "+
+			"2 write(s) FAILED, first: task %s: statement timeout on the third row",
+		uuidStr(hot), uuidStr(rows[2].ID)), summary,
+		"the mixed sweep is the only shape that emits the whole line, and it is asserted whole here "+
+			"rather than by three Contains that would each pass on a different sentence")
 }
 
 // TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll. pgx.ErrNoRows means somebody
@@ -371,4 +427,88 @@ func TestWatchdog_TheAggregateLineNamesTheWorstWorkerSinceStart(t *testing.T) {
 		"the aggregate must carry the CUMULATIVE worst, not this sweep's worst: the pattern is the "+
 			"actionable part and a single sweep does not show it. Got:\n%s", out)
 	assert.Contains(t, out, "3 task(s) swept across 2 worker(s)")
+}
+
+// TestWatchdog_TheAggregateLineDoesNotAssertAWorstItCannotEstablish.
+//
+// The clause names the worst TRACKED worker, and "tracked" is exactly what the
+// map's cap can make a lie by omission. Fill the cap at one sweep each and the
+// next never-before-seen offender's sweeps land in swept_overflow however many
+// there are, so an unqualified "worst since process start" can name a worker
+// with 1 in the same sentence as a swept count of 40 - pointing an operator's
+// disable decision at the wrong machine, under a condition a peer with
+// RELAY_ALLOW_AUTO_ENROLL can drive.
+//
+// worst() therefore returns SweptOverflow from the SAME critical section that
+// reads the map, and the line qualifies itself when it is non-zero.
+func TestWatchdog_TheAggregateLineDoesNotAssertAWorstItCannotEstablish(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+
+	var rows []store.Task
+	// One tracked worker with more than one sweep, so there IS a worst to name.
+	rows = append(rows, overdueRowForWorker(1, nthWorkerUUID(0), now))
+	rows = append(rows, overdueRowForWorker(2, nthWorkerUUID(0), now))
+	// Enough further distinct workers to fill the cap and force an overflow.
+	for i := 1; i <= api.WatchdogSweptWorkerMax; i++ {
+		rows = append(rows, overdueRowForWorker(byte(i), nthWorkerUUID(i), now))
+	}
+	q := &fakeWatchdogStore{overdue: rows}
+	w := newTestWatchdog(t, q, now)
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	require.NotZero(t, w.CounterSnapshot().Counts.SweptOverflow,
+		"the fixture must actually overflow, or this test asserts the unqualified branch by accident")
+
+	out := logged()
+	assert.Contains(t, out, "worst TRACKED worker since process start: "+uuidStr(nthWorkerUUID(0))+" with 2",
+		"with swept_overflow non-zero the clause must say it is the worst TRACKED worker. Got:\n%s", out)
+	assert.Contains(t, out, "sweep(s) unattributed - per-worker attribution is incomplete",
+		"and it must say how many sweeps the map never admitted, or the line asserts a maximum it "+
+			"cannot establish. Got:\n%s", out)
+	assert.NotContains(t, out, "worst since process start: worker ",
+		"the unqualified wording must not appear once attribution is known to be incomplete")
+}
+
+// TestWatchdog_TheWorstClauseIsOmittedWhenNobodyHasMoreThanOne. "worst ...
+// with 1" beside "256 task(s) swept across 256 worker(s)" is noise: it names an
+// arbitrary member of a set in which nothing stands out, which is the opposite
+// of the repeating-uuid signal the clause exists for.
+func TestWatchdog_TheWorstClauseIsOmittedWhenNobodyHasMoreThanOne(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+
+	q := &fakeWatchdogStore{overdue: []store.Task{
+		overdueRowForWorker(1, nthWorkerUUID(1), now),
+		overdueRowForWorker(2, nthWorkerUUID(2), now),
+	}}
+	w := newTestWatchdog(t, q, now)
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	out := logged()
+	assert.Contains(t, out, "2 task(s) swept across 2 worker(s)")
+	assert.NotContains(t, out, "worst",
+		"no worker has been swept more than once, so there is no worst to name. Got:\n%s", out)
+}
+
+// TestWatchdogCounters_WorstBreaksTiesDeterministically. The tie-break is the
+// only reason the aggregate line does not flap between equal offenders across
+// map iteration orders, and it was previously asserted nowhere: dropping the
+// second disjunct survived -count=3.
+func TestWatchdogCounters_WorstBreaksTiesDeterministically(t *testing.T) {
+	var c watchdogCounters
+	ids := []string{uuidStr(nthWorkerUUID(1)), uuidStr(nthWorkerUUID(2)), uuidStr(nthWorkerUUID(3))}
+	sort.Strings(ids)
+	for _, id := range ids {
+		c.record(id)
+		c.record(id)
+	}
+
+	for i := 0; i < 64; i++ {
+		got, n, _ := c.worst()
+		require.Equal(t, ids[0], got,
+			"three workers tied at %d must always yield the lexically smallest id, or the aggregate "+
+				"line names a different worker on different sweeps", n)
+		require.Equal(t, uint64(2), n)
+	}
 }

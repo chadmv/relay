@@ -288,12 +288,38 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 	if swept > 0 || failedWrites > 0 {
 		msg := fmt.Sprintf("watchdog: sweep ended: %d task(s) swept across %d worker(s)",
 			swept, len(sweptWorkers))
-		if worstID, worstN := w.counters.worst(); worstID != "" && swept > 0 {
-			// CUMULATIVE, and the line says so: the pattern is the actionable
-			// part and one sweep does not show it. It is the worst TRACKED
-			// worker - if swept_overflow on GET /v1/server/counters is non-zero,
-			// the true worst may be a worker the capped map never admitted.
-			msg += fmt.Sprintf("; worst since process start: worker %s with %d", worstID, worstN)
+		// GATED ON swept BEFORE worst() IS CALLED, not inside the same `if`:
+		// worst() takes the counters mutex and walks up to
+		// api.WatchdogSweptWorkerMax entries, and on a sweep that only had
+		// failed writes the result was discarded.
+		if swept > 0 {
+			worstID, worstN, overflow := w.counters.worst()
+			switch {
+			case worstN <= 1:
+				// Nothing said. "worst: worker X with 1" beside "256 swept
+				// across 256 workers" names an arbitrary member of a set in
+				// which nothing stands out, which is the opposite of the
+				// repeating-uuid signal this clause exists for. worstID == ""
+				// (nothing tracked at all) is the same case and needs no
+				// separate arm.
+			case overflow > 0:
+				// THE MAXIMUM IS OVER THE TRACKED SET ONLY, and at capacity a
+				// never-before-seen worker's sweeps go to SweptOverflow however
+				// many there are - so the real offender can be entirely absent
+				// from the map while an innocent worker with 2 is named. Say
+				// both, or the sentence asserts a maximum it cannot establish
+				// and points a disable decision at the wrong machine.
+				msg += fmt.Sprintf(
+					"; worst TRACKED worker since process start: %s with %d "+
+						"(%d sweep(s) unattributed - per-worker attribution is incomplete)",
+					worstID, worstN, overflow)
+			default:
+				// CUMULATIVE, and the line says so: the pattern is the
+				// actionable part and one sweep does not show it. Attribution
+				// is complete here, so the maximum is over every sweep this
+				// process has made and the clause can be unqualified.
+				msg += fmt.Sprintf("; worst since process start: worker %s with %d", worstID, worstN)
+			}
 		}
 		if failedWrites > 0 {
 			msg += fmt.Sprintf("; %d write(s) FAILED, first: task %s: %v",

@@ -54,11 +54,13 @@ type watchdogCounters struct {
 //
 // A worker id that is not a canonical uuid goes to overflow rather than into the
 // map. That is not defensive noise: the payload's allow-list predicate rejects
-// the WHOLE map on one non-uuid key, so a single bad key would take the
-// endpoint's guard RED rather than lose one number. ListOverdueAssignedTasks
-// requires worker_id IS NOT NULL, so this branch is unreachable today - and it
-// is what lets the payload guard be written as a shape check rather than as a
-// promise.
+// the WHOLE map on one non-uuid key. Where that costs a RED is
+// cmd/relay-server, the only package that can read keys THIS function produced
+// back out through the real route; internal/api's own guard cannot see this
+// function at all, since it drives a fake source whose keys are literals in its
+// test file. ListOverdueAssignedTasks requires worker_id IS NOT NULL, so this
+// branch is unreachable today - and it is what lets the payload guard be
+// written as a shape check rather than as a promise.
 func (w *watchdogCounters) record(workerID string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -102,12 +104,19 @@ func (w *watchdogCounters) snapshot() api.WatchdogCounters {
 }
 
 // worst reports the most-swept TRACKED worker since process start, for the
-// aggregate sweep line. It returns ("", 0) when nothing has been swept.
+// aggregate sweep line. It returns ("", 0, overflow) when nothing has been
+// swept.
 //
-// TRACKED is load-bearing: when SweptOverflow is non-zero the true worst may be
-// a worker the map never admitted, and the log line says so rather than
-// asserting a maximum it cannot establish.
-func (w *watchdogCounters) worst() (string, uint64) {
+// IT RETURNS SweptOverflow AS A THIRD VALUE, and that is the point rather than
+// a convenience. TRACKED is load-bearing: at capacity a never-before-seen
+// worker's sweeps go to SweptOverflow however many there are, so the worst
+// TRACKED worker may be an innocent machine with 1 while the real offender is
+// unattributed. A caller that could not see the overflow had no way to know
+// that, and the caller cannot read it separately either - two calls are two
+// critical sections, and the pair could then disagree. Both come out of the ONE
+// lock acquisition below, and SweepOnce qualifies its line when the third value
+// is non-zero.
+func (w *watchdogCounters) worst() (string, uint64, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -116,16 +125,28 @@ func (w *watchdogCounters) worst() (string, uint64) {
 	for k, v := range w.c.SweptByWorker {
 		// Ties broken by the lexically smaller id, so the line is deterministic
 		// across map iteration order rather than flapping between equals.
+		// TestWatchdogCounters_WorstBreaksTiesDeterministically is what keeps
+		// the second disjunct alive: dropping it survived -count=3 until that
+		// test existed.
 		if v > n || (v == n && id != "" && k < id) {
 			id, n = k, v
 		}
 	}
-	return id, n
+	return id, n, w.c.SweptOverflow
 }
 
 // canonicalWorkerKey reports whether s is the lowercase 8-4-4-4-12 form uuidStr
 // emits. Anchored and hex-only, so nothing that is not a server-rendered uuid
 // can become a key in a document an operator reads.
+//
+// IT HAS A TWIN IT CANNOT SHARE: internal/api's canonicalUUIDRe, in
+// server_counters_test.go, is the same rule spelled as a regexp and is what the
+// payload guard checks these keys against. Neither package can import the other
+// (internal/scheduler imports internal/api, which is also why
+// WatchdogSweptWorkerMax had to be hoisted over there), so the constant is
+// shared and this predicate is not. Change one and change the other: a producer
+// stricter than the guard is harmless, a producer looser than it ships a key
+// the guard will reject.
 func canonicalWorkerKey(s string) bool {
 	if len(s) != 36 {
 		return false
