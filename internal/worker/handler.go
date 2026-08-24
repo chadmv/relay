@@ -615,6 +615,15 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// breath, so no future early return can be added that forgets to. handedOff
 	// is flipped at exactly ONE place, so the two releases are mutually exclusive
 	// by construction and neither can be skipped.
+	//
+	// BOTH HALVES OF THAT SENTENCE ARE CHECKED, NOT MERELY ASSERTED, which is the
+	// only reason it is worth writing. handoffFlagIdent in
+	// handler_handoff_guard_test.go requires this defer to be an unconditional
+	// statement of finishRegister's body (so it is armed on every path) and
+	// requires the closure to be nothing but this decision - exactly one call to
+	// releaseWorkerGeneration, on the not-handed-off branch, with no else arm and
+	// no other statement. Each of those clauses was added because a rewrite that
+	// broke it left this whole package green.
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -692,12 +701,22 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// mutation confirms it.
 	//
 	// It is shipped at the TIGHTEST point in the range, immediately after the
-	// sender becomes reachable, so that a fallible statement inserted anywhere in
-	// the range is still covered by the release rather than by nothing.
-	// TestFinishRegisterHandsOffOwnershipInsideTheWindow pins that tightest point
-	// rather than the looser semantic range - there is no reason to permit drift
-	// within it - and it lives in the default lane because no default-lane test
-	// can drive a successful registration at all.
+	// sender becomes reachable, and
+	// TestFinishRegisterHandsOffOwnershipInsideTheWindow pins that exact position
+	// - the statement immediately following h.registry.Register - rather than the
+	// looser semantic range.
+	//
+	// WHAT FORBIDDING THE DRIFT BUYS is not tidiness. Any statement that comes to
+	// sit between h.registry.Register and this flip runs with handedOff still
+	// false, so if it fails, the deferred release above ends the DB generation
+	// correctly - and the sender published one line up stays in the registry with
+	// nothing to remove it, because Connect arms `defer h.teardownConnection`
+	// only on a nil error. Such a statement would be covered for the generation
+	// and uncovered for the registry, and the "EVERYTHING BELOW THIS LINE" rule
+	// below cannot see it: that rule is about positions below the flip. Adjacency
+	// is what makes the two meet with nothing in between. The guard lives in the
+	// default lane because no default-lane test can drive a successful
+	// registration at all.
 	//
 	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
 	// on a nil error, so a future statement here that returns an error would be
@@ -712,10 +731,27 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// escapes the same way: this function's own deferred release has already been
 	// waived, and Connect's teardown defer is not armed until this function
 	// returns - so the sender stays in the registry and the generation stays
-	// unreleased while the goroutine unwinds. Nothing below can panic today -
-	// Metrics is nil-checked, and the broker and the dispatch callback are
-	// supplied by the constructor - which is why this is a rule to keep rather
-	// than a defect to fix.
+	// unreleased while the goroutine unwinds.
+	//
+	// NOTHING BELOW PANICS AS THIS PACKAGE'S CONSTRUCTORS BUILD A HANDLER, which
+	// is a narrower claim than "nothing below can panic". Metrics is nil-checked,
+	// and NewHandler and NewHandlerWithGrace both supply broker and
+	// triggerDispatch. A handler built as a bare &Handler{} - which the tests in
+	// this package do routinely - leaves both nil, and both then panic on a nil
+	// dereference (measured, not assumed). Keep the nil-checked style if either
+	// ever becomes optional.
+	//
+	// AND THE UNWINDING ANALYSIS ABOVE DOES NOT COVER `go h.triggerDispatch()`:
+	// that panic happens on a NEW goroutine, where none of this function's defers
+	// exist at all. Either way the process dies - there is no recover() and no
+	// gRPC recovery interceptor anywhere in this tree - so the sender in the
+	// registry and the unreleased generation go with it. What survives a crash is
+	// the durable half: the workers row RegisterWorkerConnection set to 'online'
+	// at a live connection_epoch, with no connection behind it and no grace timer
+	// armed. Nothing at startup clears it: releaseWorkerGeneration is the only
+	// caller of MarkWorkerOfflineIfEpoch in the tree, and the startup grace
+	// seeding requeues that worker's TASKS without ever writing workers.status.
+	// The row is corrected when that agent next registers, and not before.
 	handedOff = true
 
 	if h.Metrics != nil {
