@@ -226,10 +226,39 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	// see that statement either - it only looks at returns positioned BELOW the
 	// flip. Adjacency is what makes the two checks meet with no unguarded region
 	// between them.
+	//
+	// AND ADJACENCY ONLY MEANS THAT IF THE REGISTER CALL IS ITSELF THE STATEMENT
+	// IT IS INDEXED AT. stmtIndexContaining answers "which body statement's source
+	// range CONTAINS this call", which is the right question for locating the
+	// call and the wrong one for anchoring against it: the moment
+	// h.registry.Register stops being a top-level ExprStmt and moves inside a
+	// compound body statement, regIdx names the ENCLOSING statement and
+	// `List[regIdx+1] == setTrue[0]` still holds - with arbitrarily many fallible
+	// statements sitting inside that compound statement, after the Register and
+	// before the flip, which is exactly the region this check exists to forbid.
+	// Measured: a bare block, an `if`/`switch` with the Register in its init, and
+	// the plausible-refactor shape `if h.registry != nil { Register; if err := ...
+	// { return } }` all passed this test and `go vet` and the whole package before
+	// the identity clause below. So does `if h.grace != nil { Register }` with the
+	// flip left unconditional, which strands the other direction: on the skipped
+	// branch nothing is registered, the flip waives the deferred release anyway,
+	// and Connect arms teardownConnection with a sender UnregisterIf does not own.
+	// This is the same containment-vs-identity distinction isCallTo draws for the
+	// deferred closure's body; it just has to be drawn at this anchor too.
 	regIdx := stmtIndexContaining(fn.Body, registerPos)
 	if regIdx < 0 {
 		t.Fatalf("the registry.Register call at %s is not inside any statement of finishRegister's own "+
 			"body, so the handoff cannot be positioned against it", fset.Position(registerPos))
+	}
+	if es, ok := fn.Body.List[regIdx].(*ast.ExprStmt); !ok || es.X.Pos() != registerPos {
+		t.Fatalf("the registry.Register call at %s is nested inside a compound statement of "+
+			"finishRegister's body (%s) rather than being a statement of that body itself. The "+
+			"adjacency check below asks whether the flip is the NEXT body statement, and against an "+
+			"enclosing statement that question no longer means \"with nothing in between\": every "+
+			"statement sharing the wrapper with the Register call sits after the sender is published "+
+			"and before the flip, which is the unguarded region this whole check exists to forbid. "+
+			"Register on its own line, and let the flip follow it.",
+			fset.Position(registerPos), fset.Position(fn.Body.List[regIdx].Pos()))
 	}
 	if regIdx+1 >= len(fn.Body.List) || fn.Body.List[regIdx+1] != setTrue[0] {
 		t.Fatalf("%s is set at %s, which is not the statement immediately after registry.Register at "+
@@ -327,8 +356,13 @@ func declaresFalseBool(spec *ast.ValueSpec, i int) bool {
 
 // stmtIndexContaining returns the index of body's own statement whose source
 // range contains pos, or -1 if pos falls outside all of them. Position is the
-// right tool here and identity is not: the call being located sits INSIDE a
-// statement rather than being one.
+// right tool for LOCATING the call, and identity is not: the call being located
+// sits inside a statement rather than being one.
+//
+// Containment is not enough for ANCHORING against it, though, and the caller has
+// to close that gap itself. If the call is nested in a compound statement this
+// returns the enclosing statement's index, so "the next statement" stops meaning
+// "with nothing in between" - see the identity clause at the register anchor.
 func stmtIndexContaining(body *ast.BlockStmt, pos token.Pos) int {
 	for i, s := range body.List {
 		if s.Pos() <= pos && pos < s.End() {

@@ -713,10 +713,19 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// nothing to remove it, because Connect arms `defer h.teardownConnection`
 	// only on a nil error. Such a statement would be covered for the generation
 	// and uncovered for the registry, and the "EVERYTHING BELOW THIS LINE" rule
-	// below cannot see it: that rule is about positions below the flip. Adjacency
-	// is what makes the two meet with nothing in between. The guard lives in the
-	// default lane because no default-lane test can drive a successful
-	// registration at all.
+	// below cannot see it: that rule is about positions below the flip.
+	//
+	// TWO THINGS TOGETHER MAKE THE TWO RULES MEET WITH NOTHING IN BETWEEN, and
+	// adjacency is only one of them. The other is that h.registry.Register stays a
+	// statement of finishRegister's own body. Nest it in a compound statement -
+	// a bare block, an `if`/`switch` init, or the plausible `if h.registry != nil {
+	// ... }` - and the flip is still the next BODY statement while any number of
+	// fallible statements sit inside the wrapper between the two, in exactly the
+	// unguarded region described above. All four shapes were measured passing the
+	// guard, `go vet` and the whole package before the guard grew the clause that
+	// requires the indexed statement to BE the call rather than merely contain it.
+	// The guard lives in the default lane because no default-lane test can drive a
+	// successful registration at all.
 	//
 	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
 	// on a nil error, so a future statement here that returns an error would be
