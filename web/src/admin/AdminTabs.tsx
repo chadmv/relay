@@ -14,7 +14,7 @@ export function AdminTabs() {
     // way it masked the breadcrumb rows Task 5 fixed. Five pills do not fit a
     // 375px viewport; wrapping is the same remedy as Task 5's rows rather than a
     // new idiom.
-    <div className="flex flex-wrap gap-1.5 self-start rounded-full border border-border bg-black/30 p-[3px] backdrop-blur-[8px]">
+    <div className="flex gap-1.5 self-start rounded-full border border-border bg-black/30 p-[3px] backdrop-blur-[8px]">
       {ADMIN_TABS.map((t) => (
         <NavLink
           key={t.slug}
