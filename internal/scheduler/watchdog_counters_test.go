@@ -1,8 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +14,7 @@ import (
 	"relay/internal/api"
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -257,4 +262,113 @@ func TestWatchdog_EveryPublishedCounterIsDrivenByTheSweepFixture(t *testing.T) {
 				"by nothing - a permanent zero on an operator-facing document, with every package "+
 				"green. That is slice 2's sixth-log-kind defect with the packages swapped.", name)
 	}
+}
+
+// captureLog redirects the standard logger for the duration of a test.
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return buf.String
+}
+
+// TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep.
+//
+// The failure class is a PARTIAL DEGRADATION: the scan succeeds and the write
+// does not - a statement timeout, a saturated pool, a lock wait. The row then
+// stays in the scan partition and the very next tick returns it, so the old
+// per-row line reappeared every 60 seconds per overdue row, indefinitely, in
+// exactly the conditions where log volume is least welcome.
+//
+// THE FIRST OCCURRENCE MUST STILL BE PROMPT: a fix that suppresses the condition
+// entirely, or reports it only after a delay, is worse than the bug. So the
+// assertion is one line per SWEEP, present from the first sweep, and not one
+// line per row.
+func TestWatchdog_APersistentWriteFailureIsBoundedToOneLinePerSweep(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+
+	rows := make([]store.Task, 0, 5)
+	errs := map[pgtype.UUID]error{}
+	for i := byte(1); i <= 5; i++ {
+		r := overdueRowForWorker(i, nthWorkerUUID(int(i)), now)
+		rows = append(rows, r)
+		errs[r.ID] = errors.New("connection reset by peer")
+	}
+	q := &fakeWatchdogStore{overdue: rows, updateErr: errs}
+	w := newTestWatchdog(t, q, now)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, w.SweepOnce(context.Background()))
+	}
+
+	lines := strings.Split(strings.TrimSpace(logged()), "\n")
+	require.Len(t, lines, 3,
+		"three sweeps over five permanently failing rows must produce THREE lines, not fifteen. Got:\n%s",
+		logged())
+	for _, l := range lines {
+		assert.Contains(t, l, "5 write(s) FAILED",
+			"the aggregate must say how many failed, because '5 of 5 failed' is a diagnosis and five "+
+				"separate lines are not")
+		assert.Contains(t, l, "connection reset by peer",
+			"the first error's text must survive aggregation, or the line reports a count with no cause")
+	}
+}
+
+// TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll. pgx.ErrNoRows means somebody
+// else got there first - the agent finished, a cancel landed, a grace expiry
+// requeued, or a sibling replica swept it. That is the CORRECT outcome, and the
+// whole-captured-log-is-empty style is deliberate so that ANY future wording on
+// that arm reddens.
+//
+// It is also the test that makes the summary line's `swept > 0 || failed > 0`
+// gate load-bearing: an ungated summary would print "0 task(s) swept" every 60
+// seconds forever on a healthy fleet, which is the bug this task closes wearing
+// the fix's clothes.
+func TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+	row := overdueRowForWorker(1, nthWorkerUUID(1), now)
+	q := &fakeWatchdogStore{
+		overdue:   []store.Task{row},
+		updateErr: map[pgtype.UUID]error{row.ID: pgx.ErrNoRows},
+	}
+	w := newTestWatchdog(t, q, now)
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	assert.Empty(t, logged(),
+		"a fence rejection is the correct outcome, not a failure. The whole captured log must be empty, "+
+			"so that any future line on this arm - including a well-meaning summary that counts zero - "+
+			"turns this RED.")
+	assert.Zero(t, w.CounterSnapshot().Counts.SweptTotal,
+		"and a rejected write must not be counted as a sweep")
+}
+
+// TestWatchdog_TheAggregateLineNamesTheWorstWorkerSinceStart. This is the item's
+// headline signal in an existing log pipeline: "worker X has had 37" is a
+// disable decision with one number behind it, and an operator reading raw logs
+// should not have to notice a repeating uuid to get it.
+func TestWatchdog_TheAggregateLineNamesTheWorstWorkerSinceStart(t *testing.T) {
+	logged := captureLog(t)
+	now := time.Now()
+	hot := nthWorkerUUID(1)
+	q := &fakeWatchdogStore{overdue: []store.Task{
+		overdueRowForWorker(1, hot, now),
+		overdueRowForWorker(2, hot, now),
+		overdueRowForWorker(3, nthWorkerUUID(2), now),
+	}}
+	w := newTestWatchdog(t, q, now)
+
+	require.NoError(t, w.SweepOnce(context.Background()))
+	require.NoError(t, w.SweepOnce(context.Background()))
+
+	out := logged()
+	assert.Contains(t, out, "worst since process start: worker "+uuidStr(hot)+" with 4",
+		"the aggregate must carry the CUMULATIVE worst, not this sweep's worst: the pattern is the "+
+			"actionable part and a single sweep does not show it. Got:\n%s", out)
+	assert.Contains(t, out, "3 task(s) swept across 2 worker(s)")
 }

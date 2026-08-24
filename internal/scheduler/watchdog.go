@@ -183,6 +183,22 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	// ONE AGGREGATE LINE PER SWEEP, covering BOTH the swept set and the
+	// failed-write set. Two items wanted a once-per-sweep summary
+	// (idea-2026-08-20-repeated-watchdog-sweeps-against-one-worker-are-unsurfaced
+	// and bug-2026-08-20-watchdog-error-branch-log-repeats-every-tick) and
+	// shipping them separately would have produced two lines and a third item to
+	// reconcile them.
+	//
+	// SAY WHAT THIS SWEEP CAN STILL EMIT, so "one line" is not read as more than
+	// it is: the row-cap line above (once per sweep, only when the cap binds),
+	// one line per SWEPT task (see its own comment), and this summary. Three
+	// kinds, each with its own bound.
+	var swept, failedWrites int
+	sweptWorkers := make(map[string]struct{}) // bounded by WatchdogMaxRowsPerSweep
+	var firstFailID pgtype.UUID
+	var firstFailErr error
+
 	for _, t := range overdue {
 		// The clock is read PER ROW. Sharing one reading across a batch stamps
 		// every row with a finished_at from the start of the loop, and - now that
@@ -204,11 +220,23 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		if err != nil {
 			// pgx.ErrNoRows means somebody else got there first - the agent
 			// finished, a cancel landed, a grace expiry requeued, or a sibling
-			// replica swept it. That is the CORRECT outcome, not a failure, so it
-			// is not logged. Any other error is real. Either way, continue to the
-			// next row: one bad row must never end the sweep.
+			// replica swept it. That is the CORRECT outcome, not a failure, so
+			// it is neither logged nor counted. Any other error is real, and is
+			// AGGREGATED rather than logged here: the write did not land, so the
+			// row stays in the scan partition and the very next tick returns it,
+			// which made the old per-row line repeat every 60 seconds per row
+			// for as long as the failure persisted - in exactly the conditions
+			// (a database already under stress) where log volume is least
+			// welcome. Either way, continue to the next row: one bad row must
+			// never end the sweep.
 			if !errors.Is(err, pgx.ErrNoRows) {
-				log.Printf("watchdog: UpdateTaskStatus(timed_out) for task %s: %v", uuidStr(t.ID), err)
+				failedWrites++
+				if firstFailErr == nil {
+					// FIRST, not last. The first error is the one closest to the
+					// cause; "last" is whichever row the loop happened to end
+					// on.
+					firstFailID, firstFailErr = t.ID, err
+				}
 			}
 			continue
 		}
@@ -224,9 +252,20 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 		// caller-supplied. A watchdog that kills somebody's work without saying
 		// why it decided to is worse than no watchdog - which is also why the line
 		// must never assert something false; see watchdogSweptLine.
+		//
+		// THAT ARGUMENT COVERS THIS LINE AND ONLY THIS LINE. It was read once as
+		// covering the error branch above, and it does not: the "swept at most
+		// once" clause is precisely what a row whose write FAILED does not get,
+		// because that row stayed non-terminal and comes back next tick. The
+		// failed set is aggregated into the summary below instead. A correctness
+		// argument written next to one of two branches will be read as covering
+		// the pair; say which branch.
 		log.Printf("watchdog: task %s (job %s, worker %s) %s",
 			uuidStr(updated.ID), uuidStr(updated.JobID), uuidStr(t.WorkerID),
 			watchdogSweptLine(t, now, w.margin, w.maxAssignment))
+
+		swept++
+		sweptWorkers[uuidStr(t.WorkerID)] = struct{}{}
 
 		finalizeTerminalTask(ctx, w.q, w.broker, "watchdog", updated, "timed_out")
 		if err := w.q.NotifyTaskCompleted(ctx); err != nil {
@@ -239,6 +278,28 @@ func (w *Watchdog) SweepOnce(ctx context.Context) error {
 			defer wg.Done()
 			w.sendCancel(workerID, taskID)
 		}()
+	}
+
+	// GATED ON SOMETHING HAVING HAPPENED. An ungated summary would print
+	// "0 task(s) swept" every WatchdogSweepInterval forever on a healthy fleet -
+	// 1440 lines a day - which is the very bug this line closes, wearing the
+	// fix's clothes. TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll is the
+	// guard.
+	if swept > 0 || failedWrites > 0 {
+		msg := fmt.Sprintf("watchdog: sweep ended: %d task(s) swept across %d worker(s)",
+			swept, len(sweptWorkers))
+		if worstID, worstN := w.counters.worst(); worstID != "" && swept > 0 {
+			// CUMULATIVE, and the line says so: the pattern is the actionable
+			// part and one sweep does not show it. It is the worst TRACKED
+			// worker - if swept_overflow on GET /v1/server/counters is non-zero,
+			// the true worst may be a worker the capped map never admitted.
+			msg += fmt.Sprintf("; worst since process start: worker %s with %d", worstID, worstN)
+		}
+		if failedWrites > 0 {
+			msg += fmt.Sprintf("; %d write(s) FAILED, first: task %s: %v",
+				failedWrites, uuidStr(firstFailID), firstFailErr)
+		}
+		log.Print(msg)
 	}
 	return nil
 }

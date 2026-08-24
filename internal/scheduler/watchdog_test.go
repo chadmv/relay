@@ -162,6 +162,11 @@ func TestWatchdog_FenceRejectionIsASilentNoOp(t *testing.T) {
 	assert.Empty(t, q.cascaded, "a rejected write must not cascade")
 	assert.Empty(t, q.recomputed, "a rejected write must not recompute the job")
 	assert.Zero(t, q.notifies, "a rejected write must not wake the dispatcher")
+
+	// The counter half of "silent no-op". The whole-log assertion lives in
+	// TestWatchdog_AFenceRejectionEmitsNoLogLineAtAll; this keeps the claim in
+	// the test whose name makes it.
+	assert.Zero(t, w.CounterSnapshot().Counts.SweptTotal, "a rejected write is not a sweep")
 }
 
 // TestWatchdog_APoisonedFirstRowDoesNotStopTheSweep. THE POISONED ROW IS FIRST
