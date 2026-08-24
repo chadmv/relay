@@ -148,9 +148,12 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"path taken.", flag, len(setTrue), successReturns)
 	}
 	// The flip must be a DIRECT element of the function body, not merely
-	// somewhere beneath it. Position alone cannot express "runs on every path":
-	// a flip nested inside an `if`, a closure or a `defer func(){}()` sits at a
-	// position inside the window and still leaves the success path unflipped.
+	// somewhere beneath it. Position alone cannot express "happens on every
+	// path": a flip wrapped in an `if` sits at a position well inside the window
+	// and still leaves the success path unflipped. Requiring a plain body
+	// statement rejects that, a closure wrap and a `defer func(){}()` wrap
+	// alike, without this test having to reason about what each wrapper does at
+	// runtime.
 	if !directBodyStmt(fn.Body, setTrue[0]) {
 		t.Fatalf("%s is set to true at %s, but that assignment is nested inside another statement "+
 			"rather than being a statement of finishRegister's own body. Every position check below "+
