@@ -1149,3 +1149,80 @@ func TestWatchdogSweptByWorkerExemptionRejectsHostileShapes(t *testing.T) {
 	assert.False(t, ex.typeOK(reflect.TypeOf("")))
 	assert.True(t, ex.typeOK(reflect.TypeOf(map[string]uint64{})))
 }
+
+// TestWatchdogSectionRestatesNothing is a forcing function on an ANTECEDENT, in
+// the shape of TestTaskLogFenceSourceReturnsAScalar.
+//
+// The rule this package learned in the ingest slice is that a section whose
+// payload struct RESTATES fields owned by another package needs a NumField
+// assertion between the two types. The watchdog section restates nothing: the
+// source's own return type IS the response type, so handleServerCounters
+// assigns it whole and a field added on either side is published for free.
+//
+// That is only true while the two are the SAME type. Introducing a
+// watchdogSection that copies WatchdogCounts field by field is a small,
+// reasonable-looking edit that would silently move this section into the class
+// that needs the arity check - which is exactly how slice 2 shipped a counted
+// but unpublishable log kind with all three packages green.
+func TestWatchdogSectionRestatesNothing(t *testing.T) {
+	iface := reflect.TypeOf((*WatchdogSource)(nil)).Elem()
+	require.Equal(t, 1, iface.NumMethod(),
+		"WatchdogSource must stay a ONE-METHOD interface: a second method is a second thing that could "+
+			"be restated, and the reasoning below covers only the one")
+	m, ok := iface.MethodByName("CounterSnapshot")
+	require.True(t, ok, "WatchdogSource must declare CounterSnapshot")
+	require.Equal(t, 1, m.Type.NumOut())
+
+	f, ok := reflect.TypeOf(serverCountersResponse{}).FieldByName("Watchdog")
+	require.True(t, ok, "serverCountersResponse must carry a Watchdog field")
+
+	require.Equal(t, m.Type.Out(0), f.Type.Elem(),
+		"serverCountersResponse.Watchdog is %s and CounterSnapshot returns %s. They must be the SAME "+
+			"type. The moment this section restates the source's fields instead of carrying its type, "+
+			"a NumField assertion between the two must ship IN THIS COMMIT - see "+
+			"TestIngestLogKindCountsPublishesEveryWorkerSideField, which exists because a fully correct "+
+			"sixth kind was counted on one side and published under no JSON key on the other, with "+
+			"every package green.", f.Type.Elem(), m.Type.Out(0))
+}
+
+// TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent. A watchdog that
+// has swept nothing is the HEALTHY case and the common one; it must not read as
+// "this build has no watchdog".
+//
+// It walks the section's FULL DEPTH, and the depth is the point: counts carries
+// an object (swept_by_worker), so the shipped scalar loop in
+// TestServerCounters_WiredButZeroSectionIsStillPresent would fail here. Do not
+// copy that loop.
+func TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters: CounterSources{Watchdog: fakeWatchdogSource{c: WatchdogCounters{
+			// An ALLOCATED empty map, which is what CounterSnapshot must always
+			// return: a nil map serialises as null, and null is not an object.
+			Counts: WatchdogCounts{SweptByWorker: map[string]uint64{}},
+		}}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "watchdog"}, counterKeys(top),
+		"a WIRED source whose every counter is zero must still emit its section, and no OTHER section "+
+			"may appear: each source is nil-able on its own")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["watchdog"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section), "counts only; no levels half")
+
+	var counts map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &counts))
+	require.ElementsMatch(t, []string{"swept_total", "swept_overflow", "swept_by_worker"}, counterKeys(counts))
+	assert.Equal(t, "0", string(counts["swept_total"]))
+	assert.Equal(t, "0", string(counts["swept_overflow"]))
+	assert.Equal(t, "{}", string(counts["swept_by_worker"]),
+		"an empty map must serialise as {} and never as null or be elided by omitempty. null is not an "+
+			"object, so the payload's own JSON walk has nothing to descend into and the allow-list "+
+			"predicate rejects it - which is the check that keeps the producer allocating.")
+}
