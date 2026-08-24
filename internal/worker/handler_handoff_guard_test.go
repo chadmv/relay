@@ -127,18 +127,27 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	// actually has to hold is that the flag is declared exactly once and starts
 	// out false; how it is spelled is not this test's business.
 	//
-	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET. The counters below look at
-	// *ast.Ident on the left of an assignment, and a local bool has exactly one
-	// other way to be written: through a pointer to it. `resetHandoff :=
-	// &handedOff` beside the declaration and `*resetHandoff = false` after the
-	// flip releases the generation on every SUCCESSFUL registration and was
-	// measured passing this guard, `go vet` and the whole package. Checking
-	// *ast.StarExpr on the left would not have caught it either - the identifier
-	// there is the pointer's name, not the flag's. The address-of is the
-	// chokepoint, so that is what is counted: no alias, no indirect write. (A
-	// closure that writes the flag by name, `defer func(){ handedOff = false }()`,
-	// needs no alias and is already counted as otherWrites, because ast.Inspect
-	// descends into function literals.)
+	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET, AND THIS COMMENT USED TO CLAIM
+	// THEY WERE PLUS EXACTLY ONE MORE. It said a local bool has "exactly one other
+	// way to be written: through a pointer to it", and counted address-of as the
+	// chokepoint. That is a uniqueness claim - a claim about the complement - and
+	// it was false. `(handedOff) = false` after the flip needs no pointer, no
+	// closure and no indirection: it simply wraps the name in parens, and an
+	// *ast.Ident type assertion does not see through an *ast.ParenExpr. It was
+	// measured releasing the generation on every SUCCESSFUL registration with
+	// `go vet` clean and the WHOLE REPO green. `gofmt` does not normalise it away,
+	// and this tree has no fmt gate (CRLF makes `gofmt -l` flag every file at
+	// baseline).
+	//
+	// So every expression site below is normalised with ast.Unparen first, and the
+	// honest statement of what is checked is: writes are counted BY NAME after
+	// dropping parens, plus any address-of the flag. That covers a parenthesised
+	// write, an alias through a pointer (reflect and unsafe both need the address
+	// too, so they route through the same clause), and a closure writing the flag
+	// by name - `defer func(){ handedOff = false }()` is already otherWrites,
+	// because ast.Inspect descends into function literals. Shadowing is caught by
+	// the initFalse count. Checking *ast.StarExpr on the left would not have helped
+	// with any of it: the identifier there is the pointer's name, not the flag's.
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
@@ -149,18 +158,18 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			if v.Op != token.AND {
 				return true
 			}
-			if id, ok := v.X.(*ast.Ident); ok && id.Name == flag {
+			if id, ok := ast.Unparen(v.X).(*ast.Ident); ok && id.Name == flag {
 				aliases++
 			}
 		case *ast.AssignStmt:
 			for i, lhs := range v.Lhs {
-				id, ok := lhs.(*ast.Ident)
+				id, ok := ast.Unparen(lhs).(*ast.Ident)
 				if !ok || id.Name != flag {
 					continue
 				}
 				var rhs string
 				if i < len(v.Rhs) {
-					if r, ok := v.Rhs[i].(*ast.Ident); ok {
+					if r, ok := ast.Unparen(v.Rhs[i]).(*ast.Ident); ok {
 						rhs = r.Name
 					}
 				}
@@ -200,7 +209,8 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 	if aliases != 0 {
 		t.Fatalf("finishRegister takes the address of %s %d times. Every other check here counts "+
-			"writes by name, and a pointer is the one way to write a local bool without naming it: "+
+			"writes by name after dropping parens, and a pointer is ONE way to write a local bool "+
+			"without naming it: "+
 			"`p := &%s` plus `*p = false` below the flip releases the generation on every SUCCESSFUL "+
 			"registration - the live agent published 'offline', its metrics entry wiped, a grace timer "+
 			"requeueing its running tasks - while every check above still sees one init, one flip and "+
@@ -380,7 +390,7 @@ func declaresFalseBool(spec *ast.ValueSpec, i int) bool {
 	if i >= len(spec.Values) {
 		return false
 	}
-	id, ok := spec.Values[i].(*ast.Ident)
+	id, ok := ast.Unparen(spec.Values[i]).(*ast.Ident)
 	return ok && id.Name == "false"
 }
 
