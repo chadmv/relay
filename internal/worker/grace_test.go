@@ -154,3 +154,169 @@ func TestGraceRegistry_ExpireNowReplacesPendingTimer(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	require.Equal(t, int32(1), fired.Load())
 }
+
+// TestGraceRegistry_AStaleEpochDoesNotDisplaceALiveTimer pins the registry as
+// epoch-MONOTONIC, which is a property releaseWorkerGeneration's caller cannot
+// supply for it.
+//
+// The scenario is a delayed superseded release. finishRegister's deferred
+// release checks the fence inside markWorkerOffline and then calls grace.Start
+// on the result, and those two steps are a DATABASE ROUND TRIP apart with no
+// lock held across them - so a fresher connection can register, disconnect and
+// arm its own timer in between. Without this rule the stale caller's Start
+// evicts the LIVE generation's entry and installs its own, whose epoch fence
+// then matches zero rows when it fires: that worker's tasks are never requeued
+// at all and sit until the 24h stale-task watchdog marks them timed_out.
+//
+// EQUAL EPOCHS MUST STILL REPLACE, or TestGraceRegistry_StartIsIdempotent's
+// reset-the-window behaviour is lost.
+func TestGraceRegistry_AStaleEpochDoesNotDisplaceALiveTimer(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(40*time.Millisecond, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	g.Start("w1", 8)
+	g.Start("w1", 7) // a superseded release, arriving late
+
+	select {
+	case epoch := <-fired:
+		assert.Equal(t, int32(8), epoch,
+			"the live generation's timer must survive a stale one. Firing at 7 means the entry for "+
+				"8 was evicted, and RequeueWorkerTasksIfEpoch will match zero rows at 7 - so the "+
+				"live worker's tasks are requeued by nobody.")
+	case <-time.After(2 * time.Second):
+		t.Fatal("no timer fired at all; the stale Start must leave the existing entry running")
+	}
+}
+
+// TestGraceRegistry_StartAtTheSameEpochStillResetsTheWindow is the other half of
+// the monotonicity rule: only a STRICTLY older epoch is refused.
+func TestGraceRegistry_StartAtTheSameEpochStillResetsTheWindow(t *testing.T) {
+	var fired atomic.Int32
+	g := NewGraceRegistry(40*time.Millisecond, func(workerID string, epoch int32) {
+		fired.Add(1)
+	})
+	defer g.Stop()
+
+	g.Start("w1", 3)
+	time.Sleep(25 * time.Millisecond)
+	g.Start("w1", 3)
+	time.Sleep(25 * time.Millisecond)
+	assert.Equal(t, int32(0), fired.Load(),
+		"the second Start at the same epoch must have reset the 40ms window; if it were refused "+
+			"like a stale one, the first timer would have fired by now")
+}
+
+// TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt pins the ABA
+// guard inside the AfterFunc closure. Deleting that guard leaves every other
+// test in this package green, and the monotonicity rule documented on
+// StartWithDuration leans on it: refusing a stale epoch is worthless if a timer
+// that already fired can walk in afterwards and delete whatever entry won.
+//
+// THE WINDOW IS REPRODUCED, NOT RACED FOR. A real expiry reaches this state by
+// firing microseconds before a replacing Start takes g.mu, which no test can
+// schedule deterministically. Resetting the FIRST entry's timer to zero AFTER
+// the replacement has landed runs the very same closure, capturing the very same
+// entry, against the very same map state - and it does so on every run rather
+// than on the unlucky ones. Note that StartWithDuration DID call Stop on that
+// timer; Stop is exactly the call that cannot help once the timer has fired,
+// which is why the closure needs a guard of its own.
+func TestGraceRegistry_AFiredTimerDoesNotEvictTheEntryThatReplacedIt(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(time.Hour, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	// An hour so neither generation's timer can fire on its own during the test:
+	// anything that fires here fires because the closure was re-armed below.
+	g.StartWithDuration("w1", 1, time.Hour)
+	g.mu.Lock()
+	first := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotNil(t, first, "fixture: the first generation must have a pending entry")
+
+	g.StartWithDuration("w1", 2, time.Hour)
+	g.mu.Lock()
+	second := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotSame(t, first, second,
+		"fixture: the second generation must have installed a NEW entry, or there is no ABA to test")
+
+	first.timer.Reset(0)
+
+	select {
+	case epoch := <-fired:
+		t.Fatalf("a timer belonging to a replaced entry fired, at epoch %d. Its generation ended "+
+			"when the newer Start replaced it; firing now requeues against an epoch "+
+			"RequeueWorkerTasksIfEpoch will not match, so it moves zero tasks.", epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	g.mu.Lock()
+	still := g.timers["w1"]
+	g.mu.Unlock()
+	assert.Same(t, second, still,
+		"the replaced entry's closure deleted the LIVE entry on its way past. That is the worse "+
+			"half: the live generation now has no pending requeue at all, so when its connection "+
+			"really does end there is nothing scheduled to free its tasks.")
+}
+
+// TestGraceRegistry_AFiredTimerDoesNotEvictItsSameEpochReplacement is the case
+// above with the two epochs made EQUAL, and it exists because the guard is about
+// entry IDENTITY and the case above cannot tell identity from epoch.
+//
+// Weakening `g.timers[workerID] != entry` to a comparison of epochs leaves the
+// differing-epoch case green: 2 != 1 refuses the stale closure just as the
+// identity check did. But StartWithDuration documents that an equal epoch STILL
+// replaces - that is what keeps Start idempotent-with-reset - so a same-epoch
+// replacement is an entry the epoch comparison cannot distinguish from the one
+// that fired. Under that weakening the fired timer walks past the guard, deletes
+// the replacement and calls onExpire, which requeues the live generation's tasks
+// a full grace window early and then leaves nothing scheduled behind it.
+//
+// The whole package stayed green under that weakening until this test existed.
+func TestGraceRegistry_AFiredTimerDoesNotEvictItsSameEpochReplacement(t *testing.T) {
+	fired := make(chan int32, 4)
+	g := NewGraceRegistry(time.Hour, func(workerID string, epoch int32) {
+		fired <- epoch
+	})
+	defer g.Stop()
+
+	g.StartWithDuration("w1", 5, time.Hour)
+	g.mu.Lock()
+	first := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotNil(t, first, "fixture: the first call must have installed an entry")
+
+	// Same epoch as the first. StartWithDuration refuses only a STRICTLY older
+	// one, so this must replace - and TestGraceRegistry_StartAtTheSameEpochStill
+	// ResetsTheWindow is what holds that half.
+	g.StartWithDuration("w1", 5, time.Hour)
+	g.mu.Lock()
+	second := g.timers["w1"]
+	g.mu.Unlock()
+	require.NotSame(t, first, second,
+		"fixture: an equal epoch must still install a NEW entry, or the ABA this test needs does "+
+			"not exist and it would pass for the wrong reason")
+
+	first.timer.Reset(0)
+
+	select {
+	case epoch := <-fired:
+		t.Fatalf("the replaced entry's timer fired at epoch %d. Its epoch is indistinguishable from "+
+			"the live entry's, so a guard that compares epochs instead of entry identity lets it "+
+			"through: the live generation's tasks are requeued a grace window early, while its "+
+			"connection is still up.", epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	g.mu.Lock()
+	still := g.timers["w1"]
+	g.mu.Unlock()
+	assert.Same(t, second, still,
+		"the replaced entry's closure deleted the live entry on its way past, so the generation "+
+			"that is actually pending has no timer left to requeue its tasks when it ends")
+}

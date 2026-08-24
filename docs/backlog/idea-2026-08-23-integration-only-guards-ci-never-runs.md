@@ -45,3 +45,30 @@ where neither is worth it - what is not acceptable is the current silent state.
 - `.github/workflows/go-ci.yml`, `Makefile` (`vet-integration`)
 - `docs/backlog/closed/idea-2026-06-20-vet-integration-tagged-build.md` - the accepted-tradeoff record this item revisits
 - [[idea-2026-06-03-web-e2e-harness]] - the frontend half of the same verification-story gap
+
+## 2026-08-24: a fourth instance, the sharpest yet, and this item's own remedy menu is incomplete for it
+
+The finishregister-strand slice supplied a measured instance rather than another example.
+
+`.github/workflows/go-ci.yml` runs `go test -race ./...` with no tags. In `internal/worker`, **every
+test that drives a SUCCESSFUL worker registration is `//go:build integration`** - `handler_test.go`,
+`handler_teardown_test.go`, and the new strand integration test. So the default lane structurally
+cannot observe the registration success path at all.
+
+What that cost, concretely: the slice needed to pin one line, `handedOff = true`, which decides which
+of two deferred releases owns the worker generation. Deleting it left **all 21 packages green**, and
+that mutant makes every successful registration mark its own worker offline, wipe its metrics entry,
+and requeue a healthy agent's running tasks. Fleet-wide, on a green CI.
+
+**This item's remedy menu does not cover the case.** The "add a default-lane sibling test" option is
+unavailable here: `applyInventory` opens a transaction on the concrete `*pgxpool.Pool` unconditionally,
+so a pool-less fixture panics before the success path is reached. The mechanical cause is filed
+separately as [[idea-2026-08-24-handler-pool-has-no-seam]] - **the two are not duplicates**. Fixing the
+CI lane makes the existing integration guards run; fixing the seam makes a default-lane behavioural
+test possible. Either alone leaves the other gap open, and the seam item is the cheaper of the two.
+
+The fallback the slice actually took - a `go/parser` guard in the default lane - is worth recording as
+a data point on cost: it was **evaded twice** before it held, each time by a construct that is nil in
+one context and real in the other (`h.Metrics != nil`, then `h.pool != nil` nested inside the guarded
+branch). A behavioural test would have caught both on the first run. Treat a parser guard as the
+expensive fallback it is, not as an equivalent substitute.
