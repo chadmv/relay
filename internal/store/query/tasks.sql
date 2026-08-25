@@ -30,9 +30,10 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 --   * The agent could reset the coordinator's own clock. handleTaskStatus stamps
 --     startedAt = time.Now() on EVERY TASK_STATUS_RUNNING, this allow-list admits
 --     'running', and both other predicates pass trivially for the assignee - it
---     is its own worker id, at its own epoch. AgentMessage_TaskStatus is
---     dispatched unbudgeted (only log chunks go through ingestLogLimiter), so an
---     agent with timeout_seconds=60 emitting one RUNNING every ten minutes kept
+--     is its own worker id, at its own epoch. AgentMessage_TaskStatus is itself
+--     unbudgeted - ingestLogLimiter bounds LOG LINES, never messages, and it has
+--     never gated this dispatch - so an agent with timeout_seconds=60 emitting
+--     one RUNNING every ten minutes kept
 --     `now - started_at` under the watchdog's execution bound forever. The VALUE
 --     was always a relay-server clock; the TRIGGER was the agent's, and that is
 --     what a bound measured from this column cannot survive. "A timeout the agent
@@ -115,7 +116,13 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- control, but it still answers a different question ("may this sender drive
 -- this task's status machine at all") one round trip earlier. It does NOT save
 -- a log line - handleTaskStatus drops pgx.ErrNoRows from both write sites
--- silently - and the round-trip saving is one statement instead of two, since
+-- without logging, and COUNTS it instead: h.statusFence records the rejection,
+-- classified by whether this row was still writable when GetTask read it, and
+-- GET /v1/server/counters publishes the three reasons as task_status_fence.
+-- THE COUNTER IS WHY THE GO GATE NOW MATTERS BEYOND ITS ROUND TRIP: it is what
+-- keeps those numbers attributable to the task's own assignee, so a registered
+-- peer cannot inflate conflicting_total by naming tasks it does not own. The
+-- round-trip saving is still one statement instead of two, since
 -- GetTask has already run before the gate. Do not delete either as redundant
 -- with the other, but do not oversell the Go one either.
 UPDATE tasks
