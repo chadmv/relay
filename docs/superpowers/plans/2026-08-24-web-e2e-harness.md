@@ -59,6 +59,7 @@ Every claim the spec makes that this plan depends on was re-read at HEAD before 
 
 - **`test.exclude` REPLACES the vitest defaults, it does not extend them.** Writing `exclude: ['e2e/**']` deletes `**/node_modules/**` from the exclude set, and vitest then walks `web/node_modules` collecting every `*.spec.js` it finds there. The correct form spreads `configDefaults.exclude` first. Acceptance criterion 7 ("collected file count unchanged from HEAD") is what catches this, which is why Task 2 records the baseline count *before* touching anything.
 - **`PublicOnlyRoute` has no test at HEAD.** `rg 'PublicOnlyRoute' web/src --glob '*.test.tsx'` returns nothing; `web/src/app/` has `ProtectedRoute.test.tsx` and `AdminRoute.test.tsx` and no third file. So the post-login landing route at `web/src/app/PublicOnlyRoute.tsx:9` can be changed to any path and the entire 1100-test suite stays green. The 2026-06-03 item's original complaint - "the missing post-login redirect (no app-level navigation test existed)" - **is still literally true**, two and a half months later. `auth.spec.ts` is the first gate that would catch it.
+  **2026-08-24, superseded:** the `rg` grep above checks the component's NAME, not its BEHAVIOUR. `web/src/App.test.tsx:19-38` ("a successful login lands the user on the jobs page") already drives the real `<App/>` tree through this exact redirect - see the correction now in `web/e2e/auth.spec.ts:42`. This browser test is still worth keeping (independent confirmation through a real compiled server), just not for the coverage-gap reason originally written here.
 
 ---
 
@@ -1125,6 +1126,10 @@ test('a real login lands on /jobs', async ({ page }) => {
   // the 2026-06-03 item's original complaint ("the missing post-login redirect: no
   // app-level navigation test existed"), still literally true, and this assertion
   // is the first gate in the repo that would catch it.
+  //
+  // 2026-08-24, SUPERSEDED: the rg grep above checks the component's NAME, not
+  // its BEHAVIOUR - web/src/App.test.tsx:19-38 already drives this exact
+  // redirect. See the shipped correction at web/e2e/auth.spec.ts:42.
   await expect(page).toHaveURL(/\/jobs$/)
   await expect(page.getByRole('heading', { name: 'Jobs', level: 1 })).toBeVisible()
 })
@@ -1177,7 +1182,9 @@ Edit `web/src/app/PublicOnlyRoute.tsx:9`, changing `to="/jobs"` to `to="/schedul
 npm test 2>&1 | tail -5                                  # from web/
 ```
 
-Expected: **PASS** - the whole unit suite is green, because `PublicOnlyRoute` has no test. Then:
+Expected: **PASS** - the whole unit suite is green, because `PublicOnlyRoute` has no test.
+
+**2026-08-24, SUPERSEDED:** this is wrong. `web/src/App.test.tsx:19-38` drives `<App/>` through this exact redirect; confirmed directly by re-running this exact mutation against the current tree - `npm test` goes **RED** (2 failed, 1 passed), not PASS. See the correction at `web/e2e/auth.spec.ts:42` and the matching note at line 61 above. If re-running this step, expect RED here and treat the browser lane below as independent confirmation, not the only gate. Then:
 
 ```bash
 cd .. && make web-build && go build -o bin/relay-server.exe ./cmd/relay-server && cd web
@@ -1472,7 +1479,11 @@ cd .. && make web-build && go build -o bin/relay-server.exe ./cmd/relay-server &
 npm run test:e2e -- keyboard.spec.ts --project=chromium
 ```
 
-Expected: **FAIL** on `/admin/enrollments: arrow keys scroll the clipped columns into view` with `scroll wrapper is not actually scrollable - did the min-width rule reach the bundle?` and `Received: 0`. `/admin/invites` still passes, which is what identifies the mutation as local to one consumer.
+Expected: **FAIL** on `/admin/enrollments: arrow keys scroll the clipped columns into view` with `scroll wrapper is not actually scrollable - did the min-width rule reach the bundle?` and `Received: 0`.
+
+**2026-08-24, SUPERSEDED - both the mutation form and the expected output are wrong, confirmed by re-running each:**
+1. This exact numeric-literal-interpolation form (`` `min-w-[${660}px]` ``) does **not** reproduce: esbuild constant-folds it back to the literal string inside the JS bundle before `@tailwindcss/vite` scans, but that fold is irrelevant to whether the CSS rule survives, because the Scanner reads SOURCE FILES on disk, not the emitted bundle - so the rule's presence or absence in `dist/assets/*.css` depends only on what is in the `.tsx` source. The form that actually removes the rule is an object-property lookup (`const SIZES = { w: 660 }; const MIN_W = \`min-w-[${SIZES.w}px]\``), which genuinely disappears from both the source scan and the bundle.
+2. Even with that corrected mutation form, `Received: 0` never occurs. The wrapper's fixed-pixel columns and cell padding (undamaged by this mutation - `COLS` is a plain literal) already produce a *small* residual overflow with the rule missing - measured directly at 51px (enrollments) and 32px (invites) - which the original `toBeGreaterThan(0)` precondition could not tell apart from a working 660px/740px rule. `keyboard.spec.ts` now asserts `toBeGreaterThan(100)` specifically because of this; against the corrected mutation form the actual failure reads `Expected: > 100 / Received: 51` (enrollments) or `32` (invites), on both the Tab-press and arrow-keys tests, not `Received: 0` on the arrow-keys test alone. See the comment above `assertScrollable` in `web/e2e/keyboard.spec.ts:61-87` for the full measurement.
 
 - [ ] **Step 4: Revert and confirm green**
 
@@ -1885,13 +1896,19 @@ Every row was checked against HEAD before being written down. "npm test" means `
 | # | Mutation | Site | `npm test` | `tsc -b` | `go test` | Browser lane |
 |---|---|---|---|---|---|---|
 | **M1** | Delete `flex-wrap` from the tab-bar class string | `web/src/admin/AdminTabs.tsx:17` | **GREEN** - `rg flex-wrap web/src --glob '*.test.tsx'` returns one hit and it is a comment (`ProfilePage.test.tsx:59`) | GREEN | GREEN | **`layout.spec.ts` RED** on all five `admin-*` surfaces at 320 **and** 375 (`<main> overflows`) |
-| **M2** | `const MIN_W = 'min-w-[660px]'` -> `` const MIN_W = `min-w-[${660}px]` `` | `web/src/admin/enrollments/EnrollmentsTable.tsx:18` | **GREEN** - the rendered class attribute is byte-identical and `Table.test.tsx` pins class strings, not CSS rules | GREEN | GREEN | **`keyboard.spec.ts` RED** on `/admin/enrollments`'s arrow-scroll precondition (`Received: 0`); `/admin/invites` still passes |
-| **M3** | `to="/jobs"` -> `to="/schedules"` | `web/src/app/PublicOnlyRoute.tsx:9` | **GREEN** - `PublicOnlyRoute` has no test file at HEAD | GREEN | GREEN | **`auth.spec.ts` RED** on `a real login lands on /jobs` |
+| **M2**† | `const MIN_W = 'min-w-[660px]'` -> `` const MIN_W = `min-w-[${660}px]` `` | `web/src/admin/enrollments/EnrollmentsTable.tsx:18` | **GREEN** - the rendered class attribute is byte-identical and `Table.test.tsx` pins class strings, not CSS rules | GREEN | GREEN | **`keyboard.spec.ts` RED** on `/admin/enrollments`'s arrow-scroll precondition (`Received: 0`); `/admin/invites` still passes |
+| **M3**‡ | `to="/jobs"` -> `to="/schedules"` | `web/src/app/PublicOnlyRoute.tsx:9` | **GREEN** - `PublicOnlyRoute` has no test file at HEAD | GREEN | GREEN | **`auth.spec.ts` RED** on `a real login lands on /jobs` |
 | M4 | `tabIndex={0}` -> `tabIndex={-1}` on the scroll wrapper | `web/src/components/holo/Table.tsx:190` | RED (`Table.test.tsx:323`) | GREEN | GREEN | `keyboard.spec.ts` RED on both engines - Tab never reaches the group |
 | M5 | Delete the `fs.Stat` fallback branch | `web/embed.go:37-42` | GREEN | GREEN | RED (`web/embed_test.go:10-22`) | `auth.spec.ts` RED on the logged-out deep link |
 | M6 | Build `relay-server` **without** `make web-build` first | build order | GREEN | GREEN | GREEN | **All three specs RED** - the placeholder index has no `#root` |
 
 **M1, M2 and M3 are the justification for this slice.** Each is a real defect class this project has actually shipped or currently has no gate for, and each leaves every existing gate - 1100 unit tests, the type checker, and the whole Go suite - green.
+
+**2026-08-24, SUPERSEDED:**
+- **† M2's mutation form and Browser-lane column are both wrong**, confirmed by re-running each: the numeric-literal-interpolation form shown does not reproduce (esbuild folds it back to the literal string in the JS bundle, but `@tailwindcss/vite`'s Scanner reads source files on disk, never the bundle, so the fold does not matter either way). The object-property-lookup form that actually removes the rule (`const SIZES = { w: 660 }; \`min-w-[${SIZES.w}px]\``) produces `Expected: > 100 / Received: 51` (enrollments) or `32` (invites) on **both** `keyboard.spec.ts` tests, not `Received: 0` on the arrow-keys test alone - see the Task 9 Step 3 note above for the full measurement.
+- **‡ M3's `npm test` column is wrong.** `web/src/App.test.tsx:19-38` already drives this redirect; re-running this exact mutation against the current tree turns `npm test` **RED** (2 failed), not GREEN. The Browser-lane column (`auth.spec.ts` RED) is still accurate and is still independent, real-server confirmation - it is the `npm test` claim specifically that does not hold. See the note at line 61 and the correction shipped at `web/e2e/auth.spec.ts:42`.
+
+The **conclusion these two rows exist to support - that the browser lane catches something the existing gates do not - still holds for M2** (no unit test pins the CSS rule reaching the bundle, only the class string) but **no longer holds for M3**: `App.test.tsx` already covers this redirect, so M3 is not evidence of a gap this slice closes. M1 alone remains an unambiguous, un-superseded justification.
 
 - M1 is the layout class jsdom cannot measure (`offsetWidth`/`scrollWidth` are always 0 there).
 - M2 is the Tailwind static-scan class the 2026-08-13 review lane raised as its highest-value finding ("does this fix emit any CSS in a production build at all") and which nothing in the repo has been able to ask since.
@@ -1946,6 +1963,6 @@ git diff --stat origin/main -- '*.go'               # expect: no output
 3. **Axe integration** over the surface list `surfaces.ts` already enumerates.
 4. **Amend `idea-2026-08-23-integration-only-guards-ci-never-runs`** with V6: its Go-side complaint has a strictly worse frontend twin - the web suite was not merely tag-gated but entirely absent from CI - and this slice closes that half.
 5. **A note in `README.md` or `CLAUDE.md`** pointing at `web/e2e/README.md`.
-6. **File `PublicOnlyRoute` has no unit test** as its own small item if the browser lane is not considered sufficient coverage for `web/src/app/PublicOnlyRoute.tsx:9`.
+6. ~~**File `PublicOnlyRoute` has no unit test** as its own small item if the browser lane is not considered sufficient coverage for `web/src/app/PublicOnlyRoute.tsx:9`.~~ **2026-08-24, SUPERSEDED:** it already has one - `web/src/App.test.tsx:19-38` drives this exact redirect. See the note at line 61.
 
 This plan is **one PR, one session**. It has no multi-session stages, so there is nothing here for `/backlog phases`.
