@@ -295,6 +295,14 @@ type Handler struct {
 	// counts STATUS REPORTS the status fence rejected. No input moves more than
 	// one of the three. Do not sum them and do not merge the sections.
 	statusFence statusFenceCounters
+
+	// autoEnrollRefusals counts what the two enrollment guards refused, split by
+	// cause. A VALUE, not a pointer, for the same reason its three neighbours are.
+	//
+	// A FOURTH DISTINCT NOUN, and no input moves more than one of the four. Read
+	// through AutoEnrollRefusals. NOT YET ON GET /v1/server/counters - the section
+	// is deliberately deferred to its own item; see the plan's scope decision.
+	autoEnrollRefusals autoEnrollRefusalCounters
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -317,6 +325,11 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 // never returned to an agent: the only read path is the admin-authenticated
 // GET /v1/server/counters.
 func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
+
+// AutoEnrollRefusals reports what this server's enrollment guards have refused
+// since process start, split by cause. Per PROCESS, monotonic, and never returned
+// to an agent.
+func (h *Handler) AutoEnrollRefusals() AutoEnrollRefusalCounts { return h.autoEnrollRefusals.snapshot() }
 
 // TaskStatusFenceRejections reports what handleTaskStatus's two epoch-fenced
 // writes have refused since process start, split by what the row said at T0.
@@ -621,6 +634,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 
 	if txErr != nil {
 		if errors.Is(txErr, errCredentialLive) {
+			h.autoEnrollRefusals.record(autoEnrollReasonCredentialLive)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
@@ -713,9 +727,11 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	})
 	if txErr != nil {
 		if errors.Is(txErr, errHostnameClaimed) {
+			h.autoEnrollRefusals.record(autoEnrollReasonHostnameClaimed)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		if errors.Is(txErr, errFleetAtCeiling) {
+			h.autoEnrollRefusals.record(autoEnrollReasonFleetAtCeiling)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		return "", nil, txErr

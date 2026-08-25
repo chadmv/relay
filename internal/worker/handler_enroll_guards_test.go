@@ -603,3 +603,31 @@ func TestConnect_ReconnectIsRefusedByNeitherGuard(t *testing.T) {
 	assert.False(t, f.script.sawStatement("INSERT INTO workers"))
 	assert.False(t, f.script.sawStatement("COUNT(*) FROM workers"))
 }
+
+// TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter. Three refusals that are
+// INDISTINGUISHABLE to the caller by design must still be distinguishable to the
+// operator, and this is the only place that is true.
+func TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter(t *testing.T) {
+	claimed := newEnrollFixture(t, enrollConfig{
+		hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
+	})
+	_, err := claimed.connect(t)
+	require.Error(t, err)
+	assert.Equal(t, AutoEnrollRefusalCounts{HostnameClaimed: 1}, claimed.h.AutoEnrollRefusals())
+
+	ceiling := 1
+	full := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 9})
+	full.h.AutoEnrollWorkerCeiling = &ceiling
+	_, err = full.connect(t)
+	require.Error(t, err)
+	assert.Equal(t, AutoEnrollRefusalCounts{FleetAtCeiling: 1}, full.h.AutoEnrollRefusals())
+
+	live := newEnrollFixture(t, enrollConfig{
+		hostname: "live-host", existingHostname: "live-host", existingHasLiveToken: true,
+		credential: &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:    "UPDATE 1",
+	})
+	_, err = live.connect(t)
+	require.Error(t, err)
+	assert.Equal(t, AutoEnrollRefusalCounts{CredentialLive: 1}, live.h.AutoEnrollRefusals())
+}
