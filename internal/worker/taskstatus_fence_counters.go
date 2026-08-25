@@ -154,3 +154,56 @@ func (c *statusFenceCounters) snapshot() TaskStatusFenceCounts {
 		Conflicting: c.n[fenceReasonConflicting].Load(),
 	}
 }
+
+// taskStatusIsWritable mirrors the status allow-list carried by BOTH statements
+// handleTaskStatus writes through - UpdateTaskStatus and IncrementTaskRetryCount
+// (internal/store/query/tasks.sql; the rule is stated once, at UpdateTaskStatus,
+// and the two must change together).
+//
+// READ THE STAKE BEFORE COPYING THIS SOMEWHERE ELSE. Every other status
+// allow-list in this tree is a CONTROL: it decides whether a write happens, and
+// CLAUDE.md's allow-list-never-deny-list rule exists because the wrong shape
+// fails OPEN on the next status added. This one decides nothing. It LABELS A
+// COUNTER, so drift mislabels a number and cannot admit a write. It is written
+// as the allow-list anyway, so that its shape matches the SQL it mirrors and so
+// that TestTaskStatusWritableSetMatchesTheSQLAllowList can compare the two sets
+// directly rather than the complement of one against the other.
+//
+// A NEW NON-TERMINAL STATUS (`preparing` is the live candidate: TASK_STATUS_
+// PREPARING is already in the proto) MUST BE ADDED HERE at the same time it is
+// added to those two SQL allow-lists, or a rejection for such a row is labelled
+// `duplicate`/`conflicting` when it is in fact a race. The guard test goes RED.
+func taskStatusIsWritable(status string) bool {
+	switch status {
+	case "pending", "dispatched", "running":
+		return true
+	}
+	return false
+}
+
+// classifyStatusFenceRejection labels a rejection from the row THIS HANDLER READ
+// AT T0 and the status the agent reported, both of which are already in hand at
+// the rejection site. No round trip, no allocation.
+//
+// SAY WHAT IT KNOWS AND WHAT IT DOES NOT. It does not know which SQL predicate
+// fired at T1 - the statement yields no row, so nothing can carry that. It knows
+// whether the row was ALREADY unwritable when this handler read it, which is a
+// sufficient condition for the rejection (a terminal row is one-way: the only
+// statement that reopens one, RetryJobTasks, bumps the epoch, so the agent's
+// next report is rejected by the currency gate instead). A row that was still
+// writable at T0 and rejected at T1 therefore had its generation ended INSIDE
+// this handler's own window, which is what `raced` names.
+//
+// The consequence, stated so the key names are not over-read: a `done` report on
+// a `running` row that the watchdog sweeps inside the window is labelled
+// `raced`, not `conflicting`. That is honest - a concurrent writer ended it -
+// and it is why `raced` is documented as the floor rather than as a measurement.
+func classifyStatusFenceRejection(rowStatus, reported string) taskStatusFenceReason {
+	if taskStatusIsWritable(rowStatus) {
+		return fenceReasonRaced
+	}
+	if rowStatus == reported {
+		return fenceReasonDuplicate
+	}
+	return fenceReasonConflicting
+}
