@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestEnrollmentIgnoredWarning(t *testing.T) {
@@ -69,4 +71,25 @@ func TestAuthFailureMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies. The
+// server refuses a token-less registration for three reasons and returns the
+// SAME opaque string for all of them, deliberately, so the agent's own exit log
+// is the only place an operator can learn what to try. It used to name one cause
+// and prescribe enabling a flag that is already enabled whenever the other two
+// fire.
+func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *testing.T) {
+	msg := authFailureMessage(false, false, "/var/lib/relay/token")
+
+	for _, want := range []string{
+		"RELAY_ALLOW_AUTO_ENROLL", // cause 1: the flag is off
+		"already has a worker",    // cause 2: the hostname is claimed
+		"ceiling",                 // cause 3: the fleet is at the ceiling
+		"relay workers revoke",    // remedy 1
+		"enrollment token",        // remedy 2
+	} {
+		assert.Contains(t, msg, want)
+	}
+	assert.Contains(t, msg, "exiting", "the agent exits rather than reconnect-looping on Unauthenticated")
 }

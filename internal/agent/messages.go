@@ -20,6 +20,12 @@ func authFailureMessage(hasAgentToken, hasEnrollmentToken bool, tokenPath string
 	case hasEnrollmentToken:
 		return "agent: authentication failed - enrollment token was rejected (invalid, expired, or already used); exiting"
 	default:
-		return "agent: authentication failed - token-less auto-enroll was rejected; the server must have RELAY_ALLOW_AUTO_ENROLL enabled; exiting"
+		return "agent: authentication failed - token-less auto-enroll was rejected. The server returns " +
+			"one opaque refusal for all three causes, so check them in order: (1) the server may not have " +
+			"RELAY_ALLOW_AUTO_ENROLL enabled; (2) this hostname already has a worker row, and auto-enroll " +
+			"creates workers but never claims them - run `relay workers revoke <id>` for it, or enroll with " +
+			"an admin-issued enrollment token, which does revive a revoked worker; (3) the fleet may be at " +
+			"the auto-enroll worker ceiling (RELAY_AUTO_ENROLL_WORKER_CEILING), which enrollment tokens " +
+			"are never refused by. exiting"
 	}
 }
