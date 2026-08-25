@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"relay/internal/events"
@@ -228,11 +229,31 @@ func TestClassifyStatusFenceRejection(t *testing.T) {
 type stubStatusDB struct {
 	task     store.Task // what GetTask returns
 	writeErr error      // what the retry/update statement returns
-	calls    []string
 	execErr  error
+
+	// mu protects calls ONLY. It is fixture bookkeeping: task, writeErr and
+	// execErr are written once before any goroutine starts and are read-only
+	// afterwards, so the subject under test acquires nothing this stub owns and
+	// the no-new-lock constraint on the recv goroutine is not violated by the
+	// production path. Without it the concurrency test below races on the
+	// FIXTURE rather than on the subject, which would make its -race half prove
+	// the wrong thing.
+	mu    sync.Mutex
+	calls []string
+}
+
+// callsSnapshot is how the single-threaded tests read `calls`. Reading the slice
+// directly would be a race the concurrency test can see, and -race reporting the
+// fixture is indistinguishable in the output from -race reporting the counters.
+func (d *stubStatusDB) callsSnapshot() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.calls...)
 }
 
 func (d *stubStatusDB) note(sql string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for _, name := range []string{
 		"GetTask", "UpdateTaskStatus", "IncrementTaskRetryCount",
 		"FailDependentTasks", "RecomputeJobStatus", "NotifyTaskCompleted", "NotifyTaskSubmitted",
@@ -370,8 +391,8 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 		"a task the coordinator marked timed_out whose agent reports done is the ACTIONABLE case: a "+
 			"successful task recorded as a timeout. Before this number there was no runtime signal of "+
 			"any kind for it.")
-	require.Contains(t, db.calls, "UpdateTaskStatus", "fixture: control must reach the write")
-	require.NotContains(t, db.calls, "FailDependentTasks",
+	require.Contains(t, db.callsSnapshot(), "UpdateTaskStatus", "fixture: control must reach the write")
+	require.NotContains(t, db.callsSnapshot(), "FailDependentTasks",
 		"fixture: a rejected write must return before any follow-on effect")
 
 	// DUPLICATE: same row status as the report. The expected healthy floor.
@@ -407,10 +428,10 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 	require.Equal(t, TaskStatusFenceCounts{}, h2.TaskStatusFenceRejections(),
 		"an ACCEPTED status report must not be counted as a rejection. This number is what an operator "+
 			"reads as 'reports are being discarded'; incrementing it on the happy path makes it noise.")
-	require.Contains(t, db2.calls, "RecomputeJobStatus",
+	require.Contains(t, db2.callsSnapshot(), "RecomputeJobStatus",
 		"THE REPORT WAS ACCEPTED, and this is what says so. Without a positive marker the leg above "+
 			"asserts a negative through a projection every other arm shares.")
-	require.Contains(t, db2.calls, "NotifyTaskCompleted")
+	require.Contains(t, db2.callsSnapshot(), "NotifyTaskCompleted")
 
 	require.Equal(t, "", logged(),
 		"a fence rejection must emit NO log line of any wording, including a budgeted one: it is "+
@@ -429,9 +450,9 @@ func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 	h, db := newStatusHandler(t, "timed_out", 3, 0, pgx.ErrNoRows)
 	lim := newIngestLogLimiter(&h.ingestDrops)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
-	require.Contains(t, db.calls, "IncrementTaskRetryCount",
+	require.Contains(t, db.callsSnapshot(), "IncrementTaskRetryCount",
 		"fixture: terminal + retries remaining must take the RETRY branch")
-	require.NotContains(t, db.calls, "UpdateTaskStatus",
+	require.NotContains(t, db.callsSnapshot(), "UpdateTaskStatus",
 		"fixture: the retry branch returns; the two arms are mutually exclusive and no input executes both")
 	require.Equal(t, TaskStatusFenceCounts{Conflicting: 1}, h.TaskStatusFenceRejections(),
 		"the retry arm's rejections are the SAME noun as the update arm's - the agent's report of this "+
@@ -449,7 +470,7 @@ func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 	lim = newIngestLogLimiter(&h.ingestDrops)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
 	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections())
-	require.Contains(t, db.calls, "NotifyTaskSubmitted",
+	require.Contains(t, db.callsSnapshot(), "NotifyTaskSubmitted",
 		"the accepted retry must still wake the dispatcher; this is the positive marker for this arm")
 
 	require.Equal(t, "", logged(), "no arm of the retry branch logs")
@@ -473,4 +494,50 @@ func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
 			"value of this section is that it means the FENCE refused something.")
 	require.Contains(t, logged(), "handleTaskStatus UpdateTaskStatus",
 		"fixture: the other arm still logs, so this test is exercising it rather than falling through")
+}
+
+// TestTaskStatusFenceCounters_ConcurrentRejectionsAreExact is what makes
+// "atomics, not a mutex" a checked decision rather than a comment: in production
+// every connection has its own recv goroutine and they all write these three
+// words.
+//
+// EACH GOROUTINE HAS ITS OWN Handler-FREE FIXTURE? NO - deliberately the
+// opposite. They share ONE Handler, because that is the production shape (one
+// Handler per process, one limiter per connection) and it is the only
+// arrangement in which the mutation this test exists for is observable.
+//
+// WHAT KILLS WHAT, and the halves are not equally strong. The mutation is
+// statusFenceCounters.n changed from atomic.Uint64 to a plain uint64 with `++`,
+// WITH the .Load() calls in snapshot dropped to match - leave them in and the
+// "kill" is a compile error, which measures nothing. The -race half kills
+// through happens-before analysis and does not need true parallelism; the
+// exactness half only catches a lost update when two goroutines interleave
+// inside the read-modify-write and is inert at GOMAXPROCS=1. Both are live in
+// CI, which runs `go test -race ./...` on 2-4 vCPUs.
+//
+// MEASURED FIGURES ARE FILLED IN BY THIS SLICE'S MUTATION MATRIX RUN (M6) and
+// are recorded below rather than asserted from theory. Until that run lands this
+// paragraph is deliberately empty; do not populate it from reasoning.
+func TestTaskStatusFenceCounters_ConcurrentRejectionsAreExact(t *testing.T) {
+	h, _ := newStatusHandler(t, "timed_out", 0, 0, pgx.ErrNoRows)
+	const goroutines, each = 8, 200
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// One limiter per goroutine, exactly as there is one per connection.
+			lim := newIngestLogLimiter(&h.ingestDrops)
+			for i := 0; i < each; i++ {
+				h.handleTaskStatus(context.Background(), statusWorkerID(), lim,
+					statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+			}
+		}()
+	}
+	wg.Wait()
+
+	require.Equal(t, TaskStatusFenceCounts{Conflicting: goroutines * each}, h.TaskStatusFenceRejections(),
+		"every rejection from every connection must land, and all of them under ONE reason. A plain "+
+			"uint64 here loses counts silently and is a data race -race can see.")
 }
