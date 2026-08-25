@@ -98,6 +98,28 @@ const (
 //     non-assignee's forged report is dropped a round trip earlier and never
 //     reaches a counter, so conflicting_total cannot be inflated by a peer
 //     naming tasks it does not own.
+//     TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters pins it.
+//   - ATTRIBUTABLE IS NOT HONEST, AND THE ASSIGNEE CAN FORGE ITS OWN. The gate
+//     proves who sent the report, never that the report is true. A terminal
+//     transition bumps neither the epoch nor worker_id (the terminality
+//     paragraph in internal/store/query/tasks.sql states the same reachable
+//     state in its own words), so an assignee that reports done at epoch N and
+//     then failed at epoch N passes both gates legitimately every time, and
+//     every message adds one to conflicting_total. Nothing rate-limits status
+//     messages and this path spends no log-budget token, so it is unbounded,
+//     silent and free. Measured: 10,000 forged messages produce
+//     {Raced:0 Duplicate:0 Conflicting:10000} with every other counter in the
+//     process flat.
+//     THE CONSEQUENCE IS NOT THE NUMBER, IT IS WHAT THE NUMBER IS READ AS. The
+//     shape produced is exactly the watchdog-margin signature, whose documented
+//     remedy is to RAISE RELAY_TASK_WATCHDOG_MARGIN - widening the unbounded-
+//     assignment window the watchdog exists to close, which is where a wedged
+//     agent's incentive already points. The README's task_status_fence bullets
+//     carry the operator-facing form: cross-check watchdog.counts.swept_by_worker
+//     before raising anything. Not closed here, and closing it would need a
+//     second round trip on the recv goroutine.
+//   - THEY COUNT REPORTS, NOT TASKS. One task and one assignee can account for
+//     the whole section.
 //   - PER REPLICA, monotonic, zeroed by a restart, and never returned to an
 //     agent: the only read path is the admin-authenticated
 //     GET /v1/server/counters.
