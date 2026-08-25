@@ -589,7 +589,23 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Release the resource. :execrows, and the zero case is handled rather
+	// 4. Scrub the id out of reservations naming it. NOT a dispatch fix (spec 7).
+	//
+	// ITS POSITION HERE IS CONVENTION, NOT NECESSITY, and the spec and the plan
+	// both said otherwise ("before the DELETE because after it there is no id to
+	// scrub by"). That reasoning is self-refuting: reservations.worker_ids is a
+	// bare UUID[] with NO foreign key (000001_initial.up.sql:89), which is the
+	// entire reason this statement has to exist - and it is equally the reason
+	// the DELETE does not disturb the array. The id lives in `id` either way.
+	// Verified by mutation: moving this call after DeleteWorker leaves every
+	// delete test green. Steps 2 and 5 are the pair whose order IS load-bearing.
+	scrubbed, err := q.RemoveWorkerFromReservations(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scrub reservations failed")
+		return
+	}
+
+	// 5. Release the resource. :execrows, and the zero case is handled rather
 	// than assumed - Task 6 turns it into the 409 it should be.
 	n, err := q.DeleteWorker(ctx, id)
 	if err != nil {
@@ -601,7 +617,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// 6. Wake the dispatcher so requeued tasks are placed promptly; skipped when
 	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
 	if len(requeued) > 0 {
 		if err := q.NotifyTaskSubmitted(ctx); err != nil {
@@ -622,6 +638,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, deleteWorkerResponse{
 		workerResponse:      toWorkerResponse(current),
 		RequeuedTasks:       len(requeued),
+		ReservationsUpdated: int(scrubbed),
 		EnrollmentsUnlinked: int(unlinked),
 	})
 }

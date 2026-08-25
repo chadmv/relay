@@ -141,3 +141,51 @@ func TestDeleteWorker_SucceedsForATokenEnrolledWorker(t *testing.T) {
 	assert.True(t, post.ConsumedAt.Valid, "consumed_at intact")
 	assert.False(t, post.ConsumedBy.Valid, "consumed_by NULL")
 }
+
+// TestDeleteWorker_RemovesTheIdFromReservationsThatNameIt (T-C1). The MIXED
+// reservation is created FIRST: a single-reservation fixture passes against
+// `SET worker_ids = '{}'`, and the untouched third row is what makes the
+// statement's WHERE clause load-bearing rather than cosmetic.
+func TestDeleteWorker_RemovesTheIdFromReservationsThatNameIt(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "Res Admin", "res-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	target, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+		Name: "res-target", Hostname: "res-target", CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	other, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+		Name: "res-other", Hostname: "res-other", CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: target.ID, Status: "offline"})
+	require.NoError(t, err)
+
+	mk := func(name string, ids []pgtype.UUID) store.Reservation {
+		r, err := q.CreateReservation(t.Context(), store.CreateReservationParams{
+			Name: name, Selector: []byte("{}"), WorkerIds: ids, UserID: admin.ID,
+		})
+		require.NoError(t, err)
+		return r
+	}
+	mixed := mk("mixed", []pgtype.UUID{target.ID, other.ID})
+	only := mk("only", []pgtype.UUID{target.ID})
+	none := mk("none", []pgtype.UUID{other.ID})
+
+	rec := doDeleteWorker(t, srv, uuidString(target.ID), adminToken)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, float64(2), body["reservations_updated"])
+
+	got, err := q.GetReservation(t.Context(), mixed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []pgtype.UUID{other.ID}, got.WorkerIds)
+	got, err = q.GetReservation(t.Context(), only.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.WorkerIds)
+	got, err = q.GetReservation(t.Context(), none.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []pgtype.UUID{other.ID}, got.WorkerIds)
+}
