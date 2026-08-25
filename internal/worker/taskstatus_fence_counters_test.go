@@ -228,6 +228,7 @@ func TestClassifyStatusFenceRejection(t *testing.T) {
 // projection every other arm also produces.
 type stubStatusDB struct {
 	task     store.Task // what GetTask returns
+	getErr   error      // what GetTask returns INSTEAD, when set
 	writeErr error      // what the retry/update statement returns
 	execErr  error
 
@@ -280,7 +281,7 @@ func (d *stubStatusDB) Query(_ context.Context, sql string, _ ...any) (pgx.Rows,
 func (d *stubStatusDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
 	switch d.note(sql) {
 	case "GetTask":
-		return stubTaskRow{task: d.task}
+		return stubTaskRow{task: d.task, err: d.getErr}
 	case "UpdateTaskStatus", "IncrementTaskRetryCount":
 		return stubTaskRow{task: d.task, err: d.writeErr}
 	case "RecomputeJobStatus":
@@ -607,4 +608,89 @@ func TestHandleTaskStatus_AWriteFailureFloodIsBoundedAndCountedPerSite(t *testin
 		"the recursive CTE is the most expensive statement on this path and the first to deadlock under "+
 			"contention; its line was outside the budget entirely")
 	require.Equal(t, uint64(flood-1), h.IngestLogDropCounts().Deduped.StatusFailDependents)
+}
+
+// TestHandleTaskStatus_TheSilentArmsSpendNoBudget closes a MUTATION SURVIVOR
+// found by this slice's own matrix (M18), and it is about the ORDER of the two
+// operands of an `&&`, not about anything either operand does on its own.
+//
+// Two sites in this function guard a budgeted log line with a short-circuit:
+//
+//	if !errors.Is(err, pgx.ErrNoRows) && lim.allow(...)     // GetTask
+//	if err := ...; err != nil && lim.allow(...)             // FailDependentTasks
+//
+// SWAPPING EITHER PAIR COMPILES, VETS CLEAN, CHANGES NO LOG LINE, AND LEFT THE
+// WHOLE MODULE GREEN - measured, not hypothesised. What it changes is who pays:
+// with lim.allow first, the cheapest message an unauthenticated-ish peer can
+// send (a well-formed uuid naming no task) SPENDS a token and claims a dedupe
+// slot on every call, and so does every SUCCESSFUL dependency cascade. The
+// budget is 16 tokens refilling at 6/min for the whole connection, shared across
+// all eight kinds, so draining it there silences the diagnostics that matter -
+// which is the exact failure mode the limiter exists to prevent, reintroduced by
+// an operand swap.
+//
+// It also corrupts the numbers: ingest_log_budget.counts.deduped.status_get_task
+// would climb for a kind that never logged anything, so an operator reading
+// "these lines are being folded" would be reading an event that produced no
+// line at all.
+//
+// THE POISONED INPUT IS FIRST, and it is the point of the test rather than
+// setup. The positive control after it is what proves the limiter was still
+// working - without it, a limiter broken into always-refusing would pass every
+// assertion above.
+func TestHandleTaskStatus_TheSilentArmsSpendNoBudget(t *testing.T) {
+	ctx := context.Background()
+	logged := captureUnitLog(t)
+
+	// SITE 1: GetTask returning pgx.ErrNoRows - the task does not exist. Dropped
+	// SILENTLY by design, so it must not touch the budget either.
+	h, _ := newStatusHandler(t, "running", 0, 0, nil)
+	h.q = store.New(&stubStatusDB{getErr: pgx.ErrNoRows})
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	const flood = 100
+	for i := 0; i < flood; i++ {
+		h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	}
+	require.Equal(t, ingestLogBurst, lim.tokens,
+		"a silently-dropped message must not spend a token. The whole bucket is 16 for the connection "+
+			"across all eight kinds, so a peer that can drain it by naming tasks that do not exist has "+
+			"silenced every other diagnostic on that stream.")
+	require.Empty(t, lim.seen,
+		"nor may it claim a dedupe slot: a key recorded for a line that was never emitted suppresses "+
+			"the FIRST REAL occurrence of that kind for a whole dedupe window")
+	require.Equal(t, IngestLogDrops{}, h.IngestLogDropCounts(),
+		"and nothing may be COUNTED as dropped, because nothing was dropped - no line was ever a "+
+			"candidate. A non-zero status_get_task here means the number is reporting events that "+
+			"produced no log line at all.")
+
+	// SITE 2: a SUCCESSFUL FailDependentTasks on the same shape of guard. The
+	// cascade runs on every terminal task in a healthy fleet, so a swap here
+	// spends a token per completed task.
+	db := &stubStatusDB{task: store.Task{
+		ID: statusTaskIDUUID(t), JobID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+		Status: "running", WorkerID: statusWorkerID(), AssignmentEpoch: 7,
+	}}
+	h2 := &Handler{q: store.New(db), broker: events.NewBroker()}
+	lim2 := newIngestLogLimiter(&h2.ingestDrops)
+	for i := 0; i < flood; i++ {
+		h2.handleTaskStatus(ctx, statusWorkerID(), lim2, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	}
+	require.Contains(t, db.callsSnapshot(), "FailDependentTasks",
+		"fixture: control must reach the cascade, or the assertion below is vacuous")
+	require.Equal(t, ingestLogBurst, lim2.tokens,
+		"a SUCCEEDING statement must not spend a log token. Every terminal task in a healthy fleet "+
+			"runs this cascade, so this is not an adversarial case - it is the common one.")
+	require.Empty(t, lim2.seen)
+	require.Equal(t, IngestLogDrops{}, h2.IngestLogDropCounts())
+
+	require.Equal(t, "", logged(), "neither site logs on these inputs")
+
+	// POSITIVE CONTROL, on the SAME limiter as site 1: a genuine infrastructure
+	// failure at that same site must still get its line out of the full bucket.
+	h.q = store.New(&stubStatusDB{getErr: errors.New(`ERROR: server closed the connection unexpectedly`)})
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Contains(t, logged(), "handleTaskStatus GetTask",
+		"POSITIVE CONTROL: the budget must still be spendable. Without this, a limiter mutated into "+
+			"always-refusing satisfies every assertion above.")
+	require.Equal(t, ingestLogBurst-1, lim.tokens, "and exactly one token buys exactly one line")
 }
