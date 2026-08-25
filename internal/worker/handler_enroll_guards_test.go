@@ -668,3 +668,29 @@ func TestConnect_AutoEnrollSuccessStillWritesExactlyOneAuditLine(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, "auto-enrolled worker"))
 	assert.Contains(t, out, `hostname="fresh-host"`, "%q is the injection defence and must stay")
 }
+
+// TestAutoEnrollWorkerCeiling_ResolvesTheUnsetAndNegativeCasesToTheDefault exists
+// because the mutation battery found the hole: changing this resolver's fallback
+// from DefaultAutoEnrollWorkerCeiling to 1 left every test in three packages
+// GREEN. Nothing pinned it. TestParseAutoEnrollCeiling looks like it does and
+// does not - it compares the parser's output against the same constant, so it is
+// self-referential and moves with any change to the constant OR to this
+// fallback.
+//
+// The three arms are not interchangeable. nil is "cmd/relay-server never set the
+// field", which is every bare &Handler{} in this package; NEGATIVE is the
+// parser's rejected-and-defaulted outcome, which reaches the handler as a real
+// pointer to a real negative number; and a non-nil ZERO is DISABLED and must NOT
+// resolve to the default, which is the whole reason this field is a *int.
+func TestAutoEnrollWorkerCeiling_ResolvesTheUnsetAndNegativeCasesToTheDefault(t *testing.T) {
+	neg, zero, pos := -1, 0, 7
+
+	assert.Equal(t, DefaultAutoEnrollWorkerCeiling, (&Handler{}).autoEnrollWorkerCeiling(),
+		"a nil field means UNSET and must resolve to the default, not to some other number")
+	assert.Equal(t, DefaultAutoEnrollWorkerCeiling,
+		(&Handler{AutoEnrollWorkerCeiling: &neg}).autoEnrollWorkerCeiling(),
+		"a negative value is the parser's rejected-and-defaulted outcome")
+	assert.Equal(t, 0, (&Handler{AutoEnrollWorkerCeiling: &zero}).autoEnrollWorkerCeiling(),
+		"a non-nil zero means DISABLED and must never be folded into the default")
+	assert.Equal(t, 7, (&Handler{AutoEnrollWorkerCeiling: &pos}).autoEnrollWorkerCeiling())
+}
