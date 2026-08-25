@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -13,8 +14,11 @@ import (
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // errRow is a pgx.Row that reports an error and scans nothing. pgx.ErrNoRows
@@ -55,6 +59,11 @@ func (s *rowScript) answer(sql string, args []any) pgx.Row {
 	s.seen = append(s.seen, strandExec{sql: sql, args: args})
 
 	switch {
+	// GetAgentEnrollmentByTokenHash. strandWorkerRow scans this struct
+	// successfully and makes every enrollment look consumed and expired.
+	case strings.Contains(sql, "agent_enrollments"):
+		return agentEnrollmentRow{}
+
 	// GetWorkerByHostname / GetWorkerByHostnameForUpdate: hostname is $1.
 	case strings.Contains(sql, "FROM workers") && strings.Contains(sql, "hostname = $1"):
 		if s.existingHostname != "" && strArg(args, 0) == s.existingHostname {
@@ -245,4 +254,91 @@ func TestConnect_AutoEnrollStillCreatesAWorkerForAFreshHostname(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "[redacted by scriptedStream]", resp.AgentToken,
 		"the retained message must carry the placeholder, which distinguishes 'scrubbed' from 'never sent'")
+}
+
+// agentEnrollmentRow is a store.AgentEnrollment that is NEITHER consumed NOR
+// expired - which strandWorkerRow structurally cannot be. Its type switch does
+// cover every field of that struct, but it fills EVERY pgtype.Timestamptz with
+// time.Unix(0, 0) and marks it Valid, so an enrollment read through it is
+// simultaneously already-consumed and expired in 1970, and enrollAndRegister
+// refuses it before its transaction opens.
+//
+// THE FILL IS POSITIONAL AND THE POSITION IS sqlc's TO CHOOSE.
+// store.AgentEnrollment declares CreatedAt, ExpiresAt, ConsumedAt in that order
+// and sqlc emits Scan in field order.
+// TestAgentEnrollmentRow_IsNeitherConsumedNorExpired scans into the real struct
+// and asserts both properties BY NAME, so a reordered or added column reddens
+// rather than silently re-pointing these values.
+type agentEnrollmentRow struct{}
+
+func (agentEnrollmentRow) Scan(dest ...any) error {
+	ts := 0
+	for _, d := range dest {
+		switch v := d.(type) {
+		case *pgtype.UUID:
+			*v = strandWorkerID
+		case *string:
+			*v = "enrollment-token-hash"
+		case **string:
+			*v = nil
+		case *pgtype.Timestamptz:
+			switch ts {
+			case 0: // CreatedAt
+				*v = pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true}
+			case 1: // ExpiresAt - must be in the FUTURE
+				*v = pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}
+			default: // ConsumedAt - must be INVALID (never consumed)
+				*v = pgtype.Timestamptz{}
+			}
+			ts++
+		default:
+			return fmt.Errorf("agentEnrollmentRow: no fixture value for scan destination of type %T; "+
+				"store.AgentEnrollment gained a column this stub does not model", d)
+		}
+	}
+	return nil
+}
+
+func TestAgentEnrollmentRow_IsNeitherConsumedNorExpired(t *testing.T) {
+	var e store.AgentEnrollment
+	require.NoError(t, agentEnrollmentRow{}.Scan(
+		&e.ID, &e.TokenHash, &e.HostnameHint, &e.CreatedBy, &e.CreatedAt, &e.ExpiresAt, &e.ConsumedAt, &e.ConsumedBy))
+
+	assert.False(t, e.ConsumedAt.Valid,
+		"a consumed enrollment is refused before enrollAndRegister's transaction opens")
+	assert.True(t, e.ExpiresAt.Time.After(time.Now()),
+		"an expired enrollment is refused before enrollAndRegister's transaction opens")
+}
+
+// TestConnect_EnrollmentTokenReachesASuccessfulRegistration is the enrollment
+// path's GREEN control. Without a non-zero command tag ConsumeAgentEnrollment
+// reports zero rows and errEnrollmentNotConsumable fires BY DEFAULT, so the
+// fixture could drive that rejection and structurally could not drive a success.
+func TestConnect_EnrollmentTokenReachesASuccessfulRegistration(t *testing.T) {
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:   "token-host",
+		credential: &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:    "UPDATE 1",
+	})
+
+	ev, err := f.connect(t)
+	require.NoError(t, err)
+	requireWorkerOnline(t, ev)
+	assert.Equal(t, 1, f.stream.tokensSent(), "enrollment must mint and send a fresh agent token")
+}
+
+// TestConnect_EnrollmentTokenIsRefusedWhenTheTokenIsNotConsumable pins
+// errEnrollmentNotConsumable somewhere CI executes. The tag is set EXPLICITLY to
+// zero rows so this asserts the branch rather than the fixture's default.
+func TestConnect_EnrollmentTokenIsRefusedWhenTheTokenIsNotConsumable(t *testing.T) {
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:   "token-host",
+		credential: &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:    "UPDATE 0",
+	})
+
+	_, err := f.connect(t)
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.Equal(t, 0, f.stream.tokensSent(), "a refused enrollment must send no agent token")
 }
