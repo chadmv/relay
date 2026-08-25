@@ -49,6 +49,16 @@ var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 // vocabulary from this decision entirely.
 var errHostnameClaimed = errors.New("hostname already claimed")
 
+// errCredentialLive is returned inside the enrollment transaction when the
+// existing worker row for this hostname still holds an agent_token_hash. THIS IS
+// A DIFFERENT PREDICATE FROM errHostnameClaimed's AND THE DIFFERENCE IS FORCED:
+// revoking does not delete the row (ClearWorkerAgentToken nulls the hash and sets
+// status='revoked'), so refusing every existing row here would make the revoked
+// row block its own recovery and leave `relay workers delete` - which destroys
+// assignments and reservations - as the only route. NULL means revoked
+// (recovery, allowed); non-NULL means a live credential (takeover, refused).
+var errCredentialLive = errors.New("worker credential is live")
+
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
@@ -465,10 +475,17 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 	}
 }
 
-// enrollAndRegister handles first-time enrollment using an enrollment token.
-// All DB writes (worker upsert, enrollment consume, agent-token set) execute
-// inside a single transaction so that a failure anywhere leaves no partial
-// state — either the agent is fully enrolled or not at all.
+// enrollAndRegister handles enrollment using an admin-issued enrollment token.
+// All DB writes (the FOR UPDATE worker lookup, the worker upsert, the enrollment
+// consume, the agent-token set) execute inside a single transaction, so a failure
+// anywhere leaves no partial state - either the agent is fully enrolled or not at
+// all.
+//
+// IT REFUSES A HOSTNAME WHOSE WORKER HOLDS A LIVE CREDENTIAL and still binds to
+// one whose credential is NULL. The lookup is INSIDE the transaction and holds
+// FOR UPDATE, which is what makes the check and the upsert one atomic decision
+// for an existing row. Rotating a LIVE agent's credential therefore requires a
+// revoke first - same rule, same remedy as the auto-enroll path.
 func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawEnroll string) (string, *workerSender, error) {
 	if rawEnroll == "" {
 		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
@@ -494,6 +511,24 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	var workerID pgtype.UUID
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
+
+		// FOR UPDATE, INSIDE THE SAME TRANSACTION AS THE UPSERT. The lock is what
+		// makes this non-racy for the case that matters, an existing row. For a
+		// FRESH hostname it locks nothing, so two admin-issued tokens racing on one
+		// brand-new hostname still resolve to one row via ON CONFLICT DO UPDATE -
+		// out of the threat model, and disclosed rather than closed.
+		//
+		// LOCK ORDERING: this transaction takes a workers row lock and then updates
+		// an agent_enrollments row. Re-check before adding a caller - at time of
+		// writing ConsumeAgentEnrollment has no other caller, so no transaction
+		// takes the two in the opposite order and there is no deadlock cycle.
+		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup worker: %w", err)
+		}
+		if err == nil && existing.AgentTokenHash != nil {
+			return errCredentialLive
+		}
 
 		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 			Name:               reg.Hostname,
@@ -530,6 +565,9 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	})
 
 	if txErr != nil {
+		if errors.Is(txErr, errCredentialLive) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		}
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}

@@ -51,6 +51,10 @@ type rowScript struct {
 	// how a test drives reconnectAndRegister's own credential refusal.
 	unknownAgentToken bool
 
+	// existingHasLiveToken makes the existing worker row hold a non-NULL
+	// agent_token_hash, i.e. a LIVE credential rather than a revoked one.
+	existingHasLiveToken bool
+
 	seen []strandExec
 }
 
@@ -78,6 +82,9 @@ func (s *rowScript) answer(sql string, args []any) pgx.Row {
 	// GetWorkerByHostname / GetWorkerByHostnameForUpdate: hostname is $1.
 	case strings.Contains(sql, "FROM workers") && strings.Contains(sql, "hostname = $1"):
 		if s.existingHostname != "" && strArg(args, 0) == s.existingHostname {
+			if s.existingHasLiveToken {
+				return liveWorkerRow{}
+			}
 			return strandWorkerRow{}
 		}
 		return errRow{pgx.ErrNoRows}
@@ -148,14 +155,19 @@ type enrollConfig struct {
 	hostname         string
 	credential       any // nil = token-less auto-enroll
 	existingHostname string
-	allowAutoEnroll  bool
-	execTag          string // "" keeps fakeTx's historical "DELETE 0"
+	// existingHasLiveToken: the existing row holds a non-NULL agent_token_hash.
+	existingHasLiveToken bool
+	allowAutoEnroll      bool
+	execTag              string // "" keeps fakeTx's historical "DELETE 0"
 }
 
 func newEnrollFixture(t *testing.T, cfg enrollConfig) *enrollFixture {
 	t.Helper()
 
-	script := &rowScript{existingHostname: cfg.existingHostname}
+	script := &rowScript{
+		existingHostname:     cfg.existingHostname,
+		existingHasLiveToken: cfg.existingHasLiveToken,
+	}
 	db := &strandDB{execTag: "UPDATE 1", script: script}
 	tx := &fakeTx{script: script, execTag: cfg.execTag}
 	pool := &fakePool{tx: tx}
@@ -421,4 +433,70 @@ func TestConnect_AutoEnrollRefusalIsIndistinguishableFromACredentialFailure(t *t
 		assert.NotContains(t, msg, leak,
 			"the refusal must disclose nothing about the hostname beyond the refusal itself")
 	}
+}
+
+// liveWorkerRow is strandWorkerRow with every nullable string column non-NULL,
+// which is how this fixture says "this worker holds a LIVE agent token hash".
+// strandWorkerRow sets every **string to nil - i.e. a REVOKED row, since
+// ClearWorkerAgentToken is the only writer that nulls that column.
+//
+// It delegates first so it inherits strandWorkerRow's arity check rather than
+// re-declaring it.
+type liveWorkerRow struct{}
+
+func (liveWorkerRow) Scan(dest ...any) error {
+	if err := (strandWorkerRow{}).Scan(dest...); err != nil {
+		return err
+	}
+	for _, d := range dest {
+		if v, ok := d.(**string); ok {
+			s := "live-agent-token-hash"
+			*v = &s
+		}
+	}
+	return nil
+}
+
+// TestConnect_EnrollmentTokenRefusesAHostnameWithALiveCredential. The enrollment
+// path gets item 1's ORIGINAL predicate - a non-NULL agent_token_hash - because
+// on THIS path it genuinely discriminates: NULL means revoked (recovery,
+// allowed), non-NULL means a live credential (takeover, refused).
+func TestConnect_EnrollmentTokenRefusesAHostnameWithALiveCredential(t *testing.T) {
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:             "live-host",
+		existingHostname:     "live-host",
+		existingHasLiveToken: true,
+		credential:           &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:              "UPDATE 1",
+	})
+
+	_, err := f.connect(t)
+	require.Error(t, err, "an enrollment token must never overwrite a live agent credential")
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	for _, e := range f.tx.execsSeen() {
+		assert.NotContains(t, e.sql, "agent_token_hash = $2", "SetWorkerAgentToken must not run")
+	}
+	commits, rollbacks := f.tx.outcome()
+	assert.Equal(t, 0, commits)
+	assert.GreaterOrEqual(t, rollbacks, 1)
+	assert.Empty(t, f.db.execsSeen())
+	assert.Equal(t, 0, f.stream.tokensSent())
+}
+
+// TestConnect_EnrollmentTokenStillEnrollsARevokedHostname is the control, and it
+// guards the recovery route the whole slice points operators at. WITHOUT IT the
+// pair is defeated by swapping the predicate for a status check - see M9.
+func TestConnect_EnrollmentTokenStillEnrollsARevokedHostname(t *testing.T) {
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:         "revoked-host",
+		existingHostname: "revoked-host", // exists, and its token hash is NULL
+		credential:       &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:          "UPDATE 1",
+	})
+
+	ev, err := f.connect(t)
+	require.NoError(t, err, "revoke-then-re-enroll is the recovery route this slice documents")
+	requireWorkerOnline(t, ev)
+	assert.Equal(t, 1, f.stream.tokensSent())
 }
