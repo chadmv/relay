@@ -770,7 +770,8 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// requires the indexed statement to BE the call rather than merely contain it.
 	// The guard lives in the default lane, and what it covers there has narrowed.
 	// It is now the half no runtime test can observe: source position, the
-	// deferred closure's SHAPE (the clauses described above this function's body),
+	// deferred closure's SHAPE (the clauses described at the defer that arms the
+	// release, earlier in this function),
 	// and the flag's write set. The behavioural
 	// half is TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration,
 	// which drives this whole function to a successful return without Postgres and

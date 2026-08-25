@@ -181,7 +181,7 @@ return**. Below is the complete list of what that path touches, in order, with w
 returns a fresh `*Queries` whose `db` is the tx (`internal/store/db.go:28-32`), so the tx fake must
 satisfy `pgx.Tx`, not `store.DBTX`.
 
-**Every `handler.go` line number in this table is PRE-SEAM** - it cites the tree at `1097211`, before the `txBeginner` block added 19 lines near the top of the file and the Task 8 prose added more. The same is true of the `handler_register_strand_test.go` citations. The cited SYMBOLS are all correct and are the durable half; resolve them by name. No corrected numbers are given here on purpose - they drifted again while this note was being written.
+**Every code line number in this table is PRE-SEAM** - all of them cite the tree at `1097211`, before the `txBeginner` block added 19 lines near the top of `handler.go` and the Task 8 prose added more. That applies to the whole table, not just to `handler.go`: the `handler_register_strand_test.go` and `handler_registration_deadline_test.go` citations have drifted too. The cited SYMBOLS are all correct and are the durable half; resolve them by symbol. No corrected numbers are given here on purpose - they drifted again while this note was being written.
 
 | Step | Site | What the fixture must supply |
 |---|---|---|

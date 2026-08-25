@@ -92,6 +92,18 @@ func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
 // RegisterResponse would silently drop anything added to the message later, and
 // a fixture that quietly stops recording a new field makes every test that reads
 // it prove less.
+//
+// THE SCOPE IS RELAY-ISSUED CREDENTIALS, AND THAT BOUNDARY WAS CHOSEN RATHER
+// THAN MISSED. RegisterResponse.AgentToken is the only field on any
+// CoordinatorMessage that relay MINTS and hands to a peer, so it is the only one
+// whose retention here would leak something the coordinator created. The nearest
+// other candidate is DispatchTask.env (relay.proto), a caller-supplied string map
+// that reaches this fake whenever a dispatch goes through NewWorkerSender: it is
+// retained unscrubbed, deliberately. It is user-authored job-spec input rather
+// than a relay credential, no test drives one through this fixture today, and
+// scrubbing it would cost a future dispatch test the ability to assert what the
+// agent was actually told to run. Revisit if relay ever puts a secret of its own
+// into a dispatch.
 func (s *scriptedStream) Send(m *relayv1.CoordinatorMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -103,6 +115,22 @@ func (s *scriptedStream) Send(m *relayv1.CoordinatorMessage) error {
 	}
 	s.sent = append(s.sent, m)
 	return s.sendErr
+}
+
+// tokensSent reports how many RegisterResponses carried a non-empty raw agent
+// token.
+//
+// IT EXISTS BECAUSE THE FIELD WITHOUT IT HAS ONLY A RACY SPELLING. sent got
+// sentMsgs() and agentTokensSent got nothing, so the only way to read it was as
+// a bare field - and this fixture's stated next consumer, a test pointing it at
+// enrollAndRegister or autoEnrollAndRegister, is by construction a
+// Connect-on-a-goroutine test where that read is a real -race failure. The
+// sibling field in this struct already had the guard; adding a property and
+// forgetting its guard is the recurring shape this is avoiding.
+func (s *scriptedStream) tokensSent() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agentTokensSent
 }
 
 // sentMsgs returns a copy of what has been sent so far, so callers never read
@@ -283,18 +311,23 @@ func TestScriptedStream_DoesNotRetainARawAgentToken(t *testing.T) {
 		},
 	}))
 
+	// The RAW retained slice, under the lock rather than through sentMsgs(): what
+	// this test exists to check is what the fixture KEEPS, and a copy taken by an
+	// accessor could in principle be cleaner than the store behind it.
+	s.mu.Lock()
 	for i, m := range s.sent {
 		assert.NotContains(t, m.String(), secret,
 			"retained message %d still carries the raw agent token. This slice is read back by "+
 				"assertions that print the whole message when they fail, so a real enrollment test "+
 				"would publish a live credential into CI logs.", i)
 	}
+	s.mu.Unlock()
 	for i, m := range s.sentMsgs() {
 		assert.NotContains(t, m.String(), secret,
 			"message %d handed to a test still carries the raw agent token", i)
 	}
 
-	require.Equal(t, 1, s.agentTokensSent,
+	require.Equal(t, 1, s.tokensSent(),
 		"the fact that a token WAS issued must survive the redaction - that is the assertable "+
 			"property an enrollment test needs, and the only thing about the credential worth keeping")
 
