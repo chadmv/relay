@@ -26,6 +26,7 @@ import (
 type successFixture struct {
 	h          *Handler
 	db         *strandDB
+	pool       *fakePool
 	tx         *fakeTx
 	stream     *scriptedStream
 	metrics    *metrics.Store
@@ -149,6 +150,7 @@ func newSuccessFixture(t *testing.T) *successFixture {
 
 	db := &strandDB{execTag: "UPDATE 1"}
 	tx := &fakeTx{}
+	pool := &fakePool{tx: tx}
 
 	fired := make(chan graceFire, 4)
 	grace := NewGraceRegistry(20*time.Millisecond, func(workerID string, epoch int32) {
@@ -171,7 +173,7 @@ func newSuccessFixture(t *testing.T) *successFixture {
 
 	h := &Handler{
 		q:        store.New(db),
-		pool:     &fakePool{tx: tx},
+		pool:     pool,
 		registry: NewRegistry(),
 		broker:   broker,
 		grace:    grace,
@@ -204,6 +206,7 @@ func newSuccessFixture(t *testing.T) *successFixture {
 	return &successFixture{
 		h:          h,
 		db:         db,
+		pool:       pool,
 		tx:         tx,
 		stream:     s,
 		metrics:    ms,
@@ -531,6 +534,52 @@ func TestFinishRegister_SucceedsWhenTheInventoryTransactionFails(t *testing.T) {
 	assert.GreaterOrEqual(t, rollbacks, 1,
 		"and it must have rolled back, so the worker's previous rows survive a failed replace "+
 			"intact rather than being half-cleared")
+
+	require.Error(t, finish())
+}
+
+// TestFinishRegister_SucceedsWhenTheInventoryTransactionCannotBegin is the other
+// half of the log-and-continue rule, and it is a DIFFERENT failure mode from its
+// sibling above rather than a restatement of it. That one fails inside the
+// transaction, where pgx rolls back and applyInventory returns the exec error.
+// This one never opens a transaction at all - a pool with no free connection, a
+// server that is up but refusing them - so BeginTxFunc returns before the closure
+// is ever called and no statement is issued.
+//
+// The distinction is worth a test because the two arms exercise different code:
+// the first proves a returned error is swallowed, the second proves the same of
+// an error raised before there is anything to roll back. A registration refused
+// because the pool was momentarily exhausted would be an outage caused entirely
+// by bookkeeping.
+//
+// LIKE ITS SIBLING THIS IS NOT RED AT HEAD; it pins a non-goal. Its
+// discriminating power is mutation M10 - turning applyInventory's log.Printf into
+// a return - which reddens it exactly as it reddens the sibling.
+func TestFinishRegister_SucceedsWhenTheInventoryTransactionCannotBegin(t *testing.T) {
+	f := newSuccessFixture(t)
+	workerID := uuidStr(strandWorkerID)
+	f.pool.beginErr = errors.New("timeout: context deadline exceeded acquiring connection from pool")
+
+	online, finish := f.startConnect(t)
+
+	assert.JSONEq(t, `{"id":"`+workerID+`","status":"online"}`, string(online.Data),
+		"a pool that cannot hand out a connection must not refuse the agent's registration. The "+
+			"inventory replace is bookkeeping; the connection is the product.")
+	require.NoError(t, f.h.registry.Send(workerID, &relayv1.CoordinatorMessage{}),
+		"and the sender must still reach the registry")
+
+	require.Empty(t, f.tx.execsSeen(),
+		"fixture: no statement can have been issued, because the transaction was never opened - "+
+			"that is what makes this a different arm from the exec-failure test above")
+	commits, rollbacks := f.tx.outcome()
+	assert.Equal(t, 0, commits,
+		"nothing to commit")
+	assert.Equal(t, 0, rollbacks,
+		"and nothing to roll back either: pgx.BeginTxFunc returns the begin error before it defers "+
+			"anything, so unlike the exec-failure arm this one leaves no transaction lifecycle at all")
+
+	assert.Empty(t, f.db.execsSeen(),
+		"the generation must not be released: this registration succeeded")
 
 	require.Error(t, finish())
 }
