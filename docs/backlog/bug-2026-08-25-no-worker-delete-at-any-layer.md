@@ -3,7 +3,7 @@ title: Relay cannot delete a worker at any layer, and the auto-enroll guards mad
 type: bug
 status: open
 created: 2026-08-25
-priority: high
+priority: medium
 source: 2026-08-25 auto-enroll-guards slice - the remediation prescribed `relay workers delete`, which does not exist
 ---
 
@@ -44,6 +44,33 @@ The escape hatches that DO exist, so this item is not overstated:
 - Rename the host. README:369 already documents that a renamed host rejoins as a new worker.
 
 Neither helps the case above, and the second is not a real answer for a fleet with naming conventions.
+
+## Corrections (2026-08-26, from the spec pass)
+
+This item was written by its own author immediately after the slice that motivated it, with no
+independent review. Three of its claims did not survive verification and are corrected here rather
+than left for a reader to trip over:
+
+- **The severity argument is self-refuting, and the priority is now `medium`.** The item said a
+  machine re-provisioned in place, whose operator "will not or cannot have an enrollment token
+  issued", has *no remedy at all*. But delete must be admin-only - it is a destructive fleet
+  operation - so it needs exactly the admin the premise says is unavailable. Both existing routes
+  (revoke-then-enrollment-token, and the renamed-host route at README:369) were verified working.
+  There is **no unrecoverable operator state with an admin in the loop.** The honest case for this
+  item is narrower and still real: nothing reclaims the row or the hostname, README says so, and the
+  TTL reaper's delete arm is blocked on it.
+- **The FK blocker does not apply to this item's own motivating case.** A worker that auto-enrolled
+  never consumed an enrollment token, so `agent_enrollments.consumed_by` is NULL for it and a raw
+  `DELETE FROM workers` already succeeds today. The blocker is real for *token-enrolled* workers.
+- **"The dispatcher keeps matching against" stale reservation ids is backwards.** `reservedIDs`
+  (`internal/scheduler/dispatch.go:186-191`) is an **exclusion** set, consulted while iterating live
+  worker rows (`:221`), so a dangling id matches nothing and excludes nothing. `POST /v1/reservations`
+  never existence-checks `worker_ids` either, so the state is already creatable without any delete.
+  Scrubbing is still worth doing, for the contract that a deleted id ceases to exist - not for this
+  reason.
+
+Confirmed unchanged: all three "does not exist" claims hold verbatim, all four FK claims hold
+verbatim, and a complement search found no fifth relation referencing `workers`.
 
 ## Proposal
 
