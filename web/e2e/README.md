@@ -49,6 +49,18 @@ Running `npx playwright test` directly will fail with a message telling you so.
 If you ran the npm script directly, restore the placeholder yourself:
 `git checkout -- web/dist/index.html`.
 
+**Rebuilding `relay-server` without re-running `make web-build` first silently
+embeds the restored placeholder.** `web/dist/index.html` is a TRACKED
+placeholder (see above); `test-e2e` restores it on exit so the working tree
+stays clean, but that means a bare `go build ./cmd/relay-server` run afterwards
+- outside `make test-e2e`, for instance while iterating on a Go change - embeds
+that 7-line "has not been built" page instead of the SPA. The suite then fails
+with dozens of generic `expect(locator).toBeVisible()` / "element(s) not found"
+errors - `layout.spec.ts` alone contributes 39 (13 surfaces x 3 widths) -
+whose real cause (no `#root` on the page at all) is nowhere in any individual
+failure message. Reproducible every time; if a run comes back with a wall of
+unrelated-looking timeouts, rerun `make web-build` first.
+
 ## Run it in CI
 
 `.github/workflows/web-ci.yml`, blocking on every PR. It also carries the
@@ -62,11 +74,18 @@ full-page PNG per surface per width on every run and CI uploads them. There are
 no pixel baselines: cross-platform rasterization would make them either
 permanently red or permanently regenerated. Someone has to open them.
 
-**No `relay-agent` runs in slice 1, so no worker row can exist.** `/workers` and
-`/workers/:id` are covered in their empty state only, no job executes, no task
-reaches `running`, and SSE task-log tailing is not exercised. `surfaces.ts`
-records the limit per surface in a `population` field - do not read an
-empty-state pass as a populated-state pass. Closing this is slice 2.
+**No `relay-agent` runs in slice 1, so no worker row can exist.** `/workers` is
+covered in its empty state only, no job executes, no task reaches `running`, and
+SSE task-log tailing is not exercised. `surfaces.ts` records the limit per
+surface in a `population` field - do not read an empty-state pass as a
+populated-state pass. Closing this is slice 2.
+
+**Not in `surfaces.ts` at all - 13 entries, not 15.** `/workers/:id` (no worker
+row exists to link to, per the limit above; this is a stronger gap than
+"empty-state only" - the page is never visited), `/jobs/:id/tasks/:taskId`,
+`/register`, and the `password` and `sessions` profile tabs. `/workers/:id` is
+the page the 2026-08-13 retro flagged as having under 15px of headroom, so of
+the five it is the one where the missing coverage matters most.
 
 **Playwright's `webkit` is a bundled WebKit build, not Safari.** It exercises
 WebKit's focusability semantics - the reason `components/holo/Table.tsx` carries
@@ -77,6 +96,15 @@ The **rate limiter is not exercised**: the test server runs
 `RELAY_LOGIN_RATE_LIMIT=1000:1m`. Register/self-registration flows are out too -
 covering them would mean the one test server never runs the default posture,
 which is the one production runs.
+
+**A `scrollWidth <= clientWidth` gate cannot distinguish "fits" from "clipped
+behind a scroller".** `layout.spec.ts` only fails when content overflows past
+the document edge; an element that overflows into its OWN `overflow-x-auto`
+wrapper instead (a horizontally-scrollable nav with no keyboard affordance, for
+instance) reads as zero document overflow and passes. That gap is real, not
+hypothetical: it is the shape of `bug-2026-08-24-header-nav-is-clipped-at-narrow-viewports`
+in `docs/backlog/`, found by mutating a header nav to scroll instead of wrap and
+watching all 38 tests stay green.
 
 ## Rules
 
@@ -107,3 +135,16 @@ which is the one production runs.
   test body, after execution (not collection) has reached that point. Before
   trusting a green local run of a change here, delete `e2e/.run/` first; a
   stale run directory can hide exactly this class of bug.
+- **Prose in this directory is compiled input - treat it as source.** Tailwind
+  v4's scanner reads every file under the Vite root for class-shaped
+  substrings, comments and markdown included, not just what a JS bundle
+  imports. Naming a real utility class here keeps that rule's CSS alive
+  independent of whatever component is actually supposed to own it, so
+  deleting the last real usage elsewhere would not be caught by anything in
+  this directory - a handful of app-emitted utility names are already named in
+  `keyboard.spec.ts` and `layout.spec.ts` prose for exactly this reason, none
+  load-bearing today. Writing a class-shaped string that ISN'T a real utility
+  is worse: it generates its own bogus CSS rule in the production bundle
+  (confirmed by an A/B build - see the fix at `keyboard.spec.ts`'s
+  `assertScrollable` comment for the concrete case this repo shipped). Prefer
+  describing a class in prose over spelling it.
