@@ -54,10 +54,18 @@ func (p *fakePool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
 // fakeTx is a pgx.Tx that records the statements applyInventory issues.
 //
 // THE EMBEDDED NIL pgx.Tx SUPPLIES THE EIGHT METHODS THIS PATH NEVER CALLS, and
-// supplies them as a panic rather than as a plausible zero value - the same
-// fail-loud choice fenceStore makes in internal/scheduler, and the right report
-// if applyInventory ever grows a Query or a SendBatch. The idiom is what makes
-// an eleven-method interface cost four lines instead of forty.
+// supplies them as a panic rather than as a plausible zero value. The idiom is
+// what makes an eleven-method interface cost four lines instead of forty.
+//
+// IT SHARES fenceStore's POLICY AND NOT ITS DIAGNOSTICS, which is worth being
+// exact about. fenceStore (internal/scheduler/dispatch_fence_test.go) panics
+// explicitly, with a message that says which contract was broken. A call on a
+// nil embedded interface panics with a bare `invalid memory address or nil
+// pointer dereference` and names nothing at all - the method is recoverable only
+// from the stack trace. Failing loudly is still the right default if
+// applyInventory ever grows a Query or a SendBatch, but whoever reads that
+// failure gets a worse report than fenceStore's, so override the method
+// explicitly if this path ever starts calling it.
 //
 // Commit and Rollback both return nil, which is correct rather than merely
 // convenient: pgx's beginFuncExec defers a Rollback AFTER the Commit and
@@ -495,9 +503,11 @@ func TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone(t *testing.T
 }
 
 // TestFinishRegister_SucceedsWhenTheInventoryTransactionFails pins the
-// log-and-continue shape at handler.go:693-695. applyInventory's error is
-// deliberately swallowed there, and the "EVERYTHING BELOW THIS LINE MUST STAY
-// INFALLIBLE" rule a few lines down names that shape as the required one.
+// log-and-continue shape at finishRegister's applyInventory call - cited by name
+// rather than by line, because the line number in this comment had already
+// drifted once. applyInventory's error is deliberately swallowed there, and the
+// "EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE" rule below it names that
+// shape as the required one.
 // Turning that log.Printf into a return is a plausible edit - it looks like
 // error handling - and it would make a workspace-inventory hiccup refuse an
 // agent's registration outright.

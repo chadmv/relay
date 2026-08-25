@@ -769,16 +769,20 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// guard, `go vet` and the whole package before the guard grew the clause that
 	// requires the indexed statement to BE the call rather than merely contain it.
 	// The guard lives in the default lane, and what it covers there has narrowed.
-	// It is now the SOURCE-POSITION half only: adjacency to registry.Register, the
-	// flip being a direct body statement rather than nested on a condition that is
-	// true in a fixture and false under main.go, and the absence of an error return
-	// below the flip - none of which a runtime test can observe. The behavioural
+	// It is now the half no runtime test can observe: source position, the
+	// deferred closure's SHAPE (the clauses described above this function's body),
+	// and the flag's write set. The behavioural
 	// half is TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration,
 	// which drives this whole function to a successful return without Postgres and
 	// asserts that the generation is released exactly once across the connection's
 	// life. It exists because Handler.pool is a txBeginner rather than a
 	// *pgxpool.Pool; before that seam no default-lane test could get past
 	// applyInventory.
+	//
+	// THE CLOSURE-SHAPE CLAUSES ARE THE ONES STILL DOING THE WORK, and saying so
+	// matters because "source position" sounds like the whole story and is not.
+	// `if h.AllowAutoEnroll { return }` inserted ahead of the release is killed by
+	// those clauses and by nothing else, in either lane.
 	//
 	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
 	// on a nil error, so a future statement here that returns an error would be

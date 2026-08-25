@@ -91,10 +91,15 @@ func (d *strandDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, 
 // generated :many body calls when a result set is empty.
 //
 // THE EMBEDDED NIL INTERFACE SUPPLIES THE OTHER SIX METHODS AS A PANIC, which is
-// the fail-loud choice fenceStore makes in internal/scheduler and the right
-// report if a query on this path ever grows a Scan or a Values: a nil
-// dereference naming the method beats a plausible zero value that silently makes
-// a test prove less.
+// the right default if a query on this path ever grows a Scan or a Values: a
+// panic beats a plausible zero value that silently makes a test prove less.
+//
+// THE POLICY IS fenceStore's; THE DIAGNOSTIC IS NOT. fenceStore
+// (internal/scheduler/dispatch_fence_test.go) panics explicitly and says which
+// contract was broken. A call on a nil embedded interface panics with a bare
+// `invalid memory address or nil pointer dereference` and names no method - only
+// the stack trace does. Override explicitly rather than relying on this if a
+// method here ever starts being called.
 type emptyRows struct{ pgx.Rows }
 
 func (emptyRows) Close()     {}
@@ -570,11 +575,13 @@ func TestConnect_AFailedRegistrationReplacesThePreviousDisconnectsTimer(t *testi
 // releaseWorkerGeneration directly: the arm is one level below the registration
 // path, and driving it through Connect would only re-test the level above.
 func TestReleaseWorkerGeneration_WithoutAGraceRegistryRequeuesImmediately(t *testing.T) {
-	// queryErr is set because the requeue is a :many and this stub returns no
-	// pgx.Rows. The handler discards that statement's result either way
-	// (`_, _ = h.q.RequeueWorkerTasksIfEpoch(...)`), so refusing it changes
-	// nothing about what this test observes: that the statement was issued at all,
-	// and with which fence.
+	// THE queryErr IS NO LONGER LOAD-BEARING and is kept only to say so. It used to
+	// be required because strandDB.Query returned a nil pgx.Rows, which the :many
+	// body would have dereferenced; strandDB now answers with emptyRows instead, and
+	// removing this line was measured leaving the test green. What the test observes
+	// is unchanged either way - the handler discards the result
+	// (`_, _ = h.q.RequeueWorkerTasksIfEpoch(...)`), so only the statement and its
+	// fence are under assertion - and an error here keeps that indifference explicit.
 	db := &strandDB{execTag: "UPDATE 1", queryErr: errors.New("no rows fixture")}
 	h := &Handler{
 		q:               store.New(db),

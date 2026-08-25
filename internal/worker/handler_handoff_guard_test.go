@@ -22,12 +22,17 @@ import (
 // txBeginner. Deleting the flag, or flipping it too early, is caught by those
 // two and this test's clauses for either were removed.
 //
-// WHAT NO RUNTIME TEST CAN SEE IS SOURCE POSITION, and that is the whole of what
+// WHAT NO RUNTIME TEST CAN SEE IS SOURCE POSITION AND SHAPE, and that is what
 // survives here. A flip wrapped in `if h.Metrics != nil { ... }` sits at a
-// perfectly legal position and leaves the success path unflipped in production
-// while the fixture - which must set Metrics, to assert Activate - flips it
-// happily. Measured: that mutation passes the behavioural test and fails this
-// one. So does an error return added below the flip, which is a claim about
+// perfectly legal position and is INVISIBLE TO A RUNTIME TEST - which is the
+// claim worth making, and is not the same as "broken in production". It is not
+// broken in production: cmd/relay-server/main.go:143 sets Metrics
+// unconditionally right after construction, so the wrapped flip fires there
+// too. What the wrap does is make the flag depend on a field no fixture in
+// either lane varies, so the day Metrics becomes optional it is a live defect
+// and nothing runtime would have noticed on the way there. Measured: it passes
+// the behavioural test and fails this one. So does an error return added below
+// the flip, which is a claim about
 // statements that do not exist yet and which no runtime test can ever assert.
 //
 // WHAT IS PINNED IS A POINT; WHAT THE CODE NEEDS IS A RANGE. The semantic
@@ -65,8 +70,10 @@ import (
 // guard construct and nothing more. handoffFlagIdent carries the argument for
 // that, and it is the one place here where this test does dictate style on
 // purpose: any additional statement in that closure can skip the release on a
-// condition no structural test can evaluate, and the default lane cannot drive a
-// successful registration to notice at runtime.
+// condition no structural test can evaluate AND no fixture in either lane
+// varies, so no runtime test notices it either. (The default lane CAN now drive
+// a successful registration - see the two tests named above - which is why the
+// residual claim is about unvaried state rather than about an unreachable path.)
 func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", nil, 0)
@@ -213,10 +220,14 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 		t.Fatalf("%s is set to true at %s, but that assignment is nested inside another statement "+
 			"rather than being a statement of finishRegister's own body. Every position check below "+
 			"is about WHERE the flip is; this one is about whether it happens at all. A conditional "+
-			"wrap is the live hazard - `if h.Metrics != nil { %s = true }` compiles, and h.Metrics is "+
-			"nil for every handler NewHandler and NewHandlerWithGrace build, so a SUCCESSFUL "+
-			"registration would take the deferred release: its own worker marked offline, its metrics "+
-			"entry wiped, and a grace timer armed that requeues a healthy agent's running tasks.",
+			"wrap is the live hazard - `if h.Metrics != nil { %s = true }` compiles, and it makes the "+
+			"handoff depend on a field NEITHER LANE VARIES. It is not broken today: NewHandler and "+
+			"NewHandlerWithGrace leave Metrics nil, but cmd/relay-server/main.go:143 sets it "+
+			"unconditionally, so a real server flips the flag and the default-lane fixture (which must "+
+			"set Metrics, to assert Activate) flips it too. The hazard is that the day Metrics becomes "+
+			"optional, a SUCCESSFUL registration takes the deferred release - its own worker marked "+
+			"offline, its metrics entry wiped, a grace timer armed that requeues a healthy agent's "+
+			"running tasks - and no runtime test in either lane would have noticed on the way there.",
 			flag, fset.Position(setTrue[0].Pos()), flag)
 	}
 	handoff := setTrue[0].Pos()
@@ -399,17 +410,29 @@ const releaseMethod = "releaseWorkerGeneration"
 //   - THE DEFER IS A DIRECT STATEMENT of finishRegister's body, so it is armed on
 //     every path. `if h.grace != nil { defer func(){...}() }` leaves the closure
 //     verbatim and arms it for nobody.
-//   - THE CLOSURE CALLS THE RELEASE EXACTLY ONCE, which is the "mutually
-//     exclusive" half. An `else` arm that also releases fires on the SUCCESS
-//     path, where the fence matches: a live agent is published 'offline', the
-//     metrics entry Activate just created is wiped, and a grace timer requeues
-//     that healthy agent's running tasks a window later.
+//   - THE CLOSURE RELEASES EXACTLY ONCE, which is the "mutually exclusive" half.
+//     An `else` arm that also releases fires on the SUCCESS path, where the
+//     fence matches: a live agent is published 'offline', the metrics entry
+//     Activate just created is wiped, and a grace timer requeues that healthy
+//     agent's running tasks a window later. There is no longer a dedicated
+//     COUNT clause for this - the case-1/case-2 shape checks below admit only a
+//     body with the release at one fixed place, so a second release cannot hide
+//     inside an accepted body, and mutation confirms it.
 //   - THE CLOSURE BODY IS EXACTLY THE GUARD CONSTRUCT, with the release at a
 //     fixed place inside it. Anything looser admits a skip on a condition this
 //     test cannot evaluate: `if h.AllowAutoEnroll { return }` ahead of the
-//     release is false in every fixture in this package and true wherever an
+//     release is false in every DEFAULT-LANE fixture and true wherever an
 //     operator set RELAY_ALLOW_AUTO_ENROLL, so every failed registration on such
 //     a server would release nothing while the whole package stayed green.
+//     Seven integration-lane fixtures DO set it true - handler_auth_test.go:367,
+//     :403, :467, :519, handler_tasklog_integration_test.go:543 and
+//     handler_taskstatus_integration_test.go:445, :788 - and the mutation is
+//     unreddened there too, which is the stronger statement and the one that
+//     earns this clause: six drive a SUCCESSFUL registration, where the deferred
+//     release does not run at all, and the seventh (AutoEnrollRefusesRevoked
+//     Worker) is refused inside autoEnrollAndRegister before finishRegister is
+//     entered, so the closure never exists. This guard is the mutation's only
+//     witness in EITHER lane.
 //     `if h.pool != nil { return }` used to be the example here, on the grounds
 //     that newStrandHandler left pool nil; that is no longer true - both
 //     default-lane fixtures now carry a fake pool, and mutation M13 confirmed
@@ -470,8 +493,9 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 			"    defer func() { if !flag { h.%s(...) } }()\n"+
 			"    defer func() { if flag { return }; h.%s(...) }()\n"+
 			"The body is pinned that tightly because any additional statement can skip the release on "+
-			"a condition this test cannot evaluate, and the default lane cannot drive a successful "+
-			"registration to notice. Work that genuinely belongs on this path belongs inside %s, "+
+			"a condition this test cannot evaluate and no fixture in EITHER lane varies - so no runtime "+
+			"test notices it either, which is why this clause has no behavioural successor. Work that "+
+			"genuinely belongs on this path belongs inside %s, "+
 			"where the strand tests can see it.",
 			reason, releaseMethod, releaseMethod, releaseMethod)
 	}
