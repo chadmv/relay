@@ -37,15 +37,26 @@ const serverBin = process.platform === 'win32' ? '..\\bin\\relay-server.exe' : '
 export default defineConfig({
   testDir: './e2e',
 
-  // SERIALIZED, and not a performance default for someone to tune away later.
-  // Three independent reasons, any one of which is sufficient:
+  // SERIALIZED, and not a performance default for someone to tune away later -
+  // but read the three reasons below as precautionary against future growth,
+  // not as load-bearing at HEAD today. Measured directly: `workers: 4` passed
+  // clean across four separate full runs.
   //   1. One relay-server over one Postgres is a shared mutable store with no
-  //      per-test namespace.
+  //      per-test namespace. No spec today performs a write racy enough to
+  //      trip on this (fixtures are seeded once, read-only afterwards), but a
+  //      future one could.
   //   2. /jobs, /schedules and /admin/* are UNSCOPED global lists, so a parallel
   //      test's fixtures appear in another test's table and any count assertion
-  //      or nth-row locator becomes a race.
+  //      or nth-row locator becomes a race. The house rule (see README) is to
+  //      never write either kind of locator, which is what keeps this one from
+  //      binding today.
   //   3. POST /v1/auth/login is rate limited per RemoteAddr only
-  //      (internal/api/ratelimit.go:66-72) and every worker is 127.0.0.1.
+  //      (internal/api/ratelimit.go:66-72) and every worker is 127.0.0.1. This
+  //      one is moot regardless of worker count: the suite performs exactly
+  //      THREE logins total (setup, plus auth.spec.ts's login and logout
+  //      tests), fixed by test count rather than by worker count, and three is
+  //      under the DEFAULT 10:1m limit - the RELAY_LOGIN_RATE_LIMIT raise below
+  //      exists as insurance against a fourth, not because these three trip it.
   // Same reasoning as `-p 1` on `make test-integration`.
   fullyParallel: false,
   workers: 1,
@@ -141,9 +152,19 @@ export default defineConfig({
       // a second server project with the default limits, which the non-default
       // ports above keep cheap.
       RELAY_LOGIN_RATE_LIMIT: '1000:1m',
-      // Left UNSET on purpose: RELAY_ALLOW_AUTO_ENROLL and
-      // RELAY_ALLOW_SELF_REGISTER. The test server runs the DEFAULT (safer)
-      // posture, which is the one production runs. No agent connects in slice 1.
+      // Pinned EXPLICITLY to the safe values, not left unset. Playwright merges
+      // process.env into webServer.env (playwright/lib/runner/index.js:858-861:
+      // {...DEFAULT_ENVIRONMENT_VARIABLES, ...process.env, ...this._options.env}),
+      // so a developer with either of these exported in their own shell would
+      // silently flip the test server to the permissive posture while this
+      // config and the README both keep claiming the default. Pinning here wins
+      // that merge regardless of what the invoking shell carries. RELAY_CORS_ORIGINS
+      // is pinned to '' for the same reason, not left to inherit - main.go's
+      // ParseCORSOrigins('') returns (nil, nil), the same same-origin default as
+      // unset, so this is a no-op today and a fence against tomorrow.
+      RELAY_ALLOW_AUTO_ENROLL: 'false',
+      RELAY_ALLOW_SELF_REGISTER: 'false',
+      RELAY_CORS_ORIGINS: '',
     },
   },
 })
