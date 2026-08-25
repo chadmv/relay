@@ -38,7 +38,16 @@ func parseAutoEnrollCeiling(name, raw string) (int, string) {
 
 // autoEnrollCeilingLine renders the unconditional startup line, in the shape of
 // watchdogBoundsLine and grpcBoundsLine.
-func autoEnrollCeilingLine(ceiling int, allowAutoEnroll bool) string {
+//
+// IT TAKES maxConns BECAUSE THIS IS THE ONE PLACE BOTH NUMBERS ARE IN HAND. The
+// published overshoot is ceiling + RELAY_GRPC_MAX_CONNS - two concurrent
+// auto-enrolls at the boundary both pass under read-committed - and that
+// expression HAS NO FINITE VALUE when the connection cap is disabled, which is a
+// supported configuration for an operator fronting :9090 with a proxy that caps
+// connections itself. Printing the formula there would state a bound that does
+// not exist, so the line says so instead. README cannot: it has no access to the
+// deployment's actual cap.
+func autoEnrollCeilingLine(ceiling int, allowAutoEnroll bool, maxConns int) string {
 	if !allowAutoEnroll {
 		return "auto-enroll: disabled (RELAY_ALLOW_AUTO_ENROLL is not set), so the worker ceiling is moot"
 	}
@@ -46,9 +55,15 @@ func autoEnrollCeilingLine(ceiling int, allowAutoEnroll bool) string {
 		return "auto-enroll: ENABLED with no bound on worker-row creation. Every distinct hostname a " +
 			"caller presents creates one permanent row."
 	}
+	overshoot := fmt.Sprintf("at most %d in flight, so the honest bound is %d", maxConns, ceiling+maxConns)
+	if maxConns <= 0 {
+		overshoot = "RELAY_GRPC_MAX_CONNS=0, so the number of concurrent enrolls is not bounded by relay " +
+			"and neither is the overshoot"
+	}
 	return fmt.Sprintf(
 		"auto-enroll: ENABLED, refusing token-less enrollment at %d non-revoked workers (approximate: two "+
-			"concurrent enrolls at the boundary can both pass, so the honest bound is %d + RELAY_GRPC_MAX_CONNS). "+
-			"Revoke unused workers to free budget; enrollment tokens are never refused by this ceiling.",
-		ceiling, ceiling)
+			"concurrent enrolls at the boundary can both pass; %s). "+
+			"Revoke unused workers to free budget - note that revoking frees BUDGET but not the HOSTNAME. "+
+			"Enrollment tokens are never refused by this ceiling.",
+		ceiling, overshoot)
 }

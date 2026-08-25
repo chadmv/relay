@@ -231,9 +231,9 @@ type enrollConfig struct {
 	// workerCount: what CountWorkers answers with, for the ceiling tests.
 	workerCount int64
 	// storeErr: a non-ErrNoRows store fault on the insert or the lookup.
-	storeErr error
-	allowAutoEnroll      bool
-	execTag              string // "" keeps fakeTx's historical "DELETE 0"
+	storeErr        error
+	allowAutoEnroll bool
+	execTag         string // "" keeps fakeTx's historical "DELETE 0"
 }
 
 func newEnrollFixture(t *testing.T, cfg enrollConfig) *enrollFixture {
@@ -744,23 +744,23 @@ func TestConnect_ReconnectIsRefusedByNeitherGuard(t *testing.T) {
 	assert.False(t, f.script.sawStatement("COUNT(*) FROM workers"))
 }
 
-// TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter. Three refusals that are
+// TestConnect_EachEnrollmentRefusalMovesItsOwnCounter. Three refusals that are
 // INDISTINGUISHABLE to the caller by design must still be distinguishable to the
 // operator, and this is the only place that is true.
-func TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter(t *testing.T) {
+func TestConnect_EachEnrollmentRefusalMovesItsOwnCounter(t *testing.T) {
 	claimed := newEnrollFixture(t, enrollConfig{
 		hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
 	})
 	_, err := claimed.connect(t)
 	require.Error(t, err)
-	assert.Equal(t, AutoEnrollRefusalCounts{HostnameClaimed: 1}, claimed.h.AutoEnrollRefusals())
+	assert.Equal(t, EnrollmentRefusalCounts{HostnameClaimed: 1}, claimed.h.EnrollmentRefusals())
 
 	ceiling := 1
 	full := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 9})
 	full.h.AutoEnrollWorkerCeiling = &ceiling
 	_, err = full.connect(t)
 	require.Error(t, err)
-	assert.Equal(t, AutoEnrollRefusalCounts{FleetAtCeiling: 1}, full.h.AutoEnrollRefusals())
+	assert.Equal(t, EnrollmentRefusalCounts{FleetAtCeiling: 1}, full.h.EnrollmentRefusals())
 
 	live := newEnrollFixture(t, enrollConfig{
 		hostname: "live-host", existingHostname: "live-host", existingHasLiveToken: true,
@@ -769,14 +769,14 @@ func TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter(t *testing.T) {
 	})
 	_, err = live.connect(t)
 	require.Error(t, err)
-	assert.Equal(t, AutoEnrollRefusalCounts{CredentialLive: 1}, live.h.AutoEnrollRefusals())
+	assert.Equal(t, EnrollmentRefusalCounts{CredentialLive: 1}, live.h.EnrollmentRefusals())
 }
 
-// TestConnect_AutoEnrollRefusalWritesNoLogLine. The whole captured log must be
+// TestConnect_EnrollmentRefusalWritesNoLogLine. The whole captured log must be
 // EMPTY across repeated refusals, so any wording added later reddens this rather
 // than passing a substring check. Mirrors
 // TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing.
-func TestConnect_AutoEnrollRefusalWritesNoLogLine(t *testing.T) {
+func TestConnect_EnrollmentRefusalWritesNoLogLine(t *testing.T) {
 	logged := captureUnitLog(t)
 
 	for i := 0; i < 5; i++ {
@@ -790,7 +790,7 @@ func TestConnect_AutoEnrollRefusalWritesNoLogLine(t *testing.T) {
 	assert.Empty(t, logged(),
 		"a refusal is unboundedly repeatable by the same caller with the same hostname, and the "+
 			"per-connection log limiter is not even allocated until after registration. Refusals are "+
-			"COUNTED (Handler.AutoEnrollRefusals), never logged.")
+			"COUNTED (Handler.EnrollmentRefusals), never logged.")
 }
 
 // TestConnect_AutoEnrollSuccessStillWritesExactlyOneAuditLine. The success line
@@ -818,10 +818,17 @@ func TestConnect_AutoEnrollSuccessStillWritesExactlyOneAuditLine(t *testing.T) {
 // fallback.
 //
 // The three arms are not interchangeable. nil is "cmd/relay-server never set the
-// field", which is every bare &Handler{} in this package; NEGATIVE is the
-// parser's rejected-and-defaulted outcome, which reaches the handler as a real
-// pointer to a real negative number; and a non-nil ZERO is DISABLED and must NOT
-// resolve to the default, which is the whole reason this field is a *int.
+// field", which is every bare &Handler{} in this package; a non-nil ZERO is
+// DISABLED and must NOT resolve to the default, which is the whole reason this
+// field is a *int.
+//
+// THE NEGATIVE ARM IS DEFENSIVE AND UNREACHABLE FROM main, and saying so is the
+// point rather than a caveat on it. parseAutoEnrollCeiling folds a negative or
+// unparseable value to the default BEFORE assignment, so nothing
+// cmd/relay-server can be configured to do produces a pointer to a negative
+// number here. It is reachable only by a caller constructing a Handler directly
+// - a test, or a future embedder - and it exists so such a caller fails BOUNDED
+// rather than with a ceiling that refuses every enrollment.
 func TestAutoEnrollWorkerCeiling_ResolvesTheUnsetAndNegativeCasesToTheDefault(t *testing.T) {
 	neg, zero, pos := -1, 0, 7
 
@@ -829,7 +836,7 @@ func TestAutoEnrollWorkerCeiling_ResolvesTheUnsetAndNegativeCasesToTheDefault(t 
 		"a nil field means UNSET and must resolve to the default, not to some other number")
 	assert.Equal(t, DefaultAutoEnrollWorkerCeiling,
 		(&Handler{AutoEnrollWorkerCeiling: &neg}).autoEnrollWorkerCeiling(),
-		"a negative value is the parser's rejected-and-defaulted outcome")
+		"a negative value must resolve to the default rather than disabling the bound or refusing everything")
 	assert.Equal(t, 0, (&Handler{AutoEnrollWorkerCeiling: &zero}).autoEnrollWorkerCeiling(),
 		"a non-nil zero means DISABLED and must never be folded into the default")
 	assert.Equal(t, 7, (&Handler{AutoEnrollWorkerCeiling: &pos}).autoEnrollWorkerCeiling())
@@ -888,4 +895,15 @@ func TestConnect_AStoreFaultDuringEnrollmentDisclosesNothingToTheCaller(t *testi
 			}
 		})
 	}
+}
+
+// TestDefaultAutoEnrollWorkerCeiling_IsTheValueREADMEDocuments. One layer ABOVE
+// the resolver test: that one pins "nil resolves to the default", this pins what
+// the default IS. Changing the constant from 1024 to 7 left all three packages
+// green while README documented 1024 in two places and the startup line printed
+// 7 - the classic wrong-prose shape, with the prose right and the code moved.
+func TestDefaultAutoEnrollWorkerCeiling_IsTheValueREADMEDocuments(t *testing.T) {
+	assert.Equal(t, 1024, DefaultAutoEnrollWorkerCeiling,
+		"README documents 1024 in two places (the env table row and the auto-enrollment cost section); "+
+			"change both, and the RELAY_GRPC_MAX_CONNS anchor this is derived from, before changing this")
 }

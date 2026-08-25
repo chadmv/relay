@@ -81,7 +81,7 @@ var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
 //
 // IT IS A FAULT SITE, NOT A REFUSAL SITE, and that is the whole reason it logs
 // where the refusals deliberately do not. A refusal is the system working and is
-// counted (AutoEnrollRefusals); a store fault is an operator-actionable SERVER
+// counted (EnrollmentRefusals); a store fault is an operator-actionable SERVER
 // condition that must not be silent, especially now that the peer's message
 // carries nothing anyone could act on. THE BOUND IS THE WEAKER ONE AND IS STATED
 // RATHER THAN IMPLIED: like the auto-enroll audit line below, this is one line
@@ -271,8 +271,10 @@ type Handler struct {
 	// ZERO - disabled - so an int would leave the zero value ambiguous between
 	// "unset, use the default" and "explicitly disabled", and only
 	// cmd/relay-server could express the difference. nil means the default; a
-	// non-nil 0 means DISABLED; a negative value means the default (the parser
-	// warns).
+	// non-nil 0 means DISABLED; a negative value means the default. That last arm
+	// is DEFENSIVE AND UNREACHABLE FROM cmd/relay-server, which folds a negative
+	// or unparseable value to the default before assigning it - it exists so a
+	// direct-construction caller fails bounded rather than refusing everything.
 	AutoEnrollWorkerCeiling *int
 
 	// ingestDrops counts what this server's per-connection log budgets dropped,
@@ -325,13 +327,13 @@ type Handler struct {
 	// one of the three. Do not sum them and do not merge the sections.
 	statusFence statusFenceCounters
 
-	// autoEnrollRefusals counts what the two enrollment guards refused, split by
+	// enrollmentRefusals counts what the two enrollment guards refused, split by
 	// cause. A VALUE, not a pointer, for the same reason its three neighbours are.
 	//
 	// A FOURTH DISTINCT NOUN, and no input moves more than one of the four. Read
-	// through AutoEnrollRefusals. NOT YET ON GET /v1/server/counters - the section
+	// through EnrollmentRefusals. NOT YET ON GET /v1/server/counters - the section
 	// is deliberately deferred to its own item; see the plan's scope decision.
-	autoEnrollRefusals autoEnrollRefusalCounters
+	enrollmentRefusals enrollmentRefusalCounters
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -355,10 +357,10 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 // GET /v1/server/counters.
 func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
 
-// AutoEnrollRefusals reports what this server's enrollment guards have refused
+// EnrollmentRefusals reports what this server's enrollment guards have refused
 // since process start, split by cause. Per PROCESS, monotonic, and never returned
 // to an agent.
-func (h *Handler) AutoEnrollRefusals() AutoEnrollRefusalCounts { return h.autoEnrollRefusals.snapshot() }
+func (h *Handler) EnrollmentRefusals() EnrollmentRefusalCounts { return h.enrollmentRefusals.snapshot() }
 
 // TaskStatusFenceRejections reports what handleTaskStatus's two epoch-fenced
 // writes have refused since process start, split by what the row said at T0.
@@ -672,7 +674,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 
 	if txErr != nil {
 		if errors.Is(txErr, errCredentialLive) {
-			h.autoEnrollRefusals.record(autoEnrollReasonCredentialLive)
+			h.enrollmentRefusals.record(enrollmentRefusalCredentialLive)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
@@ -765,11 +767,11 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	})
 	if txErr != nil {
 		if errors.Is(txErr, errHostnameClaimed) {
-			h.autoEnrollRefusals.record(autoEnrollReasonHostnameClaimed)
+			h.enrollmentRefusals.record(enrollmentRefusalHostnameClaimed)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		if errors.Is(txErr, errFleetAtCeiling) {
-			h.autoEnrollRefusals.record(autoEnrollReasonFleetAtCeiling)
+			h.enrollmentRefusals.record(enrollmentRefusalFleetAtCeiling)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		return "", nil, enrollmentStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
@@ -793,7 +795,7 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	// hostname FOREVER - the hostname can never be auto-enrolled again, because
 	// the row it just created refuses the next attempt. A REFUSAL is unboundedly
 	// repeatable by the same caller with the same hostname, so it takes a counter
-	// and no log site at all (see AutoEnrollRefusals).
+	// and no log site at all (see EnrollmentRefusals).
 	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }

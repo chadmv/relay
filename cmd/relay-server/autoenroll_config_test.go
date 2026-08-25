@@ -42,16 +42,38 @@ func TestParseAutoEnrollCeiling(t *testing.T) {
 // that can refuse an agent must state its limit at every boot, and disabling a
 // bound must never be silent.
 func TestAutoEnrollCeilingLineIsUnconditionalAndNamesTheDisabledState(t *testing.T) {
-	on := autoEnrollCeilingLine(1024, true)
+	on := autoEnrollCeilingLine(1024, true, 1024)
 	assert.Contains(t, on, "1024")
 
-	off := autoEnrollCeilingLine(0, true)
+	off := autoEnrollCeilingLine(0, true, 1024)
 	assert.Contains(t, off, "no bound")
 
 	// Auto-enroll itself off: the line must say the ceiling is moot rather than
 	// implying a bound is active.
-	moot := autoEnrollCeilingLine(1024, false)
+	moot := autoEnrollCeilingLine(1024, false, 1024)
 	assert.Contains(t, moot, "RELAY_ALLOW_AUTO_ENROLL")
+}
+
+// TestAutoEnrollCeilingLine_OvershootArithmeticIsHonestWhenTheConnCapIsOff.
+// The published overshoot is `ceiling + RELAY_GRPC_MAX_CONNS`, because two
+// concurrent auto-enrolls at the boundary can both pass under read-committed.
+// THAT EXPRESSION HAS NO FINITE RIGHT-HAND SIDE WHEN RELAY_GRPC_MAX_CONNS IS 0,
+// which is a supported configuration (the operator fronting :9090 with a proxy
+// that caps connections itself). Printing "1024 + RELAY_GRPC_MAX_CONNS" there
+// states a bound that does not exist.
+//
+// This is the startup line's job specifically, and not README's, because it is
+// the one place BOTH values are in hand at once.
+func TestAutoEnrollCeilingLine_OvershootArithmeticIsHonestWhenTheConnCapIsOff(t *testing.T) {
+	capped := autoEnrollCeilingLine(1024, true, 64)
+	assert.Contains(t, capped, "64",
+		"with a finite connection cap the line should name the actual overshoot term")
+
+	uncapped := autoEnrollCeilingLine(1024, true, 0)
+	assert.Contains(t, uncapped, "RELAY_GRPC_MAX_CONNS=0",
+		"the line must name the configuration that makes the overshoot unbounded")
+	assert.Contains(t, uncapped, "not bounded",
+		"and must say the overshoot is not bounded, rather than printing an expression with no finite value")
 }
 
 // TestAutoEnrollCeilingIsWiredIntoTheHandler is a copy of

@@ -48,8 +48,21 @@ const countWorkers = `-- name: CountWorkers :one
 SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 `
 
-// Total workers for the list endpoint. Excludes revoked workers so the count
-// matches the rows returned by the paginated list queries.
+// Total non-revoked workers. TWO CALLERS, AND THE SECOND IS SECURITY-RELEVANT.
+//
+//  1. The list endpoint (internal/api/workers.go), where excluding revoked
+//     workers is what makes the count match the rows the paginated list queries
+//     return.
+//  2. autoEnrollAndRegister (internal/worker/handler.go), where it is the
+//     RELAY_AUTO_ENROLL_WORKER_CEILING predicate, read inside the same
+//     transaction as the insert it gates.
+//
+// THE status != 'revoked' EXCLUSION IS LOAD-BEARING FOR CALLER 2, not incidental
+// to it: it is what makes `relay workers revoke` free ceiling budget without the
+// assignment and reservation destruction that deleting a worker causes, which is
+// the first remedy an operator at the ceiling is told to try. It is also why the
+// ceiling bounds NON-REVOKED rows rather than total rows - revoking keeps the
+// row and the hostname, so the table can still grow while this number does not.
 //
 //	SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
