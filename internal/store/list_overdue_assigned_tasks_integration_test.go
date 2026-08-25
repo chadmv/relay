@@ -244,8 +244,11 @@ func TestListOverdueAssignedTasks_StatusAndAssigneeGuards(t *testing.T) {
 	f.backdateCreatedAt(t, unclaimed.ID, older)
 
 	// An ASSIGNED-looking row whose worker_id is NULL, planted with raw SQL
-	// because no production statement can produce it: the only route is workers'
-	// ON DELETE SET NULL and nothing in this repo DELETEs a worker. It is planted
+	// because no production PATH produces it: the only route is workers'
+	// ON DELETE SET NULL, and since 2026-08-26 DeleteWorker does exist - but
+	// handleDeleteWorker runs RequeueWorkerTasks first in the same transaction, so
+	// every assignment is ended with an epoch bump before the row is released and
+	// this state is never reached. It is planted
 	// anyway because `worker_id IS NOT NULL` in the scan is otherwise untestable -
 	// every row the status allow-list admits happens to carry a worker id, so the
 	// predicate can be deleted with the whole suite still green. That row is the

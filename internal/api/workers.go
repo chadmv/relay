@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -37,6 +38,24 @@ type workerResponse struct {
 type disableWorkerResponse struct {
 	workerResponse
 	RequeuedTasks int `json:"requeued_tasks"`
+}
+
+// deleteWorkerResponse is the body returned by DELETE /v1/workers/{id}. It is a
+// 200 with a body rather than a 204 ON PURPOSE (spec 6.4): relay has no audit
+// log, so these four counts plus the embedded identity are the ONLY record of
+// what the delete destroyed. attribution_cleared was added after review found
+// the first three omitted the LARGEST destruction - see its field comment.
+// The embedded workerResponse is the row as it was, read under the FOR UPDATE.
+type deleteWorkerResponse struct {
+	workerResponse
+	RequeuedTasks       int `json:"requeued_tasks"`
+	ReservationsUpdated int `json:"reservations_updated"`
+	EnrollmentsUnlinked int `json:"enrollments_unlinked"`
+	// AttributionCleared is the count of this worker's TERMINAL tasks whose
+	// worker_id the DELETE nulls via ON DELETE SET NULL. It is the largest thing a
+	// delete destroys and the requeue does not rescue it; worker_id is public API,
+	// so after this "which machine ran that job" is unanswerable for those rows.
+	AttributionCleared int `json:"attribution_cleared"`
 }
 
 func toWorkerResponse(w store.Worker) workerResponse {
@@ -520,6 +539,205 @@ func (s *Server) handleDisableWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, disableWorkerResponse{
 		workerResponse: toWorkerResponse(updated),
 		RequeuedTasks:  len(requeuedIDs),
+	})
+}
+
+// handleDeleteWorker destroys a worker identity (admin-only). Delete is the only
+// verb that frees the hostname: revoke keeps the row, and every enrollment path
+// keys on the UNIQUE hostname column.
+//
+// THE STATEMENT ORDER IS THE CORRECTNESS ARGUMENT, not a style choice. This is
+// CLAUDE.md's first invariant in its original wording - end the generation before
+// releasing the resource. The generation is tasks.assignment_epoch; the resource
+// is the workers row. If the DELETE ran first, the FK's ON DELETE SET NULL would
+// null tasks.worker_id with no epoch bump, and the row would then be unreachable
+// by every worker-keyed statement in the tree, running forever, holding no slot,
+// with its job never leaving 'running'. The requeue would then match zero rows
+// and this handler would cheerfully report "requeued_tasks": 0.
+func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid worker id")
+		return
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer tx.Rollback(ctx)
+	q := s.q.WithTx(tx)
+
+	// 1. Lock the worker row FIRST, matching both enrollment transactions' lock
+	// order, and read the identity the response and the log line report.
+	current, err := q.GetWorkerForUpdate(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	// 2. The status gate. THE SQL PREDICATE IN DeleteWorker IS THE CONTROL; this
+	// is a second question plus a better error (spec 8.2). Because step 1 took
+	// FOR UPDATE, the two cannot disagree within this transaction; the SQL arm is
+	// defence for a future caller who writes a second delete path without a lock.
+	//
+	// WRITTEN AS AN ALLOW-LIST, like the SQL. The deny-list is interchangeable
+	// today and fails OPEN on the next status added. 'online' and 'stale' both
+	// mean CONNECTED; a disabled worker is still 'online' or 'offline'
+	// underneath, and this keys on the underlying value, so a
+	// disabled-and-connected worker is refused - correct, since disable does not
+	// close the stream. Note the consequence for the response body:
+	// toWorkerResponse synthesises status "disabled" when disabled_at is set, so
+	// a disabled-and-offline worker's own delete response reports "disabled",
+	// not the "offline" this gate matched on.
+	switch current.Status {
+	case "offline", "revoked":
+	default:
+		writeError(w, http.StatusConflict,
+			"worker is connected; disable it and wait for it to go offline before deleting. "+
+				"Revoking does NOT disconnect it - it only clears the credential, and a revoked "+
+				"worker may still be connected and running tasks")
+		return
+	}
+
+	// 3. End every assignment generation while worker_id still names them.
+	requeued, err := q.RequeueWorkerTasks(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "requeue tasks failed")
+		return
+	}
+
+	// 4. Break the enrollment link. Must precede the DELETE or the no-action FK
+	// fires; that FK is deliberately not ON DELETE SET NULL (spec 5).
+	unlinked, err := q.ClearEnrollmentConsumerForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unlink enrollments failed")
+		return
+	}
+
+	// 5. Scrub the id out of reservations naming it. NOT a dispatch fix (spec 7).
+	//
+	// ITS POSITION HERE IS CONVENTION, NOT NECESSITY, and the spec and the plan
+	// both said otherwise ("before the DELETE because after it there is no id to
+	// scrub by"). That reasoning is self-refuting: reservations.worker_ids is a
+	// bare UUID[] with NO foreign key (000001_initial.up.sql:89), which is the
+	// entire reason this statement has to exist - and it is equally the reason
+	// the DELETE does not disturb the array. The id lives in `id` either way.
+	// Verified by mutation: moving this call after DeleteWorker leaves every
+	// delete test green. Steps 3 and 6 are the pair whose order IS load-bearing.
+	scrubbed, err := q.RemoveWorkerFromReservations(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scrub reservations failed")
+		return
+	}
+
+	// 6. Count what the DELETE is about to de-attribute. Must be read BEFORE the
+	// DELETE, because afterwards there is no worker_id left to count by - unlike
+	// the reservation scrub above, this one really does depend on running first.
+	attributionCleared, err := q.CountTerminalTasksForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count task attribution failed")
+		return
+	}
+
+	// 7. Release the resource. :execrows, and the zero case is handled rather
+	// than assumed - Task 6 turns it into the 409 it should be.
+	n, err := q.DeleteWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "delete worker failed")
+		return
+	}
+	if n == 0 {
+		// A zero-row delete after a FOR UPDATE read that said the status was
+		// permitted means something is wrong - most plausibly a concurrent
+		// delete. Roll back and refuse; NEVER report success. Keep "the fence
+		// said no" distinguishable from "the query failed", per markWorkerOffline.
+		//
+		// THIS BRANCH IS UNREACHABLE BY CONSTRUCTION AND IT IS NOT DEAD CODE.
+		// DO NOT DELETE IT. Step 1 took the row FOR UPDATE and step 2 read the
+		// status off that locked row, so within this transaction the Go gate and
+		// DeleteWorker's SQL allow-list cannot disagree - which means no
+		// deterministic test can drive n == 0, and none does. Spec 13.2 (T-D4)
+		// declined to write one rather than build a flaky concurrency test, and
+		// proposed mutation M8 as the stand-in; M8 was RUN and SURVIVED, for this
+		// same reason, so the property is genuinely untested. It is kept because
+		// the two arms ARE separable - a future caller who adds a second delete
+		// path without the lock, or who drops the FOR UPDATE (mutation M12,
+		// declared unkillable), makes this reachable immediately - and the cost of
+		// being wrong is reporting a destruction that did not happen.
+		writeError(w, http.StatusConflict, "worker was modified concurrently; retry")
+		return
+	}
+
+	// 8. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
+	if len(requeued) > 0 {
+		if err := q.NotifyTaskSubmitted(ctx); err != nil {
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// ONE UNBUDGETED LOG LINE, and the budget question is answered rather than
+	// skipped: this site is reachable only by an authenticated admin, fires once
+	// per successful delete of a row that then ceases to exist, and cannot be
+	// driven by an unauthenticated peer. No counter, no new counters section, no
+	// new logKind. No line on refusal: a refusal changes nothing and the caller
+	// reads the 409 directly.
+	// hostname is PEER-SUPPLIED and unbounded: workers.hostname is bare TEXT and
+	// auto-enroll takes it off the wire unvalidated, so both log defences are
+	// wanted. %q escapes it (no newline injection into the log), and the .200
+	// precision clips it. This is not internal/worker's clipID: that helper is
+	// unexported there and its constant is the ingest-log budget's policy, which
+	// is a different question from this one, so the bound is stated here instead
+	// of coupling two unrelated policies. Volume needs no defence - one line per
+	// successful delete of a row that then ceases to exist, admin-gated.
+	log.Printf("api: worker deleted: id=%s hostname=%.200q requeued_tasks=%d reservations_updated=%d enrollments_unlinked=%d attribution_cleared=%d",
+		uuidStr(id), current.Hostname, len(requeued), scrubbed, unlinked, attributionCleared)
+
+	// TELL THE AGENT, IF THERE IS ONE. The allow-list's two members are NOT
+	// equivalent here and the original version of this comment got that wrong:
+	// 'offline' does imply disconnected, but 'revoked' DOES NOT.
+	// handleDeleteWorkerToken is a single ClearWorkerAgentToken - it does not
+	// close the stream, unregister the sender, or requeue anything - and the
+	// liveness sweeper only moves online <-> stale, so revoked-and-connected is a
+	// STABLE state rather than a narrow window. Without this the requeue above
+	// hands a still-executing task to a second worker and nobody tells the first,
+	// which is a duplicate side effect (a p4 submit, a shared output path) that is
+	// INVISIBLE in the task record because the original agent's writes are
+	// correctly fenced away by the epoch bump.
+	//
+	// No branch on status is needed: Registry.Send on an unregistered id is one
+	// map lookup returning an error that this best-effort path discards, so the
+	// 'offline' arm costs nothing and cannot imply a connection. Routed through
+	// sendCancelSignals so the sends stay bounded (the one-bounded-sender invariant), exactly
+	// as handleDisableWorker does it.
+	cancels := make([]cancelSignal, 0, len(requeued))
+	for _, tid := range requeued {
+		cancels = append(cancels, cancelSignal{
+			workerID: uuidStr(id),
+			taskID:   uuidStr(tid),
+			force:    false,
+		})
+	}
+	s.sendCancelSignals(cancels)
+
+	writeJSON(w, http.StatusOK, deleteWorkerResponse{
+		workerResponse:      toWorkerResponse(current),
+		RequeuedTasks:       len(requeued),
+		ReservationsUpdated: int(scrubbed),
+		EnrollmentsUnlinked: int(unlinked),
+		AttributionCleared:  int(attributionCleared),
 	})
 }
 

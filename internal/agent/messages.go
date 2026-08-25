@@ -36,9 +36,10 @@ func authFailureMessage(hasAgentToken, hasEnrollmentToken bool, tokenPath string
 			"identically. Ask an admin to revoke it and then re-enroll this agent with an admin-issued " +
 			"enrollment token (`relay agent enroll`), which a revoked worker accepts and which reuses the " +
 			"existing worker with its history intact. Failing that, rename the host: identity is keyed by " +
-			"hostname, so a renamed machine rejoins as a new worker. Relay has no command that frees a " +
-			"claimed hostname for token-less enrollment, so if no admin will issue a token there is no " +
-			"remedy on this path; (3) the fleet may be at " +
+			"hostname, so a renamed machine rejoins as a new worker. Or ask an admin to free the hostname " +
+			"outright: `relay workers delete --yes <id-or-hostname>` removes the worker row, which is the " +
+			"only thing that unclaims a hostname - it requeues the worker's tasks and cannot be undone; " +
+			"(3) the fleet may be at " +
 			"the auto-enroll worker ceiling (RELAY_AUTO_ENROLL_WORKER_CEILING), which enrollment tokens " +
 			"are never refused by. exiting"
 	}

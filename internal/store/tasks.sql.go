@@ -313,6 +313,40 @@ func (q *Queries) CountTaskLogs(ctx context.Context, taskID pgtype.UUID) (int64,
 	return count, err
 }
 
+const countTerminalTasksForWorker = `-- name: CountTerminalTasksForWorker :one
+SELECT COUNT(*) FROM tasks
+WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out')
+`
+
+// How many of this worker's task rows will lose their worker_id when the row is
+// deleted. Read by handleDeleteWorker, BEFORE the DELETE, for the delete
+// response's attribution_cleared count.
+//
+// tasks.worker_id is ON DELETE SET NULL for EVERY row, but RequeueWorkerTasks
+// rescues only ('dispatched','running'). This statement is the OTHER side of
+// that partition among rows that actually carry a worker_id: a pending row never
+// does (both RequeueWorkerTasks and RetryJobTasks null it), so the rows that
+// silently lose attribution are exactly the terminal ones. worker_id is public
+// API (taskResponse.WorkerID, internal/api/jobs.go), so this is a real loss and
+// not bookkeeping.
+//
+// THE PREDICATE IS AN ALLOW-LIST ON THE TERMINAL SET, deliberately, and it is the
+// same set RecomputeJobStatus treats as terminal. The equivalent deny-list
+// (`status NOT IN ('pending','dispatched','running')`) counts the same rows today
+// and fails OPEN on the next status added - a new non-terminal status would be
+// reported as attribution destroyed while its rows were in fact requeued. This
+// fails closed by under-counting instead, and TestTasksStatusVocabularyIsExactly
+// names this site so the partition is revisited rather than desynchronized.
+//
+//	SELECT COUNT(*) FROM tasks
+//	WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out')
+func (q *Queries) CountTerminalTasksForWorker(ctx context.Context, workerID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countTerminalTasksForWorker, workerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createTask = `-- name: CreateTask :one
 INSERT INTO tasks (job_id, name, commands, env, requires, timeout_seconds, retries)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -913,8 +947,13 @@ type ListOverdueAssignedTasksParams struct {
 // a plain `=`, so a row with a NULL worker_id can never be written by it;
 // selecting such a row would buy a guaranteed zero-row round trip every sweep. It
 // also documents the one state this watchdog cannot recover - a `dispatched` row
-// whose worker_id was nulled by workers' ON DELETE SET NULL - which is
-// unreachable today, because nothing in this repo DELETEs a worker.
+// whose worker_id was nulled by workers' ON DELETE SET NULL. THAT STATE IS NOW
+// REACHABLE - DeleteWorker exists (query/workers.sql) - and what keeps it from
+// occurring is ORDERING, not unreachability: handleDeleteWorker runs
+// RequeueWorkerTasks first, in the same transaction, so every assignment is ended
+// with an epoch bump while worker_id still names it. Any FUTURE deleter that
+// skips that step strands the row here permanently, unreachable by every
+// worker-keyed statement in this file.
 //
 // EVERY ARM FAILS CLOSED ON A MISSING VALUE. A NULL assigned_at, a NULL
 // started_at, and a NULL or zero timeout_seconds each make their arm FALSE

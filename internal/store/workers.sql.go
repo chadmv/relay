@@ -59,9 +59,13 @@ SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 //
 // THE status != 'revoked' EXCLUSION IS LOAD-BEARING FOR CALLER 2, not incidental
 // to it: it is what makes `relay workers revoke` free ceiling budget, and revoke
-// is the ONLY cleanup relay has - there is no worker-delete at any layer, so a
-// revoked row is permanent - which is why it is the first remedy an operator at
-// the ceiling is told to try. It is also why the
+// is non-destructive and needs no restart - which is why it is the first remedy
+// an operator at the ceiling is told to try. DeleteWorker also exists now, but it
+// frees ZERO budget for an already-revoked row, precisely because this count
+// already excludes it, and it is deliberately NOT a step in README's ceiling
+// ladder: that ladder answers a signal an attacker can drive, and deleting 1024
+// rows under an active attacker is the same treadmill as revoking them, only
+// irreversible. It is also why the
 // ceiling bounds NON-REVOKED rows rather than total rows - revoking keeps the
 // row and the hostname, so the table can still grow while this number does not.
 //
@@ -127,6 +131,42 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.SupportsWorkspaces,
 	)
 	return i, err
+}
+
+const deleteWorker = `-- name: DeleteWorker :execrows
+DELETE FROM workers WHERE id = $1 AND status IN ('offline', 'revoked')
+`
+
+// Destroys a worker identity. The ONLY DELETE FROM workers in the tree.
+//
+// THE STATUS PREDICATE IS AN ALLOW-LIST AND MUST STAY ONE. 'online' and 'stale'
+// both mean CONNECTED (internal/scheduler/dispatch.go:210-215), so the permitted
+// set is exactly the not-connected set. The equivalent deny-list
+// (`status != 'online' AND status != 'stale'`) is interchangeable against today's
+// vocabulary and FAILS OPEN on the next status added - a future 'quarantined'
+// worker would silently become deletable while connected. This fails closed.
+// TestDeleteWorker_PermitsExactlyTheDisconnectedStatuses enumerates the whole
+// vocabulary so the partition is revisited rather than desynchronized.
+//
+// THIS PREDICATE IS THE CONTROL, not handleDeleteWorker's Go check. The Go check
+// reads the same status off the FOR UPDATE'd row and exists to turn a zero-row
+// delete into a 409 an operator can act on - a second question plus a better
+// error, the same shape as handleTaskStatus's Go identity gate. A future second
+// delete path that skips the lock is still refused here.
+//
+// CALLERS MUST RUN RequeueWorkerTasks FIRST, in the same transaction. This
+// statement releases the resource; the requeue ends the generation. Reversed, the
+// FK's ON DELETE SET NULL nulls tasks.worker_id with no epoch bump and the row
+// becomes unreachable by EVERY worker-keyed statement in the tree (see
+// ListOverdueAssignedTasks's comment).
+//
+//	DELETE FROM workers WHERE id = $1 AND status IN ('offline', 'revoked')
+func (q *Queries) DeleteWorker(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteWorker, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const disableWorker = `-- name: DisableWorker :execrows
@@ -273,6 +313,64 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1 FOR UPDATE
 func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostnameForUpdate, hostname)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Hostname,
+		&i.CpuCores,
+		&i.RamGb,
+		&i.GpuCount,
+		&i.GpuModel,
+		&i.Os,
+		&i.MaxSlots,
+		&i.Labels,
+		&i.Status,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.AgentTokenHash,
+		&i.DisconnectedAt,
+		&i.DisabledAt,
+		&i.RevokedAt,
+		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
+	)
+	return i, err
+}
+
+const getWorkerForUpdate = `-- name: GetWorkerForUpdate :one
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1 FOR UPDATE
+`
+
+// The id-keyed twin of GetWorkerByHostnameForUpdate, for handleDeleteWorker.
+// IT IS STATEMENT 1 OF THE DELETE TRANSACTION AND ITS POSITION IS THE ARGUMENT:
+// taking the worker row FIRST matches the lock order of both enrollment
+// transactions (worker row, then agent_enrollments), so the delete cannot invert
+// that pair (spec R9).
+//
+// A CYCLE IS CONSTRUCTIBLE ELSEWHERE, and an earlier version of this comment
+// claimed no argument was needed - a uniqueness claim checked only against its
+// own subject. applyInventory (internal/worker/handler.go) runs
+// ReplaceWorkerInventory then UpsertWorkerWorkspace, so it holds worker_workspaces
+// rows and THEN needs FOR KEY SHARE on workers(W) for the FK check; this delete
+// holds workers(W) FOR UPDATE and then needs worker_workspaces locks for the
+// ON DELETE CASCADE. That is the inverse order and deadlocks (40P01, one side
+// aborted, the delete surfacing as a 500).
+//
+// WHAT RULES IT OUT IS THE STATUS ALLOW-LIST, not the lock order: applyInventory
+// only runs for a worker with a live gRPC stream, and DeleteWorker admits only
+// 'offline' and 'revoked'. 'offline' implies disconnected. 'revoked' does NOT -
+// that is the same gap that made the missing cancel signals a bug - so the window
+// is exactly the revoked-and-connected worker, and it is narrow rather than
+// closed. Do not widen the allow-list without revisiting this. It
+// also supplies the 404/409 discrimination inside the transaction, so there is no
+// window between the precondition and the DELETE: a concurrent
+// RegisterWorkerConnection is an UPDATE on this row and blocks until we commit or
+// roll back, so if it wins we read 'online' and refuse.
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1 FOR UPDATE
+func (q *Queries) GetWorkerForUpdate(ctx context.Context, id pgtype.UUID) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorkerForUpdate, id)
 	var i Worker
 	err := row.Scan(
 		&i.ID,

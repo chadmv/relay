@@ -117,20 +117,22 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 		"revoke it and then", // remedy 1: revoke THEN enroll with a token
 		"enrollment token",   // ... which the NULL-hash predicate now admits
 		"rename",             // remedy 2: the other escape hatch that actually exists
+		"workers delete",     // remedy 3: free the hostname outright - a REAL command since 2026-08-26
 	} {
 		assert.Contains(t, msg, want)
 	}
 	assert.Contains(t, msg, "exiting", "the agent exits rather than reconnect-looping on Unauthenticated")
 
-	// EVERY COMMAND THIS MESSAGE NAMES MUST EXIST. The previous revision
-	// prescribed `relay workers delete` as "the only way to free the hostname"
-	// and pinned it here. THERE IS NO SUCH COMMAND at any layer: internal/cli's
-	// workers switch has no delete arm (it returns "unknown workers subcommand"),
-	// there is no DELETE FROM workers in internal/store/query, and the only
-	// DELETE route on the resource is /v1/workers/{id}/token, which is revoke.
+	// EVERY COMMAND THIS MESSAGE NAMES MUST EXIST. A 2026-06 revision prescribed
+	// `relay workers delete` as "the only way to free the hostname" and pinned it
+	// here. AT THAT TIME NO SUCH COMMAND EXISTED at any layer: internal/cli's
+	// workers switch HAD no delete arm (it returned "unknown workers subcommand"),
+	// there WAS no DELETE FROM workers in internal/store/query, and the only
+	// DELETE route on the resource WAS /v1/workers/{id}/token, which is revoke.
 	// A terminal exit message is the worst possible place for that - it is the
 	// last thing an operator reads and there is nothing after it to correct the
-	// record.
+	// record. All three of those facts stopped being true on 2026-08-26; see the
+	// ghost list below, where "workers delete" graduated.
 	//
 	// This is a NEGATIVE assertion because the positive ones cannot catch it: a
 	// substring check is satisfied by any plausible-looking string, so "the
@@ -145,7 +147,14 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 	// command set out of internal/cli and requires every `relay ...` in every
 	// message to resolve, whatever its spelling. This stays only because it gives
 	// a more pointed message for the three spellings that actually shipped.
-	for _, ghost := range []string{"workers delete", "relay workers rm", "workers remove"} {
+	//
+	// "workers delete" GRADUATED FROM GHOST TO REAL COMMAND on 2026-08-26
+	// (docs/superpowers/plans/2026-08-26-worker-delete.md): internal/cli's workers
+	// switch now has a delete arm, DeleteWorker is a real statement, and
+	// DELETE /v1/workers/{id} is a real admin-only route. Forbidding it here would
+	// forbid the true remedy, so it moved to the want-list above. The other two
+	// spellings are still ghosts.
+	for _, ghost := range []string{"relay workers rm", "workers remove"} {
 		assert.NotContains(t, msg, ghost,
 			"this message must not prescribe a command that does not exist; add the subcommand to "+
 				"internal/cli/workers.go first, then say so here")
