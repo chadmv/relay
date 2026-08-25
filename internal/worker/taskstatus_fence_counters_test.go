@@ -684,6 +684,127 @@ func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 	require.Equal(t, "", logged(), "no arm of the retry branch logs")
 }
 
+// statusOtherWorkerID is a registered peer that is NOT this task's assignee.
+// Different Bytes, same Valid: the only thing separating it from the assignee is
+// the identity the gate checks.
+func statusOtherWorkerID() pgtype.UUID { return pgtype.UUID{Bytes: [16]byte{11}, Valid: true} }
+
+// TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters pins the identity
+// gate's FOURTH job, which shipped with task_status_fence and arrived unguarded.
+//
+// The gate's first three jobs are one saved round trip, a second question, and
+// defense in depth - none of them observable, which is why handleTaskStatus's
+// own comment records that the gate's discriminating power moved into SQL and
+// that no test discriminates it. This slice then added a property that depends
+// on it: conflicting_total is documented as ATTRIBUTABLE TO THE TASK'S OWN
+// ASSIGNEE. That property has a subject and a test can have one too.
+//
+// MEASURED: with the three-term gate deleted, internal/worker, internal/api and
+// cmd/relay-server all stay green while a registered peer naming a task it does
+// not own drives Conflicting one per message, unbudgeted and forever - the key
+// the README calls "the actionable number", moved by an unrelated agent. Task
+// STATE stays correct throughout (both statements carry their own worker_id
+// predicate), so nothing functional reddens. That is the whole point: the SQL
+// identity predicate protects the ROW, and only this Go gate protects the
+// COUNTER.
+//
+// THE POSITIVE CONTROL IS ON THE SAME HANDLER and it is not decoration: without
+// it a handler mutated into rejecting everything - a `return` at the top of the
+// function - passes the first leg outright.
+func TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters(t *testing.T) {
+	ctx := context.Background()
+	logged := captureUnitLog(t)
+
+	// The task is assigned to statusWorkerID at epoch 7 and the coordinator has
+	// already stamped it timed_out, so an accepted `done` report here classifies
+	// as CONFLICTING - the one key an operator is told to act on.
+	h, db := newStatusHandler(t, "timed_out", 0, 0, pgx.ErrNoRows)
+	lim := newIngestLogLimiter(&h.ingestDrops)
+
+	// LEG 1, THE POISONED INPUT, AND IT RUNS FIRST: a different registered peer
+	// sends the same message the assignee would. One thousand of them, because
+	// the exposure is not "one forged count" - nothing rate-limits a status
+	// message and the gate is the only thing between a peer and unbounded
+	// inflation of somebody else's number.
+	const forged = 1000
+	for i := 0; i < forged; i++ {
+		h.handleTaskStatus(ctx, statusOtherWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	}
+	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections(),
+		"%d status reports from a peer that is NOT this task's assignee moved a fence counter. The "+
+			"identity gate is what makes these numbers attributable: a peer that can name any task id "+
+			"can otherwise manufacture conflicting_total at one message each, and the README's "+
+			"prescribed response to a climbing conflicting_total is to RAISE "+
+			"RELAY_TASK_WATCHDOG_MARGIN - widening the unbounded-assignment window the watchdog exists "+
+			"to close.", forged)
+	calls := db.callsSnapshot()
+	require.Contains(t, calls, "GetTask",
+		"fixture: control must reach the identity gate. Without this the leg above could be satisfied "+
+			"by a return at the task-id parse, which is a different gate entirely.")
+	require.NotContains(t, calls, "UpdateTaskStatus",
+		"a non-assignee's report must be dropped a round trip BEFORE the write, not merely refused by "+
+			"the write's own worker_id predicate: it is reaching the write that reaches the counter.")
+
+	// LEG 2, THE POSITIVE CONTROL, ON THE SAME HANDLER: the assignee sends the
+	// identical message and it IS counted. This is what makes the zero above a
+	// statement about identity rather than about the handler doing nothing.
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{Conflicting: 1}, h.TaskStatusFenceRejections(),
+		"the ASSIGNEE's own report of a conflicting outcome must still be counted - that is the signal "+
+			"this section exists to carry. A zero here means the first leg proved nothing.")
+	require.Contains(t, db.callsSnapshot(), "UpdateTaskStatus",
+		"fixture: the assignee's message must reach the write")
+
+	require.Equal(t, "", logged(),
+		"a message dropped at the identity gate must emit no log line of any wording: it is "+
+			"attacker-keyed volume on the recv goroutine with no sink to send it to")
+}
+
+// TestHandleTaskStatus_AZeroValueWorkerCannotMoveTheCountersOnANeverClaimedTask
+// is the NULL-rejection half of the same gate, and it is the test
+// handleTaskStatus's comment said did not exist.
+//
+// The two .Valid terms are mutually redundant with the Bytes comparison against
+// a real worker id, so their whole value is this case: pgtype.UUID is a
+// comparable struct, so with BOTH .Valid checks dropped a zero-value workerID
+// compares EQUAL to a never-claimed task's NULL worker_id - the Go form of SQL's
+// IS NOT DISTINCT FROM - and the gate fails OPEN. Removing either term alone
+// leaves the hole closed; removing both opens it, which is why this test drives
+// the pair rather than each one.
+//
+// It has no same-handler positive control by construction - the fixture's task
+// is assigned to NOBODY, so no caller passes the gate - so the reached-the-gate
+// marker below is what stops it passing vacuously, and the counted case is
+// established next door in TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters.
+func TestHandleTaskStatus_AZeroValueWorkerCannotMoveTheCountersOnANeverClaimedTask(t *testing.T) {
+	ctx := context.Background()
+
+	db := &stubStatusDB{
+		task: store.Task{
+			ID:              statusTaskIDUUID(t),
+			JobID:           pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+			Status:          "timed_out",
+			WorkerID:        pgtype.UUID{}, // never claimed: worker_id IS NULL
+			AssignmentEpoch: 7,
+		},
+		writeErr: pgx.ErrNoRows,
+	}
+	h := &Handler{q: store.New(db), broker: events.NewBroker()}
+	lim := newIngestLogLimiter(&h.ingestDrops)
+
+	h.handleTaskStatus(ctx, pgtype.UUID{}, lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+
+	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections(),
+		"a caller that lost its identity drove a counter on a task NOBODY is assigned to. Both .Valid "+
+			"terms of the identity gate are what reject this: a zero-value pgtype.UUID equals a NULL "+
+			"worker_id under Go's struct comparison, so dropping both makes the gate an "+
+			"IS NOT DISTINCT FROM and it fails OPEN.")
+	calls := db.callsSnapshot()
+	require.Contains(t, calls, "GetTask", "fixture: control must reach the identity gate")
+	require.NotContains(t, calls, "UpdateTaskStatus",
+		"the write must never be reached, or the counter is one SQL predicate away from moving")
+}
+
 // TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection is the poisoned
 // input in its own test, and it is what kills a record() written ABOVE the
 // errors.Is check.

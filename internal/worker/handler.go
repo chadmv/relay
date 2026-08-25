@@ -1053,7 +1053,9 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	//
 	// This gate is NOT the correctness control any more, and the honest form of
 	// that is uncomfortable, so it is written down rather than implied. Delete
-	// it and the observable state is unchanged: a forged terminal from a
+	// it and the observable TASK STATE is unchanged - but not everything
+	// observable is task state; see FOURTH below, which is the half that is now
+	// pinned by a test. A forged terminal from a
 	// non-assignee reaches IncrementTaskRetryCount, which rejects on its own
 	// worker_id predicate, or UpdateTaskStatus, which rejects on its own. Both
 	// statements also fence on assignment_epoch and on the task not already
@@ -1105,6 +1107,17 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// signal an unrelated agent can move is not the signal an operator is
 	// reading.
 	//
+	// THIS IS THE ONE JOB THAT IS PINNED, and it shipped unguarded: measured,
+	// deleting the gate left internal/worker, internal/api and cmd/relay-server
+	// all green while a non-assignee drove Conflicting to 1000 in 1000 messages.
+	// TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters is that probe,
+	// with a same-handler positive control so a handler mutated into rejecting
+	// everything cannot satisfy it. Note what it does NOT establish: the gate
+	// proves the sender is the assignee, never that the report is HONEST, so the
+	// assignee's own forged conflicts are still free. That exposure is
+	// documented rather than closed - see TaskStatusFenceCounts and the README's
+	// task_status_fence bullets.
+	//
 	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
 	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
 	// is unreachable from Connect, which closes the stream on a Scan failure
@@ -1113,16 +1126,21 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// zero-value workerID (a caller that lost its identity) compares EQUAL to a
 	// never-claimed task's NULL worker_id - the Go form of SQL's
 	// IS NOT DISTINCT FROM - and the gate fails OPEN. Removing either one alone
-	// leaves the hole closed; removing both opens it. That is defense in depth
-	// against a future caller. Note honestly that NO test in the tree
-	// discriminates it any more:
+	// leaves the hole closed; removing both opens it - each of those three
+	// variants was run, not reasoned about. That is defense in depth against a
+	// future caller.
+	//
+	// The NULL-rejection half now has its own guard, which it did not when the
+	// counters shipped:
+	// TestHandleTaskStatus_AZeroValueWorkerCannotMoveTheCountersOnANeverClaimedTask
+	// drives a never-claimed task from a zero-value worker id and requires the
+	// counters to stay flat. It discriminates the pair, not either term alone,
+	// which is exactly the shape of the hole. What it guards is the COUNTER, not
+	// the row: the older
 	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
-	// was written as its permanent guard, but once IncrementTaskRetryCount gained
-	// its own worker_id predicate that test stays green with this whole gate
-	// deleted - measured, not assumed. Its discriminating power moved to the SQL
-	// layer, and what remains here is non-functional (one round trip), which is
-	// why it is recorded as a Known Limitation rather than pinned by a new test.
-	// Same rule the SQL states as "a plain =,
+	// was written as this gate's permanent guard and stays green with the whole
+	// gate deleted, because IncrementTaskRetryCount gained its own worker_id
+	// predicate - measured, not assumed. Same rule the SQL states as "a plain =,
 	// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.
 	//
 	// Silent return, exactly like the currency gate below. A log line here would
