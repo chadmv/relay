@@ -162,3 +162,24 @@ inside the spec). A rule at the allocation site replaces that per-site reasoning
 it as theoretical. A README sentence asserting the rule this item would establish was written before the
 item shipped, and it was false in two different ways at once. The rule is worth having precisely because
 somebody will write that sentence again.
+
+## 2026-08-24: this item's inventory is stale twice over
+
+Two slices have moved under it since it was filed.
+
+**The three sites it named are closed.** The 2026-08-24 handletaskstatus-pair slice brought all three
+`handleTaskStatus` write-error lines inside the per-connection budget via three new `logKind`s. Measured
+at that HEAD: **thirteen** `log.Printf` sites in `internal/worker/handler.go`, **eight** budgeted against
+five before, and no existing site lost its budget.
+
+**A fourth site exists that belongs to neither of this item's two classes.** `markWorkerOffline`'s
+teardown line was added 2026-08-24 by the finishRegister slice. It runs once per connection teardown
+with no `lim` on its call chain, so it is bounded by the connection admission caps rather than by
+message volume - a third category this item's framing (pre-budget registration lines vs budgeted
+message lines) does not have a slot for.
+
+So the remaining scope is the registration-window lines only, and the item's own count should be
+re-derived rather than trusted. Note also that the budget it would place them in is now known to be
+drainable by the connection's own peer -
+[[bug-2026-08-24-wire-keyed-dedupe-lets-a-peer-suppress-its-own-diagnostics]] - which is worth settling
+first, since moving a line into a bucket a peer can empty is not obviously an improvement.
