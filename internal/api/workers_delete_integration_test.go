@@ -294,3 +294,72 @@ func TestDeleteWorkerRoute_PermitsExactlyTheDisconnectedStatuses(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteWorker_CascadesWorkerWorkspaces (T-C2). worker_workspaces.worker_id
+// is ON DELETE CASCADE (000007_workspaces.up.sql:6), so this test's job is to
+// prove the CASCADE is still there, not that we wrote code. The rows are a
+// server-side mirror of agent inventory rebuilt on the next connect, and a
+// deleted worker has no next connect.
+func TestDeleteWorker_CascadesWorkerWorkspaces(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "Ws Admin", "ws-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	row, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+		Name: "ws-host", Hostname: "ws-host", CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: row.ID, Status: "offline"})
+	require.NoError(t, err)
+
+	for _, short := range []string{"aaa", "bbb"} {
+		require.NoError(t, q.UpsertWorkerWorkspace(t.Context(), store.UpsertWorkerWorkspaceParams{
+			WorkerID: row.ID, SourceType: "perforce", SourceKey: "//s/" + short, ShortID: short,
+			BaselineHash: "deadbeef", LastUsedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+		}))
+	}
+	pre, err := q.ListWorkerWorkspaces(t.Context(), row.ID)
+	require.NoError(t, err)
+	require.Len(t, pre, 2, "PRE-ASSERTION: without this the cascade check is vacuous")
+
+	require.Equal(t, http.StatusOK, doDeleteWorker(t, srv, uuidString(row.ID), adminToken).Code)
+
+	post, err := q.ListWorkerWorkspaces(t.Context(), row.ID)
+	require.NoError(t, err)
+	assert.Empty(t, post, "worker_workspaces.worker_id is ON DELETE CASCADE")
+}
+
+// TestDeleteWorker_OfARevokedWorkerDoesNotChangeCountWorkers (T-E2) pins spec 9
+// so README cannot drift into "delete frees budget". CountWorkers is
+// `WHERE status != 'revoked'`, so deleting a revoked row frees ZERO ceiling
+// budget; deleting an offline row decrements it.
+func TestDeleteWorker_OfARevokedWorkerDoesNotChangeCountWorkers(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "Ceil Admin", "ceil-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	mk := func(host, status string) pgtype.UUID {
+		row, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+			Name: host, Hostname: host, CpuCores: 4, RamGb: 16, Os: "linux",
+		})
+		require.NoError(t, err)
+		_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: row.ID, Status: status})
+		require.NoError(t, err)
+		return row.ID
+	}
+	revoked := mk("ceil-revoked", "revoked")
+	offline := mk("ceil-offline", "offline")
+
+	base, err := q.CountWorkers(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusOK, doDeleteWorker(t, srv, uuidString(revoked), adminToken).Code)
+	afterRevoked, err := q.CountWorkers(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, base, afterRevoked, "a revoked row is already outside CountWorkers - delete frees NO budget")
+
+	require.Equal(t, http.StatusOK, doDeleteWorker(t, srv, uuidString(offline), adminToken).Code)
+	afterOffline, err := q.CountWorkers(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, base-1, afterOffline, "an offline row was counted, so deleting it does free budget")
+}
