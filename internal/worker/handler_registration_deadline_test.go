@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // scriptedStream is the minimum grpc.BidiStreamingServer the registration path
@@ -39,8 +40,9 @@ type scriptedStream struct {
 	// directly, and every send after that goes through the workerSender's send
 	// loop. CI runs `go test -race ./...`, which reports an unguarded slice as a
 	// failure rather than as a flake.
-	mu   sync.Mutex
-	sent []*relayv1.CoordinatorMessage
+	mu              sync.Mutex
+	sent            []*relayv1.CoordinatorMessage
+	agentTokensSent int
 
 	// sendErr, when set, is what Send returns after recording. A peer that
 	// vanished between RegisterWorkerConnection and the RegisterResponse looks
@@ -66,13 +68,39 @@ func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
 	return nil, status.Error(codes.Canceled, "stream torn down")
 }
 
-// Send records what it was asked to deliver. It used to discard its argument,
-// which is what made "the RegisterResponse was actually sent" unobservable in
-// this lane - the message never left the stream fake, so no default-lane test
-// could tell a sent response from a deleted send.
+// Send records what it was asked to deliver, MINUS the raw agent token. It used
+// to discard its argument entirely, which is what made "the RegisterResponse was
+// actually sent" unobservable in this lane - the message never left the stream
+// fake, so no default-lane test could tell a sent response from a deleted send.
+//
+// THE CREDENTIAL IS SCRUBBED AT THE POINT OF RETENTION, not on the way back out,
+// and the difference is the whole point: a projection that cleans one field in
+// sentMsgs() still leaves the secret sitting in the slice behind it, where a
+// panic dump or a future accessor reaches it. Only agentTokensSent survives -
+// "a token was issued" is the assertable property, and the value itself is not
+// one any test in this package needs.
+//
+// WHY IT MATTERS WHEN TODAY'S TESTS ARE SAFE: finishRegister's reconnect caller
+// passes rawAgentToken "" (handler.go:552) and every current user of this fake
+// drives that arm. Both enrollment callers pass a real token (handler.go:534,
+// :618), and making those drivable without Postgres is exactly what the
+// txBeginner seam was for - so the next test written against this fixture is the
+// one that would have leaked. TestScriptedStream_DoesNotRetainARawAgentToken is
+// what keeps that from being silent.
+//
+// proto.Clone rather than a hand-written field copy: a field-by-field rebuild of
+// RegisterResponse would silently drop anything added to the message later, and
+// a fixture that quietly stops recording a new field makes every test that reads
+// it prove less.
 func (s *scriptedStream) Send(m *relayv1.CoordinatorMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if rr := m.GetRegisterResponse(); rr != nil && rr.AgentToken != "" {
+		s.agentTokensSent++
+		redacted := proto.Clone(m).(*relayv1.CoordinatorMessage)
+		redacted.GetRegisterResponse().AgentToken = "[redacted by scriptedStream]"
+		m = redacted
+	}
 	s.sent = append(s.sent, m)
 	return s.sendErr
 }
@@ -223,4 +251,58 @@ func TestRegistrationTimeout_ZeroMeansTheDefault(t *testing.T) {
 	assert.Equal(t, DefaultRegistrationTimeout, (&Handler{}).registrationTimeout())
 	assert.Equal(t, DefaultRegistrationTimeout, (&Handler{RegistrationTimeout: -1}).registrationTimeout())
 	assert.Equal(t, time.Second, (&Handler{RegistrationTimeout: time.Second}).registrationTimeout())
+}
+
+// TestScriptedStream_DoesNotRetainARawAgentToken pins a property of the FIXTURE,
+// not of the handler, and it is here because this fake started recording what it
+// was sent and the tests read it back through testify assertions that render the
+// whole message on failure.
+//
+// IT IS SAFE TODAY ONLY BY ACCIDENT OF WHICH ARM IS DRIVEN. finishRegister's
+// reconnect caller passes rawAgentToken "" (handler.go:552), so nothing sensitive
+// has ever reached this slice. Both enrollment callers pass a real one
+// (handler.go:534, :618), and making those two drivable in the default lane is
+// this seam's stated next consumer - so the first test that points this fixture
+// at enrollAndRegister or autoEnrollAndRegister would put a live credential into
+// retained memory and into every CI failure dump, with nothing here to notice.
+//
+// The assertion is against the RETAINED slice rather than against sentMsgs()'s
+// return, because a projection that cleans one field on the way out still leaves
+// the secret in the store behind it.
+func TestScriptedStream_DoesNotRetainARawAgentToken(t *testing.T) {
+	const secret = "b8f1e2c3d4a5960718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f"
+
+	s := &scriptedStream{ctx: context.Background(), release: make(chan struct{})}
+	require.NoError(t, s.Send(&relayv1.CoordinatorMessage{
+		Payload: &relayv1.CoordinatorMessage_RegisterResponse{
+			RegisterResponse: &relayv1.RegisterResponse{
+				WorkerId:      "5a010203-0405-0607-0809-0a0b0c0d0e0f",
+				CancelTaskIds: []string{"t1"},
+				AgentToken:    secret,
+			},
+		},
+	}))
+
+	for i, m := range s.sent {
+		assert.NotContains(t, m.String(), secret,
+			"retained message %d still carries the raw agent token. This slice is read back by "+
+				"assertions that print the whole message when they fail, so a real enrollment test "+
+				"would publish a live credential into CI logs.", i)
+	}
+	for i, m := range s.sentMsgs() {
+		assert.NotContains(t, m.String(), secret,
+			"message %d handed to a test still carries the raw agent token", i)
+	}
+
+	require.Equal(t, 1, s.agentTokensSent,
+		"the fact that a token WAS issued must survive the redaction - that is the assertable "+
+			"property an enrollment test needs, and the only thing about the credential worth keeping")
+
+	sent := s.sentMsgs()
+	require.Len(t, sent, 1)
+	rr := sent[0].GetRegisterResponse()
+	require.NotNil(t, rr)
+	assert.Equal(t, "5a010203-0405-0607-0809-0a0b0c0d0e0f", rr.WorkerId,
+		"redaction must cost no assertion power: every other field survives intact")
+	assert.Equal(t, []string{"t1"}, rr.CancelTaskIds)
 }
