@@ -18,6 +18,12 @@ make test-integration
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
 make generate
 
+# Browser end-to-end suite (Playwright). Needs node, go, and a Postgres at
+# postgres://relay:relay@127.0.0.1:5432 - the container scripts/dev.ps1 manages.
+# Install the browsers once: cd web && npx playwright install chromium webkit
+# Read web/e2e/README.md first - it is the live document for what is and is not covered.
+make test-e2e
+
 # Run a single test
 go test ./internal/api/... -run TestRegister_HappyPath -v -timeout 30s
 
@@ -57,6 +63,18 @@ Code map:
 **Task DAG.** `task_dependencies` table; `FailDependentTasks` recursive CTE for transitive cascade on failure.
 
 **Database.** Migrations are embedded in the binary and run on startup. Files in `internal/store/migrations/` use `golang-migrate` format (`000N_name.up.sql` / `000N_name.down.sql`).
+
+**Tailwind v4 scans the whole project, so prose is compiled input.** `@tailwindcss/vite` builds its
+scanner over the Vite root with `pattern: '**/*'` and reads **source files on disk**, not the emitted
+bundle - so a class-shaped substring anywhere under `web/`, including inside a comment, a test file or
+a Markdown doc, emits CSS. This cost real damage in both directions on 2026-08-24: a comment in
+`web/e2e/keyboard.spec.ts` explaining a `min-w-[660px]` mutation kept that rule alive and defeated the
+mutation, and a `min-w-[...]` placeholder in the same file shipped a literal `.min-w-\[\.\.\.\]` rule
+into the production stylesheet. Two consequences: **a mutation test that removes a class must also
+remove every mention of it**, and prose that needs to name a class should spell it in a form the
+scanner does not match (`min-width`, not the bracket form). Note the corollary that trips people the
+other way - because the scanner reads source and never the bundle, esbuild constant-folding a computed
+class back into a literal does NOT make it visible to Tailwind.
 
 **Source providers.** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent. Provision tickets out-of-band (`p4 login`); relay does not manage P4 credentials. The Perforce integration test spins up a `p4d` container via testcontainers-go.
 
