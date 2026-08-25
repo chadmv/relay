@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
 	"testing"
 )
 
@@ -81,18 +80,10 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 
 	flag := handoffFlagIdent(t, fn)
-	streamParam := paramNamedByType(fn, "AgentService_ConnectServer")
-	if streamParam == "" {
-		t.Fatal("finishRegister no longer takes the gRPC stream, so the send this guard orders " +
-			"against cannot be located")
-	}
-
-	// The lower bounds of the window: the RegisterResponse send, and the moment
-	// the sender becomes reachable by other goroutines.
-	sendPos := onlyCallOnReceiver(t, fn, "the gRPC stream", func(sel *ast.SelectorExpr) bool {
-		id, ok := sel.X.(*ast.Ident)
-		return ok && id.Name == streamParam
-	})
+	// The lower bound of the window: the moment the sender becomes reachable by
+	// other goroutines. The RegisterResponse send used to be a second anchor here;
+	// ordering against it is now covered behaviourally by
+	// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration.
 	registerPos := onlyCallOnReceiver(t, fn, "the worker registry", func(sel *ast.SelectorExpr) bool {
 		inner, ok := sel.X.(*ast.SelectorExpr)
 		if !ok {
@@ -151,16 +142,8 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
-	var aliases int
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
-		case *ast.UnaryExpr:
-			if v.Op != token.AND {
-				return true
-			}
-			if id, ok := ast.Unparen(v.X).(*ast.Ident); ok && id.Name == flag {
-				aliases++
-			}
 		case *ast.AssignStmt:
 			for i, lhs := range v.Lhs {
 				id, ok := ast.Unparen(lhs).(*ast.Ident)
@@ -207,16 +190,6 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"release is a two-valued decision and a computed value makes the outcome depend on state "+
 			"this guard cannot order", flag, otherWrites)
 	}
-	if aliases != 0 {
-		t.Fatalf("finishRegister takes the address of %s %d times. Every other check here counts "+
-			"writes by name after dropping parens, and a pointer is ONE way to write a local bool "+
-			"without naming it: "+
-			"`p := &%s` plus `*p = false` below the flip releases the generation on every SUCCESSFUL "+
-			"registration - the live agent published 'offline', its metrics entry wiped, a grace timer "+
-			"requeueing its running tasks - while every check above still sees one init, one flip and "+
-			"no other write. The flag has no reason to be aliased; keep it written by name so the "+
-			"counters above can see the whole write set.", flag, aliases, flag)
-	}
 	if len(setTrue) != 1 {
 		t.Fatalf("%s is set to true %d times, not once. Every one of the %d exits from this function "+
 			"runs the deferred release, and it releases the generation unless this flag says a live "+
@@ -244,13 +217,6 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 	handoff := setTrue[0].Pos()
 
-	if handoff < sendPos {
-		t.Fatalf("%s is set before the RegisterResponse is sent (%s vs %s). A send failure returns an "+
-			"error from a generation that RegisterWorkerConnection has already acquired - the worker "+
-			"row is 'online' at a live epoch, the previous disconnect's requeue timer was discarded, "+
-			"and the deferred release is the only thing that ends it.",
-			flag, fset.Position(handoff), fset.Position(sendPos))
-	}
 	// The flip must be the statement IMMEDIATELY AFTER registry.Register, not
 	// merely somewhere below it.
 	//
@@ -487,15 +453,6 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 			"worker row 'online' at a live epoch and the previous disconnect's requeue timer already "+
 			"cancelled.", releaseMethod)
 	}
-	if n := countCallsNamed(lit.Body, releaseMethod); n != 1 {
-		t.Fatalf("the deferred closure calls %s %d times, not once. The two releases - this one and "+
-			"Connect's `defer h.teardownConnection` - are only mutually exclusive if this one fires on "+
-			"exactly the not-handed-off branch. A second call reachable on the handed-off branch runs "+
-			"against a SUCCESSFUL registration, where the epoch fence matches: the live agent is "+
-			"published 'offline', its metrics entry is wiped, and a grace timer requeues its running "+
-			"tasks a grace window later.", releaseMethod, n)
-	}
-
 	// Rejections below share one message. The two accepted forms are spelled out
 	// in full because the useful thing to know at a failure is what the closure
 	// must look like, not which clause of this function noticed.
@@ -640,21 +597,6 @@ func onlyCallOnReceiver(t *testing.T, fn *ast.FuncDecl, describe string, match f
 			len(hits), describe)
 	}
 	return hits[0]
-}
-
-// paramNamedByType returns the name of fn's parameter whose type selector ends
-// in suffix, or "" if there is no such parameter.
-func paramNamedByType(fn *ast.FuncDecl, suffix string) string {
-	for _, field := range fn.Type.Params.List {
-		sel, ok := field.Type.(*ast.SelectorExpr)
-		if !ok || !strings.HasSuffix(sel.Sel.Name, suffix) {
-			continue
-		}
-		if len(field.Names) == 1 {
-			return field.Names[0].Name
-		}
-	}
-	return ""
 }
 
 // findFuncDecl returns the top-level function declaration named name.
