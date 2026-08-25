@@ -417,9 +417,8 @@ below is what makes that gap reachable: revoking a row keeps it, so under an act
 operator revokes 1024 junk workers, the attacker creates 1024 more under **new** hostnames - the old
 ones stay claimed forever - and the table grows without limit in the revoked bucket while the counted
 total sits flat. **Nothing reclaims either the row or the hostname** - relay has no worker-delete at any
-layer, so revoked junk rows are permanent. Bounding the table itself, and reaping those rows, is what
-that worker's assignments and reservations. Bounding the table itself is not something this ceiling
-does or is trying to do.
+layer, so revoked junk rows are permanent. Bounding the table itself, and reaping those rows, is not
+something this ceiling does or is trying to do; both are tracked separately.
 
 **When the ceiling is reached, in the order to try things.**
 
