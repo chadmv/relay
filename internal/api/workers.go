@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -574,14 +575,36 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. End every assignment generation while worker_id still names them.
+	// 2. The status gate. THE SQL PREDICATE IN DeleteWorker IS THE CONTROL; this
+	// is a second question plus a better error (spec 8.2). Because step 1 took
+	// FOR UPDATE, the two cannot disagree within this transaction; the SQL arm is
+	// defence for a future caller who writes a second delete path without a lock.
+	//
+	// WRITTEN AS AN ALLOW-LIST, like the SQL. The deny-list is interchangeable
+	// today and fails OPEN on the next status added. 'online' and 'stale' both
+	// mean CONNECTED; a disabled worker is still 'online' or 'offline'
+	// underneath, and this keys on the underlying value, so a
+	// disabled-and-connected worker is refused - correct, since disable does not
+	// close the stream. Note the consequence for the response body:
+	// toWorkerResponse synthesises status "disabled" when disabled_at is set, so
+	// a disabled-and-offline worker's own delete response reports "disabled",
+	// not the "offline" this gate matched on.
+	switch current.Status {
+	case "offline", "revoked":
+	default:
+		writeError(w, http.StatusConflict,
+			"worker is connected; disable it and wait for it to go offline, or revoke it, before deleting")
+		return
+	}
+
+	// 3. End every assignment generation while worker_id still names them.
 	requeued, err := q.RequeueWorkerTasks(ctx, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "requeue tasks failed")
 		return
 	}
 
-	// 3. Break the enrollment link. Must precede the DELETE or the no-action FK
+	// 4. Break the enrollment link. Must precede the DELETE or the no-action FK
 	// fires; that FK is deliberately not ON DELETE SET NULL (spec 5).
 	unlinked, err := q.ClearEnrollmentConsumerForWorker(ctx, id)
 	if err != nil {
@@ -589,7 +612,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Scrub the id out of reservations naming it. NOT a dispatch fix (spec 7).
+	// 5. Scrub the id out of reservations naming it. NOT a dispatch fix (spec 7).
 	//
 	// ITS POSITION HERE IS CONVENTION, NOT NECESSITY, and the spec and the plan
 	// both said otherwise ("before the DELETE because after it there is no id to
@@ -598,14 +621,14 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	// entire reason this statement has to exist - and it is equally the reason
 	// the DELETE does not disturb the array. The id lives in `id` either way.
 	// Verified by mutation: moving this call after DeleteWorker leaves every
-	// delete test green. Steps 2 and 5 are the pair whose order IS load-bearing.
+	// delete test green. Steps 3 and 6 are the pair whose order IS load-bearing.
 	scrubbed, err := q.RemoveWorkerFromReservations(ctx, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "scrub reservations failed")
 		return
 	}
 
-	// 5. Release the resource. :execrows, and the zero case is handled rather
+	// 6. Release the resource. :execrows, and the zero case is handled rather
 	// than assumed - Task 6 turns it into the 409 it should be.
 	n, err := q.DeleteWorker(ctx, id)
 	if err != nil {
@@ -613,11 +636,15 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if n == 0 {
-		writeError(w, http.StatusInternalServerError, "delete worker failed")
+		// A zero-row delete after a FOR UPDATE read that said the status was
+		// permitted means something is wrong - most plausibly a concurrent
+		// delete. Roll back and refuse; NEVER report success. Keep "the fence
+		// said no" distinguishable from "the query failed", per markWorkerOffline.
+		writeError(w, http.StatusConflict, "worker was modified concurrently; retry")
 		return
 	}
 
-	// 6. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// 7. Wake the dispatcher so requeued tasks are placed promptly; skipped when
 	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
 	if len(requeued) > 0 {
 		if err := q.NotifyTaskSubmitted(ctx); err != nil {
@@ -629,6 +656,15 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+
+	// ONE UNBUDGETED LOG LINE, and the budget question is answered rather than
+	// skipped: this site is reachable only by an authenticated admin, fires once
+	// per successful delete of a row that then ceases to exist, and cannot be
+	// driven by an unauthenticated peer. No counter, no new counters section, no
+	// new logKind. No line on refusal: a refusal changes nothing and the caller
+	// reads the 409 directly.
+	log.Printf("worker deleted: id=%s hostname=%q requeued_tasks=%d reservations_updated=%d enrollments_unlinked=%d",
+		uuidStr(id), current.Hostname, len(requeued), scrubbed, unlinked)
 
 	// NO CANCEL SIGNALS, deliberately. handleDisableWorker sends them because a
 	// disabled worker is still connected; delete refuses a connected worker, so

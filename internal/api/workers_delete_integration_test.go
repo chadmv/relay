@@ -189,3 +189,108 @@ func TestDeleteWorker_RemovesTheIdFromReservationsThatNameIt(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []pgtype.UUID{other.ID}, got.WorkerIds)
 }
+
+// TestDeleteWorker_RefusesAConnectedWorker (T-D1). The TASK assertion is what
+// proves the refusal happened BEFORE any write - it catches a handler that
+// requeues and only then discovers it may not delete.
+func TestDeleteWorker_RefusesAConnectedWorker(t *testing.T) {
+	// 'stale' FIRST: it kills the deny-list `status != 'online'` (M5), and a
+	// poisoned input placed last cannot catch an early-exit mutation.
+	for _, status := range []string{"stale", "online"} {
+		t.Run(status, func(t *testing.T) {
+			env := newCancelTestServer(t)
+			admin := createTestUser(t, env.q, "C Admin", "c-admin-"+status+"@example.com", true)
+			adminToken := createTestToken(t, env.q, admin.ID)
+			jobID := seedRunningTask(t, env, admin.ID)
+			_, err := env.q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{
+				ID: env.workerID, Status: status,
+			})
+			require.NoError(t, err)
+			before, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+			require.NoError(t, err)
+
+			rec := doDeleteWorker(t, env.srv, uuidString(env.workerID), adminToken)
+			require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+
+			// THE MESSAGE, not just the code, and this is the Go gate's own kill.
+			// The plan predicted that weakening or removing the Go status gate
+			// would change the CODE; it does not. The SQL allow-list refuses the
+			// row anyway and the n == 0 branch already answers 409, so a
+			// gate-less handler returns 409 too - both M5-go (the deny-list) and
+			// M7 (no gate at all) survive every code-only assertion. The gate's
+			// entire observable job is telling the operator WHICH 409 this is, so
+			// that is what has to be pinned.
+			assert.Contains(t, rec.Body.String(), "worker is connected",
+				"a connected worker must get the actionable refusal, not the concurrent-modification one")
+
+			_, err = env.q.GetWorker(t.Context(), env.workerID)
+			require.NoError(t, err, "the row must survive a refusal")
+			after, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+			require.NoError(t, err)
+			require.Len(t, after, 1)
+			assert.Equal(t, before[0].Status, after[0].Status, "a refusal must not requeue")
+			assert.Equal(t, before[0].AssignmentEpoch, after[0].AssignmentEpoch,
+				"a refusal must not bump the epoch - this is what catches requeue-then-discover")
+		})
+	}
+}
+
+// TestDeleteWorker_StatusCodes (T-D3). Asserts the CODE, not the message.
+// VACUITY: asserting only "not 200" collapses all three failures into one.
+func TestDeleteWorker_StatusCodes(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "SC Admin", "sc-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	user := createTestUser(t, q, "SC User", "sc-user@example.com", false)
+	userToken := createTestToken(t, q, user.ID)
+
+	assert.Equal(t, http.StatusBadRequest, doDeleteWorker(t, srv, "not-a-uuid", adminToken).Code)
+	assert.Equal(t, http.StatusNotFound,
+		doDeleteWorker(t, srv, "00000000-0000-0000-0000-000000000000", adminToken).Code)
+
+	row, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+		Name: "sc-host", Hostname: "sc-host", CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: row.ID, Status: "online"})
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, doDeleteWorker(t, srv, uuidString(row.ID), userToken).Code,
+		"admin-only: every mutating worker route is, and this is the most destructive")
+	assert.Equal(t, http.StatusConflict, doDeleteWorker(t, srv, uuidString(row.ID), adminToken).Code)
+
+	_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: row.ID, Status: "offline"})
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, doDeleteWorker(t, srv, uuidString(row.ID), adminToken).Code)
+}
+
+// TestDeleteWorkerRoute_PermitsExactlyTheDisconnectedStatuses (T-D2) at the HTTP
+// layer, over the WHOLE vocabulary, so a fifth status cannot be added without a
+// decision about the route's behaviour too.
+func TestDeleteWorkerRoute_PermitsExactlyTheDisconnectedStatuses(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "V Admin", "v-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	for _, tc := range []struct {
+		status string
+		want   int
+	}{
+		{"stale", http.StatusConflict},
+		{"online", http.StatusConflict},
+		{"offline", http.StatusOK},
+		{"revoked", http.StatusOK},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			row, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+				Name: "vocab-" + tc.status, Hostname: "vocab-" + tc.status,
+				CpuCores: 4, RamGb: 16, Os: "linux",
+			})
+			require.NoError(t, err)
+			_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{
+				ID: row.ID, Status: tc.status,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, doDeleteWorker(t, srv, uuidString(row.ID), adminToken).Code)
+		})
+	}
+}
