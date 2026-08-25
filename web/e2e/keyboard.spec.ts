@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, type Locator, test } from '@playwright/test'
 import { readSeed, type Seed } from './fixtures'
 
 // WHY THESE TWO TABLES. EnrollmentsTable and InvitesTable have ZERO focusable
@@ -33,13 +33,19 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
   // Measured directly while investigating this file's own mutation matrix
   // entry: the plan's original M2 candidate (a numeric-literal template
   // interpolation, e.g. `min-w-[${660}px]`) turned out to be constant-folded
-  // by esbuild back into the literal string during a production build, so
-  // Tailwind's scanner still found it and the mutation never actually
-  // reproduced. An object-property lookup (reading the number off a `const`
-  // object at the interpolation site, rather than writing it inline) is not
-  // folded the same way and genuinely disappears from both the built CSS and
-  // JS - but ONLY once this comment stopped independently keeping the class
-  // alive through the same whole-project scan.
+  // by esbuild back into the literal string INSIDE THE BUNDLE. That fold is
+  // irrelevant here: @tailwindcss/vite builds its Scanner over the Vite root
+  // ({base: viteRoot, pattern: '**/*'}) and reads SOURCE FILES ON DISK, never
+  // the emitted bundle, so the fold does not make the rule reappear. The
+  // reason that mutation never reproduced was this comment's own literal
+  // text independently keeping the class alive through the same
+  // whole-project scan - confirmed by re-running it with the class text
+  // absent from the comment, which goes RED (6 tests, the same failure set
+  // as the shipped form). An object-property lookup (reading the number off
+  // a `const` object at the interpolation site, rather than writing it
+  // inline) genuinely disappears from both the built CSS and the source scan
+  // - but ONLY once this comment stopped independently keeping the class
+  // alive.
   test.use({ viewport: { width: 480, height: 900 } })
 
   // marker is a FUNCTION OF Seed, not a resolved value, for the same
@@ -52,16 +58,50 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
     { path: '/admin/invites', group: 'Invites, scrolls horizontally', marker: (seed: Seed) => seed.inviteEmail },
   ]
 
+  // PRECONDITION, asserted rather than assumed, and it is the only gate in the
+  // repo that catches a computed Tailwind class. Tailwind v4 scans source
+  // STATICALLY: if a consumer built its min-width utility string instead of
+  // writing the literal, the DOM class attribute is byte-identical - so every
+  // jsdom class-string pin stays green - while the production bundle emits no
+  // rule at all, the wrapper barely overflows, and the a11y fix silently does
+  // nothing.
+  //
+  // Called BEFORE the row-marker wait in both tests below, deliberately. The
+  // group's width comes from the table header's own column widths (Table.tsx
+  // renders the wrapper and header unconditionally; `children` - the row data -
+  // is not a precondition for it), so this does not need the marker to be
+  // visible first. Ordering it first also matters for the failure mode: when
+  // the min-width rule is actually missing, the table's 1.6fr track collapses
+  // toward zero width and the marker (inside that column) never becomes
+  // visible - so with the marker wait first, both tests used to die on a
+  // generic hidden-element timeout that never mentions min-width.
+  //
+  // The threshold is 100, not 0. Measured directly by mutating both tables'
+  // MIN_W into the object-property form described above and re-running: the
+  // wrapper is NOT flush with its content even with the rule missing - the
+  // fixed-pixel columns and cell padding alone (undamaged by the mutation,
+  // since COLS is a plain literal) still produce a small residual overflow of
+  // 51px (enrollments) and 32px (invites), which `toBeGreaterThan(0)` cannot
+  // tell apart from a real one. With the rule applied, the same two surfaces
+  // measured 222px and 302px. 100 sits with comfortable margin on both sides of
+  // both pairs.
+  async function assertScrollable(group: Locator) {
+    await expect(group).toHaveCount(1)
+    const overflow = await group.evaluate((el) => el.scrollWidth - el.clientWidth)
+    expect(overflow, 'scroll wrapper is not actually scrollable - did the min-width rule reach the bundle?').toBeGreaterThan(100)
+  }
+
   for (const c of cases) {
     test(`${c.path}: a real Tab press reaches the labelled scroll region`, async ({ page }) => {
       const seed = readSeed()
       await page.goto(c.path)
-      await expect(page.getByText(c.marker(seed))).toBeVisible()
 
       // The accessible name is DERIVED from the table's own label
       // (Table.tsx:190), so this locator also pins that it has not drifted.
       const group = page.getByRole('group', { name: c.group })
-      await expect(group).toHaveCount(1)
+      await assertScrollable(group)
+
+      await expect(page.getByText(c.marker(seed))).toBeVisible()
 
       // REAL key events. web/src/components/holo/Table.test.tsx:317-328 already
       // proves tabindex="0" is in the DOM and proves nothing about keyboard
@@ -78,18 +118,10 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
     test(`${c.path}: arrow keys scroll the clipped columns into view`, async ({ page }) => {
       const seed = readSeed()
       await page.goto(c.path)
-      await expect(page.getByText(c.marker(seed))).toBeVisible()
       const group = page.getByRole('group', { name: c.group })
+      await assertScrollable(group)
 
-      // PRECONDITION, asserted rather than assumed, and it is the only gate in
-      // the repo that catches a computed Tailwind class. Tailwind v4 scans source
-      // STATICALLY: if a consumer built its min-w-[...] string instead of writing
-      // the literal, the DOM class attribute is byte-identical - so every jsdom
-      // class-string pin stays green - while the production bundle emits no rule
-      // at all, the wrapper never overflows, and the a11y fix silently does
-      // nothing.
-      const overflow = await group.evaluate((el) => el.scrollWidth - el.clientWidth)
-      expect(overflow, 'scroll wrapper is not actually scrollable - did the min-width rule reach the bundle?').toBeGreaterThan(0)
+      await expect(page.getByText(c.marker(seed))).toBeVisible()
 
       await group.focus()
       const before = await group.evaluate((el) => el.scrollLeft)
