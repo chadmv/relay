@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -335,6 +336,16 @@ func TestTaskStatusFenceRejections_TwoHandlersDoNotShareCounts(t *testing.T) {
 // and reads a set that is not a predicate at all. A quoted allow-list in prose
 // is exactly the thing this guard must not mistake for the statement's own.
 //
+// IT IS TWO-DIRECTIONAL, AND THE SECOND DIRECTION WAS MISSING. The loops below
+// assert SQL -> Go (everything the statement admits, taskStatusIsWritable calls
+// writable) and that the terminal triple is not writable. Neither of those sees
+// a GO-SIDE EXTRA - a status the mirror calls writable that the statement does
+// not admit - which is the exact edit this file's own production comment
+// anticipates: `preparing` added here ahead of the SQL. That drift mislabels
+// every genuine terminality rejection for such a row as `raced`, quietly zeroing
+// the actionable key for it. taskStatusUniverse closes it by comparing the two
+// as a PREDICATE over a candidate set rather than as one containment.
+//
 // STATE THE STAKE HONESTLY, because it is lower than every other status
 // allow-list in this tree and a reader who assumes otherwise will over-react to
 // a failure here: this set gates NOTHING. It labels a counter. Drift mislabels a
@@ -391,7 +402,63 @@ func TestTaskStatusWritableSetMatchesTheSQLAllowList(t *testing.T) {
 					"terminality rejection would then be labelled `raced` and conflicting_total would "+
 					"read zero forever - the actionable key silenced.", s, stmt)
 		}
+
+		// GO -> SQL, the direction the two loops above cannot see.
+		inSQL := map[string]bool{}
+		for _, s := range want {
+			inSQL[s] = true
+		}
+		for _, c := range taskStatusUniverse(want) {
+			require.Equal(t, inSQL[c], taskStatusIsWritable(c),
+				"taskStatusIsWritable(%q) is %v and %s's allow-list %s it. The two must agree in BOTH "+
+					"directions: a status the Go mirror admits and the statement does not means every "+
+					"genuine terminality rejection for a %q row is labelled `raced` instead of "+
+					"`duplicate` or `conflicting`, which reads as a healthy race and silences the "+
+					"actionable key for that state.",
+				c, taskStatusIsWritable(c), stmt, map[bool]string{true: "admits", false: "does not admit"}[inSQL[c]], c)
+		}
 	}
+}
+
+// taskStatusUniverse is the candidate set the two-directional comparison above
+// runs over: everything the SQL allow-list names, plus every status the WIRE can
+// carry (proto TaskStatus, less UNSPECIFIED, lowercased off its enum prefix).
+//
+// THE PROTO IS THE HALF THAT MATTERS and it is why this is a property rather
+// than a spelling. The universe has to contain the statuses somebody might add
+// to the Go mirror next, and the proto is where they appear FIRST:
+// TASK_STATUS_PREPARING is already in relay.proto and the agent already streams
+// LOG_STREAM_PREPARE chunks, so `preparing` is a candidate here today, years
+// before it is a value in tasks_status_check. A universe read out of tasks.sql
+// alone would not contain it, and the guard would pass through the one edit it
+// exists to catch.
+//
+// Candidates that are not database statuses are harmless rather than excluded:
+// `prepare_failed` is a wire-only value the handler maps onto `failed`, so both
+// sides say "not writable" and the comparison holds. Excluding it by name would
+// be the spelling rung; letting it through is the property rung.
+//
+// Sorted so a failure names the same status every run.
+func taskStatusUniverse(sqlAllowList []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range sqlAllowList {
+		add(s)
+	}
+	for _, n := range relayv1.TaskStatus_name {
+		if n == "TASK_STATUS_UNSPECIFIED" {
+			continue
+		}
+		add(strings.ToLower(strings.TrimPrefix(n, "TASK_STATUS_")))
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestClassifyStatusFenceRejection is the classifier's own truth table, with the
