@@ -203,6 +203,20 @@ type Handler struct {
 	// precedent and is what api.CounterSources uses. metrics.Store is the wrong
 	// HOME and must not gain a counter method.
 	taskLogFenceRejects atomic.Uint64
+
+	// statusFence counts the rejections handleTaskStatus's two epoch-fenced
+	// writes produced, split by what the row said when GetTask read it. A VALUE,
+	// not a pointer, for the same reason ingestDrops and taskLogFenceRejects are:
+	// the zero value works, so a bare &Handler{} in a test has working counters
+	// and there is no nil case anywhere. Read through TaskStatusFenceRejections;
+	// wired to GET /v1/server/counters by cmd/relay-server's buildHTTPServer
+	// under its OWN section and its OWN CounterSources field.
+	//
+	// A THIRD DISTINCT NOUN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
+	// taskLogFenceRejects counts LOG CHUNKS AppendTaskLog's fence rejected; this
+	// counts STATUS REPORTS the status fence rejected. No input moves more than
+	// one of the three. Do not sum them and do not merge the sections.
+	statusFence statusFenceCounters
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -225,6 +239,17 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 // never returned to an agent: the only read path is the admin-authenticated
 // GET /v1/server/counters.
 func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
+
+// TaskStatusFenceRejections reports what handleTaskStatus's two epoch-fenced
+// writes have refused since process start, split by what the row said at T0.
+//
+// It satisfies api.TaskStatusFenceSource. NOTE THE NEIGHBOUR: TaskLogFence
+// Rejections is one letter away in the middle and returns a uint64, so a crossed
+// wiring is a compile error rather than a silently wrong section. Per PROCESS,
+// monotonic, zeroed by a restart, and never returned to an agent.
+func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
+	return h.statusFence.snapshot()
+}
 
 // NewHandler returns a Handler wired to the given dependencies.
 func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
