@@ -310,14 +310,21 @@ func strandStream(t *testing.T) *scriptedStream {
 // a substitute either: it marks tasks timed_out at RELAY_TASK_MAX_ASSIGNMENT
 // (24h) rather than requeueing them, and it never writes workers.status at all.
 func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGeneration(t *testing.T) {
+	// THE ARM DISCRIMINATOR MOVED FROM THE RETURNED ERROR TO THE LOG, and it is
+	// not weaker for it. finishRegister's store errors are sanitized before they
+	// reach the peer - they used to carry "reconcile: <raw Postgres text>" to an
+	// unauthenticated caller - so the returned message is now opaque by design and
+	// can no longer say which internal step failed. registrationStoreFault logs
+	// that, which discriminates the arm exactly as before AND additionally proves
+	// the sanitizer ran.
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
 
 	err := h.Connect(strandStream(t))
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile",
+	require.Contains(t, logged(), "reconcile",
 		"fixture: the registration must fail inside reconcileRunningTasks, AFTER "+
-			"RegisterWorkerConnection acquired the generation. Any other error means this test is "+
 			"driving the wrong arm and its assertions below prove nothing.")
 
 	execs := db.execsSeen()
@@ -374,6 +381,7 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 // `== 0` early return from releaseWorkerGeneration and this test fails while the
 // strand test above still passes.
 func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 0")
 
 	offline, unsubscribe := h.broker.Subscribe(events.Filter{})
@@ -381,7 +389,7 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 
 	err := h.Connect(strandStream(t))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
+	require.Contains(t, logged(), "reconcile", "fixture: same arm as the strand test")
 
 	require.Len(t, db.execsSeen(), 1,
 		"the release must still be ATTEMPTED. The epoch fence is what decides ownership here, and "+
@@ -430,6 +438,7 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 // statement directly. If we really had been superseded, the worst case is a
 // fenced no-op; today's worst case is a permanent strand.
 func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *testing.T) {
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
 	db.execErr = errors.New("failed to connect to `host=localhost`: dial error")
 
@@ -438,7 +447,7 @@ func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *te
 
 	err := h.Connect(strandStream(t))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
+	require.Contains(t, logged(), "reconcile", "fixture: same arm as the strand test")
 
 	require.Len(t, db.execsSeen(), 1, "the release must still be attempted")
 

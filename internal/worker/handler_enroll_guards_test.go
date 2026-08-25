@@ -918,3 +918,37 @@ func TestDefaultAutoEnrollWorkerCeiling_IsTheValueREADMEDocuments(t *testing.T) 
 		"README documents 1024 in two places (the env table row and the auto-enrollment cost section); "+
 			"change both, and the RELAY_GRPC_MAX_CONNS anchor this is derived from, before changing this")
 }
+
+// TestConnect_AStoreFaultInFinishRegisterDisclosesNothingToTheCaller closes the
+// half-fix boundary the enrollment-transaction sanitizer left behind.
+// finishRegister is shared by ALL THREE registration paths, so a token-less
+// auto-enrolled peer reaches both of its store-error returns
+// (RegisterWorkerConnection and reconcileRunningTasks) and used to get the
+// wrapped Postgres text back as codes.Unknown.
+//
+// It is a weaker exposure than the one the enrollment sanitizer closed - no
+// caller-controlled value is echoed here, so it is schema disclosure rather than
+// injection - but it is the same class, and leaving it is the obvious half-fix.
+//
+// THE LOG HALF IS NOT DECORATION: sanitizing without logging would turn a real
+// database fault into a silent 500 with nothing anywhere to diagnose it.
+func TestConnect_AStoreFaultInFinishRegisterDisclosesNothingToTheCaller(t *testing.T) {
+	logged := captureUnitLog(t)
+
+	pgish := errors.New(`ERROR: relation "tasks" does not exist (SQLSTATE 42P01)`)
+	h, _, _ := newStrandHandler(t, pgish, "UPDATE 1")
+
+	err := h.Connect(strandStream(t))
+	require.Error(t, err)
+	assert.Equal(t, codes.Internal, status.Code(err))
+
+	msg := status.Convert(err).Message()
+	for _, leak := range []string{"SQLSTATE", "relation", "42P01", "reconcile"} {
+		assert.NotContains(t, msg, leak,
+			"the peer must not be told the schema or which internal step failed; got %q", msg)
+	}
+
+	out := logged()
+	assert.Contains(t, out, "SQLSTATE", "the detail must reach the operator's log instead")
+	assert.Contains(t, out, "reconcile", "and it must name which step failed")
+}

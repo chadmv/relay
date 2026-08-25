@@ -462,6 +462,8 @@ is a machine that ran successfully once, this one never registered at all. Befor
 the retry self-healed, because the upsert simply rotated the token; closing the takeover is what makes
 this permanent.
 
+**One server-side line is driveable by an unauthenticated caller, and it is not a refusal.** A store fault inside either enrollment transaction is logged (the peer gets an opaque `Internal`; the detail stays on the server). That is deliberate - a store fault is a server condition that must not be silent - but be clear about its bound, because it is weaker than the audit line's. The audit line fires only on success, so it is one line per hostname forever and is additionally capped by the ceiling. The fault line has no per-hostname bound: with auto-enroll on, a caller presenting no credential and a hostname over the ~2704-byte index limit fails deterministically and, since only `Unauthenticated` is terminal for an agent, reconnects on backoff. Neither line is covered by the per-connection ingest budget, which is not allocated until after registration. Bounding hostname length is tracked separately.
+
 **Refusals are counted, never logged.** A refusal is unboundedly repeatable by the same caller with the
 same hostname, and the per-connection log limiter is not allocated until *after* registration, so a log
 line there would be an unbounded attacker-driven log site. The server keeps a cumulative count split by

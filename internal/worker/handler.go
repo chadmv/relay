@@ -85,8 +85,16 @@ var errCredentialLive = errors.New("worker credential is live")
 // fleet-wide denial primitive.
 var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
 
-// enrollmentStoreFault turns a store error from either enrollment transaction
+// registrationStoreFault turns a store error anywhere on the registration path
 // into what the peer sees, and puts the detail in the server log instead.
+//
+// IT COVERS finishRegister TOO, not just the two enrollment transactions, and
+// the name says so because that is the half-fix boundary an earlier revision
+// stopped at. finishRegister is shared by all three registration paths, so its
+// RegisterWorkerConnection and reconcileRunningTasks errors are reachable by a
+// token-less peer exactly like the enrollment ones. Those two echo no
+// caller-controlled value, so they are schema disclosure rather than injection -
+// a weaker exposure, the same class, and not worth leaving behind.
 //
 // THE PEER USED TO GET THE WHOLE THING. Both transactions returned the wrapped
 // error verbatim and there is no sanitizing interceptor on this server, so
@@ -97,18 +105,36 @@ var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
 // credential - and made that refusal distinguishable by BOTH code and message
 // from the three README says are identical.
 //
-// IT IS A FAULT SITE, NOT A REFUSAL SITE, and that is the whole reason it logs
-// where the refusals deliberately do not. A refusal is the system working and is
-// counted (EnrollmentRefusals); a store fault is an operator-actionable SERVER
-// condition that must not be silent, especially now that the peer's message
-// carries nothing anyone could act on. THE BOUND IS THE WEAKER ONE AND IS STATED
-// RATHER THAN IMPLIED: like the auto-enroll audit line below, this is one line
-// per STREAM, priced by RELAY_GRPC_MAX_CONNS and RELAY_GRPC_REGISTRATION_TIMEOUT
-// rather than by message volume - not by the per-connection ingest budget, which
-// is not allocated until after registration. Same %q injection defence and
-// clipID volume defence as the audit line, applied to the error text too, since
-// a Postgres error can echo a caller-supplied value back into it.
-func enrollmentStoreFault(ctx context.Context, path, hostname string, err error) error {
+// IT IS A FAULT SITE, NOT A REFUSAL SITE, and that is why it logs where the
+// refusals deliberately do not. A refusal is the system working and is counted
+// (EnrollmentRefusals); a store fault is an operator-actionable SERVER condition
+// that must not be silent, especially now that the peer's message carries
+// nothing anyone could act on.
+//
+// ITS BOUND IS WEAKER THAN THE AUDIT LINE'S BELOW, AND AN EARLIER VERSION OF
+// THIS COMMENT CLAIMED PARITY WITH IT. THAT WAS WRONG. Both are one line per
+// STREAM, priced by RELAY_GRPC_MAX_CONNS and RELAY_GRPC_REGISTRATION_TIMEOUT
+// rather than by message volume - neither is covered by the per-connection
+// ingest budget, which is not allocated until after registration. But the audit
+// line has a SECOND bound this one does not: it fires only on SUCCESS, so after
+// the create-only rule it is one line per hostname FOREVER, and the total is
+// additionally capped by RELAY_AUTO_ENROLL_WORKER_CEILING. This line has no
+// per-hostname bound at all.
+//
+// AND IT IS REACHABLE PRE-AUTHENTICATION. With auto-enroll on, a peer presenting
+// NO credential and a hostname over the ~2704-byte btree entry limit fails the
+// workers.hostname unique index deterministically, every time, forever - and
+// because internal/agent only treats codes.Unauthenticated as terminal, an agent
+// (or an attacker imitating one) reconnects on backoff rather than exiting. So
+// the honest description is "unbounded by hostname, bounded only by the
+// connection caps, and driveable by an unauthenticated caller". Bounding the
+// hostname itself is the separate item the spec scoped out; until it lands, this
+// is the disclosure rather than the fix.
+//
+// Same %q injection defence and clipID volume defence as the audit line, applied
+// to the error text too, since a Postgres error can echo a caller-supplied value
+// back into it.
+func registrationStoreFault(ctx context.Context, path, hostname string, err error) error {
 	log.Printf("worker: %s store fault (hostname=%q) from %s: %q",
 		path, clipID(hostname), remoteAddr(ctx), clipID(err.Error()))
 	return status.Errorf(codes.Internal, "registration failed")
@@ -698,7 +724,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
 			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
-		return "", nil, enrollmentStoreFault(ctx, "enrollment", reg.Hostname, txErr)
+		return "", nil, registrationStoreFault(ctx, "enrollment", reg.Hostname, txErr)
 	}
 
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
@@ -792,7 +818,7 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 			h.enrollmentRefusals.record(enrollmentRefusalFleetAtCeiling)
 			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
-		return "", nil, enrollmentStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
+		return "", nil, registrationStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
 	}
 
 	// reg.Hostname is a caller-supplied proto string: validated nowhere, bounded
@@ -827,7 +853,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 		SupportsWorkspaces: reg.SupportsWorkspaces,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("register worker connection: %w", err)
+		return "", nil, registrationStoreFault(ctx, "register worker connection", reg.Hostname, err)
 	}
 
 	workerID := uuidStr(updated.ID)
@@ -905,7 +931,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// Reconcile the agent's running-task report against DB state.
 	cancelIDs, err := h.reconcileRunningTasks(ctx, updated.ID, reg.RunningTasks)
 	if err != nil {
-		return "", nil, fmt.Errorf("reconcile: %w", err)
+		return "", nil, registrationStoreFault(ctx, "reconcile", reg.Hostname, err)
 	}
 
 	// Replace workspace inventory with what the agent reported at reconnect.
