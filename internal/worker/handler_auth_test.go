@@ -16,6 +16,7 @@ import (
 	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -608,4 +609,104 @@ func TestConnect_NoCredentialRejected(t *testing.T) {
 	err := <-done
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+}
+
+// TestConnect_AutoEnrollCeilingRefusesAtCapacityAndRevokingFreesBudget is
+// README's remedy 1, end to end against real rows, and it is the only test that
+// exercises the ceiling with a real CountWorkers rather than a fixture answer.
+//
+// It asserts BOTH halves of the property an operator at the ceiling has to hold
+// at once: revoking frees ceiling BUDGET (CountWorkers excludes revoked rows),
+// and it does NOT free the HOSTNAME (the row survives, so
+// InsertWorkerForAutoEnroll still conflicts). Documenting the first without the
+// second is what made the shipped remedy an infinite loop.
+func TestConnect_AutoEnrollCeilingRefusesAtCapacityAndRevokingFreesBudget(t *testing.T) {
+	fx := newWorkerTestFixture(t)
+	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
+
+	enroll := func(hostname string) error {
+		t.Helper()
+		stream := newMockConnectStream(t)
+		stream.SendToServer(&relayv1.AgentMessage{
+			Payload: &relayv1.AgentMessage_Register{
+				Register: &relayv1.RegisterRequest{
+					Hostname: hostname, CpuCores: 4, RamGb: 8, Os: "linux",
+				},
+			},
+		})
+		done := make(chan error, 1)
+		go func() { done <- fx.Handler.Connect(stream) }()
+		select {
+		case err := <-done:
+			return err // refused
+		case msg := <-stream.fromServer:
+			require.NotNil(t, msg.GetRegisterResponse())
+			stream.CloseSend()
+			<-done
+			return nil
+		case <-time.After(10 * time.Second):
+			t.Fatal("Connect neither refused nor registered within 10s")
+			return nil
+		}
+	}
+
+	base, err := fx.Q.CountWorkers(ctx)
+	require.NoError(t, err)
+
+	// Capacity is exactly one more worker than exists right now.
+	ceiling := int(base) + 1
+	fx.Handler.AutoEnrollWorkerCeiling = &ceiling
+
+	require.NoError(t, enroll("ceiling-host-a"), "the last unit of budget must still enroll")
+
+	// Now at capacity: a DIFFERENT, never-seen hostname is refused, which is the
+	// bound doing its job rather than the create-only guard.
+	err = enroll("ceiling-host-b")
+	require.Error(t, err, "at capacity a fresh hostname must be refused")
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.Equal(t, worker.EnrollmentRefusalCounts{FleetAtCeiling: 1}, fx.Handler.EnrollmentRefusals(),
+		"the refusal must be attributed to the ceiling, not to a claimed hostname")
+
+	_, err = fx.Q.GetWorkerByHostname(ctx, "ceiling-host-b")
+	assert.ErrorIs(t, err, pgx.ErrNoRows,
+		"the ceiling check precedes the insert, so a refused auto-enroll must leave no row behind")
+
+	// REMEDY 1: revoke a worker that does not correspond to a real machine.
+	a, err := fx.Q.GetWorkerByHostname(ctx, "ceiling-host-a")
+	require.NoError(t, err)
+	_, err = fx.Q.ClearWorkerAgentToken(ctx, a.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, enroll("ceiling-host-b"),
+		"revoking must free ceiling budget for a NEW hostname, with no restart and without deleting a row")
+
+	// AND THE OTHER HALF: the revoked worker's own hostname is still claimed, so
+	// remedy 1 does not let that machine re-enroll token-lessly.
+	//
+	// ceiling-host-b's enrollment put the fleet BACK at capacity, so retrying
+	// ceiling-host-a here would be refused by the CEILING and prove nothing about
+	// the hostname. That is not an accident of this test - it is the reason
+	// aliasing documented on enrollmentRefusalFleetAtCeiling, observed: at
+	// capacity the ceiling check runs first and every token-less refusal is
+	// recorded under it, whatever the real cause. This assertion was written the
+	// other way first and caught it. Free a unit of budget so the assertion below
+	// is about the hostname.
+	b, err := fx.Q.GetWorkerByHostname(ctx, "ceiling-host-b")
+	require.NoError(t, err)
+	_, err = fx.Q.ClearWorkerAgentToken(ctx, b.ID)
+	require.NoError(t, err)
+
+	err = enroll("ceiling-host-a")
+	require.Error(t, err, "revoking frees budget but never the hostname")
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+	assert.Equal(t, worker.EnrollmentRefusalCounts{HostnameClaimed: 1, FleetAtCeiling: 1},
+		fx.Handler.EnrollmentRefusals(),
+		"with budget available the refusal is hostname_claimed, not fleet_at_ceiling: revoking freed "+
+			"the budget and did NOT free the hostname, which is why the documented recovery for THIS "+
+			"machine is revoke-then-enrollment-token, or delete - never revoke-then-retry-token-lessly")
+
+	// Byte-identical to the ceiling refusal it is not: the indistinguishability
+	// property holding on a real server rather than against a fake.
+	assert.Equal(t, "authentication failed", status.Convert(err).Message())
 }
