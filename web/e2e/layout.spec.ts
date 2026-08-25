@@ -7,7 +7,7 @@ import { surfaces } from './surfaces'
 // layout assertion there is a structural guard or a class-string pin. This file
 // is the only place in the repo where a width is a real number.
 //
-// Four qualifiers below are lessons the 2026-08-13 narrow-viewport slice paid
+// Five qualifiers below are lessons the 2026-08-13 narrow-viewport slice paid
 // for, converted into config so nobody re-learns them:
 //   - POPULATED tables, because the item was misdiagnosed twice on empty ones.
 //   - BOTH 320 and 375, because a fifth cause was found only at 320.
@@ -15,7 +15,13 @@ import { surfaces } from './surfaces'
 //     cause was found only that way.
 //   - /auth as a CONTROL (surfaces.ts), because it renders no shell and never
 //     overflowed, which is what makes the header attribution an attribution.
-const WIDTHS = [320, 375] as const
+//   - 1280, restoring a check the 2026-08-13 retro itself ran (a manual
+//     no-regression pass at that width) but which never made it into this
+//     harness. Every `md:`/`lg:` rule - ServerTab.tsx's `md:grid-cols-2` is a
+//     real one - is otherwise unevaluated by this file, since 320 and 375 both
+//     sit below every such breakpoint. The added cost is a few seconds of
+//     wall clock for a check the project already knew it needed.
+const WIDTHS = [320, 375, 1280] as const
 
 // NOT called at module scope. Playwright collects every spec file across every
 // project - including chromium/webkit, which DEPEND on setup - before it runs
