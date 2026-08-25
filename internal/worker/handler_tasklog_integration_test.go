@@ -14,6 +14,7 @@ import (
 	"relay/internal/events"
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/store"
+	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -59,6 +60,39 @@ func seedClaimedTask(t *testing.T, ctx context.Context, q *store.Queries, email,
 	})
 	require.NoError(t, err)
 	return job.ID, task.ID, w.ID, claimed.AssignmentEpoch
+}
+
+// mintAgentTokenFor gives a seeded workers row a real agent credential and
+// returns the raw token, so a test can drive reconnectAndRegister and land on
+// THAT worker id.
+//
+// IT REPLACES A FIXTURE CONVENIENCE THAT WAS THE TAKEOVER DEFECT ITSELF. Three
+// tests used to send a token-LESS RegisterRequest naming the seeded hostname and
+// rely on auto-enroll's ON CONFLICT DO UPDATE resolving to the existing row -
+// their comments said so in as many words. That resolution IS the hostname
+// takeover docs/superpowers/specs/2026-08-25-auto-enroll-guards.md closes, so
+// those tests were green BECAUSE OF the bug, in the same shape as
+// TestConnect_AutoEnrollRotatesTokenForExistingHost. Auto-enroll now creates
+// workers and never claims them, so the token-less register is refused and the
+// convenience is gone.
+//
+// What those tests actually need is "this connection is authenticated AS the
+// task's assignee", and an agent token is how a real agent establishes that -
+// the same route handler_reenrollment_revive_test.go uses. Nothing about what
+// they assert changes.
+//
+// The raw token is derived from the seed rather than fixed: agent_token_hash is
+// looked up by GetWorkerByAgentTokenHash, a :one, so two seeded workers sharing
+// a token in one database would make that lookup ambiguous rather than wrong in
+// an obvious way.
+func mintAgentTokenFor(t *testing.T, ctx context.Context, q *store.Queries, workerID pgtype.UUID, seed string) string {
+	t.Helper()
+	raw := "seeded-agent-token-" + seed
+	hash := tokenhash.Hash(raw)
+	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
+		ID: workerID, AgentTokenHash: &hash,
+	}))
+	return raw
 }
 
 func TestHandleTaskLog_PublishesToATaskScopedSubscriber(t *testing.T) {
@@ -540,22 +574,26 @@ func TestHandleTaskLog_RejectsAChunkForANeverClaimedTask(t *testing.T) {
 // reason that has nothing to do with what is under test.
 func TestConnect_TaskLogChunkIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
 	fx := newWorkerTestFixture(t)
-	fx.Handler.AllowAutoEnroll = true
 	ctx := context.Background()
 	q := fx.Q
 
 	const hostname = "w-connect-wiring"
 	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "logs7@example.com", hostname)
 	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+	agentToken := mintAgentTokenFor(t, ctx, q, workerID, hostname)
 
 	stream := newMockConnectStream(t)
-	// Auto-enroll upserts by hostname and returns the EXISTING row's id, so this
-	// connection resolves to the very worker the task above is assigned to.
+	// The connection authenticates AS the seeded worker with that worker's own
+	// agent token, so it resolves to the very worker the task above is assigned
+	// to. It used to send no credential at all and lean on auto-enroll resolving
+	// the hostname to the existing row - see mintAgentTokenFor for why that is
+	// gone.
 	stream.SendToServer(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_Register{
 			Register: &relayv1.RegisterRequest{
 				Hostname: hostname,
 				CpuCores: 1, RamGb: 1, Os: "linux",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: agentToken},
 				RunningTasks: []*relayv1.RunningTask{
 					{TaskId: taskIDStr, Epoch: int64(epoch)},
 				},

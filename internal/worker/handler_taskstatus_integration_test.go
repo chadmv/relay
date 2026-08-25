@@ -430,11 +430,12 @@ func TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask(t
 // while the whole package stayed green.
 //
 // Two fixture details are load-bearing:
-//   - Auto-enroll upserts by hostname and returns the EXISTING row's id, so
-//     seeding the claimed task against the same hostname makes this connection
-//     resolve to the very worker the task is assigned to. The assertion on the
-//     register response's worker_id is what proves that actually happened; drop
-//     it and the test proves nothing.
+//   - The connection authenticates AS the seeded worker, with that worker's own
+//     agent token, so it resolves to the very worker the task is assigned to. The
+//     assertion on the register response's worker_id is what proves that actually
+//     happened; drop it and the test proves nothing. This used to send no
+//     credential and rely on auto-enroll upserting by hostname onto the existing
+//     row - see mintAgentTokenFor for why that route is gone.
 //   - The register message must report the claimed task in RunningTasks.
 //     finishRegister runs reconcileRunningTasks, which requeues any task the
 //     coordinator has assigned to this worker but the agent did not report, and a
@@ -442,13 +443,13 @@ func TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask(t
 //     stale for a reason that has nothing to do with what is under test.
 func TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
 	fx := newWorkerTestFixture(t)
-	fx.Handler.AllowAutoEnroll = true
 	ctx := context.Background()
 	q := fx.Q
 
 	const hostname = "w-connect-status-wiring"
 	_, taskID, workerID, epoch := seedClaimedTask(t, ctx, q, "status5@example.com", hostname)
 	taskIDStr := fx.Handler.UUIDStringForTest(taskID)
+	agentToken := mintAgentTokenFor(t, ctx, q, workerID, hostname)
 
 	stream := newMockConnectStream(t)
 	stream.SendToServer(&relayv1.AgentMessage{
@@ -456,6 +457,7 @@ func TestConnect_TaskStatusIsFencedOnTheConnectionsOwnWorker(t *testing.T) {
 			Register: &relayv1.RegisterRequest{
 				Hostname: hostname,
 				CpuCores: 1, RamGb: 1, Os: "linux",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: agentToken},
 				RunningTasks: []*relayv1.RunningTask{
 					{TaskId: taskIDStr, Epoch: int64(epoch)},
 				},
@@ -767,11 +769,12 @@ func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *
 
 // Route B over the REAL message loop rather than the exported shim. Three
 // fixture details are load-bearing:
-//   - Auto-enroll upserts by hostname and returns the EXISTING row's id, so
-//     seeding the task against seedTaskAndTwoWorkers' w1 hostname (<prefix>-w1)
-//     makes this connection resolve to the very worker the task is assigned to.
-//     The assertion on the register response's worker_id is what proves that
-//     happened; drop it and the test proves nothing.
+//   - The connection authenticates AS w1, with w1's own agent token, so it
+//     resolves to the very worker the task is assigned to. The assertion on the
+//     register response's worker_id is what proves that happened; drop it and the
+//     test proves nothing. This used to send no credential and rely on auto-enroll
+//     upserting seedTaskAndTwoWorkers' w1 hostname onto the existing row - see
+//     mintAgentTokenFor for why that route is gone.
 //   - Both tasks must be reported in RunningTasks. finishRegister runs
 //     reconcileRunningTasks, which requeues any task the coordinator has
 //     assigned to this worker but the agent did not report, and a requeue bumps
@@ -785,13 +788,13 @@ func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *
 //     so it stays observable whether or not the FAILED was rejected.
 func TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask(t *testing.T) {
 	fx := newWorkerTestFixture(t)
-	fx.Handler.AllowAutoEnroll = true
 	ctx := context.Background()
 	q := fx.Q
 
 	const prefix = "status9"
 	const hostname = prefix + "-w1"
 	jobID, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, prefix, 1)
+	agentToken := mintAgentTokenFor(t, ctx, q, w1, hostname)
 	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{
 		ID: taskID, WorkerID: w1,
 	})
@@ -816,6 +819,7 @@ func TestConnect_ASecondTerminalOverTheRealMessageLoopDoesNotResurrectTheTask(t 
 			Register: &relayv1.RegisterRequest{
 				Hostname: hostname,
 				CpuCores: 1, RamGb: 1, Os: "linux",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: agentToken},
 				RunningTasks: []*relayv1.RunningTask{
 					{TaskId: taskIDStr, Epoch: int64(claimed.AssignmentEpoch)},
 					{TaskId: barrierStr, Epoch: int64(claimedBarrier.AssignmentEpoch)},
