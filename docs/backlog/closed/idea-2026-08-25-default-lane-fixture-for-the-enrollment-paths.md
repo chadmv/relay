@@ -1,8 +1,10 @@
 ---
 title: The enrollment paths are fakeable now but still have no default-lane test
 type: idea
-status: open
+status: closed
 created: 2026-08-25
+closed: 2026-08-25
+resolution: fixed
 priority: medium
 source: 2026-08-25 handler-pool-seam slice - the seam covers all three BeginTxFunc sites, but only applyInventory's was spent
 ---
@@ -53,3 +55,27 @@ have no default-lane witness today:
 - `docs/superpowers/specs/2026-08-25-handler-pool-seam.md` - finding F2 and section 12.1
 - [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - the lane problem this reduces further
 - [[idea-2026-08-24-handler-pool-has-no-seam]] - closed; the seam this spends
+
+## Resolution
+
+Fixed. `internal/worker/handler_enroll_guards_test.go` drives both `enrollAndRegister` and
+`autoEnrollAndRegister` to success and to every refusal branch in the default lane, with no Postgres
+and no build tag.
+
+Four blockers this item did not state had to be closed first, all found by the spec:
+`strandDB.QueryRow` could not express `pgx.ErrNoRows`; `fakeTx` had no `QueryRow` at all;
+`fakeTx.Exec` returned zero rows so `errEnrollmentNotConsumable` fired by default; and
+`strandWorkerRow` made every enrollment token look consumed and expired.
+
+One criterion is met differently than written: `errWorkerRevoked` no longer exists, so its named
+branch cannot be asserted - the behaviour is, by the create-only refusal that replaced it.
+
+The token scrub PR #149 shipped is now load-bearing rather than speculative. These are the paths that
+mint a real `rawAgentToken`, and `tokensSent() == 1` is asserted positively so the test cannot pass
+against a build that never minted one.
+
+Review found the fixture initially could not distinguish a POOL statement from a TRANSACTION
+statement, so three mutations hoisting each guard out of its transaction survived. Closed with an
+owner tag supplied by whichever fake receives the call.
+
+See `docs/retros/2026-08-25-auto-enroll-guards.md`.
