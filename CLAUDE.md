@@ -64,23 +64,7 @@ Code map:
 
 **Database.** Migrations are embedded in the binary and run on startup. Files in `internal/store/migrations/` use `golang-migrate` format (`000N_name.up.sql` / `000N_name.down.sql`).
 
-**Tailwind v4 scans the whole project, so prose is compiled input.** `@tailwindcss/vite` builds its
-scanner over the Vite root with `pattern: '**/*'` and reads **source files on disk**, not the emitted
-bundle - so a class-shaped substring anywhere under `web/`, including inside a comment or a test file,
-emits CSS. Demonstrated 2026-08-24: a bracket-form placeholder written in a comment in
-`web/e2e/keyboard.spec.ts` shipped a literal, invalid rule into the production stylesheet, and it
-disappeared from the built CSS the moment the comment was reworded. So **prose that needs to name an
-arbitrary-value class should spell it in a form the scanner does not match** - write the CSS property,
-not the bracket form.
-
-Two corollaries, both of which were got wrong before being measured. Because the scanner reads source
-and never the bundle, **esbuild constant-folding a computed class back to a literal does not make it
-visible to Tailwind** - a folded string is still absent from the CSS. And for the same reason a
-template literal that interpolates the value inside the brackets is not a match either, so it neither
-emits a rule nor rescues one; only a literal class-shaped substring counts. If a mutation that removes a class appears
-not to reproduce, suspect a stale `web/dist` embed before suspecting the scanner - `//go:embed`
-snapshots `web/dist` at compile time, so a Go binary built without a fresh `make web-build` serves the
-previous bundle.
+**Tailwind v4 scans prose as source - see [web/CLAUDE.md](web/CLAUDE.md).** A class-shaped substring anywhere under `web/` (comments and tests included) emits CSS, and a rule that seems not to disappear may be a stale `web/dist` embed (`//go:embed` snapshots at compile time), not the scanner.
 
 **Source providers.** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent. Provision tickets out-of-band (`p4 login`); relay does not manage P4 credentials. The Perforce integration test spins up a `p4d` container via testcontainers-go.
 
