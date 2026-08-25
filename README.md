@@ -197,7 +197,7 @@ Before a new agent can connect, an admin must issue it a one-time enrollment tok
 
 Set that token as an environment variable before starting the agent for the first time. After enrollment the agent persists a long-lived token in `--state-dir` and the env var is no longer needed.
 
-On a trusted private network you can instead run the server with `RELAY_ALLOW_AUTO_ENROLL=true` and start the agent with no token at all - skip the `relay agent enroll` step entirely. The agent receives and persists a long-lived token on its first connection, exactly as with token enrollment.
+On a trusted private network you can instead run the server with `RELAY_ALLOW_AUTO_ENROLL=true` and start the agent with no token at all - skip the `relay agent enroll` step entirely. The agent receives and persists a long-lived token on its first connection, exactly as with token enrollment. **This works for a hostname that has no existing `workers` row.** Auto-enrollment creates workers and never claims them, so a machine being re-provisioned in place - or one that lost its state directory but kept its hostname - must be revoked first (`relay workers revoke <id>`), or enrolled with an admin-issued enrollment token instead.
 
 **Linux / macOS**
 
@@ -287,7 +287,8 @@ All configuration is via environment variables:
 | `RELAY_LOGIN_RATE_LIMIT` | `10:1m` | Per-IP rate limit for `POST /v1/auth/login` (format `N:duration`) |
 | `RELAY_REGISTER_RATE_LIMIT` | `5:1m` | Per-IP rate limit for `POST /v1/auth/register` |
 | `RELAY_ALLOW_SELF_REGISTER` | _(unset)_ | When `true`, `POST /v1/auth/register` accepts requests without an `invite_token` and creates a non-admin user directly. Default off; requires server restart to change. |
-| `RELAY_ALLOW_AUTO_ENROLL` | `false` | When `true`, agents may register with no enrollment token (token-less auto-enrollment). Intended only for trusted private networks where any host able to reach gRPC is trusted. A long-lived agent token is still issued on join and used for all later reconnects. Revoked workers are not revived. |
+| `RELAY_ALLOW_AUTO_ENROLL` | `false` | When `true`, agents may register with no enrollment token (token-less auto-enrollment). Intended only for trusted private networks where any host able to reach gRPC is trusted. A long-lived agent token is still issued on join and used for all later reconnects. An existing worker row is never touched at all: a hostname that already has one is refused, whatever that worker's status and whatever its token, so "revoked workers are not revived" is the special case rather than the rule. |
+| `RELAY_AUTO_ENROLL_WORKER_CEILING` | `1024` | Refuses token-less auto-enrollment once this many **non-revoked** workers exist. `0` disables the bound; a negative or unparseable value warns and keeps the default. It counts ALL non-revoked workers, not only auto-enrolled ones, because nothing in the schema records which path created a row. The bound is approximate - see the auto-enrollment cost note below. Requires a server restart to change. |
 
 **Linux / macOS**
 
@@ -351,7 +352,7 @@ The agent writes two files to `--state-dir`:
 
 On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error **the next time it connects**. Revocation does not reach a connection that is already established: nothing re-checks a credential after registration and revoking does not close the stream, so an already-connected agent keeps running the tasks it already holds and keeps writing their task logs and statuses until it disconnects for some other reason - both of those writes are fenced on the task's assignment epoch and its `worker_id`, never on the worker's status. **New dispatches stop at once**, though: revoking sets the worker's status to `revoked`, the dispatcher only selects `online` or `stale` workers, and nothing restores `online` while the stream is live. Relay sets no maximum connection age, so there is no timer that ends the connection either. To end it immediately, disable or delete the worker and confirm it has gone offline - but note that deleting the worker row destroys its assignments and reservations, so it is not the right first move if all you needed was to stop new work.
 
-When the server runs with `RELAY_ALLOW_AUTO_ENROLL=true`, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN` attempts token-less auto-enrollment instead of exiting. If the server does not allow it, the agent exits with an authentication error.
+When the server runs with `RELAY_ALLOW_AUTO_ENROLL=true`, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN` attempts token-less auto-enrollment instead of exiting. If the server does not allow it, the agent exits with an authentication error. It exits the same way, with the same error, in two further cases: the hostname it presents **already has a `workers` row**, and the fleet is **at `RELAY_AUTO_ENROLL_WORKER_CEILING`**. The server returns one opaque refusal for all three, so the agent's own exit log is what names them and prescribes the remedy.
 
 **Disable vs revoke.** *Disabling* a worker (`relay workers disable`) takes it
 out of the scheduler's rotation while keeping its token and connection, so it
@@ -367,25 +368,75 @@ revoked state, auto-enrollment under `RELAY_ALLOW_AUTO_ENROLL` does not revive a
 revoked worker - it stays revoked until an admin clears or deletes it. (Because
 identity is keyed by hostname, a renamed host can still rejoin as a new worker.)
 
+An admin-issued enrollment token still revives a revoked worker, and that is the
+recovery route this design points you at. What it no longer does is bind to a
+worker whose credential is **live**: rotating a live agent's credential requires
+a revoke first. The asymmetry between the two paths is deliberate - revoking
+does not delete the row, so refusing every existing row on the enrollment-token
+path too would make the revoked row block its own recovery and leave
+`relay workers delete`, which destroys assignments and reservations, as the only
+way back.
+
 **What auto-enrollment costs, stated plainly.** Under `RELAY_ALLOW_AUTO_ENROLL=true`, any host able to
-reach the gRPC port may **take over an existing worker by claiming its hostname**, and may create **one
-persistent `workers` row per distinct hostname it claims**. The hostname is caller-supplied and not
-validated. Takeover is the larger of the two costs and is not a special case: the upsert is
-`ON CONFLICT (hostname) DO UPDATE ... RETURNING id`, so claiming an *in-use* hostname returns the
-existing worker's id and auto-enrollment then overwrites that worker's agent token hash. The legitimate
-agent is locked out at its next reconnect and the claimant inherits its registry slot, its assignments
-and its reservations. (See `docs/backlog/bug-2026-08-12-auto-enroll-hostname-takeover.md`, which is
-open.) Revoked workers are the one exception auto-enrollment refuses; note that the *enrollment-token*
-path has no revoked check at all, so an admin-issued token can revive a revoked worker that
-auto-enrollment could not. The row-growth cost below is the smaller, second problem. Those rows survive the connection that created them,
-survive a server restart, and appear in every `GET /v1/workers` page and every dispatcher scan. **Nothing
-bounds the total.** `RELAY_GRPC_MAX_CONNS_PER_IP` bounds how many such registrations one source address
+reach the gRPC port may create **one persistent `workers` row per distinct hostname it claims**, up to
+`RELAY_AUTO_ENROLL_WORKER_CEILING`. The hostname is caller-supplied and not validated.
+
+**Takeover is refused.** Auto-enrollment may CREATE a worker and may never CLAIM one: a hostname that
+already has a `workers` row is refused, whatever that row's status and whatever its token, so a
+token-less caller cannot overwrite an existing worker's agent token, lock its agent out, or inherit its
+registry slot, assignments and reservations. The check and the write are a single
+`INSERT ... ON CONFLICT (hostname) DO NOTHING`, so there is no window between them and two concurrent
+first boots of the same fresh hostname cannot clobber each other either. (See
+`docs/superpowers/specs/2026-08-25-auto-enroll-guards.md`.) Revoked workers are no longer a special
+case - they are refused because a row exists, not because the row is revoked.
+
+**The refusal discloses nothing beyond the refusal itself.** Every credential failure on the gRPC
+registration surface returns the identical `Unauthenticated` status and the identical string, so a
+caller cannot tell "this hostname is taken" from "this hostname is revoked" from "your token is
+unknown". One oracle is inherent and is not closed: a caller learns a hostname is claimed because
+claiming it fails, while an unclaimed one succeeds. Closing that would mean refusing everything.
+
+**Row growth is bounded.** Those rows survive the connection that created them, survive a server
+restart, and appear in every `GET /v1/workers` page and every dispatcher scan, so the total is capped:
+token-less enrollment is refused once `RELAY_AUTO_ENROLL_WORKER_CEILING` (default `1024`, `0` disables)
+non-revoked workers exist. **The bound is approximate and the arithmetic is stated rather than
+implied:** two concurrent auto-enrolls at `ceiling - 1` both pass the check under read-committed
+isolation and both insert, so the honest bound is `ceiling + RELAY_GRPC_MAX_CONNS`, not `ceiling`.
+Making it exact would need serializable isolation or an advisory lock on a hot path, for an overshoot
+that is a fraction of a percent. `RELAY_GRPC_MAX_CONNS_PER_IP` bounds how many such registrations one source address
 can have *in flight at once*; it does not bound how many rows accumulate over time, because the rows
-outlive their connections. Row growth is a deliberate, recorded decision rather than an oversight: the
+outlive their connections. Row growth is a bounded, recorded decision rather than an oversight: the
 flag is off by default and its documented trust model is that any host able to reach gRPC is trusted. The
 enrollment-token path does **not** have this property - the worker upsert and the single-use token
 consume share one transaction, so one admin-issued token buys exactly one row. If you run auto-enrollment
 on a network where that trust does not hold, do not; use enrollment tokens.
+
+**When the ceiling is reached, in the order to try things.**
+
+1. **Revoke the junk.** The ceiling counts non-revoked workers only, so `relay workers revoke <id>` on
+   rows that do not correspond to real machines frees budget immediately, with no restart, and without
+   the assignment and reservation destruction that *deleting* a worker causes.
+2. **Use enrollment tokens.** The ceiling gates the token-less path only. `relay agent enroll` is never
+   refused by it, so machines can still be added with no downtime.
+3. **Raise `RELAY_AUTO_ENROLL_WORKER_CEILING`, or set it to `0`.** This **requires a server restart** -
+   the knob is not hot-reloadable. Agents reconnect on backoff and `RELAY_WORKER_GRACE_WINDOW` covers
+   their running tasks, so it is a blip rather than data loss.
+
+An operator whose fleet genuinely exceeds 1024 machines should set this explicitly. The default is
+derived from `RELAY_GRPC_MAX_CONNS`, and **the derivation is not airtight**: that knob bounds concurrent
+*connections* while this one bounds total non-revoked *rows*, so a farm of 2000 intermittently-connected
+machines with 800 online at a time stays under the connection cap and exceeds this ceiling legitimately.
+
+**Refusals are counted, never logged.** A refusal is unboundedly repeatable by the same caller with the
+same hostname, and the per-connection log limiter is not allocated until *after* registration, so a log
+line there would be an unbounded attacker-driven log site. The server keeps a cumulative count split by
+cause - hostname already claimed, fleet at the ceiling, and enrollment token naming a live credential -
+read through the coordinator's in-process accessor. **These are not yet published on**
+`GET /v1/server/counters`; that section is filed as its own backlog item. **Diagnosing a refused agent
+starts with the AGENT's log, not the server's**: the server deliberately does not name an
+attacker-chosen hostname on a repeatable refusal, so the agent's own exit message - which names its own
+hostname and all three causes - is the naming signal. The cost is real and is stated rather than
+hidden: a legitimately refused agent produces no server-side line identifying it.
 
 ### Environment variables
 

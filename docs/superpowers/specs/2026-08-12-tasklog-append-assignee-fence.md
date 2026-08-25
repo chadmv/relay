@@ -242,6 +242,19 @@ can reach `:9090` and name *any* hostname (`authenticateAndRegister`,
 > at the matching epoch, an attacker can take over a worker, keep a live task
 > assigned to it, and then pass this fence *legitimately* as that task's
 > assignee.
+>
+> **Closed (2026-08-25).** The correction above described live behaviour when it
+> was written; it no longer does, and is kept for the record rather than as a
+> standing threat statement. `autoEnrollAndRegister` no longer calls
+> `UpsertWorkerByHostname` at all: it issues a single
+> `InsertWorkerForAutoEnroll` (`ON CONFLICT (hostname) DO NOTHING`), so naming an
+> **in-use** hostname is refused whatever that row's status, and the
+> `SetWorkerAgentToken` overwrite is unreachable from the token-less path. The
+> enrollment-token path gained its own, different guard - it refuses a hostname
+> whose worker holds a live `agent_token_hash`. See
+> `docs/superpowers/specs/2026-08-25-auto-enroll-guards.md`. **The fence this
+> spec adds is not made redundant by that** - it is made meaningful by it: an
+> identity check establishes identity only if identity cannot be seized.
 
 Agent tokens are host-local
 files (`internal/agent/credentials.go`, mode 0600) on machines that by design run

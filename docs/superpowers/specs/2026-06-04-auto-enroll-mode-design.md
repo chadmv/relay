@@ -35,6 +35,16 @@ initial join.
 - Defending against a determined operator who renames a host to evade
   revocation. Out of scope (see Security model).
 
+**Amendment (2026-08-25).** Hostname **takeover** is no longer in scope for this
+document's trust model and is now refused outright: token-less auto-enrollment
+may CREATE a worker and may never CLAIM one, so a hostname that already has a
+`workers` row is refused whatever its status. Token-less row creation is
+additionally bounded by `RELAY_AUTO_ENROLL_WORKER_CEILING`. Per-host
+allowlisting (CIDR ranges) **remains the non-goal it was above** - it is tracked
+separately as `idea-2026-06-04-cidr-allowlist-auto-enroll`, and it now sits on
+top of a create-only, ceilinged auto-enroll rather than an unbounded one. See
+`docs/superpowers/specs/2026-08-25-auto-enroll-guards.md`.
+
 ## Security Model
 
 The trust boundary is **network reachability to the gRPC server**. Enabling the
