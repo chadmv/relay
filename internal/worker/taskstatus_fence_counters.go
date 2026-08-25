@@ -132,9 +132,16 @@ type statusFenceCounters struct {
 // record adds one rejection. Out of range fails CLOSED - a panic here runs on
 // the gRPC recv goroutine, which Connect does not recover and grpc-go does not
 // recover either, so it would kill the whole server process. Losing a count is
-// the cheaper failure. This branch is UNREACHABLE while
-// TestTaskStatusFenceReasonsAreADenseRunFromZero is green, AND THAT TEST IS THE
-// ONLY THING KEEPING IT SO.
+// the cheaper failure. This branch is UNREACHABLE while TWO tests are green,
+// AND IT TAKES BOTH - an earlier version of this comment named only the first
+// and was measurably wrong about the likelier mistake.
+// TestTaskStatusFenceReasonsAreADenseRunFromZero pins the three names to 0, 1, 2
+// and the sentinel to 3, which is the renumbering case.
+// TestEveryTaskStatusFenceReasonIsDeclaredInsideTheSentinel is the one that sees
+// a fourth reason declared AFTER the sentinel or in a separate block: measured,
+// that edit leaves the dense-run test green (its run list still holds three
+// entries and the sentinel is still 3), leaves the publish test green (it
+// iterates r < fenceReasonCount), and lands every one of its increments here.
 func (c *statusFenceCounters) record(r taskStatusFenceReason) {
 	i := int(r)
 	if i < 0 || i >= len(c.n) {

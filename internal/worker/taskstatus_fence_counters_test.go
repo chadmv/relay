@@ -1,9 +1,15 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -45,6 +51,207 @@ func TestTaskStatusFenceReasonsAreADenseRunFromZero(t *testing.T) {
 			"correctly-added reason fails here first. OTHERWISE fenceReasonCount is no longer the length "+
 			"of the counter array and a reason at or beyond it is never counted.",
 		len(run), int(fenceReasonCount))
+}
+
+// TestEveryTaskStatusFenceReasonIsDeclaredInsideTheSentinel is the AST rung the
+// dense-run test above CANNOT be, and it closes an evasion that was MEASURED
+// rather than imagined: declare a fourth reason immediately AFTER
+// fenceReasonCount and record it from a real call site - the GetTask
+// pgx.ErrNoRows arm, i.e. the plausible "count the vanished-task case too" edit
+// - and internal/worker, internal/api and cmd/relay-server ALL STAY GREEN. The
+// dense-run test cannot see it (its hardcoded run list still has three entries
+// and the sentinel is still 3) and the publish test iterates
+// r < fenceReasonCount, so it never reaches the new cell either. record's bounds
+// check then drops every increment in silence, which is slice 2's defect one
+// layer down.
+//
+// THE SIBLING TYPE ALREADY ENUMERATED THIS HOLE BY NAME - see
+// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished's third bullet,
+// "a sixth kind declared AFTER kindCount (the dense-run test above cannot see
+// that one)". taskStatusFenceReason shipped with the dense-run rung and no AST
+// rung, so the enumeration existed and its counterpart did not.
+//
+// It parses the PACKAGE, not one file, and resolves const types the way Go does
+// (a ConstSpec with no type and no values inherits the previous spec's type), so
+// a fourth reason in a SEPARATE const block or a SIBLING FILE is caught by the
+// same arity assertion.
+//
+// THREE INDEPENDENT PROPERTIES, and the first two both kill the measured
+// mutation:
+//
+//   - ARITY: the package declares exactly fenceReasonCount+1 constants of this
+//     type (the reasons, plus the sentinel). One declared anywhere else is one
+//     too many.
+//   - ORDER: in whatever block declares it, fenceReasonCount is LAST.
+//   - CALL SITES: every value reaching statusFence.record is either a declared
+//     reason constant or a call to a package function whose result type is
+//     taskStatusFenceReason, and every such function returns only declared
+//     constants. Anything else fails CLOSED rather than being skipped.
+func TestEveryTaskStatusFenceReasonIsDeclaredInsideTheSentinel(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	require.NoError(t, err)
+
+	// PASS 1: every taskStatusFenceReason constant in the package, plus the
+	// per-block ordering of the sentinel.
+	declared := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, d := range f.Decls {
+				gd, ok := d.(*ast.GenDecl)
+				if !ok || gd.Tok != token.CONST {
+					continue
+				}
+				typ := ""
+				var run []string // this block's reason constants, IN SOURCE ORDER
+				for _, sp := range gd.Specs {
+					vs, ok := sp.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					switch {
+					case vs.Type != nil:
+						typ = ""
+						if id, ok := vs.Type.(*ast.Ident); ok {
+							typ = id.Name
+						}
+					case len(vs.Values) > 0:
+						// A fresh expression list takes its type from the
+						// expression, NOT from the previous spec.
+						typ = ""
+					}
+					if typ != "taskStatusFenceReason" {
+						continue
+					}
+					for _, n := range vs.Names {
+						declared[n.Name] = true
+						run = append(run, n.Name)
+					}
+				}
+				for i, name := range run {
+					if name != "fenceReasonCount" {
+						continue
+					}
+					require.Equal(t, len(run)-1, i,
+						"fenceReasonCount is declared at position %d of %d in its const block at %s, so "+
+							"%v is declared AFTER it. The sentinel is the LENGTH of the counter array, so "+
+							"a reason declared after it has a value at or beyond that length: record's "+
+							"bounds check drops every one of its increments in silence, and no other test "+
+							"in this package can see it.", i, len(run), fset.Position(gd.Pos()), run[i+1:])
+				}
+			}
+		}
+	}
+
+	require.Equal(t, int(fenceReasonCount)+1, len(declared),
+		"the package declares %d taskStatusFenceReason constants and fenceReasonCount is %d, so the "+
+			"expected count is %d (the reasons, plus the sentinel itself). Every reason must be declared "+
+			"INSIDE the sentinel run: one declared after fenceReasonCount, in a separate const block, in "+
+			"a sibling file, or with an explicit out-of-run value is never counted and never published, "+
+			"and record() drops it in silence. IF YOU JUST ADDED A REASON PROPERLY this assertion still "+
+			"passes and TestTaskStatusFenceReasonsAreADenseRunFromZero fails instead - add the reason to "+
+			"that test's `run` list and to snapshot().",
+		len(declared), int(fenceReasonCount), int(fenceReasonCount)+1)
+
+	// PASS 2: functions that PRODUCE a reason. classifyStatusFenceRejection is
+	// the only one today, and the call-site pass below accepts a call to one of
+	// these in place of a bare constant precisely because its returns are checked
+	// here.
+	reasonFuncs := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, d := range f.Decls {
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || fd.Type.Results == nil {
+					continue
+				}
+				produces := false
+				for _, r := range fd.Type.Results.List {
+					if id, ok := r.Type.(*ast.Ident); ok && id.Name == "taskStatusFenceReason" {
+						produces = true
+					}
+				}
+				if !produces {
+					continue
+				}
+				reasonFuncs[fd.Name.Name] = true
+				ast.Inspect(fd, func(n ast.Node) bool {
+					ret, ok := n.(*ast.ReturnStmt)
+					if !ok {
+						return true
+					}
+					for _, res := range ret.Results {
+						id, ok := res.(*ast.Ident)
+						require.True(t, ok,
+							"%s returns a %T at %s. A reason producer must return one of the declared "+
+								"constants directly, or this guard cannot tell whether the value it hands "+
+								"to record is a counted one.", fd.Name.Name, res, fset.Position(res.Pos()))
+						require.True(t, declared[id.Name],
+							"%s returns %s, which is not a taskStatusFenceReason constant declared in "+
+								"this package. Its increments are counted into no cell and published "+
+								"under no JSON key.", fd.Name.Name, id.Name)
+					}
+					return true
+				})
+			}
+		}
+	}
+
+	// PASS 3: the call sites. ingestLogCounters has a record method too, so the
+	// RECEIVER is matched rather than the method name alone; renaming the
+	// statusFence field makes this walk find nothing, and the assertion after the
+	// loop then fails loudly rather than passing vacuously.
+	recordCalls := 0
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "record" {
+					return true
+				}
+				var recv bytes.Buffer
+				require.NoError(t, printer.Fprint(&recv, fset, sel.X))
+				if !strings.Contains(recv.String(), "statusFence") {
+					return true
+				}
+				recordCalls++
+				require.Len(t, call.Args, 1, "statusFence.record takes exactly one reason")
+				switch a := call.Args[0].(type) {
+				case *ast.Ident:
+					require.True(t, declared[a.Name],
+						"statusFence.record(%s) at %s names something that is not a "+
+							"taskStatusFenceReason constant declared in this package.",
+						a.Name, fset.Position(call.Pos()))
+				case *ast.CallExpr:
+					id, ok := a.Fun.(*ast.Ident)
+					require.True(t, ok,
+						"statusFence.record at %s is passed a call this guard cannot name (%T)",
+						fset.Position(call.Pos()), a.Fun)
+					require.True(t, reasonFuncs[id.Name],
+						"statusFence.record at %s is passed %s(...), which does not declare "+
+							"taskStatusFenceReason as its result type, so its returns are unchecked.",
+						fset.Position(call.Pos()), id.Name)
+				default:
+					require.Fail(t,
+						"statusFence.record is passed an unusable expression",
+						"a %T at %s. It must be a declared reason constant or a call to a "+
+							"reason-producing function, or this guard cannot tell whether the cell it "+
+							"lands in exists.", call.Args[0], fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	}
+	require.GreaterOrEqual(t, recordCalls, 2,
+		"this walk found %d statusFence.record call sites and handleTaskStatus has two (the retry arm "+
+			"and the update arm), so it proved nothing. If the field was renamed, update the receiver "+
+			"match above.", recordCalls)
 }
 
 // TestTaskStatusFenceCounters_EveryReasonIsPublishedDistinctly drives every
