@@ -85,8 +85,17 @@ jobs:
       # Runs even on a cache hit: --with-deps installs apt packages that the
       # ~/.cache/ms-playwright cache does not contain. It is a no-op download when
       # the browsers are already cached.
+      #
+      # The local binary directly, not `npx playwright`: npx silently falls
+      # back to fetching a package from the registry when it cannot resolve one
+      # locally. That fallback only fails to trigger here because `npm ci` ran
+      # in this same working directory just above - if this step is ever
+      # reordered or made conditional, `npx playwright` would fetch
+      # playwright@latest unpinned and run its `apt-get install` as root with
+      # no version pin at all. Calling the checked-in binary path makes a miss
+      # ("No such file or directory") loud instead of silent.
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium webkit
+        run: ./node_modules/.bin/playwright install --with-deps chromium webkit
         working-directory: web
 
       - name: Browser end-to-end (Playwright)
