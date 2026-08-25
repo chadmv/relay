@@ -417,3 +417,64 @@ func TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneratio
 		"the send was attempted exactly once and failed; a retry here would be a second "+
 			"RegisterResponse on a stream the peer has already dropped")
 }
+
+// TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone is the check
+// that makes a prohibition enforceable. `if len(inv) == 0 { return nil }` at the
+// top of applyInventory is a green change today and a plausible one - it looks
+// like an optimisation and it removes the transaction this slice's seam had to
+// fake. It is also a silent data bug: an agent that legitimately reports zero
+// workspaces stops clearing its stale worker_workspaces rows, and the dispatcher
+// scores warm-workspace affinity off exactly those rows
+// (internal/scheduler/dispatch.go), so it keeps preferring a worker for a
+// workspace that is no longer there.
+//
+// The RegisterRequest here carries no Inventory at all - the nil case, which is
+// what a reconnecting agent with an empty registry sends.
+func TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone(t *testing.T) {
+	f := newSuccessFixture(t)
+	require.Nil(t, f.stream.msgs[0].GetRegister().Inventory,
+		"fixture: this test is about the EMPTY inventory case")
+
+	_, finish := f.startConnect(t)
+	defer func() { require.Error(t, finish()) }()
+
+	txExecs := f.tx.execsSeen()
+	require.Len(t, txExecs, 1,
+		"an empty inventory must still run the full-replace transaction. Returning early leaves the "+
+			"worker's previous worker_workspaces rows in place forever, and the dispatcher keeps "+
+			"scoring warm-workspace affinity off them.")
+	assert.Contains(t, txExecs[0].sql, "DELETE FROM worker_workspaces",
+		"the one statement must be ReplaceWorkerInventory, which is what clears the stale rows")
+}
+
+// TestFinishRegister_SucceedsWhenTheInventoryTransactionFails pins the
+// log-and-continue shape at handler.go:693-695. applyInventory's error is
+// deliberately swallowed there, and the "EVERYTHING BELOW THIS LINE MUST STAY
+// INFALLIBLE" rule a few lines down names that shape as the required one.
+// Turning that log.Printf into a return is a plausible edit - it looks like
+// error handling - and it would make a workspace-inventory hiccup refuse an
+// agent's registration outright.
+//
+// The injected error is the one from the open
+// bug-2026-08-23-applyinventory-null-timestamp item, because this seam is what
+// makes that bug cheaply reproducible for the first time. Fixing it is NOT this
+// slice's job; the item stays open.
+func TestFinishRegister_SucceedsWhenTheInventoryTransactionFails(t *testing.T) {
+	f := newSuccessFixture(t)
+	workerID := uuidStr(strandWorkerID)
+	f.tx.execErr = errors.New(
+		`ERROR: null value in column "last_used_at" violates not-null constraint (SQLSTATE 23502)`)
+
+	online, finish := f.startConnect(t)
+
+	assert.JSONEq(t, `{"id":"`+workerID+`","status":"online"}`, string(online.Data),
+		"a failed inventory replace must not stop the worker coming online. applyInventory's error is "+
+			"logged and swallowed on purpose: a registration that returns here would be covered by the "+
+			"deferred release but would refuse a healthy agent over a workspace bookkeeping fault.")
+	require.NoError(t, f.h.registry.Send(workerID, &relayv1.CoordinatorMessage{}),
+		"and the sender must still reach the registry, or the agent is online and undispatchable")
+	assert.Empty(t, f.db.execsSeen(),
+		"the generation must not be released: this registration succeeded")
+
+	require.Error(t, finish())
+}
