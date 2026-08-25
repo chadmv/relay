@@ -29,6 +29,18 @@ type errRow struct{ err error }
 
 func (r errRow) Scan(...any) error { return r.err }
 
+// countRow answers a COUNT(*) :one.
+type countRow struct{ n int64 }
+
+func (r countRow) Scan(dest ...any) error {
+	for _, d := range dest {
+		if v, ok := d.(*int64); ok {
+			*v = r.n
+		}
+	}
+	return nil
+}
+
 // rowScript answers a QueryRow FROM THE STATE THE FIXTURE IS CONFIGURED WITH,
 // not from a per-statement script, and that is load-bearing rather than
 // stylistic. A scripted fake must be reconfigured when the handler changes which
@@ -55,6 +67,9 @@ type rowScript struct {
 	// agent_token_hash, i.e. a LIVE credential rather than a revoked one.
 	existingHasLiveToken bool
 
+	// workerCount is what CountWorkers answers with.
+	workerCount int64
+
 	seen []strandExec
 }
 
@@ -71,6 +86,11 @@ func (s *rowScript) answer(sql string, args []any) pgx.Row {
 	// successfully and makes every enrollment look consumed and expired.
 	case strings.Contains(sql, "agent_enrollments"):
 		return agentEnrollmentRow{}
+
+	// CountWorkers. Matched on the full predicate so it cannot also catch
+	// CountRevokedWorkers, which differs only in the comparison operator.
+	case strings.Contains(sql, "COUNT(*) FROM workers WHERE status != 'revoked'"):
+		return countRow{n: s.workerCount}
 
 	// GetWorkerByAgentTokenHash, used by the reconnect path.
 	case strings.Contains(sql, "agent_token_hash = $1"):
@@ -157,6 +177,8 @@ type enrollConfig struct {
 	existingHostname string
 	// existingHasLiveToken: the existing row holds a non-NULL agent_token_hash.
 	existingHasLiveToken bool
+	// workerCount: what CountWorkers answers with, for the ceiling tests.
+	workerCount int64
 	allowAutoEnroll      bool
 	execTag              string // "" keeps fakeTx's historical "DELETE 0"
 }
@@ -167,6 +189,7 @@ func newEnrollFixture(t *testing.T, cfg enrollConfig) *enrollFixture {
 	script := &rowScript{
 		existingHostname:     cfg.existingHostname,
 		existingHasLiveToken: cfg.existingHasLiveToken,
+		workerCount:          cfg.workerCount,
 	}
 	db := &strandDB{execTag: "UPDATE 1", script: script}
 	tx := &fakeTx{script: script, execTag: cfg.execTag}
@@ -499,4 +522,84 @@ func TestConnect_EnrollmentTokenStillEnrollsARevokedHostname(t *testing.T) {
 	require.NoError(t, err, "revoke-then-re-enroll is the recovery route this slice documents")
 	requireWorkerOnline(t, ev)
 	assert.Equal(t, 1, f.stream.tokensSent())
+}
+
+// TestConnect_AutoEnrollRefusesWhenTheFleetIsAtTheCeiling is item 2's criterion 1.
+func TestConnect_AutoEnrollRefusesWhenTheFleetIsAtTheCeiling(t *testing.T) {
+	ceiling := 3
+	f := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 3})
+	f.h.AutoEnrollWorkerCeiling = &ceiling
+
+	_, err := f.connect(t)
+	require.Error(t, err)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	// THE CHECK MUST PRECEDE THE WRITE, which is what makes the refusal free of
+	// side effects. Asserting only the refusal cannot see a check moved after it.
+	assert.False(t, f.script.sawStatement("INSERT INTO workers"),
+		"the ceiling check must run BEFORE the insert, so a refused auto-enroll writes nothing")
+	assert.Equal(t, 0, f.stream.tokensSent())
+}
+
+// TestConnect_AutoEnrollAdmitsOneBelowTheCeiling is the BOUNDARY test, and it is
+// what distinguishes >= from >. The at-the-ceiling test alone cannot see that
+// one-character mutation.
+func TestConnect_AutoEnrollAdmitsOneBelowTheCeiling(t *testing.T) {
+	ceiling := 3
+	f := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 2})
+	f.h.AutoEnrollWorkerCeiling = &ceiling
+
+	ev, err := f.connect(t)
+	require.NoError(t, err)
+	requireWorkerOnline(t, ev)
+}
+
+// TestConnect_AutoEnrollCeilingOfZeroIsDisabled pins the knob's meaningful zero.
+func TestConnect_AutoEnrollCeilingOfZeroIsDisabled(t *testing.T) {
+	zero := 0
+	f := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 100000})
+	f.h.AutoEnrollWorkerCeiling = &zero
+
+	_, err := f.connect(t)
+	require.NoError(t, err, "0 disables the ceiling; it must not mean a ceiling of zero")
+}
+
+// TestConnect_EnrollmentTokenIsNotSubjectToTheCeiling is item 2's criterion 2.
+// The ceiling gates the auto-enroll path ONLY, which is what makes "use
+// enrollment tokens" the without-downtime answer when the budget is exhausted.
+func TestConnect_EnrollmentTokenIsNotSubjectToTheCeiling(t *testing.T) {
+	ceiling := 1
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:    "token-host",
+		credential:  &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+		execTag:     "UPDATE 1",
+		workerCount: 100000,
+	})
+	f.h.AutoEnrollWorkerCeiling = &ceiling
+
+	ev, err := f.connect(t)
+	require.NoError(t, err)
+	requireWorkerOnline(t, ev)
+	assert.False(t, f.script.sawStatement("COUNT(*) FROM workers"),
+		"the enrollment path must not even ASK the ceiling question")
+}
+
+// TestConnect_ReconnectIsRefusedByNeitherGuard is item 2's criterion 3. THE
+// "NO INSERT" HALF IS WHAT PROVES the path is row-free rather than merely
+// succeeding.
+func TestConnect_ReconnectIsRefusedByNeitherGuard(t *testing.T) {
+	ceiling := 1
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:         "strand-host",
+		existingHostname: "strand-host",
+		credential:       &relayv1.RegisterRequest_AgentToken{AgentToken: "strand-agent-token"},
+		workerCount:      100000,
+	})
+	f.h.AutoEnrollWorkerCeiling = &ceiling
+
+	ev, err := f.connect(t)
+	require.NoError(t, err)
+	requireWorkerOnline(t, ev)
+	assert.False(t, f.script.sawStatement("INSERT INTO workers"))
+	assert.False(t, f.script.sawStatement("COUNT(*) FROM workers"))
 }

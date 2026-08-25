@@ -59,6 +59,14 @@ var errHostnameClaimed = errors.New("hostname already claimed")
 // (recovery, allowed); non-NULL means a live credential (takeover, refused).
 var errCredentialLive = errors.New("worker credential is live")
 
+// errFleetAtCeiling is returned inside the auto-enroll transaction when the
+// non-revoked worker count is at or above the ceiling. IT GATES THIS PATH ONLY:
+// enrollment tokens are never refused by it, which is what makes "use
+// relay agent enroll" the without-downtime answer for an operator whose
+// token-less budget is exhausted, and what keeps a bounded refusal from being a
+// fleet-wide denial primitive.
+var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
+
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
@@ -150,6 +158,29 @@ const DefaultTrailingLogWindow = 15 * time.Minute
 // disabled.
 const DefaultRegistrationTimeout = 30 * time.Second
 
+// DefaultAutoEnrollWorkerCeiling bounds how many non-revoked workers may exist
+// before token-less auto-enrollment refuses to create another row. Without it, a
+// caller that can reach :9090 under RELAY_ALLOW_AUTO_ENROLL creates one
+// permanent row per distinct hostname, forever: the rows outlive their
+// connections, survive a restart, and appear in every GET /v1/workers page and
+// every dispatcher scan.
+//
+// 1024 IS DERIVED FROM RELAY_GRPC_MAX_CONNS, AND THE DERIVATION IS NOT AIRTIGHT.
+// The two knobs count DIFFERENT QUANTITIES: that one bounds concurrent
+// connections, this one bounds total non-revoked rows. A farm of 2000
+// intermittently-connected machines with 800 online at a time stays under the
+// connection cap and exceeds this ceiling legitimately. Such an operator should
+// set this explicitly rather than inherit a number derived from a different
+// quantity; 0 disables it.
+//
+// THE BOUND IS APPROXIMATE AND THE ARITHMETIC IS STATED RATHER THAN IMPLIED. Two
+// concurrent auto-enrolls at n == ceiling-1 both pass the check under
+// read-committed isolation and both insert, so the true bound is
+// ceiling + RELAY_GRPC_MAX_CONNS. Making it exact needs serializable isolation or
+// an advisory lock on a hot path, for an overshoot that is a fraction of a
+// percent. Do not claim an exact cap anywhere.
+const DefaultAutoEnrollWorkerCeiling = 1024
+
 // txBeginner is the subset of *pgxpool.Pool this package uses: the single method
 // pgx.BeginTxFunc requires of its second argument, which is itself declared as an
 // anonymous interface (pgx/tx.go). Handler.pool is typed as this rather than as
@@ -200,6 +231,20 @@ type Handler struct {
 	// Set by cmd/relay-server after construction, from
 	// RELAY_TASKLOG_TRAILING_WINDOW. Read-only after startup.
 	TrailingLogWindow time.Duration
+
+	// AutoEnrollWorkerCeiling bounds non-revoked workers on the auto-enroll path
+	// only. Set by cmd/relay-server after construction, from
+	// RELAY_AUTO_ENROLL_WORKER_CEILING. Read-only after startup.
+	//
+	// A *int, NOT AN int, AND THAT DIFFERS DELIBERATELY FROM RegistrationTimeout
+	// AND TrailingLogWindow. Those two resolve "non-positive means the default",
+	// which works because zero is meaningless for them. THIS KNOB HAS A MEANINGFUL
+	// ZERO - disabled - so an int would leave the zero value ambiguous between
+	// "unset, use the default" and "explicitly disabled", and only
+	// cmd/relay-server could express the difference. nil means the default; a
+	// non-nil 0 means DISABLED; a negative value means the default (the parser
+	// warns).
+	AutoEnrollWorkerCeiling *int
 
 	// ingestDrops counts what this server's per-connection log budgets dropped,
 	// split by kind and by arm. A VALUE, not a pointer: the zero value is ready
@@ -460,6 +505,16 @@ func (h *Handler) registrationTimeout() time.Duration {
 	return DefaultRegistrationTimeout
 }
 
+// autoEnrollWorkerCeiling resolves the effective ceiling. 0 is a real answer
+// here and means disabled - do not "simplify" this to the non-positive-means-
+// default rule its two neighbours use.
+func (h *Handler) autoEnrollWorkerCeiling() int {
+	if h.AutoEnrollWorkerCeiling == nil || *h.AutoEnrollWorkerCeiling < 0 {
+		return DefaultAutoEnrollWorkerCeiling
+	}
+	return *h.AutoEnrollWorkerCeiling
+}
+
 // authenticateAndRegister dispatches to the appropriate auth path based on the credential type.
 func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	switch cred := reg.Credential.(type) {
@@ -620,6 +675,17 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
 
+		// BEFORE THE INSERT, which is what makes the refusal free of side effects.
+		if ceiling := h.autoEnrollWorkerCeiling(); ceiling > 0 {
+			n, err := txq.CountWorkers(ctx)
+			if err != nil {
+				return fmt.Errorf("count workers: %w", err)
+			}
+			if n >= int64(ceiling) {
+				return errFleetAtCeiling
+			}
+		}
+
 		id, err := txq.InsertWorkerForAutoEnroll(ctx, store.InsertWorkerForAutoEnrollParams{
 			Name:               reg.Hostname,
 			Hostname:           reg.Hostname,
@@ -647,6 +713,9 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	})
 	if txErr != nil {
 		if errors.Is(txErr, errHostnameClaimed) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		}
+		if errors.Is(txErr, errFleetAtCeiling) {
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		return "", nil, txErr
