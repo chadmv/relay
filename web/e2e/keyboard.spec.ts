@@ -29,23 +29,28 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
   // anywhere in this file, comments included. Tailwind v4 scans the WHOLE
   // PROJECT for class-shaped substrings, not just what a JS bundle imports, so
   // writing the real class text here would keep its CSS rule alive regardless
-  // of whether the component that is supposed to own it still emits it.
-  // Measured directly while investigating this file's own mutation matrix
-  // entry: the plan's original M2 candidate (a numeric-literal template
-  // interpolation, e.g. `min-w-[${660}px]`) turned out to be constant-folded
-  // by esbuild back into the literal string INSIDE THE BUNDLE. That fold is
-  // irrelevant here: @tailwindcss/vite builds its Scanner over the Vite root
-  // ({base: viteRoot, pattern: '**/*'}) and reads SOURCE FILES ON DISK, never
-  // the emitted bundle, so the fold does not make the rule reappear. The
-  // reason that mutation never reproduced was this comment's own literal
-  // text independently keeping the class alive through the same
-  // whole-project scan - confirmed by re-running it with the class text
-  // absent from the comment, which goes RED (6 tests, the same failure set
-  // as the shipped form). An object-property lookup (reading the number off
-  // a `const` object at the interpolation site, rather than writing it
-  // inline) genuinely disappears from both the built CSS and the source scan
-  // - but ONLY once this comment stopped independently keeping the class
-  // alive.
+  // of whether the component that is supposed to own it still emits it. This
+  // is demonstrated, not theoretical: an earlier draft of this file spelled a
+  // placeholder as the literal class text, which the scanner matched, and an
+  // A/B build showed removing that placeholder was the only CSS delta.
+  //
+  // The plan's M2 mutation candidate - the pixel number moved into a template
+  // interpolation inside the same bracket syntax, rather than written as a
+  // plain digit - is not class-shaped text, so the scanner never matches it
+  // regardless of what this comment says. Measured
+  // directly on this tree, with this comment byte-identical to what you are
+  // reading: the mutated form emits no `min-width:660px` / `min-width:740px`
+  // rule into the production CSS, and keyboard.spec.ts fails 8 of its 8 tests
+  // (4 chromium + 4 webkit) - the same failure set as the shipped
+  // object-property form below produces when it is itself mutated back to a
+  // bare string literal. An earlier run of this same M2 mutation was reported
+  // as not reproducing; that report was wrong, and this comment's text was
+  // not the cause (it is not class-shaped either). The actual cause of that
+  // earlier false negative is unknown. The likeliest candidate, unverified,
+  // is a stale `web/dist` embed: `//go:embed` snapshots the SPA at Go compile
+  // time (see README.md), so a build that reused an un-rebuilt binary between
+  // planting the mutation and running the suite would silently test the
+  // pre-mutation bundle.
   test.use({ viewport: { width: 480, height: 900 } })
 
   // marker is a FUNCTION OF Seed, not a resolved value, for the same
