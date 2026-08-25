@@ -1165,8 +1165,11 @@ func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
 // inside the read-modify-write and is inert at GOMAXPROCS=1. Both are live in
 // CI, which runs `go test -race ./...` on 2-4 vCPUs.
 //
-// MEASURED, NOT REASONED (M6 of this slice's mutation matrix; this host,
-// 10 runs of this test per configuration, mutation as described above):
+// MEASURED, NOT REASONED (M6 of this slice's mutation matrix; 10 runs of this
+// test per configuration, mutation as described above). THE FOUR ROWS ARE NOT
+// ALL FROM THE SAME MACHINE, which is why each carries a footnote: the no-race
+// rows are this Windows host, the -race rows are the Linux container lane,
+// because -race does not run here at all - see [2].
 //
 //	                    unmutated        mutated
 //	no -race, -cpu=1    0/10 failures    0/10 failures            <- INERT
@@ -1182,12 +1185,18 @@ func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
 // regression. The cell that carries the claim is the INERT one, and it
 // reproduced at 0/10 every time it was measured.
 //
-// [2] Measured 2026-08-23 and NOT REPRODUCED SINCE. ThreadSanitizer fails to
-// allocate on this Windows host - `ThreadSanitizer failed to allocate ... (error
-// code: 87)` - for every package including unmutated ones, so these two rows
-// cannot be re-measured here at all. They record what was observed on that date;
-// they are not something a reader can check on this host today. Re-measure in
-// the Linux container lane before relying on the figures.
+// [2] NOT MEASURABLE ON THIS HOST, AND MEASURED SOMEWHERE ELSE. ThreadSanitizer
+// fails to allocate on this Windows host - `ThreadSanitizer failed to allocate
+// ... (error code: 87)` - for every package including unmutated ones, so -race
+// says nothing here and its failure is environmental rather than a finding.
+// These two rows were first taken 2026-08-23 and then REPRODUCED 2026-08-24 in
+// the Linux container lane (golang:1.26, `go test -race`), which returned
+// 10/10 failures and 10/10 DATA RACE at BOTH -cpu=1 and -cpu=2 against an
+// unmutated 0/10 baseline in the same container. Unlike [1] these cells are
+// deterministic, which is the reason the -race half is what the comment above
+// calls the strong one: it kills through happens-before analysis and does not
+// need two goroutines to actually collide. Re-measure in that lane, not on this
+// host.
 //
 // The unmutated column is the green baseline: uniform results across the four
 // configurations would have meant the harness was broken rather than that the
