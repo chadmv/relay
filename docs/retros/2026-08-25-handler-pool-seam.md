@@ -1,31 +1,259 @@
 ---
 date: 2026-08-25
 topic: handler-pool-seam
-slice: idea-2026-08-24-handler-pool-has-no-seam (filed by the previous slice; led ROADMAP "Now")
 branch: claude/pr-merging-session-868949
-range: origin/main..HEAD (backend only; Go only; one production field's type; zero SQL, zero migration, zero proto, zero generated file, zero files under web/)
-pr: handler-pool-seam - reference this work by date and slug, never by a predicted number
-closes: idea-2026-08-24-handler-pool-has-no-seam
-amends: bug-2026-08-23-applyinventory-null-timestamp-freezes-inventory, idea-2026-08-23-integration-only-guards-ci-never-runs
-filed-this-slice: none
+range: 10972115922c7d690687a183df4167d40c9b1ff2..5b7b20b8c08a5a70222e66170583e62e9ffe6157
 ---
 
-# Session Retro: 2026-08-25 - one field's type bought the default lane its first successful worker registration, and the prose defending it failed review three times while the code passed every lens once
+# Session Retro: 2026-08-25 - Handler Pool Seam
 
-**TL;DR:** `Handler.pool` is now `txBeginner`, a one-method interface (`BeginTx`) that
-`*pgxpool.Pool` satisfies, so `cmd/relay-server`'s wiring is unchanged source text. That one change
-gave `internal/worker` its first route to a **successful** `finishRegister` without Postgres, in the
-lane CI actually runs. Six new default-lane test functions landed; `handler_handoff_guard_test.go`
-shed five of its nineteen clauses, each deletion re-proved by mutation after the fact. The mutant
-that motivated the whole item - deleting `handedOff = true`, which on 2026-08-24 left all 21
-packages green - now reddens the default lane four ways.
+**TL;DR:** Relay's worker-registration code could only be tested against a real database, so the
+test suite that CI actually runs had never once exercised a worker registering successfully. This
+session changed the type of a single field so a stand-in database can be substituted, and added
+six tests covering the successful path and its failure modes. That let about seventy lines of an
+elaborate structural safeguard - written earlier precisely because those tests could not be run -
+be deleted and replaced with real behavioural coverage. The design passed every review lens on the
+first pass; three rounds of review were spent instead on incorrect explanatory text written around
+it.
 
-This slice exists because the previous one was expensive. It was, and the ledger is more
-interesting than "the seam was cheaper".
+## Handoff
 
----
+`Handler.pool` is now `txBeginner`, an unexported one-method interface (`BeginTx`) that
+`*pgxpool.Pool` satisfies, so `cmd/relay-server`'s wiring is unchanged source text; three call
+sites share it. New default-lane file `internal/worker/handler_register_success_test.go` carries
+`fakePool`, `fakeTx`, `successFixture` and `startConnect`, with five tests driven through
+`Connect` rather than `finishRegister` - the `handedOff` flag partitions a window between two
+releases and calling `finishRegister` directly sees only one of them.
 
-## 1. Was the debt worth paying? Yes, and the bill was smaller than 2026-08-24 thought
+`handler_handoff_guard_test.go` shed G3, G6, G7, G12, G15 (~70 lines), each deletion re-proved by
+mutation afterwards. All five historical evasions of that guard landed on clauses this slice KEPT;
+G14 remains the only thing that kills deleting `handedOff = true` (M2), the mutant that left all
+21 packages green on 2026-08-24 and now reddens the default lane four ways. 15 mutations run
+(M1-M15), each with an applied-check and each known survivor preceded by a control that died; M2
+and M12 are deliberate known survivors, recorded so nobody fixes them.
+
+Closes `idea-2026-08-24-handler-pool-has-no-seam`; amends
+`bug-2026-08-23-applyinventory-null-timestamp-freezes-inventory` and
+`idea-2026-08-23-integration-only-guards-ci-never-runs`. Zero SQL, zero migration, zero proto,
+zero generated file, zero files under `web/`. Shipped as squash commit `5b7b20b` (PR #149). Next
+session started at ROADMAP Now and took the auto-enroll guards pair
+(`bug-2026-08-12-auto-enroll-hostname-takeover`,
+`bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded`), shipped as #150.
+
+### Still open
+
+- **`enrollAndRegister` and `autoEnrollAndRegister` are now fakeable and untested in the default
+  lane.** Deliberate scope line. **Recommended as an item below.**
+- **`applyInventory`'s SQL remains integration-only.** The seam moves the boundary; a fake tx proves a
+  statement was issued and committed, never that it is correct against the schema.
+- **G14's residual claim:** the wrapped-flip evasion is invisible to a runtime test because no fixture
+  reaches the flip with `Metrics` nil. It is **not** broken in production - `main.go` sets `Metrics`
+  unconditionally - but the day `Metrics` becomes optional it is a live defect and nothing runtime
+  would notice on the way there. Written into the guard header rather than filed.
+- **`bug-2026-08-23-applyinventory-null-timestamp-freezes-inventory` stays open**, amended: its
+  regression test is now a cheap default-lane test, and its line citations were corrected.
+- **`idea-2026-08-23-integration-only-guards-ci-never-runs` stays open**, with one named instance
+  removed.
+- **No local `-race` path works on this host.** **Recommended as an item below.**
+
+## What Was Built
+
+- **`internal/worker/handler.go`** - the entire production diff.
+  - `txBeginner` interface (`:138-155`), with the doc comment stating that **three** call sites share
+    it, not one, and that `*pgxpool.Pool` satisfies it so `cmd/relay-server` is unchanged.
+  - `pool` field retyped (`:161`); both constructor parameters retyped; the `pgxpool` import deleted.
+  - The ownership-handoff comment (`:771-786`) rewritten to what is now true: the guard covers source
+    position, closure shape and the flag's write set, and names the behavioural half. It additionally
+    says which clauses are **still doing the work** - the closure-shape ones - because "source
+    position" reads like the whole story and is not.
+- **`internal/worker/handler_register_success_test.go`** (new, no build tag) - `fakePool`, `fakeTx`
+  (embedded nil `pgx.Tx`, `Exec`/`Commit`/`Rollback` recorded, `outcome()`), `successFixture`,
+  `startConnect`, and five tests: the successful registration through `Connect`, the
+  RegisterResponse-send failure, the empty-inventory replace, the inventory exec failure, and the
+  inventory **begin** failure.
+- **`internal/worker/handler_register_strand_test.go`** - `emptyRows`, the `strandDB.Query` empty arm
+  (proved inert: all five existing construction sites set `queryErr` non-nil), the fake pool in
+  `newStrandHandler`, header prose corrected.
+- **`internal/worker/handler_registration_deadline_test.go`** - `scriptedStream` records sends under a
+  mutex, scrubs minted agent tokens at the point of retention via `proto.Clone`, counts them in
+  `agentTokensSent` behind `tokensSent()`, and gains `sendErr`. Plus
+  `TestScriptedStream_DoesNotRetainARawAgentToken`.
+- **`internal/worker/handler_handoff_guard_test.go`** - G3, G6, G7, G12, G15 deleted with
+  `paramNamedByType`, the `strings` import and the `aliases` counter; header and both worked examples
+  rewritten to path-scoped claims that name their counter-examples.
+- **`internal/worker/handler_register_strand_integration_test.go`** - prose only. The test stays; its
+  justification changed to the one that survives.
+- **Two backlog items amended, one closed.** Zero SQL, zero migration, zero proto, zero generated
+  file, zero files under `web/`.
+
+### Verification
+
+- **This pass had no shell.** Bash was unavailable to the TPM lane; nothing was executed. No
+  `git log`, no `git diff`, no test run. Every claim below that could be checked by reading was
+  checked against the worktree.
+- **Verified by reading:** `internal/worker/handler.go:130-175`, `:440-470`, `:545-560`, `:750-805`;
+  `internal/worker/handler_register_success_test.go:1-145` and `:478-596`;
+  `internal/worker/handler_registration_deadline_test.go:20-152`;
+  `internal/worker/handler_handoff_guard_test.go:1-100` and `:430-520`, `:613-620`; the spec and the
+  plan in full; the closed item in full; both amended items; and a full enumeration of `func Test` in
+  `internal/worker`.
+- **Confirmed against code, not inferred:** that `Handler.pool` is `txBeginner` and the interface has
+  exactly one method; that three `pgx.BeginTxFunc(ctx, h.pool, ...)` sites share it (`:490`, `:565`,
+  `:1776`); that `fakeTx` counts commits and rollbacks and exposes them through `outcome()`; that
+  `scriptedStream.Send` clones with `proto.Clone` and redacts before appending, and that
+  `agentTokensSent` is read only through `tokensSent()`; that the guard file no longer imports
+  `strings` and no longer mentions `paramNamedByType`; that the guard header and both worked examples
+  are now path-scoped and name `AllowAutoEnroll` in the integration lane as the counter-example; and
+  that `.claire/worktrees/hungry-neumann-b1ba4e/internal/schedrunner/runner_test.go` exists inside
+  this worktree.
+- **One live prose defect found by reading**, stated in section 3: the Progress note on
+  `idea-2026-08-23-integration-only-guards-ci-never-runs` said four behavioural tests; there are five
+  in the success file and six new default-lane test functions in total. **Corrected before the PR** -
+  the tenth-iteration instance of this project's dominant defect class, caught by the retro rather
+  than by any of the three prose rounds that preceded it, which is itself section 3's point.
+- **One arithmetic correction, applied.** The figure "93 pass, up from 91" that circulated during the
+  slice compares against **HEAD~**, one commit back, not against `origin/main`, so it understates the
+  slice roughly threefold. The durable, checkable statement used from here on: `internal/worker`
+  reports **93 pass / 0 fail / 0 skip**, and this slice adds **six new default-lane test functions** -
+  five in `handler_register_success_test.go` plus `TestScriptedStream_DoesNotRetainARawAgentToken`.
+  Both halves were verified against `origin/main...HEAD` rather than quoted forward.
+- **Reported by the implementing and verifying lanes, not re-run here:** 21 Go packages green;
+  `internal/worker` 93 pass / 0 fail / 0 skip; integration lane 163 pass under `-tags integration
+  -p 1` plus `cmd/relay-server` green; 200/200 on the 50-iteration flake hunt; `go vet` and
+  `go vet -tags integration` clean; and every mutation result M1-M15, including M15's 21-packages-green
+  survival before the counters existed.
+- **Not verified:** all test results, the commit set, the diff stat, and the change set as `git` sees
+  it. `-race` was not run at all, locally or here; see section 7.
+- **No PR number appears anywhere in this retro or in the proposed items**, by instruction.
+- **Outstanding and belonging to the conductor:** the one-word Progress-note correction, the stray
+  `.claire/` directory check, the item filings below, the CLAUDE.md decision, the final gates, all
+  commits, and a ROADMAP refresh.
+
+## Key Decisions
+
+- **Narrow the field, do not inject a function.** A settable `applyInventoryFn` on `Handler` is a
+  *production* seam anything can replace at runtime; an interface is a *type* seam only a test can
+  exploit by constructing a different value. It also covers one of three call sites instead of three.
+- **`txBeginner` stays unexported and the field keeps the name `pool`.** No external caller names the
+  type; renaming the field would churn the very guard the slice is shrinking. The doc comment carries
+  the type's real meaning.
+- **Drive the tests through `Connect`, not `finishRegister`.** The flag partitions a window between
+  *two* releases, and calling `finishRegister` directly sees only one. The property worth pinning is
+  that the generation is released **exactly once across the connection's life**, by teardown.
+- **Empty rows, not populated.** Reconcile's content is covered in the integration lane; a populated
+  fixture adds failure modes without adding coverage of what is under test.
+- **Reduce the guard, do not retire it**, and only after the behavioural tests were green - the item's
+  own acceptance criterion, and the reason M13 and M14 were run **after** the deletions rather than
+  before, where they would have proved nothing.
+- **The forbidden fix gets a test, not a comment.** "Return early on an empty inventory" is now blocked
+  by `TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone` (M9), and the item's prohibition
+  stopped being advisory.
+- **Cite by symbol, not by line.** After a line citation in a new test comment drifted **within the
+  slice**, the comments were rewritten to name `finishRegister`'s `applyInventory` call rather than a
+  number. The spec had already conceded the same thing about its own table.
+
+### CLAUDE.md verdict
+
+**No amendment is earned by this slice, and that is a deliberate call rather than an omission.**
+
+The two strongest candidates are already in CLAUDE.md in a form this slice sharpens rather than
+contradicts:
+
+- "A uniqueness claim is a claim about the complement" is already written down. What this slice adds -
+  that a *correction* inherits the shape, and that the true claim is usually path-scoped - is a
+  refinement of an existing rule, not a new invariant, and CLAUDE.md's Invariants section is for rules
+  that new **code** must not bypass. A prose-writing heuristic does not belong there. It belongs in
+  durable memory, and it is proposed as such above.
+- "End the generation before releasing the resource", including the acquire-direction reading added on
+  2026-08-24, is **untouched** by this slice and is now, for the first time, **observed** rather than
+  asserted: the success test proves exactly one release across a connection's life, and the send-failure
+  test proves the failing arm still releases exactly once. That is the rule working as written.
+
+One thing the conductor may consider, and I do not recommend it: adding `txBeginner` to CLAUDE.md's
+`internal/worker/` code-map bullet. The type is unexported, changes no wiring and moves nothing
+operator-visible; the two `internal/scheduler` precedents it copies are not in CLAUDE.md either.
+Adding it would set a precedent for documenting test seams in the code map, which is churn.
+
+## What Went Wrong and What Changes
+
+*Original headline: one field's type bought the default lane its first successful worker
+registration, and the prose defending it failed review three times while the code passed every
+lens once.*
+
+> **Retrofit note.** This file was restructured onto the `/retro` skill's documented format after
+> the fact; do not take its remaining shape as the template. Only the frontmatter, title, TL;DR
+> and Handoff were rewritten - every body section is the original prose, reordered and demoted
+> under the skill's menu headings. Two things below are *not* the format to copy. The lesson
+> bullets predate the skill's paired `**<what went wrong>.** ... -> **What changes:** ...` form and
+> are left in their original wording rather than re-invented. And bullets tagged **Candidate for
+> durable memory** were never promoted at the time - the skill's Step 5 offers each reusable rule a
+> durable home and stamps the bullet `(promoted to <home>)` or `[[slug]]`, which is what stops the
+> next retro carrying it. Annotating a lesson is not promoting it.
+
+The lessons are listed first below, then the detailed accounts that produced them.
+
+### Lesson ledger
+
+Carried forward:
+
+- **Verify a backlog item's technical claims against the code** - honored, **twenty-second
+  iteration**. Everything load-bearing in the item was confirmed; two things it did not say changed
+  the design.
+- **A backlog proposal is not a contract** - twenty-two for twenty-two. The item's proposal was
+  correct and incomplete in exactly the way that would have failed its own acceptance criterion.
+- **Each stage treats the previous stage's output as untrusted** - honored in all three directions:
+  the spec found the item's gap, the plan refuted two spec instructions, and the fan-out found the
+  vacuity and the secret hole.
+- **A mutation proof must leave a test behind** - honored. The commit/rollback counters, the
+  begin-failure arm and the token-scrub test are all permanent.
+- **Verify the mutation actually applied** - honored; every mutation step carried an applied-check
+  command and every known-survivor was preceded by a control that died.
+- **A test seam must not destroy the RED** - honored, and this was the sharpest instance yet: the
+  headline test was written against a **pool-less** handler so it panicked inside `applyInventory` at
+  HEAD, and the test function body did not change between RED and GREEN. Only the fixture helper did.
+- **Say "declined, and here is the price"** - honored for the enrollment paths and for
+  `applyInventory`'s bug, both declined with the price written down.
+- **Wrong prose about correct code is the dominant defect class** - **tenth consecutive iteration**,
+  three rounds deep, and one instance still shipped.
+
+New from this iteration:
+
+- **Label each guard clause SUBSTITUTE or PERMANENT when the guard is written.** The evasions all
+  landed on permanent clauses; the deletions were all of substitutes. Without the labels the whole
+  guard reads as debt it is not. **Candidate for durable memory.**
+- **The correction of a uniqueness claim is itself a uniqueness claim.** Demand a different shape, not
+  a narrower instance. The shape that terminates the loop names its own counter-examples.
+  **Candidate for durable memory.**
+- **A true claim is often path-scoped where the false one is state-scoped.** "No fixture varies X" is
+  refutable by grep and says nothing about "no fixture **reaches this line** while varying X". The
+  instrument that kills the old sentence cannot confirm the new one.
+- **Asserting a statement was ISSUED is not asserting the transaction COMMITTED.** A tx fake must
+  record how the transaction ended. **Candidate for durable memory.**
+- **A recorded lesson is a retrieval aid, not a control.** Three lessons violated after being
+  recorded; the fan-out caught all three. Do not treat a memory entry as coverage.
+- **A count written mid-slice is a claim about a set the slice is still changing.** Prefer a
+  description that survives the next test being added.
+- **Isolated worktrees are not isolated lanes if the scratchpad path is shared.**
+
+### Findings triage
+
+- **1 HIGH, vacuity: `fakeTx` recorded no `Commit`/`Rollback`**, so M15 (roll back every inventory
+  replace) left all 21 packages green - including the test whose docstring forbids that outcome.
+  Found by review; control mutation died, so the harness was sound.
+- **1 HIGH, latent secret retention:** the new send recorder would retain a minted agent token the
+  moment anyone points it at the enrollment paths, which is the seam's stated purpose. Fixed in the
+  exposing change, at the point of retention.
+- **1 MEDIUM, concurrency:** `agentTokensSent` written under the lock, read bare, with its sibling
+  already guarded.
+- **19 prose defects across three rounds** (6 planned + 9 + 4), one inside a guard failure message and
+  one refuting itself inside a single `t.Fatalf` string. **One more survives in the shipped tree** and
+  is a one-word conductor fix.
+- **2 gaps found before implementation** - the missing `pgx.Rows` fake (spec) and the `pgxpool` import
+  deletion (plan) - either of which would have broken the slice.
+- **15 mutations run** (M1-M15), each with an applied-check and each known-survivor preceded by a
+  control that died. M2 and M12 are deliberate known survivors, recorded so nobody "fixes" them.
+
+### 1. Was the debt worth paying? Yes, and the bill was smaller than 2026-08-24 thought
 
 The finishregister-strand retro closed with a number offered as the argument for this slice: **five
 evasions of one 669-line parser guard.** The implication a reader takes from that sentence is that
@@ -67,9 +295,7 @@ was correct at the slice level, and the declination was recorded with the price 
 with a price on the alternative. The rule "say declined, and here is the price" was honored for one
 side of the comparison only.
 
----
-
-## 2. The spec and the plan each found a gap that would have broken the slice
+### 2. The spec and the plan each found a gap that would have broken the slice
 
 Twenty-second consecutive iteration in which planning-phase verification caught something material
 before a line was written, and this time both phases contributed independently. Neither finding was
@@ -100,9 +326,7 @@ plan substituted the teardown fence argument rather than adding a registry gette
 spec's wording literally true. That is the correct direction: **do not grow production surface to
 satisfy a spec sentence.**
 
----
-
-## 3. The headline: prose failed review three times, and the code passed every lens once
+### 3. The headline: prose failed review three times, and the code passed every lens once
 
 Count the rounds against the same body of text:
 
@@ -117,7 +341,7 @@ Meanwhile the shipped production diff - one field's type, two signatures, one de
 passed the invariants, correctness, security and integration lenses on the first pass and needed no
 behavioural change at any point in the slice.
 
-### Why prose and not code, weighed against the evidence rather than assumed
+#### Why prose and not code, weighed against the evidence rather than assumed
 
 **Hypothesis A: volume.** About 670 lines of prose defend one boolean. True, and insufficient. It
 explains a higher absolute count; it does not explain why each round *introduced* new errors. A long
@@ -172,7 +396,7 @@ not ten iterations of carelessness; it is the measurement of that structural fac
 to write comments more carefully. It is to prefer claim shapes that a reader can falsify cheaply,
 and to route every negative claim through the fan-out on the assumption it is wrong.
 
-### One instance survived into the shipped tree
+#### One instance survived into the shipped tree
 
 `docs/backlog/idea-2026-08-23-integration-only-guards-ci-never-runs.md:100` says this slice "put
 **four** behavioural tests in the default lane". `handler_register_success_test.go` contains
@@ -188,9 +412,7 @@ changing.** Prefer "the default lane now covers the success path, the send-failu
 inventory-failure arms" - a description that survives the next test being added - over a cardinal
 number that does not.
 
----
-
-## 4. A measured vacuity defect, inside the test written to prevent vacuity
+### 4. A measured vacuity defect, inside the test written to prevent vacuity
 
 `TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone` exists to make a prohibition
 enforceable: the backlog item forbids "return early on an empty inventory" by name, because an agent
@@ -225,9 +447,7 @@ anti-vacuity test**, and it argues that the anti-vacuity discipline needs to be 
 the question "what would make this assertion true without the behaviour being true" has to be asked
 of the check as well as of the thing checked.
 
----
-
-## 5. A latent secret-retention hole, caught by looking at the slice not yet written
+### 5. A latent secret-retention hole, caught by looking at the slice not yet written
 
 `scriptedStream.Send` used to discard its argument. This slice made it record, which is what made
 "the RegisterResponse was actually sent" observable at all. Recording is also how a raw agent token
@@ -257,9 +477,7 @@ what makes it a decision instead of an oversight.
 Two named patterns fired together: "review the slice that has not been written yet", and "a secret
 hides one layer below where it was defended".
 
----
-
-## 6. "Added a property, forgot its guard", again - and the recorded lesson did not prevent it
+### 6. "Added a property, forgot its guard", again - and the recorded lesson did not prevent it
 
 `agentTokensSent` was added to a mutex-guarded struct. It was written under the lock in `Send` and
 read as a **bare field** from the test goroutine. Its sibling `sent`, in the same struct, already had
@@ -285,9 +503,7 @@ outside a method that locks - but this project has just finished measuring what 
 costs, so the honest recommendation is **not** to write one for a test fixture. Recorded here so the
 next recurrence has a count to argue from.
 
----
-
-## 7. The race lane is down on this machine, and what that leaves unverified
+### 7. The race lane is down on this machine, and what that leaves unverified
 
 `go test -race` fails on this Windows host with a ThreadSanitizer allocation failure, error code 87.
 **Reproduced on an untouched package at `origin/main`**, so it is environmental and pre-existing, not
@@ -307,9 +523,7 @@ This is the second consecutive slice in which the local `-race` recipe moved. Th
 got a clean run inside a Linux container; that fallback works and is written nowhere in the
 repository. Proposed as an item below.
 
----
-
-## 8. Concurrency friction worth recording
+### 8. Concurrency friction worth recording
 
 - **Two review lanes collided on a shared `scratchpad/mut` directory** and produced one nonsense
   mutation result before it was caught. The existing lesson
@@ -321,222 +535,8 @@ repository. Proposed as an item below.
   the tree, not subagent claims", the conductor should confirm it is absent from `git status` and
   from the PR diff before assembling.
 
----
-
-## What Was Built
-
-- **`internal/worker/handler.go`** - the entire production diff.
-  - `txBeginner` interface (`:138-155`), with the doc comment stating that **three** call sites share
-    it, not one, and that `*pgxpool.Pool` satisfies it so `cmd/relay-server` is unchanged.
-  - `pool` field retyped (`:161`); both constructor parameters retyped; the `pgxpool` import deleted.
-  - The ownership-handoff comment (`:771-786`) rewritten to what is now true: the guard covers source
-    position, closure shape and the flag's write set, and names the behavioural half. It additionally
-    says which clauses are **still doing the work** - the closure-shape ones - because "source
-    position" reads like the whole story and is not.
-- **`internal/worker/handler_register_success_test.go`** (new, no build tag) - `fakePool`, `fakeTx`
-  (embedded nil `pgx.Tx`, `Exec`/`Commit`/`Rollback` recorded, `outcome()`), `successFixture`,
-  `startConnect`, and five tests: the successful registration through `Connect`, the
-  RegisterResponse-send failure, the empty-inventory replace, the inventory exec failure, and the
-  inventory **begin** failure.
-- **`internal/worker/handler_register_strand_test.go`** - `emptyRows`, the `strandDB.Query` empty arm
-  (proved inert: all five existing construction sites set `queryErr` non-nil), the fake pool in
-  `newStrandHandler`, header prose corrected.
-- **`internal/worker/handler_registration_deadline_test.go`** - `scriptedStream` records sends under a
-  mutex, scrubs minted agent tokens at the point of retention via `proto.Clone`, counts them in
-  `agentTokensSent` behind `tokensSent()`, and gains `sendErr`. Plus
-  `TestScriptedStream_DoesNotRetainARawAgentToken`.
-- **`internal/worker/handler_handoff_guard_test.go`** - G3, G6, G7, G12, G15 deleted with
-  `paramNamedByType`, the `strings` import and the `aliases` counter; header and both worked examples
-  rewritten to path-scoped claims that name their counter-examples.
-- **`internal/worker/handler_register_strand_integration_test.go`** - prose only. The test stays; its
-  justification changed to the one that survives.
-- **Two backlog items amended, one closed.** Zero SQL, zero migration, zero proto, zero generated
-  file, zero files under `web/`.
-
-## Key Decisions
-
-- **Narrow the field, do not inject a function.** A settable `applyInventoryFn` on `Handler` is a
-  *production* seam anything can replace at runtime; an interface is a *type* seam only a test can
-  exploit by constructing a different value. It also covers one of three call sites instead of three.
-- **`txBeginner` stays unexported and the field keeps the name `pool`.** No external caller names the
-  type; renaming the field would churn the very guard the slice is shrinking. The doc comment carries
-  the type's real meaning.
-- **Drive the tests through `Connect`, not `finishRegister`.** The flag partitions a window between
-  *two* releases, and calling `finishRegister` directly sees only one. The property worth pinning is
-  that the generation is released **exactly once across the connection's life**, by teardown.
-- **Empty rows, not populated.** Reconcile's content is covered in the integration lane; a populated
-  fixture adds failure modes without adding coverage of what is under test.
-- **Reduce the guard, do not retire it**, and only after the behavioural tests were green - the item's
-  own acceptance criterion, and the reason M13 and M14 were run **after** the deletions rather than
-  before, where they would have proved nothing.
-- **The forbidden fix gets a test, not a comment.** "Return early on an empty inventory" is now blocked
-  by `TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone` (M9), and the item's prohibition
-  stopped being advisory.
-- **Cite by symbol, not by line.** After a line citation in a new test comment drifted **within the
-  slice**, the comments were rewritten to name `finishRegister`'s `applyInventory` call rather than a
-  number. The spec had already conceded the same thing about its own table.
-
-## Findings Triage
-
-- **1 HIGH, vacuity: `fakeTx` recorded no `Commit`/`Rollback`**, so M15 (roll back every inventory
-  replace) left all 21 packages green - including the test whose docstring forbids that outcome.
-  Found by review; control mutation died, so the harness was sound.
-- **1 HIGH, latent secret retention:** the new send recorder would retain a minted agent token the
-  moment anyone points it at the enrollment paths, which is the seam's stated purpose. Fixed in the
-  exposing change, at the point of retention.
-- **1 MEDIUM, concurrency:** `agentTokensSent` written under the lock, read bare, with its sibling
-  already guarded.
-- **19 prose defects across three rounds** (6 planned + 9 + 4), one inside a guard failure message and
-  one refuting itself inside a single `t.Fatalf` string. **One more survives in the shipped tree** and
-  is a one-word conductor fix.
-- **2 gaps found before implementation** - the missing `pgx.Rows` fake (spec) and the `pgxpool` import
-  deletion (plan) - either of which would have broken the slice.
-- **15 mutations run** (M1-M15), each with an applied-check and each known-survivor preceded by a
-  control that died. M2 and M12 are deliberate known survivors, recorded so nobody "fixes" them.
-
-## What Remains Open
-
-- **`enrollAndRegister` and `autoEnrollAndRegister` are now fakeable and untested in the default
-  lane.** Deliberate scope line. **Recommended as an item below.**
-- **`applyInventory`'s SQL remains integration-only.** The seam moves the boundary; a fake tx proves a
-  statement was issued and committed, never that it is correct against the schema.
-- **G14's residual claim:** the wrapped-flip evasion is invisible to a runtime test because no fixture
-  reaches the flip with `Metrics` nil. It is **not** broken in production - `main.go` sets `Metrics`
-  unconditionally - but the day `Metrics` becomes optional it is a live defect and nothing runtime
-  would notice on the way there. Written into the guard header rather than filed.
-- **`bug-2026-08-23-applyinventory-null-timestamp-freezes-inventory` stays open**, amended: its
-  regression test is now a cheap default-lane test, and its line citations were corrected.
-- **`idea-2026-08-23-integration-only-guards-ci-never-runs` stays open**, with one named instance
-  removed.
-- **No local `-race` path works on this host.** **Recommended as an item below.**
-
-## Improvement Goals
-
-Carried forward:
-
-- **Verify a backlog item's technical claims against the code** - honored, **twenty-second
-  iteration**. Everything load-bearing in the item was confirmed; two things it did not say changed
-  the design.
-- **A backlog proposal is not a contract** - twenty-two for twenty-two. The item's proposal was
-  correct and incomplete in exactly the way that would have failed its own acceptance criterion.
-- **Each stage treats the previous stage's output as untrusted** - honored in all three directions:
-  the spec found the item's gap, the plan refuted two spec instructions, and the fan-out found the
-  vacuity and the secret hole.
-- **A mutation proof must leave a test behind** - honored. The commit/rollback counters, the
-  begin-failure arm and the token-scrub test are all permanent.
-- **Verify the mutation actually applied** - honored; every mutation step carried an applied-check
-  command and every known-survivor was preceded by a control that died.
-- **A test seam must not destroy the RED** - honored, and this was the sharpest instance yet: the
-  headline test was written against a **pool-less** handler so it panicked inside `applyInventory` at
-  HEAD, and the test function body did not change between RED and GREEN. Only the fixture helper did.
-- **Say "declined, and here is the price"** - honored for the enrollment paths and for
-  `applyInventory`'s bug, both declined with the price written down.
-- **Wrong prose about correct code is the dominant defect class** - **tenth consecutive iteration**,
-  three rounds deep, and one instance still shipped.
-
-New from this iteration:
-
-- **Label each guard clause SUBSTITUTE or PERMANENT when the guard is written.** The evasions all
-  landed on permanent clauses; the deletions were all of substitutes. Without the labels the whole
-  guard reads as debt it is not. **Candidate for durable memory.**
-- **The correction of a uniqueness claim is itself a uniqueness claim.** Demand a different shape, not
-  a narrower instance. The shape that terminates the loop names its own counter-examples.
-  **Candidate for durable memory.**
-- **A true claim is often path-scoped where the false one is state-scoped.** "No fixture varies X" is
-  refutable by grep and says nothing about "no fixture **reaches this line** while varying X". The
-  instrument that kills the old sentence cannot confirm the new one.
-- **Asserting a statement was ISSUED is not asserting the transaction COMMITTED.** A tx fake must
-  record how the transaction ended. **Candidate for durable memory.**
-- **A recorded lesson is a retrieval aid, not a control.** Three lessons violated after being
-  recorded; the fan-out caught all three. Do not treat a memory entry as coverage.
-- **A count written mid-slice is a claim about a set the slice is still changing.** Prefer a
-  description that survives the next test being added.
-- **Isolated worktrees are not isolated lanes if the scratchpad path is shared.**
-
-## Files Most Touched
-
-- `internal/worker/handler.go:138-161` - `txBeginner` and the retyped field. The whole production
-  change, and the comment that carries the type's real meaning.
-- `internal/worker/handler.go:771-801` - the rewritten ownership-handoff prose: what the guard now
-  covers, which clauses are still doing the work, and the disclosed panic boundary. Where the next
-  person to touch `finishRegister` lands.
-- `internal/worker/handler_register_success_test.go:54-140` - `fakeTx`, and the comment carrying the
-  M15 story plus the commits-not-rollbacks argument. The vacuity lesson is here.
-- `internal/worker/handler_register_success_test.go:293-419` - the first default-lane successful
-  registration, and the exactly-once release assertion that reddens independently at both ends.
-- `internal/worker/handler_registration_deadline_test.go:71-134` - the scrub-at-retention comment, the
-  scope boundary for relay-minted credentials, and `tokensSent()`.
-- `internal/worker/handler_handoff_guard_test.go:11-90` - the header, now path-scoped and naming its
-  counter-examples. The three-round prose story is legible from this block alone.
-- `docs/superpowers/specs/2026-08-25-handler-pool-seam.md:36-52` and `:366-397` - F1/F2 and the
-  clause-by-clause disposition table.
-- `docs/superpowers/plans/2026-08-25-handler-pool-seam.md:64-73` - the two spec defects called out
-  rather than smoothed over.
-
-## Verification
-
-- **This pass had no shell.** Bash was unavailable to the TPM lane; nothing was executed. No
-  `git log`, no `git diff`, no test run. Every claim below that could be checked by reading was
-  checked against the worktree.
-- **Verified by reading:** `internal/worker/handler.go:130-175`, `:440-470`, `:545-560`, `:750-805`;
-  `internal/worker/handler_register_success_test.go:1-145` and `:478-596`;
-  `internal/worker/handler_registration_deadline_test.go:20-152`;
-  `internal/worker/handler_handoff_guard_test.go:1-100` and `:430-520`, `:613-620`; the spec and the
-  plan in full; the closed item in full; both amended items; and a full enumeration of `func Test` in
-  `internal/worker`.
-- **Confirmed against code, not inferred:** that `Handler.pool` is `txBeginner` and the interface has
-  exactly one method; that three `pgx.BeginTxFunc(ctx, h.pool, ...)` sites share it (`:490`, `:565`,
-  `:1776`); that `fakeTx` counts commits and rollbacks and exposes them through `outcome()`; that
-  `scriptedStream.Send` clones with `proto.Clone` and redacts before appending, and that
-  `agentTokensSent` is read only through `tokensSent()`; that the guard file no longer imports
-  `strings` and no longer mentions `paramNamedByType`; that the guard header and both worked examples
-  are now path-scoped and name `AllowAutoEnroll` in the integration lane as the counter-example; and
-  that `.claire/worktrees/hungry-neumann-b1ba4e/internal/schedrunner/runner_test.go` exists inside
-  this worktree.
-- **One live prose defect found by reading**, stated in section 3: the Progress note on
-  `idea-2026-08-23-integration-only-guards-ci-never-runs` said four behavioural tests; there are five
-  in the success file and six new default-lane test functions in total. **Corrected before the PR** -
-  the tenth-iteration instance of this project's dominant defect class, caught by the retro rather
-  than by any of the three prose rounds that preceded it, which is itself section 3's point.
-- **One arithmetic correction, applied.** The figure "93 pass, up from 91" that circulated during the
-  slice compares against **HEAD~**, one commit back, not against `origin/main`, so it understates the
-  slice roughly threefold. The durable, checkable statement used from here on: `internal/worker`
-  reports **93 pass / 0 fail / 0 skip**, and this slice adds **six new default-lane test functions** -
-  five in `handler_register_success_test.go` plus `TestScriptedStream_DoesNotRetainARawAgentToken`.
-  Both halves were verified against `origin/main...HEAD` rather than quoted forward.
-- **Reported by the implementing and verifying lanes, not re-run here:** 21 Go packages green;
-  `internal/worker` 93 pass / 0 fail / 0 skip; integration lane 163 pass under `-tags integration
-  -p 1` plus `cmd/relay-server` green; 200/200 on the 50-iteration flake hunt; `go vet` and
-  `go vet -tags integration` clean; and every mutation result M1-M15, including M15's 21-packages-green
-  survival before the counters existed.
-- **Not verified:** all test results, the commit set, the diff stat, and the change set as `git` sees
-  it. `-race` was not run at all, locally or here; see section 7.
-- **No PR number appears anywhere in this retro or in the proposed items**, by instruction.
-- **Outstanding and belonging to the conductor:** the one-word Progress-note correction, the stray
-  `.claire/` directory check, the item filings below, the CLAUDE.md decision, the final gates, all
-  commits, and a ROADMAP refresh.
-
-## CLAUDE.md verdict
-
-**No amendment is earned by this slice, and that is a deliberate call rather than an omission.**
-
-The two strongest candidates are already in CLAUDE.md in a form this slice sharpens rather than
-contradicts:
-
-- "A uniqueness claim is a claim about the complement" is already written down. What this slice adds -
-  that a *correction* inherits the shape, and that the true claim is usually path-scoped - is a
-  refinement of an existing rule, not a new invariant, and CLAUDE.md's Invariants section is for rules
-  that new **code** must not bypass. A prose-writing heuristic does not belong there. It belongs in
-  durable memory, and it is proposed as such above.
-- "End the generation before releasing the resource", including the acquire-direction reading added on
-  2026-08-24, is **untouched** by this slice and is now, for the first time, **observed** rather than
-  asserted: the success test proves exactly one release across a connection's life, and the send-failure
-  test proves the failing arm still releases exactly once. That is the rule working as written.
-
-One thing the conductor may consider, and I do not recommend it: adding `txBeginner` to CLAUDE.md's
-`internal/worker/` code-map bullet. The type is unexported, changes no wiring and moves nothing
-operator-visible; the two `internal/scheduler` precedents it copies are not in CLAUDE.md either.
-Adding it would set a precedent for documenting test seams in the code map, which is churn.
+This slice exists because the previous one was expensive. It was, and the ledger is more
+interesting than "the seam was cheaper".
 
 ## Recommended Backlog Items
 
@@ -599,3 +599,23 @@ gets picked still costs a file and every edge into it.
   default lane, so the item would have no acceptance criterion beyond "do the refactor". The rule the
   strand slice followed is the right one and should be followed again: file the seam when a slice
   needs to pin a line behind it, and pay for the guard in the meantime with the price written down.
+
+## Files Most Touched
+
+- `internal/worker/handler.go:138-161` - `txBeginner` and the retyped field. The whole production
+  change, and the comment that carries the type's real meaning.
+- `internal/worker/handler.go:771-801` - the rewritten ownership-handoff prose: what the guard now
+  covers, which clauses are still doing the work, and the disclosed panic boundary. Where the next
+  person to touch `finishRegister` lands.
+- `internal/worker/handler_register_success_test.go:54-140` - `fakeTx`, and the comment carrying the
+  M15 story plus the commits-not-rollbacks argument. The vacuity lesson is here.
+- `internal/worker/handler_register_success_test.go:293-419` - the first default-lane successful
+  registration, and the exactly-once release assertion that reddens independently at both ends.
+- `internal/worker/handler_registration_deadline_test.go:71-134` - the scrub-at-retention comment, the
+  scope boundary for relay-minted credentials, and `tokensSent()`.
+- `internal/worker/handler_handoff_guard_test.go:11-90` - the header, now path-scoped and naming its
+  counter-examples. The three-round prose story is legible from this block alone.
+- `docs/superpowers/specs/2026-08-25-handler-pool-seam.md:36-52` and `:366-397` - F1/F2 and the
+  clause-by-clause disposition table.
+- `docs/superpowers/plans/2026-08-25-handler-pool-seam.md:64-73` - the two spec defects called out
+  rather than smoothed over.

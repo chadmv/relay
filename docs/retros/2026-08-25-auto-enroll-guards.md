@@ -1,32 +1,257 @@
 ---
 date: 2026-08-25
 topic: auto-enroll-guards
-slice: auto-enroll-guards (two open bugs plus one fixture idea, shipped in one sitting)
 branch: claude/pr-merging-session-868949
-range: origin/main..HEAD (backend only; Go + one new SQL statement + `make generate`; no migration, no proto, zero files under `web/`)
-pr: auto-enroll-guards - reference this work by date and slug, never by a predicted number
-closes: bug-2026-08-12-auto-enroll-hostname-takeover, bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded, idea-2026-08-25-default-lane-fixture-for-the-enrollment-paths
-amends: bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget, idea-2026-06-04-cidr-allowlist-auto-enroll
-filed-this-slice: none
+range: 5b7b20b8c08a5a70222e66170583e62e9ffe6157..02100da0858cb4875782d502542a7bebdf7373d4
 ---
 
-# Session Retro: 2026-08-25 - auto-enroll may create a worker and may never claim one; the security design passed four lenses on the first pass and the prose defending it took three remediation rounds, one of which was worse than the defect it replaced
+# Session Retro: 2026-08-25 - Auto-Enroll Guards
 
-**TL;DR:** `autoEnrollAndRegister` now refuses any hostname that already has a `workers` row, via
-`InsertWorkerForAutoEnroll` (`ON CONFLICT (hostname) DO NOTHING RETURNING id`), so check and write are
-one statement. `enrollAndRegister` gets a *different* guard - refuse only a non-NULL
-`agent_token_hash` - because revoke-then-re-enroll is the recovery route and revoking nulls the hash.
-`RELAY_AUTO_ENROLL_WORKER_CEILING` (default 1024, `0` disables) bounds token-less row creation, checked
-inside the transaction before the insert. Refusals are counted, never logged. All eleven
-`codes.Unauthenticated` returns on the registration path now pass one `msgAuthFailed` constant, held by
-an AST guard that fails closed on a twelfth.
+**TL;DR:** Two ways a worker machine's first boot could go wrong were closed. A machine could
+claim a name that already belonged to a different worker, and a machine booting without a
+registration token could create worker records without limit, so anyone who could reach the server
+could fill the database with junk. Registration now refuses a name that is already taken, refuses
+a stale credential only when one actually exists, and caps how many workers may be created without
+a token. The security design was accepted by every reviewer on the first pass; three rounds of
+rework went into the operator-facing text explaining it, and one of those rounds told operators to
+run a command that did not exist.
 
-The behavioural design was not the expensive part. **Three prose remediation rounds were**, and the
-second round's fix prescribed `relay workers delete` - a command that exists nowhere in the product.
+## Handoff
 
----
+`autoEnrollAndRegister` refuses any hostname that already has a `workers` row, via
+`InsertWorkerForAutoEnroll` (`ON CONFLICT (hostname) DO NOTHING RETURNING id`, a sqlc `:one`, so a
+taken hostname surfaces as `pgx.ErrNoRows`) - check and write in one statement, because `SELECT
+... FOR UPDATE` on a hostname with no row locks nothing and lets two concurrent first-boots both
+win. `enrollAndRegister` gets a deliberately different guard - `FOR UPDATE` plus refuse only a
+non-NULL `agent_token_hash` - because revoke-then-re-enroll is the recovery route and
+`ClearWorkerAgentToken` nulls the hash while leaving the row.
 
-## 1. The count, stated first, because it is the whole story
+`RELAY_AUTO_ENROLL_WORKER_CEILING` (`DefaultAutoEnrollWorkerCeiling = 1024`, `0` disables; a
+pointer field because its zero is meaningful) is checked inside the transaction before the insert,
+so a refusal writes nothing. The bound is approximate and every site says `ceiling +
+RELAY_GRPC_MAX_CONNS`. Refusals are counted by reason in
+`internal/worker/autoenroll_refusal_counters.go` (`hostname_claimed`, `fleet_at_ceiling`,
+`credential_live`) and never logged - a refusal is unboundedly repeatable by the same caller and
+the per-connection log limiter is not allocated until after registration. Publication on `GET
+/v1/server/counters` was de-scoped at plan time on measured evidence.
+
+All eleven `codes.Unauthenticated` returns on the registration path pass one `msgAuthFailed`
+constant, held by an AST guard in `refusal_string_guard_test.go` that fails closed on a twelfth;
+`registrationStoreFault` closes a pre-auth disclosure of raw wrapped store errors as
+`codes.Unknown`. The worker-revoked refusal string was deleted rather than joined - it was a live
+hostname-state oracle and no test asserted it. Closes
+`bug-2026-08-12-auto-enroll-hostname-takeover`,
+`bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded` and
+`idea-2026-08-25-default-lane-fixture-for-the-enrollment-paths`; amends
+`bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget` and
+`idea-2026-06-04-cidr-allowlist-auto-enroll`. Shipped as squash commit `02100da` (PR #150). Next
+session started at the gap this slice discovered - relay could delete a worker at no layer - filed
+as `bug-2026-08-25-no-worker-delete-at-any-layer` and shipped as #151.
+
+### Still open
+
+- **Relay cannot delete a worker at any layer.** Discovered by this slice rather than created by it, and
+  the create-only rule makes it operationally load-bearing: for one case the operator loop does not
+  terminate. Item below.
+- **The first-boot lockout window.** The auto-enroll transaction commits the row and its minted
+  `agent_token_hash` before the `RegisterResponse` is sent and before the agent persists it, so a failed
+  persist claims the hostname with a credential the agent never received - refused thereafter by both
+  paths. **Before this slice the retry self-healed**, because the upsert rotated the token, so closing
+  the takeover is what makes it permanent. Disclosed in README, not closed. Item below.
+- **The ceiling bounds `CountWorkers`, not the table** (section 8). The reaper is the complement. Item
+  below.
+- **`reg.Hostname` has no length or charset bound**, deliberately scoped out, and it is what makes
+  `registrationStoreFault` pre-auth reachable (section 9). Item below.
+- **Refusal counters are not on `GET /v1/server/counters`.** De-scoped at plan time; README says so.
+  Item below.
+- **`fleet_at_ceiling` aliases the other two reasons at capacity.** The ceiling check precedes the
+  insert deliberately, so at capacity every token-less refusal is attributed to the ceiling and
+  `hostname_claimed_total` goes flat exactly when an operator starts triaging. Ordering is correct;
+  aliasing is disclosed where the signal is read.
+- **M10 is a known survivor**: moving `enrollAndRegister`'s lookup outside its transaction is not
+  behaviourally detectable even after the owner tag, because the tag distinguishes tx from pool but the
+  hoisted-lookup variant still issues on the tx. Recorded so nobody later "fixes" it.
+- **No local `-race` path works on this host** - unchanged from yesterday, item already proposed there.
+
+## What Was Built
+
+- **`internal/store/query/workers.sql`** - `InsertWorkerForAutoEnroll`
+  (`ON CONFLICT (hostname) DO NOTHING RETURNING id`, a sqlc `:one`, so a taken hostname surfaces as
+  `pgx.ErrNoRows`), plus corrected comments on `UpsertWorkerByHostname` (its only caller is now
+  `enrollAndRegister`; the old comment claimed it refreshed specs "on reconnect", which reconnect never
+  did) and `SetWorkerAgentToken`. `make generate` re-run under the CRLF procedure.
+- **`internal/worker/handler.go`** - the create-only guard and the ceiling inside
+  `autoEnrollAndRegister`'s transaction (ceiling first, so a refusal writes nothing); the
+  `FOR UPDATE` + non-NULL-hash guard as the first statement of `enrollAndRegister`'s existing
+  transaction; `msgAuthFailed`; `errHostnameClaimed` and `errFleetAtCeiling` replacing
+  `errWorkerRevoked`; `registrationStoreFault`; `AutoEnrollWorkerCeiling *int` with
+  `DefaultAutoEnrollWorkerCeiling = 1024` and a resolver whose zero is meaningful (unlike
+  `RegistrationTimeout`'s, which is why the field is a pointer).
+- **`internal/worker/autoenroll_refusal_counters.go`** - refusal counts split by reason
+  (`hostname_claimed`, `fleet_at_ceiling`, `credential_live`), modelled on
+  `taskstatus_fence_counters.go`, read through an accessor returning a snapshot by value.
+- **`internal/worker/handler_enroll_guards_test.go`** (new, no build tag) - the default lane's first
+  route to both enrollment paths, with the four fixture blockers closed: statement-discriminating
+  `QueryRow` on `strandDB` and on `fakeTx`, a configurable `Exec` command tag, an enrollment-row stub
+  with a future `ExpiresAt`, and the owner tag of section 6.
+- **`internal/worker/refusal_string_guard_test.go`** (new) - the AST guard of section 7.
+- **`internal/agent/messages.go` / `messages_test.go`** - the token-less exit message now names all
+  three causes and real remedies, with the ghost-command guard of section 3.
+- **`cmd/relay-server`** - env parse, unconditional startup bounds line naming the effective ceiling and
+  saying explicitly when it is disabled, following `parseWatchdogDuration`'s three-outcome shape, never
+  `log.Fatalf`.
+- **`README.md`** - six falsified sentences corrected, including "Nothing bounds the total.", plus the
+  operator ladder, the narrow reading of the ceiling's promise, and the first-boot disclosure.
+- **Four existing tests inverted or re-credentialed** (section 4). **Three backlog items closed.**
+
+### Verification
+
+- **This pass had no shell.** Nothing was executed here - no `git log`, no `git diff`, no test run. Every
+  claim below that could be checked by reading was checked against the worktree.
+- **Confirmed against code, not inferred:** that `msgAuthFailed` exists at `handler.go:57` and is used at
+  eleven `codes.Unauthenticated` sites; that `errHostnameClaimed` and `errFleetAtCeiling` replaced
+  `errWorkerRevoked`; that `AutoEnrollWorkerCeiling` is a `*int` with a resolver treating negative as
+  default and `0` as disabled; that `registrationStoreFault`'s comment carries both the parity
+  correction and the pre-auth reachability disclosure; that the AST guard requires the `msgAuthFailed`
+  identifier and carries an 11-site tripwire labelled as not-the-property; that the ghost-command guard
+  is `assert.NotContains` over three spellings; that the owner tag exists on `rowScript` and is read
+  through `sawStatementOn`; that README's ladder demotes `0` out of the numbered steps and adds a step 0
+  naming the audit line; and that `README.md:420-422` is malformed.
+- **Reported by the implementing and verifying lanes, not re-run here:** all 21 unit packages green;
+  `internal/worker` green at `-count=10`; integration green on a cache-busted run across
+  `internal/worker` (140.8s), `internal/store` (180.8s) and `cmd/relay-server` (25.5s), plus
+  `internal/api` and `internal/agent`; `go vet` and `go vet -tags integration` clean; a mutation battery
+  across both rounds with applied-checks and controls.
+- **`go test -race` was unrunnable locally all session** - ThreadSanitizer allocation failure,
+  environmental, reproduced at `origin/main` on an untouched package. CI's `race + integration-build`
+  job is the gate and this slice relies on it. Second consecutive slice in this position.
+- **Not verified here:** all test results, the commit set, the diff stat, and the change set as `git`
+  sees it.
+- **No PR number appears anywhere in this retro or in the proposed items**, by instruction.
+- **Outstanding and belonging to the conductor:** the README:420-422 fix, the item filings below, the
+  final gates, all commits, and a ROADMAP refresh.
+
+## Key Decisions
+
+- **Auto-enroll refuses on "a row exists", not on "the hash is non-NULL"** - equivalent in production,
+  fails closed on states that do not exist yet, and deletes a status deny-list rather than editing one.
+- **A new SQL statement, not a Go predicate.** `SELECT ... FOR UPDATE` on a hostname that does not exist
+  locks nothing, so two concurrent first-boots of the same fresh hostname both see no row and
+  `DO UPDATE` lets the loser overwrite the winner's freshly minted token. One statement, no window.
+- **The two paths get different guards, and the difference is forced** by the recovery route, not chosen
+  for symmetry.
+- **The ceiling gates the auto-enroll path only**, which is what makes it answerable to the
+  denial-primitive objection without shipping a reaper: enrollment tokens are never refused by it.
+- **The bound is approximate and every site says so** - `ceiling + RELAY_GRPC_MAX_CONNS`, never
+  `ceiling`. Exactness would need serializable isolation on a hot path.
+- **Refusals are counted, never logged.** A refusal is unboundedly repeatable by the same caller, and
+  the per-connection log limiter is not allocated until after registration.
+- **The counters section on `GET /v1/server/counters` was de-scoped at plan time**, on measured evidence
+  (`internal/api/server_counters.go` is 574 lines with a 1355-line test). Counters live on `Handler`
+  with an exported accessor; README says the publication is deferred.
+- **`"worker revoked"` deleted rather than joined** - it was a live hostname-state oracle and no test
+  asserted the string.
+
+### CLAUDE.md verdict
+
+**One amendment is earned, and it is a sentence rather than a bullet.**
+
+CLAUDE.md's Invariants already carry "Identity is not honesty" and the `conflicting_total` worked
+example, which say to ask, where a signal is read, what a peer who can move it gains from the
+documented remedy. Section 8 is the second independent instance in two slices, and the *second* half of
+it is new: **an option that disables the control belongs outside the remedy ladder, not inside it as a
+peer.** That is a concrete, checkable rule and it is not currently implied by the existing text. Suggest
+appending one clause to the existing bullet rather than adding a new one.
+
+**Not earned, and deliberately so:**
+
+- The prose lessons of sections 2, 3 and 10 have no code-facing form and CLAUDE.md's Invariants section
+  is for rules that new *code* must not bypass. Durable memory, proposed above.
+- The fixture lesson of section 6 is a test-design rule. The same call was made yesterday for the same
+  reason.
+- **`RELAY_AUTO_ENROLL_WORKER_CEILING` does belong in README** and is there; it does not belong in
+  CLAUDE.md, whose env-var coverage points at README by design.
+
+One thing the conductor should consider and I do **not** recommend: adding the create-only rule to the
+Invariants list. It is a property of one code path with a guard and two default-lane tests, not a
+cross-cutting rule other code could bypass. The invariant it actually strengthens - the epoch fence and
+its `worker_id` predicate - is already there, and this slice is upstream of it rather than a peer.
+
+## What Went Wrong and What Changes
+
+*Original headline: auto-enroll may create a worker and may never claim one; the security design
+passed four lenses on the first pass and the prose defending it took three remediation rounds, one
+of which was worse than the defect it replaced.*
+
+> **Retrofit note.** This file was restructured onto the `/retro` skill's documented format after
+> the fact; do not take its remaining shape as the template. Only the frontmatter, title, TL;DR
+> and Handoff were rewritten - every body section is the original prose, reordered and demoted
+> under the skill's menu headings. Two things below are *not* the format to copy. The lesson
+> bullets predate the skill's paired `**<what went wrong>.** ... -> **What changes:** ...` form and
+> are left in their original wording rather than re-invented. And bullets tagged **Candidate for
+> durable memory** were never promoted at the time - the skill's Step 5 offers each reusable rule a
+> durable home and stamps the bullet `(promoted to <home>)` or `[[slug]]`, which is what stops the
+> next retro carrying it. Annotating a lesson is not promoting it.
+
+The lessons are listed first below, then the detailed accounts that produced them.
+
+### Lesson ledger
+
+Carried forward:
+
+- **Verify a backlog item's technical claims against the code** - honored, twenty-third iteration. Three
+  load-bearing claims across the two items did not survive, and two of the three moved the code.
+- **A backlog proposal is not a contract** - twenty-three for twenty-three. The prescribed predicate was
+  right on a path the item did not name.
+- **An accurate item can prescribe a wrong remedy** - the clean instance: item 1's diagnosis was correct
+  and its predicate belonged on the other path.
+- **Each stage treats the previous stage's output as untrusted** - honored. The spec refuted the item,
+  the plan reduced the spec's counters scope on measured evidence, and the fan-out refuted the spec's
+  own operator prose five times.
+- **Verify the mutation actually applied** - honored, and it mattered: **two mutations silently failed
+  to apply on the first attempt (CRLF) and reported false survivals** until re-run. That is now five in
+  this tree.
+- **A mutation proof must leave a test behind** - honored; the owner tag and its assertions are
+  permanent.
+- **Say "declined, and here is the price"** - honored for the reaper, the CIDR allowlist, hostname
+  validation and the counters section, each with the price written down.
+- **Wrong prose about correct code is the dominant defect class** - **eleventh consecutive iteration**,
+  three rounds deep, and one instance still shipped.
+
+New from this iteration:
+
+- **A refutation creates pressure to name a substitute, and that substitute is the least-verified
+  sentence in the document.** Route it through the fan-out as a new claim. **Candidate for durable
+  memory.**
+- **"The remedy is named" and "the remedy exists" are different properties.** A substring assertion
+  tests only the first; the check for the second is negative or AST-shaped. **Candidate for durable
+  memory.**
+- **A fake that merges two call sites cannot pin the difference between them.** Tag the observation with
+  its source at the point of recording. **Candidate for durable memory.**
+- **When a slice REMOVES a behaviour, run the integration lane** - other tests may use it as scaffolding
+  rather than as subject, and that dependency is invisible to every reading-based instrument.
+- **A prose edit that deletes a clause can strand its neighbours**; a truth check cannot see a fragment.
+- **When a conductor overrules an engineer's scope hesitation, the overruling reasoning is itself an
+  unverified claim.**
+
+### Findings triage
+
+- **1 HIGH, ghost command** (section 2): `relay workers delete` in README twice, in the agent's terminal
+  exit message, and pinned by a test - introduced by a *fix*, refutable in one grep, and contradicting
+  the item being implemented. Now closed by a negative guard.
+- **1 HIGH, lane regression** (section 4): three integration tests green because of the defect,
+  invisible to every reading-based instrument.
+- **1 HIGH, pre-auth disclosure**: both enrollment transactions returned raw wrapped store errors to an
+  unauthenticated peer as `codes.Unknown`. Closed by `registrationStoreFault`.
+- **3 surviving mutations** (section 6): all three guards hoistable out of their transactions with no
+  test noticing. Closed by the owner tag.
+- **1 MEDIUM, remedy favours the attacker** (section 8), in two instances.
+- **1 MEDIUM, exhaustiveness by coincidence** (section 7): a table claiming to be exhaustive by
+  construction that drove 5 of 11 sites.
+- **~20 prose defects across three rounds** (3 + ~15 + 5). **One survives in the shipped tree**
+  (section 10) and is a conductor fix.
+
+### 1. The count, stated first, because it is the whole story
 
 | Round | Instrument | Findings | Character |
 |---|---|---|---|
@@ -43,9 +268,7 @@ That asymmetry is now eleven consecutive iterations of this repository's dominan
 slice is the sharpest instance yet, because both halves were measured against the same diff at the same
 time by the same four lenses.
 
----
-
-## 2. The headline: the round-2 fix was worse than the defect it replaced
+### 2. The headline: the round-2 fix was worse than the defect it replaced
 
 **What shipped into review.** README, the agent's terminal exit message, and five places in the spec
 justified design decisions by the cost of "deleting a worker, which destroys its assignments and
@@ -82,7 +305,7 @@ as "otherwise delete is the only recovery". The truth is that there would be **n
 revoked row that could not be re-enrolled would be permanently stuck. The argument was right for a
 reason its author had not found.
 
-### Why this is a finding rather than an embarrassment
+#### Why this is a finding rather than an embarrassment
 
 A wrong claim about the world is ordinary. What makes this one worth a section is that it was
 **produced by the correction process**, under review pressure, by a lane that had just been told the
@@ -97,9 +320,7 @@ none of that rigour.
 > than for being right. Treat every replacement as a NEW claim arriving at Phase 4 with no lens on it,
 > not as the resolution of an old one.
 
----
-
-## 3. Second consecutive slice where the correction of a claim was itself an unverified claim
+### 3. Second consecutive slice where the correction of a claim was itself an unverified claim
 
 The 2026-08-25 handler-pool-seam retro, written the same day, named this exact shape: *"the correction
 of a uniqueness claim is itself a uniqueness claim, and inherits its unverifiability."* That slice's
@@ -114,7 +335,7 @@ The recurrence is data, not carelessness:
 > is precisely when you are looking at something else. This is the fourth recorded lesson in two slices
 > to be violated after being recorded, and in every case the review fan-out was what caught it.
 
-### What was built in response, and whether it generalises
+#### What was built in response, and whether it generalises
 
 Not another paragraph. A **negative guard**, `internal/agent/messages_test.go:139-143`:
 
@@ -152,9 +373,7 @@ its exhaustive form because eleven sites justified it. The pair is instructive -
 a deny-list tripwire and an AST-level exhaustive check, and the only difference between them is the
 number of sites at risk.
 
----
-
-## 4. The integration lane caught a regression no other lane could, and a conductor process error let it through
+### 4. The integration lane caught a regression no other lane could, and a conductor process error let it through
 
 **The process error, owned here.** The conductor told the engineer to skip integration tests during
 Phase 3. That is defensible on a slice with no migration and a fast default lane. It was wrong on this
@@ -173,7 +392,7 @@ because they assert nothing about enrollment at all; enrollment is scaffolding i
 test that depends on a defect in its fixture is invisible to a search for tests that assert the
 defect.**
 
-### Which lane owns which class of evidence
+#### Which lane owns which class of evidence
 
 - **The default lane owns branch reachability.** It proves a guard fires, that a refusal returns the
   right code, that no statement was issued. It cannot know what real Postgres does with `ON CONFLICT`,
@@ -192,9 +411,7 @@ defect.**
 
 All four tests are now inverted or given real credentials, and the lane is green.
 
----
-
-## 5. The item's prescribed remedy was on the wrong path, and striking an acceptance criterion was correct
+### 5. The item's prescribed remedy was on the wrong path, and striking an acceptance criterion was correct
 
 Twenty-third consecutive iteration of "verify a backlog item's technical claims against the code", and
 this one moved the code rather than merely confirming it.
@@ -212,7 +429,7 @@ non-NULL means a live credential, which is takeover. The spec adopted the item's
 there and took the honest wide spelling on the auto-enroll path. One item, two guards, and the asymmetry
 is forced rather than chosen.
 
-### Is striking an acceptance criterion a legitimate spec move?
+#### Is striking an acceptance criterion a legitimate spec move?
 
 Item 1's criterion 2 read: *"A revoked worker's hostname still re-enrolls (`agent_token_hash` is NULL
 after revocation), so the legitimate recovery path is not broken."* Implemented literally on the
@@ -239,9 +456,7 @@ The same discipline applied to the fixture item, whose `errWorkerRevoked` criter
 met**: the sentinel ceased to exist, so its named branch cannot be asserted, and the Resolution note
 says exactly that instead of ticking the box.
 
----
-
-## 6. Three mutations survived because the fixture could not distinguish WHERE a statement was issued
+### 6. Three mutations survived because the fixture could not distinguish WHERE a statement was issued
 
 The mutation was `txq.X -> h.q.X` on each of the three guards - the create-only check, the ceiling
 check, and the enrollment path's `FOR UPDATE` lookup. That hoists each guard **out of its transaction**
@@ -274,9 +489,7 @@ one.
 Close relative of the recorded "same-typed adjacent args transpose silently": both are guards that prove
 something happened and are fail-open on *which* something.
 
----
-
-## 7. An exhaustiveness claim was converted from prose into a check
+### 7. An exhaustiveness claim was converted from prose into a check
 
 README asserted that every credential refusal on the gRPC registration surface returns the identical
 string. **The slice's own `"auto-enroll disabled"` refuted it**, and so did `"worker revoked"`, which was
@@ -311,9 +524,7 @@ Round 2 made it structural:
 The guard also labels which of its two halves is load-bearing - the SUBSTITUTE/PERMANENT discipline the
 previous slice's retro proposed, applied on the day it was proposed.
 
----
-
-## 8. A remedy that favours the attacker, twice, in one README section
+### 8. A remedy that favours the attacker, twice, in one README section
 
 Two instances of the same shape, and it is the shape CLAUDE.md already records for
 `task_status_fence.counts.conflicting_total`.
@@ -344,9 +555,7 @@ produces". The counters say how many and why; only the audit line says **who**. 
 better first step than any of the three remedies, and it emerged from the same review pass that
 demoted `0`.
 
----
-
-## 9. One accepted trade the conductor owns
+### 9. One accepted trade the conductor owns
 
 The slice added `registrationStoreFault` (`internal/worker/handler.go:88-141`), which turns a store
 error anywhere on the registration path into `codes.Internal, "registration failed"` for the peer and
@@ -389,9 +598,7 @@ than nice-to-have** - it is proposed below, and section 9 is why its priority is
 > an unverified claim and should be routed through the fan-out like any other.** Here it was, and it
 > came back partially refuted.
 
----
-
-## 10. One live prose defect found by reading in this pass, and it is in the paragraph that fixed section 2
+### 10. One live prose defect found by reading in this pass, and it is in the paragraph that fixed section 2
 
 `README.md:420-422` currently reads:
 
@@ -420,209 +627,8 @@ those rows, is what a reaper would do, and this ceiling does not do it or try to
 > check, because a fragment asserts nothing. Re-read the whole paragraph after removing a sentence from
 > the middle of it, not just the sentence you replaced.
 
----
-
-## What Was Built
-
-- **`internal/store/query/workers.sql`** - `InsertWorkerForAutoEnroll`
-  (`ON CONFLICT (hostname) DO NOTHING RETURNING id`, a sqlc `:one`, so a taken hostname surfaces as
-  `pgx.ErrNoRows`), plus corrected comments on `UpsertWorkerByHostname` (its only caller is now
-  `enrollAndRegister`; the old comment claimed it refreshed specs "on reconnect", which reconnect never
-  did) and `SetWorkerAgentToken`. `make generate` re-run under the CRLF procedure.
-- **`internal/worker/handler.go`** - the create-only guard and the ceiling inside
-  `autoEnrollAndRegister`'s transaction (ceiling first, so a refusal writes nothing); the
-  `FOR UPDATE` + non-NULL-hash guard as the first statement of `enrollAndRegister`'s existing
-  transaction; `msgAuthFailed`; `errHostnameClaimed` and `errFleetAtCeiling` replacing
-  `errWorkerRevoked`; `registrationStoreFault`; `AutoEnrollWorkerCeiling *int` with
-  `DefaultAutoEnrollWorkerCeiling = 1024` and a resolver whose zero is meaningful (unlike
-  `RegistrationTimeout`'s, which is why the field is a pointer).
-- **`internal/worker/autoenroll_refusal_counters.go`** - refusal counts split by reason
-  (`hostname_claimed`, `fleet_at_ceiling`, `credential_live`), modelled on
-  `taskstatus_fence_counters.go`, read through an accessor returning a snapshot by value.
-- **`internal/worker/handler_enroll_guards_test.go`** (new, no build tag) - the default lane's first
-  route to both enrollment paths, with the four fixture blockers closed: statement-discriminating
-  `QueryRow` on `strandDB` and on `fakeTx`, a configurable `Exec` command tag, an enrollment-row stub
-  with a future `ExpiresAt`, and the owner tag of section 6.
-- **`internal/worker/refusal_string_guard_test.go`** (new) - the AST guard of section 7.
-- **`internal/agent/messages.go` / `messages_test.go`** - the token-less exit message now names all
-  three causes and real remedies, with the ghost-command guard of section 3.
-- **`cmd/relay-server`** - env parse, unconditional startup bounds line naming the effective ceiling and
-  saying explicitly when it is disabled, following `parseWatchdogDuration`'s three-outcome shape, never
-  `log.Fatalf`.
-- **`README.md`** - six falsified sentences corrected, including "Nothing bounds the total.", plus the
-  operator ladder, the narrow reading of the ceiling's promise, and the first-boot disclosure.
-- **Four existing tests inverted or re-credentialed** (section 4). **Three backlog items closed.**
-
-## Key Decisions
-
-- **Auto-enroll refuses on "a row exists", not on "the hash is non-NULL"** - equivalent in production,
-  fails closed on states that do not exist yet, and deletes a status deny-list rather than editing one.
-- **A new SQL statement, not a Go predicate.** `SELECT ... FOR UPDATE` on a hostname that does not exist
-  locks nothing, so two concurrent first-boots of the same fresh hostname both see no row and
-  `DO UPDATE` lets the loser overwrite the winner's freshly minted token. One statement, no window.
-- **The two paths get different guards, and the difference is forced** by the recovery route, not chosen
-  for symmetry.
-- **The ceiling gates the auto-enroll path only**, which is what makes it answerable to the
-  denial-primitive objection without shipping a reaper: enrollment tokens are never refused by it.
-- **The bound is approximate and every site says so** - `ceiling + RELAY_GRPC_MAX_CONNS`, never
-  `ceiling`. Exactness would need serializable isolation on a hot path.
-- **Refusals are counted, never logged.** A refusal is unboundedly repeatable by the same caller, and
-  the per-connection log limiter is not allocated until after registration.
-- **The counters section on `GET /v1/server/counters` was de-scoped at plan time**, on measured evidence
-  (`internal/api/server_counters.go` is 574 lines with a 1355-line test). Counters live on `Handler`
-  with an exported accessor; README says the publication is deferred.
-- **`"worker revoked"` deleted rather than joined** - it was a live hostname-state oracle and no test
-  asserted the string.
-
-## Findings Triage
-
-- **1 HIGH, ghost command** (section 2): `relay workers delete` in README twice, in the agent's terminal
-  exit message, and pinned by a test - introduced by a *fix*, refutable in one grep, and contradicting
-  the item being implemented. Now closed by a negative guard.
-- **1 HIGH, lane regression** (section 4): three integration tests green because of the defect,
-  invisible to every reading-based instrument.
-- **1 HIGH, pre-auth disclosure**: both enrollment transactions returned raw wrapped store errors to an
-  unauthenticated peer as `codes.Unknown`. Closed by `registrationStoreFault`.
-- **3 surviving mutations** (section 6): all three guards hoistable out of their transactions with no
-  test noticing. Closed by the owner tag.
-- **1 MEDIUM, remedy favours the attacker** (section 8), in two instances.
-- **1 MEDIUM, exhaustiveness by coincidence** (section 7): a table claiming to be exhaustive by
-  construction that drove 5 of 11 sites.
-- **~20 prose defects across three rounds** (3 + ~15 + 5). **One survives in the shipped tree**
-  (section 10) and is a conductor fix.
-
-## What Remains Open
-
-- **Relay cannot delete a worker at any layer.** Discovered by this slice rather than created by it, and
-  the create-only rule makes it operationally load-bearing: for one case the operator loop does not
-  terminate. Item below.
-- **The first-boot lockout window.** The auto-enroll transaction commits the row and its minted
-  `agent_token_hash` before the `RegisterResponse` is sent and before the agent persists it, so a failed
-  persist claims the hostname with a credential the agent never received - refused thereafter by both
-  paths. **Before this slice the retry self-healed**, because the upsert rotated the token, so closing
-  the takeover is what makes it permanent. Disclosed in README, not closed. Item below.
-- **The ceiling bounds `CountWorkers`, not the table** (section 8). The reaper is the complement. Item
-  below.
-- **`reg.Hostname` has no length or charset bound**, deliberately scoped out, and it is what makes
-  `registrationStoreFault` pre-auth reachable (section 9). Item below.
-- **Refusal counters are not on `GET /v1/server/counters`.** De-scoped at plan time; README says so.
-  Item below.
-- **`fleet_at_ceiling` aliases the other two reasons at capacity.** The ceiling check precedes the
-  insert deliberately, so at capacity every token-less refusal is attributed to the ceiling and
-  `hostname_claimed_total` goes flat exactly when an operator starts triaging. Ordering is correct;
-  aliasing is disclosed where the signal is read.
-- **M10 is a known survivor**: moving `enrollAndRegister`'s lookup outside its transaction is not
-  behaviourally detectable even after the owner tag, because the tag distinguishes tx from pool but the
-  hoisted-lookup variant still issues on the tx. Recorded so nobody later "fixes" it.
-- **No local `-race` path works on this host** - unchanged from yesterday, item already proposed there.
-
-## Improvement Goals
-
-Carried forward:
-
-- **Verify a backlog item's technical claims against the code** - honored, twenty-third iteration. Three
-  load-bearing claims across the two items did not survive, and two of the three moved the code.
-- **A backlog proposal is not a contract** - twenty-three for twenty-three. The prescribed predicate was
-  right on a path the item did not name.
-- **An accurate item can prescribe a wrong remedy** - the clean instance: item 1's diagnosis was correct
-  and its predicate belonged on the other path.
-- **Each stage treats the previous stage's output as untrusted** - honored. The spec refuted the item,
-  the plan reduced the spec's counters scope on measured evidence, and the fan-out refuted the spec's
-  own operator prose five times.
-- **Verify the mutation actually applied** - honored, and it mattered: **two mutations silently failed
-  to apply on the first attempt (CRLF) and reported false survivals** until re-run. That is now five in
-  this tree.
-- **A mutation proof must leave a test behind** - honored; the owner tag and its assertions are
-  permanent.
-- **Say "declined, and here is the price"** - honored for the reaper, the CIDR allowlist, hostname
-  validation and the counters section, each with the price written down.
-- **Wrong prose about correct code is the dominant defect class** - **eleventh consecutive iteration**,
-  three rounds deep, and one instance still shipped.
-
-New from this iteration:
-
-- **A refutation creates pressure to name a substitute, and that substitute is the least-verified
-  sentence in the document.** Route it through the fan-out as a new claim. **Candidate for durable
-  memory.**
-- **"The remedy is named" and "the remedy exists" are different properties.** A substring assertion
-  tests only the first; the check for the second is negative or AST-shaped. **Candidate for durable
-  memory.**
-- **A fake that merges two call sites cannot pin the difference between them.** Tag the observation with
-  its source at the point of recording. **Candidate for durable memory.**
-- **When a slice REMOVES a behaviour, run the integration lane** - other tests may use it as scaffolding
-  rather than as subject, and that dependency is invisible to every reading-based instrument.
-- **A prose edit that deletes a clause can strand its neighbours**; a truth check cannot see a fragment.
-- **When a conductor overrules an engineer's scope hesitation, the overruling reasoning is itself an
-  unverified claim.**
-
-## Files Most Touched
-
-- `internal/worker/handler.go:43-141` - the sentinels, `msgAuthFailed`, and `registrationStoreFault`
-  with the corrected bound argument of section 9. Where the next person to touch a refusal lands.
-- `internal/worker/handler.go:760-825` - `autoEnrollAndRegister`'s transaction: ceiling, then insert,
-  then the two `errors.Is` arms mapping both refusals onto one string.
-- `internal/worker/handler_enroll_guards_test.go:100-210` - the owner tag and `sawStatementOn`. The
-  section 6 story is legible from this block alone.
-- `internal/worker/refusal_string_guard_test.go:13-70` - the AST guard, and the comment distinguishing
-  the tripwire from the property.
-- `internal/agent/messages_test.go:125-143` - the ghost-command guard and the reasoning for why it is
-  negative.
-- `README.md:414-452` - the narrow reading of the ceiling's promise, the ladder, the demotion of `0`,
-  **and the malformed sentence of section 10**.
-- `docs/superpowers/specs/2026-08-25-auto-enroll-guards.md:1132-1190` - the dated correction block. Worth
-  reading as a worked example of a spec recording that it was wrong rather than being quietly edited.
-
-## Verification
-
-- **This pass had no shell.** Nothing was executed here - no `git log`, no `git diff`, no test run. Every
-  claim below that could be checked by reading was checked against the worktree.
-- **Confirmed against code, not inferred:** that `msgAuthFailed` exists at `handler.go:57` and is used at
-  eleven `codes.Unauthenticated` sites; that `errHostnameClaimed` and `errFleetAtCeiling` replaced
-  `errWorkerRevoked`; that `AutoEnrollWorkerCeiling` is a `*int` with a resolver treating negative as
-  default and `0` as disabled; that `registrationStoreFault`'s comment carries both the parity
-  correction and the pre-auth reachability disclosure; that the AST guard requires the `msgAuthFailed`
-  identifier and carries an 11-site tripwire labelled as not-the-property; that the ghost-command guard
-  is `assert.NotContains` over three spellings; that the owner tag exists on `rowScript` and is read
-  through `sawStatementOn`; that README's ladder demotes `0` out of the numbered steps and adds a step 0
-  naming the audit line; and that `README.md:420-422` is malformed.
-- **Reported by the implementing and verifying lanes, not re-run here:** all 21 unit packages green;
-  `internal/worker` green at `-count=10`; integration green on a cache-busted run across
-  `internal/worker` (140.8s), `internal/store` (180.8s) and `cmd/relay-server` (25.5s), plus
-  `internal/api` and `internal/agent`; `go vet` and `go vet -tags integration` clean; a mutation battery
-  across both rounds with applied-checks and controls.
-- **`go test -race` was unrunnable locally all session** - ThreadSanitizer allocation failure,
-  environmental, reproduced at `origin/main` on an untouched package. CI's `race + integration-build`
-  job is the gate and this slice relies on it. Second consecutive slice in this position.
-- **Not verified here:** all test results, the commit set, the diff stat, and the change set as `git`
-  sees it.
-- **No PR number appears anywhere in this retro or in the proposed items**, by instruction.
-- **Outstanding and belonging to the conductor:** the README:420-422 fix, the item filings below, the
-  final gates, all commits, and a ROADMAP refresh.
-
-## CLAUDE.md verdict
-
-**One amendment is earned, and it is a sentence rather than a bullet.**
-
-CLAUDE.md's Invariants already carry "Identity is not honesty" and the `conflicting_total` worked
-example, which say to ask, where a signal is read, what a peer who can move it gains from the
-documented remedy. Section 8 is the second independent instance in two slices, and the *second* half of
-it is new: **an option that disables the control belongs outside the remedy ladder, not inside it as a
-peer.** That is a concrete, checkable rule and it is not currently implied by the existing text. Suggest
-appending one clause to the existing bullet rather than adding a new one.
-
-**Not earned, and deliberately so:**
-
-- The prose lessons of sections 2, 3 and 10 have no code-facing form and CLAUDE.md's Invariants section
-  is for rules that new *code* must not bypass. Durable memory, proposed above.
-- The fixture lesson of section 6 is a test-design rule. The same call was made yesterday for the same
-  reason.
-- **`RELAY_AUTO_ENROLL_WORKER_CEILING` does belong in README** and is there; it does not belong in
-  CLAUDE.md, whose env-var coverage points at README by design.
-
-One thing the conductor should consider and I do **not** recommend: adding the create-only rule to the
-Invariants list. It is a property of one code path with a guard and two default-lane tests, not a
-cross-cutting rule other code could bypass. The invariant it actually strengthens - the epoch fence and
-its `worker_id` predicate - is already there, and this slice is upstream of it rather than a peer.
+The behavioural design was not the expensive part. **Three prose remediation rounds were**, and the
+second round's fix prescribed `relay workers delete` - a command that exists nowhere in the product.
 
 ## Recommended Backlog Items
 
@@ -721,3 +727,20 @@ registration** - priority `medium`.
   `0`-in-the-ladder half belongs as a clause on CLAUDE.md's existing bullet, and the one item-shaped
   residue is the README:420-422 fragment, which is a conductor fix in this session and not an item at
   all.
+
+## Files Most Touched
+
+- `internal/worker/handler.go:43-141` - the sentinels, `msgAuthFailed`, and `registrationStoreFault`
+  with the corrected bound argument of section 9. Where the next person to touch a refusal lands.
+- `internal/worker/handler.go:760-825` - `autoEnrollAndRegister`'s transaction: ceiling, then insert,
+  then the two `errors.Is` arms mapping both refusals onto one string.
+- `internal/worker/handler_enroll_guards_test.go:100-210` - the owner tag and `sawStatementOn`. The
+  section 6 story is legible from this block alone.
+- `internal/worker/refusal_string_guard_test.go:13-70` - the AST guard, and the comment distinguishing
+  the tripwire from the property.
+- `internal/agent/messages_test.go:125-143` - the ghost-command guard and the reasoning for why it is
+  negative.
+- `README.md:414-452` - the narrow reading of the ceiling's promise, the ladder, the demotion of `0`,
+  **and the malformed sentence of section 10**.
+- `docs/superpowers/specs/2026-08-25-auto-enroll-guards.md:1132-1190` - the dated correction block. Worth
+  reading as a worked example of a spec recording that it was wrong rather than being quietly edited.
