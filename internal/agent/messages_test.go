@@ -136,6 +136,15 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 	// substring check is satisfied by any plausible-looking string, so "the
 	// remedy is named" and "the remedy exists" are different properties and only
 	// this one tests the second.
+	//
+	// IT IS A DENY-LIST AND IT IS NOT WHAT HOLDS THE PROPERTY. It names three
+	// spellings; `relay worker delete` (singular) walks straight past it, and so
+	// do "destroy" and "purge". PLAUSIBILITY IS THE GENERATOR of this defect, so a
+	// list of the ghosts somebody already caught can never be the guard.
+	// TestOperatorMessages_OnlyPrescribeCommandsThatExist is: it parses the real
+	// command set out of internal/cli and requires every `relay ...` in every
+	// message to resolve, whatever its spelling. This stays only because it gives
+	// a more pointed message for the three spellings that actually shipped.
 	for _, ghost := range []string{"workers delete", "relay workers rm", "workers remove"} {
 		assert.NotContains(t, msg, ghost,
 			"this message must not prescribe a command that does not exist; add the subcommand to "+
