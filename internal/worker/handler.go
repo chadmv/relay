@@ -1243,7 +1243,20 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	}
 
 	if terminal {
-		if err := h.q.FailDependentTasks(ctx, taskID); err != nil {
+		// UNDER THE CONNECTION'S BUDGET, and NOT gated on pgx.ErrNoRows: this is
+		// an :exec, so ErrNoRows is not a shape it can return, and adding an
+		// errors.Is here would be cargo-culted from the two arms above. It is
+		// also NOT a fence-rejection site in task_status_fence's sense -
+		// FailDependentTasks satisfies the epoch fence with a terminal-only
+		// `WHERE status = 'pending'` predicate and yields no rowcount to inspect
+		// (see the partition comment in internal/scheduler/dispatch.go).
+		//
+		// Reached only AFTER a successful UpdateTaskStatus, which is exactly the
+		// condition the sibling item's Repro names: the read succeeds and the
+		// WRITE fails, so the budgeted GetTask line above never spends a token
+		// and nothing else bounds this one.
+		if err := h.q.FailDependentTasks(ctx, taskID); err != nil &&
+			lim.allow(logKey{kind: kindStatusFailDependents}) {
 			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", uuidStr(taskID), err)
 		}
 	}

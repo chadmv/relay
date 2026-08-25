@@ -648,8 +648,8 @@ func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
 		} `json:"counts"`
 	}
 	require.NoError(t, json.Unmarshal(top["ingest_log_budget"], &section))
-	require.Len(t, section.Counts.Deduped, 5, "one key per kind")
-	require.Len(t, section.Counts.Suppressed, 5, "one key per kind")
+	require.Len(t, section.Counts.Deduped, 8, "one key per kind")
+	require.Len(t, section.Counts.Suppressed, 8, "one key per kind")
 }
 
 // TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection is EXECUTED, and

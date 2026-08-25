@@ -541,3 +541,70 @@ func TestTaskStatusFenceCounters_ConcurrentRejectionsAreExact(t *testing.T) {
 		"every rejection from every connection must land, and all of them under ONE reason. A plain "+
 			"uint64 here loses counts silently and is a data race -race can see.")
 }
+
+// TestHandleTaskStatus_AWriteFailureFloodIsBoundedAndCountedPerSite is item 2's
+// own Done-When: a flood of status updates whose write fails must produce at
+// most the burst plus the refill rate of log lines, and every drop must be
+// counted under the site that lost it.
+//
+// THE THREE SITES ARE ASSERTED SEPARATELY. One shared kind would have been one
+// JSON key; three is the decision recorded in the logKind block, and this is
+// what makes it checkable - a mutation that points two sites at one kind leaves
+// one number at zero here.
+func TestHandleTaskStatus_AWriteFailureFloodIsBoundedAndCountedPerSite(t *testing.T) {
+	ctx := context.Background()
+	dbErr := errors.New(`ERROR: canceling statement due to statement timeout (SQLSTATE 57014)`)
+
+	// SITE 1: the UpdateTaskStatus arm.
+	h, _ := newStatusHandler(t, "running", 0, 0, dbErr)
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	logged := captureUnitLog(t)
+	const flood = 100
+	for i := 0; i < flood; i++ {
+		h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	}
+	require.Equal(t, 1, strings.Count(logged(), "handleTaskStatus UpdateTaskStatus"),
+		"this kind carries NO wire value, so the flood is ONE key and one line. Before this slice it "+
+			"was %d lines, one per message, at whatever rate the agent chose to send.", flood)
+	got := h.IngestLogDropCounts()
+	require.Equal(t, uint64(flood-1), got.Deduped.StatusUpdateWrite,
+		"the %d messages folded into that one line must be COUNTED. Until this slice ingest_log_budget "+
+			"read all zeros while these lines carried the volume - a control reporting zero is worse "+
+			"than one reporting nothing.", flood-1)
+	require.Zero(t, got.Deduped.StatusRetryWrite, "the count must be attributed to the RIGHT site")
+	require.Zero(t, got.Deduped.StatusFailDependents)
+	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections(),
+		"A REAL DATABASE ERROR IS NOT A FENCE REJECTION. The two arms are the subjects of two separate "+
+			"items and no input executes both; this assertion is what keeps them disjoint.")
+
+	// SITE 2: the retry arm.
+	h, _ = newStatusHandler(t, "running", 3, 0, dbErr)
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	logged = captureUnitLog(t)
+	for i := 0; i < flood; i++ {
+		h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	}
+	require.Equal(t, 1, strings.Count(logged(), "handleTaskStatus IncrementTaskRetryCount"))
+	require.Equal(t, uint64(flood-1), h.IngestLogDropCounts().Deduped.StatusRetryWrite)
+
+	// SITE 3: FailDependentTasks, which is reached only AFTER a successful
+	// UpdateTaskStatus and is NOT gated on pgx.ErrNoRows at all - it is an
+	// :exec, so ErrNoRows is not a shape it can return.
+	db := &stubStatusDB{
+		task: store.Task{
+			ID: statusTaskIDUUID(t), JobID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+			Status: "running", WorkerID: statusWorkerID(), AssignmentEpoch: 7,
+		},
+		execErr: errors.New(`ERROR: deadlock detected (SQLSTATE 40P01)`),
+	}
+	h = &Handler{q: store.New(db), broker: events.NewBroker()}
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	logged = captureUnitLog(t)
+	for i := 0; i < flood; i++ {
+		h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	}
+	require.Equal(t, 1, strings.Count(logged(), "handleTaskStatus FailDependentTasks"),
+		"the recursive CTE is the most expensive statement on this path and the first to deadlock under "+
+			"contention; its line was outside the budget entirely")
+	require.Equal(t, uint64(flood-1), h.IngestLogDropCounts().Deduped.StatusFailDependents)
+}

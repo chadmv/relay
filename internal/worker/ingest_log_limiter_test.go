@@ -270,20 +270,27 @@ func TestIngestLogLimiter_AConstantKeyKeepsReportingAcrossALongConnection(t *tes
 	}
 }
 
-// THE `kind` COMPONENT OF THE KEY. Four of the five kinds carry NO wire value,
+// THE `kind` COMPONENT OF THE KEY. SEVEN of the eight kinds carry NO wire value,
 // so each is exactly one logKey and `kind` is the ONLY thing keeping them apart.
 // Nothing else in the tree pins it: a lens set k.kind = 0 at the top of allow and
 // the entire package, unit plus integration, stayed green. A refactor that drops
-// the field, or a sixth kind with the same zero-value shape, would silently
+// the field, or a further kind with the same zero-value shape, would silently
 // collapse independent diagnostics into one.
+//
+// THE COUNT MATTERS AGAINST THE BURST: len(kinds) distinct keys are spent in one
+// call each, so this test is only meaningful while len(kinds) <= ingestLogBurst
+// (16). Eight is comfortably inside it.
 func TestIngestLogLimiter_EveryKindIsItsOwnDedupeKey(t *testing.T) {
 	l, _ := newFrozen()
 	kinds := map[string]logKind{
-		"kindTaskLogPersist":  kindTaskLogPersist,
-		"kindBadTaskIDLog":    kindBadTaskIDLog,
-		"kindBadTaskIDStatus": kindBadTaskIDStatus,
-		"kindStatusGetTask":   kindStatusGetTask,
-		"kindInventory":       kindInventory,
+		"kindTaskLogPersist":       kindTaskLogPersist,
+		"kindBadTaskIDLog":         kindBadTaskIDLog,
+		"kindBadTaskIDStatus":      kindBadTaskIDStatus,
+		"kindStatusGetTask":        kindStatusGetTask,
+		"kindInventory":            kindInventory,
+		"kindStatusRetryWrite":     kindStatusRetryWrite,
+		"kindStatusUpdateWrite":    kindStatusUpdateWrite,
+		"kindStatusFailDependents": kindStatusFailDependents,
 	}
 	for name, kind := range kinds {
 		if !l.allow(logKey{kind: kind}) {

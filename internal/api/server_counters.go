@@ -358,9 +358,11 @@ type grpcAdmissionLevels struct {
 // AND WHAT THEY DO NOT COUNT: these are LOG LINES THE BUDGET DROPPED, not
 // diagnostics lost. A handler that decides not to log without consulting the
 // budget contributes nothing - handleTaskStatus's pgx.ErrNoRows GetTask
-// short-circuits before the budget, and handleTaskLog's fence-rejection arm
-// never consults it at all (that one is counted in task_log_fence, and the two
-// numbers are disjoint).
+// short-circuits before the budget and is counted nowhere, and handleTaskLog's
+// fence-rejection arm never consults it at all (that one is counted in
+// task_log_fence). handleTaskStatus's two epoch-fenced WRITE arms are the same
+// shape and ARE counted, in task_status_fence below. All three sections are
+// disjoint from this one: no input moves more than one of them.
 type ingestLogBudgetSection struct {
 	Counts ingestLogBudgetCounts `json:"counts"`
 }
@@ -381,20 +383,26 @@ type ingestLogBudgetCounts struct {
 // THESE KEYS ARE A RESPONSE CONTRACT tied to worker's logKind names; see that
 // type's comment before renaming anything here.
 type ingestLogKindCounts struct {
-	TaskLogPersist  uint64 `json:"task_log_persist"`
-	BadTaskIDLog    uint64 `json:"bad_task_id_log"`
-	BadTaskIDStatus uint64 `json:"bad_task_id_status"`
-	StatusGetTask   uint64 `json:"status_get_task"`
-	Inventory       uint64 `json:"inventory"`
+	TaskLogPersist       uint64 `json:"task_log_persist"`
+	BadTaskIDLog         uint64 `json:"bad_task_id_log"`
+	BadTaskIDStatus      uint64 `json:"bad_task_id_status"`
+	StatusGetTask        uint64 `json:"status_get_task"`
+	Inventory            uint64 `json:"inventory"`
+	StatusRetryWrite     uint64 `json:"status_retry_write"`
+	StatusUpdateWrite    uint64 `json:"status_update_write"`
+	StatusFailDependents uint64 `json:"status_fail_dependents"`
 }
 
 func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts {
 	return ingestLogKindCounts{
-		TaskLogPersist:  k.TaskLogPersist,
-		BadTaskIDLog:    k.BadTaskIDLog,
-		BadTaskIDStatus: k.BadTaskIDStatus,
-		StatusGetTask:   k.StatusGetTask,
-		Inventory:       k.Inventory,
+		TaskLogPersist:       k.TaskLogPersist,
+		BadTaskIDLog:         k.BadTaskIDLog,
+		BadTaskIDStatus:      k.BadTaskIDStatus,
+		StatusGetTask:        k.StatusGetTask,
+		Inventory:            k.Inventory,
+		StatusRetryWrite:     k.StatusRetryWrite,
+		StatusUpdateWrite:    k.StatusUpdateWrite,
+		StatusFailDependents: k.StatusFailDependents,
 	}
 }
 
