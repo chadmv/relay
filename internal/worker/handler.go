@@ -970,10 +970,21 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 // it cannot claim to be somebody else. It is threaded here the same way
 // handleTaskLog and applyInventoryUpdate already receive it.
 //
-// lim is this connection's log budget, allocated once in Connect. Both pre-gate
-// log lines below run AHEAD of the identity and currency gates, so the budget is
-// the only thing bounding them - see
+// lim is this connection's log budget, allocated once in Connect. FIVE log lines
+// in this function go through it and the split matters: the two above the gates
+// (bad task id, GetTask failure) are bounded by the budget ALONE, because a gate
+// cannot protect a line placed before it; the three below (retry write, status
+// write, dependency cascade) are additionally behind the identity and currency
+// gates, so reaching them costs a valid assignment. All five carry NO wire value
+// in their dedupe key - each is exactly one key for the connection's whole life,
+// re-armed by ingestLogDedupeWindow. See
 // docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md.
+//
+// TWO OF THIS FUNCTION'S ARMS ARE COUNTED RATHER THAN LOGGED. Both epoch-fenced
+// writes below drop pgx.ErrNoRows silently and record it in h.statusFence, which
+// GET /v1/server/counters publishes as task_status_fence. That arm and the log
+// budget are DISJOINT: no input moves both, and neither number covers any part
+// of the other.
 func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
@@ -1059,9 +1070,10 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// one statement instead of two, not two instead of none. Real on a recv
 	// goroutine that a single sender can drive as fast as it likes, but bounded.
 	//
-	// It does NOT save a log line. Both write-error branches below are wrapped
-	// in `if !errors.Is(err, pgx.ErrNoRows)`, so a forged message rejected by
-	// either fence logs nothing at all - delete this gate and the log volume is
+	// It does NOT save a log line. Both write-error branches below put the
+	// pgx.ErrNoRows case in its own arm of an `if errors.Is(...) / else if
+	// lim.allow(...)` pair, so a forged message rejected by either fence logs
+	// nothing at all - delete this gate and the log volume is
 	// unchanged. Nor does this function have a "zero attacker-keyed log lines"
 	// property to protect: the two branches at the top of this function still
 	// run AHEAD of this gate, and a gate cannot protect a line placed before
@@ -1081,6 +1093,17 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// Third, defense in depth against a future edit to either half. Keep BOTH;
 	// do not delete this as redundant with the SQL, and do not delete the SQL
 	// predicates as redundant with this.
+	//
+	// FOURTH, AND NEW SINCE task_status_fence SHIPPED: this gate is what makes
+	// the fence counters ATTRIBUTABLE. A non-assignee's forged report is dropped
+	// here, one round trip before either write, so it never reaches a counter -
+	// which is what stops a registered peer inflating conflicting_total by
+	// naming tasks it does not own. Deleting the gate would leave the observable
+	// TASK STATE unchanged (both statements reject on their own worker_id
+	// predicate) and would make the counters peer-drivable noise. The numbers
+	// are still not peer-KEYED - the cardinality rule holds either way - but a
+	// signal an unrelated agent can move is not the signal an operator is
+	// reading.
 	//
 	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
 	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
