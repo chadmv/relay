@@ -1128,6 +1128,33 @@ Mapped to the two items' own criteria, with the amendments called out.
   limit nor the disclosure was verified in this pass. Item 16.2.
 - **The ceiling helps no deployment that has already been hit.** `revoke` frees budget manually and is
   the only remedy this slice ships. Item 16.1.
+
+**Added 2026-08-25, Phase 4.** Three limitations this section did not have, all found in review.
+
+- **The ceiling bounds NON-REVOKED rows, and remedy 1 is what makes the gap reachable.** Revoking keeps
+  the row, so under an active attacker the operator revokes the junk, the attacker creates more under
+  NEW hostnames (the old ones stay claimed), and the table grows without bound in the revoked bucket
+  while `CountWorkers` sits flat. The stated bound is honest about `CountWorkers`; it was not honest
+  about the table. README now says both, and `0` has been demoted out of the remedy ladder - a climbing
+  `fleet_at_ceiling` is exactly the signal an attacker produces, and disabling the bound is exactly what
+  that attacker wants.
+- **A FIRST BOOT THAT NEVER COMPLETES CLAIMS THE HOSTNAME PERMANENTLY, and this is a cost the slice
+  CREATES rather than one it inherits.** `autoEnrollAndRegister` commits the row and the minted
+  `agent_token_hash` before the `RegisterResponse` is sent and before the agent persists it. If the
+  stream dies in that window, or `creds.Persist` fails on a read-only or full state directory, the
+  hostname is claimed with a live credential the agent never received - refused thereafter by
+  auto-enroll (a row exists) AND by the enrollment-token path (the credential is live). Section 5.1's
+  cost list names only "an agent that loses its state directory but keeps its hostname"; this is a
+  machine that never registered at all. **Before this slice the retry self-healed**, because the upsert
+  rotated the token, so closing the takeover is what makes it permanent. DISCLOSED, NOT CLOSED, in this
+  slice: closing it properly needs a server-side notion of an unconfirmed first registration - the row
+  is not really the agent's until the agent has the token - which is a design question of its own and
+  is out of scope here.
+- **`fleet_at_ceiling` aliases the other two reasons at capacity.** The ceiling check precedes the
+  insert, deliberately, so that a refused auto-enroll writes nothing; the consequence is that at
+  capacity every token-less refusal is attributed to the ceiling and `hostname_claimed_total` goes flat
+  exactly when an operator starts triaging. The ordering is correct and stays; the aliasing is
+  disclosed where the signal is read.
 - **The refusal is a hostname-existence oracle by construction** (5.3). Closing it would mean refusing
   everything.
 - **A legitimately refused agent produces no server-side line naming it** (section 7). The agent's own

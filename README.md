@@ -396,7 +396,7 @@ caller cannot tell "this hostname is taken" from "this hostname is revoked" from
 unknown". One oracle is inherent and is not closed: a caller learns a hostname is claimed because
 claiming it fails, while an unclaimed one succeeds. Closing that would mean refusing everything.
 
-**Row growth is bounded.** Those rows survive the connection that created them, survive a server
+**NON-REVOKED row growth is bounded; total row growth is not.** Those rows survive the connection that created them, survive a server
 restart, and appear in every `GET /v1/workers` page and every dispatcher scan, so the total is capped:
 token-less enrollment is refused once `RELAY_AUTO_ENROLL_WORKER_CEILING` (default `1024`, `0` disables)
 non-revoked workers exist. **The bound is approximate and the arithmetic is stated rather than
@@ -411,21 +411,56 @@ enrollment-token path does **not** have this property - the worker upsert and th
 consume share one transaction, so one admin-issued token buys exactly one row. If you run auto-enrollment
 on a network where that trust does not hold, do not; use enrollment tokens.
 
+**Read the ceiling's promise narrowly.** It bounds the number of **non-revoked** worker rows, which
+is what `CountWorkers` measures. It does **not** bound the number of rows in the table, and remedy 1
+below is what makes that gap reachable: revoking a row keeps it, so under an active attacker the
+operator revokes 1024 junk workers, the attacker creates 1024 more under **new** hostnames - the old
+ones stay claimed forever - and the table grows without limit in the revoked bucket while the counted
+total sits flat. Reclaiming either the row or the hostname needs `relay workers delete`, which destroys
+that worker's assignments and reservations. Bounding the table itself is not something this ceiling
+does or is trying to do.
+
 **When the ceiling is reached, in the order to try things.**
 
+0. **Find out whose hostnames they are.** Read the `auto-enrolled worker` lines in the server log:
+   they carry the hostname (escaped and length-clipped) *and the remote address*, and they are the only
+   attributable signal this system produces. The refusal counters say how many and why; only these say
+   **who**. A successful token-less enrollment writes exactly one, permanently, because that hostname
+   can never be auto-enrolled again - so the log is a complete list of what was created this way.
 1. **Revoke the junk.** The ceiling counts non-revoked workers only, so `relay workers revoke <id>` on
    rows that do not correspond to real machines frees budget immediately, with no restart, and without
-   the assignment and reservation destruction that *deleting* a worker causes.
+   the assignment and reservation destruction that *deleting* a worker causes. Note what it does not
+   do: the row and its hostname remain, so this frees **budget**, never a **hostname**, and it does not
+   shrink the table.
 2. **Use enrollment tokens.** The ceiling gates the token-less path only. `relay agent enroll` is never
    refused by it, so machines can still be added with no downtime.
-3. **Raise `RELAY_AUTO_ENROLL_WORKER_CEILING`, or set it to `0`.** This **requires a server restart** -
-   the knob is not hot-reloadable. Agents reconnect on backoff and `RELAY_WORKER_GRACE_WINDOW` covers
-   their running tasks, so it is a blip rather than data loss.
+3. **Raise `RELAY_AUTO_ENROLL_WORKER_CEILING`.** This **requires a server restart** - the knob is not
+   hot-reloadable. Agents reconnect on backoff and `RELAY_WORKER_GRACE_WINDOW` covers their running
+   tasks, so it is a blip rather than data loss.
+
+**Setting the ceiling to `0` is not step 4.** It is deliberately not in the ladder above, because a
+climbing `fleet_at_ceiling` count is exactly the signal an attacker filling the budget produces, and
+disabling the bound is exactly what that attacker wants - the same shape as the forgeable
+`conflicting_total` signal documented under `task_status_fence`. Disable the ceiling only if you have
+independently decided the auto-enroll trust model holds on this network, never as a response to
+refusals you are still triaging.
 
 An operator whose fleet genuinely exceeds 1024 machines should set this explicitly. The default is
 derived from `RELAY_GRPC_MAX_CONNS`, and **the derivation is not airtight**: that knob bounds concurrent
 *connections* while this one bounds total non-revoked *rows*, so a farm of 2000 intermittently-connected
 machines with 800 online at a time stays under the connection cap and exceeds this ceiling legitimately.
+
+**A first boot that never completes claims the hostname permanently.** `autoEnrollAndRegister` commits
+the worker row *and* its freshly minted `agent_token_hash` before the `RegisterResponse` is sent and
+before the agent writes the token to its state directory. If the stream dies in that window, or the
+agent cannot persist the token (a read-only or full state directory on first boot), the hostname is
+claimed with a live credential **the agent never received**. The retry is then refused by auto-enroll
+(a row exists) *and* by the enrollment-token path (that row's credential is live), so the machine
+cannot rejoin under that hostname until an admin revokes the worker and issues an enrollment token, or
+deletes it. This is narrower than the lost-state-directory case and worth naming separately: that one
+is a machine that ran successfully once, this one never registered at all. Before the create-only rule
+the retry self-healed, because the upsert simply rotated the token; closing the takeover is what makes
+this permanent.
 
 **Refusals are counted, never logged.** A refusal is unboundedly repeatable by the same caller with the
 same hostname, and the per-connection log limiter is not allocated until *after* registration, so a log
