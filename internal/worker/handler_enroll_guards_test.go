@@ -493,10 +493,10 @@ func TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow(t *testing.T
 	assert.Equal(t, 0, f.stream.tokensSent())
 }
 
-// TestConnect_EveryCredentialRefusalIsIndistinguishable drives EVERY refusal on
-// the gRPC registration surface and compares the produced messages WITH EACH
-// OTHER rather than each against a literal - comparing literals would still pass
-// if every site were changed to something disclosing.
+// TestConnect_EveryCredentialRefusalIsIndistinguishable drives every distinct
+// refusal OUTCOME on the gRPC registration surface and compares the produced
+// messages WITH EACH OTHER rather than each against a literal - comparing
+// literals would still pass if every site were changed to something disclosing.
 //
 // IT USED TO COVER TWO HAND-PICKED ARMS, and that is how "auto-enroll disabled"
 // survived: README claims every credential failure here returns the identical
@@ -506,9 +506,20 @@ func TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow(t *testing.T
 // (1) of the three the agent's exit message tells an operator to check, i.e. the
 // one the design says is indistinguishable was the one that was not.
 //
-// The table is exhaustive over the refusal sites BY CONSTRUCTION: an arm added
-// to authenticateAndRegister that returns a new string is only caught if it is
-// added here too, so treat this list as part of the refusal surface.
+// THIS TABLE IS NOT EXHAUSTIVE OVER THE REFUSAL SITES, and the previous revision
+// of this comment claimed it was "BY CONSTRUCTION" while its own next sentence
+// admitted a new arm is only caught if added here too. handler.go carries ELEVEN
+// codes.Unauthenticated returns; five distinct outcomes reach this table, because
+// several sites produce the same one (enrollAndRegister alone has five ways to
+// say "bad enrollment token"). An exhaustiveness claim is a claim about the
+// COMPLEMENT and cannot be checked by reading the test that makes it.
+//
+// What actually holds the property is TestRegistrationRefusals_AllUseTheSharedConstant,
+// which parses handler.go and requires every one of those eleven to pass the
+// msgAuthFailed CONSTANT rather than its own literal - so a twelfth site is
+// indistinguishable whether or not anyone remembers this table. What this table
+// adds on top is end-to-end evidence that the five outcomes are actually
+// REACHABLE and actually agree, which a source-level guard cannot show.
 func TestConnect_EveryCredentialRefusalIsIndistinguishable(t *testing.T) {
 	ceiling := 1
 	arms := []struct {

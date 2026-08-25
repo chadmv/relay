@@ -40,6 +40,22 @@ var agentTokenGenerator = func() (string, string) {
 // ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
 var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 
+// msgAuthFailed is the ONE string every credential refusal on the gRPC
+// registration surface returns, and it is a constant so that property is
+// STRUCTURAL rather than eleven string literals that happen to agree.
+//
+// A refusal that differs from its neighbours is an oracle. "auto-enroll
+// disabled" was one until 2026-08-25: it told an unauthenticated peer whether
+// RELAY_ALLOW_AUTO_ENROLL was set, for free, with no row touched. The refusals
+// that remain are deliberately indistinguishable from each other - a caller
+// cannot tell "hostname taken" from "fleet at ceiling" from "unknown token" -
+// and TestRegistrationRefusals_AllUseTheSharedConstant fails any new site that
+// passes its own string instead of this one.
+//
+// The one oracle that survives is inherent and is documented rather than
+// claimed away: a caller learns a hostname is claimed because claiming it fails.
+const msgAuthFailed = "authentication failed"
+
 // errHostnameClaimed is returned inside the auto-enroll transaction when a
 // workers row for the claimed hostname already exists - whatever its status and
 // whatever its token. It replaces errWorkerRevoked, which was a DENY-LIST OF
@@ -581,7 +597,7 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 		// NOT indistinguishable. The oracle bought an operator nothing:
 		// authFailureMessage discards the server's message entirely and reasons from
 		// the agent's own local state.
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 }
 
@@ -598,19 +614,19 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 // revoke first - same rule, same remedy as the auto-enroll path.
 func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawEnroll string) (string, *workerSender, error) {
 	if rawEnroll == "" {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 
 	hash := tokenhash.Hash(rawEnroll)
 	enroll, err := h.q.GetAgentEnrollmentByTokenHash(ctx, hash)
 	if err != nil {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	if enroll.ConsumedAt.Valid {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	if time.Now().After(enroll.ExpiresAt.Time) {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 
 	rawAgent, agentHash := agentTokenGenerator()
@@ -677,10 +693,10 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	if txErr != nil {
 		if errors.Is(txErr, errCredentialLive) {
 			h.enrollmentRefusals.record(enrollmentRefusalCredentialLive)
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		return "", nil, enrollmentStoreFault(ctx, "enrollment", reg.Hostname, txErr)
 	}
@@ -691,14 +707,14 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 // reconnectAndRegister handles agent reconnection using a previously issued agent token.
 func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawAgent string) (string, *workerSender, error) {
 	if rawAgent == "" {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	hash := tokenhash.Hash(rawAgent)
 
 	w, err := h.q.GetWorkerByAgentTokenHash(ctx, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		return "", nil, status.Errorf(codes.Internal, "token lookup failed")
 	}
@@ -770,11 +786,11 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	if txErr != nil {
 		if errors.Is(txErr, errHostnameClaimed) {
 			h.enrollmentRefusals.record(enrollmentRefusalHostnameClaimed)
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		if errors.Is(txErr, errFleetAtCeiling) {
 			h.enrollmentRefusals.record(enrollmentRefusalFleetAtCeiling)
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		return "", nil, enrollmentStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
 	}
