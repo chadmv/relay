@@ -197,7 +197,23 @@ func taskStatusIsWritable(status string) bool {
 // whether the row was ALREADY unwritable when this handler read it, which is a
 // sufficient condition for the rejection (a terminal row is one-way: the only
 // statement that reopens one, RetryJobTasks, bumps the epoch, so the agent's
-// next report is rejected by the currency gate instead). A row that was still
+// next report is rejected by the currency gate instead).
+//
+// THAT CLAIM HAS A SILENT DEPENDENCY, named here because "the only statement" is
+// a claim about the complement and cannot be checked by opening its subject.
+// tasks.sql carries a second epoch-only status write - the variant that fences
+// on assignment_epoch alone, with neither a status predicate nor a bump - and it
+// could move a row terminal -> terminal or terminal -> writable at a FIXED
+// epoch, which is precisely the shape this classifier assumes away. The claim
+// holds only because that statement is test-only, and only because that is
+// enforced rather than asserted: internal/store/updatetaskstatusepoch_guard_test.go
+// fails if its identifier appears in any non-test Go file under internal/. (It
+// is named here by its file and not by its identifier for exactly that reason -
+// spelling the identifier in this comment turns that guard RED, which is
+// measured, not assumed.) If that guard is ever relaxed, re-derive this
+// paragraph before trusting `duplicate` and `conflicting`.
+//
+// A row that was still
 // writable at T0 and rejected at T1 therefore had its generation ended INSIDE
 // this handler's own window, which is what `raced` names.
 //
