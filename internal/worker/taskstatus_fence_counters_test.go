@@ -1169,10 +1169,25 @@ func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
 // 10 runs of this test per configuration, mutation as described above):
 //
 //	                    unmutated        mutated
-//	no -race, -cpu=1    0/10 failures    0/10 failures   <- INERT
-//	no -race, -cpu=2    0/10 failures    7/10 failures
-//	-race,    -cpu=1    0/10 failures    10/10 failures, 10/10 DATA RACE
-//	-race,    -cpu=2    0/10 failures    10/10 failures, 10/10 DATA RACE
+//	no -race, -cpu=1    0/10 failures    0/10 failures            <- INERT
+//	no -race, -cpu=2    0/10 failures    3/10 to 7/10 failures    [1]
+//	-race,    -cpu=1    0/10 failures    10/10 failures, 10/10 DATA RACE  [2]
+//	-race,    -cpu=2    0/10 failures    10/10 failures, 10/10 DATA RACE  [2]
+//
+// [1] READ THAT CELL AS A RANGE, NOT AS A PROPERTY OF THE MUTATION. Whether two
+// goroutines interleave inside a read-modify-write depends on what else the
+// machine is doing, and it moves: three independent measurements of the SAME
+// mutation in the SAME configuration on this host came out 7/10, 3/10 and 4/10.
+// A future run landing outside 3-7 is a different machine load, not a
+// regression. The cell that carries the claim is the INERT one, and it
+// reproduced at 0/10 every time it was measured.
+//
+// [2] Measured 2026-08-23 and NOT REPRODUCED SINCE. ThreadSanitizer fails to
+// allocate on this Windows host - `ThreadSanitizer failed to allocate ... (error
+// code: 87)` - for every package including unmutated ones, so these two rows
+// cannot be re-measured here at all. They record what was observed on that date;
+// they are not something a reader can check on this host today. Re-measure in
+// the Linux container lane before relying on the figures.
 //
 // The unmutated column is the green baseline: uniform results across the four
 // configurations would have meant the harness was broken rather than that the
