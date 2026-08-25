@@ -1160,13 +1160,29 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 			AssignmentEpoch: int32(upd.Epoch),
 			WorkerID:        workerID,
 		}); err != nil {
-			// pgx.ErrNoRows is the fence rejecting, not a failure: the task
-			// finished, was cancelled, or the generation ended between the
-			// GetTask above and here. Drop silently, exactly like the two gates.
-			// In the genuine case the cancel or the requeue won, which is the
-			// correct outcome, so there is nothing to diagnose. Any other error
-			// is real.
-			if !errors.Is(err, pgx.ErrNoRows) {
+			// TWO ARMS, MUTUALLY EXCLUSIVE BY CONSTRUCTION, and written as
+			// if/else so that no future edit can make both fire. They are the
+			// subjects of two separate backlog items and neither number covers
+			// any part of the other.
+			if errors.Is(err, pgx.ErrNoRows) {
+				// The fence rejecting, not a failure: the task finished, was
+				// cancelled, or the generation ended between the GetTask above
+				// and here. COUNTED, NEVER LOGGED - a line here would be
+				// caller-driven volume on the recv goroutine and would fire on
+				// the legitimate duplicate-terminal case. The reason is
+				// classified from the row this handler already read; see
+				// classifyStatusFenceRejection for what that can and cannot
+				// establish.
+				h.statusFence.record(classifyStatusFenceRejection(task.Status, statusStr))
+			} else if lim.allow(logKey{kind: kindStatusRetryWrite}) {
+				// Real infrastructure - a serialization failure, a statement
+				// timeout, a connection reset - and now under the connection's
+				// budget. It runs on the recv goroutine at whatever rate the
+				// agent chooses to send, and the read above (GetTask) can
+				// succeed while this write fails, so nothing else bounds it.
+				// NO WIRE VALUE IN THE KEY: such an episode is not per-task, and
+				// keying on the task id would multiply one infra event by the
+				// task count - the same argument the GetTask site above makes.
 				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", uuidStr(taskID), err)
 			}
 		} else {
@@ -1205,13 +1221,22 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
-		// pgx.ErrNoRows is the fence rejecting, not a failure: the row is
-		// already terminal (a duplicate terminal message), or the generation
-		// ended between the GetTask above and here. Drop silently, exactly like
-		// the two gates - a log line here would be caller-controlled volume on
-		// the recv goroutine with no sink to send it to, and detection belongs
-		// with the audit-log work. Any other error is real.
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The fence rejecting, not a failure: the row is already terminal (a
+			// duplicate terminal message, or a task the coordinator's stale-task
+			// watchdog already ended), or the generation ended between the
+			// GetTask above and here. COUNTED, NEVER LOGGED, for the reason at
+			// the retry arm above.
+			//
+			// NOTE WHICH PREDICATE ACTUALLY BITES HERE, because the obvious
+			// reading is wrong: the watchdog does NOT bump assignment_epoch -
+			// UpdateTaskStatus writes only status, started_at and finished_at -
+			// so a swept task's own agent still passes BOTH Go gates and is
+			// refused by the terminality predicate, at the same epoch. That is
+			// why the reasons split on the ROW'S STATUS rather than on the
+			// statement.
+			h.statusFence.record(classifyStatusFenceRejection(task.Status, statusStr))
+		} else if lim.allow(logKey{kind: kindStatusUpdateWrite}) {
 			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", uuidStr(taskID), statusStr, err)
 		}
 		return

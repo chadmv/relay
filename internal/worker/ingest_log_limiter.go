@@ -139,6 +139,10 @@ const (
 	kindStatusGetTask                      // handleTaskStatus's non-ErrNoRows GetTask failure
 	kindInventory                          // handleInventoryUpdate's persist failure
 
+	kindStatusRetryWrite     // handleTaskStatus's non-ErrNoRows IncrementTaskRetryCount failure
+	kindStatusUpdateWrite    // handleTaskStatus's non-ErrNoRows UpdateTaskStatus failure
+	kindStatusFailDependents // handleTaskStatus's FailDependentTasks failure
+
 	// kindCount MUST STAY LAST and is NOT a kind. It is the length of
 	// ingestLogCounters' array. A kind added after it is not counted at all;
 	// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what makes

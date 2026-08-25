@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	"relay/internal/events"
+	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -198,4 +208,269 @@ func TestClassifyStatusFenceRejection(t *testing.T) {
 			require.Equal(t, tc.want, classifyStatusFenceRejection(tc.row, tc.reported))
 		})
 	}
+}
+
+// stubStatusDB is the narrowest store.DBTX that drives handleTaskStatus's write
+// path WITHOUT Postgres, which is what puts this proof in the lane CI actually
+// runs (go-ci: `go test -race ./...`, no tag, no container).
+//
+// IT DISPATCHES ON THE STATEMENT'S OWN `-- name:` HEADER, which sqlc emits as
+// the first line of every generated SQL constant. That is a property of the
+// generated code rather than of a hand-copied SQL fragment, so a reformatted
+// statement cannot silently re-route a call.
+//
+// Unlike handleTaskLog, this handler is MORE than one statement - GetTask, then
+// one of two writes, then (on the success path) FailDependentTasks,
+// RecomputeJobStatus and NotifyTaskCompleted - so Exec and Query return benign
+// values instead of panicking. calls records what was actually reached, which is
+// how the success leg establishes acceptance POSITIVELY rather than through a
+// projection every other arm also produces.
+type stubStatusDB struct {
+	task     store.Task // what GetTask returns
+	writeErr error      // what the retry/update statement returns
+	calls    []string
+	execErr  error
+}
+
+func (d *stubStatusDB) note(sql string) string {
+	for _, name := range []string{
+		"GetTask", "UpdateTaskStatus", "IncrementTaskRetryCount",
+		"FailDependentTasks", "RecomputeJobStatus", "NotifyTaskCompleted", "NotifyTaskSubmitted",
+	} {
+		if strings.Contains(sql, "-- name: "+name+" ") {
+			d.calls = append(d.calls, name)
+			return name
+		}
+	}
+	d.calls = append(d.calls, "UNKNOWN")
+	return "UNKNOWN"
+}
+
+func (d *stubStatusDB) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	d.note(sql)
+	return pgconn.CommandTag{}, d.execErr
+}
+
+func (d *stubStatusDB) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	d.note(sql)
+	return nil, errors.New("stubStatusDB: handleTaskStatus performs no multi-row Query")
+}
+
+func (d *stubStatusDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	switch d.note(sql) {
+	case "GetTask":
+		return stubTaskRow{task: d.task}
+	case "UpdateTaskStatus", "IncrementTaskRetryCount":
+		return stubTaskRow{task: d.task, err: d.writeErr}
+	case "RecomputeJobStatus":
+		return stubStringRow{s: "running"}
+	}
+	return stubTaskRow{err: errors.New("stubStatusDB: unexpected QueryRow")}
+}
+
+// stubTaskRow fills a store.Task BY POSITION, and the positional copy is safe
+// for a checked reason rather than by luck: sqlc scans a `SELECT *` row in
+// MODEL FIELD ORDER (internal/store/tasks.sql.go: &i.ID, &i.JobID, ... matches
+// store.Task's declaration exactly), so reflecting over the value gives the same
+// order the generated Scan asks for. The arity assertion is what makes that a
+// checked claim: a regenerated model with a new column fails here loudly instead
+// of silently shifting every field by one.
+type stubTaskRow struct {
+	task store.Task
+	err  error
+}
+
+func (r stubTaskRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	rv := reflect.ValueOf(r.task)
+	if len(dest) != rv.NumField() {
+		return fmt.Errorf("stubTaskRow: generated Scan wants %d columns and store.Task has %d fields. "+
+			"This stub copies by position because sqlc scans in model field order; that assumption no "+
+			"longer holds, so re-derive it rather than padding the list", len(dest), rv.NumField())
+	}
+	for i, d := range dest {
+		dv := reflect.ValueOf(d)
+		if dv.Kind() != reflect.Pointer || dv.Elem().Type() != rv.Field(i).Type() {
+			return fmt.Errorf("stubTaskRow: column %d is %T and store.Task field %d is %s - the scan "+
+				"order and the field order have diverged", i, d, i, rv.Field(i).Type())
+		}
+		dv.Elem().Set(rv.Field(i))
+	}
+	return nil
+}
+
+type stubStringRow struct{ s string }
+
+func (r stubStringRow) Scan(dest ...any) error {
+	if len(dest) == 1 {
+		if p, ok := dest[0].(*string); ok {
+			*p = r.s
+		}
+	}
+	return nil
+}
+
+func statusWorkerID() pgtype.UUID { return pgtype.UUID{Bytes: [16]byte{9}, Valid: true} }
+
+const statusTaskID = "3f1c0a2e-7b64-4d8a-9c31-0e5b6a7d8c90"
+
+func statusTaskIDUUID(t *testing.T) pgtype.UUID {
+	t.Helper()
+	var u pgtype.UUID
+	require.NoError(t, u.Scan(statusTaskID))
+	return u
+}
+
+// newStatusHandler wires a Handler over the stub with a task the connection's
+// worker OWNS at the CURRENT epoch, so both Go-side gates pass and control
+// really reaches the write. Any test that wants a gate to reject changes the
+// fixture, never the handler.
+func newStatusHandler(t *testing.T, rowStatus string, retries, retryCount int32, writeErr error) (*Handler, *stubStatusDB) {
+	t.Helper()
+	db := &stubStatusDB{
+		task: store.Task{
+			ID:              statusTaskIDUUID(t),
+			JobID:           pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+			Status:          rowStatus,
+			WorkerID:        statusWorkerID(),
+			AssignmentEpoch: 7,
+			Retries:         retries,
+			RetryCount:      retryCount,
+		},
+		writeErr: writeErr,
+	}
+	return &Handler{q: store.New(db), broker: events.NewBroker()}, db
+}
+
+func statusUpdate(s relayv1.TaskStatus) *relayv1.TaskStatusUpdate {
+	return &relayv1.TaskStatusUpdate{TaskId: statusTaskID, Status: s, Epoch: 7}
+}
+
+// TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCountsNothing
+// is item 1's own Done-When at the UpdateTaskStatus arm: read the counters
+// across each rejection AND across a success.
+//
+// EACH LEG IS ASSERTED IMMEDIATELY AFTER IT RUNS. A battery that only checks
+// totals at the end cannot tell "the success incremented" from "the third
+// rejection did not", and a poisoned input observed only at the end cannot
+// detect an early-exit mutation.
+func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCountsNothing(t *testing.T) {
+	ctx := context.Background()
+	logged := captureUnitLog(t)
+
+	// CONFLICTING FIRST, because it is the leg this slice exists for and a
+	// poisoned input placed last cannot detect an early-exit mutation. The
+	// watchdog stamped `timed_out`; the agent reports `done`.
+	h, db := newStatusHandler(t, "timed_out", 0, 0, pgx.ErrNoRows)
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{Conflicting: 1}, h.TaskStatusFenceRejections(),
+		"a task the coordinator marked timed_out whose agent reports done is the ACTIONABLE case: a "+
+			"successful task recorded as a timeout. Before this number there was no runtime signal of "+
+			"any kind for it.")
+	require.Contains(t, db.calls, "UpdateTaskStatus", "fixture: control must reach the write")
+	require.NotContains(t, db.calls, "FailDependentTasks",
+		"fixture: a rejected write must return before any follow-on effect")
+
+	// DUPLICATE: same row status as the report. The expected healthy floor.
+	h, _ = newStatusHandler(t, "done", 0, 0, pgx.ErrNoRows)
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{Duplicate: 1}, h.TaskStatusFenceRejections(),
+		"a duplicate terminal from a healthy assignee is an EXPECTED rejection and must be counted "+
+			"under its own key, or the actionable number reads as constant alarm")
+
+	// RACED: the row was still writable at T0, so something ended the generation
+	// inside this handler's own window.
+	h, _ = newStatusHandler(t, "running", 0, 0, pgx.ErrNoRows)
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{Raced: 1}, h.TaskStatusFenceRejections())
+
+	// ACCUMULATION on ONE handler: an Add, never a Store.
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{Raced: 2}, h.TaskStatusFenceRejections())
+
+	// SUCCESS MUST NOT COUNT, on the SAME handler whose counter has already
+	// moved: a counter that increments unconditionally passes a fresh-handler
+	// check. Acceptance is established POSITIVELY, by the follow-on effect only
+	// the accepted path produces.
+	db2 := &stubStatusDB{task: store.Task{
+		ID: statusTaskIDUUID(t), JobID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true},
+		Status: "running", WorkerID: statusWorkerID(), AssignmentEpoch: 7,
+	}}
+	h2 := &Handler{q: store.New(db2), broker: events.NewBroker()}
+	h2.handleTaskStatus(ctx, statusWorkerID(), newIngestLogLimiter(&h2.ingestDrops),
+		statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+	require.Equal(t, TaskStatusFenceCounts{}, h2.TaskStatusFenceRejections(),
+		"an ACCEPTED status report must not be counted as a rejection. This number is what an operator "+
+			"reads as 'reports are being discarded'; incrementing it on the happy path makes it noise.")
+	require.Contains(t, db2.calls, "RecomputeJobStatus",
+		"THE REPORT WAS ACCEPTED, and this is what says so. Without a positive marker the leg above "+
+			"asserts a negative through a projection every other arm shares.")
+	require.Contains(t, db2.calls, "NotifyTaskCompleted")
+
+	require.Equal(t, "", logged(),
+		"a fence rejection must emit NO log line of any wording, including a budgeted one: it is "+
+			"caller-driven volume on the recv goroutine, firing on the legitimate duplicate-terminal case")
+}
+
+// TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections. The retry branch is
+// reached instead of the update when the report is terminal and a retry is
+// left, so it needs its own fixture and its own leg.
+func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
+	ctx := context.Background()
+	logged := captureUnitLog(t)
+
+	// CONFLICTING FIRST again. The watchdog stamped timed_out; the agent reports
+	// failed and still has a retry left.
+	h, db := newStatusHandler(t, "timed_out", 3, 0, pgx.ErrNoRows)
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	require.Contains(t, db.calls, "IncrementTaskRetryCount",
+		"fixture: terminal + retries remaining must take the RETRY branch")
+	require.NotContains(t, db.calls, "UpdateTaskStatus",
+		"fixture: the retry branch returns; the two arms are mutually exclusive and no input executes both")
+	require.Equal(t, TaskStatusFenceCounts{Conflicting: 1}, h.TaskStatusFenceRejections(),
+		"the retry arm's rejections are the SAME noun as the update arm's - the agent's report of this "+
+			"task's outcome was discarded - so they share the section and are split by REASON, not by "+
+			"statement")
+
+	// DUPLICATE at the retry arm.
+	h, _ = newStatusHandler(t, "failed", 3, 0, pgx.ErrNoRows)
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	require.Equal(t, TaskStatusFenceCounts{Duplicate: 1}, h.TaskStatusFenceRejections())
+
+	// A SUCCESSFUL retry must not count, and must still wake the dispatcher.
+	h, db = newStatusHandler(t, "running", 3, 0, nil)
+	lim = newIngestLogLimiter(&h.ingestDrops)
+	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
+	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections())
+	require.Contains(t, db.calls, "NotifyTaskSubmitted",
+		"the accepted retry must still wake the dispatcher; this is the positive marker for this arm")
+
+	require.Equal(t, "", logged(), "no arm of the retry branch logs")
+}
+
+// TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection is the poisoned
+// input in its own test, and it is what kills a record() written ABOVE the
+// errors.Is check.
+func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
+	h, _ := newStatusHandler(t, "running", 0, 0,
+		errors.New(`ERROR: could not serialize access due to concurrent update (SQLSTATE 40001)`))
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	logged := captureUnitLog(t)
+
+	h.handleTaskStatus(context.Background(), statusWorkerID(), lim,
+		statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
+
+	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections(),
+		"a REAL database error is a different arm with a different meaning. A record() placed above the "+
+			"errors.Is check counts every database error and makes the number unreadable: the whole "+
+			"value of this section is that it means the FENCE refused something.")
+	require.Contains(t, logged(), "handleTaskStatus UpdateTaskStatus",
+		"fixture: the other arm still logs, so this test is exercising it rather than falling through")
 }
