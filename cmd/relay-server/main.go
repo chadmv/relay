@@ -156,6 +156,14 @@ func main() {
 		agentHandler.AllowAutoEnroll = allow
 	}
 
+	autoEnrollCeiling, autoEnrollCeilingWarning := parseAutoEnrollCeiling(
+		"RELAY_AUTO_ENROLL_WORKER_CEILING", os.Getenv("RELAY_AUTO_ENROLL_WORKER_CEILING"))
+	if autoEnrollCeilingWarning != "" {
+		log.Printf("WARNING: %s", autoEnrollCeilingWarning)
+	}
+	agentHandler.AutoEnrollWorkerCeiling = &autoEnrollCeiling
+	log.Print(autoEnrollCeilingLine(autoEnrollCeiling, agentHandler.AllowAutoEnroll))
+
 	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 	if err != nil {
 		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)
