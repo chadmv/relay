@@ -601,6 +601,9 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.suppressed.status_update_write",
 	"ingest_log_budget.counts.suppressed.status_fail_dependents",
 	"task_log_fence.counts.rejected_total",
+	"task_status_fence.counts.raced_total",
+	"task_status_fence.counts.duplicate_total",
+	"task_status_fence.counts.conflicting_total",
 	"watchdog.counts.swept_total",
 	"watchdog.counts.swept_overflow",
 	"watchdog.counts.swept_by_worker",
@@ -724,6 +727,7 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 			}},
 			IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()},
 			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
+			TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()},
 			Watchdog:        fakeWatchdogSource{c: threeDistinctSweeps()},
 		},
 	}
@@ -1248,4 +1252,104 @@ func TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent(t *testing.T) 
 		"an empty map must serialise as {} and never as null or be elided by omitempty. null is not an "+
 			"object, so the payload's own JSON walk has nothing to descend into and the allow-list "+
 			"predicate rejects it - which is the check that keeps the producer allocating.")
+}
+
+// fakeTaskStatusFenceSource returns a fixed snapshot. THREE DISTINCT VALUES:
+// equal values would hide a crossed field.
+type fakeTaskStatusFenceSource struct{ c worker.TaskStatusFenceCounts }
+
+func (f fakeTaskStatusFenceSource) TaskStatusFenceRejections() worker.TaskStatusFenceCounts { return f.c }
+
+func threeDistinctStatusRejections() worker.TaskStatusFenceCounts {
+	return worker.TaskStatusFenceCounts{Raced: 3, Duplicate: 41, Conflicting: 7}
+}
+
+// TestTaskStatusFenceSectionRestatesNothing guards the ANTECEDENT of the rule
+// that produced TestIngestLogKindCountsPublishesEveryWorkerSideField, rather
+// than the consequent: "a section that copies a subsystem's snapshot field by
+// field needs a cardinality check" is satisfied here by not copying.
+//
+// internal/api imports internal/worker, so unlike the watchdog (where the import
+// direction forced the type into THIS package) the PRODUCER owns the type and
+// this package wraps it. Either way there is no mapper and no arity to drift.
+func TestTaskStatusFenceSectionRestatesNothing(t *testing.T) {
+	iface := reflect.TypeOf((*TaskStatusFenceSource)(nil)).Elem()
+	require.Equal(t, 1, iface.NumMethod(), "one method; the reasoning below covers only the one")
+	m, ok := iface.MethodByName("TaskStatusFenceRejections")
+	require.True(t, ok)
+	require.Equal(t, 1, m.Type.NumOut())
+
+	section, ok := reflect.TypeOf(taskStatusFenceSection{}).FieldByName("Counts")
+	require.True(t, ok, "taskStatusFenceSection must carry a Counts field")
+	require.Equal(t, m.Type.Out(0), section.Type,
+		"taskStatusFenceSection.Counts is %s and the source returns %s. THIS SECTION MUST NOT RESTATE "+
+			"THE PRODUCER'S FIELDS. If a restatement is genuinely necessary, an arity assertion between "+
+			"the two types must ship IN THIS COMMIT - see "+
+			"TestIngestLogKindCountsPublishesEveryWorkerSideField, which exists because a fully correct "+
+			"sixth log kind was counted on the recv path and published under no JSON key with all three "+
+			"packages green.", section.Type, m.Type.Out(0))
+}
+
+func TestServerCounters_ReportsTheTaskStatusFenceSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		TaskStatusFence *struct {
+			Counts map[string]any `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"task_status_fence"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.TaskStatusFence, "a wired section must be present")
+	require.Nil(t, body.TaskStatusFence.Levels,
+		"COUNTS ONLY. There is no current 'level' of discarded status reports.")
+
+	// Key-set equality, not per-key assertions alone: a renamed key decodes as a
+	// missing value and reads as zero.
+	assert.ElementsMatch(t,
+		[]string{"raced_total", "duplicate_total", "conflicting_total"},
+		counterMapKeys(body.TaskStatusFence.Counts))
+	assert.Equal(t, float64(3), body.TaskStatusFence.Counts["raced_total"])
+	assert.Equal(t, float64(41), body.TaskStatusFence.Counts["duplicate_total"])
+	assert.Equal(t, float64(7), body.TaskStatusFence.Counts["conflicting_total"])
+	assert.NotContains(t, counterMapKeys(body.TaskStatusFence.Counts), "rejected_total",
+		"THERE IS NO TOTAL, BY DECISION. The three keys partition the rejections, so a published total "+
+			"would sit beside its own summands where it can only agree or be a bug.")
+}
+
+// TestServerCounters_WiredButZeroTaskStatusFenceSectionIsStillPresent. A server
+// whose status fence has rejected nothing is the COMMON case and must still emit
+// its section: zeros mean "this control ran and stopped nothing", absence means
+// "not wired on this build".
+func TestServerCounters_WiredButZeroTaskStatusFenceSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskStatusFence: fakeTaskStatusFenceSource{}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "task_status_fence"}, counterKeys(top),
+		"a WIRED source whose counters are zero must still emit its section, and no OTHER section may "+
+			"appear: each source is nil-able on its own")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["task_status_fence"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section), "counts only; no levels half")
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &fields))
+	require.Len(t, fields, 3, "counts must be an object with the three keys, not an empty object")
+	for k, v := range fields {
+		assert.Equal(t, "0", string(v), "%s must serialise as an explicit zero, never be elided by omitempty", k)
+	}
 }
