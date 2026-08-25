@@ -12,6 +12,18 @@ SELECT * FROM workers WHERE hostname = $1;
 -- name: GetWorkerByHostnameForUpdate :one
 SELECT * FROM workers WHERE hostname = $1 FOR UPDATE;
 
+-- name: GetWorkerForUpdate :one
+-- The id-keyed twin of GetWorkerByHostnameForUpdate, for handleDeleteWorker.
+-- IT IS STATEMENT 1 OF THE DELETE TRANSACTION AND ITS POSITION IS THE ARGUMENT:
+-- taking the worker row FIRST matches the lock order of both enrollment
+-- transactions (worker row, then agent_enrollments), so the delete cannot invert
+-- it and needs no argument about why a cycle is not constructible (spec R9). It
+-- also supplies the 404/409 discrimination inside the transaction, so there is no
+-- window between the precondition and the DELETE: a concurrent
+-- RegisterWorkerConnection is an UPDATE on this row and blocks until we commit or
+-- roll back, so if it wins we read 'online' and refuse.
+SELECT * FROM workers WHERE id = $1 FOR UPDATE;
+
 -- name: ListWorkers :many
 SELECT * FROM workers ORDER BY name;
 
@@ -117,6 +129,31 @@ WHERE id = $1;
 UPDATE workers
 SET agent_token_hash = NULL, status = 'revoked', revoked_at = NOW()
 WHERE id = $1;
+
+-- name: DeleteWorker :execrows
+-- Destroys a worker identity. The ONLY DELETE FROM workers in the tree.
+--
+-- THE STATUS PREDICATE IS AN ALLOW-LIST AND MUST STAY ONE. 'online' and 'stale'
+-- both mean CONNECTED (internal/scheduler/dispatch.go:210-215), so the permitted
+-- set is exactly the not-connected set. The equivalent deny-list
+-- (`status != 'online' AND status != 'stale'`) is interchangeable against today's
+-- vocabulary and FAILS OPEN on the next status added - a future 'quarantined'
+-- worker would silently become deletable while connected. This fails closed.
+-- TestDeleteWorker_PermitsExactlyTheDisconnectedStatuses enumerates the whole
+-- vocabulary so the partition is revisited rather than desynchronized.
+--
+-- THIS PREDICATE IS THE CONTROL, not handleDeleteWorker's Go check. The Go check
+-- reads the same status off the FOR UPDATE'd row and exists to turn a zero-row
+-- delete into a 409 an operator can act on - a second question plus a better
+-- error, the same shape as handleTaskStatus's Go identity gate. A future second
+-- delete path that skips the lock is still refused here.
+--
+-- CALLERS MUST RUN RequeueWorkerTasks FIRST, in the same transaction. This
+-- statement releases the resource; the requeue ends the generation. Reversed, the
+-- FK's ON DELETE SET NULL nulls tasks.worker_id with no epoch bump and the row
+-- becomes unreachable by EVERY worker-keyed statement in the tree (see
+-- ListOverdueAssignedTasks's comment).
+DELETE FROM workers WHERE id = $1 AND status IN ('offline', 'revoked');
 
 -- name: GetWorkerByAgentTokenHash :one
 SELECT * FROM workers

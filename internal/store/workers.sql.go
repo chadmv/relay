@@ -129,6 +129,42 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 	return i, err
 }
 
+const deleteWorker = `-- name: DeleteWorker :execrows
+DELETE FROM workers WHERE id = $1 AND status IN ('offline', 'revoked')
+`
+
+// Destroys a worker identity. The ONLY DELETE FROM workers in the tree.
+//
+// THE STATUS PREDICATE IS AN ALLOW-LIST AND MUST STAY ONE. 'online' and 'stale'
+// both mean CONNECTED (internal/scheduler/dispatch.go:210-215), so the permitted
+// set is exactly the not-connected set. The equivalent deny-list
+// (`status != 'online' AND status != 'stale'`) is interchangeable against today's
+// vocabulary and FAILS OPEN on the next status added - a future 'quarantined'
+// worker would silently become deletable while connected. This fails closed.
+// TestDeleteWorker_PermitsExactlyTheDisconnectedStatuses enumerates the whole
+// vocabulary so the partition is revisited rather than desynchronized.
+//
+// THIS PREDICATE IS THE CONTROL, not handleDeleteWorker's Go check. The Go check
+// reads the same status off the FOR UPDATE'd row and exists to turn a zero-row
+// delete into a 409 an operator can act on - a second question plus a better
+// error, the same shape as handleTaskStatus's Go identity gate. A future second
+// delete path that skips the lock is still refused here.
+//
+// CALLERS MUST RUN RequeueWorkerTasks FIRST, in the same transaction. This
+// statement releases the resource; the requeue ends the generation. Reversed, the
+// FK's ON DELETE SET NULL nulls tasks.worker_id with no epoch bump and the row
+// becomes unreachable by EVERY worker-keyed statement in the tree (see
+// ListOverdueAssignedTasks's comment).
+//
+//	DELETE FROM workers WHERE id = $1 AND status IN ('offline', 'revoked')
+func (q *Queries) DeleteWorker(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteWorker, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const disableWorker = `-- name: DisableWorker :execrows
 UPDATE workers SET disabled_at = NOW() WHERE id = $1 AND disabled_at IS NULL
 `
@@ -273,6 +309,48 @@ SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slot
 //	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE hostname = $1 FOR UPDATE
 func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname string) (Worker, error) {
 	row := q.db.QueryRow(ctx, getWorkerByHostnameForUpdate, hostname)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Hostname,
+		&i.CpuCores,
+		&i.RamGb,
+		&i.GpuCount,
+		&i.GpuModel,
+		&i.Os,
+		&i.MaxSlots,
+		&i.Labels,
+		&i.Status,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.AgentTokenHash,
+		&i.DisconnectedAt,
+		&i.DisabledAt,
+		&i.RevokedAt,
+		&i.ConnectionEpoch,
+		&i.SupportsWorkspaces,
+	)
+	return i, err
+}
+
+const getWorkerForUpdate = `-- name: GetWorkerForUpdate :one
+SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1 FOR UPDATE
+`
+
+// The id-keyed twin of GetWorkerByHostnameForUpdate, for handleDeleteWorker.
+// IT IS STATEMENT 1 OF THE DELETE TRANSACTION AND ITS POSITION IS THE ARGUMENT:
+// taking the worker row FIRST matches the lock order of both enrollment
+// transactions (worker row, then agent_enrollments), so the delete cannot invert
+// it and needs no argument about why a cycle is not constructible (spec R9). It
+// also supplies the 404/409 discrimination inside the transaction, so there is no
+// window between the precondition and the DELETE: a concurrent
+// RegisterWorkerConnection is an UPDATE on this row and blocks until we commit or
+// roll back, so if it wins we read 'online' and refuse.
+//
+//	SELECT id, name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, max_slots, labels, status, last_seen_at, created_at, agent_token_hash, disconnected_at, disabled_at, revoked_at, connection_epoch, supports_workspaces FROM workers WHERE id = $1 FOR UPDATE
+func (q *Queries) GetWorkerForUpdate(ctx context.Context, id pgtype.UUID) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorkerForUpdate, id)
 	var i Worker
 	err := row.Scan(
 		&i.ID,
