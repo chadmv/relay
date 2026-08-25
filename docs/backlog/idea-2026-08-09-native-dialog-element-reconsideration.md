@@ -68,3 +68,25 @@ legitimate outcome.
 - `docs/superpowers/specs/2026-08-09-dialog-hardening.md` section 3 (route selection)
 - [[idea-2026-06-03-web-e2e-harness]] - one of the two trigger conditions
 - Shipped the shell this would replace: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]]
+
+## 2026-08-24: THIS ITEM'S WRITTEN TRIGGER HAS FIRED - and here is exactly what that does and does not unlock
+
+The item defers reconsidering `<dialog>` until the project has a real browser lane, on the grounds that
+jsdom cannot evaluate the top layer, `::backdrop`, or the element's focus behaviour. **That lane now
+exists**: `web/e2e/` runs Chromium and WebKit against the production-embedded SPA in CI, as of the
+2026-08-24 web-e2e-harness slice.
+
+Recording precisely what is now available, so the fired trigger does not become noise:
+
+- **Available**: a real browser, two engines, real `Tab` and arrow key presses, real layout, full-page
+  screenshots as artifacts.
+- **NOT available, and one of these is load-bearing here**: the harness has **no visual assertions** -
+  screenshots are artifacts a human reads, not baselines a test compares - so a `::backdrop` regression
+  would not fail a build. And **WebKit is not Safari**; the config says so explicitly. If this item's
+  reconsideration turns on Safari-specific dialog behaviour rather than WebKit's, the trigger has
+  fired only partly.
+
+So the honest status is: the blocker on *evaluating* `<dialog>` is gone, and the blocker on
+*regression-proofing* it is not. Anyone picking this up should decide which of the two they need before
+scoping, and should read `web/e2e/README.md` rather than this paragraph, since that file is maintained
+with the harness.
