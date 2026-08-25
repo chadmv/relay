@@ -40,9 +40,14 @@ var agentTokenGenerator = func() (string, string) {
 // ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
 var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 
-// errWorkerRevoked is returned inside the auto-enroll transaction when the
-// existing worker row for this hostname has status 'revoked'.
-var errWorkerRevoked = errors.New("worker revoked")
+// errHostnameClaimed is returned inside the auto-enroll transaction when a
+// workers row for the claimed hostname already exists - whatever its status and
+// whatever its token. It replaces errWorkerRevoked, which was a DENY-LIST OF
+// EXACTLY ONE STATUS VALUE and failed open on every status added to the
+// vocabulary. "A row exists" is a claim about the table rather than about
+// today's writers, so it cannot fail open that way, and it removes the status
+// vocabulary from this decision entirely.
+var errHostnameClaimed = errors.New("hostname already claimed")
 
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
@@ -553,8 +558,20 @@ func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.Agent
 }
 
 // autoEnrollAndRegister handles token-less enrollment when AllowAutoEnroll is
-// set. It upserts the worker by hostname and issues a fresh agent token without
-// consuming any enrollment record.
+// set. IT MAY CREATE A WORKER AND MAY NEVER CLAIM ONE: a single
+// InsertWorkerForAutoEnroll (ON CONFLICT DO NOTHING) both creates the row and
+// refuses a hostname that already has one, with no window between the check and
+// the write. It then issues a fresh agent token without consuming any enrollment
+// record.
+//
+// THE REFUSAL IS DELIBERATELY THE SAME status AND THE SAME STRING every other
+// credential failure on this surface returns. The previous "worker revoked"
+// message told an unauthenticated caller that a row for that hostname existed and
+// was revoked - a live hostname-state oracle, and exactly the disclosure the new
+// guard must not add a second instance of. The oracle that REMAINS is inherent:
+// a caller learns a hostname is claimed because claiming it fails. Refusing
+// everything is the only way to close that, and README says so rather than
+// claiming the refusal is opaque.
 func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	rawAgent, agentHash := agentTokenGenerator()
 	if rawAgent == "" || agentHash == "" {
@@ -565,15 +582,7 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
 
-		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("lookup worker: %w", err)
-		}
-		if err == nil && existing.Status == "revoked" {
-			return errWorkerRevoked
-		}
-
-		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		id, err := txq.InsertWorkerForAutoEnroll(ctx, store.InsertWorkerForAutoEnrollParams{
 			Name:               reg.Hostname,
 			Hostname:           reg.Hostname,
 			CpuCores:           reg.CpuCores,
@@ -583,21 +592,24 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 			Os:                 reg.Os,
 			SupportsWorkspaces: reg.SupportsWorkspaces,
 		})
-		if err != nil {
-			return fmt.Errorf("upsert worker: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errHostnameClaimed
 		}
-		workerID = w.ID
+		if err != nil {
+			return fmt.Errorf("insert worker: %w", err)
+		}
+		workerID = id
 
 		if err := txq.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
-			ID: w.ID, AgentTokenHash: &agentHash,
+			ID: id, AgentTokenHash: &agentHash,
 		}); err != nil {
 			return fmt.Errorf("set agent token: %w", err)
 		}
 		return nil
 	})
 	if txErr != nil {
-		if errors.Is(txErr, errWorkerRevoked) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "worker revoked")
+		if errors.Is(txErr, errHostnameClaimed) {
+			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
 		return "", nil, txErr
 	}
@@ -614,6 +626,13 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	// and closes streams in a loop emits one of these per cycle. What prices that
 	// loop is RELAY_GRPC_REGISTRATION_TIMEOUT plus the connection caps, not this
 	// line, which is why it still takes no budget key.
+	//
+	// AND THE ASYMMETRY WITH THE REFUSAL BELOW IT IS THE ARGUMENT FOR COUNTING
+	// RATHER THAN LOGGING. A SUCCESSFUL token-less enrollment is now one line per
+	// hostname FOREVER - the hostname can never be auto-enrolled again, because
+	// the row it just created refuses the next attempt. A REFUSAL is unboundedly
+	// repeatable by the same caller with the same hostname, so it takes a counter
+	// and no log site at all (see AutoEnrollRefusals).
 	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }

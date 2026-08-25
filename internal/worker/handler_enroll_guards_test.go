@@ -47,6 +47,10 @@ type rowScript struct {
 	// workers table already holds a row for.
 	existingHostname string
 
+	// unknownAgentToken makes the reconnect path's token lookup miss, which is
+	// how a test drives reconnectAndRegister's own credential refusal.
+	unknownAgentToken bool
+
 	seen []strandExec
 }
 
@@ -63,6 +67,13 @@ func (s *rowScript) answer(sql string, args []any) pgx.Row {
 	// successfully and makes every enrollment look consumed and expired.
 	case strings.Contains(sql, "agent_enrollments"):
 		return agentEnrollmentRow{}
+
+	// GetWorkerByAgentTokenHash, used by the reconnect path.
+	case strings.Contains(sql, "agent_token_hash = $1"):
+		if s.unknownAgentToken {
+			return errRow{pgx.ErrNoRows}
+		}
+		return strandWorkerRow{}
 
 	// GetWorkerByHostname / GetWorkerByHostnameForUpdate: hostname is $1.
 	case strings.Contains(sql, "FROM workers") && strings.Contains(sql, "hostname = $1"):
@@ -341,4 +352,73 @@ func TestConnect_EnrollmentTokenIsRefusedWhenTheTokenIsNotConsumable(t *testing.
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
 	assert.Equal(t, 0, f.stream.tokensSent(), "a refused enrollment must send no agent token")
+}
+
+// TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow is item 1's
+// criterion 1 in the default lane. AUTO-ENROLL MAY CREATE A WORKER AND MAY NEVER
+// CLAIM ONE - whatever the existing row's status and whatever its token.
+//
+// Identity takeover is UPSTREAM of every per-task fence in the tree: a claimant
+// that inherits a worker id passes AppendTaskLog's and UpdateTaskStatus's
+// worker_id predicates as the task's genuine assignee. Those fences establish
+// currency and identity; both are worthless if an attacker can BECOME the
+// assignee.
+func TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow(t *testing.T) {
+	f := newEnrollFixture(t, enrollConfig{
+		hostname:         "taken-host",
+		existingHostname: "taken-host",
+		allowAutoEnroll:  true,
+	})
+
+	_, err := f.connect(t)
+	require.Error(t, err, "auto-enroll must never bind to a hostname that already has a worker row")
+	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	assert.False(t, f.script.sawStatement("DO UPDATE"),
+		"the auto-enroll path must not issue UpsertWorkerByHostname at all")
+	for _, e := range f.tx.execsSeen() {
+		assert.NotContains(t, e.sql, "agent_token_hash = $2",
+			"SetWorkerAgentToken must never run: the existing worker's token stays intact")
+	}
+
+	// ASSERTING THAT NO STATEMENT WAS ISSUED IS NOT ASSERTING THE TRANSACTION
+	// DID NOT COMMIT. Both halves, deliberately.
+	commits, rollbacks := f.tx.outcome()
+	assert.Equal(t, 0, commits)
+	assert.GreaterOrEqual(t, rollbacks, 1)
+
+	// The refusal returns above finishRegister, so no generation is acquired and
+	// there is nothing to release. MarkWorkerOfflineIfEpoch is the only Exec on
+	// this seam, so an empty list is the cheap check that this stays true.
+	assert.Empty(t, f.db.execsSeen())
+	assert.Equal(t, 0, f.stream.tokensSent())
+}
+
+// TestConnect_AutoEnrollRefusalIsIndistinguishableFromACredentialFailure.
+// The two messages are COMPARED WITH EACH OTHER rather than each against a
+// literal: comparing literals would still pass if both sites were changed to
+// something disclosing.
+func TestConnect_AutoEnrollRefusalIsIndistinguishableFromACredentialFailure(t *testing.T) {
+	claimed := newEnrollFixture(t, enrollConfig{
+		hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
+	})
+	_, claimedErr := claimed.connect(t)
+	require.Error(t, claimedErr)
+
+	unknown := newEnrollFixture(t, enrollConfig{
+		hostname:   "any-host",
+		credential: &relayv1.RegisterRequest_AgentToken{AgentToken: "no-such-token"},
+	})
+	unknown.script.unknownAgentToken = true
+	_, unknownErr := unknown.connect(t)
+	require.Error(t, unknownErr)
+
+	assert.Equal(t, status.Code(unknownErr), status.Code(claimedErr))
+	assert.Equal(t, status.Convert(unknownErr).Message(), status.Convert(claimedErr).Message())
+
+	msg := status.Convert(claimedErr).Message()
+	for _, leak := range []string{"taken-host", "revoked", "exists", "claimed", "ceiling"} {
+		assert.NotContains(t, msg, leak,
+			"the refusal must disclose nothing about the hostname beyond the refusal itself")
+	}
 }
