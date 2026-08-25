@@ -720,7 +720,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	// No branch on status is needed: Registry.Send on an unregistered id is one
 	// map lookup returning an error that this best-effort path discards, so the
 	// 'offline' arm costs nothing and cannot imply a connection. Routed through
-	// sendCancelSignals so the sends stay bounded (CLAUDE.md invariant 3), exactly
+	// sendCancelSignals so the sends stay bounded (the one-bounded-sender invariant), exactly
 	// as handleDisableWorker does it.
 	cancels := make([]cancelSignal, 0, len(requeued))
 	for _, tid := range requeued {
