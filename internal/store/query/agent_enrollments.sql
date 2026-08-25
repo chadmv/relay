@@ -63,3 +63,19 @@ WHERE consumed_at IS NULL
        OR (expires_at, id) > (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
 ORDER BY expires_at ASC, id ASC
 LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: ClearEnrollmentConsumerForWorker :execrows
+-- Breaks the enrollment -> worker link so a worker row can be deleted. THE ONLY
+-- STATEMENT PERMITTED TO SATISFY agent_enrollments.consumed_by's FOREIGN KEY,
+-- which deliberately has NO ON DELETE ACTION (000005_agent_auth.up.sql:9).
+--
+-- THAT IS A DECISION, NOT AN OVERSIGHT (spec 5). A no-action FK fails CLOSED for
+-- every future deleter - the planned TTL reaper included - with a loud SQLSTATE
+-- 23503 that sends its author here. ON DELETE SET NULL would fail SILENT and
+-- shred the link with no statement naming the act. If you arrived here from a
+-- 23503, the guard is working: call this inside your delete transaction, before
+-- the DELETE.
+--
+-- consumed_at is deliberately left alone, so the row still records that the token
+-- was used and an unconsumed token stays distinguishable from a consumed one.
+UPDATE agent_enrollments SET consumed_by = NULL WHERE consumed_by = $1;

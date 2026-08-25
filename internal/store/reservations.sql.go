@@ -673,3 +673,39 @@ func (q *Queries) ListReservationsPageByStartsDesc(ctx context.Context, arg List
 	}
 	return items, nil
 }
+
+const removeWorkerFromReservations = `-- name: RemoveWorkerFromReservations :execrows
+UPDATE reservations
+SET worker_ids = array_remove(worker_ids, $1::uuid)
+WHERE $1::uuid = ANY(worker_ids)
+`
+
+// Scrubs a deleted worker's id out of every reservation naming it.
+// reservations.worker_ids is a bare UUID[] with NO foreign key
+// (000001_initial.up.sql:89) - the one place a worker id can outlive its row.
+//
+// THIS IS NOT A DISPATCH CORRECTNESS FIX and must not be sold as one. The
+// dispatcher's reservedIDs map (internal/scheduler/dispatch.go:185-191) is an
+// EXCLUSION set iterated over live workers rows, so a dangling id matches nothing
+// and withholds nothing. What this fixes is the contract - delete means "this id
+// ceases to exist" - and GET /v1/reservations showing a phantom.
+//
+// THE WHERE CLAUSE IS NOT REDUNDANT WITH array_remove. Without it every
+// reservation is rewritten and the :execrows count becomes the table size instead
+// of "how many reservations named this worker", which is the number the delete
+// response reports and a test asserts.
+//
+// A reservation whose array empties is LEFT ALONE: it becomes inert rather than
+// wrong, and deleting it would be a second destructive act the admin did not
+// request. README documents that limitation.
+//
+//	UPDATE reservations
+//	SET worker_ids = array_remove(worker_ids, $1::uuid)
+//	WHERE $1::uuid = ANY(worker_ids)
+func (q *Queries) RemoveWorkerFromReservations(ctx context.Context, workerID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, removeWorkerFromReservations, workerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

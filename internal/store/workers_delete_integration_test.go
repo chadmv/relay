@@ -6,10 +6,12 @@ import (
 	"context"
 	"sort"
 	"testing"
+	"time"
 
 	"relay/internal/store"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
@@ -94,4 +96,89 @@ func TestGetWorkerForUpdate_LocksAnExistingRowAndDistinguishesAMissingOne(t *tes
 
 	_, err = q.GetWorkerForUpdate(ctx, pgtype.UUID{Valid: true})
 	require.ErrorIs(t, err, pgx.ErrNoRows, "a missing worker must be pgx.ErrNoRows, never a zero-value row")
+}
+
+// TestDeleteWorker_IsRefusedWhileAnEnrollmentNamesTheWorker proves DECISION A's
+// PREMISE, which is the whole reason the spec declined a migration:
+// agent_enrollments.consumed_by's FK has NO ON DELETE action, so it fails CLOSED
+// with SQLSTATE 23503 for any future deleter that forgets to unlink. If this goes
+// green, somebody added ON DELETE SET NULL and the guard is gone.
+func TestDeleteWorker_IsRefusedWhileAnEnrollmentNamesTheWorker(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+	admin := newTestUser(t, q, true)
+	w := newTestWorker(t, q)
+	_, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{ID: w.ID, Status: "offline"})
+	require.NoError(t, err)
+
+	e, err := q.CreateAgentEnrollment(ctx, store.CreateAgentEnrollmentParams{
+		TokenHash: "hash-" + t.Name(), CreatedBy: admin.ID,
+		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	rows, err := q.ConsumeAgentEnrollment(ctx, store.ConsumeAgentEnrollmentParams{ID: e.ID, ConsumedBy: w.ID})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rows)
+
+	_, err = q.DeleteWorker(ctx, w.ID)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23503", pgErr.Code, "the FK must fail closed for a deleter that did not unlink")
+
+	n, err := q.ClearEnrollmentConsumerForWorker(ctx, w.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "the count is what the delete response reports")
+
+	deleted, err := q.DeleteWorker(ctx, w.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deleted)
+
+	after, err := q.GetAgentEnrollmentByTokenHash(ctx, "hash-"+t.Name())
+	require.NoError(t, err, "the enrollment row must survive the worker")
+	require.True(t, after.ConsumedAt.Valid, "consumed_at must be intact")
+	require.False(t, after.ConsumedBy.Valid, "consumed_by must be NULL")
+}
+
+func TestRemoveWorkerFromReservations_ScrubsOnlyTheReservationsThatNameIt(t *testing.T) {
+	ctx := context.Background()
+	q := newTestQueries(t)
+	user := newTestUser(t, q, true)
+	target := newTestWorker(t, q)
+	other, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "other-" + t.Name(), Hostname: "other-" + t.Name(),
+		CpuCores: 4, RamGb: 16, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+
+	mk := func(name string, ids []pgtype.UUID) store.Reservation {
+		r, err := q.CreateReservation(ctx, store.CreateReservationParams{
+			Name: name, Selector: []byte("{}"), WorkerIds: ids, UserID: user.ID,
+		})
+		require.NoError(t, err)
+		return r
+	}
+	// THE MIXED RESERVATION IS FIRST. A single-worker fixture passes against
+	// `SET worker_ids = '{}'`; the mixed row is what forces array_remove
+	// semantics, and it must not sit behind a benign row where an early-exit
+	// mutation could hide.
+	mixed := mk("mixed", []pgtype.UUID{target.ID, other.ID})
+	only := mk("only", []pgtype.UUID{target.ID})
+	none := mk("none", []pgtype.UUID{other.ID})
+
+	n, err := q.RemoveWorkerFromReservations(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), n,
+		"the count must be how many reservations NAMED this worker - the WHERE clause is what makes it mean that")
+
+	got, err := q.GetReservation(ctx, mixed.ID)
+	require.NoError(t, err)
+	require.Equal(t, []pgtype.UUID{other.ID}, got.WorkerIds, "array_remove must keep the other id")
+
+	got, err = q.GetReservation(ctx, only.ID)
+	require.NoError(t, err)
+	require.Empty(t, got.WorkerIds)
+
+	got, err = q.GetReservation(ctx, none.ID)
+	require.NoError(t, err)
+	require.Equal(t, []pgtype.UUID{other.ID}, got.WorkerIds, "an unrelated reservation must be untouched")
 }
