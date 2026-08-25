@@ -1,9 +1,11 @@
 ---
 title: Three handleTaskStatus error lines run on the recv goroutine with the log budget already in scope and never consult it
 type: bug
-status: open
+status: closed
 created: 2026-08-21
 priority: low
+closed: 2026-08-24
+resolution: fixed
 source: Phase 4 of the 2026-08-21-silent-drop-observability slice 2; the README claim that was false, and the half of it the registration item does not cover
 ---
 
@@ -157,3 +159,38 @@ raises it above a shrug is the second-order effect that this whole cluster exist
 `ingest_log_budget` section reads **all zeros** while these lines carry the volume, so the endpoint an
 operator consults to distinguish "a flood is in progress" from "the fleet is quiet" gives the wrong
 answer with total confidence. A control that reports zero is worse than one that reports nothing.
+
+## Resolution
+
+Closed 2026-08-24 (handletaskstatus-pair), shipped in one pass with the fence-rejection counter item -
+same 60-line region, same publish checklist.
+
+All three sites named by the deep review are now inside the per-connection ingest log budget, via three
+new `logKind`s added across `internal/worker` and `internal/api` **in a single commit**, because slice
+2 of this cluster shipped a fully correct sixth kind that was counted on one side and published under
+no JSON key with all three packages green.
+
+The item was right that it is three sites and not two arms: `FailDependentTasks` is on neither
+`pgx.ErrNoRows` arm and could not be gated on it anyway, since it is `:exec` and cannot return that
+error. Measured at HEAD: thirteen `log.Printf` sites in `handleTaskStatus`'s file, eight now budgeted
+against five before, and **no existing site lost its budget**.
+
+### One defect found while doing it, and one caveat the fix introduced
+
+**A short-circuit operand order carried a side effect.** Swapping
+`!errors.Is(err, pgx.ErrNoRows) && lim.allow(...)` to the other order compiles, vets clean, changes no
+log line and leaves the whole module green - while letting the cheapest forged message (a well-formed
+uuid naming no task) spend a budget token and claim a dedupe slot on every call. A second instance of
+the same shape was found on `FailDependentTasks`' arm, and a later AST walk over all fifteen `&&`/`||`
+sites in both packages established there is no third. Pinned by
+`TestHandleTaskStatus_TheSilentArmsSpendNoBudget`, poisoned input first.
+
+**The three lines are now suppressible by the connection's own peer**, which they were not before -
+the 16-token bucket is shared across all eight kinds, and one kind's dedupe key is wire-derived. Filed
+as [[bug-2026-08-24-wire-keyed-dedupe-lets-a-peer-suppress-its-own-diagnostics]] with the reproduction.
+Per-connection only and itself counted under `ingest_log_budget.counts.suppressed.*`, so it is
+detectable - but an agent causing status-write failures can now hide them from its own connection's log.
+
+Note for whoever reads `status_fail_dependents`: a non-zero value is a **data-integrity** signal, not a
+logging one. `FailDependentTasks` failing leaves the failed task's dependents `pending` forever, and
+`GetEligibleTasks` blocks on `dep.status != 'done'`, so the job is stuck.

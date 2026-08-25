@@ -124,6 +124,25 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     status belongs here only if a task can be in it while its DispatchTask is
 //     still in flight.
 //
+// THE FOURTEENTH ENTRY IS NOT A STATEMENT, and it is here because the list above
+// presented itself as complete while something else sliced the same set:
+//
+//   - taskStatusIsWritable (internal/worker/taskstatus_fence_counters.go) - A GO
+//     -SIDE MIRROR, not SQL. It restates UpdateTaskStatus's and
+//     IncrementTaskRetryCount's `('pending','dispatched','running')` in Go so
+//     that handleTaskStatus can label a fence rejection `raced` versus
+//     `duplicate`/`conflicting` without a second round trip. It is the ONLY site
+//     on this list that decides nothing: it labels a counter, so drift mislabels
+//     a number and cannot admit or refuse a write. A new NON-TERMINAL status
+//     belongs here whenever it is added to those two allow-lists, or every
+//     rejection for such a row reads as a healthy race and the actionable key
+//     goes quiet for that state. It is covered TRANSITIVELY today -
+//     TestTaskStatusWritableSetMatchesTheSQLAllowList parses tasks.sql and
+//     compares both directions, so moving the SQL turns it RED without anyone
+//     consulting this list - which is exactly why it was easy to leave off, and
+//     exactly why a completeness claim has to name it anyway. A claim about the
+//     complement cannot be checked by opening its subject.
+//
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
 // equivalent deny-list a new status would be writable and retryable by default,
@@ -132,7 +151,9 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // assignment-partition group - are where the allow-list points the OTHER way and
 // omission fails open, which is why they are spelled out at length above rather
 // than folded into the list. Count them before assuming the fail-closed default:
-// seven of the thirteen sites named here are inverted.
+// seven of the thirteen STATEMENTS named here are inverted. The fourteenth entry
+// is not a statement and is not one of the seven; it is neither fail-open nor
+// fail-closed, because it gates nothing at all.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -161,5 +182,9 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 			"RequeueWorkerTasksIfEpoch - means a task in that state is never seen by reconcile, never covered by "+
 			"a grace timer, never requeued on disconnect or disable, and never swept: it holds its worker slot "+
 			"and its job forever, with no error and no log line. RequeueTask's narrower 'dispatched'-only "+
-			"predicate is deliberate - see its own comment before touching it")
+			"predicate is deliberate - see its own comment before touching it. THERE IS ALSO ONE NON-STATEMENT "+
+			"SITE: taskStatusIsWritable in internal/worker/taskstatus_fence_counters.go mirrors "+
+			"UpdateTaskStatus's allow-list in Go to label fence-rejection counters. It gates nothing, so drift "+
+			"there mislabels a number rather than admitting a write - but a new non-terminal status left out of "+
+			"it makes every rejection for that state read as a healthy race")
 }

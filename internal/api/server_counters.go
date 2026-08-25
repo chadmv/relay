@@ -112,10 +112,10 @@ type GRPCAdmissionSource interface {
 // IngestLogBudgetSource is whatever can report what the per-connection agent log
 // budgets have dropped - in production, *worker.Handler.
 //
-// ONE METHOD, AND A SEPARATE FIELD FROM ANY FUTURE WORKER COUNTER. The task-log
-// fence-rejection counter (idea-2026-08-14) will live on the same *worker.Handler
-// and must get its OWN source field and its own section, so that "wired" stays a
-// per-SECTION fact. Widening this interface to carry both would make two
+// ONE METHOD, AND A SEPARATE FIELD PER WORKER COUNTER. THREE CONTROLS NOW LIVE
+// ON ONE *worker.Handler - this budget, the task-log fence and the task-status
+// fence - and each has its OWN source field and its own section, so that "wired"
+// stays a per-SECTION fact. Widening this interface to carry another would make
 // independent controls appear and disappear together.
 type IngestLogBudgetSource interface {
 	IngestLogDropCounts() worker.IngestLogDrops
@@ -125,10 +125,10 @@ type IngestLogBudgetSource interface {
 // AppendTaskLog fence has rejected - in production, *worker.Handler.
 //
 // ITS OWN SOURCE FIELD, NOT A WIDENED IngestLogBudgetSource, exactly as that
-// interface's comment demands. The two counters live on the same *worker.Handler
+// interface's comment demands. THREE counters live on the same *worker.Handler
 // and are wired together today, but they are independent CONTROLS counting
-// different nouns, and an interface carrying both would make them appear and
-// disappear together as a matter of TYPE rather than as a matter of wiring.
+// different nouns, and an interface carrying more than one would make them appear
+// and disappear together as a matter of TYPE rather than as a matter of wiring.
 //
 // A SCALAR, NOT A STRUCT, and that is load-bearing rather than minimal: a
 // section whose payload struct restates fields owned by another package needs a
@@ -139,6 +139,25 @@ type IngestLogBudgetSource interface {
 // widened.
 type TaskLogFenceSource interface {
 	TaskLogFenceRejections() uint64
+}
+
+// TaskStatusFenceSource is whatever can report what handleTaskStatus's two
+// epoch-fenced writes have refused - in production, *worker.Handler.
+//
+// ITS OWN SOURCE FIELD, not a widened TaskLogFenceSource and not a widened
+// IngestLogBudgetSource. All three counters live on the same *worker.Handler and
+// are wired together today, but they are independent CONTROLS counting different
+// nouns, and an interface carrying two would make them appear and disappear
+// together as a matter of TYPE rather than as a matter of wiring.
+//
+// A PRODUCER-OWNED STRUCT, AND THE DIRECTION IS FORCED. internal/api imports
+// internal/worker (server.go), so the watchdog's shape - declare the snapshot
+// type in this package - is a compile error here. The section therefore WRAPS
+// worker.TaskStatusFenceCounts rather than restating its fields, which means
+// there is no hand-written mapper on either side and no arity to drift.
+// TestTaskStatusFenceSectionRestatesNothing holds that.
+type TaskStatusFenceSource interface {
+	TaskStatusFenceRejections() worker.TaskStatusFenceCounts
 }
 
 // WatchdogSweptWorkerMax bounds how many distinct workers watchdog.counts.
@@ -307,6 +326,7 @@ type CounterSources struct {
 	GRPCAdmission   GRPCAdmissionSource
 	IngestLogBudget IngestLogBudgetSource
 	TaskLogFence    TaskLogFenceSource
+	TaskStatusFence TaskStatusFenceSource
 	Watchdog        WatchdogSource
 }
 
@@ -315,6 +335,13 @@ type serverCountersResponse struct {
 	GRPCAdmission   *grpcAdmissionSection   `json:"grpc_admission,omitempty"`
 	IngestLogBudget *ingestLogBudgetSection `json:"ingest_log_budget,omitempty"`
 	TaskLogFence    *taskLogFenceSection    `json:"task_log_fence,omitempty"`
+
+	// *taskStatusFenceSection wrapping worker.TaskStatusFenceCounts DIRECTLY.
+	// The producing package owns the counts type (internal/api imports
+	// internal/worker, so the reverse is a cycle), and this wrapper adds only
+	// the "counts" nesting the payload contract requires. No field name appears
+	// twice, so there is no mapper and no arity to drift.
+	TaskStatusFence *taskStatusFenceSection `json:"task_status_fence,omitempty"`
 
 	// *WatchdogCounters, not a *watchdogSection restating it. The source's own
 	// type IS the response type, so there is no hand-written mapper and no arity
@@ -358,9 +385,11 @@ type grpcAdmissionLevels struct {
 // AND WHAT THEY DO NOT COUNT: these are LOG LINES THE BUDGET DROPPED, not
 // diagnostics lost. A handler that decides not to log without consulting the
 // budget contributes nothing - handleTaskStatus's pgx.ErrNoRows GetTask
-// short-circuits before the budget, and handleTaskLog's fence-rejection arm
-// never consults it at all (that one is counted in task_log_fence, and the two
-// numbers are disjoint).
+// short-circuits before the budget and is counted nowhere, and handleTaskLog's
+// fence-rejection arm never consults it at all (that one is counted in
+// task_log_fence). handleTaskStatus's two epoch-fenced WRITE arms are the same
+// shape and ARE counted, in task_status_fence below. All three sections are
+// disjoint from this one: no input moves more than one of them.
 type ingestLogBudgetSection struct {
 	Counts ingestLogBudgetCounts `json:"counts"`
 }
@@ -381,20 +410,26 @@ type ingestLogBudgetCounts struct {
 // THESE KEYS ARE A RESPONSE CONTRACT tied to worker's logKind names; see that
 // type's comment before renaming anything here.
 type ingestLogKindCounts struct {
-	TaskLogPersist  uint64 `json:"task_log_persist"`
-	BadTaskIDLog    uint64 `json:"bad_task_id_log"`
-	BadTaskIDStatus uint64 `json:"bad_task_id_status"`
-	StatusGetTask   uint64 `json:"status_get_task"`
-	Inventory       uint64 `json:"inventory"`
+	TaskLogPersist       uint64 `json:"task_log_persist"`
+	BadTaskIDLog         uint64 `json:"bad_task_id_log"`
+	BadTaskIDStatus      uint64 `json:"bad_task_id_status"`
+	StatusGetTask        uint64 `json:"status_get_task"`
+	Inventory            uint64 `json:"inventory"`
+	StatusRetryWrite     uint64 `json:"status_retry_write"`
+	StatusUpdateWrite    uint64 `json:"status_update_write"`
+	StatusFailDependents uint64 `json:"status_fail_dependents"`
 }
 
 func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts {
 	return ingestLogKindCounts{
-		TaskLogPersist:  k.TaskLogPersist,
-		BadTaskIDLog:    k.BadTaskIDLog,
-		BadTaskIDStatus: k.BadTaskIDStatus,
-		StatusGetTask:   k.StatusGetTask,
-		Inventory:       k.Inventory,
+		TaskLogPersist:       k.TaskLogPersist,
+		BadTaskIDLog:         k.BadTaskIDLog,
+		BadTaskIDStatus:      k.BadTaskIDStatus,
+		StatusGetTask:        k.StatusGetTask,
+		Inventory:            k.Inventory,
+		StatusRetryWrite:     k.StatusRetryWrite,
+		StatusUpdateWrite:    k.StatusUpdateWrite,
+		StatusFailDependents: k.StatusFailDependents,
 	}
 }
 
@@ -431,6 +466,64 @@ type taskLogFenceCounts struct {
 	RejectedTotal uint64 `json:"rejected_total"`
 }
 
+// task_status_fence is COUNTS ONLY, and it is THREE KEYS THAT PARTITION rather
+// than one scalar. It counts status reports handleTaskStatus's epoch-fenced
+// writes refused, split by what the row said when the handler read it:
+//
+//   - raced_total: the row was still writable at T0, so a concurrent writer
+//     ended the generation inside the handler's own read-to-write window. THE
+//     ONE KEY THAT IS A FLOOR - the Go-side identity and currency gates reject
+//     stale and forged reports a round trip earlier, so only that narrow window
+//     reaches the SQL fence's worker_id and assignment_epoch predicates.
+//   - duplicate_total: the row was already terminal and its status is the one
+//     being reported. THE EXPECTED HEALTHY BASELINE, whose height depends on
+//     agent retry behaviour. A non-zero value here is not an incident.
+//   - conflicting_total: the row was already terminal with a DIFFERENT status.
+//     THE ACTIONABLE ONE, and the reason this section exists: a task the
+//     coordinator's stale-task watchdog stamped 'timed_out' whose agent then
+//     reports 'done' lands here. That is a successful task recorded as a
+//     timeout, which is what RELAY_TASK_WATCHDOG_MARGIN set too small produces
+//     and which had no runtime signal of any kind before this number.
+//
+// UNLIKE raced_total, THE OTHER TWO ARE EXACT rather than floors, and the
+// asymmetry is worth knowing: nothing between GetTask and the write reads the
+// row's status, so the terminality predicate has no Go-side pre-filter and every
+// T0-terminal report that reaches the write is counted.
+//
+// THERE IS NO TOTAL, BY DECISION. The three partition the rejections, so a
+// published sum would sit beside its own summands where it can only agree or be
+// a bug.
+//
+// WHY THE ARMS ARE NOT SPLIT BY STATEMENT, which is the split the filing item
+// proposed: IncrementTaskRetryCount and UpdateTaskStatus carry the IDENTICAL
+// three predicates, which of the two runs is decided by the reported status and
+// the row's retry budget rather than by anything about the rejection, and both
+// mean the same thing to an operator - the agent's report of this task's outcome
+// was discarded. Splitting by reason answers the question the item actually
+// asked (which of these is alarming); splitting by statement does not.
+//
+// A FINER SPLIT - WHICH SQL PREDICATE FIRED - IS DECLINED WITH THE PRICE, NOT
+// IMPOSSIBLE. Both statements yield no row on any predicate failure, so nothing
+// can carry a reason; recovering one needs a second round trip (forbidden on the
+// recv goroutine) or a rewrite of both result contracts. See task_log_fence
+// above, where the same call was made and the same wording is required.
+//
+// AND WHAT IT DOES NOT COVER:
+//
+//   - IT IS NOT A CENSUS OF FENCE REJECTIONS. Dispatcher.failClaimedTask and
+//     Watchdog.SweepOnce are fenced by the same statement and are counted
+//     nowhere. This is the AGENT-REPORTED status path only.
+//   - IT IS NOT COMPARABLE WITH task_log_fence.counts.rejected_total, which has
+//     no equivalent Go-side pre-filter. No input moves both, and neither
+//     explains any part of the other.
+//   - IT DOES NOT RECONCILE WITH watchdog.counts.swept_total, and an operator
+//     will try. The two are opposite ends of the same event seen from the
+//     coordinator and from the agent, and they will not match: the watchdog also
+//     sweeps tasks whose agents are gone and never report at all.
+type taskStatusFenceSection struct {
+	Counts worker.TaskStatusFenceCounts `json:"counts"`
+}
+
 // handleServerCounters assembles whichever sections are wired. It reads no
 // request body, so readJSON is not involved; the response goes through
 // writeJSON, matching handleGetWorkerMetrics.
@@ -461,6 +554,12 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 		resp.TaskLogFence = &taskLogFenceSection{
 			Counts: taskLogFenceCounts{RejectedTotal: src.TaskLogFenceRejections()},
 		}
+	}
+	if src := s.Counters.TaskStatusFence; src != nil {
+		// ONE ASSIGNMENT INTO A WRAPPER, NOT A FIELD-BY-FIELD COPY: the
+		// producer's type IS the counts half, so a reason added in
+		// internal/worker reaches a JSON key with no edit here.
+		resp.TaskStatusFence = &taskStatusFenceSection{Counts: src.TaskStatusFenceRejections()}
 	}
 	if src := s.Counters.Watchdog; src != nil {
 		// ONE ASSIGNMENT, NOT A FIELD-BY-FIELD COPY, and that is the whole

@@ -73,3 +73,23 @@ packages can import, so the two copies of the canonical-uuid rule
 - `cmd/relay-server/counters_wiring_test.go` - the pattern to copy.
 - [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - adjacent, and explicitly not the same.
 - [[idea-2026-08-24-watchdog-counters-never-driven-by-real-rows]] - the sibling gap one layer down.
+
+## 2026-08-24 (same day): a fourth section shipped, and it separates two things this item conflates
+
+`task_status_fence` is the fifth counter section and the fourth to reach the payload guard. It is worth
+recording because it makes a distinction the item's framing blurs.
+
+The **arity** class - slice 2's defect, where a correct counter was counted on one side and published
+under no JSON key with every package green - is now closed **by construction** for this section, not by
+a guard. `internal/api` wraps `worker.TaskStatusFenceCounts` **directly** as the response type, so there
+is no hand-written mapper on either side and nothing to drift. Proven by mutation: adding a field to the
+worker-side struct with zero edits in `internal/api` put the new JSON key into the served payload and
+reddened six tests across three packages.
+
+That says nothing about **this** item. The allow-list predicates still only ever see values constructed
+as literals in `internal/api`'s own test file. The two are independent: wrapping removes the restatement,
+and the fixture-versus-producer gap survives it untouched.
+
+Worth carrying into the fix: of the three type-ownership shapes the cluster has now used - producer-owned
+with a mapper (slice 2), consumer-owned with no mapper (slice 4), producer-owned wrapped with no mapper
+(this one) - **only the mapper ever produced a defect**.

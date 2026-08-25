@@ -24,10 +24,17 @@ const (
 //
 // WHAT THESE NUMBERS ARE. They count LOG LINES THE BUDGET DROPPED, not
 // diagnostics lost. A handler that decides not to log without consulting the
-// budget contributes nothing here - handleTaskStatus's pgx.ErrNoRows GetTask
-// (which short-circuits before allow) and handleTaskLog's fence-rejection arm
-// (whose counter is a separate item) are both invisible to these fields, by
-// design.
+// budget contributes nothing here, and handleTaskStatus is now BOTH kinds of
+// example rather than only the first: its pgx.ErrNoRows GetTask case
+// short-circuits before allow and is counted nowhere, while its two epoch-fenced
+// write arms short-circuit before allow AND are counted, under task_status_fence
+// rather than here. handleTaskLog's fence-rejection arm is the same shape, under
+// task_log_fence. All three of those sections are disjoint from these fields; no
+// input moves more than one of them.
+//
+// The three status-WRITE lines used to be in the first category and are not any
+// more: as of this slice they consult the budget and appear here as
+// status_retry_write, status_update_write and status_fail_dependents.
 //
 // MONOTONIC, per process, zeroed by a restart, and never returned to an agent:
 // the only read path is the admin-authenticated GET /v1/server/counters.
@@ -59,11 +66,14 @@ type IngestLogDrops struct {
 // under ingest_log_budget.counts; see the logKind block in
 // ingest_log_limiter.go.
 type IngestLogDropsByKind struct {
-	TaskLogPersist  uint64
-	BadTaskIDLog    uint64
-	BadTaskIDStatus uint64
-	StatusGetTask   uint64
-	Inventory       uint64
+	TaskLogPersist       uint64
+	BadTaskIDLog         uint64
+	BadTaskIDStatus      uint64
+	StatusGetTask        uint64
+	Inventory            uint64
+	StatusRetryWrite     uint64
+	StatusUpdateWrite    uint64
+	StatusFailDependents uint64
 }
 
 // ingestLogCounters is the process-lifetime home for what the per-connection log
@@ -77,7 +87,7 @@ type IngestLogDropsByKind struct {
 // its snapshot carries a cross-field invariant (max_per_source <= live_total <=
 // the configured cap) that only one critical section can hold, and plain fields
 // make an unsynchronised access a data race -race can see. NEITHER APPLIES HERE.
-// These ten numbers have no relation to each other - each is an independent
+// These sixteen numbers have no relation to each other - each is an independent
 // monotonic total - so a snapshot that reads them microseconds apart is not
 // inconsistent, merely unsynchronised in a way nothing can observe. And the
 // increment site is the gRPC recv goroutine, whose standing constraint is no new
@@ -149,10 +159,13 @@ func (c *ingestLogCounters) snapshot() IngestLogDrops {
 // TestIngestLogCounters_EveryKindIsPublishedDistinctly turns RED.
 func (c *ingestLogCounters) byKind(arm int) IngestLogDropsByKind {
 	return IngestLogDropsByKind{
-		TaskLogPersist:  c.n[kindTaskLogPersist][arm].Load(),
-		BadTaskIDLog:    c.n[kindBadTaskIDLog][arm].Load(),
-		BadTaskIDStatus: c.n[kindBadTaskIDStatus][arm].Load(),
-		StatusGetTask:   c.n[kindStatusGetTask][arm].Load(),
-		Inventory:       c.n[kindInventory][arm].Load(),
+		TaskLogPersist:       c.n[kindTaskLogPersist][arm].Load(),
+		BadTaskIDLog:         c.n[kindBadTaskIDLog][arm].Load(),
+		BadTaskIDStatus:      c.n[kindBadTaskIDStatus][arm].Load(),
+		StatusGetTask:        c.n[kindStatusGetTask][arm].Load(),
+		Inventory:            c.n[kindInventory][arm].Load(),
+		StatusRetryWrite:     c.n[kindStatusRetryWrite][arm].Load(),
+		StatusUpdateWrite:    c.n[kindStatusUpdateWrite][arm].Load(),
+		StatusFailDependents: c.n[kindStatusFailDependents][arm].Load(),
 	}
 }

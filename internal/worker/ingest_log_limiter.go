@@ -64,7 +64,7 @@ import "time"
 // the map already limits things - the map deliberately does not.
 //
 // Note what the composite key does and does not buy. It is required because one
-// map now holds five kinds of key, NOT because it closes the flood. Moving the
+// map now holds eight kinds of key, NOT because it closes the flood. Moving the
 // epoch back into the value would still be bounded, because the bucket is the
 // bound. The key shape is a diagnostics decision; the bucket is the security
 // control.
@@ -75,6 +75,19 @@ import "time"
 // appears off that goroutine, that caller is the finding, not the missing lock.
 // It is a stack local in Connect, so it dies with the frame: there is no
 // teardown to get wrong and no way for one connection to reach another's.
+//
+// WHAT THE BUDGET COVERS, so the next reader does not have to enumerate call
+// sites to find out. EIGHT log sites on the gRPC receive path go through it:
+// handleTaskLog's bad-id and persist lines, handleTaskStatus's bad-id, GetTask,
+// retry-write, status-write and dependency-cascade lines, and
+// handleInventoryUpdate's persist line. WHAT IS STILL OUTSIDE IT, and why:
+// registration-time lines (the budget is allocated after
+// authenticateAndRegister returns - bug-2026-08-15-registration-log-sites-are-
+// outside-the-connection-budget) and markWorkerOffline's teardown line, which
+// runs once per connection teardown and so is bounded by the connection caps
+// rather than by message volume. handleTaskLog's marshal line is deliberately
+// unbudgeted; see its own comment for the argument. Counted at HEAD: thirteen
+// log.Printf sites in handler.go, eight budgeted and five not.
 //
 // ONE FIELD IS THE EXCEPTION AND IT IS DELIBERATE: `drops` points at the
 // Handler's process-lifetime counters, which every connection shares, because a
@@ -137,7 +150,30 @@ const (
 	kindBadTaskIDLog                       // an unparseable task id on the LOG path
 	kindBadTaskIDStatus                    // an unparseable task id on the STATUS path
 	kindStatusGetTask                      // handleTaskStatus's non-ErrNoRows GetTask failure
-	kindInventory                          // handleInventoryUpdate's persist failure
+
+	// kindInventory is handleInventoryUpdate's persist failure.
+	kindInventory
+
+	// THE THREE STATUS-WRITE KINDS ARE DELIBERATELY SEPARATE, AND ONE SHARED
+	// KIND WOULD HAVE BEEN ONE JSON KEY INSTEAD OF THREE. Two things decided it:
+	//
+	//   - THEY ARE MUTUALLY EXCLUSIVE PER MESSAGE. The retry branch returns, the
+	//     update branch returns, and FailDependentTasks runs only AFTER a
+	//     successful UpdateTaskStatus. One message reaches at most one of them,
+	//     so the split across three keys is a clean attribution rather than a
+	//     mixture an operator has to decompose.
+	//   - THE REMEDIES DIFFER. FailDependentTasks is a RECURSIVE CTE - the most
+	//     expensive statement on this path and the first to hit a deadlock or a
+	//     statement_timeout under contention - while UpdateTaskStatus is a
+	//     single-row update. "Your recursive cascade is timing out" and "your
+	//     simple updates are failing" are different incidents with different
+	//     answers.
+	//
+	// The price is eight mechanical edits per kind, and it is paid down by the
+	// guards that fire on an omission (see this type's comment).
+	kindStatusRetryWrite     // handleTaskStatus's non-ErrNoRows IncrementTaskRetryCount failure
+	kindStatusUpdateWrite    // handleTaskStatus's non-ErrNoRows UpdateTaskStatus failure
+	kindStatusFailDependents // handleTaskStatus's FailDependentTasks failure (an :exec; no ErrNoRows arm)
 
 	// kindCount MUST STAY LAST and is NOT a kind. It is the length of
 	// ingestLogCounters' array. A kind added after it is not counted at all;
@@ -147,8 +183,11 @@ const (
 )
 
 // logKey is the dedupe key. Only kindTaskLogPersist populates id and epoch; the
-// other four kinds deliberately carry NO wire value, so the caller cannot vary
-// them (see the per-site table in the spec's section 6.4).
+// other SEVEN kinds deliberately carry NO wire value, so the caller cannot vary
+// them (see the per-site table in the spec's section 6.4). The three status-write
+// kinds joined that set for the reason already written at kindStatusGetTask: an
+// infrastructure episode is not per-task, so keying on the task id would multiply
+// one event by the task count.
 //
 // The only string that ever reaches this struct is a CANONICALLY RE-ENCODED task
 // id - uuidStr over the parsed pgtype.UUID, never the wire string. That is 36
@@ -185,7 +224,7 @@ const (
 	ingestLogRefill = 10 * time.Second
 
 	// How long one key stays deduplicated before it re-arms. THE SUPPRESSION MUST
-	// BE TIME-BOUNDED, and that is not a nicety - four of the five kinds carry no
+	// BE TIME-BOUNDED, and that is not a nicety - seven of the eight kinds carry no
 	// wire value, so each of them is exactly ONE key for the connection's whole
 	// life and can never reach the capacity clear on its own. With a bare presence
 	// flag they logged once per connection and then never again: a Postgres outage
@@ -334,7 +373,7 @@ func (l *ingestLogLimiter) allow(k logKey) bool {
 	// bucket is therefore visibly the thing that re-opens the original bug.
 	//
 	// Note this branch is not the only recovery, and used not to be a recovery at
-	// all for most keys: the four kinds carrying no wire value can never reach 128
+	// all for most keys: the seven kinds carrying no wire value can never reach 128
 	// entries on their own, so they had exactly the permanent suppression this
 	// comment argues against. ingestLogDedupeWindow is the general answer and this
 	// branch is now only the map's size bound.

@@ -1,9 +1,11 @@
 ---
 title: handleTaskStatus's two fence-rejection arms are silent and uncounted, so a discarded TERMINAL status report leaves no runtime signal
 type: idea
-status: open
+status: closed
 created: 2026-08-21
 priority: medium
+closed: 2026-08-24
+resolution: fixed
 source: Phase 4 of the 2026-08-21-silent-drop-observability slice 3; the sibling arms the closing item's scope deliberately excluded
 ---
 
@@ -222,3 +224,55 @@ inspect at all. An earlier version of that comment asserted a bare count of five
 over - it omitted `ClaimTaskForWorker` and named a function that has never existed. If this item's
 scope is "count fence rejections", the rowcount sites are a genuinely different problem: there is no
 error value to classify, so counting them means reading `n`.
+
+## Resolution
+
+Closed 2026-08-24 (handletaskstatus-pair), the fifth and final slice of the silent-drop observability
+cluster. Shipped together with the budget-bypass bug, in one pass over the same 60-line region.
+
+`internal/worker/taskstatus_fence_counters.go` partitions the rejections from `handleTaskStatus`'s two
+epoch-fenced writes and publishes them as `task_status_fence` on admin-only
+`GET /v1/server/counters`. `internal/store/` is byte-identical apart from comments.
+
+### The item's motivating mechanism was wrong, and the fix is shaped by the correction
+
+This item said the live cause of a discarded terminal report is the coordinator watchdog having
+already bumped the epoch. **The watchdog does not bump anything** - it passes `AssignmentEpoch` as a
+fence, and `UpdateTaskStatus` writes only status and timestamps; its own comment says so. The outcome
+the item describes is real and reachable, but through the **terminality predicate** at the same epoch.
+
+That is why the counter splits on **what the row said when this handler read it**, not on which
+statement rejected:
+
+- `raced_total` - the row was still writable at T0, so something ended the generation inside this
+  handler's own read-to-write window. **A floor**, because the Go identity and currency gates reject
+  stale and forged messages a round trip earlier.
+- `duplicate_total` - already unwritable and the status agrees. The expected healthy floor; a terminal
+  transition bumps neither the epoch nor `worker_id`, so a duplicate from a healthy assignee lands here.
+- `conflicting_total` - already unwritable and the status disagrees. The actionable one.
+
+The item's own two-counter proposal (split by statement) was refuted: both statements carry identical
+predicates and which one runs is a property of the row, so that split would have put a healthy
+duplicate and a watchdog clobber in the same key.
+
+### NOT covered - read before treating this as a census
+
+- **It is the agent-reported status path only.** `Dispatcher.failClaimedTask` and `Watchdog.SweepOnce`
+  are fenced by the same statement and counted nowhere. Filed as
+  [[idea-2026-08-24-failclaimedtask-is-a-ready-uncounted-fence-site]] with the reasoning for leaving
+  them out.
+- **`conflicting_total` and `duplicate_total` are forgeable BY THE TASK'S OWN ASSIGNEE**, and the
+  README and the type's doc comment now say so. A terminal transition bumps neither the epoch nor
+  `worker_id`, so an assignee can replay a contradicting terminal indefinitely at one unbudgeted gRPC
+  message per increment - measured at 10,000 forged messages producing `Conflicting: 10000` with zero
+  log lines and zero budget spent. **The shape it produces is exactly the watchdog-margin signature the
+  README tells an operator to act on**, so confirm `RELAY_TASK_WATCHDOG_MARGIN` against its configured
+  value and cross-check `watchdog.counts.swept_by_worker` before raising it. Raising the margin in
+  response to a forged climb widens the unbounded-assignment window the watchdog exists to close.
+- **These count messages, not tasks or incidents.** One already-terminal task held by one agent can
+  dominate the number.
+- **They are not comparable with `task_log_fence.counts.rejected_total`** - that arm has no Go-side
+  pre-filter; this one runs behind an identity gate and a currency gate.
+- A finer split - which of the three SQL predicates fired - is **declined on price, not impossible**:
+  both statements are single-row `UPDATE ... WHERE` forms that return no row, so nothing can carry a
+  reason without a second round trip on the recv goroutine or a rewrite of both result contracts.

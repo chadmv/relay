@@ -589,12 +589,21 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.deduped.bad_task_id_status",
 	"ingest_log_budget.counts.deduped.status_get_task",
 	"ingest_log_budget.counts.deduped.inventory",
+	"ingest_log_budget.counts.deduped.status_retry_write",
+	"ingest_log_budget.counts.deduped.status_update_write",
+	"ingest_log_budget.counts.deduped.status_fail_dependents",
 	"ingest_log_budget.counts.suppressed.task_log_persist",
 	"ingest_log_budget.counts.suppressed.bad_task_id_log",
 	"ingest_log_budget.counts.suppressed.bad_task_id_status",
 	"ingest_log_budget.counts.suppressed.status_get_task",
 	"ingest_log_budget.counts.suppressed.inventory",
+	"ingest_log_budget.counts.suppressed.status_retry_write",
+	"ingest_log_budget.counts.suppressed.status_update_write",
+	"ingest_log_budget.counts.suppressed.status_fail_dependents",
 	"task_log_fence.counts.rejected_total",
+	"task_status_fence.counts.raced_total",
+	"task_status_fence.counts.duplicate_total",
+	"task_status_fence.counts.conflicting_total",
 	"watchdog.counts.swept_total",
 	"watchdog.counts.swept_overflow",
 	"watchdog.counts.swept_by_worker",
@@ -716,8 +725,9 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 				Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
 				Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
 			}},
-			IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()},
+			IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()},
 			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
+			TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()},
 			Watchdog:        fakeWatchdogSource{c: threeDistinctSweeps()},
 		},
 	}
@@ -810,22 +820,24 @@ func TestIngestLogKindCountsPublishesEveryWorkerSideField(t *testing.T) {
 			"TestServerCounters_ReportsTheIngestLogSnapshot.", src.NumField(), pub.NumField())
 }
 
-// fakeIngestLogSource returns a fixed snapshot. TEN DISTINCT VALUES: the mapping
-// from worker.IngestLogDrops into the response types is ten hand-written
-// assignments, and equal values would hide a crossed one.
+// fakeIngestLogSource returns a fixed snapshot. SIXTEEN DISTINCT VALUES: the
+// mapping from worker.IngestLogDrops into the response types is sixteen
+// hand-written assignments, and equal values would hide a crossed one.
 type fakeIngestLogSource struct{ d worker.IngestLogDrops }
 
 func (f fakeIngestLogSource) IngestLogDropCounts() worker.IngestLogDrops { return f.d }
 
-func tenDistinctDrops() worker.IngestLogDrops {
+func sixteenDistinctDrops() worker.IngestLogDrops {
 	return worker.IngestLogDrops{
 		Deduped: worker.IngestLogDropsByKind{
 			TaskLogPersist: 11, BadTaskIDLog: 22, BadTaskIDStatus: 33,
 			StatusGetTask: 44, Inventory: 55,
+			StatusRetryWrite: 111, StatusUpdateWrite: 122, StatusFailDependents: 133,
 		},
 		Suppressed: worker.IngestLogDropsByKind{
 			TaskLogPersist: 66, BadTaskIDLog: 77, BadTaskIDStatus: 88,
 			StatusGetTask: 99, Inventory: 110,
+			StatusRetryWrite: 144, StatusUpdateWrite: 155, StatusFailDependents: 166,
 		},
 	}
 }
@@ -833,7 +845,7 @@ func tenDistinctDrops() worker.IngestLogDrops {
 func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
@@ -858,7 +870,10 @@ func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	// Key-set equality, not per-key assertions alone: a renamed key would decode
 	// as a missing value and a per-key check would report zero. THESE NAMES ARE A
 	// RESPONSE CONTRACT - see the logKind block in internal/worker.
-	kinds := []string{"task_log_persist", "bad_task_id_log", "bad_task_id_status", "status_get_task", "inventory"}
+	kinds := []string{
+		"task_log_persist", "bad_task_id_log", "bad_task_id_status", "status_get_task", "inventory",
+		"status_retry_write", "status_update_write", "status_fail_dependents",
+	}
 	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Deduped))
 	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Suppressed))
 
@@ -872,6 +887,12 @@ func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	assert.Equal(t, float64(88), body.IngestLogBudget.Counts.Suppressed["bad_task_id_status"])
 	assert.Equal(t, float64(99), body.IngestLogBudget.Counts.Suppressed["status_get_task"])
 	assert.Equal(t, float64(110), body.IngestLogBudget.Counts.Suppressed["inventory"])
+	assert.Equal(t, float64(111), body.IngestLogBudget.Counts.Deduped["status_retry_write"])
+	assert.Equal(t, float64(122), body.IngestLogBudget.Counts.Deduped["status_update_write"])
+	assert.Equal(t, float64(133), body.IngestLogBudget.Counts.Deduped["status_fail_dependents"])
+	assert.Equal(t, float64(144), body.IngestLogBudget.Counts.Suppressed["status_retry_write"])
+	assert.Equal(t, float64(155), body.IngestLogBudget.Counts.Suppressed["status_update_write"])
+	assert.Equal(t, float64(166), body.IngestLogBudget.Counts.Suppressed["status_fail_dependents"])
 }
 
 // TestServerCounters_WiredButZeroIngestSectionIsStillPresent is the
@@ -909,7 +930,7 @@ func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
 	for _, arm := range []string{"deduped", "suppressed"} {
 		var fields map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(counts[arm], &fields))
-		require.Len(t, fields, 5, "%s must carry one key per kind, not an empty object", arm)
+		require.Len(t, fields, 8, "%s must carry one key per kind, not an empty object", arm)
 		for k, v := range fields {
 			assert.Equal(t, "0", string(v), "%s.%s must serialise as an explicit zero", arm, k)
 		}
@@ -922,7 +943,7 @@ func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
 func TestServerCounters_OneWiredSectionDoesNotDragInTheOther(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: tenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
@@ -1231,4 +1252,104 @@ func TestServerCounters_WiredButZeroWatchdogSectionIsStillPresent(t *testing.T) 
 		"an empty map must serialise as {} and never as null or be elided by omitempty. null is not an "+
 			"object, so the payload's own JSON walk has nothing to descend into and the allow-list "+
 			"predicate rejects it - which is the check that keeps the producer allocating.")
+}
+
+// fakeTaskStatusFenceSource returns a fixed snapshot. THREE DISTINCT VALUES:
+// equal values would hide a crossed field.
+type fakeTaskStatusFenceSource struct{ c worker.TaskStatusFenceCounts }
+
+func (f fakeTaskStatusFenceSource) TaskStatusFenceRejections() worker.TaskStatusFenceCounts { return f.c }
+
+func threeDistinctStatusRejections() worker.TaskStatusFenceCounts {
+	return worker.TaskStatusFenceCounts{Raced: 3, Duplicate: 41, Conflicting: 7}
+}
+
+// TestTaskStatusFenceSectionRestatesNothing guards the ANTECEDENT of the rule
+// that produced TestIngestLogKindCountsPublishesEveryWorkerSideField, rather
+// than the consequent: "a section that copies a subsystem's snapshot field by
+// field needs a cardinality check" is satisfied here by not copying.
+//
+// internal/api imports internal/worker, so unlike the watchdog (where the import
+// direction forced the type into THIS package) the PRODUCER owns the type and
+// this package wraps it. Either way there is no mapper and no arity to drift.
+func TestTaskStatusFenceSectionRestatesNothing(t *testing.T) {
+	iface := reflect.TypeOf((*TaskStatusFenceSource)(nil)).Elem()
+	require.Equal(t, 1, iface.NumMethod(), "one method; the reasoning below covers only the one")
+	m, ok := iface.MethodByName("TaskStatusFenceRejections")
+	require.True(t, ok)
+	require.Equal(t, 1, m.Type.NumOut())
+
+	section, ok := reflect.TypeOf(taskStatusFenceSection{}).FieldByName("Counts")
+	require.True(t, ok, "taskStatusFenceSection must carry a Counts field")
+	require.Equal(t, m.Type.Out(0), section.Type,
+		"taskStatusFenceSection.Counts is %s and the source returns %s. THIS SECTION MUST NOT RESTATE "+
+			"THE PRODUCER'S FIELDS. If a restatement is genuinely necessary, an arity assertion between "+
+			"the two types must ship IN THIS COMMIT - see "+
+			"TestIngestLogKindCountsPublishesEveryWorkerSideField, which exists because a fully correct "+
+			"sixth log kind was counted on the recv path and published under no JSON key with all three "+
+			"packages green.", section.Type, m.Type.Out(0))
+}
+
+func TestServerCounters_ReportsTheTaskStatusFenceSnapshot(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		TaskStatusFence *struct {
+			Counts map[string]any `json:"counts"`
+			Levels map[string]any `json:"levels"`
+		} `json:"task_status_fence"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotNil(t, body.TaskStatusFence, "a wired section must be present")
+	require.Nil(t, body.TaskStatusFence.Levels,
+		"COUNTS ONLY. There is no current 'level' of discarded status reports.")
+
+	// Key-set equality, not per-key assertions alone: a renamed key decodes as a
+	// missing value and reads as zero.
+	assert.ElementsMatch(t,
+		[]string{"raced_total", "duplicate_total", "conflicting_total"},
+		counterMapKeys(body.TaskStatusFence.Counts))
+	assert.Equal(t, float64(3), body.TaskStatusFence.Counts["raced_total"])
+	assert.Equal(t, float64(41), body.TaskStatusFence.Counts["duplicate_total"])
+	assert.Equal(t, float64(7), body.TaskStatusFence.Counts["conflicting_total"])
+	assert.NotContains(t, counterMapKeys(body.TaskStatusFence.Counts), "rejected_total",
+		"THERE IS NO TOTAL, BY DECISION. The three keys partition the rejections, so a published total "+
+			"would sit beside its own summands where it can only agree or be a bug.")
+}
+
+// TestServerCounters_WiredButZeroTaskStatusFenceSectionIsStillPresent. A server
+// whose status fence has rejected nothing is the COMMON case and must still emit
+// its section: zeros mean "this control ran and stopped nothing", absence means
+// "not wired on this build".
+func TestServerCounters_WiredButZeroTaskStatusFenceSectionIsStillPresent(t *testing.T) {
+	s := &Server{
+		startedAt: testStartedAt(),
+		Counters:  CounterSources{TaskStatusFence: fakeTaskStatusFenceSource{}},
+	}
+	rec := httptest.NewRecorder()
+	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	require.ElementsMatch(t, []string{"started_at", "task_status_fence"}, counterKeys(top),
+		"a WIRED source whose counters are zero must still emit its section, and no OTHER section may "+
+			"appear: each source is nil-able on its own")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["task_status_fence"], &section))
+	require.ElementsMatch(t, []string{"counts"}, counterKeys(section), "counts only; no levels half")
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(section["counts"], &fields))
+	require.Len(t, fields, 3, "counts must be an object with the three keys, not an empty object")
+	for k, v := range fields {
+		assert.Equal(t, "0", string(v), "%s must serialise as an explicit zero, never be elided by omitempty", k)
+	}
 }

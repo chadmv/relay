@@ -203,6 +203,20 @@ type Handler struct {
 	// precedent and is what api.CounterSources uses. metrics.Store is the wrong
 	// HOME and must not gain a counter method.
 	taskLogFenceRejects atomic.Uint64
+
+	// statusFence counts the rejections handleTaskStatus's two epoch-fenced
+	// writes produced, split by what the row said when GetTask read it. A VALUE,
+	// not a pointer, for the same reason ingestDrops and taskLogFenceRejects are:
+	// the zero value works, so a bare &Handler{} in a test has working counters
+	// and there is no nil case anywhere. Read through TaskStatusFenceRejections;
+	// wired to GET /v1/server/counters by cmd/relay-server's buildHTTPServer
+	// under its OWN section and its OWN CounterSources field.
+	//
+	// A THIRD DISTINCT NOUN. ingestDrops counts LOG LINES THE BUDGET DROPPED;
+	// taskLogFenceRejects counts LOG CHUNKS AppendTaskLog's fence rejected; this
+	// counts STATUS REPORTS the status fence rejected. No input moves more than
+	// one of the three. Do not sum them and do not merge the sections.
+	statusFence statusFenceCounters
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -225,6 +239,17 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 // never returned to an agent: the only read path is the admin-authenticated
 // GET /v1/server/counters.
 func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
+
+// TaskStatusFenceRejections reports what handleTaskStatus's two epoch-fenced
+// writes have refused since process start, split by what the row said at T0.
+//
+// It satisfies api.TaskStatusFenceSource. NOTE THE NEIGHBOUR: TaskLogFence
+// Rejections is one letter away in the middle and returns a uint64, so a crossed
+// wiring is a compile error rather than a silently wrong section. Per PROCESS,
+// monotonic, zeroed by a restart, and never returned to an agent.
+func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
+	return h.statusFence.snapshot()
+}
 
 // NewHandler returns a Handler wired to the given dependencies.
 func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
@@ -945,10 +970,21 @@ func (h *Handler) reconcileRunningTasks(ctx context.Context, workerID pgtype.UUI
 // it cannot claim to be somebody else. It is threaded here the same way
 // handleTaskLog and applyInventoryUpdate already receive it.
 //
-// lim is this connection's log budget, allocated once in Connect. Both pre-gate
-// log lines below run AHEAD of the identity and currency gates, so the budget is
-// the only thing bounding them - see
+// lim is this connection's log budget, allocated once in Connect. FIVE log lines
+// in this function go through it and the split matters: the two above the gates
+// (bad task id, GetTask failure) are bounded by the budget ALONE, because a gate
+// cannot protect a line placed before it; the three below (retry write, status
+// write, dependency cascade) are additionally behind the identity and currency
+// gates, so reaching them costs a valid assignment. All five carry NO wire value
+// in their dedupe key - each is exactly one key for the connection's whole life,
+// re-armed by ingestLogDedupeWindow. See
 // docs/superpowers/specs/2026-08-15-tasklog-err-limiter-keying.md.
+//
+// TWO OF THIS FUNCTION'S ARMS ARE COUNTED RATHER THAN LOGGED. Both epoch-fenced
+// writes below drop pgx.ErrNoRows silently and record it in h.statusFence, which
+// GET /v1/server/counters publishes as task_status_fence. That arm and the log
+// budget are DISJOINT: no input moves both, and neither number covers any part
+// of the other.
 func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, lim *ingestLogLimiter, upd *relayv1.TaskStatusUpdate) {
 	var taskID pgtype.UUID
 	if err := taskID.Scan(upd.TaskId); err != nil {
@@ -1017,7 +1053,9 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	//
 	// This gate is NOT the correctness control any more, and the honest form of
 	// that is uncomfortable, so it is written down rather than implied. Delete
-	// it and the observable state is unchanged: a forged terminal from a
+	// it and the observable TASK STATE is unchanged - but not everything
+	// observable is task state; see FOURTH below, which is the half that is now
+	// pinned by a test. A forged terminal from a
 	// non-assignee reaches IncrementTaskRetryCount, which rejects on its own
 	// worker_id predicate, or UpdateTaskStatus, which rejects on its own. Both
 	// statements also fence on assignment_epoch and on the task not already
@@ -1034,9 +1072,10 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// one statement instead of two, not two instead of none. Real on a recv
 	// goroutine that a single sender can drive as fast as it likes, but bounded.
 	//
-	// It does NOT save a log line. Both write-error branches below are wrapped
-	// in `if !errors.Is(err, pgx.ErrNoRows)`, so a forged message rejected by
-	// either fence logs nothing at all - delete this gate and the log volume is
+	// It does NOT save a log line. Both write-error branches below put the
+	// pgx.ErrNoRows case in its own arm of an `if errors.Is(...) / else if
+	// lim.allow(...)` pair, so a forged message rejected by either fence logs
+	// nothing at all - delete this gate and the log volume is
 	// unchanged. Nor does this function have a "zero attacker-keyed log lines"
 	// property to protect: the two branches at the top of this function still
 	// run AHEAD of this gate, and a gate cannot protect a line placed before
@@ -1057,6 +1096,28 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// do not delete this as redundant with the SQL, and do not delete the SQL
 	// predicates as redundant with this.
 	//
+	// FOURTH, AND NEW SINCE task_status_fence SHIPPED: this gate is what makes
+	// the fence counters ATTRIBUTABLE. A non-assignee's forged report is dropped
+	// here, one round trip before either write, so it never reaches a counter -
+	// which is what stops a registered peer inflating conflicting_total by
+	// naming tasks it does not own. Deleting the gate would leave the observable
+	// TASK STATE unchanged (both statements reject on their own worker_id
+	// predicate) and would make the counters peer-drivable noise. The numbers
+	// are still not peer-KEYED - the cardinality rule holds either way - but a
+	// signal an unrelated agent can move is not the signal an operator is
+	// reading.
+	//
+	// THIS IS THE ONE JOB THAT IS PINNED, and it shipped unguarded: measured,
+	// deleting the gate left internal/worker, internal/api and cmd/relay-server
+	// all green while a non-assignee drove Conflicting to 1000 in 1000 messages.
+	// TestHandleTaskStatus_OnlyTheAssigneeMovesTheFenceCounters is that probe,
+	// with a same-handler positive control so a handler mutated into rejecting
+	// everything cannot satisfy it. Note what it does NOT establish: the gate
+	// proves the sender is the assignee, never that the report is HONEST, so the
+	// assignee's own forged conflicts are still free. That exposure is
+	// documented rather than closed - see TaskStatusFenceCounts and the README's
+	// task_status_fence bullets.
+	//
 	// Keep all three terms. Against a real, non-zero worker UUID the two .Valid
 	// checks are mutually redundant with the Bytes comparison, and !workerID.Valid
 	// is unreachable from Connect, which closes the stream on a Scan failure
@@ -1065,16 +1126,21 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// zero-value workerID (a caller that lost its identity) compares EQUAL to a
 	// never-claimed task's NULL worker_id - the Go form of SQL's
 	// IS NOT DISTINCT FROM - and the gate fails OPEN. Removing either one alone
-	// leaves the hole closed; removing both opens it. That is defense in depth
-	// against a future caller. Note honestly that NO test in the tree
-	// discriminates it any more:
+	// leaves the hole closed; removing both opens it - each of those three
+	// variants was run, not reasoned about. That is defense in depth against a
+	// future caller.
+	//
+	// The NULL-rejection half now has its own guard, which it did not when the
+	// counters shipped:
+	// TestHandleTaskStatus_AZeroValueWorkerCannotMoveTheCountersOnANeverClaimedTask
+	// drives a never-claimed task from a zero-value worker id and requires the
+	// counters to stay flat. It discriminates the pair, not either term alone,
+	// which is exactly the shape of the hole. What it guards is the COUNTER, not
+	// the row: the older
 	// TestHandleTaskStatus_ZeroValueWorkerIdCannotBurnARetryOnANeverClaimedTask
-	// was written as its permanent guard, but once IncrementTaskRetryCount gained
-	// its own worker_id predicate that test stays green with this whole gate
-	// deleted - measured, not assumed. Its discriminating power moved to the SQL
-	// layer, and what remains here is non-functional (one round trip), which is
-	// why it is recorded as a Known Limitation rather than pinned by a new test.
-	// Same rule the SQL states as "a plain =,
+	// was written as this gate's permanent guard and stays green with the whole
+	// gate deleted, because IncrementTaskRetryCount gained its own worker_id
+	// predicate - measured, not assumed. Same rule the SQL states as "a plain =,
 	// never IS NOT DISTINCT FROM"; see internal/store/query/tasks.sql.
 	//
 	// Silent return, exactly like the currency gate below. A log line here would
@@ -1135,13 +1201,29 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 			AssignmentEpoch: int32(upd.Epoch),
 			WorkerID:        workerID,
 		}); err != nil {
-			// pgx.ErrNoRows is the fence rejecting, not a failure: the task
-			// finished, was cancelled, or the generation ended between the
-			// GetTask above and here. Drop silently, exactly like the two gates.
-			// In the genuine case the cancel or the requeue won, which is the
-			// correct outcome, so there is nothing to diagnose. Any other error
-			// is real.
-			if !errors.Is(err, pgx.ErrNoRows) {
+			// TWO ARMS, MUTUALLY EXCLUSIVE BY CONSTRUCTION, and written as
+			// if/else so that no future edit can make both fire. They are the
+			// subjects of two separate backlog items and neither number covers
+			// any part of the other.
+			if errors.Is(err, pgx.ErrNoRows) {
+				// The fence rejecting, not a failure: the task finished, was
+				// cancelled, or the generation ended between the GetTask above
+				// and here. COUNTED, NEVER LOGGED - a line here would be
+				// caller-driven volume on the recv goroutine and would fire on
+				// the legitimate duplicate-terminal case. The reason is
+				// classified from the row this handler already read; see
+				// classifyStatusFenceRejection for what that can and cannot
+				// establish.
+				h.statusFence.record(classifyStatusFenceRejection(task.Status, statusStr))
+			} else if lim.allow(logKey{kind: kindStatusRetryWrite}) {
+				// Real infrastructure - a serialization failure, a statement
+				// timeout, a connection reset - and now under the connection's
+				// budget. It runs on the recv goroutine at whatever rate the
+				// agent chooses to send, and the read above (GetTask) can
+				// succeed while this write fails, so nothing else bounds it.
+				// NO WIRE VALUE IN THE KEY: such an episode is not per-task, and
+				// keying on the task id would multiply one infra event by the
+				// task count - the same argument the GetTask site above makes.
 				log.Printf("worker: handleTaskStatus IncrementTaskRetryCount %s: %v", uuidStr(taskID), err)
 			}
 		} else {
@@ -1180,20 +1262,42 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 		AssignmentEpoch: int32(upd.Epoch),
 	})
 	if err != nil {
-		// pgx.ErrNoRows is the fence rejecting, not a failure: the row is
-		// already terminal (a duplicate terminal message), or the generation
-		// ended between the GetTask above and here. Drop silently, exactly like
-		// the two gates - a log line here would be caller-controlled volume on
-		// the recv goroutine with no sink to send it to, and detection belongs
-		// with the audit-log work. Any other error is real.
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The fence rejecting, not a failure: the row is already terminal (a
+			// duplicate terminal message, or a task the coordinator's stale-task
+			// watchdog already ended), or the generation ended between the
+			// GetTask above and here. COUNTED, NEVER LOGGED, for the reason at
+			// the retry arm above.
+			//
+			// NOTE WHICH PREDICATE ACTUALLY BITES HERE, because the obvious
+			// reading is wrong: the watchdog does NOT bump assignment_epoch -
+			// UpdateTaskStatus writes only status, started_at and finished_at -
+			// so a swept task's own agent still passes BOTH Go gates and is
+			// refused by the terminality predicate, at the same epoch. That is
+			// why the reasons split on the ROW'S STATUS rather than on the
+			// statement.
+			h.statusFence.record(classifyStatusFenceRejection(task.Status, statusStr))
+		} else if lim.allow(logKey{kind: kindStatusUpdateWrite}) {
 			log.Printf("worker: handleTaskStatus UpdateTaskStatus %s -> %s: %v", uuidStr(taskID), statusStr, err)
 		}
 		return
 	}
 
 	if terminal {
-		if err := h.q.FailDependentTasks(ctx, taskID); err != nil {
+		// UNDER THE CONNECTION'S BUDGET, and NOT gated on pgx.ErrNoRows: this is
+		// an :exec, so ErrNoRows is not a shape it can return, and adding an
+		// errors.Is here would be cargo-culted from the two arms above. It is
+		// also NOT a fence-rejection site in task_status_fence's sense -
+		// FailDependentTasks satisfies the epoch fence with a terminal-only
+		// `WHERE status = 'pending'` predicate and yields no rowcount to inspect
+		// (see the partition comment in internal/scheduler/dispatch.go).
+		//
+		// Reached only AFTER a successful UpdateTaskStatus, which is exactly the
+		// condition the sibling item's Repro names: the read succeeds and the
+		// WRITE fails, so the budgeted GetTask line above never spends a token
+		// and nothing else bounds this one.
+		if err := h.q.FailDependentTasks(ctx, taskID); err != nil &&
+			lim.allow(logKey{kind: kindStatusFailDependents}) {
 			log.Printf("worker: handleTaskStatus FailDependentTasks %s: %v", uuidStr(taskID), err)
 		}
 	}

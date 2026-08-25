@@ -38,6 +38,9 @@ func TestIngestLogKindsAreADenseRunFromOne(t *testing.T) {
 		kindBadTaskIDStatus,
 		kindStatusGetTask,
 		kindInventory,
+		kindStatusRetryWrite,
+		kindStatusUpdateWrite,
+		kindStatusFailDependents,
 	}
 	for i, k := range run {
 		require.Equal(t, logKind(i+1), k,
