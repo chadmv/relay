@@ -35,7 +35,32 @@ shape drift, not flag logic.
 - A deliberately introduced response-shape change in `internal/api` reddens the CLI lane (proven
   once, as the discriminating mutation).
 
+## Confirmed live, 2026-08-25
+This is no longer hypothetical. `relay logs` prints nothing for every job, on every task, and has
+done since `a90c727` (2026-05-08) moved `GET /v1/tasks/{id}/logs` to a pagination envelope while the
+CLI kept decoding a bare array. The whole suite was green throughout, for precisely the reason this
+item states: the fixture at `internal/cli/logs_test.go:47` hand-writes the shape the server stopped
+sending, so `TestLogs*` asserts the CLI agrees with the fixture rather than with the handler.
+
+Three and a half months of silent breakage on a user-facing subcommand. Two points the original
+filing did not anticipate:
+
+- **The same fixture pattern hides the same drift in the Python SDK** (`task_logs()`, with its own
+  stale bare-array fixture at `python/tests/unit/test_client.py:184`). The gap is not CLI-specific -
+  it is "every non-web client hand-writes its own idea of the contract". A fix scoped to
+  `internal/cli` leaves the second client uncovered.
+- **A previous fix aimed at this defect class already missed an endpoint.**
+  [[bug-2026-05-26-python-sdk-list-pagination-envelope]] was closed `fixed` on 2026-06-03 with the
+  acceptance criterion "All paginated REST endpoints have a corresponding SDK method", three and a
+  half weeks after the logs endpoint became paginated. Per-method repair without a lane does not
+  converge.
+
+`priority: low` was set before any of this was known. The measured cost is now one wholly broken
+subcommand plus one broken SDK method; re-prioritise accordingly.
+
 ## Related
 - `internal/cli/admin_test.go:16`, `internal/cli/admin_users_test.go`, `internal/cli/admin_output_test.go`
+- [[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]] and
+  [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] - the two confirmed instances
 - [[idea-2026-06-03-web-e2e-harness]] - the same verification gap for the SPA client
 - [[bug-2026-08-15-cli-prints-unvalidated-worker-hostname-unescaped]] - open CLI-output item a real-server lane would exercise for real
