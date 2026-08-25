@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
 	"testing"
 )
 
@@ -14,20 +13,37 @@ import (
 // untagged so it runs in the lane CI actually executes: .github/workflows/go-ci.yml
 // runs `go test -race ./...` with no -tags integration.
 //
-// WHY A GUARD AND NOT A BEHAVIOURAL TEST. Every test in this package that drives
-// a SUCCESSFUL registration is //go:build integration, and the default-lane
-// fixture structurally cannot drive one: applyInventory opens a transaction on
-// the concrete *pgxpool.Pool unconditionally, so a pool-less stub panics one
-// statement past the reconcile. The flag's two failure modes therefore have no
-// default-lane behavioural witness at all, and both are fleet-scale:
+// WHY A GUARD AS WELL AS A BEHAVIOURAL TEST. There is now a behavioural witness:
+// TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration
+// drives a SUCCESSFUL registration in this lane and asserts the generation is
+// released exactly once across the connection's life, and
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration
+// covers the send arm. Both were impossible until Handler.pool became a
+// txBeginner. Deleting the flag, or flipping it too early, is caught by those
+// two and this test's clauses for either were removed.
 //
-//   - Never set, and every SUCCESSFUL registration releases the generation it
-//     just took. The worker flips 'offline' the instant it comes online,
-//     Metrics.Clear wipes the entry Activate just created, and a grace timer is
-//     armed against a live agent that requeues all of its running tasks a grace
-//     window later.
-//   - Set too early, and the RegisterResponse-send arm of the strand reopens -
-//     which only the integration lane covers.
+// WHAT NO RUNTIME TEST CAN SEE IS SOURCE POSITION AND SHAPE, and that is what
+// survives here. A flip wrapped in `if h.Metrics != nil { ... }` sits at a
+// perfectly legal position and is INVISIBLE TO A RUNTIME TEST - which is the
+// claim worth making, and is not the same as "broken in production". It is not
+// broken in production: cmd/relay-server/main.go:143 sets Metrics
+// unconditionally right after construction, so the wrapped flip fires there
+// too.
+//
+// WHAT HIDES IT IS A PATH, NOT AN UNVARIED FIELD - and the weaker claim was here
+// until it was checked. Metrics IS varied, in this very lane: newSuccessFixture
+// sets it (handler_register_success_test.go, deliberately, because it asserts
+// Activate), newStrandHandler leaves it nil, and handler_telemetry_test.go
+// exercises both states head-on. The true statement is narrower and checkable:
+// detecting the wrap needs a fixture that REACHES THE FLIP with Metrics nil, and
+// no fixture does both. The one that drives a successful registration must set
+// Metrics; the one that leaves it nil drives only registrations that fail above
+// the flip; and the telemetry tests never enter finishRegister at all. So the
+// day Metrics becomes optional this is a live defect, and nothing runtime would
+// have noticed on the way there. Measured: it passes the behavioural test and
+// fails this one. So does an error return added below the flip, which is a claim
+// about statements that do not exist yet and which no runtime test can ever
+// assert.
 //
 // WHAT IS PINNED IS A POINT; WHAT THE CODE NEEDS IS A RANGE. The semantic
 // requirement is only that the flag be flipped after the send has succeeded and
@@ -46,11 +62,10 @@ import (
 //
 // THE FLAG IS NOT NAMED BY THIS TEST. It is whatever identifier the deferred
 // release closure guards on, so renaming it moves the guard with the code
-// instead of defeating it, and the stream parameter and the success return are
-// derived the same way - by type, and by the final result being the predeclared
-// nil. The remaining anchors ARE source text: the file name, "finishRegister",
-// the "AgentService_ConnectServer" type suffix, "releaseWorkerGeneration", and
-// at the registry anchor the receiver "h" and the field "registry". Renaming any
+// instead of defeating it, and the success return is derived the same way - by
+// its final result being the predeclared nil. The remaining anchors ARE source
+// text: the file name, "finishRegister", "releaseWorkerGeneration", and at the
+// registry anchor the receiver "h" and the field "registry". Renaming any
 // of those makes this test fail rather than pass vacuously - it is brittleness,
 // not a hole - but the message it fails with will describe a missing anchor
 // rather than the rename that moved it.
@@ -65,8 +80,14 @@ import (
 // guard construct and nothing more. handoffFlagIdent carries the argument for
 // that, and it is the one place here where this test does dictate style on
 // purpose: any additional statement in that closure can skip the release on a
-// condition no structural test can evaluate, and the default lane cannot drive a
-// successful registration to notice at runtime.
+// condition no structural test can evaluate, and which no fixture that reaches
+// the release ON A FAILED REGISTRATION varies. That path scope is the whole of
+// the residual claim: the closure only releases when the registration failed, so
+// a fixture that varies the field while driving a SUCCESSFUL registration
+// watches the closure return without releasing and notices nothing. The worked
+// example below - `if h.AllowAutoEnroll { return }` - is exactly that shape.
+// (The default lane CAN now drive a successful registration, see the two tests
+// named above; what it cannot do is drive a FAILED one with these fields varied.)
 func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", nil, 0)
@@ -81,18 +102,10 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	}
 
 	flag := handoffFlagIdent(t, fn)
-	streamParam := paramNamedByType(fn, "AgentService_ConnectServer")
-	if streamParam == "" {
-		t.Fatal("finishRegister no longer takes the gRPC stream, so the send this guard orders " +
-			"against cannot be located")
-	}
-
-	// The lower bounds of the window: the RegisterResponse send, and the moment
-	// the sender becomes reachable by other goroutines.
-	sendPos := onlyCallOnReceiver(t, fn, "the gRPC stream", func(sel *ast.SelectorExpr) bool {
-		id, ok := sel.X.(*ast.Ident)
-		return ok && id.Name == streamParam
-	})
+	// The lower bound of the window: the moment the sender becomes reachable by
+	// other goroutines. The RegisterResponse send used to be a second anchor here;
+	// ordering against it is now covered behaviourally by
+	// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration.
 	registerPos := onlyCallOnReceiver(t, fn, "the worker registry", func(sel *ast.SelectorExpr) bool {
 		inner, ok := sel.X.(*ast.SelectorExpr)
 		if !ok {
@@ -127,40 +140,35 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	// actually has to hold is that the flag is declared exactly once and starts
 	// out false; how it is spelled is not this test's business.
 	//
-	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET, AND THIS COMMENT USED TO CLAIM
-	// THEY WERE PLUS EXACTLY ONE MORE. It said a local bool has "exactly one other
-	// way to be written: through a pointer to it", and counted address-of as the
-	// chokepoint. That is a uniqueness claim - a claim about the complement - and
-	// it was false. `(handedOff) = false` after the flip needs no pointer, no
-	// closure and no indirection: it simply wraps the name in parens, and an
-	// *ast.Ident type assertion does not see through an *ast.ParenExpr. It was
-	// measured releasing the generation on every SUCCESSFUL registration with
-	// `go vet` clean and the WHOLE REPO green. `gofmt` does not normalise it away,
-	// and this tree has no fmt gate (CRLF makes `gofmt -l` flag every file at
-	// baseline).
+	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET, and this comment used to claim
+	// they were plus exactly one more. It said a local bool has "exactly one other
+	// way to be written: through a pointer to it", counted address-of, and was
+	// wrong: `(handedOff) = false` after the flip needs no pointer and no
+	// indirection, it simply wraps the name in parens, which an *ast.Ident type
+	// assertion does not see through. It was measured releasing the generation on
+	// every SUCCESSFUL registration with `go vet` clean and the whole repo green.
+	// `gofmt` does not normalise it away, and this tree has no fmt gate (CRLF makes
+	// `gofmt -l` flag every file at baseline).
 	//
 	// So every expression site below is normalised with ast.Unparen first, and the
 	// honest statement of what is checked is: writes are counted BY NAME after
-	// dropping parens, plus any address-of the flag. That covers a parenthesised
-	// write, an alias through a pointer (reflect and unsafe both need the address
-	// too, so they route through the same clause), and a closure writing the flag
-	// by name - `defer func(){ handedOff = false }()` is already otherWrites,
+	// dropping parens. That covers a parenthesised write and a closure writing the
+	// flag by name - `defer func(){ handedOff = false }()` is already otherWrites,
 	// because ast.Inspect descends into function literals. Shadowing is caught by
-	// the initFalse count. Checking *ast.StarExpr on the left would not have helped
-	// with any of it: the identifier there is the pointer's name, not the flag's.
+	// the initFalse count.
+	//
+	// AN ALIAS THROUGH A POINTER IS NO LONGER COUNTED HERE, deliberately.
+	// `p := &handedOff` plus `*p = false` below the flip is now caught by
+	// TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration,
+	// in four places at once - a grace fire, a non-empty statement log, a second
+	// worker event and a teardown release count of two - which is what the deleted
+	// clause's failure message described in words. Mutation M14 confirmed it after
+	// the deletion, not before.
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
-	var aliases int
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
-		case *ast.UnaryExpr:
-			if v.Op != token.AND {
-				return true
-			}
-			if id, ok := ast.Unparen(v.X).(*ast.Ident); ok && id.Name == flag {
-				aliases++
-			}
 		case *ast.AssignStmt:
 			for i, lhs := range v.Lhs {
 				id, ok := ast.Unparen(lhs).(*ast.Ident)
@@ -207,16 +215,6 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 			"release is a two-valued decision and a computed value makes the outcome depend on state "+
 			"this guard cannot order", flag, otherWrites)
 	}
-	if aliases != 0 {
-		t.Fatalf("finishRegister takes the address of %s %d times. Every other check here counts "+
-			"writes by name after dropping parens, and a pointer is ONE way to write a local bool "+
-			"without naming it: "+
-			"`p := &%s` plus `*p = false` below the flip releases the generation on every SUCCESSFUL "+
-			"registration - the live agent published 'offline', its metrics entry wiped, a grace timer "+
-			"requeueing its running tasks - while every check above still sees one init, one flip and "+
-			"no other write. The flag has no reason to be aliased; keep it written by name so the "+
-			"counters above can see the whole write set.", flag, aliases, flag)
-	}
 	if len(setTrue) != 1 {
 		t.Fatalf("%s is set to true %d times, not once. Every one of the %d exits from this function "+
 			"runs the deferred release, and it releases the generation unless this flag says a live "+
@@ -236,21 +234,20 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 		t.Fatalf("%s is set to true at %s, but that assignment is nested inside another statement "+
 			"rather than being a statement of finishRegister's own body. Every position check below "+
 			"is about WHERE the flip is; this one is about whether it happens at all. A conditional "+
-			"wrap is the live hazard - `if h.Metrics != nil { %s = true }` compiles, and h.Metrics is "+
-			"nil for every handler NewHandler and NewHandlerWithGrace build, so a SUCCESSFUL "+
-			"registration would take the deferred release: its own worker marked offline, its metrics "+
-			"entry wiped, and a grace timer armed that requeues a healthy agent's running tasks.",
+			"wrap is the live hazard - `if h.Metrics != nil { %s = true }` compiles, and NO FIXTURE "+
+			"REACHES THIS FLIP WITH Metrics NIL. Metrics is varied in this lane; what is missing is the "+
+			"COMBINATION. It is not broken today: NewHandler and NewHandlerWithGrace leave Metrics nil, "+
+			"but cmd/relay-server/main.go:143 sets it unconditionally, so a real server flips the flag, "+
+			"and the fixture that drives a successful registration must set Metrics too, to assert "+
+			"Activate. The fixture that DOES leave it nil drives only registrations that fail above "+
+			"this line, where the flip is never reached and the release fires either way. The hazard is "+
+			"that the day Metrics becomes optional, a SUCCESSFUL registration takes the deferred "+
+			"release - its own worker marked offline, its metrics entry wiped, a grace timer armed that "+
+			"requeues a healthy agent's running tasks - and no runtime test would have noticed.",
 			flag, fset.Position(setTrue[0].Pos()), flag)
 	}
 	handoff := setTrue[0].Pos()
 
-	if handoff < sendPos {
-		t.Fatalf("%s is set before the RegisterResponse is sent (%s vs %s). A send failure returns an "+
-			"error from a generation that RegisterWorkerConnection has already acquired - the worker "+
-			"row is 'online' at a live epoch, the previous disconnect's requeue timer was discarded, "+
-			"and the deferred release is the only thing that ends it.",
-			flag, fset.Position(handoff), fset.Position(sendPos))
-	}
 	// The flip must be the statement IMMEDIATELY AFTER registry.Register, not
 	// merely somewhere below it.
 	//
@@ -429,18 +426,38 @@ const releaseMethod = "releaseWorkerGeneration"
 //   - THE DEFER IS A DIRECT STATEMENT of finishRegister's body, so it is armed on
 //     every path. `if h.grace != nil { defer func(){...}() }` leaves the closure
 //     verbatim and arms it for nobody.
-//   - THE CLOSURE CALLS THE RELEASE EXACTLY ONCE, which is the "mutually
-//     exclusive" half. An `else` arm that also releases fires on the SUCCESS
-//     path, where the fence matches: a live agent is published 'offline', the
-//     metrics entry Activate just created is wiped, and a grace timer requeues
-//     that healthy agent's running tasks a window later.
+//   - THE CLOSURE RELEASES EXACTLY ONCE, which is the "mutually exclusive" half.
+//     An `else` arm that also releases fires on the SUCCESS path, where the
+//     fence matches: a live agent is published 'offline', the metrics entry
+//     Activate just created is wiped, and a grace timer requeues that healthy
+//     agent's running tasks a window later. There is no longer a dedicated
+//     COUNT clause for this - the case-1/case-2 shape checks below admit only a
+//     body with the release at one fixed place, so a second release cannot hide
+//     inside an accepted body, and mutation confirms it.
 //   - THE CLOSURE BODY IS EXACTLY THE GUARD CONSTRUCT, with the release at a
 //     fixed place inside it. Anything looser admits a skip on a condition this
-//     test cannot evaluate: `if h.pool != nil { return }` ahead of the release is
-//     false in every default-lane fixture (newStrandHandler leaves pool nil
-//     deliberately, and applyInventory's unconditional BeginTxFunc is why) and
-//     true under main.go, so every failed registration would release nothing in
-//     production while this whole package stayed green.
+//     test cannot evaluate: `if h.AllowAutoEnroll { return }` ahead of the
+//     release is false in every DEFAULT-LANE fixture and true wherever an
+//     operator set RELAY_ALLOW_AUTO_ENROLL, so every failed registration on such
+//     a server would release nothing while the whole package stayed green.
+//     Seven integration-lane fixtures DO set it true - handler_auth_test.go:367,
+//     :403, :467, :519, handler_tasklog_integration_test.go:543 and
+//     handler_taskstatus_integration_test.go:445, :788 - and the mutation is
+//     unreddened there too, which is the stronger statement and the one that
+//     earns this clause: six drive ONLY successful registrations, where the
+//     deferred release does not run at all. The seventh
+//     (AutoEnrollRefusesRevokedWorker) drives one of those AND THEN a second
+//     stream, refused inside autoEnrollAndRegister before finishRegister is
+//     entered, so on that arm the closure never exists. Both of its arms are
+//     non-releasing, which is what matters, but it is not a seventh CATEGORY -
+//     an earlier draft of this comment claimed a disjoint partition that the
+//     test does not have. This guard is the mutation's only witness in EITHER
+//     lane.
+//     `if h.pool != nil { return }` used to be the example here, on the grounds
+//     that newStrandHandler left pool nil; that is no longer true - both
+//     default-lane fixtures now carry a fake pool, and mutation M13 confirmed
+//     the edit reddens them as well as this clause. The general shape is what
+//     this clause is for, not that one instance.
 //
 // BOTH SPELLINGS OF THE GUARD ARE ACCEPTED. `if !flag { release }` and
 // `if flag { return }; release` are the same decision written two ordinary ways.
@@ -487,15 +504,6 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 			"worker row 'online' at a live epoch and the previous disconnect's requeue timer already "+
 			"cancelled.", releaseMethod)
 	}
-	if n := countCallsNamed(lit.Body, releaseMethod); n != 1 {
-		t.Fatalf("the deferred closure calls %s %d times, not once. The two releases - this one and "+
-			"Connect's `defer h.teardownConnection` - are only mutually exclusive if this one fires on "+
-			"exactly the not-handed-off branch. A second call reachable on the handed-off branch runs "+
-			"against a SUCCESSFUL registration, where the epoch fence matches: the live agent is "+
-			"published 'offline', its metrics entry is wiped, and a grace timer requeues its running "+
-			"tasks a grace window later.", releaseMethod, n)
-	}
-
 	// Rejections below share one message. The two accepted forms are spelled out
 	// in full because the useful thing to know at a failure is what the closure
 	// must look like, not which clause of this function noticed.
@@ -505,8 +513,11 @@ func handoffFlagIdent(t *testing.T, fn *ast.FuncDecl) string {
 			"    defer func() { if !flag { h.%s(...) } }()\n"+
 			"    defer func() { if flag { return }; h.%s(...) }()\n"+
 			"The body is pinned that tightly because any additional statement can skip the release on "+
-			"a condition this test cannot evaluate, and the default lane cannot drive a successful "+
-			"registration to notice. Work that genuinely belongs on this path belongs inside %s, "+
+			"a condition this test cannot evaluate, and no fixture that reaches this closure ON A "+
+			"FAILED registration varies such a field. The ones that do vary it - AllowAutoEnroll, in "+
+			"the integration lane - drive successful registrations, where this closure returns without "+
+			"releasing and there is nothing to notice. That is why this clause has no behavioural "+
+			"successor. Work that genuinely belongs on this path belongs inside %s, "+
 			"where the strand tests can see it.",
 			reason, releaseMethod, releaseMethod, releaseMethod)
 	}
@@ -602,8 +613,9 @@ func countCallsNamed(n ast.Node, name string) int {
 
 // isCallTo reports whether stmt IS an expression statement calling a method
 // named name, as opposed to a statement that merely contains such a call. That
-// distinction is the whole point: `if h.pool != nil { return }` followed by the
-// release contains the call, and containment is what a recursive check accepts.
+// distinction is the whole point: `if h.AllowAutoEnroll { return }` followed by
+// the release contains the call, and containment is what a recursive check
+// accepts.
 func isCallTo(stmt ast.Stmt, name string) bool {
 	expr, ok := stmt.(*ast.ExprStmt)
 	if !ok {
@@ -640,21 +652,6 @@ func onlyCallOnReceiver(t *testing.T, fn *ast.FuncDecl, describe string, match f
 			len(hits), describe)
 	}
 	return hits[0]
-}
-
-// paramNamedByType returns the name of fn's parameter whose type selector ends
-// in suffix, or "" if there is no such parameter.
-func paramNamedByType(fn *ast.FuncDecl, suffix string) string {
-	for _, field := range fn.Type.Params.List {
-		sel, ok := field.Type.(*ast.SelectorExpr)
-		if !ok || !strings.HasSuffix(sel.Sel.Name, suffix) {
-			continue
-		}
-		if len(field.Names) == 1 {
-			return field.Names[0].Name
-		}
-	}
-	return ""
 }
 
 // findFuncDecl returns the top-level function declaration named name.

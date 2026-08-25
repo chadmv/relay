@@ -27,14 +27,20 @@ import (
 // no tag, no container). It is the same seam tasklog_fence_counter_test.go uses,
 // one layer up.
 //
-// IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that is a fact
-// about line numbers rather than a design choice. finishRegister returns on
-// reconcileRunningTasks' error four lines ABOVE the applyInventory call that
-// opens a transaction on the concrete *pgxpool.Pool - unconditionally, even for
-// an empty inventory. A nil pool is therefore a complete fixture for THIS arm
-// and would panic one statement later. That is also why the RegisterResponse-send
-// arm cannot live in this lane; its proof is
-// TestRegisterWorker_SendFailureReleasesTheGeneration, //go:build integration.
+// IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that stays worth
+// saying: finishRegister returns on reconcileRunningTasks' error four lines
+// ABOVE the applyInventory call that opens a transaction, so the four tests below
+// need no inventory fixture at all and the fake pool newStrandHandler carries is
+// there for mutation coverage rather than for them.
+//
+// THE SEND ARM IS NO LONGER EXCLUDED FROM THIS LANE. It used to be - h.pool was a
+// concrete *pgxpool.Pool and a pool-less fixture could not reach stream.Send at
+// all - and that sentence was here. Handler.pool is now a txBeginner, and
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration in
+// handler_register_success_test.go drives that arm right here in the default
+// lane. TestRegisterWorker_SendFailureReleasesTheGeneration stays in the
+// integration lane for what it carries that this cannot: a real worker row, a
+// real task, a real requeue.
 type strandDB struct {
 	mu       sync.Mutex
 	queryErr error // returned by Query, i.e. by GetActiveTasksForWorker
@@ -59,15 +65,46 @@ func (d *strandDB) Exec(_ context.Context, sql string, args ...any) (pgconn.Comm
 	return pgconn.NewCommandTag(d.execTag), nil
 }
 
-// Query records what it was asked as well as refusing it. RequeueWorkerTasksIfEpoch
+// Query records what it was asked as well as answering it. RequeueWorkerTasksIfEpoch
 // is a :many, so the else arm of releaseWorkerGeneration lands here rather than
 // in Exec, and the statement it issues is the only evidence that arm ran.
+//
+// A NIL pgx.Rows WITH A NIL ERROR IS NOT AN EMPTY RESULT, and it used to be what
+// this returned. sqlc's :many body does `rows, err := q.db.Query(...)` and then
+// `defer rows.Close()` on the very next line (internal/store/tasks.sql.go), so
+// (nil, nil) panics on a nil interface receiver inside generated code - one frame
+// short of applyInventory, and easy to misread as the pool panic it sits next to.
+// A fixture that means "this worker has no active tasks" has to say so with a
+// Rows that exists.
 func (d *strandDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.queries = append(d.queries, strandExec{sql: sql, args: args})
-	return nil, d.queryErr
+	if d.queryErr != nil {
+		return nil, d.queryErr
+	}
+	return emptyRows{}, nil
 }
+
+// emptyRows is a pgx.Rows carrying no rows at all: Next says there are none,
+// Close is a no-op and Err reports success. That is the whole of what a
+// generated :many body calls when a result set is empty.
+//
+// THE EMBEDDED NIL INTERFACE SUPPLIES THE OTHER SIX METHODS AS A PANIC, which is
+// the right default if a query on this path ever grows a Scan or a Values: a
+// panic beats a plausible zero value that silently makes a test prove less.
+//
+// THE POLICY IS fenceStore's; THE DIAGNOSTIC IS NOT. fenceStore
+// (internal/scheduler/dispatch_fence_test.go) panics explicitly and says which
+// contract was broken. A call on a nil embedded interface panics with a bare
+// `invalid memory address or nil pointer dereference` and names no method - only
+// the stack trace does. Override explicitly rather than relying on this if a
+// method here ever starts being called.
+type emptyRows struct{ pgx.Rows }
+
+func (emptyRows) Close()     {}
+func (emptyRows) Next() bool { return false }
+func (emptyRows) Err() error { return nil }
 
 func (d *strandDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
 	return strandWorkerRow{}
@@ -191,9 +228,19 @@ type graceFire struct {
 // question is whether a timer was armed and at WHICH epoch. The 20ms window
 // makes an armed timer observable in milliseconds and a missing one observable
 // as a timeout.
+//
+// THE POOL IS NON-NIL EVEN THOUGH NO TEST HERE REACHES IT, and that is the
+// point. All four tests below fail inside reconcileRunningTasks, four lines
+// above applyInventory, so the pool is never touched and this changes none of
+// their behaviour. What it changes is what a MUTATION can hide behind: a
+// construct that is nil in every default-lane fixture and real under main.go is
+// exactly how this package's handoff guard was evaded twice, and
+// `if h.pool != nil { return }` ahead of the deferred release was the second of
+// those two. With a pool here, that edit makes these tests red instead of green.
 func newStrandHandler(t *testing.T, queryErr error, execTag string) (*Handler, *strandDB, <-chan graceFire) {
 	t.Helper()
 	db := &strandDB{queryErr: queryErr, execTag: execTag}
+	pool := &fakePool{tx: &fakeTx{}}
 	fired := make(chan graceFire, 4)
 	grace := NewGraceRegistry(20*time.Millisecond, func(workerID string, epoch int32) {
 		fired <- graceFire{workerID: workerID, epoch: epoch}
@@ -201,6 +248,7 @@ func newStrandHandler(t *testing.T, queryErr error, execTag string) (*Handler, *
 	t.Cleanup(grace.Stop)
 	h := &Handler{
 		q:                   store.New(db),
+		pool:                pool,
 		registry:            NewRegistry(),
 		broker:              events.NewBroker(),
 		grace:               grace,
@@ -527,11 +575,13 @@ func TestConnect_AFailedRegistrationReplacesThePreviousDisconnectsTimer(t *testi
 // releaseWorkerGeneration directly: the arm is one level below the registration
 // path, and driving it through Connect would only re-test the level above.
 func TestReleaseWorkerGeneration_WithoutAGraceRegistryRequeuesImmediately(t *testing.T) {
-	// queryErr is set because the requeue is a :many and this stub returns no
-	// pgx.Rows. The handler discards that statement's result either way
-	// (`_, _ = h.q.RequeueWorkerTasksIfEpoch(...)`), so refusing it changes
-	// nothing about what this test observes: that the statement was issued at all,
-	// and with which fence.
+	// THE queryErr IS NO LONGER LOAD-BEARING and is kept only to say so. It used to
+	// be required because strandDB.Query returned a nil pgx.Rows, which the :many
+	// body would have dereferenced; strandDB now answers with emptyRows instead, and
+	// removing this line was measured leaving the test green. What the test observes
+	// is unchanged either way - the handler discards the result
+	// (`_, _ = h.q.RequeueWorkerTasksIfEpoch(...)`), so only the statement and its
+	// fence are under assertion - and an error here keeps that indifference explicit.
 	db := &strandDB{execTag: "UPDATE 1", queryErr: errors.New("no rows fixture")}
 	h := &Handler{
 		q:               store.New(db),

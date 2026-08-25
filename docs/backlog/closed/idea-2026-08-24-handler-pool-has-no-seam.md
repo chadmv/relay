@@ -1,8 +1,10 @@
 ---
 title: Handler.pool has no seam, so the default lane structurally cannot drive a successful worker registration
 type: idea
-status: open
+status: closed
 created: 2026-08-24
+closed: 2026-08-25
+resolution: fixed
 priority: medium
 source: 2026-08-24 finishregister-strand slice - the mechanical cause of that slice's three-round guard problem
 ---
@@ -59,3 +61,37 @@ an open defect of its own. The point is a test seam, not a behaviour change.
 - `internal/worker/handler_handoff_guard_test.go` - the guard bought instead of this seam
 - [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - the lane problem this is the mechanical cause of
 - [[bug-2026-08-23-failed-finishregister-strands-worker-online]] - the slice that paid the cost
+
+## Resolution
+
+Fixed. `Handler.pool` is now a one-method `txBeginner` interface, and the default lane drives a
+successful worker registration without Postgres for the first time.
+
+All three Acceptance criteria met:
+
+- `TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration` drives `finishRegister`
+  to a successful return with no Postgres, through `Connect` rather than directly - so it observes
+  BOTH releases and asserts the generation is released exactly once across the connection's life.
+- The success path's observable effects are asserted in the lane CI runs: sender registered, worker
+  online, metrics activated, dispatch triggered, RegisterResponse actually sent, epoch carried.
+- The structural guard is reduced, not retired. Five clauses (G3, G6, G7, G12, G15) were deleted only
+  after their behavioural replacements were green, each deletion re-proved by mutation in three
+  independent isolated trees. The clauses that survive are the ones no runtime test can see: source
+  position, the deferred closure's shape, and the flag's write set.
+
+The mutant that motivated the item - deleting `handedOff = true`, which previously left all 21
+packages green - now reddens the default lane four ways.
+
+Two things the item did not anticipate, both recorded in the spec:
+
+- The pool seam alone does not reach a successful `finishRegister`. `GetActiveTasksForWorker` is a
+  sqlc `:many` and the existing fake returned a nil `pgx.Rows` with a nil error, panicking one frame
+  short of the pool. An `emptyRows` fake was required too.
+- One interface covers all three `h.pool` sites, not just `applyInventory`'s - so
+  `enrollAndRegister` and `autoEnrollAndRegister` are now fakeable as well. That is the obvious next
+  consumer and is filed separately.
+
+`applyInventory`'s behaviour is unchanged, and the forbidden "return early on empty inventory" fix is
+now blocked by a test rather than by a comment.
+
+See `docs/retros/2026-08-25-handler-pool-seam.md`.
