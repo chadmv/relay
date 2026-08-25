@@ -55,6 +55,10 @@ site would leave three.
 existing case has a `\r` in the final position, which is the only position that triggers the defect.
 
 ## Proposal
+Two parts. **Part 1 is the fix and ships alone; Part 2 does not block it and Part 2 does not
+replace it.** See "Where normalisation belongs" below for why both are needed.
+
+### Part 1 - the web fix (required, sufficient on its own)
 Strip at most ONE trailing `\r` inside `collapseCR`, then do the existing progress-bar collapse. Do
 not remove the collapse - progress-bar handling is wanted and correct for interior CR runs.
 
@@ -66,7 +70,69 @@ The ordering is the whole correctness argument, and both alternatives are wrong:
 - Strip ALL trailing CRs: `"a\rb\r"` is unaffected here, but the single-strip form is the one that
   matches CRLF's definition; prefer the narrower rule.
 
+### Part 2 - CRLF to LF at the agent (separately shippable, covers the other three clients)
+Normalise CRLF to LF in the agent's `chunkWriter` (`internal/agent/runner.go:285`), holding back a
+trailing `\r` and prepending it to the next `Write`, flushed on close.
+
+**Do not skip the hold-back.** An entry is not a line: `chunkWriter` copies whatever `os/exec` hands
+it, so a CRLF can straddle a chunk boundary - chunk N ends `"\r"`, chunk N+1 starts `"\n"`. A
+stateless `ReplaceAll` cannot see that pair. The hold-back is O(1) state and makes every emitted
+chunk straddle-free, after which a plain replace is exact. Watch the existing `len(p) == 0` guard:
+a `Write` whose entire payload is `"\r"` must still return `len(p)` so `io.Copy` does not stall.
+
+Two costs, both judged acceptable, neither a side effect to discover later:
+
+- It does not fix rows already stored, nor output from an agent that has not been upgraded. **That
+  is exactly why Part 1 is not optional** - the web client must keep handling CRLF on the wire
+  forever, because it will keep receiving it from history and from un-upgraded agents.
+- Stored bytes stop being a byte-exact copy of the subprocess output, which forecloses a
+  byte-exact log export ([[idea-2026-08-09-task-log-tail-and-paging-improvements]] proposes one).
+  CRLF-vs-LF is not information anyone will want back, so take it - but take it deliberately.
+
+## Where normalisation belongs
+Recorded 2026-08-25, after `relay logs` was found to need the same treatment
+([[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]]) and the obvious reaction was to move
+all of this server-side and do it once. Read this before moving any of it.
+
+**Only ONE of the three transforms in `logBuffer.ts` is shared work.**
+
+| transform | who wants it | shared? |
+|---|---|---|
+| CRLF to LF | web, CLI, Python SDK, any export | yes - Part 2 |
+| interior-CR collapse (progress bars) | web only | no |
+| ANSI strip | web only, and the CLI wants the OPPOSITE | no |
+
+**Do not unify the last two, and in particular never move ANSI stripping server-side.** The web
+strips ANSI because a DOM has no cursor and no colour state, so the raw bytes would render as
+visible corruption. A terminal renders them correctly, which is the entire point of a program
+emitting them. Stripping at or before storage permanently destroys colour output for `relay logs`
+and for any future export. The interior-CR collapse is lossy in the same way - a CLI user piping to
+a file wants the frames.
+
+**"Once" has to mean a pipeline stage, not a shared function.** Four clients consume this data in
+three languages - `internal/cli`, `web/`, the Python SDK, and `internal/mcp` (which passes the
+envelope through untouched and is structurally immune to the whole class). No importable helper
+spans them, so putting this in `internal/relayclient` would cover one of the four.
+
+**Why the agent rather than the server.** The straddle constraint above eliminates the alternatives:
+
+- *Server ingest* (`internal/worker/handler.go:1671`) is otherwise the attractive one - a single
+  edit covers both the stored row and the SSE publish, since both derive from the same bytes, and it
+  works for already-deployed agents. But the straddle needs per-`(task, stream)` partial state the
+  server does not keep, on a recv-goroutine path whose own comments justify staying at one
+  statement; and the fence can reject the chunk, so it would transform bytes it then discards.
+  **This is the fallback if covering already-deployed agents matters more than the straddle case.**
+- *Server read path* is worse, and is two sites rather than one: the REST handler reads `l.Content`
+  from the row (`internal/api/tasks.go:118`) while the SSE publish sends `chunk.Content` from the
+  wire (`internal/worker/handler.go`, the publish after `AppendTaskLog`). The REST side has the full
+  ordered set and could reassemble perfectly; the SSE side still sees one chunk at a time. It pays
+  on every read and is still not uniform.
+
+The agent is the only site holding the contiguous byte stream, so it is the only one that can be
+both complete and O(1).
+
 ## Acceptance / Done When
+### Part 1 (web)
 - A CRLF-terminated line renders its text. `appendEntries` on `'hello windows\r\nsecond line\r\n'`
   yields `['hello windows', 'second line']`.
 - The interior-CR progress-bar case still collapses: the existing `logBuffer.test.ts:118` case stays
@@ -76,10 +142,27 @@ The ordering is the whole correctness argument, and both alternatives are wrong:
 - The partial paths are covered: an entry ending exactly at `"text\r"` with no newline yet renders
   `text` in `visibleRows`, and `finalizePartials` flushes it as `text`.
 
+### Part 2 (agent), if taken
+- A subprocess emitting `\r\n` produces chunks containing no `\r\n`, end to end against a real
+  agent.
+- **The test feeds a STRADDLED CRLF** - one chunk ending in `\r`, the next beginning with `\n`.
+  Without that input a stateless `ReplaceAll` and the stateful hold-back are indistinguishable, and
+  the test passes on the version that still drops lines. This is the discriminating input; the
+  ordinary same-chunk `\r\n` case does not stand in for it.
+- A `Write` whose payload is exactly `"\r"` returns `len(p)` and does not stall `io.Copy`.
+- A trailing `\r` at end of stream is flushed rather than swallowed on close.
+- Part 1 still passes unchanged afterwards. Part 2 must not be treated as making the web fix
+  redundant - history and un-upgraded agents keep sending CRLF.
+
 ## Related
 - `web/src/jobs/logBuffer.ts:93` (`collapseCR`), `:146`, `:175`, `:178`, `:197` (its four call sites)
 - `web/src/jobs/logBuffer.test.ts:118` (the interior-CR test that cannot see this)
 - `web/src/jobs/useTaskLogStream.ts:182` (the single `ingest` both read paths share)
+- `internal/agent/runner.go:285` (`chunkWriter.Write`) - the Part 2 site
+- `internal/worker/handler.go:1671` (ingest, the documented fallback site);
+  `internal/api/tasks.go:118` (the REST read site, rejected)
+- [[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]] - the second client that needs the
+  same CRLF treatment, and the reason Part 2 exists
 - Adjacent but distinct: [[idea-2026-08-09-task-log-tail-and-paging-improvements]] names
   `logBuffer.ts` as a source pointer, but covers tail paging, virtualization and export. Its Notes
   list what else that spec deliberately deferred (ANSI colour rendering, in-log search); CRLF is not
