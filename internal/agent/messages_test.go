@@ -117,6 +117,7 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 		"revoke it and then", // remedy 1: revoke THEN enroll with a token
 		"enrollment token",   // ... which the NULL-hash predicate now admits
 		"rename",             // remedy 2: the other escape hatch that actually exists
+		"workers delete",     // remedy 3: free the hostname outright - a REAL command since 2026-08-26
 	} {
 		assert.Contains(t, msg, want)
 	}
@@ -145,7 +146,14 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 	// command set out of internal/cli and requires every `relay ...` in every
 	// message to resolve, whatever its spelling. This stays only because it gives
 	// a more pointed message for the three spellings that actually shipped.
-	for _, ghost := range []string{"workers delete", "relay workers rm", "workers remove"} {
+	//
+	// "workers delete" GRADUATED FROM GHOST TO REAL COMMAND on 2026-08-26
+	// (docs/superpowers/plans/2026-08-26-worker-delete.md): internal/cli's workers
+	// switch now has a delete arm, DeleteWorker is a real statement, and
+	// DELETE /v1/workers/{id} is a real admin-only route. Forbidding it here would
+	// forbid the true remedy, so it moved to the want-list above. The other two
+	// spellings are still ghosts.
+	for _, ghost := range []string{"relay workers rm", "workers remove"} {
 		assert.NotContains(t, msg, ghost,
 			"this message must not prescribe a command that does not exist; add the subcommand to "+
 				"internal/cli/workers.go first, then say so here")
