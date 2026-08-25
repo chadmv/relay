@@ -7,6 +7,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestEnrollmentIgnoredWarning_DoesNotPrescribeDeletingTheTokenFileAlone. The
+// warning used to say "delete that file to re-enroll", which stopped being true
+// when enrollAndRegister started refusing a hostname whose worker holds a live
+// agent_token_hash: deleting the local token file leaves the SERVER-side hash
+// live, so the re-enroll is refused and the agent has destroyed the only
+// credential that still worked.
+func TestEnrollmentIgnoredWarning_DoesNotPrescribeDeletingTheTokenFileAlone(t *testing.T) {
+	got := EnrollmentIgnoredWarning(true, true, "/var/lib/relay/token")
+	if !strings.Contains(got, "revoke") {
+		t.Errorf("warning %q must say the server-side credential has to be revoked first", got)
+	}
+}
+
 func TestEnrollmentIgnoredWarning(t *testing.T) {
 	const path = "/var/lib/relay-agent/token"
 	tests := []struct {
@@ -55,7 +68,12 @@ func TestAuthFailureMessage(t *testing.T) {
 		wantSubstrings []string
 	}{
 		{"stored token rejected", true, false, []string{path, "delete that file", "RELAY_AGENT_ENROLLMENT_TOKEN", "exiting"}},
-		{"enrollment token rejected", false, true, []string{"enrollment token was rejected", "exiting"}},
+		// The cause substring is asserted, not just the leading clause. This row
+		// used to check only "enrollment token was rejected" and "exiting", so it
+		// exercised the arm while proving NOTHING about what it says the cause
+		// was - and errCredentialLive made all three of its stated causes false.
+		{"enrollment token rejected", false, true, []string{
+			"enrollment token was rejected", "hostname already has a worker", "revoke", "exiting"}},
 		{"token-less auto-enroll rejected", false, false, []string{"auto-enroll was rejected", "RELAY_ALLOW_AUTO_ENROLL", "exiting"}},
 	}
 	for _, tt := range tests {
@@ -86,8 +104,19 @@ func TestAuthFailureMessage_TokenlessArmNamesAllThreeCausesAndBothRemedies(t *te
 		"RELAY_ALLOW_AUTO_ENROLL", // cause 1: the flag is off
 		"already has a worker",    // cause 2: the hostname is claimed
 		"ceiling",                 // cause 3: the fleet is at the ceiling
-		"relay workers revoke",    // remedy 1
-		"enrollment token",        // remedy 2
+
+		// THE TWO ROUTES ARE SEQUENTIAL, NOT ALTERNATIVE, and asserting only
+		// "relay workers revoke" locked in a remedy that PROVABLY DOES NOT WORK:
+		// ClearWorkerAgentToken nulls the hash and sets status='revoked', it does
+		// NOT delete the row, and InsertWorkerForAutoEnroll conflicts on
+		// (hostname) whatever the status - which
+		// TestConnect_AutoEnrollRefusesRevokedWorker asserts. An operator who
+		// revoked and restarted a token-less agent got a byte-identical message
+		// and no server-side line naming the host, so the loop terminated only by
+		// reading source.
+		"revoke it and then",   // remedy 1: revoke THEN enroll with a token
+		"enrollment token",     // ... which the NULL-hash predicate now admits
+		"relay workers delete", // remedy 2: the only way to free the HOSTNAME
 	} {
 		assert.Contains(t, msg, want)
 	}
