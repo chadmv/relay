@@ -20,7 +20,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -136,11 +135,30 @@ const DefaultTrailingLogWindow = 15 * time.Minute
 // disabled.
 const DefaultRegistrationTimeout = 30 * time.Second
 
+// txBeginner is the subset of *pgxpool.Pool this package uses: the single method
+// pgx.BeginTxFunc requires of its second argument, which is itself declared as an
+// anonymous interface (pgx/tx.go). Handler.pool is typed as this rather than as
+// the concrete pool for the same reason internal/scheduler narrowed
+// failClaimedStore - it is what makes finishRegister's SUCCESS path drivable by a
+// fake, without Postgres, and therefore in the lane CI actually runs.
+//
+// THREE CALL SITES SHARE IT, not one: enrollAndRegister, autoEnrollAndRegister
+// and applyInventory all open their transaction with the identical expression
+// pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, ...) and differ only in the
+// closure they pass.
+//
+// *pgxpool.Pool satisfies it, so cmd/relay-server's wiring is unchanged and
+// production behaviour is identical. The field keeps the name `pool` because in
+// production it still is one; this comment carries the type's real meaning.
+type txBeginner interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+}
+
 // Handler implements relayv1.AgentServiceServer.
 type Handler struct {
 	relayv1.UnimplementedAgentServiceServer
 	q               *store.Queries
-	pool            *pgxpool.Pool
+	pool            txBeginner
 	registry        *Registry
 	broker          *events.Broker
 	triggerDispatch func()
@@ -251,14 +269,15 @@ func (h *Handler) TaskStatusFenceRejections() TaskStatusFenceCounts {
 	return h.statusFence.snapshot()
 }
 
-// NewHandler returns a Handler wired to the given dependencies.
-func NewHandler(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
+// NewHandler returns a Handler wired to the given dependencies. pool is a
+// txBeginner, which *pgxpool.Pool satisfies; see that type for why.
+func NewHandler(q *store.Queries, pool txBeginner, r *Registry, b *events.Broker, triggerDispatch func()) *Handler {
 	return &Handler{q: q, pool: pool, registry: r, broker: b, triggerDispatch: triggerDispatch}
 }
 
 // NewHandlerWithGrace is like NewHandler but also wires in a GraceRegistry so
 // that agent disconnects start a grace timer instead of immediately requeueing.
-func NewHandlerWithGrace(q *store.Queries, pool *pgxpool.Pool, r *Registry, b *events.Broker, triggerDispatch func(), g *GraceRegistry) *Handler {
+func NewHandlerWithGrace(q *store.Queries, pool txBeginner, r *Registry, b *events.Broker, triggerDispatch func(), g *GraceRegistry) *Handler {
 	return &Handler{q: q, pool: pool, registry: r, broker: b, triggerDispatch: triggerDispatch, grace: g}
 }
 

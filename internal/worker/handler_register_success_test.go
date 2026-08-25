@@ -1,0 +1,358 @@
+package worker
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"relay/internal/events"
+	"relay/internal/metrics"
+	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// successFixture is a Handler whose reconnect registration SUCCEEDS, plus one
+// observable for every effect finishRegister has below applyInventory. It reuses
+// strandDB, strandWorkerRow, strandWorkerID, strandEpoch, graceFire and
+// scriptedStream from the two files next door rather than re-declaring them -
+// same package, one fixture family.
+type successFixture struct {
+	h          *Handler
+	db         *strandDB
+	tx         *fakeTx
+	stream     *scriptedStream
+	metrics    *metrics.Store
+	events     <-chan events.Event
+	dispatched chan struct{}
+	fired      <-chan graceFire
+	release    func()
+}
+
+// fakePool is the txBeginner a default-lane Handler gets instead of a
+// *pgxpool.Pool. It hands out one fakeTx, so a test can read back what the
+// transaction was asked to do.
+type fakePool struct {
+	tx       *fakeTx
+	beginErr error
+}
+
+func (p *fakePool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	if p.beginErr != nil {
+		return nil, p.beginErr
+	}
+	return p.tx, nil
+}
+
+// fakeTx is a pgx.Tx that records the statements applyInventory issues.
+//
+// THE EMBEDDED NIL pgx.Tx SUPPLIES THE EIGHT METHODS THIS PATH NEVER CALLS, and
+// supplies them as a panic rather than as a plausible zero value - the same
+// fail-loud choice fenceStore makes in internal/scheduler, and the right report
+// if applyInventory ever grows a Query or a SendBatch. The idiom is what makes
+// an eleven-method interface cost four lines instead of forty.
+//
+// Commit and Rollback both return nil, which is correct rather than merely
+// convenient: pgx's beginFuncExec defers a Rollback AFTER the Commit and
+// propagates a rollback error only when it is not ErrTxClosed, so a nil from
+// both is the quiet, successful shape.
+type fakeTx struct {
+	pgx.Tx
+	mu      sync.Mutex
+	execErr error
+	execs   []strandExec
+}
+
+func (tx *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.execs = append(tx.execs, strandExec{sql: sql, args: args})
+	if tx.execErr != nil {
+		return pgconn.CommandTag{}, tx.execErr
+	}
+	return pgconn.NewCommandTag("DELETE 0"), nil
+}
+
+func (tx *fakeTx) Commit(context.Context) error   { return nil }
+func (tx *fakeTx) Rollback(context.Context) error { return nil }
+
+// execsSeen is a SEPARATE list from strandDB's, and keeping them apart is what
+// lets "the deferred release did not fire" stay an exact count of zero. Let
+// ReplaceWorkerInventory land in the same list as MarkWorkerOfflineIfEpoch and
+// that assertion weakens from a count to a substring match.
+func (tx *fakeTx) execsSeen() []strandExec {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	out := make([]strandExec, len(tx.execs))
+	copy(out, tx.execs)
+	return out
+}
+
+// newSuccessFixture builds the handler.
+//
+// THE ONE THING THAT MAKES IT DIFFERENT from newStrandHandler is the absent
+// queryErr: with none, strandDB.Query hands back an empty pgx.Rows,
+// GetActiveTasksForWorker returns no rows, and reconcileRunningTasks becomes a
+// no-op instead of the failure the four strand tests drive. Empty rather than
+// populated is deliberate - reconcile's CONTENT is covered by
+// handler_reconcile_canonical_test.go in the integration lane, and a populated
+// fixture here would add failure modes without adding coverage of what is under
+// test, which is everything BELOW reconcile.
+//
+// Metrics IS set here and is nil in newStrandHandler, also deliberately: the
+// Metrics.Activate call near the bottom of finishRegister is one of the effects
+// under test, and LastSampleAt is how it is read back.
+func newSuccessFixture(t *testing.T) *successFixture {
+	t.Helper()
+
+	db := &strandDB{execTag: "UPDATE 1"}
+	tx := &fakeTx{}
+
+	fired := make(chan graceFire, 4)
+	grace := NewGraceRegistry(20*time.Millisecond, func(workerID string, epoch int32) {
+		fired <- graceFire{workerID: workerID, epoch: epoch}
+	})
+	t.Cleanup(grace.Stop)
+
+	// A BUFFERED SEND, NOT A CLOSE. triggerDispatch is called once by
+	// finishRegister and again by requeueWorkerTasks on the no-grace release arm,
+	// so closing a channel here would turn a second call into a panic that reports
+	// the wrong thing entirely. Capacity 4 keeps every call non-blocking, which
+	// matters because one of them runs on a goroutine nothing joins.
+	dispatched := make(chan struct{}, 4)
+
+	broker := events.NewBroker()
+	evs, unsubscribe := broker.Subscribe(events.Filter{})
+	t.Cleanup(unsubscribe)
+
+	ms := metrics.NewStore(8)
+
+	h := &Handler{
+		q:        store.New(db),
+		pool:     &fakePool{tx: tx},
+		registry: NewRegistry(),
+		broker:   broker,
+		grace:    grace,
+		triggerDispatch: func() {
+			select {
+			case dispatched <- struct{}{}:
+			default:
+			}
+		},
+		Metrics:             ms,
+		RegistrationTimeout: 5 * time.Second,
+	}
+
+	s := &scriptedStream{
+		ctx:     context.Background(),
+		release: make(chan struct{}),
+		msgs: []*relayv1.AgentMessage{{Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname:   "strand-host",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: "strand-agent-token"},
+			},
+		}}},
+	}
+	// OnceFunc because the release is closed by the test that wants to observe
+	// teardown AND by the cleanup that covers the tests that do not; a second
+	// close of the same channel would panic.
+	release := sync.OnceFunc(func() { close(s.release) })
+	t.Cleanup(release)
+
+	return &successFixture{
+		h:          h,
+		db:         db,
+		tx:         tx,
+		stream:     s,
+		metrics:    ms,
+		events:     evs,
+		dispatched: dispatched,
+		fired:      fired,
+		release:    release,
+	}
+}
+
+// startConnect runs Connect on its own goroutine and blocks until the worker
+// event finishRegister publishes arrives. That event is the barrier every
+// assertion rests on: it is published second-to-last on the success path, so by
+// the time it is observed the registry entry, the metrics activation and the
+// RegisterResponse are all already in place and will not move. scriptedStream.Recv
+// then parks in the message loop, which is what keeps them stable while the test
+// reads them.
+//
+// Returns that event and a func that tears the stream down and waits for Connect
+// to return.
+//
+// THE TIMEOUT IS THE FAILURE REPORT FOR HALF THE MUTATION BATTERY. Deleting the
+// publish, or turning applyInventory's swallowed error into a return, both end
+// with no event arriving - and that has to be one bounded, explanatory failure
+// rather than a hung package.
+func (f *successFixture) startConnect(t *testing.T) (events.Event, func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f.h.Connect(f.stream) }()
+
+	finish := func() error {
+		f.release()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Error("Connect did not return after the stream was torn down, so the teardown half of " +
+				"this test observed nothing")
+			return nil
+		}
+	}
+
+	select {
+	case ev := <-f.events:
+		return ev, finish
+	case <-time.After(5 * time.Second):
+		select {
+		case err := <-done:
+			t.Fatalf("the registration ended without publishing a worker event: %v. finishRegister "+
+				"publishes 'online' as its second-to-last statement, so no event means the success path "+
+				"was never reached and every assertion below would be about a registration that did not "+
+				"happen.", err)
+		default:
+			t.Fatal("no worker event was published within 5s and Connect is still running. " +
+				"finishRegister publishes 'online' immediately before `go h.triggerDispatch()`; without " +
+				"it the SPA and GET /v1/workers never learn the agent connected.")
+		}
+		return events.Event{}, finish
+	}
+}
+
+// TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration is
+// the first default-lane test in this repository to reach a SUCCESSFUL worker
+// registration, and it exists because everything it asserts could previously
+// only be pinned by reading source text.
+//
+// IT IS DRIVEN THROUGH Connect, NOT finishRegister, and that is the whole design.
+// The handedOff flag partitions a window between TWO releases -
+// finishRegister's own deferred releaseWorkerGeneration and Connect's
+// `defer h.teardownConnection` - and calling finishRegister directly sees only
+// one of them. The property worth pinning is that across the connection's whole
+// life the generation is released EXACTLY ONCE, and that the one release is
+// teardown's. Delete `handedOff = true` and the count becomes two, with the
+// first landing before the mid-connection assertions below: both halves redden
+// independently, which is what makes the assertion hard to satisfy by accident.
+func TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration(t *testing.T) {
+	f := newSuccessFixture(t)
+	workerID := uuidStr(strandWorkerID)
+
+	online, finish := f.startConnect(t)
+
+	require.Equal(t, "worker", online.Type)
+	assert.JSONEq(t, `{"id":"`+workerID+`","status":"online"}`, string(online.Data),
+		"a successful registration publishes exactly one worker event and it says online; this frame "+
+			"is what GET /v1/workers subscribers and the SPA render from")
+
+	select {
+	case <-f.dispatched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the registration did not trigger dispatch. A worker that comes online while tasks " +
+			"sit pending then waits for the scheduler's next poll instead of being fed immediately.")
+	}
+
+	// THE GENERATION WAS NOT RELEASED. This wait comes FIRST because it is the
+	// slowest of the three signals: the release does markWorkerOffline and only
+	// then grace.Start, so 300ms of silence on a 20ms grace window means no
+	// release ran at all, and the two cheaper assertions after it cannot then be
+	// racing a release that is still in flight.
+	select {
+	case fire := <-f.fired:
+		t.Fatalf("a grace timer was armed for %s at epoch %d by a SUCCESSFUL registration. That timer "+
+			"requeues a healthy agent's running tasks one grace window from now, out from under a "+
+			"connection that is up and serving.", fire.workerID, fire.epoch)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	assert.Empty(t, f.db.execsSeen(),
+		"a successful registration must issue no statement at all before teardown. The only Exec on "+
+			"this path is MarkWorkerOfflineIfEpoch, so anything here means the generation this "+
+			"registration just acquired was released by the registration itself - the live agent "+
+			"published 'offline' and its metrics entry wiped the instant it came online.")
+
+	select {
+	case ev := <-f.events:
+		t.Fatalf("a second worker event was published mid-connection: %s. One registration publishes "+
+			"one event; a second means something below the publish released the generation.", ev.Data)
+	default:
+	}
+
+	// Read the stream BEFORE probing the registry: the probe below goes through
+	// the workerSender's queue and lands in this same slice a moment later.
+	sent := f.stream.sentMsgs()
+	require.Len(t, sent, 1,
+		"exactly one message must have reached the raw stream: the RegisterResponse finishRegister "+
+			"sends before anything else can race it")
+	rr := sent[0].GetRegisterResponse()
+	require.NotNil(t, rr,
+		"the one message must be the RegisterResponse; the agent blocks on it and cannot run a task "+
+			"until it arrives")
+	assert.Equal(t, workerID, rr.WorkerId,
+		"the response carries the id the agent uses for every later message on this stream")
+	assert.Empty(t, rr.CancelTaskIds,
+		"the agent reported no running tasks and the coordinator has none assigned, so reconcile has "+
+			"nothing to cancel")
+
+	require.NoError(t, f.h.registry.Send(workerID, &relayv1.CoordinatorMessage{}),
+		"the sender must be in the registry. Registry.Send is the ONLY route the dispatcher has to a "+
+			"connected agent, and it answers a missing entry with `worker is not connected` - so an "+
+			"unregistered sender is an agent that is online, idle and unreachable.")
+
+	at, tracked := f.metrics.LastSampleAt(workerID)
+	require.True(t, tracked,
+		"Metrics.Activate must have run. An untracked worker is skipped by the liveness sweeper "+
+			"(internal/metrics/sweep.go), which is the one runtime mechanism that flips a "+
+			"connected-looking worker to 'stale' - so an agent that stops reporting is never noticed.")
+	assert.False(t, at.IsZero(),
+		"Activate seeds activatedAt, and LastSampleAt returns it until the first telemetry sample "+
+			"arrives; a zero time means the activation carried no clock")
+
+	require.Error(t, finish(),
+		"tearing the stream down ends Connect with the Recv error, which is how a real disconnect "+
+			"arrives")
+
+	execs := f.db.execsSeen()
+	require.Len(t, execs, 1,
+		"across the connection's whole life the generation must be released EXACTLY ONCE, and this is "+
+			"it: teardown's. Two means finishRegister released its own generation as well, which is the "+
+			"failure the handedOff flag exists to prevent; zero means a disconnected agent's worker row "+
+			"stays 'online' forever with its tasks assigned to a stream that has closed.")
+	assert.Contains(t, execs[0].sql, "status = 'offline'",
+		"the one statement must be MarkWorkerOfflineIfEpoch")
+	assert.Contains(t, execs[0].sql, "connection_epoch = $4",
+		"and it must carry its epoch fence")
+	assert.Contains(t, execs[0].args, strandEpoch,
+		"the fence must carry THIS connection's epoch, which is the value RegisterWorkerConnection "+
+			"returned and workerSender.connEpoch was set from. Every int32 column of the stub row "+
+			"scans distinct (TestStrandFixture_EveryInt32ColumnScansDistinct), so binding any other "+
+			"one at the assignment is visible right here.")
+
+	select {
+	case fire := <-f.fired:
+		assert.Equal(t, workerID, fire.workerID)
+		assert.Equal(t, strandEpoch, fire.epoch,
+			"the grace timer must be armed at the epoch whose generation just ended; "+
+				"RequeueWorkerTasksIfEpoch fences on workers.connection_epoch, so a timer at any other "+
+				"epoch requeues nothing and the disconnected agent's tasks are stranded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("teardown armed no grace timer, so the disconnected worker's running tasks have no " +
+			"requeue scheduled at all - the only thing left is the 24h stale-task watchdog, which " +
+			"marks them timed_out rather than re-running them")
+	}
+
+	select {
+	case fire := <-f.fired:
+		t.Fatalf("a second grace timer fired, at epoch %d. One ended generation schedules one requeue.",
+			fire.epoch)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
