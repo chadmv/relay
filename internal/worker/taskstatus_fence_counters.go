@@ -164,9 +164,23 @@ type statusFenceCounters struct {
 // that edit leaves the dense-run test green (its run list still holds three
 // entries and the sentinel is still 3), leaves the publish test green (it
 // iterates r < fenceReasonCount), and lands every one of its increments here.
+//
+// THE CHECK IS AN UPPER BOUND ONLY, AND THAT IS THE WHOLE GUARD. Do not restore
+// a `< 0` arm to match ingestLogCounters.record's shape: taskStatusFenceReason
+// is uint8, so int(r) cannot be negative and such an arm is dead code wearing
+// the costume of a control. The shape WAS copied from there, and it does not
+// transfer - that method's `i <= 0` is live because logKind starts at 1, which
+// its own comment records as a measured mutation survivor. Reasons here start at
+// 0 (see the const block), so slot 0 is a real cell and excluding it would lose
+// every `raced`. len(c.n) rather than fenceReasonCount because the array is what
+// is being indexed; the two are the same number by construction and the array is
+// the one that panics. Measured: deleting this `if` fails
+// TestTaskStatusFenceCounters_AnOutOfRangeReasonIsDroppedNotPanicked with
+// "index out of range [3] with length 3", so the arm that remains is
+// load-bearing.
 func (c *statusFenceCounters) record(r taskStatusFenceReason) {
 	i := int(r)
-	if i < 0 || i >= len(c.n) {
+	if i >= len(c.n) {
 		return
 	}
 	c.n[i].Add(1)
