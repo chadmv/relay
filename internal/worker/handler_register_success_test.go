@@ -90,6 +90,8 @@ type fakeTx struct {
 	pgx.Tx
 	mu        sync.Mutex
 	execErr   error
+	script    *rowScript
+	execTag   string
 	execs     []strandExec
 	commits   int
 	rollbacks int
@@ -102,7 +104,25 @@ func (tx *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.Comma
 	if tx.execErr != nil {
 		return pgconn.CommandTag{}, tx.execErr
 	}
-	return pgconn.NewCommandTag("DELETE 0"), nil
+	tag := tx.execTag
+	if tag == "" {
+		// The historical value: zero rows affected, which is what every test
+		// predating this field was written against.
+		tag = "DELETE 0"
+	}
+	return pgconn.NewCommandTag(tag), nil
+}
+
+// QueryRow delegates to the shared rowScript, or - with none - keeps the
+// historical strandWorkerRow. EVERY statement in both enrollment transactions is
+// a QueryRow on the tx, so without this method those paths are unreachable in
+// this lane: it fell through to the embedded nil pgx.Tx and panicked with a bare
+// nil dereference one frame inside generated code.
+func (tx *fakeTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if tx.script != nil {
+		return tx.script.answer(sql, args)
+	}
+	return strandWorkerRow{}
 }
 
 func (tx *fakeTx) Commit(context.Context) error {

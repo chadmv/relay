@@ -46,6 +46,7 @@ type strandDB struct {
 	queryErr error // returned by Query, i.e. by GetActiveTasksForWorker
 	execErr  error // returned by Exec, i.e. by MarkWorkerOfflineIfEpoch
 	execTag  string
+	script   *rowScript
 	execs    []strandExec
 	queries  []strandExec
 }
@@ -106,7 +107,14 @@ func (emptyRows) Close()     {}
 func (emptyRows) Next() bool { return false }
 func (emptyRows) Err() error { return nil }
 
-func (d *strandDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+// QueryRow delegates to the shared rowScript when one is configured. A nil
+// script keeps the unconditional strandWorkerRow this used to return, which is
+// what makes the change inert for the strand and success tests: they build a
+// strandDB without a script and see byte-identical behaviour.
+func (d *strandDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if d.script != nil {
+		return d.script.answer(sql, args)
+	}
 	return strandWorkerRow{}
 }
 
