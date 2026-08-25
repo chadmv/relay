@@ -217,9 +217,19 @@ type graceFire struct {
 // question is whether a timer was armed and at WHICH epoch. The 20ms window
 // makes an armed timer observable in milliseconds and a missing one observable
 // as a timeout.
+//
+// THE POOL IS NON-NIL EVEN THOUGH NO TEST HERE REACHES IT, and that is the
+// point. All four tests below fail inside reconcileRunningTasks, four lines
+// above applyInventory, so the pool is never touched and this changes none of
+// their behaviour. What it changes is what a MUTATION can hide behind: a
+// construct that is nil in every default-lane fixture and real under main.go is
+// exactly how this package's handoff guard was evaded twice, and
+// `if h.pool != nil { return }` ahead of the deferred release was the second of
+// those two. With a pool here, that edit makes these tests red instead of green.
 func newStrandHandler(t *testing.T, queryErr error, execTag string) (*Handler, *strandDB, <-chan graceFire) {
 	t.Helper()
 	db := &strandDB{queryErr: queryErr, execTag: execTag}
+	pool := &fakePool{tx: &fakeTx{}}
 	fired := make(chan graceFire, 4)
 	grace := NewGraceRegistry(20*time.Millisecond, func(workerID string, epoch int32) {
 		fired <- graceFire{workerID: workerID, epoch: epoch}
@@ -227,6 +237,7 @@ func newStrandHandler(t *testing.T, queryErr error, execTag string) (*Handler, *
 	t.Cleanup(grace.Stop)
 	h := &Handler{
 		q:                   store.New(db),
+		pool:                pool,
 		registry:            NewRegistry(),
 		broker:              events.NewBroker(),
 		grace:               grace,
