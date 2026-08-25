@@ -150,17 +150,31 @@ export function surfaces(): Surface[] {
       ready: async (p) => {
         // NOT aria-current="page": that is set by the router on mount, before
         // any of the tab's four queries (GET /v1/jobs/stats, GET
-        // /v1/workers/stats, GET /v1/config x2) have returned - measured, it
-        // resolved in 53ms under a 2500ms API delay (the eight other populated
-        // surfaces took ~2900ms) and it STILL resolved with every API forced to
-        // 500. It certifies navigation, not readiness. Gated instead on the
-        // Access panel's Chip (ServerTab.tsx:104-106), which renders only once
-        // config.data has actually landed - ErrorStrip renders in its place on
-        // a failure, so this locator does not appear at all under a forced 500.
-        // Scoped to the "Self-registration" row specifically: the fleet stats
-        // grid on this same page has its own StatCell labelled DISABLED
-        // (ServerTab.tsx:44), and an unscoped text match resolves to both -
-        // measured directly, a strict-mode violation.
+        // /v1/workers/stats, GET /v1/health and GET /v1/config) have
+        // returned - measured, it resolved in 53ms under a 2500ms delay on
+        // those four endpoints (the eight other populated surfaces took
+        // ~2900ms). It certifies navigation, not readiness.
+        //
+        // SCOPE MATTERS HERE. Under a delay or a 500 scoped to just this
+        // tab's own four endpoints, `aria-current="page"` resolves in 53ms /
+        // still resolves at all - it says nothing about this page's data.
+        // Under a BLANKET `**/v1/**` interception instead, the old
+        // `aria-current` gate never resolves either, because
+        // `/v1/users/me` (used by every surface's app shell, not just this
+        // tab) fails too and the app never renders past its own loading
+        // state - so a blanket forced-500 run cannot distinguish this gate
+        // from a working one. Measured: blanket 2500ms delay, this gate
+        // 5475ms vs `aria-current` 2902ms; tab-scoped 2500ms delay, this gate
+        // 2916ms vs `aria-current` 55ms; tab-scoped forced 500, this gate
+        // throws at 10011ms (the `expect` timeout) vs `aria-current`
+        // resolving in 47ms regardless. Gated instead on the Access panel's
+        // Chip (ServerTab.tsx:104-106), which renders only once config.data
+        // has actually landed - ErrorStrip renders in its place on a
+        // failure, so this locator does not appear at all under a tab-scoped
+        // forced 500. Scoped to the "Self-registration" row specifically:
+        // the fleet stats grid on this same page has its own StatCell
+        // labelled DISABLED (ServerTab.tsx:44), and an unscoped text match
+        // resolves to both - measured directly, a strict-mode violation.
         const row = p.getByText('Self-registration').locator('xpath=..')
         await expect(row.getByText(/^(ENABLED|DISABLED)$/)).toBeVisible()
       },
@@ -171,12 +185,17 @@ export function surfaces(): Surface[] {
       population: 'populated',
       ready: async (p, seed) => {
         // NOT `main h1`: that locator matches the <h1> on every one of these
-        // surfaces, so it certifies nothing specific to this page - it would
-        // pass equally on a page that failed to load the signed-in user at
-        // all. Gated on the meta strip's own email testid
-        // (ProfilePage.tsx:79), whose text is the AuthProvider user's real
-        // email and must equal the seeded admin's - a locator that can only
-        // pass once this page has actually rendered ITS data.
+        // surfaces (13 of them share it), so it would pass equally on a
+        // page that redirected somewhere else with an <h1> of its own - it
+        // is not specific to this page. This is a SPECIFICITY fix, not a
+        // readiness one: with GET /v1/users/me forced to 500, both `main h1`
+        // and this gate fail, because AuthProvider redirects to /auth when
+        // it cannot load the signed-in user, and neither locator exists on
+        // that page - measured directly. Gated instead on the meta strip's
+        // own email testid (ProfilePage.tsx:79), whose text is the
+        // AuthProvider user's real email and must equal the seeded admin's -
+        // a locator that can only pass once this specific page has rendered
+        // ITS OWN data, not just any page's.
         await expect(p.getByTestId('meta-email')).toHaveText(seed.adminEmail)
       },
     },
