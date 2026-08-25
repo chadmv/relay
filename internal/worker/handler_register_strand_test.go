@@ -20,12 +20,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// strandDB is the narrowest store.DBTX that drives an entire reconnect
-// registration - GetWorkerByAgentTokenHash, RegisterWorkerConnection,
-// GetActiveTasksForWorker, MarkWorkerOfflineIfEpoch - WITHOUT Postgres, which is
-// what puts this proof in the lane CI actually runs (go-ci: `go test -race ./...`,
-// no tag, no container). It is the same seam tasklog_fence_counter_test.go uses,
-// one layer up.
+// strandDB is the narrowest store.DBTX that drives a whole registration WITHOUT
+// Postgres, which is what puts this proof in the lane CI actually runs (go-ci:
+// `go test -race ./...`, no tag, no container). It is the same seam
+// tasklog_fence_counter_test.go uses, one layer up.
+//
+// WHAT IT REACHES IS DESCRIBED, NOT ENUMERATED, AND THAT IS DELIBERATE. This
+// header used to list the four statements of the reconnect path, and the list
+// went stale the moment QueryRow learned to discriminate by statement - which is
+// what let handler_enroll_guards_test.go drive both ENROLLMENT paths through the
+// same type. A description survives the next fixture edit; a list does not. What
+// it cannot do is anything needing real SQL semantics: it answers statements, it
+// does not execute them.
 //
 // IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that stays worth
 // saying: finishRegister returns on reconcileRunningTasks' error four lines

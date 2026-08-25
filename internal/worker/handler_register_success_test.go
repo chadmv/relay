@@ -51,10 +51,15 @@ func (p *fakePool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
 	return p.tx, nil
 }
 
-// fakeTx is a pgx.Tx that records the statements applyInventory issues.
+// fakeTx is a pgx.Tx that records the statements a transaction on this handler
+// issues - applyInventory's, and, since it grew a QueryRow, both enrollment
+// transactions' as well.
 //
-// THE EMBEDDED NIL pgx.Tx SUPPLIES THE EIGHT METHODS THIS PATH NEVER CALLS, and
-// supplies them as a panic rather than as a plausible zero value. The idiom is
+// THE EMBEDDED NIL pgx.Tx SUPPLIES THE METHODS THIS PATH NEVER CALLS, and
+// supplies them as a panic rather than as a plausible zero value. That COUNT is
+// deliberately not written down: it was "the eight methods", and the number went
+// stale the moment QueryRow was overridden. Say which methods are live, not how
+// many are not. The idiom is
 // what makes an eleven-method interface cost four lines instead of forty.
 //
 // IT SHARES fenceStore's POLICY AND NOT ITS DIAGNOSTICS, which is worth being

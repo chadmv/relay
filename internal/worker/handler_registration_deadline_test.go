@@ -80,13 +80,19 @@ func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
 // "a token was issued" is the assertable property, and the value itself is not
 // one any test in this package needs.
 //
-// WHY IT MATTERS WHEN TODAY'S TESTS ARE SAFE: finishRegister's reconnect caller
-// passes rawAgentToken "" (handler.go:552) and every current user of this fake
-// drives that arm. Both enrollment callers pass a real token (handler.go:534,
-// :618), and making those drivable without Postgres is exactly what the
-// txBeginner seam was for - so the next test written against this fixture is the
-// one that would have leaked. TestScriptedStream_DoesNotRetainARawAgentToken is
-// what keeps that from being silent.
+// THE SCRUB NOW FIRES, AND THIS PARAGRAPH USED TO PREDICT IT RATHER THAN RECORD
+// IT. It said "the next test written against this fixture is the one that would
+// have leaked", because finishRegister's reconnect caller passes rawAgentToken
+// "" and, at the time, every user of this fake drove that arm. Both enrollment
+// callers pass a real minted token, and handler_enroll_guards_test.go now drives
+// both without Postgres - so the redaction branch has real consumers.
+//
+// TestConnect_AutoEnrollStillCreatesAWorkerForAFreshHostname is the one to read:
+// it asserts tokensSent() == 1 AND that the retained message carries the
+// placeholder. The first half is what stops the test passing against a build that
+// never minted a token; the second is what distinguishes "scrubbed" from "never
+// sent". TestScriptedStream_DoesNotRetainARawAgentToken keeps the absence half
+// from being silent.
 //
 // proto.Clone rather than a hand-written field copy: a field-by-field rebuild of
 // RegisterResponse would silently drop anything added to the message later, and
