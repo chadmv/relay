@@ -203,18 +203,32 @@ func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, 
 }
 
 // resolveWorkerID returns the UUID for target, resolving a hostname via GET
-// /v1/workers when target is not already UUID-shaped.
+// /v1/workers and, on a miss, GET /v1/workers/revoked.
+//
+// THE FALLBACK IS NOT COSMETIC. Every paginated variant behind GET /v1/workers
+// carries `WHERE status != 'revoked'` (query/workers.sql), so without it a
+// hostname cannot be resolved for exactly the rows an operator most wants to
+// delete. The primary list is tried first, so a live worker never costs a second
+// round trip and no existing caller's behaviour changes for a non-revoked host.
 func resolveWorkerID(ctx context.Context, c *relayclient.Client, target string) (string, error) {
 	if looksLikeUUID(target) {
 		return target, nil
 	}
-	workers, _, err := relayclient.FetchAllPages[workerResp](ctx, c, "/v1/workers", nil, 0)
-	if err != nil {
-		return "", fmt.Errorf("list workers: %w", err)
-	}
-	for _, wk := range workers {
-		if wk.Hostname == target {
-			return wk.ID, nil
+	for _, path := range []string{"/v1/workers", "/v1/workers/revoked"} {
+		workers, _, err := relayclient.FetchAllPages[workerResp](ctx, c, path, nil, 0)
+		if err != nil {
+			// The revoked list is admin-only; a non-admin caller gets an error
+			// there and should still see the primary list's miss, not an auth
+			// error about an endpoint they did not ask for.
+			if path == "/v1/workers" {
+				return "", fmt.Errorf("list workers: %w", err)
+			}
+			break
+		}
+		for _, wk := range workers {
+			if wk.Hostname == target {
+				return wk.ID, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("no worker found with hostname %q", target)

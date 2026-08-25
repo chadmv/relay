@@ -68,12 +68,20 @@ func TestWorkersRevoke_ByHostname(t *testing.T) {
 func TestWorkersRevoke_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "GET", r.Method)
-		require.Equal(t, "/v1/workers", r.URL.Path)
+		// A hostname miss now costs TWO requests, not one: resolveWorkerID falls
+		// back to the revoked list because GET /v1/workers excludes revoked rows
+		// (2026-08-26 worker-delete slice). The assertion here is about the MISS,
+		// not about the request count, so the fixture serves both paths.
+		require.Contains(t, []string{"/v1/workers", "/v1/workers/revoked"}, r.URL.Path)
+		items := []workerResp{
+			{ID: "00000000-0000-0000-0000-000000000003", Hostname: "other-node", Status: "online"},
+		}
+		if r.URL.Path == "/v1/workers/revoked" {
+			items = nil
+		}
 		json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
-			Items: []workerResp{
-				{ID: "00000000-0000-0000-0000-000000000003", Hostname: "other-node", Status: "online"},
-			},
-			Total: 1,
+			Items: items,
+			Total: int64(len(items)),
 		})
 	}))
 	defer srv.Close()

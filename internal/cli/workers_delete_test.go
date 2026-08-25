@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"relay/internal/relayclient"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,4 +57,35 @@ func TestWorkersDelete_RequiresConfirmation(t *testing.T) {
 	require.Contains(t, err.Error(), "--yes")
 	require.Empty(t, requests, "no request may be issued without --yes")
 	require.Contains(t, out.String(), workerID, "it must print what it WOULD delete")
+}
+
+// TestWorkersDelete_ResolvesARevokedHostname (T-F2). VACUITY: a fixture serving
+// the worker from /v1/workers too passes WITHOUT the fallback, so the worker must
+// be ABSENT from the primary list.
+func TestWorkersDelete_ResolvesARevokedHostname(t *testing.T) {
+	const workerID = "00000000-0000-0000-0000-000000000013"
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/workers":
+			// Empty on purpose: GET /v1/workers excludes revoked rows.
+			_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{Items: []workerResp{}, Total: 0})
+		case r.Method == "GET" && r.URL.Path == "/v1/workers/revoked":
+			_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
+				Items: []workerResp{{ID: workerID, Hostname: "render-07", Status: "revoked"}}, Total: 1,
+			})
+		case r.Method == "DELETE" && r.URL.Path == "/v1/workers/"+workerID:
+			deleted = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": workerID})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-tok"}
+	var out strings.Builder
+	require.NoError(t, doWorkers(context.Background(), cfg, []string{"delete", "--yes", "render-07"}, &out))
+	require.True(t, deleted, "the DELETE must reach the revoked worker's id")
 }
