@@ -826,9 +826,13 @@ relay workers revoke <worker-id>
 relay workers revoke <hostname>
 ```
 
-A hostname is resolved against `GET /v1/workers` first and, on a miss, against
-`GET /v1/workers/revoked` - so an already-revoked worker can still be named by
-hostname. That costs a second request on a miss.
+Note the hostname wart, which is **not** fixed here: a hostname is resolved
+against `GET /v1/workers` only, and that endpoint excludes revoked rows, so
+`relay workers revoke <hostname>` cannot name a worker that is already revoked.
+Revoke is idempotent in intent, so this is harmless - pass the worker UUID if you
+need to. `relay workers delete` is the one subcommand that resolves against the
+revoked list too, because reaching an already-revoked row is the point of that
+verb; whether the other subcommands should is an open question tracked separately.
 
 ---
 
@@ -847,6 +851,12 @@ a prompt breaks scripted use.
 relay workers delete --yes <worker-id>
 relay workers delete --yes <hostname>
 ```
+
+A hostname is resolved against `GET /v1/workers` first and, on a miss, against
+`GET /v1/workers/revoked`, so an already-revoked worker can still be named by
+hostname - which matters because revoke-then-later-delete is the natural
+sequence. That costs a second request only on a miss, and **only for `delete`**:
+the other `workers` subcommands resolve against the live list alone.
 
 The delete is **permitted only while the worker is disconnected** - the row's
 status must be `offline` or `revoked`. A connected worker (`online` or `stale`,

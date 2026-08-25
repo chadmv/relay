@@ -149,17 +149,10 @@ func TestDoWorkersEvictWorkspace_ResolvesHostname(t *testing.T) {
 
 func TestDoWorkersWorkspaces_UnknownHostname(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Same reason as TestWorkersRevoke_NotFound: a hostname miss now costs two
-		// requests because resolveWorkerID falls back to the revoked list. The
-		// assertion is about the miss, not the request count.
-		require.Contains(t, []string{"/v1/workers", "/v1/workers/revoked"}, r.URL.Path)
-		items := []workerResp{{ID: "00000000-0000-0000-0000-000000000001", Hostname: "other-host"}}
-		if r.URL.Path == "/v1/workers/revoked" {
-			items = nil
-		}
+		require.Equal(t, "/v1/workers", r.URL.Path)
 		json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
-			Items: items,
-			Total: int64(len(items)),
+			Items: []workerResp{{ID: "00000000-0000-0000-0000-000000000001", Hostname: "other-host"}},
+			Total: 1,
 		})
 	}))
 	defer srv.Close()

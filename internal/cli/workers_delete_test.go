@@ -89,3 +89,54 @@ func TestWorkersDelete_ResolvesARevokedHostname(t *testing.T) {
 	require.NoError(t, doWorkers(context.Background(), cfg, []string{"delete", "--yes", "render-07"}, &out))
 	require.True(t, deleted, "the DELETE must reach the revoked worker's id")
 }
+
+// TestWorkersDelete_ResolvesALiveHostnameInOneRequest pins the path ORDER inside
+// resolveWorkerIDIncludingRevoked, and it is REPLACEMENT COVERAGE, added
+// deliberately.
+//
+// The order used to be pinned by accident: while the fallback lived in the shared
+// resolveWorkerID, reversing the two paths reddened four unrelated fixtures
+// (TestWorkersEnable_ByHostname, TestWorkersRevoke_ByHostname,
+// TestDoWorkersWorkspaces_ResolvesHostname,
+// TestDoWorkersEvictWorkspace_ResolvesHostname) whose handlers t.Errorf on an
+// unexpected request. Narrowing the fallback to delete alone removed those four
+// from the blast radius, and the reversal was measured to SURVIVE the whole
+// package with nothing else asserting it.
+//
+// The property is the contract in the helper's own comment: the primary list is
+// tried first, so a LIVE worker never costs a second round trip. Reversing the
+// paths makes the revoked list the first request, and this test reads the
+// recorded sequence rather than a count, so it fails on the order and not merely
+// on the total.
+func TestWorkersDelete_ResolvesALiveHostnameInOneRequest(t *testing.T) {
+	const workerID = "00000000-0000-0000-0000-000000000014"
+	var gets []string
+	deleted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET":
+			gets = append(gets, r.URL.Path)
+			items := []workerResp{}
+			if r.URL.Path == "/v1/workers" {
+				items = []workerResp{{ID: workerID, Hostname: "render-08", Status: "offline"}}
+			}
+			_ = json.NewEncoder(w).Encode(relayclient.PageEnvelope[workerResp]{
+				Items: items, Total: int64(len(items)),
+			})
+		case r.Method == "DELETE" && r.URL.Path == "/v1/workers/"+workerID:
+			deleted = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": workerID})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-tok"}
+	var out strings.Builder
+	require.NoError(t, doWorkers(context.Background(), cfg, []string{"delete", "--yes", "render-08"}, &out))
+	require.True(t, deleted)
+	require.Equal(t, []string{"/v1/workers"}, gets,
+		"the live list must be consulted FIRST and alone; a reversed path order asks the revoked list first")
+}

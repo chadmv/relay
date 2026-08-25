@@ -640,6 +640,19 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		// permitted means something is wrong - most plausibly a concurrent
 		// delete. Roll back and refuse; NEVER report success. Keep "the fence
 		// said no" distinguishable from "the query failed", per markWorkerOffline.
+		//
+		// THIS BRANCH IS UNREACHABLE BY CONSTRUCTION AND IT IS NOT DEAD CODE.
+		// DO NOT DELETE IT. Step 1 took the row FOR UPDATE and step 2 read the
+		// status off that locked row, so within this transaction the Go gate and
+		// DeleteWorker's SQL allow-list cannot disagree - which means no
+		// deterministic test can drive n == 0, and none does. Spec 13.2 (T-D4)
+		// declined to write one rather than build a flaky concurrency test, and
+		// proposed mutation M8 as the stand-in; M8 was RUN and SURVIVED, for this
+		// same reason, so the property is genuinely untested. It is kept because
+		// the two arms ARE separable - a future caller who adds a second delete
+		// path without the lock, or who drops the FOR UPDATE (mutation M12,
+		// declared unkillable), makes this reachable immediately - and the cost of
+		// being wrong is reporting a destruction that did not happen.
 		writeError(w, http.StatusConflict, "worker was modified concurrently; retry")
 		return
 	}

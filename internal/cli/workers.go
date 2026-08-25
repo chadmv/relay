@@ -189,7 +189,7 @@ func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, 
 		fmt.Fprintf(w, "would delete worker %s (its assignments are requeued, its reservations scrubbed, its enrollment link nulled).\n", target)
 		return fmt.Errorf("refusing to delete without --yes")
 	}
-	id, err := resolveWorkerID(ctx, c, target)
+	id, err := resolveWorkerIDIncludingRevoked(ctx, c, target)
 	if err != nil {
 		return err
 	}
@@ -203,18 +203,40 @@ func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, 
 }
 
 // resolveWorkerID returns the UUID for target, resolving a hostname via GET
-// /v1/workers and, on a miss, GET /v1/workers/revoked.
+// /v1/workers when target is not already UUID-shaped.
+//
+// IT DOES NOT SEE REVOKED WORKERS, and that is deliberate rather than an
+// oversight - see resolveWorkerIDIncludingRevoked, which only `delete` calls.
+// Widening this helper would silently give disable, enable, workspaces and
+// evict-workspace the ability to be addressed by a revoked worker's hostname,
+// which nobody asked for and which is a behaviour change with no spec of its own.
+// It would also cost every hostname MISS on those four commands a second request,
+// which for a non-admin is a 403 on an endpoint they did not ask about.
+func resolveWorkerID(ctx context.Context, c *relayclient.Client, target string) (string, error) {
+	return resolveWorkerIDIn(ctx, c, target, "/v1/workers")
+}
+
+// resolveWorkerIDIncludingRevoked resolves a hostname against GET /v1/workers
+// and, on a miss, GET /v1/workers/revoked. ONLY doWorkersDelete CALLS THIS.
 //
 // THE FALLBACK IS NOT COSMETIC. Every paginated variant behind GET /v1/workers
 // carries `WHERE status != 'revoked'` (query/workers.sql), so without it a
 // hostname cannot be resolved for exactly the rows an operator most wants to
-// delete. The primary list is tried first, so a live worker never costs a second
-// round trip and no existing caller's behaviour changes for a non-revoked host.
-func resolveWorkerID(ctx context.Context, c *relayclient.Client, target string) (string, error) {
+// delete - revoke-then-later-delete is the natural sequence, and it would break
+// on the second step. Delete is the one verb for which reaching a revoked row by
+// hostname is the POINT, so the widening is scoped to it.
+func resolveWorkerIDIncludingRevoked(ctx context.Context, c *relayclient.Client, target string) (string, error) {
+	return resolveWorkerIDIn(ctx, c, target, "/v1/workers", "/v1/workers/revoked")
+}
+
+// resolveWorkerIDIn is the shared body. THE PATH ORDER IS THE CALLER'S CONTRACT,
+// not an implementation detail: the primary list is tried first so a live worker
+// never costs a second round trip.
+func resolveWorkerIDIn(ctx context.Context, c *relayclient.Client, target string, paths ...string) (string, error) {
 	if looksLikeUUID(target) {
 		return target, nil
 	}
-	for _, path := range []string{"/v1/workers", "/v1/workers/revoked"} {
+	for _, path := range paths {
 		workers, _, err := relayclient.FetchAllPages[workerResp](ctx, c, path, nil, 0)
 		if err != nil {
 			// The revoked list is admin-only; a non-admin caller gets an error
