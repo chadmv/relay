@@ -18,6 +18,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
+import { parse as parsePgConnectionString } from 'pg-connection-string'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runDir = join(here, '.run')
@@ -34,12 +35,23 @@ const dbName = decodeURIComponent(target.pathname.replace(/^\//, ''))
 // ALLOW-LIST, not a deny-list. `relay` and `postgres`/`template1` were the
 // previous three-entry deny-list; the server already refuses to bootstrap
 // against a database with an existing admin (relay -> 401, no diagnostic) and
-// Postgres itself refuses to drop the template databases, so `relay` was the
-// only entry doing any work, and a deny-list's failure mode is "everything not
-// named" - `relay_e2e_prod` or any other name a typo or a copy-pasted DSN might
-// carry would sail through the old check and get dropped. This regex subsumes
-// the old "simple identifier" shape check too - one check, not two.
-const ALLOWED_DB_NAME = /^relay_e2e(_[A-Za-z0-9]+)?$/
+// Postgres itself refuses to drop template1 and the other real template
+// databases (postgres itself is protected only because the admin client
+// below connects TO it, not because it is a template database), so `relay`
+// was the only entry doing any real work, and a deny-list's failure mode is
+// "everything not named" - a typo or a copy-pasted DSN naming anything else
+// would sail through the old check and get dropped.
+//
+// EXACT MATCH, not a prefix. An earlier version of this allow-list was
+// `/^relay_e2e(_[A-Za-z0-9]+)?$/`, meant to leave room for a per-lane suffix
+// on a future parallel run. Measured directly: that pattern accepts
+// `relay_e2e_prod` too - the exact typo/copy-paste shape this check exists to
+// catch - and dropped and recreated it. Nothing in this repo runs parallel
+// e2e lanes today (playwright.config.ts pins `workers: 1`, and there is one
+// CI job), so there is no real suffix to allow for yet. If parallel lanes are
+// added, widen this to the specific run-id shape they actually use, not to an
+// open-ended one.
+const ALLOWED_DB_NAME = /^relay_e2e$/
 if (!ALLOWED_DB_NAME.test(dbName)) {
   throw new Error(
     `refusing to drop ${JSON.stringify(dbName)}: RELAY_E2E_DATABASE_URL must name a dedicated e2e database matching ${ALLOWED_DB_NAME}`,
@@ -50,8 +62,14 @@ if (!ALLOWED_DB_NAME.test(dbName)) {
 // `relay_e2e` on a remote host - `prod-db.internal`, say - through: this drops
 // it WITH (FORCE), which terminates whatever live sessions that database has,
 // on the strength of nothing but a hostname nobody validated. Gated behind an
-// explicit opt-in so remote use, if ever wanted, shows up in a diff rather than
-// silently working.
+// explicit opt-in so remote use, if ever wanted, requires someone to type
+// `RELAY_E2E_ALLOW_REMOTE=1` in the invoking shell rather than silently
+// working - an env var leaves no trace in a diff the way a code change would,
+// so the visibility this buys is at the point of use, not in review.
+//
+// ONE FLAG RELAXES ALL THREE checks below (database, HTTP and gRPC host) -
+// `allowRemote` is read once here and short-circuits every `assertLoopback`
+// call in this file.
 const allowRemote = process.env.RELAY_E2E_ALLOW_REMOTE === '1'
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
 function assertLoopback(hostname, label) {
@@ -62,7 +80,24 @@ function assertLoopback(hostname, label) {
     )
   }
 }
-assertLoopback(target.hostname, 'RELAY_E2E_DATABASE_URL host')
+// Resolve the host the SAME WAY `pg` itself will, not via `new URL().hostname`.
+// `pg-connection-string` (which `pg` uses internally to parse the connection
+// string) honors a `host` query parameter over the URL's own hostname -
+// node_modules/pg-connection-string/index.js's `if (!config.host)` guard only
+// falls back to the URL hostname when no `host` param is present - and `pg`'s
+// ConnectionParameters.host, the value actually passed to dns.lookup() when
+// opening the socket, is that resolved value. Checking `target.hostname`
+// let a `?host=` query parameter smuggle a non-loopback host past this gate
+// while `pg` connected to it anyway. Measured directly:
+// `postgres://relay:relay@127.0.0.1:5432/relay_e2e?sslmode=disable&host=prod-db.internal`
+// passed a `target.hostname`-based check and then attempted to reach
+// `prod-db.internal` - it would have run DROP DATABASE ... WITH (FORCE) there
+// had it resolved. `port` and `hostaddr` query params don't have the same
+// hazard: node-postgres's ConnectionParameters never reads `hostaddr` at all,
+// and an overridden `port` alone can't redirect the connection to a different
+// network host.
+const resolvedDbHost = parsePgConnectionString(databaseUrl).host
+assertLoopback(resolvedDbHost, 'RELAY_E2E_DATABASE_URL host (resolved)')
 
 const adminUrl = new URL(databaseUrl)
 adminUrl.pathname = '/postgres'
