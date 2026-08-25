@@ -70,8 +70,20 @@ export function surfaces(): Surface[] {
     },
     { name: 'job-new', path: () => '/jobs/new', population: 'populated', ready: h1('New job') },
 
-    // EMPTY-STATE ONLY: no agent runs, so no worker row exists.
-    { name: 'workers', path: () => '/workers', population: 'empty', ready: h1('Workers') },
+    // EMPTY-STATE ONLY: no agent runs, so no worker row exists. Gated on the
+    // page's actual empty-state copy (WorkersPage.tsx: "No workers enrolled
+    // yet."), not on the <h1> alone - the h1 renders during the pre-fetch
+    // skeleton too (measured: it resolved in 35ms, before GET /v1/workers had
+    // even returned), so an h1-only gate is an any-state pass and certifies
+    // nothing about the empty state it claims to cover.
+    {
+      name: 'workers',
+      path: () => '/workers',
+      population: 'empty',
+      ready: async (p) => {
+        await expect(p.getByText('No workers enrolled yet.')).toBeVisible()
+      },
+    },
 
     {
       name: 'schedules',
@@ -136,18 +148,36 @@ export function surfaces(): Surface[] {
       path: () => '/admin/server',
       population: 'populated',
       ready: async (p) => {
-        // NavLink sets aria-current="page" on the active tab
-        // (web/src/admin/AdminTabs.tsx:19-31), which is a cheaper and more
-        // specific readiness signal than any of the tab's own numbers.
-        await expect(p.getByRole('link', { name: 'Server' })).toHaveAttribute('aria-current', 'page')
+        // NOT aria-current="page": that is set by the router on mount, before
+        // any of the tab's four queries (GET /v1/jobs/stats, GET
+        // /v1/workers/stats, GET /v1/config x2) have returned - measured, it
+        // resolved in 53ms under a 2500ms API delay (the eight other populated
+        // surfaces took ~2900ms) and it STILL resolved with every API forced to
+        // 500. It certifies navigation, not readiness. Gated instead on the
+        // Access panel's Chip (ServerTab.tsx:104-106), which renders only once
+        // config.data has actually landed - ErrorStrip renders in its place on
+        // a failure, so this locator does not appear at all under a forced 500.
+        // Scoped to the "Self-registration" row specifically: the fleet stats
+        // grid on this same page has its own StatCell labelled DISABLED
+        // (ServerTab.tsx:44), and an unscoped text match resolves to both -
+        // measured directly, a strict-mode violation.
+        const row = p.getByText('Self-registration').locator('xpath=..')
+        await expect(row.getByText(/^(ENABLED|DISABLED)$/)).toBeVisible()
       },
     },
     {
       name: 'profile',
       path: () => '/profile/identity',
       population: 'populated',
-      ready: async (p) => {
-        await expect(p.locator('main h1')).toBeVisible()
+      ready: async (p, seed) => {
+        // NOT `main h1`: that locator matches the <h1> on every one of these
+        // surfaces, so it certifies nothing specific to this page - it would
+        // pass equally on a page that failed to load the signed-in user at
+        // all. Gated on the meta strip's own email testid
+        // (ProfilePage.tsx:79), whose text is the AuthProvider user's real
+        // email and must equal the seeded admin's - a locator that can only
+        // pass once this page has actually rendered ITS data.
+        await expect(p.getByTestId('meta-email')).toHaveText(seed.adminEmail)
       },
     },
   ]
