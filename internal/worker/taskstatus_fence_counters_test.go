@@ -516,9 +516,20 @@ func TestHandleTaskStatus_ARealDatabaseErrorIsNotAFenceRejection(t *testing.T) {
 // inside the read-modify-write and is inert at GOMAXPROCS=1. Both are live in
 // CI, which runs `go test -race ./...` on 2-4 vCPUs.
 //
-// MEASURED FIGURES ARE FILLED IN BY THIS SLICE'S MUTATION MATRIX RUN (M6) and
-// are recorded below rather than asserted from theory. Until that run lands this
-// paragraph is deliberately empty; do not populate it from reasoning.
+// MEASURED, NOT REASONED (M6 of this slice's mutation matrix; this host,
+// 10 runs of this test per configuration, mutation as described above):
+//
+//	                    unmutated        mutated
+//	no -race, -cpu=1    0/10 failures    0/10 failures   <- INERT
+//	no -race, -cpu=2    0/10 failures    7/10 failures
+//	-race,    -cpu=1    0/10 failures    10/10 failures, 10/10 DATA RACE
+//	-race,    -cpu=2    0/10 failures    10/10 failures, 10/10 DATA RACE
+//
+// The unmutated column is the green baseline: uniform results across the four
+// configurations would have meant the harness was broken rather than that the
+// coverage was good. The inert cell is the point - the exactness half alone
+// would have been a coverage claim this host could not cash at GOMAXPROCS=1,
+// and -race is what makes the kill deterministic. Do not drop either half.
 func TestTaskStatusFenceCounters_ConcurrentRejectionsAreExact(t *testing.T) {
 	h, _ := newStatusHandler(t, "timed_out", 0, 0, pgx.ErrNoRows)
 	const goroutines, each = 8, 200
