@@ -39,6 +39,17 @@ type disableWorkerResponse struct {
 	RequeuedTasks int `json:"requeued_tasks"`
 }
 
+// deleteWorkerResponse is the body returned by DELETE /v1/workers/{id}. It is a
+// 200 with a body rather than a 204 ON PURPOSE (spec 6.4): relay has no audit
+// log, so these three counts are the ONLY record of what the delete destroyed.
+// The embedded workerResponse is the row as it was, read under the FOR UPDATE.
+type deleteWorkerResponse struct {
+	workerResponse
+	RequeuedTasks       int `json:"requeued_tasks"`
+	ReservationsUpdated int `json:"reservations_updated"`
+	EnrollmentsUnlinked int `json:"enrollments_unlinked"`
+}
+
 func toWorkerResponse(w store.Worker) workerResponse {
 	var lastSeen *time.Time
 	if w.LastSeenAt.Valid {
@@ -520,6 +531,89 @@ func (s *Server) handleDisableWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, disableWorkerResponse{
 		workerResponse: toWorkerResponse(updated),
 		RequeuedTasks:  len(requeuedIDs),
+	})
+}
+
+// handleDeleteWorker destroys a worker identity (admin-only). Delete is the only
+// verb that frees the hostname: revoke keeps the row, and every enrollment path
+// keys on the UNIQUE hostname column.
+//
+// THE STATEMENT ORDER IS THE CORRECTNESS ARGUMENT, not a style choice. This is
+// CLAUDE.md's first invariant in its original wording - end the generation before
+// releasing the resource. The generation is tasks.assignment_epoch; the resource
+// is the workers row. If the DELETE ran first, the FK's ON DELETE SET NULL would
+// null tasks.worker_id with no epoch bump, and the row would then be unreachable
+// by every worker-keyed statement in the tree, running forever, holding no slot,
+// with its job never leaving 'running'. The requeue would then match zero rows
+// and this handler would cheerfully report "requeued_tasks": 0.
+func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid worker id")
+		return
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	defer tx.Rollback(ctx)
+	q := s.q.WithTx(tx)
+
+	// 1. Lock the worker row FIRST, matching both enrollment transactions' lock
+	// order, and read the identity the response and the log line report.
+	current, err := q.GetWorkerForUpdate(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	// 2. End every assignment generation while worker_id still names them.
+	requeued, err := q.RequeueWorkerTasks(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "requeue tasks failed")
+		return
+	}
+
+	// 3. Release the resource. :execrows, and the zero case is handled rather
+	// than assumed - Task 6 turns it into the 409 it should be.
+	n, err := q.DeleteWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "delete worker failed")
+		return
+	}
+	if n == 0 {
+		writeError(w, http.StatusInternalServerError, "delete worker failed")
+		return
+	}
+
+	// 4. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
+	if len(requeued) > 0 {
+		if err := q.NotifyTaskSubmitted(ctx); err != nil {
+			writeError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// NO CANCEL SIGNALS, deliberately. handleDisableWorker sends them because a
+	// disabled worker is still connected; delete refuses a connected worker, so
+	// by construction there is no agent to tell and sending anyway would imply a
+	// connection this path exists to forbid (spec 6.3).
+
+	writeJSON(w, http.StatusOK, deleteWorkerResponse{
+		workerResponse: toWorkerResponse(current),
+		RequeuedTasks:  len(requeued),
 	})
 }
 

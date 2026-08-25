@@ -176,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/workers/revoked", auth(admin(http.HandlerFunc(s.handleListRevokedWorkers))))
 	mux.Handle("POST /v1/workers/{id}/disable", auth(admin(http.HandlerFunc(s.handleDisableWorker))))
 	mux.Handle("POST /v1/workers/{id}/enable", auth(admin(http.HandlerFunc(s.handleEnableWorker))))
+	mux.Handle("DELETE /v1/workers/{id}", auth(admin(http.HandlerFunc(s.handleDeleteWorker))))
 
 	// User management
 	mux.Handle("GET /v1/users", auth(admin(http.HandlerFunc(s.handleListUsers))))
