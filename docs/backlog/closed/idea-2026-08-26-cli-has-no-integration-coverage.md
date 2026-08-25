@@ -1,7 +1,9 @@
 ---
 title: internal/cli has zero integration coverage - every CLI test drives a hand-written fake
 type: idea
-status: open
+status: closed
+closed: 2026-08-25
+resolution: duplicate
 created: 2026-08-26
 priority: medium
 source: 2026-08-26 worker-delete slice - the integration lens measured the lane at 1.0s and found no containers
@@ -64,3 +66,17 @@ different job.
 - [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - the other half: a lane CI does not run
 - `internal/cli/workers_delete_test.go`, `internal/cli/workers.go`
 - `docs/retros/2026-08-26-worker-delete.md`
+
+## Resolution
+Closed 2026-08-25 as a duplicate of [[idea-2026-08-23-cli-tests-never-hit-real-server]], which is
+the outcome this item's own Proposal and Acceptance asked for ("fold this evidence into it and close
+this as a duplicate"). Both of its distinguishing contributions were folded into that item first, in
+`8da5a5e`: the runtime measurement (no `go:build integration` file and no testcontainers in the
+package; `internal/cli` finishes in 1.0s under the integration tag against 257s for `internal/store`
+and 175s for `internal/worker`) and the `relay workers delete` stakes as the first irreversible
+command, which also became an explicit acceptance criterion there.
+
+The surviving item was raised `low` -> `medium` in the same commit. Two confirmed instances of the
+gap now exist, neither of which this item predates knowing about: `relay logs` has printed nothing
+for any job since 2026-05-08, and the Python SDK's `task_logs()` cannot return records - both hidden
+by exactly the hand-written-fixture pattern both items describe.
