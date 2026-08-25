@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -336,15 +337,41 @@ func TestTaskStatusFenceRejections_TwoHandlersDoNotShareCounts(t *testing.T) {
 // and reads a set that is not a predicate at all. A quoted allow-list in prose
 // is exactly the thing this guard must not mistake for the statement's own.
 //
-// IT IS TWO-DIRECTIONAL, AND THE SECOND DIRECTION WAS MISSING. The loops below
-// assert SQL -> Go (everything the statement admits, taskStatusIsWritable calls
-// writable) and that the terminal triple is not writable. Neither of those sees
-// a GO-SIDE EXTRA - a status the mirror calls writable that the statement does
-// not admit - which is the exact edit this file's own production comment
-// anticipates: `preparing` added here ahead of the SQL. That drift mislabels
-// every genuine terminality rejection for such a row as `raced`, quietly zeroing
-// the actionable key for it. taskStatusUniverse closes it by comparing the two
-// as a PREDICATE over a candidate set rather than as one containment.
+// IT IS TWO-DIRECTIONAL, AND THE SECOND DIRECTION TOOK TWO GOES. The first two
+// loops below assert SQL -> Go (everything the statement admits,
+// taskStatusIsWritable calls writable) and that the terminal triple is not
+// writable. Neither sees a GO-SIDE EXTRA - a status the mirror calls writable
+// that the statement does not admit - which is the edit this file's own
+// production comment anticipates: `preparing` added here ahead of the SQL. That
+// drift mislabels every genuine terminality rejection for such a row as `raced`,
+// quietly zeroing the actionable key for it.
+//
+// THE FIRST ATTEMPT AT THAT DIRECTION WAS A UNIVERSE LOOP, AND IT ONLY CLOSED
+// HALF OF IT - measured, not reasoned. Iterating a candidate set and requiring
+// both sides to agree catches a Go-side extra only when SOMETHING ENUMERATES THE
+// STATUS. Adding `cancelled` to taskStatusIsWritable left `go test
+// ./internal/worker/` GREEN through three separate widenings of that candidate
+// set, because `cancelled` is not in the SQL allow-list, not in
+// tasks_status_check, and not in the proto - so no source produced it and
+// nothing iterated it. A universe can only ever contain statuses somebody has
+// already written down somewhere; the edit this guard exists to catch is
+// somebody writing one down HERE FIRST.
+//
+// SO THE CLOSING RUNG READS THE MIRROR'S OWN SOURCE. taskStatusWritableLiterals
+// pulls every string literal out of taskStatusIsWritable's body via go/ast and
+// the last block below compares that to the SQL allow-list AS A SET, in both
+// directions, with no candidate set in the middle. A status of ANY spelling
+// added to the Go mirror is then caught whether or not any other source has ever
+// heard of it. It is an AST parse and not a text scan for the reason the
+// Table-minWidth guard was deleted over: a `//` comment naming a status is not a
+// literal in the AST, so it cannot feed this parse the way it could feed a grep.
+//
+// THE UNIVERSE LOOP STAYS, and it is NOT redundant with the rung above even
+// though it is weaker. It is the BEHAVIOURAL half: it calls the function rather
+// than reading it, so it survives the function being rewritten into a shape the
+// literal parse cannot interpret, and it is what kills the deny-list rewrite
+// (`case "done","failed","timed_out": return false` - measured, fails naming
+// `prepare_failed`). Keep both; they fail on disjoint edits.
 //
 // STATE THE STAKE HONESTLY, because it is lower than every other status
 // allow-list in this tree and a reader who assumes otherwise will over-react to
@@ -403,12 +430,15 @@ func TestTaskStatusWritableSetMatchesTheSQLAllowList(t *testing.T) {
 					"read zero forever - the actionable key silenced.", s, stmt)
 		}
 
-		// GO -> SQL, the direction the two loops above cannot see.
+		// GO -> SQL, BEHAVIOURALLY, over a candidate set. Weaker than the set
+		// comparison after the loop - it sees only statuses some source
+		// enumerates - but it calls the function instead of reading it, which is
+		// what kills a rewritten body.
 		inSQL := map[string]bool{}
 		for _, s := range want {
 			inSQL[s] = true
 		}
-		for _, c := range taskStatusUniverse(want) {
+		for _, c := range taskStatusUniverse(t, want) {
 			require.Equal(t, inSQL[c], taskStatusIsWritable(c),
 				"taskStatusIsWritable(%q) is %v and %s's allow-list %s it. The two must agree in BOTH "+
 					"directions: a status the Go mirror admits and the statement does not means every "+
@@ -417,21 +447,117 @@ func TestTaskStatusWritableSetMatchesTheSQLAllowList(t *testing.T) {
 					"actionable key for that state.",
 				c, taskStatusIsWritable(c), stmt, map[bool]string{true: "admits", false: "does not admit"}[inSQL[c]], c)
 		}
+
+		// GO -> SQL AS A SET, with no candidate set in the middle. This is the
+		// rung that sees a status nothing else in the tree has ever named.
+		sort.Strings(want)
+		require.Equal(t, want, taskStatusWritableLiterals(t),
+			"taskStatusIsWritable's own source names a different set of statuses than %s's allow-list. "+
+				"A status the Go mirror admits and the statement does not mislabels every genuine "+
+				"terminality rejection for such a row as `raced`, silencing the actionable key for it; "+
+				"one the statement admits and the mirror does not does the reverse. Unlike the loop "+
+				"above this comparison needs no source to have enumerated the status, which is the "+
+				"whole point - it is the only thing here that catches a status invented at this "+
+				"function.", stmt)
 	}
 }
 
-// taskStatusUniverse is the candidate set the two-directional comparison above
-// runs over: everything the SQL allow-list names, plus every status the WIRE can
-// carry (proto TaskStatus, less UNSPECIFIED, lowercased off its enum prefix).
+// taskStatusWritableLiterals returns every string literal in the body of
+// taskStatusIsWritable, sorted and deduplicated.
 //
-// THE PROTO IS THE HALF THAT MATTERS and it is why this is a property rather
-// than a spelling. The universe has to contain the statuses somebody might add
-// to the Go mirror next, and the proto is where they appear FIRST:
-// TASK_STATUS_PREPARING is already in relay.proto and the agent already streams
-// LOG_STREAM_PREPARE chunks, so `preparing` is a candidate here today, years
-// before it is a value in tasks_status_check. A universe read out of tasks.sql
-// alone would not contain it, and the guard would pass through the one edit it
-// exists to catch.
+// READING THE FUNCTION IS THE POINT. Every other assertion in this guard CALLS
+// it, and a call can only ask about a status the caller already knows to ask
+// about. This reads the set the function was written with, so a status that
+// exists nowhere else in the tree is still compared against the SQL.
+//
+// IT FAILS CLOSED IN THREE WAYS, because a parse that silently returns nothing
+// would make the set comparison it feeds pass by agreeing with an empty SQL
+// allow-list only, and quietly do nothing otherwise. The function must be found,
+// it must contain at least one literal, and every literal in it must be an
+// untyped string constant - so a body rewritten to compare against a variable,
+// a constant identifier or another function's result fails here with a message
+// saying to re-derive the guard, rather than reporting an empty set.
+//
+// COMMENTS CANNOT REACH IT: parser.ParseDir is called with mode 0, so comments
+// are not attached and are not nodes. That is the difference between this and a
+// grep, and it is the reason this rung is allowed to exist at all given what a
+// one-comment evasion did to the Table-minWidth guard.
+func taskStatusWritableLiterals(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	require.NoError(t, err)
+
+	var fn *ast.FuncDecl
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "taskStatusIsWritable" {
+					require.Nil(t, fn, "taskStatusIsWritable is declared more than once in this package")
+					fn = fd
+				}
+			}
+		}
+	}
+	require.NotNil(t, fn,
+		"no func taskStatusIsWritable in package worker. It was renamed or removed; this guard reads "+
+			"its source, so re-point it rather than deleting it - the SQL mirror still needs comparing.")
+
+	seen := map[string]bool{}
+	var out []string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok {
+			return true
+		}
+		require.Equal(t, token.STRING, lit.Kind,
+			"taskStatusIsWritable contains a non-string literal %s at %s. This guard assumes every "+
+				"literal in the body is a status; re-derive it.", lit.Value, fset.Position(lit.Pos()))
+		s, err := strconv.Unquote(lit.Value)
+		require.NoError(t, err)
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+		return true
+	})
+	require.NotEmpty(t, out,
+		"parsed no string literals out of taskStatusIsWritable's body. It no longer names its statuses "+
+			"inline - it now reads them from somewhere else - so this guard is comparing nothing and "+
+			"would pass vacuously. Re-point it at whatever now holds the set.")
+
+	sort.Strings(out)
+	return out
+}
+
+// taskStatusUniverse is the candidate set the two-directional comparison above
+// runs over. It is the union of THREE sources, and it took all three:
+//
+//   - THE SQL ALLOW-LIST the caller just parsed. Everything the statement
+//     admits.
+//   - THE COLUMN VOCABULARY - tasks_status_check, read out of the migration that
+//     adds it. WHAT A ROW CAN ACTUALLY HOLD, which is the half the first two
+//     sources omit and the reason this helper was one-directional in practice
+//     after being written as two. Measured: with only the allow-list and the
+//     proto in the universe, adding `cancelled` to taskStatusIsWritable left
+//     `go test ./internal/worker/` GREEN, because `cancelled` is in neither
+//     source and so nothing iterated it. `cancelled` is the live candidate -
+//     CancelJobTasks squashes cancellation onto `failed` today and
+//     internal/store/tasks_status_vocabulary_lockstep_test.go names it as the
+//     status somebody will eventually want for real.
+//   - THE WIRE - proto TaskStatus, less UNSPECIFIED, lowercased off its enum
+//     prefix.
+//
+// THE PROTO IS NOT REDUNDANT WITH THE VOCABULARY and neither subsumes the other,
+// which is why both are here. A status appears in relay.proto BEFORE it is a
+// value in tasks_status_check: TASK_STATUS_PREPARING is in the proto today and
+// the agent already streams LOG_STREAM_PREPARE chunks, so `preparing` is a
+// candidate here years before the column can hold it. Going the other way, a
+// status can be a legal column value with no wire spelling at all, which is
+// exactly the `cancelled` shape above. The union is what makes this a property
+// rather than a spelling.
 //
 // Candidates that are not database statuses are harmless rather than excluded:
 // `prepare_failed` is a wire-only value the handler maps onto `failed`, so both
@@ -439,7 +565,8 @@ func TestTaskStatusWritableSetMatchesTheSQLAllowList(t *testing.T) {
 // be the spelling rung; letting it through is the property rung.
 //
 // Sorted so a failure names the same status every run.
-func taskStatusUniverse(sqlAllowList []string) []string {
+func taskStatusUniverse(t *testing.T, sqlAllowList []string) []string {
+	t.Helper()
 	seen := map[string]bool{}
 	var out []string
 	add := func(s string) {
@@ -451,6 +578,9 @@ func taskStatusUniverse(sqlAllowList []string) []string {
 	for _, s := range sqlAllowList {
 		add(s)
 	}
+	for _, s := range tasksStatusVocabulary(t) {
+		add(s)
+	}
 	for _, n := range relayv1.TaskStatus_name {
 		if n == "TASK_STATUS_UNSPECIFIED" {
 			continue
@@ -458,6 +588,54 @@ func taskStatusUniverse(sqlAllowList []string) []string {
 		add(strings.ToLower(strings.TrimPrefix(n, "TASK_STATUS_")))
 	}
 	sort.Strings(out)
+	return out
+}
+
+// tasksStatusVocabulary reads the literal set of tasks_status_check out of the
+// migration that adds it - the same constraint
+// internal/store/tasks_status_vocabulary_lockstep_test.go reads back off a live
+// Postgres. This lane cannot reach a database (it is the no-tag CI lane), so it
+// reads the source the constraint is built from instead.
+//
+// IT SCANS EVERY up-MIGRATION AND REQUIRES EXACTLY ONE DEFINITION rather than
+// opening 000019 by name. A hard-coded path goes stale silently the day a later
+// migration drops and re-adds the constraint with a wider set: this parse would
+// keep returning the old vocabulary and the guard would keep passing. With the
+// scan, that edit makes the count 2 and this fails with a message that says
+// which files. The down-migrations are excluded because 000019's drops the
+// constraint by name and would otherwise be a second hit.
+func tasksStatusVocabulary(t *testing.T) []string {
+	t.Helper()
+	dir := filepath.Join("..", "store", "migrations")
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+
+	// `\s` spans newlines, which matters: the ALTER TABLE is written across
+	// three lines with the constraint name on its own.
+	def := regexp.MustCompile(`ADD CONSTRAINT tasks_status_check\s+CHECK \(status IN \(([^)]*)\)`)
+	quoted := regexp.MustCompile(`'([a-z_]+)'`)
+
+	var out, from []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		require.NoError(t, err)
+		for _, m := range def.FindAllStringSubmatch(string(src), -1) {
+			from = append(from, e.Name())
+			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
+				out = append(out, q[1])
+			}
+		}
+	}
+
+	require.Len(t, from, 1,
+		"expected exactly one up-migration to ADD CONSTRAINT tasks_status_check, found %d (%v). If the "+
+			"constraint is now dropped and re-added, this parse is reading a stale vocabulary and the "+
+			"universe it feeds no longer contains every status a row can hold. Re-derive it.", len(from), from)
+	require.NotEmpty(t, out,
+		"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code", from[0])
 	return out
 }
 

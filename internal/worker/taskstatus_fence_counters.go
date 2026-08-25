@@ -194,14 +194,26 @@ func (c *statusFenceCounters) snapshot() TaskStatusFenceCounts {
 // CLAUDE.md's allow-list-never-deny-list rule exists because the wrong shape
 // fails OPEN on the next status added. This one decides nothing. It LABELS A
 // COUNTER, so drift mislabels a number and cannot admit a write. It is written
-// as the allow-list anyway, so that its shape matches the SQL it mirrors and so
-// that TestTaskStatusWritableSetMatchesTheSQLAllowList can compare the two sets
-// directly rather than the complement of one against the other.
+// as the allow-list anyway so that its shape matches the SQL it mirrors, and
+// TestTaskStatusWritableSetMatchesTheSQLAllowList exploits that: the case list
+// below is read straight out of this source with go/ast and required to EQUAL
+// the parsed SQL allow-list, as a set. That is a genuine two-way comparison and
+// not a complement check, so a status added here that appears in no other source
+// in the tree - not the SQL, not tasks_status_check, not the proto - is still
+// caught. An earlier version of this sentence claimed the comparison before the
+// comparison existed; the guard iterated a candidate set instead, and `cancelled`
+// added here went through it green.
 //
 // A NEW NON-TERMINAL STATUS (`preparing` is the live candidate: TASK_STATUS_
 // PREPARING is already in the proto) MUST BE ADDED HERE at the same time it is
 // added to those two SQL allow-lists, or a rejection for such a row is labelled
-// `duplicate`/`conflicting` when it is in fact a race. The guard test goes RED.
+// `duplicate`/`conflicting` when it is in fact a race. Adding it here first
+// fails the set comparison; adding it to the SQL first fails the containment
+// loop. Either order goes RED until both sides move.
+//
+// KEEP THE STATUSES SPELLED INLINE. Moving them to a var, a const or another
+// function is not a refactor here - it is what the guard's own fail-closed arm
+// exists for, and it fails with a message saying so.
 func taskStatusIsWritable(status string) bool {
 	switch status {
 	case "pending", "dispatched", "running":
