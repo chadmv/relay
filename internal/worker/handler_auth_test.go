@@ -514,51 +514,78 @@ func TestConnect_AutoEnrollRefusesRevokedWorker(t *testing.T) {
 	assert.Equal(t, "revoked", w.Status)
 }
 
-func TestConnect_AutoEnrollRotatesTokenForExistingHost(t *testing.T) {
+// TestConnect_AutoEnrollRefusesAnExistingHostnameAndLeavesItsTokenIntact is the
+// integration arm of item 1's criterion 1, and it is the REWRITE of
+// TestConnect_AutoEnrollRotatesTokenForExistingHost. That test asserted the
+// takeover as desirable ("re-enrollment should rotate the agent token") and its
+// three assertions are inverted here, deliberately: the second token-less enroll
+// is refused, the FIRST worker's token still authenticates, and the row's
+// agent_token_hash is byte-identical afterwards. It is a defect pinned by a test,
+// not an assertion relaxed to fit new code.
+func TestConnect_AutoEnrollRefusesAnExistingHostnameAndLeavesItsTokenIntact(t *testing.T) {
 	fx := newWorkerTestFixture(t)
 	fx.Handler.AllowAutoEnroll = true
+	ctx := context.Background()
 
-	enroll := func() string {
-		stream := newMockConnectStream(t)
-		stream.SendToServer(&relayv1.AgentMessage{
-			Payload: &relayv1.AgentMessage_Register{
-				Register: &relayv1.RegisterRequest{
-					Hostname: "rotate-host",
-					CpuCores: 4, RamGb: 8, Os: "linux",
-				},
-			},
-		})
-		done := make(chan error, 1)
-		go func() { done <- fx.Handler.Connect(stream) }()
-		resp := stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
-		require.NotNil(t, resp)
-		stream.CloseSend()
-		<-done
-		return resp.AgentToken
-	}
-
-	first := enroll()
-	second := enroll()
-	require.NotEmpty(t, first)
-	require.NotEmpty(t, second)
-	assert.NotEqual(t, first, second, "re-enrollment should rotate the agent token")
-
-	// Reconnect with the rotated (second) token must succeed.
-	stream := newMockConnectStream(t)
-	stream.SendToServer(&relayv1.AgentMessage{
+	// First enrollment: a fresh hostname, so it succeeds and mints a token.
+	stream1 := newMockConnectStream(t)
+	stream1.SendToServer(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_Register{
 			Register: &relayv1.RegisterRequest{
-				Hostname: "rotate-host",
-				CpuCores: 4, RamGb: 8, Os: "linux",
-				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: second},
+				Hostname: "takeover-host", CpuCores: 4, RamGb: 8, Os: "linux",
 			},
 		},
 	})
-	done := make(chan error, 1)
-	go func() { done <- fx.Handler.Connect(stream) }()
-	require.NotNil(t, stream.RecvFromServer(t, 5*time.Second).GetRegisterResponse())
-	stream.CloseSend()
-	<-done
+	done1 := make(chan error, 1)
+	go func() { done1 <- fx.Handler.Connect(stream1) }()
+	resp1 := stream1.RecvFromServer(t, 5*time.Second).GetRegisterResponse()
+	require.NotNil(t, resp1)
+	first := resp1.AgentToken
+	require.NotEmpty(t, first)
+	stream1.CloseSend()
+	<-done1
+
+	before, err := fx.Q.GetWorkerByHostname(ctx, "takeover-host")
+	require.NoError(t, err)
+	require.NotNil(t, before.AgentTokenHash)
+
+	// Second token-less enroll of the SAME hostname: the takeover attempt.
+	stream2 := newMockConnectStream(t)
+	stream2.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "takeover-host", CpuCores: 64, RamGb: 512, Os: "linux",
+			},
+		},
+	})
+	done2 := make(chan error, 1)
+	go func() { done2 <- fx.Handler.Connect(stream2) }()
+	err2 := <-done2
+	require.Error(t, err2)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err2))
+
+	after, err := fx.Q.GetWorkerByHostname(ctx, "takeover-host")
+	require.NoError(t, err)
+	require.NotNil(t, after.AgentTokenHash)
+	assert.Equal(t, *before.AgentTokenHash, *after.AgentTokenHash,
+		"the existing worker's agent_token_hash must be byte-identical after a refused takeover")
+
+	// The ORIGINAL agent's token still authenticates. This is the assertion the
+	// old test made about the CLAIMANT's token.
+	stream3 := newMockConnectStream(t)
+	stream3.SendToServer(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_Register{
+			Register: &relayv1.RegisterRequest{
+				Hostname: "takeover-host", CpuCores: 4, RamGb: 8, Os: "linux",
+				Credential: &relayv1.RegisterRequest_AgentToken{AgentToken: first},
+			},
+		},
+	})
+	done3 := make(chan error, 1)
+	go func() { done3 <- fx.Handler.Connect(stream3) }()
+	require.NotNil(t, stream3.RecvFromServer(t, 5*time.Second).GetRegisterResponse())
+	stream3.CloseSend()
+	<-done3
 }
 
 func TestConnect_NoCredentialRejected(t *testing.T) {
