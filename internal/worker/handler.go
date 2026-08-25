@@ -1948,7 +1948,9 @@ func (h *Handler) markWorkerOffline(workerID string, epoch int32) (int64, error)
 		// it is allowed on a frame that has no ingest budget. Nothing here is
 		// peer-drivable: workerID is uuidStr() over a RETURNING UUID, the statement
 		// runs on context.Background() so a dead peer cannot cancel it into an
-		// error, and no code path deletes a worker row. An agent reconnect loop
+		// error, and a DELETED worker row makes MarkWorkerOfflineIfEpoch match zero
+		// rows rather than error, so the delete path added on 2026-08-26 does not
+		// reach this branch either. An agent reconnect loop
 		// cannot make this line fire; only a broken pool can, and then the volume
 		// is the pool's, not the fleet's.
 		log.Printf("worker: could not mark %s offline at epoch %d, releasing anyway: %v", workerID, epoch, err)

@@ -162,13 +162,15 @@ func doWorkersRevoke(ctx context.Context, c *relayclient.Client, args []string, 
 	return nil
 }
 
-/// deleteResp decodes the counts DELETE /v1/workers/{id} reports. Relay has no
-// audit log, so these three numbers are the only record of what was destroyed.
+// deleteResp decodes what DELETE /v1/workers/{id} reports. Relay has no audit
+// log, so the hostname plus these four numbers are the only record of what was
+// destroyed - which is why Hostname is printed and not merely decoded.
 type deleteResp struct {
 	Hostname            string `json:"hostname"`
 	RequeuedTasks       int    `json:"requeued_tasks"`
 	ReservationsUpdated int    `json:"reservations_updated"`
 	EnrollmentsUnlinked int    `json:"enrollments_unlinked"`
+	AttributionCleared  int    `json:"attribution_cleared"`
 }
 
 // doWorkersDelete destroys a worker identity (admin only). --yes IS REQUIRED AND
@@ -182,6 +184,13 @@ func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, 
 	}
 	if fs.NArg() == 0 {
 		return fmt.Errorf("usage: relay workers delete --yes <worker-id-or-hostname>")
+	}
+	// REFUSE AMBIGUITY rather than silently taking the first. fs.Arg(0) alone
+	// meant `delete --yes hostA hostB` destroyed hostA, reported success, and
+	// named neither - unacceptable for a command with no undo.
+	if fs.NArg() > 1 {
+		return fmt.Errorf("delete takes exactly one worker, got %d (%v); there is no undo, so run it once per worker",
+			fs.NArg(), fs.Args())
 	}
 	target := fs.Arg(0)
 	// The refusal prints BEFORE resolving the id, so it issues no request at all.
@@ -197,8 +206,10 @@ func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, 
 	if err := c.Do(ctx, "DELETE", "/v1/workers/"+id, nil, &resp); err != nil {
 		return fmt.Errorf("delete worker: %w", err)
 	}
-	fmt.Fprintf(w, "deleted; %d task(s) requeued, %d reservation(s) updated, %d enrollment(s) unlinked.\n",
-		resp.RequeuedTasks, resp.ReservationsUpdated, resp.EnrollmentsUnlinked)
+	fmt.Fprintf(w, "deleted worker %q (%s); %d task(s) requeued, %d reservation(s) updated, "+
+		"%d enrollment(s) unlinked, %d finished task(s) lost their worker attribution.\n",
+		resp.Hostname, id, resp.RequeuedTasks, resp.ReservationsUpdated,
+		resp.EnrollmentsUnlinked, resp.AttributionCleared)
 	return nil
 }
 
@@ -236,13 +247,16 @@ func resolveWorkerIDIn(ctx context.Context, c *relayclient.Client, target string
 	if looksLikeUUID(target) {
 		return target, nil
 	}
-	for _, path := range paths {
+	for i, path := range paths {
 		workers, _, err := relayclient.FetchAllPages[workerResp](ctx, c, path, nil, 0)
 		if err != nil {
-			// The revoked list is admin-only; a non-admin caller gets an error
-			// there and should still see the primary list's miss, not an auth
-			// error about an endpoint they did not ask for.
-			if path == "/v1/workers" {
+			// The PRIMARY list's error is fatal; a fallback's is soft, because the
+			// revoked list is admin-only and a non-admin should still see the
+			// primary list's miss rather than an auth error about an endpoint they
+			// did not ask for. Keyed on the INDEX, not on the path string: a
+			// literal comparison would silently turn a third path's 500 or 403
+			// into "no worker found".
+			if i == 0 {
 				return "", fmt.Errorf("list workers: %w", err)
 			}
 			break

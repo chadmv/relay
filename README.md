@@ -350,7 +350,7 @@ The agent writes two files to `--state-dir`:
 - `worker-id` — UUID assigned on first registration; reused on reconnect so the server recognises the same machine
 - `token` — long-lived authentication token issued by the server on enrollment; written at 0600 permissions
 
-On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error **the next time it connects**. Revocation does not reach a connection that is already established: nothing re-checks a credential after registration and revoking does not close the stream, so an already-connected agent keeps running the tasks it already holds and keeps writing their task logs and statuses until it disconnects for some other reason - both of those writes are fenced on the task's assignment epoch and its `worker_id`, never on the worker's status. **New dispatches stop at once**, though: revoking sets the worker's status to `revoked`, the dispatcher only selects `online` or `stale` workers, and nothing restores `online` while the stream is live. Relay sets no maximum connection age, so there is no timer that ends the connection either. To end it immediately, disable the worker and confirm it has gone offline. (Deleting the worker is **not** the way to end a live connection either, and the three relations are why. `DELETE /v1/workers/{id}` **refuses a connected worker** - it is permitted only while the row's status is `offline` or `revoked` - so it cannot take a task away from a running agent. When it does run, it does not do what an earlier revision of this paragraph claimed. `tasks.worker_id` is `ON DELETE SET NULL`, so a naive delete would orphan running tasks rather than destroy them; the handler therefore **requeues them first, in the same transaction**, which ends each assignment generation with an epoch bump while `worker_id` still names it. `reservations.worker_ids` is a bare `UUID[]` with no foreign key, so a naive delete would leave reservations naming a phantom; the handler **scrubs the id out** of every reservation naming it. And `agent_enrollments.consumed_by` has no `ON DELETE` action at all, so a naive delete would **fail outright** for any worker ever enrolled with a token; the handler **nulls that link** first, leaving `consumed_at` intact.)
+On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error **the next time it connects**. Revocation does not reach a connection that is already established: nothing re-checks a credential after registration and revoking does not close the stream, so an already-connected agent keeps running the tasks it already holds and keeps writing their task logs and statuses until it disconnects for some other reason - both of those writes are fenced on the task's assignment epoch and its `worker_id`, never on the worker's status. **New dispatches stop at once**, though: revoking sets the worker's status to `revoked`, the dispatcher only selects `online` or `stale` workers, and nothing restores `online` while the stream is live. Relay sets no maximum connection age, so there is no timer that ends the connection either. To end it immediately, disable the worker and confirm it has gone offline. (Deleting the worker is **not** the way to end a live connection either. `DELETE /v1/workers/{id}` is permitted only while the row's status is `offline` or `revoked`, and **those two are not equivalent**: `offline` does mean disconnected, but `revoked` does **not** - as the sentences above say, revoking clears the credential and leaves the stream up. So delete can run against a worker that is still connected and still executing tasks. Because it requeues those tasks for somebody else, it therefore **sends the still-connected agent a cancel for each one**, exactly as `disable --requeue` does, so the subprocess is killed rather than left to duplicate the work; a cancel to an `offline` worker is a no-op. What delete does NOT do is end the connection - the agent's next reconnect fails authentication because its row is gone. When it runs, it does not do what an earlier revision of this paragraph claimed. `tasks.worker_id` is `ON DELETE SET NULL`, so a naive delete would orphan running tasks rather than destroy them; the handler therefore **requeues them first, in the same transaction**, which ends each assignment generation with an epoch bump while `worker_id` still names it. `reservations.worker_ids` is a bare `UUID[]` with no foreign key, so a naive delete would leave reservations naming a phantom; the handler **scrubs the id out** of every reservation naming it. And `agent_enrollments.consumed_by` has no `ON DELETE` action at all, so a naive delete would **fail outright** for any worker ever enrolled with a token; the handler **nulls that link** first, leaving `consumed_at` intact.)
 
 When the server runs with `RELAY_ALLOW_AUTO_ENROLL=true`, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN` attempts token-less auto-enrollment instead of exiting. If the server does not allow it, the agent exits with an authentication error. It exits the same way, with the same error, in two further cases: the hostname it presents **already has a `workers` row**, and the fleet is **at `RELAY_AUTO_ENROLL_WORKER_CEILING`**. The server returns one opaque refusal for all three, so the agent's own exit log is what names them and prescribes the remedy.
 
@@ -858,16 +858,29 @@ hostname - which matters because revoke-then-later-delete is the natural
 sequence. That costs a second request only on a miss, and **only for `delete`**:
 the other `workers` subcommands resolve against the live list alone.
 
-The delete is **permitted only while the worker is disconnected** - the row's
-status must be `offline` or `revoked`. A connected worker (`online` or `stale`,
-including a disabled one, since disable does not close the stream) is refused
-with 409: disable it and wait for it to go offline, or revoke it, first.
+The delete is **permitted only while the row's status is `offline` or `revoked`**.
+A worker that is `online` or `stale` (including a disabled one, since disable does
+not close the stream) is refused with 409: disable it and wait for it to go
+offline first. **Revoking is not a way around that**, and the 409 deliberately
+does not suggest it: revoking only clears the credential, it does not close the
+stream, so a revoked worker may still be connected and running tasks. Delete
+handles that case rather than pretending it cannot happen - it sends the
+still-connected agent a cancel for every task it requeues.
 
 In one transaction it requeues the worker's assigned tasks (they go back to
 `pending` with their assignment epoch bumped, so they are re-dispatchable rather
 than stranded), nulls the consuming enrollment's `consumed_by` while leaving
 `consumed_at` intact, removes the worker's id from every reservation naming it,
-and cascades its workspace rows away. It then prints the three counts.
+and cascades its workspace rows away. It then prints what it destroyed: the
+hostname, and four counts.
+
+The fourth count, `attribution_cleared`, is the one worth reading. `tasks.worker_id`
+is `ON DELETE SET NULL` for **every** row, but only `dispatched`/`running` tasks are
+requeued - so every **finished** task the worker ever ran silently loses its
+`worker_id`, and that field is part of the task API. After the delete, "which
+machine ran this job" is unanswerable for those rows. Nothing recovers it; the
+count exists so at least the scale of the loss is on the record. It is usually the
+largest number the command prints.
 
 Two limitations worth knowing. A reservation whose `worker_ids` becomes empty is
 **left in place**: it then reserves nothing, and nothing says so, so it must be
@@ -1396,7 +1409,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `GET` | `/v1/workers/revoked` | List revoked (decommissioned) workers for audit, newest revocation first (admin only). Paginated, same `page` envelope as `GET /v1/workers`; each item includes `revoked_at`. Sortable only by `-revoked_at` (the default). |
 | `GET` | `/v1/workers/{id}` | Get a worker |
 | `PATCH` | `/v1/workers/{id}` | Update name, labels, or max_slots (admin only) |
-| `DELETE` | `/v1/workers/{id}` | Delete a worker row (admin only). Permitted only while the worker is disconnected (`offline` or `revoked`); a connected worker returns 409. Requeues the worker's assigned tasks first, scrubs its id out of every reservation, nulls the consuming enrollment's `consumed_by`, and cascades its workspace rows. Returns 200 with `requeued_tasks`, `reservations_updated` and `enrollments_unlinked`. Frees the hostname for re-enrollment; frees ceiling budget only if the worker was not already revoked. |
+| `DELETE` | `/v1/workers/{id}` | Delete a worker row (admin only). Permitted only while the row's status is `offline` or `revoked`; `online` or `stale` returns 409. Note `revoked` does not imply disconnected (revoke does not close the stream), so a still-connected agent is sent a cancel for every task this requeues. Requeues the worker's assigned tasks first, scrubs its id out of every reservation, nulls the consuming enrollment's `consumed_by`, and cascades its workspace rows. Returns 200 with the deleted row's identity plus `requeued_tasks`, `reservations_updated`, `enrollments_unlinked` and `attribution_cleared` - the last being the count of FINISHED tasks whose `worker_id` the cascade nulls, which is unrecoverable and usually the largest number. Frees the hostname for re-enrollment; frees ceiling budget only if the worker was not already revoked. |
 | `DELETE` | `/v1/workers/{id}/token` | Revoke agent long-lived token (admin only) |
 | `POST` | `/v1/workers/{id}/disable` | Stop the scheduler from dispatching new tasks to a worker (admin only); its token and connection are kept. `?requeue=true` also requeues and cancels the worker's active tasks; the default leaves running tasks to finish. |
 | `POST` | `/v1/workers/{id}/enable` | Re-enable a disabled worker (admin only). |

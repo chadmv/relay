@@ -20,9 +20,13 @@ func TestWorkersDelete_ByIDWithYes(t *testing.T) {
 		require.Equal(t, "DELETE", r.Method)
 		require.Equal(t, "/v1/workers/"+workerID, r.URL.Path)
 		called = true
+		// THREE DISTINCT DISCRIMINATORS, not 2/1/1. Same-typed adjacent Fprintf
+		// args transpose silently: with 1 and 1 in the last two slots, swapping
+		// them survived. 2/3/5/7 makes every position identifiable.
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id": workerID, "hostname": "render-07",
-			"requeued_tasks": 2, "reservations_updated": 1, "enrollments_unlinked": 1,
+			"requeued_tasks": 2, "reservations_updated": 3, "enrollments_unlinked": 5,
+			"attribution_cleared": 7,
 		})
 	}))
 	defer srv.Close()
@@ -33,9 +37,35 @@ func TestWorkersDelete_ByIDWithYes(t *testing.T) {
 	require.True(t, called)
 	got := out.String()
 	require.Contains(t, got, "deleted")
+	// The CLI decoded Hostname and never printed it. For an irreversible command
+	// whose output README calls the only record, not naming what was destroyed is
+	// the gap; the unused field said it was meant to be there.
+	require.Contains(t, got, "render-07", "the output must name what it destroyed")
 	require.Contains(t, got, "2 task(s) requeued")
-	require.Contains(t, got, "1 reservation(s) updated")
-	require.Contains(t, got, "1 enrollment(s) unlinked")
+	require.Contains(t, got, "3 reservation(s) updated")
+	require.Contains(t, got, "5 enrollment(s) unlinked")
+	require.Contains(t, got, "7 finished task(s) lost their worker attribution")
+}
+
+// TestWorkersDelete_RejectsMoreThanOneTarget: fs.Arg(0) silently ignored every
+// extra positional, so `relay workers delete --yes hostA hostB` deleted only
+// hostA and reported success naming NEITHER argument. For an irreversible command
+// that is the worst available default.
+func TestWorkersDelete_RejectsMoreThanOneTarget(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &Config{ServerURL: srv.URL, Token: "admin-tok"}
+	var out strings.Builder
+	err := doWorkers(context.Background(), cfg,
+		[]string{"delete", "--yes", "host-a", "host-b"}, &out)
+	require.Error(t, err, "two targets must be refused, not silently narrowed to the first")
+	require.Contains(t, err.Error(), "one worker")
+	require.Empty(t, requests, "and nothing may be deleted while the command is ambiguous")
 }
 
 // TestWorkersDelete_RequiresConfirmation (T-F1). VACUITY: assert NO REQUEST WAS

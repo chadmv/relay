@@ -42,13 +42,20 @@ type disableWorkerResponse struct {
 
 // deleteWorkerResponse is the body returned by DELETE /v1/workers/{id}. It is a
 // 200 with a body rather than a 204 ON PURPOSE (spec 6.4): relay has no audit
-// log, so these three counts are the ONLY record of what the delete destroyed.
+// log, so these four counts plus the embedded identity are the ONLY record of
+// what the delete destroyed. attribution_cleared was added after review found
+// the first three omitted the LARGEST destruction - see its field comment.
 // The embedded workerResponse is the row as it was, read under the FOR UPDATE.
 type deleteWorkerResponse struct {
 	workerResponse
 	RequeuedTasks       int `json:"requeued_tasks"`
 	ReservationsUpdated int `json:"reservations_updated"`
 	EnrollmentsUnlinked int `json:"enrollments_unlinked"`
+	// AttributionCleared is the count of this worker's TERMINAL tasks whose
+	// worker_id the DELETE nulls via ON DELETE SET NULL. It is the largest thing a
+	// delete destroys and the requeue does not rescue it; worker_id is public API,
+	// so after this "which machine ran that job" is unanswerable for those rows.
+	AttributionCleared int `json:"attribution_cleared"`
 }
 
 func toWorkerResponse(w store.Worker) workerResponse {
@@ -593,7 +600,9 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	case "offline", "revoked":
 	default:
 		writeError(w, http.StatusConflict,
-			"worker is connected; disable it and wait for it to go offline, or revoke it, before deleting")
+			"worker is connected; disable it and wait for it to go offline before deleting. "+
+				"Revoking does NOT disconnect it - it only clears the credential, and a revoked "+
+				"worker may still be connected and running tasks")
 		return
 	}
 
@@ -628,7 +637,16 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Release the resource. :execrows, and the zero case is handled rather
+	// 6. Count what the DELETE is about to de-attribute. Must be read BEFORE the
+	// DELETE, because afterwards there is no worker_id left to count by - unlike
+	// the reservation scrub above, this one really does depend on running first.
+	attributionCleared, err := q.CountTerminalTasksForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count task attribution failed")
+		return
+	}
+
+	// 7. Release the resource. :execrows, and the zero case is handled rather
 	// than assumed - Task 6 turns it into the 409 it should be.
 	n, err := q.DeleteWorker(ctx, id)
 	if err != nil {
@@ -657,7 +675,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// 8. Wake the dispatcher so requeued tasks are placed promptly; skipped when
 	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
 	if len(requeued) > 0 {
 		if err := q.NotifyTaskSubmitted(ctx); err != nil {
@@ -676,19 +694,50 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	// driven by an unauthenticated peer. No counter, no new counters section, no
 	// new logKind. No line on refusal: a refusal changes nothing and the caller
 	// reads the 409 directly.
-	log.Printf("worker deleted: id=%s hostname=%q requeued_tasks=%d reservations_updated=%d enrollments_unlinked=%d",
-		uuidStr(id), current.Hostname, len(requeued), scrubbed, unlinked)
+	// hostname is PEER-SUPPLIED and unbounded: workers.hostname is bare TEXT and
+	// auto-enroll takes it off the wire unvalidated, so both log defences are
+	// wanted. %q escapes it (no newline injection into the log), and the .200
+	// precision clips it. This is not internal/worker's clipID: that helper is
+	// unexported there and its constant is the ingest-log budget's policy, which
+	// is a different question from this one, so the bound is stated here instead
+	// of coupling two unrelated policies. Volume needs no defence - one line per
+	// successful delete of a row that then ceases to exist, admin-gated.
+	log.Printf("api: worker deleted: id=%s hostname=%.200q requeued_tasks=%d reservations_updated=%d enrollments_unlinked=%d attribution_cleared=%d",
+		uuidStr(id), current.Hostname, len(requeued), scrubbed, unlinked, attributionCleared)
 
-	// NO CANCEL SIGNALS, deliberately. handleDisableWorker sends them because a
-	// disabled worker is still connected; delete refuses a connected worker, so
-	// by construction there is no agent to tell and sending anyway would imply a
-	// connection this path exists to forbid (spec 6.3).
+	// TELL THE AGENT, IF THERE IS ONE. The allow-list's two members are NOT
+	// equivalent here and the original version of this comment got that wrong:
+	// 'offline' does imply disconnected, but 'revoked' DOES NOT.
+	// handleDeleteWorkerToken is a single ClearWorkerAgentToken - it does not
+	// close the stream, unregister the sender, or requeue anything - and the
+	// liveness sweeper only moves online <-> stale, so revoked-and-connected is a
+	// STABLE state rather than a narrow window. Without this the requeue above
+	// hands a still-executing task to a second worker and nobody tells the first,
+	// which is a duplicate side effect (a p4 submit, a shared output path) that is
+	// INVISIBLE in the task record because the original agent's writes are
+	// correctly fenced away by the epoch bump.
+	//
+	// No branch on status is needed: Registry.Send on an unregistered id is one
+	// map lookup returning an error that this best-effort path discards, so the
+	// 'offline' arm costs nothing and cannot imply a connection. Routed through
+	// sendCancelSignals so the sends stay bounded (CLAUDE.md invariant 3), exactly
+	// as handleDisableWorker does it.
+	cancels := make([]cancelSignal, 0, len(requeued))
+	for _, tid := range requeued {
+		cancels = append(cancels, cancelSignal{
+			workerID: uuidStr(id),
+			taskID:   uuidStr(tid),
+			force:    false,
+		})
+	}
+	s.sendCancelSignals(cancels)
 
 	writeJSON(w, http.StatusOK, deleteWorkerResponse{
 		workerResponse:      toWorkerResponse(current),
 		RequeuedTasks:       len(requeued),
 		ReservationsUpdated: int(scrubbed),
 		EnrollmentsUnlinked: int(unlinked),
+		AttributionCleared:  int(attributionCleared),
 	})
 }
 

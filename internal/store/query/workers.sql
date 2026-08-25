@@ -17,7 +17,23 @@ SELECT * FROM workers WHERE hostname = $1 FOR UPDATE;
 -- IT IS STATEMENT 1 OF THE DELETE TRANSACTION AND ITS POSITION IS THE ARGUMENT:
 -- taking the worker row FIRST matches the lock order of both enrollment
 -- transactions (worker row, then agent_enrollments), so the delete cannot invert
--- it and needs no argument about why a cycle is not constructible (spec R9). It
+-- that pair (spec R9).
+--
+-- A CYCLE IS CONSTRUCTIBLE ELSEWHERE, and an earlier version of this comment
+-- claimed no argument was needed - a uniqueness claim checked only against its
+-- own subject. applyInventory (internal/worker/handler.go) runs
+-- ReplaceWorkerInventory then UpsertWorkerWorkspace, so it holds worker_workspaces
+-- rows and THEN needs FOR KEY SHARE on workers(W) for the FK check; this delete
+-- holds workers(W) FOR UPDATE and then needs worker_workspaces locks for the
+-- ON DELETE CASCADE. That is the inverse order and deadlocks (40P01, one side
+-- aborted, the delete surfacing as a 500).
+--
+-- WHAT RULES IT OUT IS THE STATUS ALLOW-LIST, not the lock order: applyInventory
+-- only runs for a worker with a live gRPC stream, and DeleteWorker admits only
+-- 'offline' and 'revoked'. 'offline' implies disconnected. 'revoked' does NOT -
+-- that is the same gap that made the missing cancel signals a bug - so the window
+-- is exactly the revoked-and-connected worker, and it is narrow rather than
+-- closed. Do not widen the allow-list without revisiting this. It
 -- also supplies the 404/409 discrimination inside the transaction, so there is no
 -- window between the precondition and the DELETE: a concurrent
 -- RegisterWorkerConnection is an UPDATE on this row and blocks until we commit or

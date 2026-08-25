@@ -41,6 +41,17 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     status omitted here cannot be retried. A new terminal status MUST stay
 //     omitted, or the resurrection bug this predicate closes
 //     (bug-2026-06-26-retry-resurrects-cancelled-task) re-opens for it.
+//   - CountTerminalTasksForWorker (query/tasks.sql) - `status IN ('done',
+//     'failed','timed_out')`, read by handleDeleteWorker BEFORE the DELETE for
+//     the delete response's attribution_cleared count. It must remain the exact
+//     complement of the assignment-partition group below AMONG ROWS THAT CARRY A
+//     worker_id, because the two numbers jointly account for every such row: the
+//     requeue rescues the assigned ones, this counts the ones that silently lose
+//     worker_id to ON DELETE SET NULL. A new TERMINAL status must be ADDED here
+//     or its rows are de-attributed without appearing in the only record the
+//     delete produces. A new NON-TERMINAL status must stay out AND be added to
+//     the assignment-partition group, or it falls between the two and is neither
+//     rescued nor counted - the one gap this pairing cannot self-detect.
 //   - RecomputeJobStatus (query/jobs.sql) - counts `('done','failed',
 //     'timed_out')` as terminal. This must remain the exact complement of the
 //     two predicates above; a status that one side treats as terminal and the

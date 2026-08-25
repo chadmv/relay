@@ -135,6 +135,12 @@ func TestDeleteWorker_SucceedsForATokenEnrolledWorker(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
 	assert.Equal(t, float64(1), body["enrollments_unlinked"])
+	// 6c: THE EMBEDDED workerResponse, which nothing else pins. Every other body
+	// assertion in this file reads a count, so toWorkerResponse could vanish from
+	// deleteWorkerResponse with the whole suite green - and the deleted row's
+	// identity is the SUBJECT of the record those counts are about.
+	assert.Equal(t, uuidString(row.ID), body["id"], "the response must name the row it destroyed")
+	assert.Equal(t, "enrolled", body["hostname"])
 
 	post, err := q.GetAgentEnrollmentByTokenHash(t.Context(), "enr-hash")
 	require.NoError(t, err, "the enrollment row must survive")
@@ -362,4 +368,111 @@ func TestDeleteWorker_OfARevokedWorkerDoesNotChangeCountWorkers(t *testing.T) {
 	afterOffline, err := q.CountWorkers(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, base-1, afterOffline, "an offline row was counted, so deleting it does free budget")
+}
+
+// TestDeleteWorker_RevokedButStillConnectedGetsItsSubprocessesCancelled is the
+// regression test for the HIGH found in Phase 4.
+//
+// REVOKED DOES NOT MEAN DISCONNECTED, and the handler used to assume it did.
+// handleDeleteWorkerToken is one ClearWorkerAgentToken (agent_enrollments.go) -
+// it does not close the stream, unregister the sender, or requeue anything, and
+// README says so: "Revocation does not reach a connection that is already
+// established". internal/metrics/sweep.go only moves online <-> stale, so
+// revoked-and-connected is a STABLE state, not a narrow window. The delete gate
+// admits 'revoked', so delete could take a running task off a live agent,
+// requeue it for a second worker, and tell nobody - a duplicate execution that
+// is INVISIBLE in the task record, because the original agent's status and log
+// writes are correctly fenced away by the epoch bump.
+//
+// The fixture is the discriminator: newCancelTestServer registers a live sender
+// for this worker, so the row is revoked AND connected, which is exactly the
+// combination the old comment claimed could not exist.
+func TestDeleteWorker_RevokedButStillConnectedGetsItsSubprocessesCancelled(t *testing.T) {
+	env := newCancelTestServer(t)
+	admin := createTestUser(t, env.q, "Rev Admin", "rev-admin@example.com", true)
+	adminToken := createTestToken(t, env.q, admin.ID)
+	jobID := seedRunningTask(t, env, admin.ID)
+
+	_, err := env.q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{
+		ID: env.workerID, Status: "revoked",
+	})
+	require.NoError(t, err)
+
+	before, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+	require.Equal(t, "running", before[0].Status,
+		"PRE-ASSERTION: the agent is running this task right now")
+
+	rec := doDeleteWorker(t, env.srv, uuidString(env.workerID), adminToken)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	after, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	require.Equal(t, "pending", after[0].Status,
+		"the task is now re-dispatchable, which is what makes the missing cancel a DOUBLE RUN")
+
+	var sawCancel bool
+	for _, m := range env.cs.snapshot() {
+		if c := m.GetCancelTask(); c != nil && c.TaskId == uuidString(after[0].ID) {
+			sawCancel = true
+		}
+	}
+	assert.True(t, sawCancel,
+		"the still-connected agent must be told to kill the subprocess for the task we just "+
+			"handed to somebody else; handleDisableWorker does this and delete must too")
+}
+
+// TestDeleteWorker_ReportsTheTaskAttributionItDestroys pins the LARGEST thing a
+// worker delete destroys, which the first three counts do not mention.
+//
+// tasks.worker_id is ON DELETE SET NULL for EVERY row, but RequeueWorkerTasks
+// only touches ('dispatched','running'). So every done/failed/timed_out task the
+// worker ever ran silently loses its worker_id at the DELETE - and that field is
+// public API (taskResponse.WorkerID in internal/api/jobs.go). "Which machine ran
+// this job" stops being answerable, which is exactly the question an operator has
+// when they are deleting a MISBEHAVING worker.
+//
+// deleteWorkerResponse's own comment claims the counts are "the ONLY record of
+// what the delete destroyed", so leaving this out made that claim false. The
+// PRE-ASSERTION that the finished task still names its worker is the
+// discriminator: without it this passes against a fixture that never attributed
+// anything.
+func TestDeleteWorker_ReportsTheTaskAttributionItDestroys(t *testing.T) {
+	env := newCancelTestServer(t)
+	admin := createTestUser(t, env.q, "Attr Admin", "attr-admin@example.com", true)
+	adminToken := createTestToken(t, env.q, admin.ID)
+	jobID := seedRunningTask(t, env, admin.ID)
+
+	seeded, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+	require.NoError(t, err)
+	require.Len(t, seeded, 1)
+	finished, err := env.q.UpdateTaskStatusEpoch(t.Context(), store.UpdateTaskStatusEpochParams{
+		Status: "done", ID: seeded[0].ID, Epoch: seeded[0].AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "done", finished.Status)
+	require.True(t, finished.WorkerID.Valid,
+		"PRE-ASSERTION: a finished task still names the machine that ran it")
+
+	_, err = env.q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{
+		ID: env.workerID, Status: "offline",
+	})
+	require.NoError(t, err)
+
+	rec := doDeleteWorker(t, env.srv, uuidString(env.workerID), adminToken)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, float64(1), body["attribution_cleared"])
+	assert.Equal(t, float64(0), body["requeued_tasks"],
+		"a finished task is NOT requeued, which is precisely why the requeue count does not cover it")
+
+	after, err := env.q.ListTasksByJob(t.Context(), mustParseUUID(t, jobID))
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	assert.Equal(t, "done", after[0].Status, "the task row itself survives the worker")
+	assert.False(t, after[0].WorkerID.Valid,
+		"and THIS is the destruction the count reports: ON DELETE SET NULL, silently, for every terminal row")
 }

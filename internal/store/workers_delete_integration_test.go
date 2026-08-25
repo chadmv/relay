@@ -83,10 +83,25 @@ func TestDeleteWorker_PermitsExactlyTheDisconnectedStatuses(t *testing.T) {
 }
 
 // TestGetWorkerForUpdate_LocksAnExistingRowAndDistinguishesAMissingOne pins the
-// 404 discrimination the handler makes INSIDE the transaction (spec 6.3 step 1).
+// 404 discrimination the handler makes INSIDE the transaction (spec 6.3 step 1)
+// AND the row lock its name claims.
+//
+// THE LOCK HALF WAS MISSING AND THE NAME WAS A LIE. The first two assertions pass
+// identically against a plain SELECT with no FOR UPDATE, yet FOR UPDATE is the
+// half the statement's own comment calls "the argument": it is what makes the
+// Go status gate and DeleteWorker's SQL allow-list unable to disagree inside one
+// transaction, which in turn is why handleDeleteWorker's n == 0 branch is
+// unreachable. Spec M12 declared dropping FOR UPDATE UNKILLABLE and this slice
+// repeated that claim after running the mutation and watching it survive. THAT
+// WAS WRONG: the probe below kills it deterministically, with no sleep and no
+// second goroutine, because FOR UPDATE NOWAIT fails immediately with SQLSTATE
+// 55P03 rather than blocking. The control arm after the rollback is what proves
+// the probe can succeed at all, so a 55P03 from some unrelated cause cannot be
+// mistaken for the property.
 func TestGetWorkerForUpdate_LocksAnExistingRowAndDistinguishesAMissingOne(t *testing.T) {
 	ctx := context.Background()
-	q := newTestQueries(t)
+	pool := newTestPool(t)
+	q := store.New(pool)
 	w := newTestWorker(t, q)
 
 	got, err := q.GetWorkerForUpdate(ctx, w.ID)
@@ -96,6 +111,31 @@ func TestGetWorkerForUpdate_LocksAnExistingRowAndDistinguishesAMissingOne(t *tes
 
 	_, err = q.GetWorkerForUpdate(ctx, pgtype.UUID{Valid: true})
 	require.ErrorIs(t, err, pgx.ErrNoRows, "a missing worker must be pgx.ErrNoRows, never a zero-value row")
+
+	// Hold the row the way handleDeleteWorker's step 1 holds it.
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	locked, err := store.New(tx).GetWorkerForUpdate(ctx, w.ID)
+	require.NoError(t, err)
+	require.Equal(t, w.ID, locked.ID)
+
+	// A SECOND POOL CONNECTION must be refused. NOWAIT turns "would block" into an
+	// immediate error, which is what makes this deterministic instead of flaky.
+	const probe = `SELECT id FROM workers WHERE id = $1 FOR UPDATE NOWAIT`
+	var probeID pgtype.UUID
+	err = pool.QueryRow(ctx, probe, w.ID).Scan(&probeID)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr,
+		"GetWorkerForUpdate must hold a row lock; without FOR UPDATE this probe simply succeeds")
+	require.Equal(t, "55P03", pgErr.Code, "lock_not_available")
+
+	// CONTROL: release the lock and the identical probe must now succeed. Without
+	// this the 55P03 above could come from anywhere.
+	require.NoError(t, tx.Rollback(ctx))
+	require.NoError(t, pool.QueryRow(ctx, probe, w.ID).Scan(&probeID),
+		"CONTROL: once the holder rolls back the same probe must succeed")
+	require.Equal(t, w.ID, probeID)
 }
 
 // TestDeleteWorker_IsRefusedWhileAnEnrollmentNamesTheWorker proves DECISION A's
