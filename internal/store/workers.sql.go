@@ -48,8 +48,22 @@ const countWorkers = `-- name: CountWorkers :one
 SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 `
 
-// Total workers for the list endpoint. Excludes revoked workers so the count
-// matches the rows returned by the paginated list queries.
+// Total non-revoked workers. TWO CALLERS, AND THE SECOND IS SECURITY-RELEVANT.
+//
+//  1. The list endpoint (internal/api/workers.go), where excluding revoked
+//     workers is what makes the count match the rows the paginated list queries
+//     return.
+//  2. autoEnrollAndRegister (internal/worker/handler.go), where it is the
+//     RELAY_AUTO_ENROLL_WORKER_CEILING predicate, read inside the same
+//     transaction as the insert it gates.
+//
+// THE status != 'revoked' EXCLUSION IS LOAD-BEARING FOR CALLER 2, not incidental
+// to it: it is what makes `relay workers revoke` free ceiling budget, and revoke
+// is the ONLY cleanup relay has - there is no worker-delete at any layer, so a
+// revoked row is permanent - which is why it is the first remedy an operator at
+// the ceiling is told to try. It is also why the
+// ceiling bounds NON-REVOKED rows rather than total rows - revoking keeps the
+// row and the hostname, so the table can still grow while this number does not.
 //
 //	SELECT COUNT(*) FROM workers WHERE status != 'revoked'
 func (q *Queries) CountWorkers(ctx context.Context) (int64, error) {
@@ -282,6 +296,61 @@ func (q *Queries) GetWorkerByHostnameForUpdate(ctx context.Context, hostname str
 		&i.SupportsWorkspaces,
 	)
 	return i, err
+}
+
+const insertWorkerForAutoEnroll = `-- name: InsertWorkerForAutoEnroll :one
+INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::bool, TRUE))
+ON CONFLICT (hostname) DO NOTHING
+RETURNING id
+`
+
+type InsertWorkerForAutoEnrollParams struct {
+	Name               string `json:"name"`
+	Hostname           string `json:"hostname"`
+	CpuCores           int32  `json:"cpu_cores"`
+	RamGb              int32  `json:"ram_gb"`
+	GpuCount           int32  `json:"gpu_count"`
+	GpuModel           string `json:"gpu_model"`
+	Os                 string `json:"os"`
+	SupportsWorkspaces *bool  `json:"supports_workspaces"`
+}
+
+// Token-less auto-enrollment's ONLY row-creating statement, and the whole of the
+// create-only rule: enrollment may CREATE a worker and may never CLAIM one.
+//
+// DO NOTHING, NOT DO UPDATE, AND NOT A SEPARATE LOOKUP. As a :one this returns
+// pgx.ErrNoRows when the hostname is already taken, whatever the existing row's
+// status and whatever its token - that IS the refusal signal. A
+// SELECT ... FOR UPDATE plus a Go predicate is equivalent for an existing row and
+// NOT equivalent for a fresh one: FOR UPDATE on a hostname that does not exist
+// locks nothing, so two concurrent auto-enrolls of the same fresh hostname both
+// see no row, both proceed, and DO UPDATE lets the loser overwrite the winner's
+// freshly minted token. Check and write are one statement here, so there is no
+// window.
+//
+// IT IS NOT UpsertWorkerByHostname AND MUST NOT BECOME IT. That statement stays
+// byte-identical and stays the enrollment-TOKEN path's, where an admin-issued
+// credential authorizes binding to an existing row (see SetWorkerAgentToken).
+//
+//	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
+//	VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::bool, TRUE))
+//	ON CONFLICT (hostname) DO NOTHING
+//	RETURNING id
+func (q *Queries) InsertWorkerForAutoEnroll(ctx context.Context, arg InsertWorkerForAutoEnrollParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, insertWorkerForAutoEnroll,
+		arg.Name,
+		arg.Hostname,
+		arg.CpuCores,
+		arg.RamGb,
+		arg.GpuCount,
+		arg.GpuModel,
+		arg.Os,
+		arg.SupportsWorkspaces,
+	)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listRevokedWorkersPage = `-- name: ListRevokedWorkersPage :many
@@ -1181,6 +1250,11 @@ type SetWorkerAgentTokenParams struct {
 // the natural not-yet-connected state; RegisterWorkerConnection flips it to
 // 'online' a moment later when the agent's connection registers.
 //
+// WHICH CALLER MAY REACH IT WITH AN EXISTING ROW: enrollAndRegister only, and
+// only when that row's agent_token_hash is NULL, i.e. it was revoked. That is
+// the revoke-then-re-enroll recovery route. autoEnrollAndRegister can never reach
+// this with an existing row - InsertWorkerForAutoEnroll refuses first.
+//
 //	UPDATE workers SET agent_token_hash = $2, revoked_at = NULL,
 //	    status = CASE WHEN status = 'revoked' THEN 'offline' ELSE status END
 //	WHERE id = $1
@@ -1353,8 +1427,14 @@ type UpsertWorkerByHostnameRow struct {
 	SupportsWorkspaces bool               `json:"supports_workspaces"`
 }
 
-// Insert a new worker or update hardware specs on reconnect.
-// Admin-managed fields (name, labels, max_slots) are preserved on conflict.
+// Insert a new worker, or bind to the existing row for this hostname and refresh
+// its hardware specs. Admin-managed fields (name, labels, max_slots) are
+// preserved on conflict.
+//
+// ITS ONLY CALLER IS enrollAndRegister (internal/worker/handler.go). The old
+// comment said "on reconnect", which was never true - reconnectAndRegister looks
+// the worker up by agent-token hash and calls nothing here - and became more
+// misleading once auto-enroll moved to InsertWorkerForAutoEnroll.
 //
 //	INSERT INTO workers (name, hostname, cpu_cores, ram_gb, gpu_count, gpu_model, os, supports_workspaces)
 //	VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::bool, TRUE))

@@ -40,9 +40,105 @@ var agentTokenGenerator = func() (string, string) {
 // ConsumeAgentEnrollment returns rows == 0 (already consumed or concurrent race).
 var errEnrollmentNotConsumable = errors.New("enrollment not consumable")
 
-// errWorkerRevoked is returned inside the auto-enroll transaction when the
-// existing worker row for this hostname has status 'revoked'.
-var errWorkerRevoked = errors.New("worker revoked")
+// msgAuthFailed is the ONE string every credential refusal on the gRPC
+// registration surface returns, and it is a constant so that property is
+// STRUCTURAL rather than eleven string literals that happen to agree.
+//
+// A refusal that differs from its neighbours is an oracle. "auto-enroll
+// disabled" was one until 2026-08-25: it told an unauthenticated peer whether
+// RELAY_ALLOW_AUTO_ENROLL was set, for free, with no row touched. The refusals
+// that remain are deliberately indistinguishable from each other - a caller
+// cannot tell "hostname taken" from "fleet at ceiling" from "unknown token" -
+// and TestRegistrationRefusals_AllUseTheSharedConstant fails any new site that
+// passes its own string instead of this one.
+//
+// The one oracle that survives is inherent and is documented rather than
+// claimed away: a caller learns a hostname is claimed because claiming it fails.
+const msgAuthFailed = "authentication failed"
+
+// errHostnameClaimed is returned inside the auto-enroll transaction when a
+// workers row for the claimed hostname already exists - whatever its status and
+// whatever its token. It replaces errWorkerRevoked, which was a DENY-LIST OF
+// EXACTLY ONE STATUS VALUE and failed open on every status added to the
+// vocabulary. "A row exists" is a claim about the table rather than about
+// today's writers, so it cannot fail open that way, and it removes the status
+// vocabulary from this decision entirely.
+var errHostnameClaimed = errors.New("hostname already claimed")
+
+// errCredentialLive is returned inside the enrollment transaction when the
+// existing worker row for this hostname still holds an agent_token_hash. THIS IS
+// A DIFFERENT PREDICATE FROM errHostnameClaimed's AND THE DIFFERENCE IS FORCED:
+// revoking does not delete the row (ClearWorkerAgentToken nulls the hash and sets
+// status='revoked'), so refusing every existing row here would make the revoked
+// row block its own recovery and leave NO ROUTE AT ALL: relay has no
+// worker-delete - no CLI subcommand, no DELETE FROM workers, no DELETE route on
+// the resource - so a revoked row that could not be re-enrolled by token would
+// be permanently stuck. NULL means revoked
+// (recovery, allowed); non-NULL means a live credential (takeover, refused).
+var errCredentialLive = errors.New("worker credential is live")
+
+// errFleetAtCeiling is returned inside the auto-enroll transaction when the
+// non-revoked worker count is at or above the ceiling. IT GATES THIS PATH ONLY:
+// enrollment tokens are never refused by it, which is what makes "use
+// relay agent enroll" the without-downtime answer for an operator whose
+// token-less budget is exhausted, and what keeps a bounded refusal from being a
+// fleet-wide denial primitive.
+var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
+
+// registrationStoreFault turns a store error anywhere on the registration path
+// into what the peer sees, and puts the detail in the server log instead.
+//
+// IT COVERS finishRegister TOO, not just the two enrollment transactions, and
+// the name says so because that is the half-fix boundary an earlier revision
+// stopped at. finishRegister is shared by all three registration paths, so its
+// RegisterWorkerConnection and reconcileRunningTasks errors are reachable by a
+// token-less peer exactly like the enrollment ones. Those two echo no
+// caller-controlled value, so they are schema disclosure rather than injection -
+// a weaker exposure, the same class, and not worth leaving behind.
+//
+// THE PEER USED TO GET THE WHOLE THING. Both transactions returned the wrapped
+// error verbatim and there is no sanitizing interceptor on this server, so
+// grpc-go sent the full text as codes.Unknown. reg.Hostname is caller-supplied
+// and validated nowhere, and workers.hostname carries an unconditional unique
+// btree (max entry ~2704 bytes), so an oversized hostname turned a table name,
+// an index name and a SQLSTATE into a reply to a caller that presented no
+// credential - and made that refusal distinguishable by BOTH code and message
+// from the three README says are identical.
+//
+// IT IS A FAULT SITE, NOT A REFUSAL SITE, and that is why it logs where the
+// refusals deliberately do not. A refusal is the system working and is counted
+// (EnrollmentRefusals); a store fault is an operator-actionable SERVER condition
+// that must not be silent, especially now that the peer's message carries
+// nothing anyone could act on.
+//
+// ITS BOUND IS WEAKER THAN THE AUDIT LINE'S BELOW, AND AN EARLIER VERSION OF
+// THIS COMMENT CLAIMED PARITY WITH IT. THAT WAS WRONG. Both are one line per
+// STREAM, priced by RELAY_GRPC_MAX_CONNS and RELAY_GRPC_REGISTRATION_TIMEOUT
+// rather than by message volume - neither is covered by the per-connection
+// ingest budget, which is not allocated until after registration. But the audit
+// line has a SECOND bound this one does not: it fires only on SUCCESS, so after
+// the create-only rule it is one line per hostname FOREVER, and the total is
+// additionally capped by RELAY_AUTO_ENROLL_WORKER_CEILING. This line has no
+// per-hostname bound at all.
+//
+// AND IT IS REACHABLE PRE-AUTHENTICATION. With auto-enroll on, a peer presenting
+// NO credential and a hostname over the ~2704-byte btree entry limit fails the
+// workers.hostname unique index deterministically, every time, forever - and
+// because internal/agent only treats codes.Unauthenticated as terminal, an agent
+// (or an attacker imitating one) reconnects on backoff rather than exiting. So
+// the honest description is "unbounded by hostname, bounded only by the
+// connection caps, and driveable by an unauthenticated caller". Bounding the
+// hostname itself is the separate item the spec scoped out; until it lands, this
+// is the disclosure rather than the fix.
+//
+// Same %q injection defence and clipID volume defence as the audit line, applied
+// to the error text too, since a Postgres error can echo a caller-supplied value
+// back into it.
+func registrationStoreFault(ctx context.Context, path, hostname string, err error) error {
+	log.Printf("worker: %s store fault (hostname=%q) from %s: %q",
+		path, clipID(hostname), remoteAddr(ctx), clipID(err.Error()))
+	return status.Errorf(codes.Internal, "registration failed")
+}
 
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
@@ -135,6 +231,29 @@ const DefaultTrailingLogWindow = 15 * time.Minute
 // disabled.
 const DefaultRegistrationTimeout = 30 * time.Second
 
+// DefaultAutoEnrollWorkerCeiling bounds how many non-revoked workers may exist
+// before token-less auto-enrollment refuses to create another row. Without it, a
+// caller that can reach :9090 under RELAY_ALLOW_AUTO_ENROLL creates one
+// permanent row per distinct hostname, forever: the rows outlive their
+// connections, survive a restart, and appear in every GET /v1/workers page and
+// every dispatcher scan.
+//
+// 1024 IS DERIVED FROM RELAY_GRPC_MAX_CONNS, AND THE DERIVATION IS NOT AIRTIGHT.
+// The two knobs count DIFFERENT QUANTITIES: that one bounds concurrent
+// connections, this one bounds total non-revoked rows. A farm of 2000
+// intermittently-connected machines with 800 online at a time stays under the
+// connection cap and exceeds this ceiling legitimately. Such an operator should
+// set this explicitly rather than inherit a number derived from a different
+// quantity; 0 disables it.
+//
+// THE BOUND IS APPROXIMATE AND THE ARITHMETIC IS STATED RATHER THAN IMPLIED. Two
+// concurrent auto-enrolls at n == ceiling-1 both pass the check under
+// read-committed isolation and both insert, so the true bound is
+// ceiling + RELAY_GRPC_MAX_CONNS. Making it exact needs serializable isolation or
+// an advisory lock on a hot path, for an overshoot that is a fraction of a
+// percent. Do not claim an exact cap anywhere.
+const DefaultAutoEnrollWorkerCeiling = 1024
+
 // txBeginner is the subset of *pgxpool.Pool this package uses: the single method
 // pgx.BeginTxFunc requires of its second argument, which is itself declared as an
 // anonymous interface (pgx/tx.go). Handler.pool is typed as this rather than as
@@ -186,6 +305,22 @@ type Handler struct {
 	// RELAY_TASKLOG_TRAILING_WINDOW. Read-only after startup.
 	TrailingLogWindow time.Duration
 
+	// AutoEnrollWorkerCeiling bounds non-revoked workers on the auto-enroll path
+	// only. Set by cmd/relay-server after construction, from
+	// RELAY_AUTO_ENROLL_WORKER_CEILING. Read-only after startup.
+	//
+	// A *int, NOT AN int, AND THAT DIFFERS DELIBERATELY FROM RegistrationTimeout
+	// AND TrailingLogWindow. Those two resolve "non-positive means the default",
+	// which works because zero is meaningless for them. THIS KNOB HAS A MEANINGFUL
+	// ZERO - disabled - so an int would leave the zero value ambiguous between
+	// "unset, use the default" and "explicitly disabled", and only
+	// cmd/relay-server could express the difference. nil means the default; a
+	// non-nil 0 means DISABLED; a negative value means the default. That last arm
+	// is DEFENSIVE AND UNREACHABLE FROM cmd/relay-server, which folds a negative
+	// or unparseable value to the default before assigning it - it exists so a
+	// direct-construction caller fails bounded rather than refusing everything.
+	AutoEnrollWorkerCeiling *int
+
 	// ingestDrops counts what this server's per-connection log budgets dropped,
 	// split by kind and by arm. A VALUE, not a pointer: the zero value is ready
 	// to use, so a Handler built by any route (including a bare &Handler{} in a
@@ -235,6 +370,14 @@ type Handler struct {
 	// counts STATUS REPORTS the status fence rejected. No input moves more than
 	// one of the three. Do not sum them and do not merge the sections.
 	statusFence statusFenceCounters
+
+	// enrollmentRefusals counts what the two enrollment guards refused, split by
+	// cause. A VALUE, not a pointer, for the same reason its three neighbours are.
+	//
+	// A FOURTH DISTINCT NOUN, and no input moves more than one of the four. Read
+	// through EnrollmentRefusals. NOT YET ON GET /v1/server/counters - the section
+	// is deliberately deferred to its own item; see the plan's scope decision.
+	enrollmentRefusals enrollmentRefusalCounters
 }
 
 // IngestLogDropCounts reports what this server's ingest log budget has dropped
@@ -257,6 +400,11 @@ func (h *Handler) IngestLogDropCounts() IngestLogDrops { return h.ingestDrops.sn
 // never returned to an agent: the only read path is the admin-authenticated
 // GET /v1/server/counters.
 func (h *Handler) TaskLogFenceRejections() uint64 { return h.taskLogFenceRejects.Load() }
+
+// EnrollmentRefusals reports what this server's enrollment guards have refused
+// since process start, split by cause. Per PROCESS, monotonic, and never returned
+// to an agent.
+func (h *Handler) EnrollmentRefusals() EnrollmentRefusalCounts { return h.enrollmentRefusals.snapshot() }
 
 // TaskStatusFenceRejections reports what handleTaskStatus's two epoch-fenced
 // writes have refused since process start, split by what the row said at T0.
@@ -445,6 +593,16 @@ func (h *Handler) registrationTimeout() time.Duration {
 	return DefaultRegistrationTimeout
 }
 
+// autoEnrollWorkerCeiling resolves the effective ceiling. 0 is a real answer
+// here and means disabled - do not "simplify" this to the non-positive-means-
+// default rule its two neighbours use.
+func (h *Handler) autoEnrollWorkerCeiling() int {
+	if h.AutoEnrollWorkerCeiling == nil || *h.AutoEnrollWorkerCeiling < 0 {
+		return DefaultAutoEnrollWorkerCeiling
+	}
+	return *h.AutoEnrollWorkerCeiling
+}
+
 // authenticateAndRegister dispatches to the appropriate auth path based on the credential type.
 func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	switch cred := reg.Credential.(type) {
@@ -456,29 +614,45 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 		if h.AllowAutoEnroll {
 			return h.autoEnrollAndRegister(ctx, stream, reg)
 		}
-		return "", nil, status.Errorf(codes.Unauthenticated, "auto-enroll disabled")
+		// THE SAME STRING AS EVERY OTHER CREDENTIAL REFUSAL, and it used to be
+		// "auto-enroll disabled". That told an unauthenticated peer whether
+		// RELAY_ALLOW_AUTO_ENROLL is set - free, side-effect-free, no row touched -
+		// and it refuted README's claim that every credential failure on this
+		// surface returns the identical status and string. It also made cause (1)
+		// of the three the agent tells an operator to check the one cause that was
+		// NOT indistinguishable. The oracle bought an operator nothing:
+		// authFailureMessage discards the server's message entirely and reasons from
+		// the agent's own local state.
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 }
 
-// enrollAndRegister handles first-time enrollment using an enrollment token.
-// All DB writes (worker upsert, enrollment consume, agent-token set) execute
-// inside a single transaction so that a failure anywhere leaves no partial
-// state — either the agent is fully enrolled or not at all.
+// enrollAndRegister handles enrollment using an admin-issued enrollment token.
+// All DB writes (the FOR UPDATE worker lookup, the worker upsert, the enrollment
+// consume, the agent-token set) execute inside a single transaction, so a failure
+// anywhere leaves no partial state - either the agent is fully enrolled or not at
+// all.
+//
+// IT REFUSES A HOSTNAME WHOSE WORKER HOLDS A LIVE CREDENTIAL and still binds to
+// one whose credential is NULL. The lookup is INSIDE the transaction and holds
+// FOR UPDATE, which is what makes the check and the upsert one atomic decision
+// for an existing row. Rotating a LIVE agent's credential therefore requires a
+// revoke first - same rule, same remedy as the auto-enroll path.
 func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawEnroll string) (string, *workerSender, error) {
 	if rawEnroll == "" {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 
 	hash := tokenhash.Hash(rawEnroll)
 	enroll, err := h.q.GetAgentEnrollmentByTokenHash(ctx, hash)
 	if err != nil {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	if enroll.ConsumedAt.Valid {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	if time.Now().After(enroll.ExpiresAt.Time) {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 
 	rawAgent, agentHash := agentTokenGenerator()
@@ -489,6 +663,24 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	var workerID pgtype.UUID
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
+
+		// FOR UPDATE, INSIDE THE SAME TRANSACTION AS THE UPSERT. The lock is what
+		// makes this non-racy for the case that matters, an existing row. For a
+		// FRESH hostname it locks nothing, so two admin-issued tokens racing on one
+		// brand-new hostname still resolve to one row via ON CONFLICT DO UPDATE -
+		// out of the threat model, and disclosed rather than closed.
+		//
+		// LOCK ORDERING: this transaction takes a workers row lock and then updates
+		// an agent_enrollments row. Re-check before adding a caller - at time of
+		// writing ConsumeAgentEnrollment has no other caller, so no transaction
+		// takes the two in the opposite order and there is no deadlock cycle.
+		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup worker: %w", err)
+		}
+		if err == nil && existing.AgentTokenHash != nil {
+			return errCredentialLive
+		}
 
 		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
 			Name:               reg.Hostname,
@@ -525,10 +717,14 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 	})
 
 	if txErr != nil {
-		if errors.Is(txErr, errEnrollmentNotConsumable) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		if errors.Is(txErr, errCredentialLive) {
+			h.enrollmentRefusals.record(enrollmentRefusalCredentialLive)
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
-		return "", nil, txErr
+		if errors.Is(txErr, errEnrollmentNotConsumable) {
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
+		}
+		return "", nil, registrationStoreFault(ctx, "enrollment", reg.Hostname, txErr)
 	}
 
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
@@ -537,14 +733,14 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 // reconnectAndRegister handles agent reconnection using a previously issued agent token.
 func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest, rawAgent string) (string, *workerSender, error) {
 	if rawAgent == "" {
-		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+		return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 	}
 	hash := tokenhash.Hash(rawAgent)
 
 	w, err := h.q.GetWorkerByAgentTokenHash(ctx, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
 		return "", nil, status.Errorf(codes.Internal, "token lookup failed")
 	}
@@ -553,8 +749,20 @@ func (h *Handler) reconnectAndRegister(ctx context.Context, stream relayv1.Agent
 }
 
 // autoEnrollAndRegister handles token-less enrollment when AllowAutoEnroll is
-// set. It upserts the worker by hostname and issues a fresh agent token without
-// consuming any enrollment record.
+// set. IT MAY CREATE A WORKER AND MAY NEVER CLAIM ONE: a single
+// InsertWorkerForAutoEnroll (ON CONFLICT DO NOTHING) both creates the row and
+// refuses a hostname that already has one, with no window between the check and
+// the write. It then issues a fresh agent token without consuming any enrollment
+// record.
+//
+// THE REFUSAL IS DELIBERATELY THE SAME status AND THE SAME STRING every other
+// credential failure on this surface returns. The previous "worker revoked"
+// message told an unauthenticated caller that a row for that hostname existed and
+// was revoked - a live hostname-state oracle, and exactly the disclosure the new
+// guard must not add a second instance of. The oracle that REMAINS is inherent:
+// a caller learns a hostname is claimed because claiming it fails. Refusing
+// everything is the only way to close that, and README says so rather than
+// claiming the refusal is opaque.
 func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.AgentService_ConnectServer, reg *relayv1.RegisterRequest) (string, *workerSender, error) {
 	rawAgent, agentHash := agentTokenGenerator()
 	if rawAgent == "" || agentHash == "" {
@@ -565,15 +773,18 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	txErr := pgx.BeginTxFunc(ctx, h.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		txq := h.q.WithTx(tx)
 
-		existing, err := txq.GetWorkerByHostnameForUpdate(ctx, reg.Hostname)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("lookup worker: %w", err)
-		}
-		if err == nil && existing.Status == "revoked" {
-			return errWorkerRevoked
+		// BEFORE THE INSERT, which is what makes the refusal free of side effects.
+		if ceiling := h.autoEnrollWorkerCeiling(); ceiling > 0 {
+			n, err := txq.CountWorkers(ctx)
+			if err != nil {
+				return fmt.Errorf("count workers: %w", err)
+			}
+			if n >= int64(ceiling) {
+				return errFleetAtCeiling
+			}
 		}
 
-		w, err := txq.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		id, err := txq.InsertWorkerForAutoEnroll(ctx, store.InsertWorkerForAutoEnrollParams{
 			Name:               reg.Hostname,
 			Hostname:           reg.Hostname,
 			CpuCores:           reg.CpuCores,
@@ -583,23 +794,31 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 			Os:                 reg.Os,
 			SupportsWorkspaces: reg.SupportsWorkspaces,
 		})
-		if err != nil {
-			return fmt.Errorf("upsert worker: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errHostnameClaimed
 		}
-		workerID = w.ID
+		if err != nil {
+			return fmt.Errorf("insert worker: %w", err)
+		}
+		workerID = id
 
 		if err := txq.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{
-			ID: w.ID, AgentTokenHash: &agentHash,
+			ID: id, AgentTokenHash: &agentHash,
 		}); err != nil {
 			return fmt.Errorf("set agent token: %w", err)
 		}
 		return nil
 	})
 	if txErr != nil {
-		if errors.Is(txErr, errWorkerRevoked) {
-			return "", nil, status.Errorf(codes.Unauthenticated, "worker revoked")
+		if errors.Is(txErr, errHostnameClaimed) {
+			h.enrollmentRefusals.record(enrollmentRefusalHostnameClaimed)
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
 		}
-		return "", nil, txErr
+		if errors.Is(txErr, errFleetAtCeiling) {
+			h.enrollmentRefusals.record(enrollmentRefusalFleetAtCeiling)
+			return "", nil, status.Errorf(codes.Unauthenticated, msgAuthFailed)
+		}
+		return "", nil, registrationStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
 	}
 
 	// reg.Hostname is a caller-supplied proto string: validated nowhere, bounded
@@ -614,6 +833,13 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 	// and closes streams in a loop emits one of these per cycle. What prices that
 	// loop is RELAY_GRPC_REGISTRATION_TIMEOUT plus the connection caps, not this
 	// line, which is why it still takes no budget key.
+	//
+	// AND THE ASYMMETRY WITH THE REFUSAL BELOW IT IS THE ARGUMENT FOR COUNTING
+	// RATHER THAN LOGGING. A SUCCESSFUL token-less enrollment is now one line per
+	// hostname FOREVER - the hostname can never be auto-enrolled again, because
+	// the row it just created refuses the next attempt. A REFUSAL is unboundedly
+	// repeatable by the same caller with the same hostname, so it takes a counter
+	// and no log site at all (see EnrollmentRefusals).
 	log.Printf("worker: auto-enrolled worker %s (hostname=%q) from %s", uuidStr(workerID), clipID(reg.Hostname), remoteAddr(ctx))
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
 }
@@ -627,7 +853,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 		SupportsWorkspaces: reg.SupportsWorkspaces,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("register worker connection: %w", err)
+		return "", nil, registrationStoreFault(ctx, "register worker connection", reg.Hostname, err)
 	}
 
 	workerID := uuidStr(updated.ID)
@@ -705,7 +931,7 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// Reconcile the agent's running-task report against DB state.
 	cancelIDs, err := h.reconcileRunningTasks(ctx, updated.ID, reg.RunningTasks)
 	if err != nil {
-		return "", nil, fmt.Errorf("reconcile: %w", err)
+		return "", nil, registrationStoreFault(ctx, "reconcile", reg.Hostname, err)
 	}
 
 	// Replace workspace inventory with what the agent reported at reconnect.

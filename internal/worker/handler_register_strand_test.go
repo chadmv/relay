@@ -20,12 +20,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// strandDB is the narrowest store.DBTX that drives an entire reconnect
-// registration - GetWorkerByAgentTokenHash, RegisterWorkerConnection,
-// GetActiveTasksForWorker, MarkWorkerOfflineIfEpoch - WITHOUT Postgres, which is
-// what puts this proof in the lane CI actually runs (go-ci: `go test -race ./...`,
-// no tag, no container). It is the same seam tasklog_fence_counter_test.go uses,
-// one layer up.
+// strandDB is the narrowest store.DBTX that drives a whole registration WITHOUT
+// Postgres, which is what puts this proof in the lane CI actually runs (go-ci:
+// `go test -race ./...`, no tag, no container). It is the same seam
+// tasklog_fence_counter_test.go uses, one layer up.
+//
+// WHAT IT REACHES IS DESCRIBED, NOT ENUMERATED, AND THAT IS DELIBERATE. This
+// header used to list the four statements of the reconnect path, and the list
+// went stale the moment QueryRow learned to discriminate by statement - which is
+// what let handler_enroll_guards_test.go drive both ENROLLMENT paths through the
+// same type. A description survives the next fixture edit; a list does not. What
+// it cannot do is anything needing real SQL semantics: it answers statements, it
+// does not execute them.
 //
 // IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that stays worth
 // saying: finishRegister returns on reconcileRunningTasks' error four lines
@@ -46,6 +52,7 @@ type strandDB struct {
 	queryErr error // returned by Query, i.e. by GetActiveTasksForWorker
 	execErr  error // returned by Exec, i.e. by MarkWorkerOfflineIfEpoch
 	execTag  string
+	script   *rowScript
 	execs    []strandExec
 	queries  []strandExec
 }
@@ -106,7 +113,14 @@ func (emptyRows) Close()     {}
 func (emptyRows) Next() bool { return false }
 func (emptyRows) Err() error { return nil }
 
-func (d *strandDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+// QueryRow delegates to the shared rowScript when one is configured. A nil
+// script keeps the unconditional strandWorkerRow this used to return, which is
+// what makes the change inert for the strand and success tests: they build a
+// strandDB without a script and see byte-identical behaviour.
+func (d *strandDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if d.script != nil {
+		return d.script.answer("pool", sql, args)
+	}
 	return strandWorkerRow{}
 }
 
@@ -296,14 +310,21 @@ func strandStream(t *testing.T) *scriptedStream {
 // a substitute either: it marks tasks timed_out at RELAY_TASK_MAX_ASSIGNMENT
 // (24h) rather than requeueing them, and it never writes workers.status at all.
 func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGeneration(t *testing.T) {
+	// THE ARM DISCRIMINATOR MOVED FROM THE RETURNED ERROR TO THE LOG, and it is
+	// not weaker for it. finishRegister's store errors are sanitized before they
+	// reach the peer - they used to carry "reconcile: <raw Postgres text>" to an
+	// unauthenticated caller - so the returned message is now opaque by design and
+	// can no longer say which internal step failed. registrationStoreFault logs
+	// that, which discriminates the arm exactly as before AND additionally proves
+	// the sanitizer ran.
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
 
 	err := h.Connect(strandStream(t))
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile",
+	require.Contains(t, logged(), "reconcile",
 		"fixture: the registration must fail inside reconcileRunningTasks, AFTER "+
-			"RegisterWorkerConnection acquired the generation. Any other error means this test is "+
 			"driving the wrong arm and its assertions below prove nothing.")
 
 	execs := db.execsSeen()
@@ -360,6 +381,7 @@ func TestConnect_ARegistrationFailingAfterRegisterWorkerConnectionReleasesTheGen
 // `== 0` early return from releaseWorkerGeneration and this test fails while the
 // strand test above still passes.
 func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 0")
 
 	offline, unsubscribe := h.broker.Subscribe(events.Filter{})
@@ -367,7 +389,7 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 
 	err := h.Connect(strandStream(t))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
+	require.Contains(t, logged(), "reconcile", "fixture: same arm as the strand test")
 
 	require.Len(t, db.execsSeen(), 1,
 		"the release must still be ATTEMPTED. The epoch fence is what decides ownership here, and "+
@@ -416,6 +438,7 @@ func TestConnect_ASupersededFailedRegistrationReleasesNothing(t *testing.T) {
 // statement directly. If we really had been superseded, the worst case is a
 // fenced no-op; today's worst case is a permanent strand.
 func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *testing.T) {
+	logged := captureUnitLog(t)
 	h, db, fired := newStrandHandler(t, errors.New("connection reset by peer"), "UPDATE 1")
 	db.execErr = errors.New("failed to connect to `host=localhost`: dial error")
 
@@ -424,7 +447,7 @@ func TestConnect_AFailedRegistrationStillReleasesWhenTheOfflineWriteERRORS(t *te
 
 	err := h.Connect(strandStream(t))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "reconcile", "fixture: same arm as the strand test")
+	require.Contains(t, logged(), "reconcile", "fixture: same arm as the strand test")
 
 	require.Len(t, db.execsSeen(), 1, "the release must still be attempted")
 

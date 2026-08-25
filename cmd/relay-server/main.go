@@ -156,6 +156,13 @@ func main() {
 		agentHandler.AllowAutoEnroll = allow
 	}
 
+	autoEnrollCeiling, autoEnrollCeilingWarning := parseAutoEnrollCeiling(
+		"RELAY_AUTO_ENROLL_WORKER_CEILING", os.Getenv("RELAY_AUTO_ENROLL_WORKER_CEILING"))
+	if autoEnrollCeilingWarning != "" {
+		log.Printf("WARNING: %s", autoEnrollCeilingWarning)
+	}
+	agentHandler.AutoEnrollWorkerCeiling = &autoEnrollCeiling
+
 	corsOrigins, err := api.ParseCORSOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 	if err != nil {
 		log.Fatalf("parse RELAY_CORS_ORIGINS: %v", err)
@@ -193,6 +200,9 @@ func main() {
 		log.Printf("WARNING: %s", m)
 	}
 	log.Print(grpcBoundsLine(grpcBnds))
+	// After grpcBoundsLine: the ceiling line quotes maxConns in its overshoot
+	// arithmetic, so it cannot be printed before that value is resolved.
+	log.Print(autoEnrollCeilingLine(autoEnrollCeiling, agentHandler.AllowAutoEnroll, grpcBnds.maxConns))
 	agentHandler.RegistrationTimeout = grpcBnds.registrationTimeout
 
 	grpcSrv := grpc.NewServer(grpcServerOptions(grpcBnds)...)

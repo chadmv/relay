@@ -1,8 +1,10 @@
 ---
 title: Auto-enroll worker row creation is unbounded, and the fix belongs on the auto-enroll path rather than on the upsert
 type: bug
-status: open
+status: closed
 created: 2026-08-21
+closed: 2026-08-25
+resolution: fixed
 priority: medium
 source: Section 5.2 of the 2026-08-20-grpc-admission-bounds spec; the half of the source item that slice closed by written decision rather than by code
 ---
@@ -151,3 +153,36 @@ not. The token path's upsert and single-use consume share one transaction, and `
 upsert back. Anyone who fixes this by guarding `UpsertWorkerByHostname` will have penalised the one
 path that was already correct, and the test suite as it stands today would probably not object.
 </content>
+
+## Resolution
+
+Fixed. `RELAY_AUTO_ENROLL_WORKER_CEILING` (default 1024, `0` disables) refuses token-less
+auto-enrollment once that many non-revoked workers exist, checked inside the transaction **before**
+the insert so the refusal is free of side effects.
+
+The item offered three mechanisms and called the choice a product decision. The spec picked the
+ceiling on the item's own acceptance criterion - "stops creating rows at a **stated bound**" - which
+a rate limit cannot give (it loses to a slow drip) and a reaper cannot give (its steady state is
+rate x TTL, and rate is unbounded). The ceiling and the reaper are complements, not alternatives;
+the reaper is filed separately.
+
+The conductor's lean - that closing the takeover would shrink this attack - was **refuted**: closing
+takeover confines the attacker to hostnames with no row, and creating a row for a hostname with no
+row IS this attack. The two are independent, exactly as the item said.
+
+The bound is approximate and every site says so rather than claiming an exact cap: two concurrent
+auto-enrolls at `ceiling - 1` both pass under read-committed isolation, so the honest bound is
+`ceiling + RELAY_GRPC_MAX_CONNS`.
+
+The operator story the item required is in README: revoke junk rows (frees budget immediately, no
+restart), use enrollment tokens (never subject to the ceiling), or raise the knob (requires a
+restart, said plainly). Review then found the first remedy is a treadmill under active attack -
+revoking frees ceiling budget without freeing the hostname, so an attacker refills with new
+hostnames and the revoked bucket grows unbounded. README now says that, and "Row growth is bounded"
+is corrected to "Non-revoked row growth is bounded".
+
+Refusals are COUNTED, never logged: a refusal is unboundedly repeatable by the same caller and the
+per-connection log limiter is not allocated until after registration. The counters live on `Handler`;
+publishing them on `GET /v1/server/counters` is filed separately.
+
+See `docs/retros/2026-08-25-auto-enroll-guards.md`.

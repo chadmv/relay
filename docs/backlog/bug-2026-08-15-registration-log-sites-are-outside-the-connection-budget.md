@@ -183,3 +183,27 @@ re-derived rather than trusted. Note also that the budget it would place them in
 drainable by the connection's own peer -
 [[bug-2026-08-24-wire-keyed-dedupe-lets-a-peer-suppress-its-own-diagnostics]] - which is worth settling
 first, since moving a line into a bucket a peer can empty is not obviously an improvement.
+
+## 2026-08-25: a FIFTH category - a refusal path that logs nothing, by decision
+
+The auto-enroll guards slice (`docs/superpowers/specs/2026-08-25-auto-enroll-guards.md`) added two new
+refusal paths inside `authenticateAndRegister` - a hostname that already has a `workers` row, and a
+fleet at `RELAY_AUTO_ENROLL_WORKER_CEILING` - and gave them **no log site at all**. They are counted
+instead, on `Handler`, split by cause.
+
+**This is an amendment, not a closure.** This item stays open and its remaining scope is unchanged: the
+registration-window lines that DO exist are still outside the budget. What moves is the census's shape.
+The item frames sites as budgeted or unbudgeted; 2026-08-24 already added a third category (bounded by
+the connection caps rather than by message volume). This is a fourth: **deliberately absent**. The
+reasoning is the item's own, run forwards - the limiter is allocated at `handler.go:350`, after
+`authenticateAndRegister` has returned, so a `log.Printf` on an attacker-reachable refusal *cannot* be
+budgeted where it stands, and the refusal is unboundedly repeatable by the same caller with the same
+hostname. Not adding the site is a stronger outcome than budgeting it, and it needs no new `logKind`.
+
+So the log-site count in `internal/worker/handler.go` is unchanged by that slice, and README's
+`ingest_log_budget` list correctly did not move - checked by reading it, not by reasoning about it.
+
+The cost is recorded where it is paid rather than here: a legitimately refused agent produces no
+server-side line naming it, so the operator's naming signal is the AGENT's exit message. If the rule
+this item proposes ever lands at the allocation site, it should have a slot for "this path deliberately
+does not log", or it will read as an omission to whoever audits it next.

@@ -1,8 +1,10 @@
 ---
 title: Enrolling with an in-use hostname takes over that worker's identity and locks out the real agent
 type: bug
-status: open
+status: closed
 created: 2026-08-12
+closed: 2026-08-25
+resolution: fixed
 priority: medium
 source: Phase 4 review of the task-log assignee-fence iteration (2026-08-12)
 ---
@@ -138,3 +140,42 @@ If the decision goes the other way and this is accepted as within auto-enroll's 
 then it should still land as a documentation change: the trust model needs to say out loud that
 enabling auto-enroll means any reachable host can seize any worker identity by hostname, because
 that is a materially stronger statement than "any reachable host can become a worker".
+
+## Resolution
+
+Fixed. Auto-enroll may CREATE a worker and may never CLAIM one.
+
+`InsertWorkerForAutoEnroll` (`ON CONFLICT (hostname) DO NOTHING RETURNING id`, a sqlc `:one`, so a
+taken hostname surfaces as `pgx.ErrNoRows`) replaces `UpsertWorkerByHostname` on the token-less path.
+Check and write are ONE statement, which the item's proposal was not: a `SELECT ... FOR UPDATE` plus
+a Go predicate is equivalent for an existing row and **not** equivalent for a fresh one, because
+`FOR UPDATE` on a hostname that does not exist locks nothing - so two concurrent first-boots of the
+same hostname both see no row and `DO UPDATE` lets the loser overwrite the winner's freshly minted
+token. The spec caught that; the item did not.
+
+The enrollment-TOKEN path gets a **different** guard, and the difference is forced: refuse only when
+the existing row's `agent_token_hash` is non-NULL. Revoking nulls the hash, so revoke-then-re-enroll
+is the recovery route, and that route only exists if the token path admits a revoked row.
+
+Two of the item's claims were refuted and are recorded in the spec:
+
+- Its `agent_token_hash != nil` predicate is production-equivalent to "a row exists" on the
+  auto-enroll path, because `CreateWorker` has no production caller - so a NULL hash means revoked,
+  and revoked was already refused. It is the right predicate on the *enrollment* path; the item put
+  it on the wrong one.
+- Acceptance criterion 2 ("a revoked worker's hostname still re-enrolls") asked for a regression
+  against `autoEnrollAndRegister`'s existing revoked check AND against README:364-368, which already
+  documented that auto-enroll does not revive a revoked worker. Struck rather than implemented.
+
+Found while implementing, in neither item: `TestConnect_AutoEnrollRotatesTokenForExistingHost`
+asserted the takeover as DESIRABLE ("re-enrollment should rotate the agent token"), and three
+integration tests in `handler_tasklog_integration_test.go` / `handler_taskstatus_integration_test.go`
+were green *because of* this defect - they sent a token-less register for a pre-seeded hostname and
+relied on upsert-by-hostname resolving to the existing row. All four are now inverted or given real
+credentials.
+
+The old `"worker revoked"` refusal was a hostname-state oracle and was REPLACED, not joined: all
+eleven `codes.Unauthenticated` returns on the registration path now pass one `msgAuthFailed` constant,
+held by an AST guard that fails closed on a twelfth site.
+
+See `docs/retros/2026-08-25-auto-enroll-guards.md`.
