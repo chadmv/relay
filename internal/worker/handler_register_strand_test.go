@@ -27,14 +27,20 @@ import (
 // no tag, no container). It is the same seam tasklog_fence_counter_test.go uses,
 // one layer up.
 //
-// IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that is a fact
-// about line numbers rather than a design choice. finishRegister returns on
-// reconcileRunningTasks' error four lines ABOVE the applyInventory call that
-// opens a transaction on the concrete *pgxpool.Pool - unconditionally, even for
-// an empty inventory. A nil pool is therefore a complete fixture for THIS arm
-// and would panic one statement later. That is also why the RegisterResponse-send
-// arm cannot live in this lane; its proof is
-// TestRegisterWorker_SendFailureReleasesTheGeneration, //go:build integration.
+// IT WORKS BECAUSE THE FAILING PATH NEVER TOUCHES h.pool, and that stays worth
+// saying: finishRegister returns on reconcileRunningTasks' error four lines
+// ABOVE the applyInventory call that opens a transaction, so the four tests below
+// need no inventory fixture at all and the fake pool newStrandHandler carries is
+// there for mutation coverage rather than for them.
+//
+// THE SEND ARM IS NO LONGER EXCLUDED FROM THIS LANE. It used to be - h.pool was a
+// concrete *pgxpool.Pool and a pool-less fixture could not reach stream.Send at
+// all - and that sentence was here. Handler.pool is now a txBeginner, and
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration in
+// handler_register_success_test.go drives that arm right here in the default
+// lane. TestRegisterWorker_SendFailureReleasesTheGeneration stays in the
+// integration lane for what it carries that this cannot: a real worker row, a
+// real task, a real requeue.
 type strandDB struct {
 	mu       sync.Mutex
 	queryErr error // returned by Query, i.e. by GetActiveTasksForWorker

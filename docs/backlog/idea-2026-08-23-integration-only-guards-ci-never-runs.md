@@ -92,3 +92,12 @@ One measurement worth carrying, because it prices the item: during the 2026-08-2
 line whose deletion left all 21 Go packages green had to be guarded by a `go/parser` test instead of a
 behavioural one, and **that guard was evaded five times** before it held. The cost of a lane CI never
 runs is not the missing signal alone; it is the elaborate and fragile substitute built in its place.
+
+## Progress
+
+- 2026-08-25: one named instance removed. `internal/worker`'s successful-registration
+  path had every witness behind `//go:build integration`; narrowing `Handler.pool` to a
+  one-method `txBeginner` interface put four behavioural tests in the default lane
+  (`internal/worker/handler_register_success_test.go`) and let
+  `handler_handoff_guard_test.go` shed five clauses. The item stays open - the remaining
+  instances are untouched.

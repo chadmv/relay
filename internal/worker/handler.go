@@ -768,8 +768,17 @@ func (h *Handler) finishRegister(ctx context.Context, stream relayv1.AgentServic
 	// unguarded region described above. All four shapes were measured passing the
 	// guard, `go vet` and the whole package before the guard grew the clause that
 	// requires the indexed statement to BE the call rather than merely contain it.
-	// The guard lives in the default lane because no default-lane test can drive a
-	// successful registration at all.
+	// The guard lives in the default lane, and what it covers there has narrowed.
+	// It is now the SOURCE-POSITION half only: adjacency to registry.Register, the
+	// flip being a direct body statement rather than nested on a condition that is
+	// true in a fixture and false under main.go, and the absence of an error return
+	// below the flip - none of which a runtime test can observe. The behavioural
+	// half is TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration,
+	// which drives this whole function to a successful return without Postgres and
+	// asserts that the generation is released exactly once across the connection's
+	// life. It exists because Handler.pool is a txBeginner rather than a
+	// *pgxpool.Pool; before that seam no default-lane test could get past
+	// applyInventory.
 	//
 	// EVERYTHING BELOW THIS LINE MUST STAY INFALLIBLE. Connect arms its defer only
 	// on a nil error, so a future statement here that returns an error would be

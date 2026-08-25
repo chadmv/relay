@@ -43,3 +43,13 @@ committable. Fix both `applyInventory` and `applyInventoryUpdate`; correct the c
 - `internal/worker/handler.go:1387-1429`, `internal/store/migrations/000007_workspaces.up.sql:11`, `internal/scheduler/dispatch.go:110-120`
 - [[idea-2026-04-25-last-used-at-accuracy-sweeper]] (Deferred) - accuracy of the same field on the agent side
 - [[bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget]] - `:590` is one of its unbudgeted sites
+
+## Amendment 2026-08-25
+
+- Its regression test is now cheap and default-lane. `Handler.pool` is a `txBeginner`
+  interface, so a `fakeTx.Exec` returning a NOT NULL violation reproduces this without
+  Postgres - `TestFinishRegister_SucceedsWhenTheInventoryTransactionFails` in
+  `internal/worker/handler_register_success_test.go` already injects exactly that error
+  for a different purpose. **This item is not fixed and stays open.**
+- Its line citations have drifted: `applyInventory` is at `internal/worker/handler.go:1770-1794`,
+  not `:1387-1411`.

@@ -13,20 +13,22 @@ import (
 // untagged so it runs in the lane CI actually executes: .github/workflows/go-ci.yml
 // runs `go test -race ./...` with no -tags integration.
 //
-// WHY A GUARD AND NOT A BEHAVIOURAL TEST. Every test in this package that drives
-// a SUCCESSFUL registration is //go:build integration, and the default-lane
-// fixture structurally cannot drive one: applyInventory opens a transaction on
-// the concrete *pgxpool.Pool unconditionally, so a pool-less stub panics one
-// statement past the reconcile. The flag's two failure modes therefore have no
-// default-lane behavioural witness at all, and both are fleet-scale:
+// WHY A GUARD AS WELL AS A BEHAVIOURAL TEST. There is now a behavioural witness:
+// TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration
+// drives a SUCCESSFUL registration in this lane and asserts the generation is
+// released exactly once across the connection's life, and
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration
+// covers the send arm. Both were impossible until Handler.pool became a
+// txBeginner. Deleting the flag, or flipping it too early, is caught by those
+// two and this test's clauses for either were removed.
 //
-//   - Never set, and every SUCCESSFUL registration releases the generation it
-//     just took. The worker flips 'offline' the instant it comes online,
-//     Metrics.Clear wipes the entry Activate just created, and a grace timer is
-//     armed against a live agent that requeues all of its running tasks a grace
-//     window later.
-//   - Set too early, and the RegisterResponse-send arm of the strand reopens -
-//     which only the integration lane covers.
+// WHAT NO RUNTIME TEST CAN SEE IS SOURCE POSITION, and that is the whole of what
+// survives here. A flip wrapped in `if h.Metrics != nil { ... }` sits at a
+// perfectly legal position and leaves the success path unflipped in production
+// while the fixture - which must set Metrics, to assert Activate - flips it
+// happily. Measured: that mutation passes the behavioural test and fails this
+// one. So does an error return added below the flip, which is a claim about
+// statements that do not exist yet and which no runtime test can ever assert.
 //
 // WHAT IS PINNED IS A POINT; WHAT THE CODE NEEDS IS A RANGE. The semantic
 // requirement is only that the flag be flipped after the send has succeeded and
@@ -45,11 +47,10 @@ import (
 //
 // THE FLAG IS NOT NAMED BY THIS TEST. It is whatever identifier the deferred
 // release closure guards on, so renaming it moves the guard with the code
-// instead of defeating it, and the stream parameter and the success return are
-// derived the same way - by type, and by the final result being the predeclared
-// nil. The remaining anchors ARE source text: the file name, "finishRegister",
-// the "AgentService_ConnectServer" type suffix, "releaseWorkerGeneration", and
-// at the registry anchor the receiver "h" and the field "registry". Renaming any
+// instead of defeating it, and the success return is derived the same way - by
+// its final result being the predeclared nil. The remaining anchors ARE source
+// text: the file name, "finishRegister", "releaseWorkerGeneration", and at the
+// registry anchor the receiver "h" and the field "registry". Renaming any
 // of those makes this test fail rather than pass vacuously - it is brittleness,
 // not a hole - but the message it fails with will describe a missing anchor
 // rather than the rename that moved it.
@@ -118,27 +119,30 @@ func TestFinishRegisterHandsOffOwnershipInsideTheWindow(t *testing.T) {
 	// actually has to hold is that the flag is declared exactly once and starts
 	// out false; how it is spelled is not this test's business.
 	//
-	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET, AND THIS COMMENT USED TO CLAIM
-	// THEY WERE PLUS EXACTLY ONE MORE. It said a local bool has "exactly one other
-	// way to be written: through a pointer to it", and counted address-of as the
-	// chokepoint. That is a uniqueness claim - a claim about the complement - and
-	// it was false. `(handedOff) = false` after the flip needs no pointer, no
-	// closure and no indirection: it simply wraps the name in parens, and an
-	// *ast.Ident type assertion does not see through an *ast.ParenExpr. It was
-	// measured releasing the generation on every SUCCESSFUL registration with
-	// `go vet` clean and the WHOLE REPO green. `gofmt` does not normalise it away,
-	// and this tree has no fmt gate (CRLF makes `gofmt -l` flag every file at
-	// baseline).
+	// WRITES BY NAME ARE NOT THE WHOLE WRITE SET, and this comment used to claim
+	// they were plus exactly one more. It said a local bool has "exactly one other
+	// way to be written: through a pointer to it", counted address-of, and was
+	// wrong: `(handedOff) = false` after the flip needs no pointer and no
+	// indirection, it simply wraps the name in parens, which an *ast.Ident type
+	// assertion does not see through. It was measured releasing the generation on
+	// every SUCCESSFUL registration with `go vet` clean and the whole repo green.
+	// `gofmt` does not normalise it away, and this tree has no fmt gate (CRLF makes
+	// `gofmt -l` flag every file at baseline).
 	//
 	// So every expression site below is normalised with ast.Unparen first, and the
 	// honest statement of what is checked is: writes are counted BY NAME after
-	// dropping parens, plus any address-of the flag. That covers a parenthesised
-	// write, an alias through a pointer (reflect and unsafe both need the address
-	// too, so they route through the same clause), and a closure writing the flag
-	// by name - `defer func(){ handedOff = false }()` is already otherWrites,
+	// dropping parens. That covers a parenthesised write and a closure writing the
+	// flag by name - `defer func(){ handedOff = false }()` is already otherWrites,
 	// because ast.Inspect descends into function literals. Shadowing is caught by
-	// the initFalse count. Checking *ast.StarExpr on the left would not have helped
-	// with any of it: the identifier there is the pointer's name, not the flag's.
+	// the initFalse count.
+	//
+	// AN ALIAS THROUGH A POINTER IS NO LONGER COUNTED HERE, deliberately.
+	// `p := &handedOff` plus `*p = false` below the flip is now caught by
+	// TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration,
+	// in four places at once - a grace fire, a non-empty statement log, a second
+	// worker event and a teardown release count of two - which is what the deleted
+	// clause's failure message described in words. Mutation M14 confirmed it after
+	// the deletion, not before.
 	var setTrue []*ast.AssignStmt
 	var initFalse int
 	var otherWrites int
@@ -402,11 +406,15 @@ const releaseMethod = "releaseWorkerGeneration"
 //     that healthy agent's running tasks a window later.
 //   - THE CLOSURE BODY IS EXACTLY THE GUARD CONSTRUCT, with the release at a
 //     fixed place inside it. Anything looser admits a skip on a condition this
-//     test cannot evaluate: `if h.pool != nil { return }` ahead of the release is
-//     false in every default-lane fixture (newStrandHandler leaves pool nil
-//     deliberately, and applyInventory's unconditional BeginTxFunc is why) and
-//     true under main.go, so every failed registration would release nothing in
-//     production while this whole package stayed green.
+//     test cannot evaluate: `if h.AllowAutoEnroll { return }` ahead of the
+//     release is false in every fixture in this package and true wherever an
+//     operator set RELAY_ALLOW_AUTO_ENROLL, so every failed registration on such
+//     a server would release nothing while the whole package stayed green.
+//     `if h.pool != nil { return }` used to be the example here, on the grounds
+//     that newStrandHandler left pool nil; that is no longer true - both
+//     default-lane fixtures now carry a fake pool, and mutation M13 confirmed
+//     the edit reddens them as well as this clause. The general shape is what
+//     this clause is for, not that one instance.
 //
 // BOTH SPELLINGS OF THE GUARD ARE ACCEPTED. `if !flag { release }` and
 // `if flag { return }; release` are the same decision written two ordinary ways.
@@ -559,8 +567,9 @@ func countCallsNamed(n ast.Node, name string) int {
 
 // isCallTo reports whether stmt IS an expression statement calling a method
 // named name, as opposed to a statement that merely contains such a call. That
-// distinction is the whole point: `if h.pool != nil { return }` followed by the
-// release contains the call, and containment is what a recursive check accepts.
+// distinction is the whole point: `if h.AllowAutoEnroll { return }` followed by
+// the release contains the call, and containment is what a recursive check
+// accepts.
 func isCallTo(stmt ast.Stmt, name string) bool {
 	expr, ok := stmt.(*ast.ExprStmt)
 	if !ok {

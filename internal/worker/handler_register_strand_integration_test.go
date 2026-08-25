@@ -55,13 +55,19 @@ func (s *sendFailStream) SendHeader(metadata.MD) error { return nil }
 func (s *sendFailStream) SetTrailer(metadata.MD)       {}
 
 // TestRegisterWorker_SendFailureReleasesTheGeneration is the second of the two
-// arms the strand can take, and the one this lane exists for: it needs a real
-// pool, because applyInventory opens a transaction on *pgxpool.Pool
-// unconditionally between the reconcile and the send, so a pool-less fixture
-// cannot reach stream.Send at all.
+// arms the strand can take, proven end to end against real Postgres.
 //
-// It carries what the default-lane proof cannot: the actual worker ROW and the
-// actual TASK, through a real grace timer, to a real requeue.
+// IT IS NO LONGER THE ONLY WITNESS FOR THIS ARM, and its justification changed
+// when that stopped being true. It used to say it needed a real pool because
+// applyInventory opened a transaction on *pgxpool.Pool unconditionally, so a
+// pool-less fixture could not reach stream.Send at all. Handler.pool is a
+// txBeginner now and
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration
+// covers the same arm in the lane CI runs.
+//
+// What keeps this test is the half the default-lane proof cannot carry: the
+// actual worker ROW and the actual TASK, through a real grace timer, to a real
+// requeue. The duplication is deliberate and the two are at different layers.
 func TestRegisterWorker_SendFailureReleasesTheGeneration(t *testing.T) {
 	ctx := context.Background()
 	q, pool := newTestStore(t)
