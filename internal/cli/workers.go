@@ -29,11 +29,11 @@ type workerResp struct {
 }
 
 // WorkersCommand returns the relay workers Command.
-// Subcommands: list, get, disable, enable, revoke, workspaces, evict-workspace
+// Subcommands: list, get, disable, enable, revoke, delete, workspaces, evict-workspace
 func WorkersCommand() Command {
 	return Command{
 		Name:  "workers",
-		Usage: "workers <list|get|disable|enable|revoke|workspaces|evict-workspace> [args]",
+		Usage: "workers <list|get|disable|enable|revoke|delete|workspaces|evict-workspace> [args]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
 			return doWorkers(ctx, cfg, args, os.Stdout)
 		},
@@ -42,7 +42,7 @@ func WorkersCommand() Command {
 
 func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: relay workers <list|get|disable|enable|revoke|workspaces|evict-workspace>")
+		return fmt.Errorf("usage: relay workers <list|get|disable|enable|revoke|delete|workspaces|evict-workspace>")
 	}
 	if cfg.Token == "" {
 		return fmt.Errorf("no token configured — run 'relay login' first")
@@ -60,6 +60,8 @@ func doWorkers(ctx context.Context, cfg *Config, args []string, w io.Writer) err
 		return doWorkersEnable(ctx, c, args[1:], w)
 	case "revoke":
 		return doWorkersRevoke(ctx, c, args[1:], w)
+	case "delete":
+		return doWorkersDelete(ctx, c, args[1:], w)
 	case "workspaces":
 		return doWorkersWorkspaces(ctx, c, args[1:], w)
 	case "evict-workspace":
@@ -157,6 +159,46 @@ func doWorkersRevoke(ctx context.Context, c *relayclient.Client, args []string, 
 		return fmt.Errorf("revoke token: %w", err)
 	}
 	fmt.Fprintln(w, "revoked.")
+	return nil
+}
+
+/// deleteResp decodes the counts DELETE /v1/workers/{id} reports. Relay has no
+// audit log, so these three numbers are the only record of what was destroyed.
+type deleteResp struct {
+	Hostname            string `json:"hostname"`
+	RequeuedTasks       int    `json:"requeued_tasks"`
+	ReservationsUpdated int    `json:"reservations_updated"`
+	EnrollmentsUnlinked int    `json:"enrollments_unlinked"`
+}
+
+// doWorkersDelete destroys a worker identity (admin only). --yes IS REQUIRED AND
+// IS NOT AN INTERACTIVE PROMPT: every destructive path in this CLI is flag-driven
+// and non-interactive, and a prompt breaks scripted use (spec 8.5).
+func doWorkersDelete(ctx context.Context, c *relayclient.Client, args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("workers delete", flag.ContinueOnError)
+	yes := fs.Bool("yes", false, "confirm the delete; required, and there is no undo")
+	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: relay workers delete --yes <worker-id-or-hostname>")
+	}
+	target := fs.Arg(0)
+	// The refusal prints BEFORE resolving the id, so it issues no request at all.
+	if !*yes {
+		fmt.Fprintf(w, "would delete worker %s (its assignments are requeued, its reservations scrubbed, its enrollment link nulled).\n", target)
+		return fmt.Errorf("refusing to delete without --yes")
+	}
+	id, err := resolveWorkerID(ctx, c, target)
+	if err != nil {
+		return err
+	}
+	var resp deleteResp
+	if err := c.Do(ctx, "DELETE", "/v1/workers/"+id, nil, &resp); err != nil {
+		return fmt.Errorf("delete worker: %w", err)
+	}
+	fmt.Fprintf(w, "deleted; %d task(s) requeued, %d reservation(s) updated, %d enrollment(s) unlinked.\n",
+		resp.RequeuedTasks, resp.ReservationsUpdated, resp.EnrollmentsUnlinked)
 	return nil
 }
 
