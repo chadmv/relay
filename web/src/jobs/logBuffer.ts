@@ -87,12 +87,50 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
-// Within one emitted line only the segment after the final carriage return is
-// kept, so `\rframe 12/100` progress output renders as one updating line instead
-// of a wall of concatenated garbage.
+// Two rules, in this order, and the order is the whole correctness argument.
+//
+// 1. EVERY trailing carriage return is removed. Not one. CRLF output puts a \r
+//    in the final position of every line, and "x\r\r" - two of them - is what
+//    the Windows C runtime writes for print("done", end="\r") followed by
+//    print(), which is the most ordinary progress-bar-then-newline sequence
+//    there is. Stripping a single CR leaves that row blank.
+// 2. THEN the progress-bar collapse: only the segment after the final REMAINING
+//    carriage return is kept, so a run of \r-updated frames renders as one
+//    updating line instead of a wall of concatenated garbage.
+//
+// Why removing a run of trailing CRs cannot lose visible content: this function
+// is only ever called on a complete line (everything before a \n) or on the
+// whole of a stream's in-flight partial. In both, a trailing carriage return has
+// NO SUCCESSOR INSIDE THE UNIT, so nothing can be written after the cursor
+// returns and the CR can overwrite nothing. Removing it can only stop the
+// approximation from returning the empty suffix that follows it. That is as true
+// for a run as for one, which is why the rule is strip-all rather than merely
+// tolerant.
+//
+// Collapsing FIRST and stripping afterwards does nothing at all: the collapse has
+// already returned '' for a line ending in a carriage return.
+//
+// The strip is an INDEX WALK, deliberately not a regular expression. JavaScript's
+// engine backtracks, so a trailing-run pattern is quadratic in a long run of
+// carriage returns, and nothing here caps line LENGTH - MAX_LINES caps line
+// COUNT, and the partial buffer in appendEntries grows until a newline arrives.
+// A job printing megabytes of carriage returns would freeze the operator's tab.
+//
+// This runs AFTER stripAnsi (appendEntries strips before it splits), and that
+// ordering is in the fix's favour: an erase-line escape sequence sitting between
+// a carriage return and the newline is removed first, so a CR the raw bytes had
+// buried behind an escape is still trailing by the time we see it. Anything
+// upstream of stripAnsi would see fewer carriage returns, not more.
+//
+// The remaining approximation is unchanged and deliberate: a terminal renders
+// 'abc' CR 'd' as `dbc`, and this keeps `d`. That is wrong in the MIDDLE of a
+// unit and is out of scope; this makes it right at the END.
 function collapseCR(s: string): string {
-  const i = s.lastIndexOf('\r')
-  return i === -1 ? s : s.slice(i + 1)
+  let end = s.length
+  while (end > 0 && s.charCodeAt(end - 1) === 13) end-- // 13 === '\r'
+  const t = end === s.length ? s : s.slice(0, end)
+  const i = t.lastIndexOf('\r')
+  return i === -1 ? t : t.slice(i + 1)
 }
 
 function capLines(lines: LogRow[]): { lines: LogRow[]; evicted: boolean } {

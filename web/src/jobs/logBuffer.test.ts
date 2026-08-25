@@ -121,6 +121,33 @@ test('a carriage-return run collapses to the segment after the final CR', () => 
   expect(s.lines.map((l) => l.text)).toEqual(['frame 3/100'])
 })
 
+// THE THREE DISCRIMINATING INPUTS (spec T1-A). All three must stay:
+//   case 1 alone passes under a fix that deleted the progress-bar collapse;
+//   case 2 alone passes at HEAD, where the bug lives;
+//   case 3 alone passes under a fix that strips every CR, interior ones included.
+//
+// CASE 3 IS THE ONE THE BACKLOG ITEM'S OWN DESIGN FAILS. That item proposes
+// stripping at most ONE trailing carriage return. The Windows C runtime writes
+// "done\r\r\n" for print("done", end="\r") followed by print() - a literal \r is
+// not translated, the \n becomes \r\n - so the line is "done\r\r" and a single
+// strip still renders it blank. The spec refutes the item here (R1/D1). Do not
+// narrow this rule back.
+//
+// Unlike the Go straddle test in internal/agent, each case here is an
+// INDEPENDENT appendEntries call over a fresh state, so no case can pass by
+// riding on a previous one and the table order is not load-bearing.
+test('collapseCR strips EVERY trailing carriage return and still collapses interior CR runs', () => {
+  const cases: Array<[string, string[]]> = [
+    ['hello windows\r\nsecond line\r\n', ['hello windows', 'second line']],
+    ['frame 1/100\rframe 2/100\rframe 3/100\n', ['frame 3/100']],
+    ['x\r\r\n', ['x']],
+  ]
+  const got = cases.map(([content]) =>
+    appendEntries(createLogState(), [chunk(1, content)]).lines.map((l) => l.text),
+  )
+  expect(got).toEqual(cases.map(([, want]) => want))
+})
+
 test('ANSI SGR escape sequences are stripped', () => {
   let s = createLogState()
   s = appendEntries(s, [chunk(1, '[32mgreen[0m and [1;31mred[0m\n')])
