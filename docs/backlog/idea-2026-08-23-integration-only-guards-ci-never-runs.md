@@ -97,7 +97,7 @@ runs is not the missing signal alone; it is the elaborate and fragile substitute
 
 - 2026-08-25: one named instance removed. `internal/worker`'s successful-registration
   path had every witness behind `//go:build integration`; narrowing `Handler.pool` to a
-  one-method `txBeginner` interface put four behavioural tests in the default lane
+  one-method `txBeginner` interface put five behavioural tests in the default lane
   (`internal/worker/handler_register_success_test.go`) and let
   `handler_handoff_guard_test.go` shed five clauses. The item stays open - the remaining
   instances are untouched.
