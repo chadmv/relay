@@ -1,8 +1,10 @@
 ---
 title: Relay cannot delete a worker at any layer, and the auto-enroll guards made that a terminal state
 type: bug
-status: open
+status: closed
 created: 2026-08-25
+closed: 2026-08-26
+resolution: fixed
 priority: medium
 source: 2026-08-25 auto-enroll-guards slice - the remediation prescribed `relay workers delete`, which does not exist
 ---
@@ -108,3 +110,41 @@ Then: an admin-only route, a CLI arm, and README's recovery prose pointing at it
 - [[bug-2026-08-12-auto-enroll-hostname-takeover]] (closed) - the guard that made this terminal
 - [[idea-2026-08-25-ttl-reaper-for-never-reconnected-workers]] - the other half of reclaiming rows
 - `docs/retros/2026-08-25-auto-enroll-guards.md`
+
+## Resolution
+
+Fixed. `DELETE /v1/workers/{id}` (admin-only) and `relay workers delete --yes <id-or-hostname>`.
+One transaction: `SELECT ... FOR UPDATE` -> status gate -> requeue assigned tasks -> unlink
+`agent_enrollments.consumed_by` -> `array_remove` from `reservations.worker_ids` -> DELETE.
+
+**No migration.** `consumed_by` is NULLed inside the transaction rather than by altering the FK,
+because a no-action FK fails *closed* for the planned TTL reaper's delete arm while
+`ON DELETE SET NULL` fails silent. Both arms end at the same row state, so the audit trail argument
+this item raised was empty; the tie-breaker was which failure mode a future caller inherits.
+
+**Requeue precedes the DELETE**, which is the whole correctness argument - after the row is gone
+`worker_id` no longer names the tasks. Pinned by assertion, not by comment: a delete-first build
+leaves `status = 'running'` and the epoch unbumped, neither of which `ON DELETE SET NULL` can
+produce. A lens reversed it in a scratch worktree and watched the test die.
+
+**The status gate is `('offline','revoked')` as an allow-list** in both the SQL and the Go check, so
+a future status fails closed in both. `stale` is excluded and is placed FIRST in both status tables
+so an early-exit mutation cannot hide.
+
+**Three of this item's own claims were refuted at spec time** and are recorded in its `## Corrections`
+section - the severity argument was self-refuting, so the priority dropped HIGH to medium.
+
+**Verification found a HIGH the implementation missed, and it is the reason this slice took four
+rounds.** `revoked` is in the allow-list and revoking does not close the agent's stream, so delete
+could requeue a *live* agent's running task, let the dispatcher hand it to a second worker, and send
+no cancel - duplicate execution, invisible in the task record because the original agent's writes are
+correctly fenced away. The handler now sends cancels through `sendCancelSignals` unconditionally
+(`Registry.Send` on an unregistered id is one map lookup), exactly as `handleDisableWorker` does. The
+409 no longer offers "or revoke it" as a remedy for "worker is connected", because revoking moves the
+status into the allow-list rather than disconnecting anything.
+
+Four follow-ups filed rather than folded in: the freed hostname is claimable in a race under
+auto-enroll, re-enrollment mints a new uuid so reservations must be re-pointed by hand, `internal/cli`
+has zero integration coverage, and the integration lane can time out inside Docker teardown.
+
+See `docs/retros/2026-08-26-worker-delete.md`.
