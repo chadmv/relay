@@ -3,7 +3,7 @@ title: internal/cli tests hand-write server responses, so a response-shape drift
 type: idea
 status: open
 created: 2026-08-23
-priority: low
+priority: medium
 source: 2026-08-23 deep roadmap refresh - integration-tester lens finding
 ---
 
@@ -34,6 +34,28 @@ shape drift, not flag logic.
   exercises the real server end to end.
 - A deliberately introduced response-shape change in `internal/api` reddens the CLI lane (proven
   once, as the discriminating mutation).
+- `relay workers delete --yes` is exercised end to end against a real server, including the refusal
+  paths (409 on a connected worker, 404 on a missing one). It is the first irreversible command, so
+  it goes first regardless of which resource area is tackled first.
+
+## Measured, 2026-08-26 (absorbed from a duplicate item)
+Filed separately by the worker-delete slice's integration lens, then folded in here. The runtime is
+the tell, and it is a cheaper check than reading the test files:
+
+```
+grep -rl "go:build integration" internal/cli/   -> no matches
+grep -rl testcontainers internal/cli            -> no matches
+ok  relay/internal/cli  1.046s
+```
+
+Under `-tags integration -p 1`, `internal/cli` finishes in **1.0s** while `internal/store` takes
+257s and `internal/worker` 175s. Nothing containerized runs in this package, and nothing ever has.
+
+**The stakes moved with `relay workers delete`.** It is the first irreversible operation in the
+product, and its end-to-end coverage is "does the CLI construct the request and parse the response
+the fake returns". Four tests, all against a hand-written literal. A drift in the real handler's
+status codes, response shape, or error strings is invisible to every one of them - which is no
+longer a hypothetical, because that is exactly what happened to `relay logs`.
 
 ## Confirmed live, 2026-08-25
 This is no longer hypothetical. `relay logs` prints nothing for every job, on every task, and has
@@ -55,10 +77,17 @@ filing did not anticipate:
   half weeks after the logs endpoint became paginated. Per-method repair without a lane does not
   converge.
 
-`priority: low` was set before any of this was known. The measured cost is now one wholly broken
-subcommand plus one broken SDK method; re-prioritise accordingly.
+Raised `low` -> `medium` on 2026-08-25. The original priority was set before any confirmed
+instance existed; the measured cost is now one wholly broken subcommand plus one broken SDK
+method, both attributable to this gap.
 
 ## Related
+- [[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]] and
+  [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] - the two confirmed instances
+- Absorbed 2026-08-25: `idea-2026-08-26-cli-has-no-integration-coverage`, closed as a duplicate.
+  Its measurement and its `workers delete` stakes are folded in above; its own Proposal asked for
+  exactly that outcome. Sources it cited: `internal/cli/workers_delete_test.go`,
+  `internal/cli/workers.go`, `docs/retros/2026-08-26-worker-delete.md`.
 - `internal/cli/admin_test.go:16`, `internal/cli/admin_users_test.go`, `internal/cli/admin_output_test.go`
 - [[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]] and
   [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] - the two confirmed instances
