@@ -631,3 +631,40 @@ func TestConnect_EachAutoEnrollRefusalMovesItsOwnCounter(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, AutoEnrollRefusalCounts{CredentialLive: 1}, live.h.AutoEnrollRefusals())
 }
+
+// TestConnect_AutoEnrollRefusalWritesNoLogLine. The whole captured log must be
+// EMPTY across repeated refusals, so any wording added later reddens this rather
+// than passing a substring check. Mirrors
+// TestRegisterWorker_ReconcileEchoesAnUnparseableRunningTaskIdAndLogsNothing.
+func TestConnect_AutoEnrollRefusalWritesNoLogLine(t *testing.T) {
+	logged := captureUnitLog(t)
+
+	for i := 0; i < 5; i++ {
+		f := newEnrollFixture(t, enrollConfig{
+			hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
+		})
+		_, err := f.connect(t)
+		require.Error(t, err)
+	}
+
+	assert.Empty(t, logged(),
+		"a refusal is unboundedly repeatable by the same caller with the same hostname, and the "+
+			"per-connection log limiter is not even allocated until after registration. Refusals are "+
+			"COUNTED (Handler.AutoEnrollRefusals), never logged.")
+}
+
+// TestConnect_AutoEnrollSuccessStillWritesExactlyOneAuditLine. The success line
+// survives unbudgeted BY DECISION, and after the create-only guard the argument
+// is stronger than it was: a token-less enrollment is now one line per hostname
+// FOREVER, because that hostname can never be auto-enrolled again.
+func TestConnect_AutoEnrollSuccessStillWritesExactlyOneAuditLine(t *testing.T) {
+	logged := captureUnitLog(t)
+
+	f := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true})
+	_, err := f.connect(t)
+	require.NoError(t, err)
+
+	out := logged()
+	assert.Equal(t, 1, strings.Count(out, "auto-enrolled worker"))
+	assert.Contains(t, out, `hostname="fresh-host"`, "%q is the injection defence and must stay")
+}
