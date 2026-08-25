@@ -80,7 +80,7 @@ SSE task-log tailing is not exercised. `surfaces.ts` records the limit per
 surface in a `population` field - do not read an empty-state pass as a
 populated-state pass. Closing this is slice 2.
 
-**Not in `surfaces.ts` at all - 13 entries, not 15.** `/workers/:id` (no worker
+**Not in `surfaces.ts` at all - 13 entries.** `/workers/:id` (no worker
 row exists to link to, per the limit above; this is a stronger gap than
 "empty-state only" - the page is never visited), `/jobs/:id/tasks/:taskId`,
 `/register`, and the `password` and `sessions` profile tabs. `/workers/:id` is
@@ -103,8 +103,10 @@ the document edge; an element that overflows into its OWN `overflow-x-auto`
 wrapper instead (a horizontally-scrollable nav with no keyboard affordance, for
 instance) reads as zero document overflow and passes. That gap is real, not
 hypothetical: it is the shape of `bug-2026-08-24-header-nav-is-clipped-at-narrow-viewports`
-in `docs/backlog/`, found by mutating a header nav to scroll instead of wrap and
-watching all 38 tests stay green.
+in `docs/backlog/` - the shipped header nav is already an `overflow-x-auto`
+scroll container and never wraps, so no mutation was needed to demonstrate the
+gap. It was found by a human reviewing the screenshots from the harness's
+first CI run, with the full 51-test suite green throughout.
 
 ## Rules
 
@@ -142,8 +144,9 @@ watching all 38 tests stay green.
   independent of whatever component is actually supposed to own it, so
   deleting the last real usage elsewhere would not be caught by anything in
   this directory - a handful of app-emitted utility names are already named in
-  `keyboard.spec.ts` and `layout.spec.ts` prose for exactly this reason, none
-  load-bearing today. Writing a class-shaped string that ISN'T a real utility
+  `layout.spec.ts` and `auth.spec.ts` prose, and in this README's own prose
+  above, for exactly this reason, none load-bearing today. Writing a
+  class-shaped string that ISN'T a real utility
   is worse: it generates its own bogus CSS rule in the production bundle
   (confirmed by an A/B build - see the fix at `keyboard.spec.ts`'s
   `assertScrollable` comment for the concrete case this repo shipped). Prefer
