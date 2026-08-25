@@ -62,11 +62,28 @@ func (p *fakePool) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
 // convenient: pgx's beginFuncExec defers a Rollback AFTER the Commit and
 // propagates a rollback error only when it is not ErrTxClosed, so a nil from
 // both is the quiet, successful shape.
+//
+// THEY ALSO COUNT, AND WITHOUT THAT THE INVENTORY TESTS ARE VACUOUS. "the
+// DELETE was issued" is satisfied just as well by a transaction that issued it
+// and then rolled back, which leaves the stale worker_workspaces rows exactly
+// where an early return would have. Measured (mutation M15): making
+// applyInventory's closure return an error instead of nil rolls back every
+// inventory replace, and all 21 Go packages stayed green until these counters
+// existed.
+//
+// COMMITS IS THE DISCRIMINATOR, NOT ROLLBACKS, because of the shape of pgx's
+// beginFuncExec: it defers a Rollback unconditionally and then returns
+// tx.Commit(ctx), so a SUCCESSFUL transaction records one commit and one
+// rollback, while a failed one records no commit and two rollbacks (the error
+// branch's and the defer's). Asserting rollbacks == 0 on the success path would
+// therefore fail against correct code.
 type fakeTx struct {
 	pgx.Tx
-	mu      sync.Mutex
-	execErr error
-	execs   []strandExec
+	mu        sync.Mutex
+	execErr   error
+	execs     []strandExec
+	commits   int
+	rollbacks int
 }
 
 func (tx *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -79,8 +96,27 @@ func (tx *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.Comma
 	return pgconn.NewCommandTag("DELETE 0"), nil
 }
 
-func (tx *fakeTx) Commit(context.Context) error   { return nil }
-func (tx *fakeTx) Rollback(context.Context) error { return nil }
+func (tx *fakeTx) Commit(context.Context) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.commits++
+	return nil
+}
+
+func (tx *fakeTx) Rollback(context.Context) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.rollbacks++
+	return nil
+}
+
+// outcome reports how the transaction ENDED, which is the half "what statements
+// were issued" cannot see.
+func (tx *fakeTx) outcome() (commits, rollbacks int) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.commits, tx.rollbacks
+}
 
 // execsSeen is a SEPARATE list from strandDB's, and keeping them apart is what
 // lets "the deferred release did not fire" stay an exact count of zero. Let
@@ -445,6 +481,14 @@ func TestFinishRegister_AppliesInventoryEvenWhenTheAgentReportsNone(t *testing.T
 			"scoring warm-workspace affinity off them.")
 	assert.Contains(t, txExecs[0].sql, "DELETE FROM worker_workspaces",
 		"the one statement must be ReplaceWorkerInventory, which is what clears the stale rows")
+
+	commits, _ := f.tx.outcome()
+	assert.Equal(t, 1, commits,
+		"and the transaction must have COMMITTED. Issuing the DELETE is not the property that "+
+			"matters - a replace that runs and then rolls back leaves exactly the stale rows an early "+
+			"return would have, and the dispatcher goes on scoring warm-workspace affinity off them. "+
+			"Mutation M15 (applyInventory's closure returning an error instead of nil) is green against "+
+			"every other assertion in this package and dies here.")
 }
 
 // TestFinishRegister_SucceedsWhenTheInventoryTransactionFails pins the
@@ -475,6 +519,18 @@ func TestFinishRegister_SucceedsWhenTheInventoryTransactionFails(t *testing.T) {
 		"and the sender must still reach the registry, or the agent is online and undispatchable")
 	assert.Empty(t, f.db.execsSeen(),
 		"the generation must not be released: this registration succeeded")
+
+	commits, rollbacks := f.tx.outcome()
+	require.Len(t, f.tx.execsSeen(), 1,
+		"fixture: the inventory transaction must actually have been REACHED and the injected error "+
+			"actually returned. Without this the test passes just as well against a build where "+
+			"applyInventory never ran, and every assertion above would be about a registration that "+
+			"had nothing to swallow.")
+	assert.Equal(t, 0, commits,
+		"the failed replace must not have committed")
+	assert.GreaterOrEqual(t, rollbacks, 1,
+		"and it must have rolled back, so the worker's previous rows survive a failed replace "+
+			"intact rather than being half-cleared")
 
 	require.Error(t, finish())
 }
