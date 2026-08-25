@@ -72,3 +72,23 @@ a data point on cost: it was **evaded twice** before it held, each time by a con
 one context and real in the other (`h.Metrics != nil`, then `h.pool != nil` nested inside the guarded
 branch). A behavioural test would have caught both on the first run. Treat a parser guard as the
 expensive fallback it is, not as an equivalent substitute.
+
+## 2026-08-24: the frontend twin was WORSE than the Go one, and it is now half-closed
+
+This item was filed about Go guards behind `//go:build integration`. The frontend had the same disease
+in a more advanced form and nobody had named it: **there was no web CI at all**. No workflow referenced
+npm, node or `web/`, so `npm test` (1116 tests), `tsc -b` and `npm run build` had never run in CI on any
+commit. The Go guards at least ran locally by convention; the frontend suite was advisory everywhere.
+
+`.github/workflows/web-ci.yml` (2026-08-24) closes that half: unit tests, type-check, production build
+and the browser suite now run on every PR.
+
+**What this does NOT close, and the distinction matters for scoping:** the Go integration lane still
+runs no tags in CI, which is this item's original subject and is untouched. Also note the new workflow
+inherits a version-currency problem of its own -
+[[idea-2026-08-24-web-ci-node-20-actions-and-unverified-node-version]].
+
+One measurement worth carrying, because it prices the item: during the 2026-08-24 finishRegister slice a
+line whose deletion left all 21 Go packages green had to be guarded by a `go/parser` test instead of a
+behavioural one, and **that guard was evaded five times** before it held. The cost of a lane CI never
+runs is not the missing signal alone; it is the elaborate and fragile substitute built in its place.

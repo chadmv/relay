@@ -134,3 +134,20 @@ Raise the priority if either trigger fires: an eleventh table is added by someon
 and nothing will remind them to revisit `MIN_W`). The second is the more likely of the two and it is
 the one no reviewer would think to check.
 </invoke>
+
+## 2026-08-24: two of the consumers now have a real magnitude gate, and the number came from measurement
+
+The browser harness's `keyboard.spec.ts` asserts that each table's scroll wrapper is genuinely
+scrollable before it tries to scroll it - `scrollWidth - clientWidth > 100` at 480px, for
+`/admin/enrollments` and `/admin/invites`.
+
+The threshold is the interesting part for this item. It started as `> 0` and that was **measured to be
+useless**: with the `min-w-[...]` rule entirely absent, the wrapper's fixed-pixel columns alone still
+produce 51px (enrollments) and 32px (invites) of residual overflow, so `> 0` could not tell a missing
+rule from a working one. `> 100` can. That is a magnitude check on two of the ten consumers, arrived at
+by measuring the failure mode rather than by picking a round number - which is the method this item is
+asking for.
+
+Two caveats before treating this as a template: it is asserted at one width (480), and it is a *lower*
+bound only, so a rule that is far too large is still invisible. The remaining eight consumers are
+unchanged.

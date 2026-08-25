@@ -40,3 +40,21 @@ Run `npm audit` in `web/`:
 ## Related
 - Commit 3b058f6 (jsdom `^25` → `^29`)
 - `web/package.json`, `web/vite.config.*`, `web/package-lock.json`
+
+## 2026-08-24: the sequencing argument inverted, and three new requirements
+
+ROADMAP has argued that this upgrade should happen **before** the new test surface grows. That ordering
+is now inverted by events: the browser harness shipped first (2026-08-24), so the upgrade has to carry
+it rather than precede it. Three concrete additions to this item's scope:
+
+1. **`web/vite.config.ts` now sets `test.exclude`** as `[...configDefaults.exclude, 'e2e/**']`, importing
+   `configDefaults` from `vitest/config`. The spread is load-bearing - the bare form deletes vitest's
+   default excludes and sends it walking `node_modules`. Any config rewrite must preserve it, and the
+   check is that `npm test` still collects exactly 152 files / 1116 tests.
+2. **`web/tsconfig.json` now includes `e2e` and `playwright.config.ts`** and adds `"node"` to `types`.
+   Verified during that slice: this widens nothing, because vitest already pulled Node types in
+   transitively. Re-verify that claim after the upgrade rather than inheriting it - it is exactly the
+   kind of fact an upgrade changes.
+3. **A green `npm test` is no longer sufficient evidence.** `make test-e2e` and the `web-ci` workflow are
+   now part of the frontend gate, and the harness pins `@playwright/test` exactly. An upgrade that moves
+   vite must be checked against the production bundle the harness serves, not just the dev server.
