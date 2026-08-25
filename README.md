@@ -197,7 +197,7 @@ Before a new agent can connect, an admin must issue it a one-time enrollment tok
 
 Set that token as an environment variable before starting the agent for the first time. After enrollment the agent persists a long-lived token in `--state-dir` and the env var is no longer needed.
 
-On a trusted private network you can instead run the server with `RELAY_ALLOW_AUTO_ENROLL=true` and start the agent with no token at all - skip the `relay agent enroll` step entirely. The agent receives and persists a long-lived token on its first connection, exactly as with token enrollment. **This works for a hostname that has no existing `workers` row.** Auto-enrollment creates workers and never claims them, so a machine being re-provisioned in place - or one that lost its state directory but kept its hostname - is refused. **Revoking alone does not fix that**, and this is the trap worth knowing before you hit it: `relay workers revoke <id>` nulls the credential but keeps the row, so the hostname stays claimed and the token-less agent gets the identical refusal on every restart. The two routes are **sequential, not alternative**. Either revoke the worker **and then** enroll the agent with an admin-issued enrollment token - which a revoked worker accepts, and which reuses the existing worker with its history intact - or run `relay workers delete <id>` to free the hostname for token-less enrollment, which also destroys that worker's assignments and reservations.
+On a trusted private network you can instead run the server with `RELAY_ALLOW_AUTO_ENROLL=true` and start the agent with no token at all - skip the `relay agent enroll` step entirely. The agent receives and persists a long-lived token on its first connection, exactly as with token enrollment. **This works for a hostname that has no existing `workers` row.** Auto-enrollment creates workers and never claims them, so a machine being re-provisioned in place - or one that lost its state directory but kept its hostname - is refused. **Revoking alone does not fix that**, and this is the trap worth knowing before you hit it: `relay workers revoke <id>` nulls the credential but keeps the row, so the hostname stays claimed and the token-less agent gets the identical refusal on every restart. The two routes are **sequential, not alternative**: revoke the worker **and then** enroll the agent with an admin-issued enrollment token (`relay agent enroll`), which a revoked worker accepts and which reuses the existing worker with its history intact. The other escape hatch is to **rename the host** - identity is keyed by hostname, so a renamed machine rejoins as a new worker. **There is no command that frees a claimed hostname for token-less enrollment**; relay has no worker-delete at any layer. A machine re-provisioned in place, under auto-enroll, whose operator cannot get an enrollment token issued, has no remedy on the token-less path - that case is a known gap, not an oversight.
 
 **Linux / macOS**
 
@@ -350,7 +350,7 @@ The agent writes two files to `--state-dir`:
 - `worker-id` — UUID assigned on first registration; reused on reconnect so the server recognises the same machine
 - `token` — long-lived authentication token issued by the server on enrollment; written at 0600 permissions
 
-On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error **the next time it connects**. Revocation does not reach a connection that is already established: nothing re-checks a credential after registration and revoking does not close the stream, so an already-connected agent keeps running the tasks it already holds and keeps writing their task logs and statuses until it disconnects for some other reason - both of those writes are fenced on the task's assignment epoch and its `worker_id`, never on the worker's status. **New dispatches stop at once**, though: revoking sets the worker's status to `revoked`, the dispatcher only selects `online` or `stale` workers, and nothing restores `online` while the stream is live. Relay sets no maximum connection age, so there is no timer that ends the connection either. To end it immediately, disable or delete the worker and confirm it has gone offline - but note that deleting the worker row destroys its assignments and reservations, so it is not the right first move if all you needed was to stop new work.
+On first boot the agent requires a one-time enrollment token. After successful enrollment the long-lived token is persisted and used automatically on subsequent starts. If the token is revoked by an admin, the agent exits with an authentication error **the next time it connects**. Revocation does not reach a connection that is already established: nothing re-checks a credential after registration and revoking does not close the stream, so an already-connected agent keeps running the tasks it already holds and keeps writing their task logs and statuses until it disconnects for some other reason - both of those writes are fenced on the task's assignment epoch and its `worker_id`, never on the worker's status. **New dispatches stop at once**, though: revoking sets the worker's status to `revoked`, the dispatcher only selects `online` or `stale` workers, and nothing restores `online` while the stream is live. Relay sets no maximum connection age, so there is no timer that ends the connection either. To end it immediately, disable the worker and confirm it has gone offline. (This used to say "disable or delete the worker ... deleting the worker row destroys its assignments and reservations". Both halves were wrong and are corrected here: **relay has no worker-delete** - no CLI subcommand, no `DELETE FROM workers` query, and no DELETE route on the resource - and were one added, `tasks.worker_id` is `ON DELETE SET NULL` so running tasks would be orphaned rather than destroyed, `reservations.worker_ids` is a bare `UUID[]` with no foreign key so reservations would be untouched, and `agent_enrollments.consumed_by` has no `ON DELETE` action at all, so the delete would fail outright for any worker that was ever enrolled with a token.)
 
 When the server runs with `RELAY_ALLOW_AUTO_ENROLL=true`, an agent with no `token` file and no `RELAY_AGENT_ENROLLMENT_TOKEN` attempts token-less auto-enrollment instead of exiting. If the server does not allow it, the agent exits with an authentication error. It exits the same way, with the same error, in two further cases: the hostname it presents **already has a `workers` row**, and the fleet is **at `RELAY_AUTO_ENROLL_WORKER_CEILING`**. The server returns one opaque refusal for all three, so the agent's own exit log is what names them and prescribes the remedy.
 
@@ -374,8 +374,8 @@ worker whose credential is **live**: rotating a live agent's credential requires
 a revoke first. The asymmetry between the two paths is deliberate - revoking
 does not delete the row, so refusing every existing row on the enrollment-token
 path too would make the revoked row block its own recovery and leave
-`relay workers delete`, which destroys assignments and reservations, as the only
-way back.
+no way back at all: relay has no worker-delete, so the revoked row would block
+its own recovery permanently.
 
 **What auto-enrollment costs, stated plainly.** Under `RELAY_ALLOW_AUTO_ENROLL=true`, any host able to
 reach the gRPC port may create **one persistent `workers` row per distinct hostname it claims**, up to
@@ -416,7 +416,8 @@ is what `CountWorkers` measures. It does **not** bound the number of rows in the
 below is what makes that gap reachable: revoking a row keeps it, so under an active attacker the
 operator revokes 1024 junk workers, the attacker creates 1024 more under **new** hostnames - the old
 ones stay claimed forever - and the table grows without limit in the revoked bucket while the counted
-total sits flat. Reclaiming either the row or the hostname needs `relay workers delete`, which destroys
+total sits flat. **Nothing reclaims either the row or the hostname** - relay has no worker-delete at any
+layer, so revoked junk rows are permanent. Bounding the table itself, and reaping those rows, is what
 that worker's assignments and reservations. Bounding the table itself is not something this ceiling
 does or is trying to do.
 
@@ -428,10 +429,9 @@ does or is trying to do.
    **who**. A successful token-less enrollment writes exactly one, permanently, because that hostname
    can never be auto-enrolled again - so the log is a complete list of what was created this way.
 1. **Revoke the junk.** The ceiling counts non-revoked workers only, so `relay workers revoke <id>` on
-   rows that do not correspond to real machines frees budget immediately, with no restart, and without
-   the assignment and reservation destruction that *deleting* a worker causes. Note what it does not
-   do: the row and its hostname remain, so this frees **budget**, never a **hostname**, and it does not
-   shrink the table.
+   rows that do not correspond to real machines frees budget immediately, with no restart, and is the
+   only cleanup relay has - there is no worker-delete. Note what it does not do: the row and its
+   hostname remain, so this frees **budget**, never a **hostname**, and it does not shrink the table.
 2. **Use enrollment tokens.** The ceiling gates the token-less path only. `relay agent enroll` is never
    refused by it, so machines can still be added with no downtime.
 3. **Raise `RELAY_AUTO_ENROLL_WORKER_CEILING`.** This **requires a server restart** - the knob is not

@@ -1129,6 +1129,29 @@ Mapped to the two items' own criteria, with the amendments called out.
 - **The ceiling helps no deployment that has already been hit.** `revoke` frees budget manually and is
   the only remedy this slice ships. Item 16.1.
 
+**CORRECTION, 2026-08-25 Phase 4 re-verify. `relay workers delete` DOES NOT EXIST, and this document
+names it five times.** Sections 5.4, 6.4, 9 and 16.1 all justify a decision by the cost of "deleting a
+worker, which destroys its assignments and reservations". Both halves are false and were never checked:
+
+- **There is no worker-delete at any layer.** `internal/cli/workers.go`'s switch has no `delete` arm
+  (its usage line is `<list|get|disable|enable|revoke|workspaces|evict-workspace>`), there is no
+  `DELETE FROM workers` in `internal/store/query/`, and the only DELETE route on the resource is
+  `/v1/workers/{id}/token`, which is revoke. `bug-2026-08-21-auto-enroll-worker-row-creation-is-unbounded`
+  says so in its own Summary - the item this slice implements stated the fact the slice then contradicted.
+- **The stated cost is wrong three ways even hypothetically.** `tasks.worker_id` is
+  `ON DELETE SET NULL` (000001:62), so a running task would be ORPHANED, not destroyed;
+  `reservations.worker_ids` is a bare `UUID[]` with no foreign key (000001:89), so reservations would
+  be untouched; and `agent_enrollments.consumed_by` (000005:9) has no `ON DELETE` action at all, so the
+  delete would FAIL with a foreign-key violation for every worker ever enrolled with a token.
+
+The DECISIONS this cost was used to justify all survive, and one is strengthened: the enrollment-token
+path's asymmetric guard (5.4) was argued as "otherwise delete is the only recovery"; the truth is that
+there would be NO recovery, because a revoked row that could not be re-enrolled would be permanently
+stuck. What changes is the operator prose, corrected in README and in the agent's exit message: the
+remedy is revoke-then-enrollment-token, or rename the host, and there is NO remedy for a machine
+re-provisioned in place whose operator cannot get a token issued. That gap is real and is proposed as
+its own item rather than papered over with a command that does not exist.
+
 **Added 2026-08-25, Phase 4.** Three limitations this section did not have, all found in review.
 
 - **The ceiling bounds NON-REVOKED rows, and remedy 1 is what makes the gap reachable.** Revoking keeps

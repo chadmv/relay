@@ -54,8 +54,10 @@ var errHostnameClaimed = errors.New("hostname already claimed")
 // A DIFFERENT PREDICATE FROM errHostnameClaimed's AND THE DIFFERENCE IS FORCED:
 // revoking does not delete the row (ClearWorkerAgentToken nulls the hash and sets
 // status='revoked'), so refusing every existing row here would make the revoked
-// row block its own recovery and leave `relay workers delete` - which destroys
-// assignments and reservations - as the only route. NULL means revoked
+// row block its own recovery and leave NO ROUTE AT ALL: relay has no
+// worker-delete - no CLI subcommand, no DELETE FROM workers, no DELETE route on
+// the resource - so a revoked row that could not be re-enrolled by token would
+// be permanently stuck. NULL means revoked
 // (recovery, allowed); non-NULL means a live credential (takeover, refused).
 var errCredentialLive = errors.New("worker credential is live")
 

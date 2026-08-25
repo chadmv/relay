@@ -141,9 +141,10 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 --    transaction as the insert it gates.
 --
 -- THE status != 'revoked' EXCLUSION IS LOAD-BEARING FOR CALLER 2, not incidental
--- to it: it is what makes `relay workers revoke` free ceiling budget without the
--- assignment and reservation destruction that deleting a worker causes, which is
--- the first remedy an operator at the ceiling is told to try. It is also why the
+-- to it: it is what makes `relay workers revoke` free ceiling budget, and revoke
+-- is the ONLY cleanup relay has - there is no worker-delete at any layer, so a
+-- revoked row is permanent - which is why it is the first remedy an operator at
+-- the ceiling is told to try. It is also why the
 -- ceiling bounds NON-REVOKED rows rather than total rows - revoking keeps the
 -- row and the hostname, so the table can still grow while this number does not.
 SELECT COUNT(*) FROM workers WHERE status != 'revoked';
