@@ -59,15 +59,41 @@ func (d *strandDB) Exec(_ context.Context, sql string, args ...any) (pgconn.Comm
 	return pgconn.NewCommandTag(d.execTag), nil
 }
 
-// Query records what it was asked as well as refusing it. RequeueWorkerTasksIfEpoch
+// Query records what it was asked as well as answering it. RequeueWorkerTasksIfEpoch
 // is a :many, so the else arm of releaseWorkerGeneration lands here rather than
 // in Exec, and the statement it issues is the only evidence that arm ran.
+//
+// A NIL pgx.Rows WITH A NIL ERROR IS NOT AN EMPTY RESULT, and it used to be what
+// this returned. sqlc's :many body does `rows, err := q.db.Query(...)` and then
+// `defer rows.Close()` on the very next line (internal/store/tasks.sql.go), so
+// (nil, nil) panics on a nil interface receiver inside generated code - one frame
+// short of applyInventory, and easy to misread as the pool panic it sits next to.
+// A fixture that means "this worker has no active tasks" has to say so with a
+// Rows that exists.
 func (d *strandDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.queries = append(d.queries, strandExec{sql: sql, args: args})
-	return nil, d.queryErr
+	if d.queryErr != nil {
+		return nil, d.queryErr
+	}
+	return emptyRows{}, nil
 }
+
+// emptyRows is a pgx.Rows carrying no rows at all: Next says there are none,
+// Close is a no-op and Err reports success. That is the whole of what a
+// generated :many body calls when a result set is empty.
+//
+// THE EMBEDDED NIL INTERFACE SUPPLIES THE OTHER SIX METHODS AS A PANIC, which is
+// the fail-loud choice fenceStore makes in internal/scheduler and the right
+// report if a query on this path ever grows a Scan or a Values: a nil
+// dereference naming the method beats a plausible zero value that silently makes
+// a test prove less.
+type emptyRows struct{ pgx.Rows }
+
+func (emptyRows) Close()     {}
+func (emptyRows) Next() bool { return false }
+func (emptyRows) Err() error { return nil }
 
 func (d *strandDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
 	return strandWorkerRow{}

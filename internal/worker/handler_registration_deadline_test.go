@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,16 @@ type scriptedStream struct {
 	release  chan struct{}
 	recvDone chan struct{} // closed by the Recv that returns after release
 	delay    time.Duration // sleep before handing back the first message
+
+	// mu guards sent, and it is load-bearing rather than defensive. The
+	// successful-registration tests next door run Connect on their own goroutine
+	// and read this slice from the test goroutine, and the sends arrive from TWO
+	// goroutines even within Connect: finishRegister writes the RegisterResponse
+	// directly, and every send after that goes through the workerSender's send
+	// loop. CI runs `go test -race ./...`, which reports an unguarded slice as a
+	// failure rather than as a flake.
+	mu   sync.Mutex
+	sent []*relayv1.CoordinatorMessage
 }
 
 func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
@@ -49,13 +60,33 @@ func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
 	return nil, status.Error(codes.Canceled, "stream torn down")
 }
 
-func (s *scriptedStream) Send(*relayv1.CoordinatorMessage) error { return nil }
-func (s *scriptedStream) Context() context.Context               { return s.ctx }
-func (s *scriptedStream) RecvMsg(any) error                      { return nil }
-func (s *scriptedStream) SendMsg(any) error                      { return nil }
-func (s *scriptedStream) SetHeader(metadata.MD) error            { return nil }
-func (s *scriptedStream) SendHeader(metadata.MD) error           { return nil }
-func (s *scriptedStream) SetTrailer(metadata.MD)                 {}
+// Send records what it was asked to deliver. It used to discard its argument,
+// which is what made "the RegisterResponse was actually sent" unobservable in
+// this lane - the message never left the stream fake, so no default-lane test
+// could tell a sent response from a deleted send.
+func (s *scriptedStream) Send(m *relayv1.CoordinatorMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, m)
+	return nil
+}
+
+// sentMsgs returns a copy of what has been sent so far, so callers never read
+// the slice the send goroutine is appending to.
+func (s *scriptedStream) sentMsgs() []*relayv1.CoordinatorMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*relayv1.CoordinatorMessage, len(s.sent))
+	copy(out, s.sent)
+	return out
+}
+
+func (s *scriptedStream) Context() context.Context     { return s.ctx }
+func (s *scriptedStream) RecvMsg(any) error            { return nil }
+func (s *scriptedStream) SendMsg(any) error            { return nil }
+func (s *scriptedStream) SetHeader(metadata.MD) error  { return nil }
+func (s *scriptedStream) SendHeader(metadata.MD) error { return nil }
+func (s *scriptedStream) SetTrailer(metadata.MD)       {}
 
 // TestConnect_SilentPeerIsDisconnectedAtTheRegistrationDeadline.
 //
