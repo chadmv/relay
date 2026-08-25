@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"relay/internal/api"
 	"relay/internal/store"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,4 +101,43 @@ func TestDeleteWorker_FreesTheHostnameForTokenlessAutoEnroll(t *testing.T) {
 	third, err := q.InsertWorkerForAutoEnroll(t.Context(), params)
 	require.NoError(t, err, "the hostname must be free again")
 	assert.NotEqual(t, first, third, "a NEW row, not a revived one")
+}
+
+// TestDeleteWorker_SucceedsForATokenEnrolledWorker (T-A1). VACUITY: this passes
+// trivially if the fixture never consumed a token, so the PRE-ASSERTION that
+// consumed_by is non-NULL before the delete is the whole discriminator.
+func TestDeleteWorker_SucceedsForATokenEnrolledWorker(t *testing.T) {
+	srv, q := newTestServer(t)
+	admin := createTestUser(t, q, "Enr Admin", "enr-admin@example.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	row, err := q.UpsertWorkerByHostname(t.Context(), store.UpsertWorkerByHostnameParams{
+		Name: "enrolled", Hostname: "enrolled", CpuCores: 4, RamGb: 16, Os: "linux",
+	})
+	require.NoError(t, err)
+	_, err = q.UpdateWorkerStatus(t.Context(), store.UpdateWorkerStatusParams{ID: row.ID, Status: "offline"})
+	require.NoError(t, err)
+
+	e, err := q.CreateAgentEnrollment(t.Context(), store.CreateAgentEnrollmentParams{
+		TokenHash: "enr-hash", CreatedBy: admin.ID,
+		ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	_, err = q.ConsumeAgentEnrollment(t.Context(), store.ConsumeAgentEnrollmentParams{ID: e.ID, ConsumedBy: row.ID})
+	require.NoError(t, err)
+
+	pre, err := q.GetAgentEnrollmentByTokenHash(t.Context(), "enr-hash")
+	require.NoError(t, err)
+	require.True(t, pre.ConsumedBy.Valid, "PRE-ASSERTION: without this the test is the generic delete test")
+
+	rec := doDeleteWorker(t, srv, uuidString(row.ID), adminToken)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	assert.Equal(t, float64(1), body["enrollments_unlinked"])
+
+	post, err := q.GetAgentEnrollmentByTokenHash(t.Context(), "enr-hash")
+	require.NoError(t, err, "the enrollment row must survive")
+	assert.True(t, post.ConsumedAt.Valid, "consumed_at intact")
+	assert.False(t, post.ConsumedBy.Valid, "consumed_by NULL")
 }

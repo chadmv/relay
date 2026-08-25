@@ -581,7 +581,15 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Release the resource. :execrows, and the zero case is handled rather
+	// 3. Break the enrollment link. Must precede the DELETE or the no-action FK
+	// fires; that FK is deliberately not ON DELETE SET NULL (spec 5).
+	unlinked, err := q.ClearEnrollmentConsumerForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unlink enrollments failed")
+		return
+	}
+
+	// 4. Release the resource. :execrows, and the zero case is handled rather
 	// than assumed - Task 6 turns it into the 409 it should be.
 	n, err := q.DeleteWorker(ctx, id)
 	if err != nil {
@@ -593,7 +601,7 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Wake the dispatcher so requeued tasks are placed promptly; skipped when
+	// 5. Wake the dispatcher so requeued tasks are placed promptly; skipped when
 	// nothing moved, to avoid a spurious cycle (same as handleDisableWorker).
 	if len(requeued) > 0 {
 		if err := q.NotifyTaskSubmitted(ctx); err != nil {
@@ -612,8 +620,9 @@ func (s *Server) handleDeleteWorker(w http.ResponseWriter, r *http.Request) {
 	// connection this path exists to forbid (spec 6.3).
 
 	writeJSON(w, http.StatusOK, deleteWorkerResponse{
-		workerResponse: toWorkerResponse(current),
-		RequeuedTasks:  len(requeued),
+		workerResponse:      toWorkerResponse(current),
+		RequeuedTasks:       len(requeued),
+		EnrollmentsUnlinked: int(unlinked),
 	})
 }
 
