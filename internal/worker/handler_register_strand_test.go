@@ -119,7 +119,7 @@ func (emptyRows) Err() error { return nil }
 // strandDB without a script and see byte-identical behaviour.
 func (d *strandDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	if d.script != nil {
-		return d.script.answer(sql, args)
+		return d.script.answer("pool", sql, args)
 	}
 	return strandWorkerRow{}
 }

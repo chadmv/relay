@@ -70,16 +70,38 @@ type rowScript struct {
 	// workerCount is what CountWorkers answers with.
 	workerCount int64
 
-	seen []strandExec
+	seen []scriptedQuery
+}
+
+// scriptedQuery is what rowScript records, and it carries an OWNER that
+// strandExec has no room for.
+//
+// WITHOUT IT NO ASSERTION CAN SAY WHERE A STATEMENT WAS ISSUED, only that it
+// was, because strandDB.QueryRow and fakeTx.QueryRow share one rowScript and
+// appended to one undifferentiated list. Measured: changing any of
+// autoEnrollAndRegister's or enrollAndRegister's three txq.* calls to h.q.* -
+// i.e. hoisting it OUT of the transaction onto the pool - left every test in
+// this package green. That is not a cosmetic gap: enrollAndRegister's own
+// comment claims "the lock is what makes this non-racy for the case that
+// matters, an existing row", and a FOR UPDATE taken outside the transaction
+// holds nothing by the time the upsert runs. For InsertWorkerForAutoEnroll the
+// production consequence is worse than the fake's: a SetWorkerAgentToken failure
+// would no longer roll the insert back, leaving an orphan row with a NULL hash
+// that blocks its hostname permanently while not counting against the
+// non-revoked ceiling budget either.
+type scriptedQuery struct {
+	owner string // "tx" for fakeTx, "pool" for strandDB
+	sql   string
+	args  []any
 }
 
 // answer resolves one QueryRow. First match wins; anything unmatched keeps the
 // historical strandWorkerRow, which is what makes this inert for every test in
 // the package that predates it.
-func (s *rowScript) answer(sql string, args []any) pgx.Row {
+func (s *rowScript) answer(owner, sql string, args []any) pgx.Row {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.seen = append(s.seen, strandExec{sql: sql, args: args})
+	s.seen = append(s.seen, scriptedQuery{owner: owner, sql: sql, args: args})
 
 	switch {
 	// GetAgentEnrollmentByTokenHash. strandWorkerRow scans this struct
@@ -139,17 +161,33 @@ func strArg(args []any, i int) string {
 // queryRowsSeen copies every statement this script answered. A SEPARATE list
 // from strandDB.execs and fakeTx.execs, so "no INSERT was issued" stays an exact
 // assertion rather than a substring hunt across mixed lists.
-func (s *rowScript) queryRowsSeen() []strandExec {
+func (s *rowScript) queryRowsSeen() []scriptedQuery {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]strandExec, len(s.seen))
+	out := make([]scriptedQuery, len(s.seen))
 	copy(out, s.seen)
 	return out
 }
 
+// sawStatement asks only WHETHER a statement was issued. Use sawStatementOn when
+// the question is where - "no INSERT at all" and "no INSERT inside the
+// transaction" are different claims and only the fixture can tell them apart.
 func (s *rowScript) sawStatement(substr string) bool {
 	for _, q := range s.queryRowsSeen() {
 		if strings.Contains(q.sql, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// sawStatementOn asks whether a statement was issued on a PARTICULAR handle -
+// "tx" for the enrollment transaction, "pool" for a bare h.q call outside it.
+// It is what pins transactional placement, which nothing else in this package
+// can see.
+func (s *rowScript) sawStatementOn(owner, substr string) bool {
+	for _, q := range s.queryRowsSeen() {
+		if q.owner == owner && strings.Contains(q.sql, substr) {
 			return true
 		}
 	}
@@ -300,6 +338,13 @@ func TestConnect_AutoEnrollStillCreatesAWorkerForAFreshHostname(t *testing.T) {
 	require.NotNil(t, resp)
 	assert.Equal(t, "[redacted by scriptedStream]", resp.AgentToken,
 		"the retained message must carry the placeholder, which distinguishes 'scrubbed' from 'never sent'")
+
+	// THE INSERT MUST BE ON THE TRANSACTION, not on the pool. Hoisting it out
+	// leaves this test green on every other assertion while a SetWorkerAgentToken
+	// failure would strand an orphan row with a NULL agent_token_hash - blocking
+	// that hostname forever and counting against nothing.
+	assert.True(t, f.script.sawStatementOn("tx", "INSERT INTO workers"),
+		"InsertWorkerForAutoEnroll must be issued inside the auto-enroll transaction")
 }
 
 // agentEnrollmentRow is a store.AgentEnrollment that is NEITHER consumed NOR
@@ -411,6 +456,9 @@ func TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow(t *testing.T
 
 	assert.False(t, f.script.sawStatement("DO UPDATE"),
 		"the auto-enroll path must not issue UpsertWorkerByHostname at all")
+	assert.True(t, f.script.sawStatementOn("tx", "INSERT INTO workers"),
+		"the refusal must come from the INSERT inside the transaction - a create-only guard "+
+			"hoisted onto the pool refuses identically here and rolls nothing back in production")
 	for _, e := range f.tx.execsSeen() {
 		assert.NotContains(t, e.sql, "agent_token_hash = $2",
 			"SetWorkerAgentToken must never run: the existing worker's token stays intact")
@@ -499,7 +547,27 @@ func TestConnect_EnrollmentTokenRefusesAHostnameWithALiveCredential(t *testing.T
 
 	for _, e := range f.tx.execsSeen() {
 		assert.NotContains(t, e.sql, "agent_token_hash = $2", "SetWorkerAgentToken must not run")
+		// THE GUARD MUST PRECEDE ConsumeAgentEnrollment, and rollback makes the two
+		// orderings observationally identical everywhere else - moving the guard
+		// below the consume survives the whole mutation battery without this line.
+		// A consumed one-shot admin credential that bought nothing is a real cost
+		// even when the transaction unwinds it, because a retry needs a NEW token.
+		assert.NotContains(t, e.sql, "consumed_at",
+			"the live-credential guard must refuse BEFORE the enrollment token is consumed")
 	}
+
+	// FOR UPDATE, ON THE TRANSACTION. enrollAndRegister's comment claims the lock
+	// is what makes this non-racy for an existing row; a lookup hoisted onto the
+	// pool takes a lock that is released before the upsert runs, and until this
+	// assertion existed that claim had no witness at all.
+	assert.True(t, f.script.sawStatementOn("tx", "FOR UPDATE"),
+		"the worker lookup must be issued inside the enrollment transaction")
+
+	// BOTH HALVES, AND THEY ARE NOT REDUNDANT. commits == 0 says the transaction
+	// did not succeed; rollbacks >= 1 says a transaction was OPENED AND UNWOUND at
+	// all, which is what fails when the guard is hoisted above BeginTxFunc - the
+	// refusal then returns before any transaction exists and this count is 0. Do
+	// not delete either one as duplicative of the other.
 	commits, rollbacks := f.tx.outcome()
 	assert.Equal(t, 0, commits)
 	assert.GreaterOrEqual(t, rollbacks, 1)
@@ -538,6 +606,9 @@ func TestConnect_AutoEnrollRefusesWhenTheFleetIsAtTheCeiling(t *testing.T) {
 	// side effects. Asserting only the refusal cannot see a check moved after it.
 	assert.False(t, f.script.sawStatement("INSERT INTO workers"),
 		"the ceiling check must run BEFORE the insert, so a refused auto-enroll writes nothing")
+	assert.True(t, f.script.sawStatementOn("tx", "COUNT(*) FROM workers"),
+		"CountWorkers must be read inside the same transaction as the insert it gates; on the pool "+
+			"it is a separate snapshot and the check no longer bounds the write it is guarding")
 	assert.Equal(t, 0, f.stream.tokensSent())
 }
 

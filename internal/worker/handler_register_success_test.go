@@ -125,7 +125,7 @@ func (tx *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.Comma
 // nil dereference one frame inside generated code.
 func (tx *fakeTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	if tx.script != nil {
-		return tx.script.answer(sql, args)
+		return tx.script.answer("tx", sql, args)
 	}
 	return strandWorkerRow{}
 }
