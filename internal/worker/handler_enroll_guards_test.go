@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -70,6 +71,12 @@ type rowScript struct {
 	// workerCount is what CountWorkers answers with.
 	workerCount int64
 
+	// storeErr, when set, is returned by the two statements that can fail with a
+	// RAW POSTGRES ERROR on a caller-controlled input: the create-only insert and
+	// the FOR UPDATE lookup. It is neither pgx.ErrNoRows nor a refusal - it stands
+	// in for a genuine store fault.
+	storeErr error
+
 	seen []scriptedQuery
 }
 
@@ -123,6 +130,9 @@ func (s *rowScript) answer(owner, sql string, args []any) pgx.Row {
 
 	// GetWorkerByHostname / GetWorkerByHostnameForUpdate: hostname is $1.
 	case strings.Contains(sql, "FROM workers") && strings.Contains(sql, "hostname = $1"):
+		if s.storeErr != nil {
+			return errRow{s.storeErr}
+		}
 		if s.existingHostname != "" && strArg(args, 0) == s.existingHostname {
 			if s.existingHasLiveToken {
 				return liveWorkerRow{}
@@ -134,6 +144,9 @@ func (s *rowScript) answer(owner, sql string, args []any) pgx.Row {
 	// InsertWorkerForAutoEnroll: name is $1, hostname is $2, and DO NOTHING
 	// returns NO ROW on conflict - the whole refusal signal.
 	case strings.Contains(sql, "INSERT INTO workers") && strings.Contains(sql, "DO NOTHING"):
+		if s.storeErr != nil {
+			return errRow{s.storeErr}
+		}
 		if s.existingHostname != "" && strArg(args, 1) == s.existingHostname {
 			return errRow{pgx.ErrNoRows}
 		}
@@ -217,6 +230,8 @@ type enrollConfig struct {
 	existingHasLiveToken bool
 	// workerCount: what CountWorkers answers with, for the ceiling tests.
 	workerCount int64
+	// storeErr: a non-ErrNoRows store fault on the insert or the lookup.
+	storeErr error
 	allowAutoEnroll      bool
 	execTag              string // "" keeps fakeTx's historical "DELETE 0"
 }
@@ -228,6 +243,7 @@ func newEnrollFixture(t *testing.T, cfg enrollConfig) *enrollFixture {
 		existingHostname:     cfg.existingHostname,
 		existingHasLiveToken: cfg.existingHasLiveToken,
 		workerCount:          cfg.workerCount,
+		storeErr:             cfg.storeErr,
 	}
 	db := &strandDB{execTag: "UPDATE 1", script: script}
 	tx := &fakeTx{script: script, execTag: cfg.execTag}
@@ -477,32 +493,85 @@ func TestConnect_AutoEnrollRefusesAHostnameThatAlreadyHasAWorkerRow(t *testing.T
 	assert.Equal(t, 0, f.stream.tokensSent())
 }
 
-// TestConnect_AutoEnrollRefusalIsIndistinguishableFromACredentialFailure.
-// The two messages are COMPARED WITH EACH OTHER rather than each against a
-// literal: comparing literals would still pass if both sites were changed to
-// something disclosing.
-func TestConnect_AutoEnrollRefusalIsIndistinguishableFromACredentialFailure(t *testing.T) {
-	claimed := newEnrollFixture(t, enrollConfig{
-		hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
-	})
-	_, claimedErr := claimed.connect(t)
-	require.Error(t, claimedErr)
+// TestConnect_EveryCredentialRefusalIsIndistinguishable drives EVERY refusal on
+// the gRPC registration surface and compares the produced messages WITH EACH
+// OTHER rather than each against a literal - comparing literals would still pass
+// if every site were changed to something disclosing.
+//
+// IT USED TO COVER TWO HAND-PICKED ARMS, and that is how "auto-enroll disabled"
+// survived: README claims every credential failure here returns the identical
+// status and the identical string, and that arm returned "auto-enroll disabled",
+// so an unauthenticated peer could fingerprint whether RELAY_ALLOW_AUTO_ENROLL
+// is set - free, side-effect-free, and no worker row touched. It is also cause
+// (1) of the three the agent's exit message tells an operator to check, i.e. the
+// one the design says is indistinguishable was the one that was not.
+//
+// The table is exhaustive over the refusal sites BY CONSTRUCTION: an arm added
+// to authenticateAndRegister that returns a new string is only caught if it is
+// added here too, so treat this list as part of the refusal surface.
+func TestConnect_EveryCredentialRefusalIsIndistinguishable(t *testing.T) {
+	ceiling := 1
+	arms := []struct {
+		name  string
+		build func(t *testing.T) *enrollFixture
+	}{
+		{"auto-enroll DISABLED, no credential", func(t *testing.T) *enrollFixture {
+			return newEnrollFixture(t, enrollConfig{hostname: "any-host"}) // allowAutoEnroll false
+		}},
+		{"auto-enroll, hostname already claimed", func(t *testing.T) *enrollFixture {
+			return newEnrollFixture(t, enrollConfig{
+				hostname: "taken-host", existingHostname: "taken-host", allowAutoEnroll: true,
+			})
+		}},
+		{"auto-enroll, fleet at the ceiling", func(t *testing.T) *enrollFixture {
+			f := newEnrollFixture(t, enrollConfig{hostname: "fresh-host", allowAutoEnroll: true, workerCount: 9})
+			f.h.AutoEnrollWorkerCeiling = &ceiling
+			return f
+		}},
+		{"reconnect, unknown agent token", func(t *testing.T) *enrollFixture {
+			f := newEnrollFixture(t, enrollConfig{
+				hostname:   "any-host",
+				credential: &relayv1.RegisterRequest_AgentToken{AgentToken: "no-such-token"},
+			})
+			f.script.unknownAgentToken = true
+			return f
+		}},
+		{"enrollment token, hostname holds a live credential", func(t *testing.T) *enrollFixture {
+			return newEnrollFixture(t, enrollConfig{
+				hostname: "live-host", existingHostname: "live-host", existingHasLiveToken: true,
+				credential: &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+				execTag:    "UPDATE 1",
+			})
+		}},
+	}
 
-	unknown := newEnrollFixture(t, enrollConfig{
-		hostname:   "any-host",
-		credential: &relayv1.RegisterRequest_AgentToken{AgentToken: "no-such-token"},
-	})
-	unknown.script.unknownAgentToken = true
-	_, unknownErr := unknown.connect(t)
-	require.Error(t, unknownErr)
+	type outcome struct {
+		name string
+		code codes.Code
+		msg  string
+	}
+	var got []outcome
+	for _, a := range arms {
+		f := a.build(t)
+		_, err := f.connect(t)
+		require.Error(t, err, "%s must be refused", a.name)
+		got = append(got, outcome{a.name, status.Code(err), status.Convert(err).Message()})
+	}
 
-	assert.Equal(t, status.Code(unknownErr), status.Code(claimedErr))
-	assert.Equal(t, status.Convert(unknownErr).Message(), status.Convert(claimedErr).Message())
+	first := got[0]
+	for _, o := range got[1:] {
+		assert.Equal(t, first.code, o.code,
+			"%q and %q must return the same status code", first.name, o.name)
+		assert.Equal(t, first.msg, o.msg,
+			"%q and %q must return the same message; a caller that can tell them apart can "+
+				"fingerprint server configuration and hostname state without a credential", first.name, o.name)
+	}
 
-	msg := status.Convert(claimedErr).Message()
-	for _, leak := range []string{"taken-host", "revoked", "exists", "claimed", "ceiling"} {
-		assert.NotContains(t, msg, leak,
-			"the refusal must disclose nothing about the hostname beyond the refusal itself")
+	for _, o := range got {
+		for _, leak := range []string{"taken-host", "live-host", "revoked", "exists", "claimed", "ceiling", "disabled", "auto-enroll"} {
+			assert.NotContains(t, o.msg, leak,
+				"%q discloses %q: a refusal must say nothing beyond the refusal itself", o.name, leak)
+		}
 	}
 }
 
@@ -764,4 +833,59 @@ func TestAutoEnrollWorkerCeiling_ResolvesTheUnsetAndNegativeCasesToTheDefault(t 
 	assert.Equal(t, 0, (&Handler{AutoEnrollWorkerCeiling: &zero}).autoEnrollWorkerCeiling(),
 		"a non-nil zero means DISABLED and must never be folded into the default")
 	assert.Equal(t, 7, (&Handler{AutoEnrollWorkerCeiling: &pos}).autoEnrollWorkerCeiling())
+}
+
+// pgFaultOnACallerControlledHostname is the shape a real Postgres error takes
+// when an unvalidated hostname exceeds the btree entry limit on the
+// workers.hostname unique index. reg.Hostname is a caller-supplied proto string
+// bounded only by gRPC's 4 MiB receive limit, so this is reachable by a peer
+// that has presented no credential at all.
+var pgFaultOnACallerControlledHostname = errors.New(
+	`ERROR: index row size 3000 exceeds btree version 4 maximum 2704 for index "workers_hostname_key" (SQLSTATE 54000)`)
+
+// TestConnect_AStoreFaultDuringEnrollmentDisclosesNothingToTheCaller. Both
+// enrollment transactions used to wrap a non-ErrNoRows store error and return it
+// VERBATIM. There is no sanitizing interceptor on this server, so grpc-go sends
+// the whole text to the peer as codes.Unknown - table name, index name and
+// SQLSTATE included, to a caller that authenticated with nothing.
+//
+// The two arms are driven together because the two paths reach a raw error
+// through DIFFERENT statements: auto-enroll through the create-only insert,
+// enrollment through the FOR UPDATE lookup. Fixing one and not the other is the
+// obvious half-fix and this is what catches it.
+func TestConnect_AStoreFaultDuringEnrollmentDisclosesNothingToTheCaller(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  enrollConfig
+	}{
+		{"auto-enroll, failing on the create-only insert", enrollConfig{
+			hostname: "fresh-host", allowAutoEnroll: true,
+			storeErr: pgFaultOnACallerControlledHostname,
+		}},
+		{"enrollment token, failing on the FOR UPDATE lookup", enrollConfig{
+			hostname:   "fresh-host",
+			credential: &relayv1.RegisterRequest_EnrollmentToken{EnrollmentToken: "raw-enrollment-token"},
+			execTag:    "UPDATE 1",
+			storeErr:   pgFaultOnACallerControlledHostname,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEnrollFixture(t, tc.cfg)
+
+			_, err := f.connect(t)
+			require.Error(t, err)
+
+			// Internal, not Unknown: a store fault is a SERVER fault and must say so
+			// with a status the handler chose, rather than by grpc-go stringifying
+			// whatever bubbled up.
+			assert.Equal(t, codes.Internal, status.Code(err))
+
+			msg := status.Convert(err).Message()
+			for _, leak := range []string{"workers_hostname_key", "SQLSTATE", "btree", "index row size", "INSERT", "workers"} {
+				assert.NotContains(t, msg, leak,
+					"a peer that presented no credential must not be told the schema; got %q", msg)
+			}
+		})
+	}
 }

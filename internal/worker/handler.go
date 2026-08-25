@@ -67,6 +67,35 @@ var errCredentialLive = errors.New("worker credential is live")
 // fleet-wide denial primitive.
 var errFleetAtCeiling = errors.New("worker fleet at the auto-enroll ceiling")
 
+// enrollmentStoreFault turns a store error from either enrollment transaction
+// into what the peer sees, and puts the detail in the server log instead.
+//
+// THE PEER USED TO GET THE WHOLE THING. Both transactions returned the wrapped
+// error verbatim and there is no sanitizing interceptor on this server, so
+// grpc-go sent the full text as codes.Unknown. reg.Hostname is caller-supplied
+// and validated nowhere, and workers.hostname carries an unconditional unique
+// btree (max entry ~2704 bytes), so an oversized hostname turned a table name,
+// an index name and a SQLSTATE into a reply to a caller that presented no
+// credential - and made that refusal distinguishable by BOTH code and message
+// from the three README says are identical.
+//
+// IT IS A FAULT SITE, NOT A REFUSAL SITE, and that is the whole reason it logs
+// where the refusals deliberately do not. A refusal is the system working and is
+// counted (AutoEnrollRefusals); a store fault is an operator-actionable SERVER
+// condition that must not be silent, especially now that the peer's message
+// carries nothing anyone could act on. THE BOUND IS THE WEAKER ONE AND IS STATED
+// RATHER THAN IMPLIED: like the auto-enroll audit line below, this is one line
+// per STREAM, priced by RELAY_GRPC_MAX_CONNS and RELAY_GRPC_REGISTRATION_TIMEOUT
+// rather than by message volume - not by the per-connection ingest budget, which
+// is not allocated until after registration. Same %q injection defence and
+// clipID volume defence as the audit line, applied to the error text too, since
+// a Postgres error can echo a caller-supplied value back into it.
+func enrollmentStoreFault(ctx context.Context, path, hostname string, err error) error {
+	log.Printf("worker: %s store fault (hostname=%q) from %s: %q",
+		path, clipID(hostname), remoteAddr(ctx), clipID(err.Error()))
+	return status.Errorf(codes.Internal, "registration failed")
+}
+
 // remoteAddr returns the gRPC peer address for logging, or "unknown".
 func remoteAddr(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
@@ -539,7 +568,16 @@ func (h *Handler) authenticateAndRegister(ctx context.Context, stream relayv1.Ag
 		if h.AllowAutoEnroll {
 			return h.autoEnrollAndRegister(ctx, stream, reg)
 		}
-		return "", nil, status.Errorf(codes.Unauthenticated, "auto-enroll disabled")
+		// THE SAME STRING AS EVERY OTHER CREDENTIAL REFUSAL, and it used to be
+		// "auto-enroll disabled". That told an unauthenticated peer whether
+		// RELAY_ALLOW_AUTO_ENROLL is set - free, side-effect-free, no row touched -
+		// and it refuted README's claim that every credential failure on this
+		// surface returns the identical status and string. It also made cause (1)
+		// of the three the agent tells an operator to check the one cause that was
+		// NOT indistinguishable. The oracle bought an operator nothing:
+		// authFailureMessage discards the server's message entirely and reasons from
+		// the agent's own local state.
+		return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 	}
 }
 
@@ -640,7 +678,7 @@ func (h *Handler) enrollAndRegister(ctx context.Context, stream relayv1.AgentSer
 		if errors.Is(txErr, errEnrollmentNotConsumable) {
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
-		return "", nil, txErr
+		return "", nil, enrollmentStoreFault(ctx, "enrollment", reg.Hostname, txErr)
 	}
 
 	return h.finishRegister(ctx, stream, reg, workerID, rawAgent)
@@ -734,7 +772,7 @@ func (h *Handler) autoEnrollAndRegister(ctx context.Context, stream relayv1.Agen
 			h.autoEnrollRefusals.record(autoEnrollReasonFleetAtCeiling)
 			return "", nil, status.Errorf(codes.Unauthenticated, "authentication failed")
 		}
-		return "", nil, txErr
+		return "", nil, enrollmentStoreFault(ctx, "auto-enroll", reg.Hostname, txErr)
 	}
 
 	// reg.Hostname is a caller-supplied proto string: validated nowhere, bounded
