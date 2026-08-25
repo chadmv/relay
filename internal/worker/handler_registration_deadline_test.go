@@ -41,6 +41,12 @@ type scriptedStream struct {
 	// failure rather than as a flake.
 	mu   sync.Mutex
 	sent []*relayv1.CoordinatorMessage
+
+	// sendErr, when set, is what Send returns after recording. A peer that
+	// vanished between RegisterWorkerConnection and the RegisterResponse looks
+	// exactly like this from the server's side, and it is the second of the two
+	// arms a failed registration can take.
+	sendErr error
 }
 
 func (s *scriptedStream) Recv() (*relayv1.AgentMessage, error) {
@@ -68,7 +74,7 @@ func (s *scriptedStream) Send(m *relayv1.CoordinatorMessage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sent = append(s.sent, m)
-	return nil
+	return s.sendErr
 }
 
 // sentMsgs returns a copy of what has been sent so far, so callers never read

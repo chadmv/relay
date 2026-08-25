@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -355,4 +356,64 @@ func TestConnect_ASuccessfulRegistrationPublishesTheWorkerAndKeepsItsGeneration(
 			fire.epoch)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration
+// is the arm that existed only behind //go:build integration
+// (TestRegisterWorker_SendFailureReleasesTheGeneration), which CI compiles and
+// never runs. That test STAYS: it carries the durable half this one cannot - a
+// real workers row, a real task, a real grace timer, a real requeue. This one
+// carries the half CI executes on every push.
+//
+// IT IS NOT RED AT HEAD AND IS NOT PRESENTED AS IF IT WERE. The behaviour it
+// covers shipped in the finishregister-strand slice; what this test adds is a
+// witness in the lane that runs. Its discriminating power is established by
+// mutation M8 - moving `handedOff = true` above the send - which is also the
+// replacement proof for deleting the structural guard's ordering clause in the
+// next task.
+func TestConnect_ARegistrationWhoseRegisterResponseSendFailsReleasesTheGeneration(t *testing.T) {
+	f := newSuccessFixture(t)
+	workerID := uuidStr(strandWorkerID)
+	f.stream.sendErr = errors.New("rpc error: code = Unavailable desc = transport is closing")
+
+	err := f.h.Connect(f.stream)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "send register response",
+		"fixture: the registration must fail on the RegisterResponse send - AFTER "+
+			"RegisterWorkerConnection acquired the generation, AFTER grace.Cancel discarded the "+
+			"previous disconnect's requeue, and AFTER a reconcile that moved nothing. Any other error "+
+			"means this test is driving a different arm and its assertions below prove nothing.")
+
+	execs := f.db.execsSeen()
+	require.Len(t, execs, 1,
+		"a registration that failed on the send must release the generation it acquired, exactly "+
+			"once. Nothing else will: no sender was ever registered, so Connect's teardown defer is "+
+			"never armed, and the liveness sweeper walks past this worker because Metrics.Activate is "+
+			"below the failure.")
+	assert.Contains(t, execs[0].sql, "status = 'offline'",
+		"the one statement must be MarkWorkerOfflineIfEpoch")
+	assert.Contains(t, execs[0].args, strandEpoch,
+		"fenced on the epoch THIS registration created")
+
+	select {
+	case fire := <-f.fired:
+		assert.Equal(t, workerID, fire.workerID)
+		assert.Equal(t, strandEpoch, fire.epoch,
+			"the timer must be armed at the epoch this registration created. Re-arming at the previous "+
+				"epoch is a silent no-op - RequeueWorkerTasksIfEpoch fences on "+
+				"workers.connection_epoch and the row has moved past it.")
+	case <-time.After(3 * time.Second):
+		t.Fatal("no grace timer was armed after the failed send. grace.Cancel destroyed the previous " +
+			"disconnect's pending requeue, so without a fresh one these tasks have no requeue " +
+			"scheduled at all.")
+	}
+
+	require.Error(t, f.h.registry.Send(workerID, &relayv1.CoordinatorMessage{}),
+		"a registration that failed on the send must leave no sender in the registry: "+
+			"h.registry.Register sits BELOW the send, so nothing was ever published")
+
+	require.Len(t, f.stream.sentMsgs(), 1,
+		"the send was attempted exactly once and failed; a retry here would be a second "+
+			"RegisterResponse on a stream the peer has already dropped")
 }
