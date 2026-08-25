@@ -70,10 +70,11 @@ var errHostnameClaimed = errors.New("hostname already claimed")
 // A DIFFERENT PREDICATE FROM errHostnameClaimed's AND THE DIFFERENCE IS FORCED:
 // revoking does not delete the row (ClearWorkerAgentToken nulls the hash and sets
 // status='revoked'), so refusing every existing row here would make the revoked
-// row block its own recovery and leave NO ROUTE AT ALL: relay has no
-// worker-delete - no CLI subcommand, no DELETE FROM workers, no DELETE route on
-// the resource - so a revoked row that could not be re-enrolled by token would
-// be permanently stuck. NULL means revoked
+// row block its own recovery and leave NO NON-DESTRUCTIVE ROUTE BACK: the
+// enrollment-token path is the only recovery that keeps the revoked worker's row
+// and its history, so a revoked row that could not be re-enrolled by token would
+// have to be DELETED to be reused. `relay workers delete` does exist, and it is
+// not a substitute - it destroys the identity rather than reviving it. NULL means revoked
 // (recovery, allowed); non-NULL means a live credential (takeover, refused).
 var errCredentialLive = errors.New("worker credential is live")
 

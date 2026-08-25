@@ -179,9 +179,13 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 --
 -- THE status != 'revoked' EXCLUSION IS LOAD-BEARING FOR CALLER 2, not incidental
 -- to it: it is what makes `relay workers revoke` free ceiling budget, and revoke
--- is the ONLY cleanup relay has - there is no worker-delete at any layer, so a
--- revoked row is permanent - which is why it is the first remedy an operator at
--- the ceiling is told to try. It is also why the
+-- is non-destructive and needs no restart - which is why it is the first remedy
+-- an operator at the ceiling is told to try. DeleteWorker also exists now, but it
+-- frees ZERO budget for an already-revoked row, precisely because this count
+-- already excludes it, and it is deliberately NOT a step in README's ceiling
+-- ladder: that ladder answers a signal an attacker can drive, and deleting 1024
+-- rows under an active attacker is the same treadmill as revoking them, only
+-- irreversible. It is also why the
 -- ceiling bounds NON-REVOKED rows rather than total rows - revoking keeps the
 -- row and the hostname, so the table can still grow while this number does not.
 SELECT COUNT(*) FROM workers WHERE status != 'revoked';

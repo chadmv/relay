@@ -913,8 +913,13 @@ type ListOverdueAssignedTasksParams struct {
 // a plain `=`, so a row with a NULL worker_id can never be written by it;
 // selecting such a row would buy a guaranteed zero-row round trip every sweep. It
 // also documents the one state this watchdog cannot recover - a `dispatched` row
-// whose worker_id was nulled by workers' ON DELETE SET NULL - which is
-// unreachable today, because nothing in this repo DELETEs a worker.
+// whose worker_id was nulled by workers' ON DELETE SET NULL. THAT STATE IS NOW
+// REACHABLE - DeleteWorker exists (query/workers.sql) - and what keeps it from
+// occurring is ORDERING, not unreachability: handleDeleteWorker runs
+// RequeueWorkerTasks first, in the same transaction, so every assignment is ended
+// with an epoch bump while worker_id still names it. Any FUTURE deleter that
+// skips that step strands the row here permanently, unreachable by every
+// worker-keyed statement in this file.
 //
 // EVERY ARM FAILS CLOSED ON A MISSING VALUE. A NULL assigned_at, a NULL
 // started_at, and a NULL or zero timeout_seconds each make their arm FALSE
