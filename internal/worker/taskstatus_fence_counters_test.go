@@ -577,6 +577,42 @@ func statusUpdate(s relayv1.TaskStatus) *relayv1.TaskStatusUpdate {
 	return &relayv1.TaskStatusUpdate{TaskId: statusTaskID, Status: s, Epoch: 7}
 }
 
+// statusSubscribe tails every status event this handler publishes, and
+// SUBSCRIBING IS LOAD-BEARING rather than fixture noise: Publish on an
+// unsubscribed broker is a map lookup that finds nothing, so an added
+// h.broker.Publish on a rejection arm is INVISIBLE without a subscriber. Slice 3
+// closed exactly this for the log path (fenceSubscribe in
+// tasklog_fence_counter_test.go); the status path's tests had no
+// broker.Subscribe anywhere, and measured, a Publish added to the
+// UpdateTaskStatus pgx.ErrNoRows arm left internal/worker, internal/api and
+// cmd/relay-server all green.
+//
+// It is what CLAUDE.md's epoch fence calls the named consequence: "Gate any side
+// effect on the fence having actually matched". A rejected status report that
+// reaches the broker puts a swept or contradicted outcome into a live SSE view,
+// where it then vanishes on refresh because it was correctly never stored.
+//
+// The zero Filter takes ALL status events - "task" and "job" alike - so an added
+// publish of either type is seen. The drain is non-blocking because Publish is
+// synchronous under the broker's own mutex and completes before
+// handleTaskStatus returns.
+func statusSubscribe(t *testing.T, h *Handler) func() []events.Event {
+	t.Helper()
+	ch, cancel := h.broker.Subscribe(events.Filter{})
+	t.Cleanup(cancel)
+	return func() []events.Event {
+		var got []events.Event
+		for {
+			select {
+			case e := <-ch:
+				got = append(got, e)
+			default:
+				return got
+			}
+		}
+	}
+}
+
 // TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCountsNothing
 // is item 1's own Done-When at the UpdateTaskStatus arm: read the counters
 // across each rejection AND across a success.
@@ -585,20 +621,30 @@ func statusUpdate(s relayv1.TaskStatus) *relayv1.TaskStatusUpdate {
 // totals at the end cannot tell "the success incremented" from "the third
 // rejection did not", and a poisoned input observed only at the end cannot
 // detect an early-exit mutation.
+//
+// IT ALSO CARRIES THE DROP-BEFORE-PUBLISH PROPERTY, which was unpinned on this
+// path in the unit lane: see statusSubscribe.
 func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCountsNothing(t *testing.T) {
 	ctx := context.Background()
 	logged := captureUnitLog(t)
+
+	const noPublish = "a status report the fence REJECTED must not be published. CLAUDE.md's epoch " +
+		"fence names publishing as the consequence to gate on the fence having actually matched: a " +
+		"swept or contradicted outcome that reaches the broker appears in a live SSE view and then " +
+		"vanishes on refresh, because it was correctly never stored."
 
 	// CONFLICTING FIRST, because it is the leg this slice exists for and a
 	// poisoned input placed last cannot detect an early-exit mutation. The
 	// watchdog stamped `timed_out`; the agent reports `done`.
 	h, db := newStatusHandler(t, "timed_out", 0, 0, pgx.ErrNoRows)
 	lim := newIngestLogLimiter(&h.ingestDrops)
+	published := statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
 	require.Equal(t, TaskStatusFenceCounts{Conflicting: 1}, h.TaskStatusFenceRejections(),
 		"a task the coordinator marked timed_out whose agent reports done is the ACTIONABLE case: a "+
 			"successful task recorded as a timeout. Before this number there was no runtime signal of "+
 			"any kind for it.")
+	require.Empty(t, published(), noPublish)
 	require.Contains(t, db.callsSnapshot(), "UpdateTaskStatus", "fixture: control must reach the write")
 	require.NotContains(t, db.callsSnapshot(), "FailDependentTasks",
 		"fixture: a rejected write must return before any follow-on effect")
@@ -606,21 +652,25 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 	// DUPLICATE: same row status as the report. The expected healthy floor.
 	h, _ = newStatusHandler(t, "done", 0, 0, pgx.ErrNoRows)
 	lim = newIngestLogLimiter(&h.ingestDrops)
+	published = statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
 	require.Equal(t, TaskStatusFenceCounts{Duplicate: 1}, h.TaskStatusFenceRejections(),
 		"a duplicate terminal from a healthy assignee is an EXPECTED rejection and must be counted "+
 			"under its own key, or the actionable number reads as constant alarm")
+	require.Empty(t, published(), noPublish)
 
 	// RACED: the row was still writable at T0, so something ended the generation
 	// inside this handler's own window.
 	h, _ = newStatusHandler(t, "running", 0, 0, pgx.ErrNoRows)
 	lim = newIngestLogLimiter(&h.ingestDrops)
+	published = statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
 	require.Equal(t, TaskStatusFenceCounts{Raced: 1}, h.TaskStatusFenceRejections())
 
 	// ACCUMULATION on ONE handler: an Add, never a Store.
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
 	require.Equal(t, TaskStatusFenceCounts{Raced: 2}, h.TaskStatusFenceRejections())
+	require.Empty(t, published(), noPublish)
 
 	// SUCCESS MUST NOT COUNT, on the SAME handler whose counter has already
 	// moved: a counter that increments unconditionally passes a fresh-handler
@@ -631,6 +681,7 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 		Status: "running", WorkerID: statusWorkerID(), AssignmentEpoch: 7,
 	}}
 	h2 := &Handler{q: store.New(db2), broker: events.NewBroker()}
+	published2 := statusSubscribe(t, h2)
 	h2.handleTaskStatus(ctx, statusWorkerID(), newIngestLogLimiter(&h2.ingestDrops),
 		statusUpdate(relayv1.TaskStatus_TASK_STATUS_DONE))
 	require.Equal(t, TaskStatusFenceCounts{}, h2.TaskStatusFenceRejections(),
@@ -641,6 +692,16 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 			"asserts a negative through a projection every other arm shares.")
 	require.Contains(t, db2.callsSnapshot(), "NotifyTaskCompleted")
 
+	// THE POSITIVE HALF OF DROP-BEFORE-PUBLISH, and it is what stops every
+	// require.Empty above being satisfied by a handler that publishes nothing at
+	// all. Exactly ONE event: the "task" frame. The stub's RecomputeJobStatus
+	// answers "running", so the job frame is correctly not sent.
+	accepted := published2()
+	require.Len(t, accepted, 1,
+		"an ACCEPTED status report must publish exactly one task event. Without this leg the "+
+			"no-publish assertions above hold vacuously against a handler that never publishes.")
+	require.Equal(t, "task", accepted[0].Type)
+
 	require.Equal(t, "", logged(),
 		"a fence rejection must emit NO log line of any wording, including a budgeted one: it is "+
 			"caller-driven volume on the recv goroutine, firing on the legitimate duplicate-terminal case")
@@ -649,6 +710,13 @@ func TestHandleTaskStatus_TheUpdateArmCountsEachRejectionReasonAndASuccessCounts
 // TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections. The retry branch is
 // reached instead of the update when the report is terminal and a retry is
 // left, so it needs its own fixture and its own leg.
+//
+// THE NO-PUBLISH ASSERTION HERE IS THE WHOLE BRANCH, NOT JUST ITS REJECTIONS,
+// and that is deliberate rather than a copy of the update arm: an accepted retry
+// publishes NOTHING - it wakes the dispatcher and recomputes the job status and
+// returns - so the discriminating positive marker for this branch is
+// NotifyTaskSubmitted, already asserted below, and the event count is zero on
+// every leg. A Publish added to either arm of this branch moves it off zero.
 func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 	ctx := context.Background()
 	logged := captureUnitLog(t)
@@ -657,6 +725,7 @@ func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 	// failed and still has a retry left.
 	h, db := newStatusHandler(t, "timed_out", 3, 0, pgx.ErrNoRows)
 	lim := newIngestLogLimiter(&h.ingestDrops)
+	published := statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
 	require.Contains(t, db.callsSnapshot(), "IncrementTaskRetryCount",
 		"fixture: terminal + retries remaining must take the RETRY branch")
@@ -666,20 +735,27 @@ func TestHandleTaskStatus_TheRetryArmCountsItsOwnRejections(t *testing.T) {
 		"the retry arm's rejections are the SAME noun as the update arm's - the agent's report of this "+
 			"task's outcome was discarded - so they share the section and are split by REASON, not by "+
 			"statement")
+	require.Empty(t, published(),
+		"a retry the fence REJECTED must not be published - and the retry branch publishes nothing on "+
+			"any leg, so any event here is an added side effect that is not gated on the fence matching")
 
 	// DUPLICATE at the retry arm.
 	h, _ = newStatusHandler(t, "failed", 3, 0, pgx.ErrNoRows)
 	lim = newIngestLogLimiter(&h.ingestDrops)
+	published = statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
 	require.Equal(t, TaskStatusFenceCounts{Duplicate: 1}, h.TaskStatusFenceRejections())
+	require.Empty(t, published(), "no leg of the retry branch publishes")
 
 	// A SUCCESSFUL retry must not count, and must still wake the dispatcher.
 	h, db = newStatusHandler(t, "running", 3, 0, nil)
 	lim = newIngestLogLimiter(&h.ingestDrops)
+	published = statusSubscribe(t, h)
 	h.handleTaskStatus(ctx, statusWorkerID(), lim, statusUpdate(relayv1.TaskStatus_TASK_STATUS_FAILED))
 	require.Equal(t, TaskStatusFenceCounts{}, h.TaskStatusFenceRejections())
 	require.Contains(t, db.callsSnapshot(), "NotifyTaskSubmitted",
 		"the accepted retry must still wake the dispatcher; this is the positive marker for this arm")
+	require.Empty(t, published(), "no leg of the retry branch publishes")
 
 	require.Equal(t, "", logged(), "no arm of the retry branch logs")
 }
