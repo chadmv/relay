@@ -578,6 +578,23 @@ func TestHandleTaskStatus_ASecondTerminalFromTheAssigneeDoesNotOverwriteOrCascad
 		t.FailNow() // the overwrite got through; the positive control below is moot
 	}
 
+	// THE COUNTER, AGAINST REAL POSTGRES. Every other assertion about
+	// task_status_fence in this repo runs against a stub store.DBTX, so this is
+	// the one place the classification is driven by a real fence rejection from
+	// a real statement. The agent reported FAILED at a row that says 'done', so
+	// the coordinator and the agent DISAGREE about this task's outcome and the
+	// rejection is 'conflicting', not 'duplicate'.
+	//
+	// READ BEFORE THE POSITIVE CONTROL BELOW, deliberately: that control drives
+	// a further accepted report through the same handler, and an exact-count
+	// assertion taken after it would be measuring two episodes.
+	fence := h.TaskStatusFenceRejections()
+	assert.Equal(t, uint64(1), fence.Conflicting,
+		"a second terminal that CONTRADICTS the recorded one must be counted as conflicting: the agent "+
+			"says failed and the row says done")
+	assert.Zero(t, fence.Duplicate, "the statuses differ, so this is not a duplicate")
+	assert.Zero(t, fence.Raced, "the row was already terminal when GetTask read it")
+
 	// Positive control on the SAME code path: a task that is genuinely running
 	// still fails and still cascades to its dependent. Without it, a
 	// handleTaskStatus that had stopped accepting anything at all would pass
@@ -704,6 +721,23 @@ func TestHandleTaskStatus_AssigneeCannotResurrectItsOwnCompletedTaskViaRetry(t *
 	if t.Failed() {
 		t.FailNow() // the resurrection got through; the positive control below is moot
 	}
+
+	// THE COUNTER, AGAINST REAL POSTGRES. Every other assertion about
+	// task_status_fence in this repo runs against a stub store.DBTX, so this is
+	// the one place the classification is driven by a real fence rejection from
+	// a real statement. The agent reported FAILED at a row that says 'done', so
+	// the coordinator and the agent DISAGREE about this task's outcome and the
+	// rejection is 'conflicting', not 'duplicate'.
+	//
+	// READ BEFORE THE POSITIVE CONTROL BELOW, deliberately: that control drives
+	// a further accepted report through the same handler, and an exact-count
+	// assertion taken after it would be measuring two episodes.
+	fence := h.TaskStatusFenceRejections()
+	assert.Equal(t, uint64(1), fence.Conflicting,
+		"the RETRY statement is the writer here, and its rejections share the section with the update arm's: the agent "+
+			"says failed and the row says done")
+	assert.Zero(t, fence.Duplicate, "the statuses differ, so this is not a duplicate")
+	assert.Zero(t, fence.Raced, "the row was already terminal when GetTask read it")
 
 	// Positive control on the SAME code path: a task that is genuinely running
 	// still burns its retry when its assignee reports FAILED. Without it, a
