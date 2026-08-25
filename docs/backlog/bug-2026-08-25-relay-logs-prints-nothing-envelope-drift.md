@@ -92,8 +92,23 @@ suite green."
 - Precedent, closed: [[bug-2026-05-26-python-sdk-list-pagination-envelope]]
 
 ## Notes
-The CLI is a second consumer that needs the CRLF treatment tracked in
+The CLI is a second consumer of the CRLF handling tracked in
 [[bug-2026-08-25-windows-crlf-log-lines-render-blank]]: it prints `Content` raw, so a Windows
-subprocess's `\r` reaches the terminal as-is. Mostly harmless there - a terminal honours the CR -
-but it means a fix confined to `web/` leaves this consumer untreated. Worth deciding whether
-normalisation belongs server-side rather than being implemented twice.
+subprocess's `\r` reaches the terminal as-is.
+
+**That question is now decided - see "Where normalisation belongs" in that item.** The summary, so
+this item does not re-open it:
+
+- **CRLF to LF is the only shared transform**, and it goes in the agent's `chunkWriter`
+  (`internal/agent/runner.go:285`) with a one-byte hold-back for the straddled case. That covers the
+  CLI, the SPA, the Python SDK and any future export in one place. It is filed as Part 2 of the
+  CRLF item, not as scope here.
+- **Do NOT move ANSI stripping or the interior-CR collapse out of `web/`.** The web strips ANSI
+  because a DOM has no cursor; a terminal renders it correctly, so stripping it server-side would
+  destroy colour output for this very command. The two transforms are not duplicated work - they
+  are a rendering decision that belongs to exactly one client.
+
+What remains CLI-local, and is in scope for THIS item's fix: `printTaskLogs` prints
+`[<task> <stream>] <content>`, so an interior `\r` in the content returns the terminal cursor over
+its own prefix. Decide what that line should do - the agent-side change does not address it,
+because an interior CR is legitimate progress-bar output rather than a line terminator.
