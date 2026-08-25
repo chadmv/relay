@@ -1015,3 +1015,47 @@ func TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap(t *te
 	require.Equal(t, uint64(workers-api.WatchdogSweptWorkerMax), section.Counts.SweptOverflow,
 		"and the sweeps the cap refused must be counted, not dropped")
 }
+
+// TestBuildHTTPServer_ServesTheWiredHandlersTaskStatusFenceSection is the
+// third section fed by the agentHandler deps field, and it is checked the same
+// way its two siblings are: through the real route, off a real buildHTTPServer.
+//
+// NO NEW wiredDep ROW. This section reuses an httpServerDeps field that already
+// has one, so it inherits every main.go identifier check that row carries -
+// which is exactly what countersAssignmentSources requires and why the
+// assignment below must be spelled d.agentHandler.
+//
+// IT DECODES THE COUNTS HALF AS map[string]json.RawMessage AND REUSES keysOfRaw
+// rather than adding a second key-set helper for json.Number. The raw form
+// answers both questions this test asks - the key SET and the literal zero - and
+// a second helper spelled differently would be a second name for one thing.
+func TestBuildHTTPServer_ServesTheWiredHandlersTaskStatusFenceSection(t *testing.T) {
+	h := worker.NewHandler(nil, nil, worker.NewRegistry(), events.NewBroker(), func() {})
+	srv := buildHTTPServer(httpServerDeps{
+		addr:         "127.0.0.1:0",
+		q:            store.New(stubAdminDB{}),
+		agentHandler: h,
+	})
+
+	top := countersAsAdmin(t, srv)
+	raw, ok := top["task_status_fence"]
+	require.True(t, ok, "a wired agentHandler must serve task_status_fence: %v", keysOfRaw(top))
+
+	var section struct {
+		Counts map[string]json.RawMessage `json:"counts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &section))
+	require.ElementsMatch(t,
+		[]string{"raced_total", "duplicate_total", "conflicting_total"},
+		keysOfRaw(section.Counts),
+		"the three keys are the response contract; a rename here is operator-visible")
+	for k, v := range section.Counts {
+		require.Equal(t, "0", string(v), "a fresh handler has refused nothing, so %s is an explicit zero", k)
+	}
+
+	_, hasIngest := top["ingest_log_budget"]
+	_, hasLogFence := top["task_log_fence"]
+	require.True(t, hasIngest && hasLogFence,
+		"one agentHandler feeds THREE sections under one nil filter, because all three controls live on "+
+			"that one object and neither exists without it")
+}
