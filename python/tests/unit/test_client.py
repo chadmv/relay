@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from relay import (
     AuthError,
@@ -254,6 +255,49 @@ def test_task_logs_parses_records() -> None:
         (7, "stdout", "hi\n"),
         (8, "stderr", "warn\n"),
     ]
+
+
+def test_task_logs_page_returns_one_envelope_and_sends_its_params() -> None:
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=_log_page([_log_row(11)], next_seq=11, total=42))
+
+    client = _make_client(handler)
+    page = client.task_logs_page("abc", since_seq=10, limit=25)
+    assert [r.seq for r in page.items] == [11]
+    assert page.next_seq == 11
+    assert page.total == 42
+    assert calls[0]["since_seq"] == "10"
+    assert calls[0]["limit"] == "25"
+
+    # since_seq=0 means "from the beginning" and is not sent. limit is sent
+    # only when the caller gives one, so a hand-pager sees the server's default
+    # of 50 and is told there is more by next_seq. task_logs() is the opposite -
+    # it ALWAYS sends limit=200, because there the truncation would be silent.
+    # The asymmetry is deliberate.
+    client.task_logs_page("abc")
+    assert "since_seq" not in calls[1]
+    assert "limit" not in calls[1]
+
+
+def test_task_logs_page_raises_on_a_bare_array_body() -> None:
+    """A server rollback to the pre-2026-05-08 bare array must be LOUD, not an
+    empty log. The whole body goes through LogPage.model_validate, so the model
+    is the pin - the client never hand-picks keys.
+
+    pydantic's ValidationError does NOT descend from relay.RelayError. That is a
+    known, separately-tracked gap (the README says otherwise and is corrected in
+    this slice); do not "fix" it here by wrapping.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_log_row(1), _log_row(2)])
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.task_logs_page("abc")
 
 
 # ─── wait() ──────────────────────────────────────────────────────────────────

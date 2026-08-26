@@ -23,6 +23,7 @@ from .models import (
     Event,
     Job,
     JobStatus,
+    LogPage,
     LogRecord,
     OverlapPolicy,
     Page,
@@ -258,6 +259,30 @@ class Client:
         response = self._http.get(f"/v1/tasks/{task_id}")
         raise_for_response(response)
         return Task.model_validate(response.json())
+
+    def task_logs_page(
+        self, task_id: str, *, since_seq: int = 0, limit: Optional[int] = None
+    ) -> LogPage:
+        """Fetch one page of a task's log.
+
+        ``limit`` is the PAGE SIZE (1-200); omitted, the server's default of 50
+        applies, which is visible here because ``next_seq`` tells the caller
+        there is more. Pass the returned ``next_seq`` back as ``since_seq=`` to
+        page forward - VERBATIM, never ``+ 1``: the server's predicate is
+        ``id > $2``, so the cursor is exclusive already.
+        """
+        self._require_token()
+        params: dict[str, str] = {}
+        if since_seq:
+            params["since_seq"] = str(since_seq)
+        if limit is not None:
+            params["limit"] = str(limit)
+        response = self._http.get(f"/v1/tasks/{task_id}/logs", params=params)
+        raise_for_response(response)
+        # The WHOLE body goes through the model, never a hand-picked
+        # body["items"]. The model is the pin: a missing next_seq or total
+        # raises here rather than reading as "drained".
+        return LogPage.model_validate(response.json())
 
     def task_logs(self, task_id: str) -> list[LogRecord]:
         self._require_token()
