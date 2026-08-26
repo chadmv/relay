@@ -134,9 +134,15 @@ func (lc logCompleteness) reason() string {
 }
 
 // taskIsTerminal and jobIsTerminal slice the two status vocabularies this command
-// depends on, and this file is registered as a slicing site in
-// internal/store/tasks_status_vocabulary_lockstep_test.go. Read that test before
-// adding a status to either.
+// depends on, and this file is registered as a slicing site in BOTH lockstep
+// guards - internal/store/tasks_status_vocabulary_lockstep_test.go for
+// taskIsTerminal and internal/store/jobs_status_vocabulary_lockstep_test.go for
+// jobIsTerminal. Read the matching one before adding a status to either.
+//
+// The second guard exists because the first one is not one: it reads
+// tasks_status_check and nothing else, so from the day jobIsTerminal was
+// registered until the day the jobs guard was written, the registration was
+// prose that could never fire.
 //
 // A new TERMINAL task status omitted from taskIsTerminal means that task's log is
 // never fetched, while the exit code still claims every task's log printed in

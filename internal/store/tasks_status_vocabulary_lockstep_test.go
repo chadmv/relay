@@ -178,6 +178,12 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     Unlike taskStatusIsWritable there is NO transitive cover here. Nothing parses
 //     tasks.sql on the CLI's behalf and no test compares these two functions with
 //     anything, so this list is their entire guard.
+//     And for HALF of the entry this test could not be that guard at all: it reads
+//     tasks_status_check and nothing else, so adding a terminal JOB status left it
+//     green while the very consequence spelled out above - relay logs hanging on a
+//     finished job until the connection drops - shipped unsignalled.
+//     TestJobsStatusVocabularyIsExactly, in
+//     internal/store/jobs_status_vocabulary_lockstep_test.go, is the missing half.
 //
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
