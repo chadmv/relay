@@ -101,3 +101,18 @@ runs is not the missing signal alone; it is the elaborate and fragile substitute
   (`internal/worker/handler_register_success_test.go`) and let
   `handler_handoff_guard_test.go` shed five clauses. The item stays open - the remaining
   instances are untouched.
+
+- 2026-08-26: a fifth instance, and it is **structural rather than a choice**. Both status-vocabulary
+  lockstep guards - `TestTasksStatusVocabularyIsExactly` and the new `TestJobsStatusVocabularyIsExactly`
+  (`internal/store/`) - are `//go:build integration`, so neither runs in `make test`. They cannot simply
+  be moved: each reads `pg_get_constraintdef` from a live catalog, which needs a real Postgres. The
+  jobs guard was added by `bug-2026-08-25-relay-logs-prints-nothing-envelope-drift` precisely because
+  nothing pinned the jobs vocabulary at all, and writing it surfaced `terminalStatuses`
+  (`internal/mcp/wait.go`) as an unregistered slicing site.
+
+  This instance supplies a remedy the item's menu lacks: **parse the migration `.sql` for the CHECK
+  constraint instead of querying the catalog.** The migration is the source of truth the catalog is
+  built from, it is a file in the repo, and reading it needs no container - so the same exact-set
+  assertion could run in the default lane. That trades "what the database actually has" for "what the
+  repo says it should have", which is the weaker claim but the one that catches the drift this guard
+  exists to catch.
