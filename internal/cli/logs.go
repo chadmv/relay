@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,15 +52,15 @@ func doLogs(ctx context.Context, cfg *Config, args []string, out, errOut io.Writ
 	}
 	c := cfg.NewClient()
 
-	status, logFailures, err := watchJobLogs(ctx, c, args[0], out, errOut)
+	status, completeness, err := watchJobLogs(ctx, c, args[0], out, errOut)
 	if err != nil {
 		return err
 	}
 	// A described failure takes precedence over silentError{}: both exit 1, and
 	// the described one is strictly more informative. Silence is the thing being
 	// fixed, so where the two compete silence loses.
-	if logFailures > 0 {
-		return fmt.Errorf("logs incomplete for %d of the job's tasks", logFailures)
+	if !completeness.complete() {
+		return errors.New(completeness.reason())
 	}
 	if status != "done" {
 		return silentError{}
@@ -67,20 +68,80 @@ func doLogs(ctx context.Context, cfg *Config, args []string, out, errOut io.Writ
 	return nil
 }
 
+// logCompleteness records why the printed output may not be the whole log. Its
+// ZERO VALUE is the claim the exit code makes: every task that reached a terminal
+// state had its log printed in full.
+//
+// It is a struct rather than the plain count it replaced because the count could
+// only describe logs that were ATTEMPTED AND FAILED, and was silent about logs
+// that were never attempted at all - which is the larger of the two holes and the
+// one this command shipped with. Both fields have to be able to say "incomplete",
+// or the exit code overstates what was printed.
+type logCompleteness struct {
+	// failedTasks counts tasks whose log fetch errored partway through.
+	failedTasks int
+	// unreconciled is set when the authoritative final job snapshot could not be
+	// read, so the CLI cannot know whether any task's log went unprinted.
+	unreconciled bool
+}
+
+func (lc logCompleteness) complete() bool {
+	return lc.failedTasks == 0 && !lc.unreconciled
+}
+
+// reason is the message for a non-complete outcome, and is empty when complete.
+func (lc logCompleteness) reason() string {
+	switch {
+	case lc.failedTasks > 0 && lc.unreconciled:
+		return fmt.Sprintf(
+			"logs incomplete for %d of the job's tasks, and the job's final task list could not be read",
+			lc.failedTasks)
+	case lc.failedTasks > 0:
+		return fmt.Sprintf("logs incomplete for %d of the job's tasks", lc.failedTasks)
+	case lc.unreconciled:
+		return "logs may be incomplete: the job's final task list could not be read"
+	}
+	return ""
+}
+
+// taskIsTerminal and jobIsTerminal slice the two status vocabularies this command
+// depends on, and this file is registered as a slicing site in
+// internal/store/tasks_status_vocabulary_lockstep_test.go. Read that test before
+// adding a status to either.
+//
+// A new TERMINAL task status omitted from taskIsTerminal means that task's log is
+// never fetched, while the exit code still claims every task's log printed in
+// full. A new terminal JOB status omitted from jobIsTerminal means relay logs
+// hangs until the connection drops and then reports "connection lost".
+// `preparing` is harmless at both because it is non-terminal; a task-level
+// `cancelled` is the candidate that would bite.
+func taskIsTerminal(status string) bool {
+	return status == "done" || status == "failed" || status == "timed_out"
+}
+
+func jobIsTerminal(status string) bool {
+	return status == "done" || status == "failed" || status == "cancelled"
+}
+
 // watchJobLogs subscribes to SSE events for jobID, then takes a snapshot so a job
 // that went terminal before the subscribe is still caught (the broker has no replay).
 // When a task reaches a terminal state its logs are fetched and printed once.
-// Returns the final job status ("done", "failed", or "cancelled"), the number of
-// tasks whose logs could not be printed in full, and any error.
+//
+// Once the job reaches a terminal status the authoritative task list is re-read
+// and any terminal task not yet printed is printed then - see
+// reconcileFinalSnapshot for why the stream alone is not enough.
+//
+// Returns the final job status ("done", "failed", or "cancelled"), how complete
+// the printed output is, and any error.
 //
 // A log failure never aborts the watch: the remaining tasks still stream and
-// print. It is reported on errOut immediately and counted, and doLogs turns a
-// non-zero count into a non-silent error.
-func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (string, int, error) {
+// print. It is reported on errOut immediately and counted, and doLogs turns an
+// incomplete outcome into a non-silent error.
+func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (string, logCompleteness, error) {
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)
 	var finalStatus string
-	logFailures := 0
+	var completeness logCompleteness
 
 	// emit prints one task's log and reports an incomplete one on errOut. One
 	// diagnostic per failing task, naming the task, the task id and the last
@@ -88,7 +149,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	emit := func(taskID, taskName string) {
 		lastSeq, err := printTaskLogs(ctx, c, taskID, taskName, out)
 		if err != nil {
-			logFailures++
+			completeness.failedTasks++
 			fmt.Fprintf(errOut, "relay: logs for task %s (%s) are incomplete - stopped after seq %d: %v\n",
 				taskName, taskID, lastSeq, err)
 		}
@@ -103,25 +164,80 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// Fall through to the stream; a transient snapshot error should not abort.
 			// taskNames stays empty here, so any subsequent stream task event prints
 			// with a blank name - acceptable on this degraded path (the stream event
-			// payload carries only id/status, never the name).
+			// payload carries only id/status, never the name). The final reconcile
+			// below is the backstop that keeps the exit code honest.
 			return true
 		}
 		for _, t := range job.Tasks {
 			taskNames[t.ID] = t.Name
 		}
 		for _, t := range job.Tasks {
-			if t.Status == "done" || t.Status == "failed" || t.Status == "timed_out" {
+			if taskIsTerminal(t.Status) {
 				if !printed[t.ID] {
 					printed[t.ID] = true
 					emit(t.ID, t.Name)
 				}
 			}
 		}
-		if job.Status == "done" || job.Status == "failed" || job.Status == "cancelled" {
+		if jobIsTerminal(job.Status) {
 			finalStatus = job.Status
 			return false
 		}
 		return true
+	}
+
+	// reconcileFinalSnapshot runs once a terminal job status has been observed,
+	// and it is what makes the exit code's completeness claim true.
+	//
+	// A terminal job frame is the LAST thing the watch sees, and it is not preceded
+	// by a task frame for every task. Two paths reach a terminal job with tasks that
+	// never produced one:
+	//
+	//   - Cancel. handleCancelJob calls CancelJobTasks, which flips every
+	//     non-terminal task to `failed` in a single statement, then publishes ONE
+	//     event, for the job. No task frame is published for those tasks anywhere:
+	//     the three production `Type: "task"` publish sites are two in
+	//     internal/scheduler/dispatch.go and one in internal/worker/handler.go, and
+	//     none of them is on the cancel path. Without this reconcile the command
+	//     prints nothing at all for a cancelled job whose tasks ran and logged.
+	//   - Ordering. handleTaskStatus publishes its task frame AFTER recomputing the
+	//     job status, so with two tasks finishing concurrently the job's `done`
+	//     frame can reach the subscriber ahead of the last task's own frame.
+	//     internal/api/jobs.go already documents this class for a sibling publish:
+	//     an SSE status is a cache hint, not a source of truth. This is what stops
+	//     watchJobLogs from treating one as a source of truth.
+	//
+	// A task still NON-TERMINAL in the final snapshot is legitimately absent, not an
+	// omission: nothing is owed for it, because it has not reached the state that
+	// entitles it to a log print and its output is not final. So it neither prints
+	// nor counts here.
+	reconcileFinalSnapshot := func() {
+		var job jobResp
+		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+			// Unlike the onSubscribed snapshot, this failure is NOT survivable by
+			// falling through. There the stream was still ahead and could deliver
+			// everything the snapshot would have; here there is no stream left, so a
+			// silent fall-through is exactly the never-attempted omission this
+			// function exists to close. Fail closed - say so on errOut and refuse to
+			// claim completeness - rather than exiting 0 on an unverified guess.
+			completeness.unreconciled = true
+			fmt.Fprintf(errOut,
+				"relay: could not re-read job %s after it finished, so some tasks' logs may be missing: %v\n",
+				jobID, err)
+			return
+		}
+		for _, t := range job.Tasks {
+			if t.Name != "" {
+				taskNames[t.ID] = t.Name
+			}
+		}
+		for _, t := range job.Tasks {
+			if printed[t.ID] || !taskIsTerminal(t.Status) {
+				continue
+			}
+			printed[t.ID] = true
+			emit(t.ID, taskNames[t.ID])
+		}
 	}
 
 	handler := func(e relayclient.SSEEvent) bool {
@@ -134,7 +250,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			if json.Unmarshal([]byte(e.Data), &data) != nil {
 				return true
 			}
-			if data.Status == "done" || data.Status == "failed" || data.Status == "timed_out" {
+			if taskIsTerminal(data.Status) {
 				if !printed[data.ID] {
 					printed[data.ID] = true
 					emit(data.ID, taskNames[data.ID])
@@ -147,7 +263,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			if json.Unmarshal([]byte(e.Data), &data) != nil {
 				return true
 			}
-			if data.Status == "done" || data.Status == "failed" || data.Status == "cancelled" {
+			if jobIsTerminal(data.Status) {
 				finalStatus = data.Status
 				return false
 			}
@@ -156,12 +272,13 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	}
 
 	if err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, onSubscribed, handler); err != nil {
-		return "", logFailures, err
+		return "", completeness, err
 	}
 	if finalStatus == "" {
-		return "", logFailures, fmt.Errorf("connection lost — job %s may still be running", jobID)
+		return "", completeness, fmt.Errorf("connection lost — job %s may still be running", jobID)
 	}
-	return finalStatus, logFailures, nil
+	reconcileFinalSnapshot()
+	return finalStatus, completeness, nil
 }
 
 // maxLogPages bounds the paging loop against a server whose next_seq keeps

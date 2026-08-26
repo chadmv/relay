@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -227,14 +228,14 @@ func doSubmit(ctx context.Context, cfg *Config, args []string, w, errOut io.Writ
 		return nil
 	}
 
-	status, logFailures, err := watchJobLogs(ctx, c, job.ID, w, errOut)
+	status, completeness, err := watchJobLogs(ctx, c, job.ID, w, errOut)
 	if err != nil {
 		return err
 	}
 	// Same precedence as doLogs: a described failure beats silentError{}, and
 	// leaving relay submit silent would re-create this bug in the sibling command.
-	if logFailures > 0 {
-		return fmt.Errorf("logs incomplete for %d of the job's tasks", logFailures)
+	if !completeness.complete() {
+		return errors.New(completeness.reason())
 	}
 	if status != "done" {
 		return silentError{}
