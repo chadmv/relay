@@ -99,6 +99,8 @@ def _log_rows(first: int, last: int) -> list[dict[str, Any]]:
 def _log_page(rows: list[dict[str, Any]], *, next_seq: int, total: int) -> dict[str, Any]:
     """The envelope: {items, next_seq, total}, keys hand-written."""
     return {"items": rows, "next_seq": next_seq, "total": total}
+
+
 def _serve_logs(
     rows: list[dict[str, Any]], calls: list[dict[str, str]]
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -143,7 +145,6 @@ def _serve_logs(
         return httpx.Response(200, json=_log_page(page, next_seq=next_seq, total=len(rows)))
 
     return handler
-
 
 
 # ─── Auth & wiring ────────────────────────────────────────────────────────────

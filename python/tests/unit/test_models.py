@@ -411,6 +411,8 @@ def test_log_page_requires_next_seq_and_total(missing: str) -> None:
     del body[missing]
     with pytest.raises(PydanticValidationError):
         LogPage.model_validate(body)
+
+
 # ─── sweep findings D2 / D3 / D4 ──────────────────────────────────────────────
 
 
@@ -496,8 +498,16 @@ def test_event_type_covers_every_type_the_server_publishes() -> None:
     "task_log" (internal/events/broker.go), and "dropped", written as a raw
     frame by handleEvents when the broker drops a slow subscriber.
 
-    Set EQUALITY, not a containment check: this fails both on a member the
-    server publishes and the SDK lacks, and on a member the SDK invents.
+    Set EQUALITY, not a containment check, so it fails in both directions
+    against the literal below.
+
+    What it CANNOT do is notice a sixth type appearing server-side. Both sides
+    of the comparison are Python literals in this one file, and
+    .github/workflows/python.yml path-filters this lane to `python/**`, so a Go
+    commit adding an event type would not even run it. It pins the vocabulary
+    this file asserts, and the fact that a human transcribed it from the five
+    publish sites above; keeping the two in step is a cross-language
+    registration that does not exist yet and is tracked separately.
     """
     assert {e.value for e in EventType} == {
         "job",

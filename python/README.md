@@ -113,7 +113,13 @@ while True:
 
 A server that cannot be paged raises `ProtocolError`: an empty page that still
 advertises more rows, a cursor that does not advance, or a log that never
-reports itself drained within 10000 pages. The records collected before the
+reports itself drained within 10000 pages. That page cap bounds the number of
+REQUESTS and nothing else. Not wall clock: httpx's read timeout is per socket
+read, so a slow-trickling server never trips it (measured: 14.3 s under a 0.5 s
+read timeout) and that is per page. Not bytes: gzip is decoded unbounded
+(measured: 89 KiB on the wire, 31 MB in memory). Not memory: a full 2,000,000
+-row walk retains well over a gigabyte. Bound the first two with your own
+`Client(timeout=)` or an injected `http_client`, and the third with `limit=`. The records collected before the
 walk was abandoned are on the exception, so a caller keeps the partial log and
 the reason it is partial:
 
@@ -140,7 +146,9 @@ terminal = {relay.JobStatus.DONE, relay.JobStatus.FAILED, relay.JobStatus.CANCEL
 for event in client.follow_job(job_id):
     if event.type == relay.EventType.DROPPED:
         # The broker dropped this subscriber for falling behind. Frames
-        # published in the gap are gone; re-read the job and the task logs.
+        # published in the gap are gone; re-read the job with get_job(), and
+        # resume each task's log with task_logs_page(id, since_seq=last_seq).
+        # Not task_logs(), which has no since_seq and restarts at row 0.
         break
     if event.type == relay.EventType.JOB and event.data.get("status") in terminal:
         break
@@ -152,9 +160,17 @@ Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
 ## Errors
 
 Errors raised by the SDK's own request handling descend from `relay.RelayError`.
-Response DECODING is the exception: a body that does not match the model raises
-`pydantic.ValidationError`, which does **not** descend from `RelayError`. That
-gap is known and tracked separately.
+Response DECODING is the exception, and it escapes in two ways, neither of
+which descends from `RelayError`:
+
+- a body that is well-formed JSON but does not match the model raises
+  `pydantic.ValidationError`;
+- a body that JSON itself cannot read raises a plain `ValueError` first, before
+  any model is reached - `json.JSONDecodeError` for a 200 whose body is not
+  JSON at all (an ingress or proxy returning an HTML error page), and
+  `ValueError` for an integer over CPython's 4300-digit limit.
+
+That gap is known and tracked separately.
 
 | Class | When |
 |---|---|
@@ -167,8 +183,10 @@ gap is known and tracked separately.
 | `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained. Carries `.records` (what the abandoned walk collected) instead of `.response` |
 | `TimeoutError` | `wait()` exceeded its wall-clock limit |
 
-The original `httpx.Response` is attached as `.response` on each instance
-for debugging.
+The original `httpx.Response` is attached as `.response` on the
+status-derived errors above - every row except `ProtocolError` and
+`TimeoutError`, which are raised across several responses (or none) and so
+have no single one to attach.
 
 ## Compatibility
 

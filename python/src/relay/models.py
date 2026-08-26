@@ -97,8 +97,10 @@ class EventType(str, Enum):
     ``DROPPED`` is not a resource event. The server writes it directly
     (handleEvents, internal/api/events.go) when the broker drops a subscriber
     for falling behind, and its meaning is "you missed frames": anything
-    published in the gap is gone, so re-read the job or re-fetch the task's
-    logs from the last seq you saw.
+    published in the gap is gone, so re-read the job with
+    :meth:`relay.Client.get_job` and resume each task's log with
+    ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not ``task_logs``,
+    which takes no ``since_seq``.
     """
 
     JOB = "job"

@@ -57,17 +57,47 @@ class Client:
     and ``timeout`` is IGNORED - the caller who injects a client owns its
     policy. httpx's default for a bare ``httpx.Client()`` is 5 s; a client
     built with ``timeout=None`` has no bound at all and the SDK will not add
-    one.
+    one. The injected client is also MUTATED once, at construction: the
+    ``Authorization`` header is written onto it permanently and
+    :meth:`close` does not undo it, correctly, because the SDK does not own
+    that client's lifetime. So the object you passed in carries the bearer
+    token for as long as you keep it. (httpx redacts ``authorization`` to
+    ``[secure]`` in ``Headers.__repr__``, so it does not reach tracebacks or
+    ``repr()``.)
     """
 
     # Per-request page size used when auto-paginating. Matches the server's
     # max limit and relayclient.PageRequestLimit so we minimize round-trips.
     _PAGE_REQUEST_LIMIT = 200
 
-    # Bounds the log paging loop against a server whose next_seq keeps advancing
-    # but which never reports the log as drained. 10000 pages at
-    # _PAGE_REQUEST_LIMIT rows is 2,000,000 rows: a hang bound, not a product
-    # limit. A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
+    # Bounds the NUMBER OF REQUESTS the log paging loop makes against a server
+    # whose next_seq keeps advancing but which never reports the log as
+    # drained. 10000 pages at _PAGE_REQUEST_LIMIT rows is 2,000,000 rows.
+    #
+    # Requests is all it bounds. It was described here as a "hang bound" and
+    # it is not one, so read it as the count it is - the three axes it leaves
+    # open were measured:
+    #
+    #   - Wall clock. httpx's read timeout applies per SOCKET READ, not per
+    #     request, so a server dribbling one byte every 0.4 s never trips a
+    #     0.5 s read timeout: measured, one request completed in 14.3 s, 29x
+    #     the timeout. Multiply by 10000 sequential pages.
+    #   - Bytes. httpx sends `accept-encoding: gzip, deflate` by default and
+    #     decodes with no bound: measured, 89 KiB on the wire materialised as
+    #     31 MB, a 343x ratio. Again per page.
+    #   - Memory. A LogRecord retains roughly 0.5-1 KB depending on line
+    #     length, so a full 2,000,000-row walk is well over a gigabyte,
+    #     retained, before task_logs returns.
+    #
+    # A wall-clock or byte bound belongs to the http_client the caller owns
+    # (Client(timeout=) or an injected client), which is where those two axes
+    # are actually configurable. A private total-row budget is DECLINED
+    # deliberately rather than omitted: `task_logs(limit=N)` already is that
+    # budget, it short-circuits the walk, and it is public and caller-chosen -
+    # a second private one would bound the same axis twice while still
+    # advertising nothing about the other two.
+    #
+    # A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
     # it - which means the loop must read it off `self`, not off a module global.
     _MAX_LOG_PAGES = 10000
 
@@ -432,8 +462,11 @@ class Client:
 
         A ``dropped`` frame (:attr:`relay.EventType.DROPPED`) means the broker
         dropped this subscriber for falling behind: frames published in the gap
-        are gone, and the recovery is to re-read the job and re-fetch the
-        task's logs from the last seq seen.
+        are gone, and the recovery is to re-read the job with :meth:`get_job`
+        and resume each task's log with
+        ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not
+        :meth:`task_logs`, which takes no ``since_seq`` and would restart at
+        row 0 and re-walk the whole log.
 
         The underlying HTTP connection is closed on generator exit.
         """
