@@ -154,6 +154,31 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     exactly why a completeness claim has to name it anyway. A claim about the
 //     complement cannot be checked by opening its subject.
 //
+// THE FIFTEENTH ENTRY IS NOT A STATEMENT EITHER, and it is not even in the server
+// binary:
+//
+//   - taskIsTerminal and jobIsTerminal (internal/cli/logs.go) - the CLI's own two
+//     copies, one per vocabulary. taskIsTerminal is ('done','failed','timed_out'),
+//     the same terminal partition RecomputeJobStatus uses. jobIsTerminal is
+//     ('done','failed','cancelled') - the JOBS vocabulary, which no other entry on
+//     this list slices. Together they decide when `relay logs` and `relay submit`
+//     fetch a task's log, and when they stop watching a job.
+//     What makes them worth listing is not that they could admit a bad write; they
+//     could not, this is a read-only client. It is what the command now
+//     ADVERTISES. `relay logs` documents exit 0 as meaning every task's log printed
+//     IN FULL, so a new TERMINAL task status omitted from taskIsTerminal means that
+//     task's log is never fetched while the exit code still makes that claim -
+//     silent, and indistinguishable from a task that produced no output. A new
+//     terminal JOB status omitted from jobIsTerminal is louder and worse to
+//     diagnose: neither the snapshot nor the stream ever recognises the job as
+//     finished, so the command hangs until the connection drops and then reports
+//     "connection lost" about a job that finished long ago. `preparing` is harmless
+//     at both, being non-terminal; the task-level `cancelled` this comment's header
+//     names as the near-term candidate is not.
+//     Unlike taskStatusIsWritable there is NO transitive cover here. Nothing parses
+//     tasks.sql on the CLI's behalf and no test compares these two functions with
+//     anything, so this list is their entire guard.
+//
 // The allow-list form of these predicates is what makes this guard the only
 // thing standing between a new status and a silent regression: under the
 // equivalent deny-list a new status would be writable and retryable by default,
@@ -162,9 +187,12 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // assignment-partition group - are where the allow-list points the OTHER way and
 // omission fails open, which is why they are spelled out at length above rather
 // than folded into the list. Count them before assuming the fail-closed default:
-// seven of the thirteen STATEMENTS named here are inverted. The fourteenth entry
-// is not a statement and is not one of the seven; it is neither fail-open nor
-// fail-closed, because it gates nothing at all.
+// seven of the thirteen STATEMENTS named here are inverted. The fourteenth and
+// fifteenth entries are not statements and are not among the seven; neither gates
+// a write, so neither is fail-open or fail-closed in that sense. Drift in the
+// fourteenth mislabels a counter. Drift in the fifteenth silently breaks a promise
+// the CLI makes to a shell script, which is the fail-OPEN direction for the one
+// thing that entry does control.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -193,9 +221,14 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 			"RequeueWorkerTasksIfEpoch - means a task in that state is never seen by reconcile, never covered by "+
 			"a grace timer, never requeued on disconnect or disable, and never swept: it holds its worker slot "+
 			"and its job forever, with no error and no log line. RequeueTask's narrower 'dispatched'-only "+
-			"predicate is deliberate - see its own comment before touching it. THERE IS ALSO ONE NON-STATEMENT "+
-			"SITE: taskStatusIsWritable in internal/worker/taskstatus_fence_counters.go mirrors "+
+			"predicate is deliberate - see its own comment before touching it. THERE ARE ALSO TWO NON-STATEMENT "+
+			"SITES. taskStatusIsWritable in internal/worker/taskstatus_fence_counters.go mirrors "+
 			"UpdateTaskStatus's allow-list in Go to label fence-rejection counters. It gates nothing, so drift "+
 			"there mislabels a number rather than admitting a write - but a new non-terminal status left out of "+
-			"it makes every rejection for that state read as a healthy race")
+			"it makes every rejection for that state read as a healthy race. taskIsTerminal and jobIsTerminal in "+
+			"internal/cli/logs.go are the CLI's copies, and jobIsTerminal is the only site on this list slicing "+
+			"the JOBS vocabulary. A new TERMINAL task status omitted from taskIsTerminal means relay logs never "+
+			"fetches that task's log while still exiting 0, which it documents as meaning every task's log "+
+			"printed in full; a new terminal JOB status omitted from jobIsTerminal makes relay logs hang until "+
+			"the connection drops and then report 'connection lost' about a job that finished long ago")
 }
