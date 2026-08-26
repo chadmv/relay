@@ -1,11 +1,51 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
-from typing import Any, Generic, Optional, TypeVar, Union
+from typing import Annotated, Any, Generic, Optional, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+# ─── null-valued jsonb fields ─────────────────────────────────────────────────
+
+
+def _empty_on_null(empty: Callable[[], Any]) -> BeforeValidator:
+    """Coerce a wire ``null`` to the field's empty value, leaving absence alone.
+
+    ``Field(default_factory=dict)`` covers a MISSING key. It does nothing for a
+    key that is present and ``null``, which is a different wire shape and the
+    one five of the API's jsonb fields actually send.
+
+    internal/api/server.go has two helpers for those columns. ``rawObject``
+    normalises ``null`` to ``{}`` and its comment says why - "so a client never
+    receives a null where an object is expected" - but it is used at only 2
+    sites (Task.env, Task.requires). ``rawJSON`` passes ``null`` through, and
+    its 5 sites are the fields annotated with this below. Server-side that
+    asymmetry is a separate question; client-side the SDK must not raise on a
+    document the server legitimately produces today.
+
+    A BEFORE validator, so the declared type stays ``dict``/``list`` rather
+    than becoming Optional: a caller never has to test these for None, which
+    is the whole point of the empty default they already carried.
+    """
+
+    def _coerce(value: Any) -> Any:
+        return empty() if value is None else value
+
+    return BeforeValidator(_coerce)
+
+
+_NullIsEmptyDict = _empty_on_null(dict)
+_NullIsEmptyList = _empty_on_null(list)
 
 
 class Priority(str, Enum):
@@ -177,7 +217,7 @@ class Task(BaseModel):
 
     # Authoring fields
     name: str
-    commands: list[list[str]] = Field(default_factory=list)
+    commands: Annotated[list[list[str]], _NullIsEmptyList] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     requires: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: Optional[int] = None
@@ -261,7 +301,7 @@ class Job(BaseModel):
     # Authoring fields
     name: str
     priority: Priority = Priority.NORMAL
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: Annotated[dict[str, str], _NullIsEmptyDict] = Field(default_factory=dict)
     tasks: list[Task] = Field(default_factory=list)
 
     # Response-only fields
@@ -433,7 +473,7 @@ class ScheduledJob(BaseModel):
     owner_id: str
     cron_expr: str
     timezone: str
-    job_spec: dict[str, Any]
+    job_spec: Annotated[dict[str, Any], _NullIsEmptyDict]
     overlap_policy: str
     enabled: bool
     next_run_at: datetime
@@ -475,7 +515,7 @@ class Worker(BaseModel):
     gpu_model: str
     os: str
     max_slots: int
-    labels: dict[str, Any] = Field(default_factory=dict)
+    labels: Annotated[dict[str, Any], _NullIsEmptyDict] = Field(default_factory=dict)
     status: str
     last_seen_at: Optional[datetime] = None
     last_sample_at: Optional[datetime] = None
@@ -488,7 +528,7 @@ class Reservation(BaseModel):
 
     id: str
     name: str
-    selector: dict[str, Any] = Field(default_factory=dict)
+    selector: Annotated[dict[str, Any], _NullIsEmptyDict] = Field(default_factory=dict)
     worker_ids: list[str] = Field(default_factory=list)
     user_id: str
     project: Optional[str] = None

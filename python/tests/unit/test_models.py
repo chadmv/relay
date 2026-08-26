@@ -13,8 +13,10 @@ from relay import (
     Page,
     Priority,
     Reservation,
+    ScheduledJob,
     Source,
     Sync,
+    Task,
     TaskStatus,
     User,
     ValidationError,
@@ -504,3 +506,133 @@ def test_event_type_covers_every_type_the_server_publishes() -> None:
         "task_log",
         "dropped",
     }
+
+
+# ─── null-valued object fields (rawJSON, not rawObject) ───────────────────────
+#
+# internal/api/server.go has two helpers for the jsonb columns the API returns.
+# rawObject normalises `null` to `{}` and says why in its own comment ("so a
+# client never receives a null where an object is expected"); rawJSON passes
+# `null` straight through. rawObject is used at 2 sites (Task.env,
+# Task.requires); rawJSON at 5, and those 5 are the fields below.
+#
+# `Field(default_factory=dict)` covers an ABSENT key, not a null one, so every
+# one of these five raised against a real server. Job.labels is not
+# hypothetical: it is null on the wire for a job submitted without labels, and
+# it is what broke list_jobs() against a live relay-server.
+#
+# The full axis was swept, not just these five: of 61 non-Optional fields across
+# the 11 response models, 60 reject null, and exactly these 5 have a Go
+# counterpart that can emit it. The other 55 are backed by a Go non-pointer
+# scalar (never null), a slice tagged omitempty (omitted, never null), or a
+# slice built with make (always []).
+
+
+def _worker_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "w1", "name": "worker-a", "hostname": "host-a", "cpu_cores": 8,
+        "ram_gb": 32, "gpu_count": 1, "gpu_model": "RTX", "os": "linux",
+        "max_slots": 4, "labels": {}, "status": "online",
+    }
+    base.update(overrides)
+    return base
+
+
+def _reservation_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "r1", "name": "res-a", "selector": {}, "worker_ids": [],
+        "user_id": "u1", "created_at": "2026-08-26T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def _scheduled_job_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "s1", "name": "hourly", "owner_id": "u1", "cron_expr": "@hourly",
+        "timezone": "UTC", "job_spec": {}, "overlap_policy": "skip",
+        "enabled": True, "next_run_at": "2026-08-26T13:00:00Z",
+        "created_at": "2026-08-26T12:00:00Z", "updated_at": "2026-08-26T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_job_labels_null_parses_as_empty_dict() -> None:
+    """rawJSON(j.Labels), internal/api/jobs.go:111. A job submitted with no
+    labels stores a nil map, which marshals to `null`. Confirmed live: this is
+    the field that made list_jobs() raise against a real relay-server.
+    """
+    job = Job.model_validate(
+        {
+            "id": "j1", "name": "nightly", "priority": "normal",
+            "status": "running", "labels": None,
+            "created_at": "2026-08-26T12:00:00Z",
+            "updated_at": "2026-08-26T12:00:00Z",
+        }
+    )
+    assert job.labels == {}
+
+
+def test_task_commands_null_parses_as_empty_list() -> None:
+    """rawJSON(t.Commands), internal/api/jobs.go:85. The one rawJSON site whose
+    field is an ARRAY, so its empty value is [] and not {}.
+    """
+    task = Task.model_validate(
+        {"id": "t1", "name": "cook", "status": "done", "commands": None}
+    )
+    assert task.commands == []
+
+
+def test_worker_labels_null_parses_as_empty_dict() -> None:
+    """rawJSON(w.Labels), internal/api/workers.go:92."""
+    assert Worker.model_validate(_worker_wire(labels=None)).labels == {}
+
+
+def test_reservation_selector_null_parses_as_empty_dict() -> None:
+    """rawJSON(res.Selector), internal/api/reservations.go:45."""
+    assert Reservation.model_validate(_reservation_wire(selector=None)).selector == {}
+
+
+def test_scheduled_job_spec_null_parses_as_empty_dict() -> None:
+    """rawJSON(sj.JobSpec), internal/api/scheduled_jobs.go:43.
+
+    job_spec is the one of the five with no default, and it STAYS required -
+    see the next test. Only the null is coerced, and `{}` is chosen because it
+    is the value rawJSON itself already returns for the adjacent empty case
+    (len(b) == 0), so both of the server's own "nothing here" spellings arrive
+    as the same Python value.
+    """
+    assert ScheduledJob.model_validate(_scheduled_job_wire(job_spec=None)).job_spec == {}
+
+
+def test_scheduled_job_spec_is_still_required_when_absent() -> None:
+    """The coercion must not become a default. An ABSENT job_spec is a response
+    the SDK cannot talk to and must stay loud; a NULL one is the server's own
+    spelling of an empty jsonb. Collapsing the two would make a rawJSON site
+    dropped from the response read as an empty schedule.
+    """
+    wire = _scheduled_job_wire()
+    del wire["job_spec"]
+    with pytest.raises(PydanticValidationError):
+        ScheduledJob.model_validate(wire)
+
+
+def test_task_env_and_requires_are_normalised_server_side() -> None:
+    """The control for the five above. Task.env and Task.requires are the only
+    two rawOBJECT sites (internal/api/jobs.go:86-87), so the server already
+    sends `{}` and no null ever reaches the model.
+
+    They are left uncoerced deliberately: a coercion here would be dead code
+    that reads as protection, and it would hide the day rawObject stops being
+    used at those sites. This test pins WHICH helper each field is behind, so
+    a server-side switch to rawJSON is a conversation and not a silence.
+    """
+    task = Task.model_validate(
+        {"id": "t1", "name": "cook", "status": "done", "commands": [], "env": {},
+         "requires": {}}
+    )
+    assert task.env == {}
+    assert task.requires == {}
+    with pytest.raises(PydanticValidationError):
+        Task.model_validate({"name": "cook", "env": None})
