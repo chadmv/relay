@@ -106,14 +106,29 @@ func TestChunkWriter_LoneCarriageReturnIsConsumedWithoutEnqueueing(t *testing.T)
 // of after would leave a '\r' owned by a writer whose abort path has already
 // decided to stop sending.
 //
-// Deterministic, not timing-based: sendCh is wedged full BEFORE the write and
-// forcedCh is closed, so sendOrAbort has exactly one ready case.
+// THE FIRST WRITE IS THE FIXTURE, NOT SETUP NOISE. held must already be armed
+// when the abandoned write runs, or the assertion is vacuous in both directions:
+// with nothing held, held is nil before the write and nil after it whether or
+// not Write clears it, so the test stays green against a chunkWriter that never
+// clears held at all. Pre-arming makes it kill both mutants - the missing clear
+// (held survives the abort as "\r") and arming the new byte before the enqueue
+// instead of after.
+//
+// Deterministic, not timing-based: the pre-arming write also fills the one-slot
+// sendCh, and forcedCh is closed before the second write, so sendOrAbort has
+// exactly one ready case.
 func TestChunkWriter_AbandonedWriteDropsTheHeldByte(t *testing.T) {
 	w, r, sendCh := newCRLFWriter(t, relayv1.LogStream_LOG_STREAM_STDOUT, 1)
-	sendCh <- &relayv1.AgentMessage{} // wedge it full
-	r.Cancel(true)
 
 	n, err := w.Write([]byte("abc\r"))
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	require.Len(t, w.held, 1, "the pre-arming write must leave a trailing CR held")
+	require.Len(t, sendCh, 1, "the pre-arming write enqueues its own chunk and wedges the channel full")
+
+	r.Cancel(true)
+
+	n, err = w.Write([]byte("def\r"))
 	require.ErrorIs(t, err, errForcedAbort)
 	require.Equal(t, 0, n, "an abandoned Write reports zero bytes consumed alongside its error")
 	require.Empty(t, w.held,
@@ -182,6 +197,11 @@ func TestCRLFHelperProcess(t *testing.T) {
 		// Two CRLF pairs and a bare trailing CR. The middle CR-CR-LF is the
 		// shape the whole slice turns on.
 		_, _ = os.Stdout.Write([]byte("a\r\nb\r\r\nc\r"))
+		// STDERR CARRIES ITS OWN TRAILING CR, and writing to two streams is the
+		// whole reason this mode exists in its current form. outW.flush() and
+		// errW.flush() are two independent call sites; with stdout as the only
+		// assertion subject, deleting errW.flush() left every package green.
+		_, _ = os.Stderr.Write([]byte("d\r\ne\r"))
 	case "trailing-cr":
 		_, _ = os.Stdout.Write([]byte("step-one\r"))
 	}
@@ -191,7 +211,7 @@ func TestCRLFHelperProcess(t *testing.T) {
 // crlfHelperCmd returns the argv and env that re-exec this test binary as the
 // helper above. os.Args[0] under `go test` is the built test binary, an absolute
 // path. The sentinel travels through DispatchTask.Env, which Run merges into the
-// child's environment (runner.go:155-161), so the parent's own environment is
+// child's environment (runner.go:155-162), so the parent's own environment is
 // never mutated.
 func crlfHelperCmd(mode string) ([]string, map[string]string) {
 	return []string{os.Args[0], "-test.run=^TestCRLFHelperProcess$"},
@@ -201,6 +221,11 @@ func crlfHelperCmd(mode string) ([]string, map[string]string) {
 // TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus is spec T2-C, and it
 // is what makes M6 and M7 killable: unit-testing flush() directly, or asserting
 // that the method exists, proves nothing about the CALL SITE.
+//
+// IT ASSERTS ON BOTH STREAMS BECAUSE THERE ARE TWO CALL SITES. Run builds a
+// stdout writer and a stderr writer per step and flushes each one; a wiring test
+// that reads only LOG_STREAM_STDOUT pins outW.flush() and says nothing about
+// errW.flush().
 func TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus(t *testing.T) {
 	sendCh := make(chan *relayv1.AgentMessage, 64)
 	argv, env := crlfHelperCmd("crlf")
@@ -215,7 +240,7 @@ func TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus(t *testing.T) {
 	require.NotEmpty(t, msgs)
 
 	// Everything the step emitted BEFORE the terminal status, in FIFO order.
-	// internal/worker/handler.go:173-178 bounds AppendTaskLog's trailing window
+	// internal/worker/handler.go:173-183 bounds AppendTaskLog's trailing window
 	// on exactly this ordering: a chunk enqueued before sendFinalStatus cannot
 	// outlive the terminal status. A flush hoisted past the loop makes that
 	// sentence false and pushes a one-byte chunk into the trailing-window
@@ -233,16 +258,24 @@ func TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, term, 0, "the task must reach a terminal status")
 
-	var before strings.Builder
+	var beforeOut, beforeErr strings.Builder
 	for _, m := range msgs[:term] {
-		if l := m.GetTaskLog(); l != nil && l.Stream == relayv1.LogStream_LOG_STREAM_STDOUT {
-			before.Write(l.Content)
+		l := m.GetTaskLog()
+		if l == nil {
+			continue
+		}
+		switch l.Stream {
+		case relayv1.LogStream_LOG_STREAM_STDOUT:
+			beforeOut.Write(l.Content)
+		case relayv1.LogStream_LOG_STREAM_STDERR:
+			beforeErr.Write(l.Content)
 		}
 	}
 	// Drop the synthetic step marker, which is always the first stdout content
-	// and is terminated by the first '\n' in the joined stream.
-	_, payload, ok := strings.Cut(before.String(), "\n")
-	require.True(t, ok, "expected the step marker line then the subprocess bytes; got %q", before.String())
+	// and is terminated by the first '\n' in the joined stream. stderr carries no
+	// marker, so its join is the subprocess's bytes exactly.
+	_, payload, ok := strings.Cut(beforeOut.String(), "\n")
+	require.True(t, ok, "expected the step marker line then the subprocess bytes; got %q", beforeOut.String())
 
 	// THE EXPECTED VALUE CONTAINS A CR-LF AND THAT IS NOT A TYPO. The transform is
 	// defined on the ORIGINAL byte positions. The input "a\r\nb\r\r\nc\r" has two
@@ -257,6 +290,15 @@ func TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus(t *testing.T) {
 	// loss - Write would have reported a byte consumed that appears nowhere - and
 	// it would break the concatenation invariant.
 	require.Equal(t, "a\nb\r\nc\r", payload)
+
+	// THE SECOND CALL SITE, WHICH IS NOT THE FIRST ONE. Run creates two writers
+	// per step and flushes each; asserting only on stdout leaves errW.flush()
+	// unpinned, and deleting that one line kept all 21 packages green. The
+	// assertion has to come through Run's per-step loop for the same reason the
+	// comment above gives: calling flush() on a writer the test built itself
+	// proves the method works, not that anything calls it.
+	require.Equal(t, "d\ne\r", beforeErr.String(),
+		"stderr's held trailing CR was never flushed; errW.flush() is a call site of its own")
 }
 
 // TestRunner_HeldCarriageReturnIsFlushedBeforeTheNextStepMarker is spec T2-D and
