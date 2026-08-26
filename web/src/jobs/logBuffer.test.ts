@@ -49,8 +49,8 @@ test('returns the identical state object when every entry is a duplicate', () =>
 
 // THE test that protects against the README's old, wrong contract. seq comes from
 // a table-wide BIGSERIAL, so gaps are normal on a busy farm
-// (README.md:1357-1360); any gap detection would re-backfill on nearly every
-// frame.
+// (README.md, "Events (Server-Sent Events)"); any gap detection would
+// re-backfill on nearly every frame.
 test('non-contiguous seq is NOT a drop signal', () => {
   let s = createLogState()
   s = appendEntries(s, [chunk(10, 'a\n'), chunk(40, 'b\n'), chunk(41, 'c\n')])
@@ -278,8 +278,9 @@ test('shouldFollow is true for a container smaller than its viewport', () => {
 // newline blanks that line permanently.
 //
 // BOTH STREAMS ON PURPOSE: visibleRows renders the stdout and stderr partials
-// through two SEPARATE call sites (logBuffer.ts:175 and :178), so a stdout-only
-// fixture passes against a fix applied to one of them.
+// through two SEPARATE call sites (the two collapseCR calls inside visibleRows,
+// one per stream), so a stdout-only fixture passes against a fix applied to
+// one of them.
 test('a partial ending in a carriage return renders its text, on stdout and on stderr', () => {
   let s = createLogState()
   s = appendEntries(s, [chunk(1, 'text\r', 'stdout'), chunk(2, 'oops\r', 'stderr')])
@@ -309,7 +310,7 @@ test('an empty or CR-only unit still renders a row', () => {
 
 // Spec T1-E: an erase-line escape sequence sitting BETWEEN the carriage return
 // and the newline - which is exactly what a progress bar emits. stripAnsi runs
-// before the split (logBuffer.ts:139-142), so the sequence is gone by the time
+// before the split, inside appendEntries, so the sequence is gone by the time
 // the line is formed and the CR it was hiding behind is trailing after all.
 //
 // Without this test nothing pins that the strip runs AFTER stripAnsi: a strip
