@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	relayv1 "relay/internal/proto/relayv1"
 
@@ -152,4 +154,168 @@ func TestChunkWriter_StdoutAndStderrHoldIndependently(t *testing.T) {
 	// part of a CRLF pair and this transform does not touch it. Collapsing it
 	// would be a judgement about visible content, which stays in the client.
 	require.Equal(t, "out\rput\n", got[relayv1.LogStream_LOG_STREAM_STDOUT])
+}
+
+// TestCRLFHelperProcess IS NOT A TEST. It is the SUBPROCESS the two wiring tests
+// exec: the test binary re-executes itself with -test.run pointed here, so the
+// producer is Go code writing exact bytes and the same bytes reach the runner on
+// Windows and on Linux. Go performs no newline translation.
+//
+// A SHELL PRODUCER CANNOT CARRY THIS ASSERTION. `cmd /c echo` emits CRLF
+// natively on Windows and never on Linux, so a CRLF assertion behind a
+// runtime.GOOS switch is vacuously green on CI and meaningful only on a
+// developer's machine - the platform-gated-verification trap, inverted. That is
+// why this file carries no build tag and no GOOS switch (spec D15).
+//
+// os.Exit(0) IS NOT OPTIONAL: without it the testing framework appends "PASS\nok
+// ..." to the very stdout the parent asserts on. Nothing is written before the
+// test body runs in non-verbose mode, and a raw test binary does not read
+// GOFLAGS (that is the go command's variable), so the child's stdout is exactly
+// what this function writes.
+func TestCRLFHelperProcess(t *testing.T) {
+	mode := os.Getenv("RELAY_CRLF_HELPER")
+	if mode == "" {
+		return // an ordinary test run; this process is not the helper
+	}
+	switch mode {
+	case "crlf":
+		// Two CRLF pairs and a bare trailing CR. The middle CR-CR-LF is the
+		// shape the whole slice turns on.
+		_, _ = os.Stdout.Write([]byte("a\r\nb\r\r\nc\r"))
+	case "trailing-cr":
+		_, _ = os.Stdout.Write([]byte("step-one\r"))
+	}
+	os.Exit(0)
+}
+
+// crlfHelperCmd returns the argv and env that re-exec this test binary as the
+// helper above. os.Args[0] under `go test` is the built test binary, an absolute
+// path. The sentinel travels through DispatchTask.Env, which Run merges into the
+// child's environment (runner.go:155-161), so the parent's own environment is
+// never mutated.
+func crlfHelperCmd(mode string) ([]string, map[string]string) {
+	return []string{os.Args[0], "-test.run=^TestCRLFHelperProcess$"},
+		map[string]string{"RELAY_CRLF_HELPER": mode}
+}
+
+// TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus is spec T2-C, and it
+// is what makes M6 and M7 killable: unit-testing flush() directly, or asserting
+// that the method exists, proves nothing about the CALL SITE.
+func TestRunner_CRLFFlushIsWiredAndPrecedesTheTerminalStatus(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+	argv, env := crlfHelperCmd("crlf")
+	r, runCtx := newRunner("t-crlf-wire", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "t-crlf-wire",
+		Commands: []*relayv1.CommandLine{{Argv: argv}},
+		Env:      env,
+	})
+
+	msgs := collectMessages(sendCh, 1500*time.Millisecond)
+	require.NotEmpty(t, msgs)
+
+	// Everything the step emitted BEFORE the terminal status, in FIFO order.
+	// internal/worker/handler.go:173-178 bounds AppendTaskLog's trailing window
+	// on exactly this ordering: a chunk enqueued before sendFinalStatus cannot
+	// outlive the terminal status. A flush hoisted past the loop makes that
+	// sentence false and pushes a one-byte chunk into the trailing-window
+	// carve-out instead of the status allow-list.
+	term := -1
+	for i, m := range msgs {
+		if ts := m.GetTaskStatus(); ts != nil {
+			switch ts.Status {
+			case relayv1.TaskStatus_TASK_STATUS_DONE,
+				relayv1.TaskStatus_TASK_STATUS_FAILED,
+				relayv1.TaskStatus_TASK_STATUS_TIMED_OUT:
+				term = i
+			}
+		}
+	}
+	require.GreaterOrEqual(t, term, 0, "the task must reach a terminal status")
+
+	var before strings.Builder
+	for _, m := range msgs[:term] {
+		if l := m.GetTaskLog(); l != nil && l.Stream == relayv1.LogStream_LOG_STREAM_STDOUT {
+			before.Write(l.Content)
+		}
+	}
+	// Drop the synthetic step marker, which is always the first stdout content
+	// and is terminated by the first '\n' in the joined stream.
+	_, payload, ok := strings.Cut(before.String(), "\n")
+	require.True(t, ok, "expected the step marker line then the subprocess bytes; got %q", before.String())
+
+	// THE EXPECTED VALUE CONTAINS A CR-LF AND THAT IS NOT A TYPO. The transform is
+	// defined on the ORIGINAL byte positions. The input "a\r\nb\r\r\nc\r" has two
+	// CRLF pairs; removing both leaves "a\nb" + "\r" + "\nc" - a CRLF at a
+	// position that did not have one. "Correcting" this to "a\nb\nc\r" silently
+	// changes the design to \r+\n -> \n, which the spec rejects on purpose (6.2):
+	// that is a judgement about visible content, and visible-content judgements
+	// stay in the client that holds the opinion. The residue is removed by
+	// web/src/jobs/logBuffer.ts, which strips ALL trailing carriage returns.
+	//
+	// The trailing "c\r" is the FLUSHED held byte. Swallowing it would be silent
+	// loss - Write would have reported a byte consumed that appears nowhere - and
+	// it would break the concatenation invariant.
+	require.Equal(t, "a\nb\r\nc\r", payload)
+}
+
+// TestRunner_HeldCarriageReturnIsFlushedBeforeTheNextStepMarker is spec T2-D and
+// it pins the flush call site as PER STEP. The writers are constructed fresh
+// inside the command loop and become garbage at the end of each iteration, so a
+// flush hoisted to the end of Run finds step 1's writer already replaced and
+// loses its byte outright.
+func TestRunner_HeldCarriageReturnIsFlushedBeforeTheNextStepMarker(t *testing.T) {
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+	argv, env := crlfHelperCmd("trailing-cr")
+	r, runCtx := newRunner("t-crlf-steps", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId: "t-crlf-steps",
+		Commands: []*relayv1.CommandLine{
+			{Argv: argv},
+			{Argv: echoArgv("second")},
+		},
+		Env: env,
+	})
+
+	joined := collectStdoutLogs(collectMessages(sendCh, 2500*time.Millisecond))
+
+	held := strings.Index(joined, "step-one\r")
+	require.GreaterOrEqual(t, held, 0,
+		"step 1's held trailing CR was never flushed; logs:\n%q", joined)
+	marker2 := strings.Index(joined, "=== relay step 2/2")
+	require.GreaterOrEqual(t, marker2, 0, "step 2 must have run; logs:\n%q", joined)
+	require.Less(t, held, marker2,
+		"the held byte must be enqueued before the next step's marker")
+}
+
+// TestChunkWriter_FlushIsBoundedByTheCancelChannels is spec T2-G / D8. flush()
+// runs after cmd.Wait() on the CANCEL path too, and r.send is bounded only by
+// the AGENT context - not the run context - so a per-task cancel with a wedged
+// sendCh would park Run until agent shutdown. That is precisely the wedge
+// sendFinalStatus's cancelled branch and sendInventory were both written to
+// avoid, and it would delay the terminal status indefinitely.
+//
+// The 2s bound is not a timing assertion in disguise: correct code returns in
+// microseconds and the mutant parks FOREVER, so there is no margin to tune.
+func TestChunkWriter_FlushIsBoundedByTheCancelChannels(t *testing.T) {
+	w, r, sendCh := newCRLFWriter(t, relayv1.LogStream_LOG_STREAM_STDOUT, 2)
+
+	n, err := w.Write([]byte("abc\r"))
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	require.Len(t, w.held, 1, "the trailing CR must be held for the next write")
+
+	for len(sendCh) < cap(sendCh) {
+		sendCh <- &relayv1.AgentMessage{} // wedge it full
+	}
+	r.Cancel(false) // closes cancelledCh; r.ctx is Background and stays live
+
+	done := make(chan struct{})
+	go func() { defer close(done); w.flush() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush parked on a wedged sendCh: it must use sendOrAbort, not the agent-context-only r.send")
+	}
+	require.Len(t, sendCh, cap(sendCh), "an abandoned flush must enqueue nothing")
 }

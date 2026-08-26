@@ -200,8 +200,10 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		// enforces WaitDelay: if a leaked child still holds the write end after
 		// the process exits, Wait force-closes the descriptors within 5s instead
 		// of blocking forever (go.dev/issue/23019).
-		cmd.Stdout = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
-		cmd.Stderr = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
+		outW := &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
+		errW := &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
+		cmd.Stdout = outW
+		cmd.Stderr = errW
 
 		if err := cmd.Start(); err != nil {
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
@@ -214,6 +216,25 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		assignProcTree()
 
 		waitErr := cmd.Wait()
+		// Flush each writer's held trailing '\r' HERE, and nowhere else. Four
+		// constraints have exactly one satisfying position:
+		//   - the writers are per STEP and become garbage at the end of this
+		//     iteration, and both the `continue` and the `break` below come after
+		//     this line, so every path flushes;
+		//   - a held byte must be enqueued before the NEXT step's sendStepMarker,
+		//     which is at the top of the next iteration;
+		//   - a log chunk must be enqueued before sendFinalStatus (after the
+		//     loop), or internal/worker/handler.go:173-178's FIFO argument
+		//     becomes false and a one-byte chunk lands in AppendTaskLog's
+		//     trailing-window carve-out instead of its status allow-list;
+		//   - no copy goroutine may still be running: Cmd.Wait waits for the
+		//     command to exit AND for the copying from stdout and stderr to
+		//     complete, and WaitDelay force-closes the pipes so those copies do
+		//     complete.
+		// A no-op when nothing is held, so the two earlier breaks (nil argv,
+		// cmd.Start failure) need no reasoning about.
+		outW.flush()
+		errW.flush()
 		cleanupProcTree()
 
 		lastExitCode = nil
@@ -308,6 +329,10 @@ var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log writ
 // is done), the enqueue is abandoned and Write returns errForcedAbort so exec's
 // io.Copy stops and cmd.Wait() returns promptly instead of waiting out
 // WaitDelay; the held byte goes with the discarded chunk and is never re-armed.
+//
+// flush() MUST be called after cmd.Wait() returns for the step that created this
+// writer, for BOTH writers, or a trailing '\r' at the end of a step is silently
+// dropped. exec will not call it; see flush's own comment.
 type chunkWriter struct {
 	r         *Runner
 	stream    relayv1.LogStream
@@ -375,6 +400,50 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// flush enqueues any held trailing '\r' as its own chunk and clears it.
+//
+// IT MUST BE CALLED EXPLICITLY, IMMEDIATELY AFTER cmd.Wait() RETURNS, FOR BOTH
+// WRITERS, INSIDE THE PER-STEP LOOP. os/exec closes only the pipes it created
+// and never calls Close on a caller-supplied Stdout/Stderr, so there is no close
+// hook and naming this Close() would imply a call that does not happen. The
+// writers are per STEP, so a byte not flushed before the iteration ends is
+// silently lost - no error, no log line - and a flush deferred to the end of Run
+// would find the step's writer already replaced. See makePrepareProgressFn's
+// flush, which is the same shape and the same hazard.
+//
+// SENDS THROUGH sendOrAbort, NEVER r.send. flush runs after cmd.Wait on the
+// cancel path too, and r.send is bounded only by the AGENT context, so a
+// per-task forced cancel with a wedged sendCh would park Run until agent
+// shutdown - the exact wedge sendFinalStatus's cancelled branch and sendInventory
+// were both written to avoid. After an abandoned Write there is nothing held, so
+// this sends nothing: the writer must not send after the abort path decided to
+// stop sending.
+//
+// The lock is released before the send. Holding it across a bounded-but-slow
+// enqueue is the first step toward the lock-scope problems the Invariants exist
+// to prevent.
+func (w *chunkWriter) flush() {
+	w.mu.Lock()
+	held := w.held
+	w.held = nil
+	w.mu.Unlock()
+	if len(held) == 0 {
+		return
+	}
+	w.r.sendOrAbort(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId:    w.r.taskID,
+				Stream:    w.stream,
+				Content:   held,
+				Epoch:     w.r.epoch,
+				StepIndex: w.stepIndex,
+				StepTotal: w.stepTotal,
+			},
+		},
+	})
+}
+
 // collapseCRLF removes the CR of every CRLF pair in b IN PLACE and returns the
 // shortened prefix. b must be a buffer the caller owns - chunkWriter.Write
 // already has to copy exec's slice, so no second allocation is needed. The
@@ -440,8 +509,11 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 // sendOrAbort enqueues a log chunk like send, but additionally abandons the
 // enqueue if a forced cancel (forcedCh) or a per-task default cancel / abandon
 // (cancelledCh) has signalled, or the agent context is done. It returns true on a
-// successful enqueue and false if it abandoned. Only chunkWriter.Write uses this;
-// all other callers use send so their blocking discipline is unchanged.
+// successful enqueue and false if it abandoned. Both of chunkWriter's enqueue
+// paths use this - Write and flush; all other callers use send, so their
+// blocking discipline is unchanged. flush is the second caller BECAUSE it runs
+// after cmd.Wait on the cancel path too, where r.send (bounded only by the agent
+// context) would park Run until agent shutdown.
 func (r *Runner) sendOrAbort(msg *relayv1.AgentMessage) bool {
 	select {
 	case r.sendCh <- msg:
