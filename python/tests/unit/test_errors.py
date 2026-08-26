@@ -8,6 +8,8 @@ from relay import (
     Conflict,
     HTTPError,
     NotFound,
+    ProtocolError,
+    RelayError,
     ServerError,
     ValidationError,
 )
@@ -61,3 +63,13 @@ def test_response_attached_to_exception() -> None:
     with pytest.raises(NotFound) as exc_info:
         raise_for_response(response)
     assert exc_info.value.response is response
+
+
+def test_protocol_error_is_a_relay_error() -> None:
+    """The three paging stops need a class callers can catch. ServerError is
+    wrong (the status was 200) and RelayError itself is untypeable by a caller
+    who wants to distinguish this from everything else.
+    """
+    assert issubclass(ProtocolError, RelayError)
+    err = ProtocolError("server cursor did not advance (next_seq 7 after since_seq 7)")
+    assert "did not advance" in str(err)

@@ -57,6 +57,17 @@ class HTTPError(RelayError):
         self.response = response
 
 
+class ProtocolError(RelayError):
+    """The server answered with well-formed HTTP that is not a usable relay
+    response: a page that advertises more rows but carries none, a cursor that
+    does not advance, or a log that never reports itself drained.
+
+    Message-only, like :class:`TimeoutError` and unlike the status-derived
+    errors above: it is raised from a walk across several responses, so there
+    is no single ``httpx.Response`` that explains it.
+    """
+
+
 class TimeoutError(RelayError):
     """Wall-clock timeout from wait()/follow_job()."""
 
