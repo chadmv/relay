@@ -43,6 +43,12 @@ Three independent pieces, in rough order of value:
    consequential surface than the paged view - it should not be more permissive than the existing
    read path.
 
+   **A byte-exact export is foreclosed as of 2026-08-25.** The agent normalises `\r\n` to `\n`
+   before a chunk is ever sent (`docs/superpowers/specs/2026-08-25-windows-crlf-log-lines.md`,
+   Part 2), so stored bytes are no longer a byte-exact copy of the subprocess output. CRLF-vs-LF is
+   not information anyone will want back and the trade was taken deliberately - but do not write
+   this piece against a byte-exactness guarantee that no longer holds.
+
 ## Acceptance / Done When
 Treat each piece as separately shippable. For (1): a client can fetch the most recent N log entries
 for a task without paging through the whole history, with a test covering the non-contiguous-`seq`

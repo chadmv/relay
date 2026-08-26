@@ -24,6 +24,15 @@ make generate
 # Read web/e2e/README.md first - it is the live document for what is and is not covered.
 make test-e2e
 
+# Race detector. CI gates on this (.github/workflows/go-ci.yml, `race + integration-build`),
+# so it is a merge gate, not an optional lane.
+make test-race
+
+# ...but on Windows the native lane is unreliable, and the container below is the
+# route that actually works. See "Running -race locally" after this block.
+MSYS_NO_PATHCONV=1 docker run --rm -v "$(pwd -W):/src" -w /src -e CGO_ENABLED=1 \
+  golang:1.26 go test -race ./... -count=1 -timeout 600s
+
 # Run a single test
 go test ./internal/api/... -run TestRegister_HappyPath -v -timeout 30s
 
@@ -32,6 +41,33 @@ go test -tags integration -p 1 ./internal/api/... -run TestRegister -v -timeout 
 ```
 
 Integration tests use `//go:build integration` and spin up real Postgres containers via testcontainers-go. On Windows the `desktop-linux` Docker context is used automatically.
+
+### Running `-race` locally
+
+`make test-race` is the canonical target and the Makefile comment above it carries the compiler
+fix. On Windows the lane has **two distinct failure modes and they are easy to confuse** - the
+second one presents exactly like a real regression:
+
+- **Compiler.** `-race` needs cgo with a working gcc. The default Strawberry Perl gcc fails with
+  `exit status 0xc0000139` on every package. Fix: MSYS2 mingw64, `CC=/c/msys64/mingw64/bin/gcc.exe`
+  with its `bin` on PATH.
+- **Runtime.** Even with the right `CC`, ThreadSanitizer can fail to allocate its shadow arena:
+  `ThreadSanitizer failed to allocate 0x000004670000 bytes (error code: 87)`. This is
+  **environmental, memory-pressure related, and intermittent** - on 2026-08-25 it reproduced on
+  `internal/tokenhash` (a trivial, untouched package) at `origin/main`. **Distinguishing symptom:**
+  the failure names ThreadSanitizer and an allocation, and it is not attached to any test. Before
+  concluding a change caused it, re-run at `origin/main` on an untouched package - the project's
+  measure-a-red-gate-both-ways rule applies here first.
+
+**The Linux container is the reliable route on this machine**, and it closes a second gap for free:
+`go test` on Windows silently skips every `//go:build !windows` file (`internal/agent/runner_cancel_test.go`
+among them), so the container is also the only local way to run those at all. Verified green across
+all 21 packages, zero data races, on 2026-08-25.
+
+**If the lane is genuinely unavailable, say so rather than substituting.** `-count=N` repetition is
+what one slice used instead, and it is NOT equivalent: it re-runs tests under the ordinary scheduler
+and cannot observe an unsynchronised access that never happens to interleave badly. It raises
+confidence in flakiness, not in race-freedom. State plainly that `-race` did not run.
 
 ## Architecture
 

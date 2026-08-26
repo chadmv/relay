@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -199,8 +200,10 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		// enforces WaitDelay: if a leaked child still holds the write end after
 		// the process exits, Wait force-closes the descriptors within 5s instead
 		// of blocking forever (go.dev/issue/23019).
-		cmd.Stdout = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
-		cmd.Stderr = &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
+		outW := &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDOUT, stepIndex: step, stepTotal: stepTotal}
+		errW := &chunkWriter{r: r, stream: relayv1.LogStream_LOG_STREAM_STDERR, stepIndex: step, stepTotal: stepTotal}
+		cmd.Stdout = outW
+		cmd.Stderr = errW
 
 		if err := cmd.Start(); err != nil {
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
@@ -214,6 +217,36 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 		waitErr := cmd.Wait()
 		cleanupProcTree()
+		// Flush each writer's held trailing '\r' HERE. Four constraints bound a
+		// REGION, not a point: anywhere between cmd.Wait returning and the end of
+		// this iteration satisfies all four.
+		//   - the writers are per STEP and become garbage at the end of this
+		//     iteration, and both the `continue` and the `break` below come after
+		//     this line, so every path flushes;
+		//   - a held byte must be enqueued before the NEXT step's sendStepMarker,
+		//     which is at the top of the next iteration;
+		//   - a log chunk must be enqueued before sendFinalStatus (after the
+		//     loop), or internal/worker/handler.go:173-183's FIFO argument
+		//     becomes false and a one-byte chunk lands in AppendTaskLog's
+		//     trailing-window carve-out instead of its status allow-list;
+		//   - no copy goroutine may still be running: Cmd.Wait waits for the
+		//     command to exit AND for the copying from stdout and stderr to
+		//     complete, and WaitDelay force-closes the pipes so those copies do
+		//     complete.
+		// cleanupProcTree participates in NONE of the four, so where it sits in
+		// the region is a free choice - AND IT GOES FIRST ON PURPOSE. flush parks
+		// in sendOrAbort whenever a byte is held and sendCh is full, and on a
+		// healthy-but-disconnected agent none of forcedCh, cancelledCh or
+		// r.ctx.Done() ever fires, so that park lasts the whole partition.
+		// cleanupProcTree closes the Job Object handle carrying
+		// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (proctree_windows.go), which is what
+		// kills this step's leaked grandchildren; putting it after a flush that
+		// can park leaves them running for the length of the outage. Do not
+		// reorder these two back.
+		// The flushes are a no-op when nothing is held, so the two earlier breaks
+		// (nil argv, cmd.Start failure) need no reasoning about.
+		outW.flush()
+		errW.flush()
 
 		lastExitCode = nil
 		if cmd.ProcessState != nil {
@@ -268,26 +301,96 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log write")
 
 // chunkWriter is the io.Writer exec copies subprocess stdout/stderr into. Each
-// Write copies its slice (exec reuses the buffer between calls), wraps it in a
-// TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
-// through r.sendOrAbort. On a successful enqueue Write returns (len(p), nil) so
-// exec keeps copying until EOF (unchanged slow-consumer behavior). If a per-task
-// cancel has closed r.forcedCh or r.cancelledCh (or the agent context is done),
-// the enqueue is abandoned and Write returns errForcedAbort so exec's io.Copy
-// stops and cmd.Wait() returns promptly instead of waiting out WaitDelay.
+// Write builds its own buffer (exec reuses the slice between calls), collapses
+// CRLF to LF in it, wraps it in a TaskLogChunk stamped with the runner's
+// stream/step/epoch, and pushes it through r.sendOrAbort.
+//
+// THE CRLF COLLAPSE IS EXACTLY \r\n -> \n, NOT \r+\n -> \n. The wider rule would
+// also remove the residue a CR-run before a newline leaves behind, but that is a
+// judgement about what is VISIBLE, which is a rendering decision, and rendering
+// decisions stay in the client that holds the opinion - the SPA already collapses
+// carriage returns (web/src/jobs/logBuffer.ts) and the CLI deliberately wants the
+// raw bytes. The narrow rule has one definition every consumer agrees on and one
+// statable cost: precisely the CR of each CRLF is removed, nothing else.
+//
+// THE INVARIANT IS OVER THE CONCATENATION, AGAINST THE ORIGINAL BYTE POSITIONS:
+// for one (step, stream) writer, the concatenation of every payload it emits
+// equals the subprocess's bytes with each \r\n OF THE ORIGINAL replaced by \n.
+// It is NOT the per-chunk property "no emitted chunk contains a CRLF", which is
+// false on purpose: a payload of "\r\r" emits a chunk ending in '\r' (correct -
+// that CR's successor is known to be another CR, not a LF), and a CR-run before
+// a newline emits a CRLF at a position that did not have one. A second pass would
+// be a different transform; see above.
+//
+// THE HOLD-BACK IS ONE BIT, NOT A BUFFER. The only byte that is ever held is a
+// trailing '\r' whose successor has not been read yet, so heldCR records whether
+// one is outstanding and the byte itself is a literal at the two places it is
+// re-emitted. A CRLF can straddle a Write boundary - exec hands over whatever the
+// pipe had - so without the hold-back a per-Write replace silently misses every
+// pair split across two reads. The held CR is folded into the next Write's buffer
+// BEFORE the scan, so no pair straddles by the time the scan runs. mu guards
+// heldCR; see flush for why the lock is insurance rather than correctness.
+//
+// Write has THREE outcomes, not two. On a successful enqueue it returns
+// (len(p), nil) so exec keeps copying until EOF (unchanged slow-consumer
+// behavior). On a payload consumed entirely into the hold-back - which happens on
+// exactly one input, a lone "\r" with nothing already held - it returns (len(p), nil)
+// having enqueued NOTHING; that is what bufio.Writer does, io.Writer requires
+// n < len(p) only alongside a non-nil error, and emitting no chunk strengthens
+// the never-emit-an-empty-chunk guard below rather than breaking it. If a
+// per-task cancel has closed r.forcedCh or r.cancelledCh (or the agent context
+// is done), the enqueue is abandoned and Write returns errForcedAbort so exec's
+// io.Copy stops and cmd.Wait() returns promptly instead of waiting out
+// WaitDelay; the held CR goes with the discarded chunk and is never re-armed.
+//
+// flush() MUST be called after cmd.Wait() returns for the step that created this
+// writer, for BOTH writers, or a trailing '\r' at the end of a step is silently
+// dropped. exec will not call it; see flush's own comment.
 type chunkWriter struct {
 	r         *Runner
 	stream    relayv1.LogStream
 	stepIndex int32
 	stepTotal int32
+
+	mu     sync.Mutex
+	heldCR bool // a trailing '\r' whose successor is not yet known is held back
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil // match the old pipeLog n>0 guard: never emit an empty chunk
 	}
-	chunk := make([]byte, len(p))
-	copy(chunk, p)
+
+	// Fold the held CR in and CLEAR the flag in the same breath. Its lifetime is
+	// exactly one Write, and newHeldCR below is armed only after a successful
+	// enqueue, so no early return - including the errForcedAbort one the abort
+	// path takes - can leave a byte owned by a writer nobody will call again.
+	w.mu.Lock()
+	chunk := make([]byte, 0, 1+len(p))
+	if w.heldCR {
+		chunk = append(chunk, '\r')
+	}
+	chunk = append(chunk, p...)
+	w.heldCR = false
+	w.mu.Unlock()
+
+	newHeldCR := false
+	if chunk[len(chunk)-1] == '\r' {
+		newHeldCR = true
+		chunk = chunk[:len(chunk)-1]
+	}
+	chunk = collapseCRLFInPlace(chunk)
+
+	if len(chunk) == 0 {
+		// Reachable on exactly one input: nothing held and p == "\r".
+		// collapseCRLFInPlace keeps a byte for every pair it collapses, so only
+		// the hold-back above can empty the buffer.
+		w.mu.Lock()
+		w.heldCR = newHeldCR
+		w.mu.Unlock()
+		return len(p), nil
+	}
+
 	if !w.r.sendOrAbort(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_TaskLog{
 			TaskLog: &relayv1.TaskLogChunk{
@@ -302,10 +405,86 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	}) {
 		// Abandoned. On a forced cancel this stops io.Copy so cmd.Wait returns.
 		// On agent shutdown (ctx.Done) returning the sentinel is equally fine:
-		// the runner is tearing down regardless.
+		// the runner is tearing down regardless. newHeldCR is deliberately NOT
+		// armed - the writer must not send after the abort path decided to stop.
 		return 0, errForcedAbort
 	}
+	w.mu.Lock()
+	w.heldCR = newHeldCR
+	w.mu.Unlock()
 	return len(p), nil
+}
+
+// flush enqueues a held trailing '\r' as its own chunk and clears the hold-back.
+//
+// IT MUST BE CALLED EXPLICITLY, IMMEDIATELY AFTER cmd.Wait() RETURNS, FOR BOTH
+// WRITERS, INSIDE THE PER-STEP LOOP. os/exec closes only the pipes it created
+// and never calls Close on a caller-supplied Stdout/Stderr, so there is no close
+// hook and naming this Close() would imply a call that does not happen. The
+// writers are per STEP, so a byte not flushed before the iteration ends is
+// silently lost - no error, no log line - and a flush deferred to the end of Run
+// would find the step's writer already replaced. See makePrepareProgressFn's
+// flush, which is the same shape and the same hazard.
+//
+// SENDS THROUGH sendOrAbort, NEVER r.send. flush runs after cmd.Wait on the
+// cancel path too, and r.send is bounded only by the AGENT context, so a
+// per-task forced cancel with a wedged sendCh would park Run until agent
+// shutdown - the exact wedge sendFinalStatus's cancelled branch and sendInventory
+// were both written to avoid. After an abandoned Write there is nothing held, so
+// this sends nothing: the writer must not send after the abort path decided to
+// stop sending.
+//
+// The lock is released before the send, and what leaves the critical section is
+// a bool, not a slice header - so nothing the outgoing chunk points at was ever
+// reachable from the writer. Holding the lock across a bounded-but-slow enqueue
+// would be the first step toward the lock-scope problems the Invariants exist to
+// prevent, and handing a shared backing array out from under it would be the
+// second.
+func (w *chunkWriter) flush() {
+	w.mu.Lock()
+	held := w.heldCR
+	w.heldCR = false
+	w.mu.Unlock()
+	if !held {
+		return
+	}
+	w.r.sendOrAbort(&relayv1.AgentMessage{
+		Payload: &relayv1.AgentMessage_TaskLog{
+			TaskLog: &relayv1.TaskLogChunk{
+				TaskId:    w.r.taskID,
+				Stream:    w.stream,
+				Content:   []byte{'\r'},
+				Epoch:     w.r.epoch,
+				StepIndex: w.stepIndex,
+				StepTotal: w.stepTotal,
+			},
+		},
+	})
+}
+
+// collapseCRLFInPlace removes the CR of every CRLF pair in b IN PLACE and returns
+// the shortened prefix, which ALIASES b. The name carries the precondition
+// because prose does not: b must be a buffer the caller owns, and the caller must
+// stop using b afterwards. chunkWriter.Write already has to copy exec's slice
+// (exec reuses it between calls), so no second allocation is needed. The
+// compaction only ever skips bytes, so the write index never overtakes the read
+// index.
+//
+// The IndexByte fast path is not a micro-optimisation for its own sake: it is
+// every write on every Linux agent, where a full forward scan would buy nothing.
+func collapseCRLFInPlace(b []byte) []byte {
+	i := bytes.IndexByte(b, '\r')
+	if i < 0 {
+		return b
+	}
+	out := b[:i]
+	for ; i < len(b); i++ {
+		if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' {
+			continue
+		}
+		out = append(out, b[i])
+	}
+	return out
 }
 
 func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
@@ -350,8 +529,11 @@ func (r *Runner) send(msg *relayv1.AgentMessage) {
 // sendOrAbort enqueues a log chunk like send, but additionally abandons the
 // enqueue if a forced cancel (forcedCh) or a per-task default cancel / abandon
 // (cancelledCh) has signalled, or the agent context is done. It returns true on a
-// successful enqueue and false if it abandoned. Only chunkWriter.Write uses this;
-// all other callers use send so their blocking discipline is unchanged.
+// successful enqueue and false if it abandoned. Both of chunkWriter's enqueue
+// paths use this - Write and flush; all other callers use send, so their
+// blocking discipline is unchanged. flush is the second caller BECAUSE it runs
+// after cmd.Wait on the cancel path too, where r.send (bounded only by the agent
+// context) would park Run until agent shutdown.
 func (r *Runner) sendOrAbort(msg *relayv1.AgentMessage) bool {
 	select {
 	case r.sendCh <- msg:

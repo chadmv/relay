@@ -1,7 +1,9 @@
 ---
 title: Windows CRLF log lines render blank on the job detail page
 type: bug
-status: open
+status: closed
+closed: 2026-08-25
+resolution: fixed
 created: 2026-08-25
 priority: high
 source: Production use in another environment, 2026-08-25 - a job whose steps shell out to a Python script showed timestamps with no text
@@ -173,3 +175,31 @@ Relay is developed on Windows, so this is the default rendering for the project'
 platform. It was not caught earlier because relay's own log lines come from Go with a bare `\n` and
 therefore render fine - the blank rows are exactly the subprocess output an operator opens the page
 to read.
+
+## Resolution
+Both parts shipped, in one slice, on branch `claude/windows-crlf-log-blank-c488bf`.
+
+**Part 1 shipped a different fix than this item proposed.** The spec refuted the strip-ONE design
+above: `"x\r\r"` is what the Windows C runtime writes for `print("done", end="\r")` followed by
+`print()` - the literal CR passes through untranslated and the LF becomes CRLF - so a single strip
+still leaves that row blank, for the same reason the bug exists. `collapseCR` strips EVERY trailing
+carriage return, then does the pre-existing interior-CR collapse. Strip-all also makes Part 2
+provably render-invisible on every input, which is what allowed both parts to ship together.
+
+**Part 2's stated acceptance criterion was also wrong and was replaced.** "Chunks contain no `\r\n`"
+is false by design: `"x\r\r\n"` correctly emits `"x\r\n"`, a CRLF at byte positions that did not
+have one. The guarantee is an equality on the CONCATENATION of emitted payloads, verified over
+27,994 exhaustive `(string, split)` combinations and several hundred thousand randomised cases with
+zero mismatches.
+
+**A design gap this item glossed:** `chunkWriter` had no close path and `os/exec` never closes a
+caller-supplied `Stdout`, so "flushed on close" named a hook that does not exist. The writers are
+constructed per STEP, so `flush()` is called explicitly for both writers inside the per-step loop
+after `cmd.Wait()`.
+
+Verified beyond the local Windows gate: the `//go:build !windows` cancel tests and `go test -race`
+were both run green in a `golang:1.26` Linux container, and the integration lane passed 626 tests
+against real Postgres and p4d containers.
+
+Commits: `a97568d` (spec), `840de0d` (plan), `ff8dac2`/`9d60a45`/`5f96f95` (web),
+`fe68f4e`/`b7acca9`/`c7931d4`/`acd588b` (agent), `faaa506`/`769a51a`/`2c1e300` (prose).

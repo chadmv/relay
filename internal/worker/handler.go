@@ -171,11 +171,16 @@ func remoteAddr(ctx context.Context) string {
 // enforce.
 //
 // The reachable case is narrower than "any queued chunk". chunkWriter's writes
-// are enqueued before sendFinalStatus and sendCh is FIFO, so a chunk ordered
-// BEFORE the terminal status cannot outlive it - by the time the status has
-// landed, that chunk already has. What can arrive after the terminal status is a
-// chunk enqueued after it: the WaitDelay orphan-writer race, and the
-// cancel/abandon cleanup paths.
+// AND its flush (the held trailing '\r', enqueued right after cmd.Wait inside
+// the per-step loop - internal/agent/runner.go) are both enqueued before
+// sendFinalStatus, and sendCh is FIFO, so a chunk ordered BEFORE the terminal
+// status cannot outlive it - by the time the status has landed, that chunk
+// already has. THAT IS A CONSTRAINT ON WHERE THE FLUSH MAY BE CALLED, not an
+// observation about it: moving the flush after sendFinalStatus makes this
+// sentence false and pushes a one-byte chunk out of AppendTaskLog's status
+// allow-list and into the trailing-window carve-out this constant bounds.
+// What can arrive after the terminal status is a chunk enqueued after it: the
+// WaitDelay orphan-writer race, and the cancel/abandon cleanup paths.
 //
 // So: large enough that no ordinary agent-side delay truncates real output,
 // small enough that "forever" is genuinely closed. Override with

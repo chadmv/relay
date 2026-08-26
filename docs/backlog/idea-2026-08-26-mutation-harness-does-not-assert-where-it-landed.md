@@ -67,3 +67,35 @@ outcome accounting, not coverage scoring.
 - `docs/retros/2026-08-25-auto-enroll-guards.md`, `docs/retros/2026-08-25-handler-pool-seam.md`
 - [[idea-2026-08-25-no-documented-working-local-race-lane]] - the same shape: a tool whose failure
   mode is indistinguishable from a real result
+
+## Notes
+
+**2026-08-25, windows-crlf-log-lines slice - three more instances, and the scope is wider than this
+item states.** Three independent actors in one slice each lost mutations to a silently-unapplied
+edit, all reporting the false-survival direction this item names:
+
+- The correctness review lens lost four mutations to `sed`/`perl` line anchors not matching `\r\n`.
+- The backend engineer lost several to backslash sequences mangled through shell heredocs before
+  reaching Python - a different mechanism from CRLF, identical symptom.
+- The conductor lost one to `perl -0pi -e 's/^status: open$/.../m'`, where `$` does not match before
+  `\r\n`.
+
+**The conductor's instance is the one that matters for scoping.** It was not a mutation at all - it
+was `/backlog close` stamping frontmatter during ordinary housekeeping. The file was silently left
+unchanged and the close would have committed an item still marked `status: open`, caught only by the
+skill's own verify step. So the failure mode is not "the mutation harness does not assert where it
+landed"; it is **"any line-anchored byte edit on this CRLF tree can silently no-op"**, and mutation
+testing is merely where it does the most damage, because there the silence is indistinguishable from
+a result.
+
+That argues the harness this item proposes should expose its applied-check as something callable
+outside mutation runs, or that the rule belongs somewhere every scripted edit sees it rather than
+only in a mutation harness. Worth deciding before building.
+
+Counting instances: this item recorded six across the project; these three bring it to nine, and one
+of them is outside the harness's scope entirely.
+
+## Related
+
+- [[bug-2026-08-25-windows-crlf-log-lines-render-blank]] - the slice these three came from, itself a
+  CRLF bug, which is a coincidence worth enjoying but not reading anything into

@@ -26,9 +26,11 @@ jobs:
       - name: Integration-tagged build check
         run: make vet-integration
       - name: Race unit tests
-        # CI runs on Linux, where the whole module is race-clean. The shared
-        # `make test-race` target excludes internal/agent for local Windows devs
-        # (a Windows-only race in proctree_windows.go, tracked separately); that
-        # file is never compiled on Linux, so CI runs the complete set for full
-        # coverage of the agent send goroutine and Runner.
+        # Byte-identical to the shared `make test-race` target, which also runs
+        # the whole module - internal/agent included. Keep the two in step.
+        #
+        # This comment used to say the Makefile target EXCLUDED internal/agent for
+        # a Windows-only proctree race. That exclusion was removed when the race was
+        # fixed (docs/backlog/closed/bug-2026-06-20-agent-proctree-windows-race.md,
+        # closed 2026-06-20) and the comment was not. Corrected 2026-08-25.
         run: go test -race ./... -timeout 180s

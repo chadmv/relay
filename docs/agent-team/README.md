@@ -102,6 +102,30 @@ plan").
 - **Phase 6** is TPM-owned; backlog acceptance keeps the human as final approver,
   and closing backlog items requires the git mv to docs/backlog/closed/.
 
+## Read every handed-down artifact once for contradiction, before acting on it
+
+Each phase hands the next one a document, and on this project **every stage has refuted the stage
+before it** - the spec refuted the backlog item's own fix, the plan refuted two of the spec's test
+designs, the engineers refuted the plan's mutations, and Phase 4 refuted the engineers. That is the
+pipeline working, but it is cheapest when the reader looks for it deliberately rather than
+stumbling on it mid-implementation.
+
+So before executing a spec or plan, read it ONCE asking only: does it contradict itself, does it
+contradict the tree, and does it prescribe something that does not exist? Three recurring shapes,
+each caught on this project after it had already been handed down:
+
+- **A remedy that names a hook or command that is not there.** A spec said to flush a writer "on
+  close" for a type with no close path, and `os/exec` never closes a caller-supplied `Stdout`.
+- **An acceptance criterion that is false against the design it accompanies.** "Chunks contain no
+  CRLF" was stated for a transform that deliberately emits one on some inputs. A test written to
+  that wording would have failed on correct code, and the natural fix is to weaken it.
+- **Line citations that were accurate when written.** They rot as soon as anything inserts lines
+  above them - including the same commit. Cite by symbol.
+
+Say what you refuted in your report. A stage that returns "the input was correct, here is the work"
+is a stage that either verified nothing or found nothing worth saying - and the two are
+indistinguishable to the conductor unless you state which.
+
 ## Kickoff example
 
 > "Build <feature> with the relay agent team in gated mode."
