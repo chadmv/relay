@@ -345,11 +345,44 @@ class Job(BaseModel):
 
 
 class LogRecord(BaseModel):
+    """One line of a task's log, as served by GET /v1/tasks/{id}/logs.
+
+    ``seq`` is the row's global ``task_logs.id``. It is REQUIRED and has no
+    default for three reasons: it is the only way a caller using
+    :meth:`relay.Client.task_logs_page` can correlate a record with a cursor,
+    every other field here is required, and a defaulted ``seq: int = 0`` reads
+    a missing key as row zero.
+    """
+
     model_config = ConfigDict(extra="ignore")
 
+    seq: int
     stream: str
     content: str
     created_at: datetime
+
+
+class LogPage(BaseModel):
+    """One page of a task's log, forward-only from ``since_seq``.
+
+    ``next_seq`` is 0 when the server reports the log drained; otherwise it is
+    the cursor for the next request, passed VERBATIM as ``?since_seq=`` because
+    the server's predicate is ``id > $2`` (exclusive - see GetTaskLogsPage in
+    internal/store/query/tasks.sql). Never ``next_seq + 1``: ``task_logs.id`` is
+    a global BIGSERIAL, so when one task logs alone its ids are contiguous and
+    +1 skips the very next row.
+
+    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`'s cursor,
+    which is read with ``body.get("next_cursor", "")``. A defaulted
+    ``next_seq: int = 0`` would read a missing key as "drained" and silently
+    return page 1 - the same shape as the defect this model exists to fix.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[LogRecord]
+    next_seq: int
+    total: int
 
 
 class Event(BaseModel):

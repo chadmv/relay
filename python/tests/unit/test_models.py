@@ -7,6 +7,8 @@ from relay import (
     AgentEnrollment,
     Job,
     JobStatus,
+    LogPage,
+    LogRecord,
     Page,
     Priority,
     Reservation,
@@ -344,3 +346,65 @@ def test_user_and_agent_enrollment_parse() -> None:
     )
     assert e.created_by == "u1"
     assert e.hostname_hint == "host-x"
+# ─── LogRecord / LogPage ──────────────────────────────────────────────────────
+
+
+def test_log_record_parses_a_server_row() -> None:
+    r = LogRecord.model_validate(
+        {
+            "seq": 42,
+            "stream": "stdout",
+            "content": "hello\n",
+            "created_at": "2026-05-06T12:00:00Z",
+        }
+    )
+    assert r.seq == 42
+    assert r.stream == "stdout"
+
+
+def test_log_record_requires_seq() -> None:
+    """seq has NO default. It is the only thing that correlates a record with a
+    LogPage.next_seq cursor, the server has emitted it since 2026-05-08, and a
+    defaulted `seq: int = 0` would read a missing key as row zero - the same
+    absent-field-benign-default shape as a defaulted next_seq.
+    """
+    with pytest.raises(PydanticValidationError):
+        LogRecord.model_validate(
+            {"stream": "stdout", "content": "hi\n", "created_at": "2026-05-06T12:00:00Z"}
+        )
+
+
+def test_log_page_parses_the_envelope() -> None:
+    page = LogPage.model_validate(
+        {
+            "items": [
+                {
+                    "seq": 7,
+                    "stream": "stdout",
+                    "content": "hi\n",
+                    "created_at": "2026-05-06T12:00:00Z",
+                }
+            ],
+            "next_seq": 7,
+            "total": 3,
+            "future_field": "ignored",
+        }
+    )
+    assert [r.seq for r in page.items] == [7]
+    assert page.next_seq == 7
+    assert page.total == 3
+
+
+@pytest.mark.parametrize("missing", ["next_seq", "total"])
+def test_log_page_requires_next_seq_and_total(missing: str) -> None:
+    """A deliberate departure from _get_page's body.get("next_cursor", "").
+
+    A defaulted next_seq: int = 0 would read a missing key as "drained" and
+    silently return page 1 - which is the same shape as the defect this whole
+    slice exists to fix, rebuilt inside the fix. The handler writes both keys
+    unconditionally from a map literal, so requiring them costs nothing.
+    """
+    body = {"items": [], "next_seq": 5, "total": 9}
+    del body[missing]
+    with pytest.raises(PydanticValidationError):
+        LogPage.model_validate(body)
