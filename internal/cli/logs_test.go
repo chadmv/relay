@@ -405,6 +405,9 @@ func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 	require.Contains(t, errOut.String(), "frame-001", "the diagnostic names the task")
 	require.Contains(t, errOut.String(), taskID, "the diagnostic names the task id")
 	require.Contains(t, errOut.String(), "incomplete")
+	require.NotContains(t, errOut.String(), "rows)",
+		"the very first request failed, so no total was ever reported; "+
+			"\"(0 of 0 rows)\" would be noise dressed up as data")
 
 	// And doLogs turns that count into a printed, non-silent error, so the
 	// shell sees exit 1 WITH a message rather than the bare exit 1 of
@@ -1413,4 +1416,44 @@ func TestWatchJobLogs_SubscribeSnapshotFailed_ReconcileNamesTheTask(t *testing.T
 	require.True(t, completeness.complete())
 	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered",
 		"the reconcile is the only reader that ever saw this task's name")
+}
+
+// taskIsTerminal's three arms, each with a task in that state as the test's
+// subject. `timed_out` appeared exactly once in this package - inside the
+// predicate - so dropping it changed no test: the arm was registered in the
+// store's lockstep guard while being behaviourally free.
+//
+// The discriminator is not "did it print". Since a non-terminal task in a
+// terminal job now prints too, dropping an arm still produces the log line; what
+// it produces as well is the not-final diagnostic and a non-zero exit. So the
+// assertion that separates a terminal status from a non-terminal one is a clean
+// completeness claim and an empty stderr.
+func TestWatchJobLogs_EveryTerminalTaskStatusPrintsCleanly(t *testing.T) {
+	for _, tc := range []struct{ taskStatus, jobStatus string }{
+		{"done", "done"},
+		{"failed", "failed"},
+		{"timed_out", "failed"},
+	} {
+		t.Run(tc.taskStatus, func(t *testing.T) {
+			jobID, taskID := "job-"+tc.taskStatus, "task-"+tc.taskStatus
+			srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+				{ID: jobID, Status: tc.jobStatus,
+					Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: tc.taskStatus}}},
+			}, "")
+
+			c := relayclient.NewClient(srv.URL, "tok")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			var out, errOut strings.Builder
+			status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+			require.NoError(t, err)
+			require.Equal(t, tc.jobStatus, status)
+			require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+			require.True(t, completeness.complete(),
+				"a task in a terminal state has a final log, so the output is complete")
+			require.Empty(t, errOut.String(),
+				"a terminal task is not 'still running when the job ended'")
+		})
+	}
 }
