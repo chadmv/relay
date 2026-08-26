@@ -1040,3 +1040,135 @@ func TestPrintTaskLogs_TaskIDIsPathEscaped(t *testing.T) {
 	require.Contains(t, gotURI, "%2F", "the id's separators must be escaped, not path segments")
 	require.NotContains(t, gotURI, "/v1/users")
 }
+
+// fakeJobSnapshotServer answers GET /v1/jobs/<id> from bodies, one per read and
+// repeating the last entry once they run out; streams sse verbatim on
+// /v1/events (holding the connection open afterwards, unless sse is empty); and
+// serves oneFrameRows on the task's logs route.
+//
+// It exists because the two snapshot readers' inputs are BODIES, not transport
+// outcomes. Every failure this fixture is used for is a 200 that decodes
+// cleanly and still cannot be the job's task list, which is the one shape the
+// existing fixtures cannot express: fakeReconcileFailServer 500s, and a 500 is
+// the failure mode the server does NOT produce when ListTasksByJob errors.
+func fakeJobSnapshotServer(t *testing.T, jobID, taskID string, bodies []jobResp, sse string) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	reads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			i := reads
+			reads++
+			mu.Unlock()
+			if i >= len(bodies) {
+				i = len(bodies) - 1
+			}
+			json.NewEncoder(w).Encode(bodies[i])
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if sse == "" {
+				return
+			}
+			fmt.Fprint(w, sse)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			writeTaskLogPage(w, r, oneFrameRows())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A 200 that decodes is not the same fact as an answer. `tasks` is
+// `json:"tasks,omitempty"`, so a body without it decodes into a silently-empty
+// slice - and handleGetJob discarded ListTasksByJob's error, so a pool
+// exhaustion or statement timeout produced exactly that body. The reconcile then
+// iterated nothing, set nothing, and returned having "reconciled": exit 0, both
+// streams empty, which is bit-for-bit the production symptom this slice exists
+// to fix, arriving through the function written to close it.
+func TestWatchJobLogs_FinalSnapshotHasNoTasks_RefusesToClaimCompleteness(t *testing.T) {
+	jobID, taskID := "job-notasks", "task-notasks"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		{ID: jobID, Status: "done"},
+	}, "event: job\ndata: {\"status\":\"done\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.False(t, completeness.complete(),
+		"a body that cannot be the job's task list is a failed reconcile, not an empty one")
+	require.True(t, completeness.unreconciled)
+	require.Contains(t, errOut.String(), jobID)
+	require.Contains(t, errOut.String(), "logs may be missing")
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out2, errOut2 strings.Builder
+	err = doLogs(ctx, cfg, []string{jobID}, &out2, &errOut2)
+	require.Error(t, err)
+	var se silentError
+	require.False(t, errors.As(err, &se))
+}
+
+// The reconcile never checked that the body it reasons about is the job it asked
+// for. A response about another job is not a weaker answer than none; it is a
+// wrong one, and printing its tasks would attribute another job's output to this
+// one.
+func TestWatchJobLogs_FinalSnapshotIsADifferentJob_RefusesToClaimCompleteness(t *testing.T) {
+	jobID, taskID := "job-mismatch", "task-mismatch"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		{ID: "some-other-job", Status: "done", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}}},
+	}, "event: job\ndata: {\"status\":\"done\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.True(t, completeness.unreconciled)
+	require.Empty(t, out.String(),
+		"another job's task list must not be printed as this job's output")
+}
+
+// The subscribe-time snapshot has to reject the same body the reconcile does, or
+// skipping the reconcile after a terminal snapshot reopens the hole by the other
+// door: an unusable body carrying a terminal job status would set finalStatus,
+// print nothing, and exit 0 with no reconcile left to catch it.
+//
+// Fail closed instead: the body establishes nothing, so the watch falls through
+// to the stream exactly as it does for a transport error, and the terminal
+// status is never taken from it.
+func TestWatchJobLogs_SubscribeSnapshotHasNoTasks_EstablishesNothing(t *testing.T) {
+	jobID, taskID := "job-sub-notasks", "task-sub-notasks"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "done"},
+	}, "")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, _, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.Error(t, err, "a terminal status must not be taken from a body that carries no task list")
+	require.Contains(t, err.Error(), "connection lost")
+	require.Empty(t, status)
+	require.Empty(t, out.String())
+}

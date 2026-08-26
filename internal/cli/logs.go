@@ -147,6 +147,42 @@ func jobIsTerminal(status string) bool {
 	return status == "done" || status == "failed" || status == "cancelled"
 }
 
+// jobSnapshotUnusable reports why a decoded GET /v1/jobs/{id} body cannot be
+// treated as the authoritative answer for jobID, and returns "" when it can.
+//
+// A 200 that decodes is not the same fact as an answer. jobResp's `tasks` field
+// is `json:"tasks,omitempty"`, so a body that carries no task list decodes into
+// a silently-empty slice - and handleGetJob discarded ListTasksByJob's error
+// until 2026-08-26, so a pool exhaustion, statement timeout or cancelled context
+// produced exactly that body behind a 200. Iterating it prints nothing, sets
+// nothing, and returns having "reconciled": the same silently-zero decode
+// against a body that does not carry what the code assumed that this command was
+// fixed for, arriving through the function written to close it.
+//
+// Two things make a body unusable.
+//
+//   - No tasks. Every job in the database has at least one, and that is a
+//     construction guarantee rather than an observation: jobcreate.CreateJobFromSpec
+//     is the single job-creation path (CLAUDE.md's single job-spec pipeline
+//     invariant) and it calls jobspec.Validate, which rejects a spec with zero
+//     tasks. This holds for EVERY status, `cancelled` included. handleCancelJob
+//     does not itself require the job to have tasks, but it cannot cancel a job
+//     that was never created, so the creation-time floor is what governs and a
+//     task-less cancelled job is not a case to accommodate. An empty list
+//     therefore always means the response is not this job's task list.
+//   - A different id. Neither reader otherwise checks that the body it reasons
+//     about describes the job it asked for, and another job's tasks printed as
+//     this job's output is a wrong answer, not a thin one.
+func jobSnapshotUnusable(job jobResp, jobID string) string {
+	if job.ID != jobID {
+		return fmt.Sprintf("the response describes job %q, not %q", job.ID, jobID)
+	}
+	if len(job.Tasks) == 0 {
+		return "the response carried no task list"
+	}
+	return ""
+}
+
 // watchJobLogs subscribes to SSE events for jobID, then takes a snapshot so a job
 // that went terminal before the subscribe is still caught (the broker has no replay).
 // When a task reaches a terminal state its logs are fetched and printed once.
@@ -190,6 +226,15 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// with a blank name - acceptable on this degraded path (the stream event
 			// payload carries only id/status, never the name). The final reconcile
 			// below is the backstop that keeps the exit code honest.
+			return true
+		}
+		if jobSnapshotUnusable(job, jobID) != "" {
+			// An unusable body is treated exactly like a failed read, and it has to
+			// be rejected HERE and not only in the reconcile. Nothing is printed and
+			// no status is taken from it, so the watch stays on the stream and what
+			// the operator ends up seeing is either the reconcile's diagnostic or
+			// the connection-lost error - both non-silent. Accepting a terminal
+			// status from such a body would end the watch, print nothing, and exit 0.
 			return true
 		}
 		for _, t := range job.Tasks {
@@ -248,6 +293,13 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			fmt.Fprintf(errOut,
 				"relay: could not re-read job %s after it finished, so some tasks' logs may be missing: %v\n",
 				jobID, err)
+			return
+		}
+		if why := jobSnapshotUnusable(job, jobID); why != "" {
+			completeness.unreconciled = true
+			fmt.Fprintf(errOut,
+				"relay: could not re-read job %s after it finished, so some tasks' logs may be missing: %s\n",
+				jobID, why)
 			return
 		}
 		for _, t := range job.Tasks {
