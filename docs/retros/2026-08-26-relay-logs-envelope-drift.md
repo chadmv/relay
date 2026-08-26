@@ -164,8 +164,11 @@ the next author opens.
 ## What Went Wrong and What Changes
 
 **Ledger.** From `2026-08-25-windows-crlf-log-lines`. *A green re-run bounds a red run's frequency*
-- not exercised, still unpromoted, carried. *A test whose name asserts more than its body* - not
-exercised, still unpromoted, carried. *Read every artifact once for internal contradiction* -
+- not exercised this session, but **promoted** to [[feedback_a_green_rerun_bounds_not_retires]];
+drop from future ledgers. *A test whose name asserts more than its body* - not exercised this
+session, but **promoted** as an extension of [[reference_cadence_test_must_assert_wiring]], together
+with the "unkillable is a claim about the instruments reached for" rule it is a corollary of; drop
+from future ledgers. *Read every artifact once for internal contradiction* -
 **recurred, three times**, and in a register the rule does not name; entry below. *A spec-designed
 test can be structurally incapable of the kill it is paired with* - **recurred**, caught by the
 plan this time; entry below. Promoted lessons used and vindicated:
@@ -189,7 +192,7 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   step - run it over the STRINGS AND COMMENTS a commit adds, against the code in the same hunk. The
   rule as written fires when you are reading a spec; these three were written while closing a
   finding, which the 2026-08-25 retro already identified as the least-verified moment in a claim's
-  life.
+  life. (promoted to [[reference_wrong_prose_is_the_dominant_defect]])
 
 - **(CARRIED, variant) The spec's test helper was built out of the type under test.**
   `writeTaskLogPage(w, r, rows []taskLogEntry)` would have marshalled the CLI's own json tags, so a
@@ -198,9 +201,8 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   which declared it "the single most important correction in this plan".
   -> **What changes:** a fixture that simulates a producer must not import the consumer's types.
   Declare the wire shape locally with hand-written tags, and say in the comment that de-duplicating
-  the two structs re-opens the bug. Offered for promotion as an extension of
-  [[reference_guard_never_sees_real_producer]], whose current trigger is an import direction rather
-  than a shared type.
+  the two structs re-opens the bug. (promoted to [[reference_guard_never_sees_real_producer]], whose
+  trigger was an import direction; this adds the shared-type shape)
 
 - **A registration in a guard is not a guard if the guard's instrument reads something else.**
   `jobIsTerminal` was listed in `TestTasksStatusVocabularyIsExactly`, which reads
@@ -213,8 +215,7 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   it reads the constraint the new site slices - a registration is a claim about the INSTRUMENT, not
   about the list. And when a guard's subject turns out to be a second vocabulary, grep for other
   sites slicing it before writing the expected set, because the first guard's list is evidence only
-  about the first vocabulary. Promotion candidate: extend
-  [[reference_match_the_instrument_to_the_claim]].
+  about the first vocabulary. (promoted to [[reference_match_the_instrument_to_the_claim]])
 
 - **Three fix rounds each introduced a regression in their own newest code; the fourth did not.** A
   task-less 200 was read as "nothing owed" by the reconcile written to close the omission. A
@@ -224,8 +225,8 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   -> **What changes:** after a fix round, the verify lens's primary subject is the fix's own diff,
   not the original defect. State it as the round's opening question: "what does this round's new code
   do with the input that produced the original symptom?" Three for three here, and the fourth round
-  is the only evidence that the sequence terminates. Promotion candidate: `docs/agent-team/README.md`
-  phase briefs.
+  is the only evidence that the sequence terminates. (promoted to `docs/agent-team/README.md`, Phase 4
+  brief; the defect-shape half is [[reference_backstop_recreates_the_defect]])
 
 - **A test's substring assertion was satisfiable by its own fixture's identifiers.**
   `require.NotContains(errOut, "finished")` was being decided by a job id that contained the word,
@@ -233,14 +234,14 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   the collision having been found and renamed away.
   -> **What changes:** a `Contains`/`NotContains` assertion needs fixture identifiers disjoint from
   every asserted substring. Pick the ids adversarially - the assertion is on a buffer that the
-  fixture also writes into. Promotion candidate: durable memory, as a sibling of
-  [[reference_test_green_because_of_the_bug]].
+  fixture also writes into. (promoted to [[reference_test_green_because_of_the_bug]] as its third
+  shape)
 
 - **An agent lost an uncommitted implementation to `git checkout --`.**
   -> **What changes:** never `git checkout -- <path>` in a lane that has uncommitted work in that
-  path; `git stash` or commit first, and read the reflog before any destructive restore. Offered as
-  an extension of [[feedback_concurrent_agents_share_one_git_index]], which today covers `git add` +
-  bare commit and reset, not restore.
+  path; `git stash` or commit first, and read the reflog before any destructive restore. (promoted to
+  [[feedback_concurrent_agents_share_one_git_index]], which covered `git add` + bare commit and reset,
+  not restore)
 
 - **Mutation testing found four things reading did not, and one of them was a whole uncovered
   path.** `relay submit`'s non-detach path had zero coverage. `timed_out` appeared exactly once in
@@ -250,6 +251,20 @@ undercounted the fixtures 1:4 and its CRLF scope note was stale by one commit).
   -> No process change - the recorded mutation lessons are what produced these, and they worked.
   Recorded here as the evidence that they are working, and as the argument for the harness item
   already open.
+
+- **The retro was dispatched to a subagent, which silently skipped the half of the skill that needs a
+  human.** `/retro` stops at Step 5 to present the backlog candidates and the PROMOTION candidates and
+  waits for a decision. A subagent has no one to present to, so it wrote the file and returned - eight
+  promotion candidates were never offered, and the conductor then promoted one lesson unilaterally
+  without asking, which is the same failure a second time. Caught by the user, not by the pipeline. The
+  playbook's own Phase 6 line ("relay-tpm (retro + backlog)") is what prescribed it, and
+  `relay-tpm`'s agent prompt listed "run the retro skill" as a responsibility, so both artifacts were
+  wrong and agreed with each other - which is why nothing flagged it.
+  -> **What changes:** a skill that pauses for human input cannot be delegated to a subagent. Before
+  dispatching any skill-driven work, check whether the skill has a step that presents options and
+  waits; if it does, the orchestrator runs it. The tell is a step that says "wait for the user's reply
+  before proceeding". (promoted to `docs/agent-team/README.md` Phase 6 and
+  `.claude/agents/relay-tpm.md`, both of which were corrected in this session)
 
 ## Recommended Backlog Items
 
