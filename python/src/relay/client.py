@@ -50,6 +50,13 @@ class Client:
     at ``~/.relay/config.json`` (or ``%APPDATA%\\relay\\config.json`` on
     Windows). If no token is found, methods that require authentication
     raise :class:`AuthError` with a hint pointing at ``relay login``.
+
+    ``timeout`` applies only to the client the SDK builds for itself. When you
+    pass ``http_client=``, that client's own timeout policy is used unchanged
+    and ``timeout`` is IGNORED - the caller who injects a client owns its
+    policy. httpx's default for a bare ``httpx.Client()`` is 5 s; a client
+    built with ``timeout=None`` has no bound at all and the SDK will not add
+    one.
     """
 
     # Per-request page size used when auto-paginating. Matches the server's
@@ -248,6 +255,15 @@ class Client:
         return params
 
     def cancel_job(self, job_id: str, *, force: bool = False) -> Job:
+        """Cancel a job. Graceful by default; ``force=True`` asks the agent to
+        kill the running task immediately.
+
+        The returned :class:`Job` carries NO task list. ``handleCancelJob``
+        serializes with ``tasks`` omitted (the field is ``omitempty``), so
+        ``job.tasks`` is ``[]`` here for EVERY job - including jobs that have
+        tasks, which is all of them, since the server rejects a spec with none.
+        Do not read ``.tasks`` off this value; call :meth:`get_tasks` instead.
+        """
         self._require_token()
         params = {"force": "true"} if force else {}
         response = self._http.delete(f"/v1/jobs/{job_id}", params=params)
@@ -363,9 +379,20 @@ class Client:
     # ─── Following progress ───────────────────────────────────────────────
 
     def follow_job(self, job_id: str) -> Iterator[Event]:
-        """Stream events for a single job over SSE. Yields :class:`Event`
-        objects until the server closes the connection (which it does when
-        the job reaches a terminal state) or the caller breaks out.
+        """Stream events for a single job over SSE.
+
+        **The server does not end the stream when the job finishes.**
+        ``handleEvents`` closes on exactly two conditions - the request context
+        is done, or the broker drops this subscriber for falling behind - and
+        it has no notion of job terminality. This iterator sets no read
+        timeout, so a caller that iterates to exhaustion blocks forever after
+        the job is done. Break out on a terminal ``job`` frame yourself, or use
+        :meth:`wait`, which polls and is immune.
+
+        A ``dropped`` frame (:attr:`relay.EventType.DROPPED`) means the broker
+        dropped this subscriber for falling behind: frames published in the gap
+        are gone, and the recovery is to re-read the job and re-fetch the
+        task's logs from the last seq seen.
 
         The underlying HTTP connection is closed on generator exit.
         """
