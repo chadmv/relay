@@ -329,9 +329,9 @@ type logProgress struct {
 
 // ofTotal renders how much of the task's log was printed, for a diagnostic that
 // otherwise names only a stopping point: 4200 of 4201 rows and 4200 of 91340 rows
-// are very different situations. It is empty when the server never told us a
-// total - the case when the very first request failed, where "(0 of 0 rows)"
-// would be noise dressed up as data.
+// are very different situations. It is empty whenever the server never told us a
+// total, chiefly when the very first request failed, since "(0 of 0 rows)" would
+// be noise dressed up as data.
 func (p logProgress) ofTotal() string {
 	if p.total <= 0 {
 		return ""
@@ -358,12 +358,13 @@ func (p logProgress) ofTotal() string {
 // when one task is logging alone its ids are contiguous and +1 skips the very
 // next row.
 //
-// The loop is bounded twice and both bounds are needed. The cursor is
-// server-supplied and drives a client loop, and the provenance of a value says
-// nothing about who controls its content or the timing of the writes behind it.
-// next_seq <= since catches a non-advancing cursor on the second request;
-// maxLogPages catches an ever-advancing cursor that never drains, which the
-// first guard cannot see.
+// Beyond the server's own drained signal the loop has THREE stops, and all three
+// are needed. The cursor is server-supplied and drives a client loop, and the
+// provenance of a value says nothing about who controls its content or the timing
+// of the writes behind it. An empty page that still advertises more catches a
+// server the client cannot page at all; next_seq <= since catches a non-advancing
+// cursor on the second request; maxLogPages catches an ever-advancing cursor that
+// never drains, which neither of the other two can see.
 func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, out io.Writer) (logProgress, error) {
 	var progress logProgress
 	since := int64(0)
