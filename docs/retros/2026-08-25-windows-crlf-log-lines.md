@@ -172,7 +172,7 @@ here**; still unpromoted, offered below.
   -> **What changes:** cite the SYMBOL, never a line range - unconditionally, not only when you are
   editing the file you are citing. The recorded rule carries that conditional, and under concurrent
   lanes you do not know which files are under edit. `:45 -> :46` is a fix with the same expiry date as
-  the defect.
+  the defect. (promoted to [[reference_wrong_prose_is_the_dominant_defect]])
 
 - **(CARRIED) The CRLF byte-edit trap fired FOUR times in one slice, on three different actors.**
   Line-anchored `sed`/`perl` patterns do not match `\r\n`, so the edit silently does not apply and the
@@ -183,7 +183,7 @@ here**; still unpromoted, offered below.
   -> **What changes:** this is no longer a lesson, it is a tooling rule. Every byte-level edit on this
   tree - mutation or not - carries a `count(anchor) == 1` uniqueness assertion plus a before/after
   applied-check. The recorded rule is filed under mutation testing; the conductor's instance was
-  frontmatter, which is why it did not fire.
+  frontmatter, which is why it did not fire. (promoted to [[reference_verify_the_mutation_applied]])
 
 - **Two concurrent agents share ONE git index, and `git add <files>` then a bare `git commit` is not
   atomic.** The frontend lane's commit swept in the backend lane's in-progress `runner.go`. Recovery was
@@ -191,7 +191,7 @@ here**; still unpromoted, offered below.
   committed inside that window, the reset would have discarded ITS commit.
   -> **What changes:** when two lanes commit to one branch, use `git commit -- <pathspec>`, which
   bypasses the index entirely. The plan said "stage an explicit file list" and that was insufficient -
-  it constrains what you add, not what is already staged.
+  it constrains what you add, not what is already staged. (promoted to [[feedback_concurrent_agents_share_one_git_index]])
 
 - **`git worktree remove --force` recursed through a Windows junction and deleted the real
   `web/node_modules`.** Not the link, the target. Restored with `npm ci`, which is why vitest was run
@@ -199,7 +199,7 @@ here**; still unpromoted, offered below.
   the one the project's own durable memory recommends.
   -> **What changes:** remove the junction before removing the worktree, or do not junction at all and
   pay the `npm ci`. Warn wherever mutation worktrees are described, because the destructive step is the
-  teardown, not the setup.
+  teardown, not the setup. (promoted to [[feedback_mutation_testing_needs_isolated_tree]])
 
 - **`errW.flush()` was a deletable line: the whole package stayed green without it.** Found by two
   Phase 4 lenses independently and reproduced by the conductor with a working control (deleting
@@ -220,7 +220,7 @@ here**; still unpromoted, offered below.
   seven web mutations still die.
   -> **What changes:** when a mitigation is justified by an asymptotic or security claim, benchmark it
   against the code it REPLACES on the input the claim names - not only against the threat. Two separate
-  errors hid behind one correct conclusion, and neither was visible to reading.
+  errors hid behind one correct conclusion, and neither was visible to reading. (promoted to [[reference_benchmark_against_what_you_replace]])
 
 - **A spec-designed test can be structurally incapable of the kill it is paired with.** Spec T2-E
   framed the abort test at the `Run` level; once `forcedCh` is closed, `flush()` sends nothing whether
@@ -238,49 +238,26 @@ here**; still unpromoted, offered below.
   assertions while still dying under M11.
   -> **What changes:** for every pin, state its colour at HEAD explicitly - RED, or "green at HEAD and
   its kill is mutation M<n>". The plan did this for T1-D and caught T2-F by doing it. No process change
-  beyond making that statement mandatory rather than customary.
+  beyond making that statement mandatory rather than customary. (promoted to docs/agent-team/README.md)
 
 ## Recommended Backlog Items
 
-Proposals only; the human gives final accept. This is intake, not a priority order - `ROADMAP.md` orders
-the work and the Handoff names the next entry point.
+All accepted and filed at Phase 6. This is intake, not a priority order - `ROADMAP.md` orders the
+work and the Handoff names the next entry point.
 
-- [idea] **No test drives a real agent subprocess through gRPC into a `task_logs` row.** This slice's
-  two halves are proven independently and the wire between them is assumed. `internal/worker/
-  handler_tasklog_e2e_integration_test.go` calls `HandleTaskLog` directly, so nothing exercises
-  `chunkWriter` -> `sendCh` -> the gRPC stream -> `HandleTaskLog` -> `AppendTaskLog` as one path. The
-  measured consequence is that the closing acceptance criterion of
-  `bug-2026-08-25-windows-crlf-log-lines-render-blank` ("a CRLF-emitting subprocess renders its text on
-  the job detail page") has never been observed. Distinct from
-  `idea-2026-08-24-e2e-harness-slice-2-agent-in-harness`, which is about which browser SURFACES become
-  reachable; this is about byte fidelity through the log pipeline and is closeable at the Go
-  integration level without Playwright. Also adjacent to
-  `idea-2026-08-23-integration-only-guards-ci-never-runs`.
-- [bug] **A log line has no length cap in the SPA.** `MAX_LINES` (`web/src/jobs/logBuffer.ts`) caps line
-  COUNT; the partial buffer in `appendEntries` grows unbounded until a newline arrives. A job printing
-  megabytes with no newline degrades the operator's tab regardless of the index walk. Pre-existing and
-  named in spec 13.1/13.3. Not covered by
-  `idea-2026-08-09-task-log-tail-and-paging-improvements` (retained-line cap and virtualization, both
-  count-based) nor by `bug-2026-08-14-task-logs-have-no-per-task-volume-cap` (server-side volume).
-- [idea] **`README.md:332` describes `task_logs` as captured stdout/stderr and no longer qualifies
-  that.** As of this slice the agent normalises `\r\n` to `\n` before a chunk is sent, so stored bytes
-  are not a byte-exact copy. Spec 8.5 scoped README out on the accurate grounds that no passage claims
-  byte-exactness; "captured" nonetheless reads as verbatim to someone deciding whether an export can be
-  byte-exact. Small, and the `idea-2026-08-09` annotation already covers the consumer most likely to
-  care.
-- [append to `idea-2026-08-25-no-documented-working-local-race-lane`] **The container `-race` lane has a
-  verified working invocation and it should go in the item.** `MSYS_NO_PATHCONV=1 docker run --rm -v
-  <abs>:/src -w /src -e CGO_ENABLED=1 golang:1.26 go test -race ./...` was run green here at two
-  different HEADs, and it also runs the `//go:build !windows` tests that `go test` skips wholesale on
-  Windows. That is the item's second acceptance criterion satisfied with a command rather than a
-  promise; what remains open is the CLAUDE.md edit and naming both failure modes.
+- See [`idea-2026-08-25-no-e2e-path-from-agent-subprocess-to-task-logs`](../backlog/idea-2026-08-25-no-e2e-path-from-agent-subprocess-to-task-logs.md) - no test drives a real agent subprocess through gRPC into a `task_logs` row, so this slice's two halves are proven with the wire between them assumed.
+- See [`bug-2026-08-25-spa-log-line-has-no-length-cap`](../backlog/bug-2026-08-25-spa-log-line-has-no-length-cap.md) - `MAX_LINES` caps line COUNT; the partial buffer grows unbounded until a newline arrives.
+- See [`idea-2026-08-25-readme-task-logs-no-longer-byte-exact`](../backlog/idea-2026-08-25-readme-task-logs-no-longer-byte-exact.md) - README calls `task_logs` captured stdout/stderr without qualifying that CRLF is now normalised at the agent.
+- Appended to [`idea-2026-08-25-no-documented-working-local-race-lane`](../backlog/idea-2026-08-25-no-documented-working-local-race-lane.md) - the container `-race` invocation, verified green at two HEADs, plus the two traps that cost time (`MSYS_NO_PATHCONV`, and a pipe supplying exit 0 over a failed run).
+- Appended to [`idea-2026-08-26-mutation-harness-does-not-assert-where-it-landed`](../backlog/idea-2026-08-26-mutation-harness-does-not-assert-where-it-landed.md) - three more instances, and the scope correction: the conductor's was `/backlog close` stamping frontmatter, not a mutation at all, so the failure mode is any line-anchored byte edit on this tree.
 
 **Already tracked** (linked, not offered): `relay logs` prints its `[task stream]` prefix per chunk
 rather than per line -> [`bug-2026-08-25-relay-logs-prints-nothing-envelope-drift`](../backlog/bug-2026-08-25-relay-logs-prints-nothing-envelope-drift.md).
 
 **Not filed as backlog, routed to durable homes instead:** the concurrent-lane git index collision and
 the junction deletion. Both are process rules with no code acceptance criterion, and a permanently-open
-row is the wrong shape for them. They are promotion candidates below.
+row is the wrong shape for them. Both were promoted to memory instead; see the stamps in
+"What Went Wrong and What Changes" above.
 
 ## Files Most Touched
 
