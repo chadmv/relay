@@ -48,8 +48,24 @@ class OverlapPolicy(str, Enum):
 
 
 class EventType(str, Enum):
+    """The event types the server publishes on GET /v1/events.
+
+    ``Event.type`` is a plain ``str`` so an unknown future type still parses;
+    this enum is the vocabulary the server emits TODAY, for comparison and
+    autocomplete.
+
+    ``DROPPED`` is not a resource event. The server writes it directly
+    (handleEvents, internal/api/events.go) when the broker drops a subscriber
+    for falling behind, and its meaning is "you missed frames": anything
+    published in the gap is gone, so re-read the job or re-fetch the task's
+    logs from the last seq you saw.
+    """
+
     JOB = "job"
     TASK = "task"
+    WORKER = "worker"
+    TASK_LOG = "task_log"
+    DROPPED = "dropped"
 
 
 # ─── Source specs (Perforce) ──────────────────────────────────────────────────
@@ -256,6 +272,18 @@ class Job(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    # List-only enrichment (GET /v1/jobs rows). The server computes these from
+    # the job's tasks and its scheduled-job source, and does not populate them
+    # on single-job routes. They are DEFAULTED because Job is the authoring
+    # model too - Job(name="nightly") must keep working - which is why the
+    # strict no-default rule LogPage follows does not apply here.
+    total_tasks: int = 0
+    done_tasks: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    scheduled_job_id: Optional[str] = None
+    scheduled_job_name: Optional[str] = None
+
     @field_validator("name")
     @classmethod
     def _name_required(cls, v: str) -> str:
@@ -452,6 +480,7 @@ class Worker(BaseModel):
     last_seen_at: Optional[datetime] = None
     last_sample_at: Optional[datetime] = None
     disabled_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
 
 
 class Reservation(BaseModel):

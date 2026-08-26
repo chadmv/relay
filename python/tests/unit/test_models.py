@@ -5,6 +5,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from relay import (
     AgentEnrollment,
+    EventType,
     Job,
     JobStatus,
     LogPage,
@@ -408,3 +409,98 @@ def test_log_page_requires_next_seq_and_total(missing: str) -> None:
     del body[missing]
     with pytest.raises(PydanticValidationError):
         LogPage.model_validate(body)
+# ─── sweep findings D2 / D3 / D4 ──────────────────────────────────────────────
+
+
+def test_worker_parses_revoked_at() -> None:
+    """D2. workerResponse has emitted revoked_at since worker revocation
+    shipped (internal/api/workers.go, toWorkerResponse); Worker did not model
+    it, so extra="ignore" dropped it silently and a Python caller could not see
+    that a worker had been revoked.
+    """
+    w = Worker.model_validate(
+        {
+            "id": "w1",
+            "name": "worker-a",
+            "hostname": "host-a",
+            "cpu_cores": 8,
+            "ram_gb": 32,
+            "gpu_count": 1,
+            "gpu_model": "RTX",
+            "os": "linux",
+            "max_slots": 4,
+            "labels": {},
+            "status": "offline",
+            "revoked_at": "2026-08-25T09:00:00Z",
+        }
+    )
+    assert w.revoked_at is not None
+    assert w.revoked_at.year == 2026
+
+
+def test_job_parses_list_enrichment_fields() -> None:
+    """D3. jobResponse carries six list-only enrichment keys on GET /v1/jobs
+    rows. Job modeled none of them, so list_jobs() silently discarded the
+    progress and timing the server had already computed.
+    """
+    job = Job.model_validate(
+        {
+            "id": "j1",
+            "name": "nightly",
+            "priority": "normal",
+            "status": "running",
+            "labels": {},
+            "created_at": "2026-08-25T09:00:00Z",
+            "updated_at": "2026-08-25T09:05:00Z",
+            "total_tasks": 7,
+            "done_tasks": 3,
+            "started_at": "2026-08-25T09:01:00Z",
+            "finished_at": None,
+            "scheduled_job_id": "s1",
+            "scheduled_job_name": "nightly-cook",
+        }
+    )
+    assert job.total_tasks == 7
+    assert job.done_tasks == 3
+    assert job.started_at is not None
+    assert job.finished_at is None
+    assert job.scheduled_job_id == "s1"
+    assert job.scheduled_job_name == "nightly-cook"
+
+
+def test_job_authoring_does_not_require_enrichment_fields() -> None:
+    """The six D3 fields are DEFAULTED, and that is deliberate rather than a
+    lapse from the strict no-default rule LogPage follows.
+
+    Job is the AUTHORING model as well as the response model - Job(name=...) is
+    the README's first example - so a required total_tasks would break every
+    authoring call site. LogPage is response-only and has no authoring caller,
+    which is why the strict rule costs nothing there and everything here. Do
+    not "make these consistent".
+    """
+    job = Job(name="nightly")
+    assert job.total_tasks == 0
+    assert job.done_tasks == 0
+    assert job.started_at is None
+    assert job.scheduled_job_id is None
+
+
+def test_event_type_covers_every_type_the_server_publishes() -> None:
+    """D4. EventType had JOB and TASK only - an incomplete slicing of a
+    five-value vocabulary. The five publish sites, by symbol: "job"
+    (internal/api/jobs.go, internal/scheduler/dispatch.go), "task"
+    (dispatch.go, internal/worker/handler.go), "worker"
+    (internal/metrics/sweep.go, worker/handler.go), events.TypeTaskLog =
+    "task_log" (internal/events/broker.go), and "dropped", written as a raw
+    frame by handleEvents when the broker drops a slow subscriber.
+
+    Set EQUALITY, not a containment check: this fails both on a member the
+    server publishes and the SDK lacks, and on a member the SDK invents.
+    """
+    assert {e.value for e in EventType} == {
+        "job",
+        "task",
+        "worker",
+        "task_log",
+        "dropped",
+    }
