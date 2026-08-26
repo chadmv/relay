@@ -192,9 +192,11 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // that went terminal before the subscribe is still caught (the broker has no replay).
 // When a task reaches a terminal state its logs are fetched and printed once.
 //
-// Once the job reaches a terminal status the authoritative task list is re-read
-// and any terminal task not yet printed is printed then - see
-// reconcileFinalSnapshot for why the stream alone is not enough.
+// When the STREAM is what reports the terminal status, the authoritative task
+// list is re-read and any task not yet printed is printed then - see
+// reconcileFinalSnapshot for why the stream alone is not enough, and the defer
+// near the bottom for why that re-read is skipped when the subscribe-time
+// snapshot is what ended the watch instead.
 //
 // Returns the final job status ("done", "failed", or "cancelled"), how complete
 // the printed output is, and any error.
@@ -202,11 +204,15 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // A log failure never aborts the watch: the remaining tasks still stream and
 // print. It is reported on errOut immediately and counted, and doLogs turns an
 // incomplete outcome into a non-silent error.
-func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (string, logCompleteness, error) {
+// The returns are NAMED because the reconcile below is armed by a defer that
+// writes through them, not by a call at the bottom of the function.
+func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (finalStatus string, completeness logCompleteness, err error) {
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)
-	var finalStatus string
-	var completeness logCompleteness
+	// snapshotWasFinal records that the SUBSCRIBE-time snapshot, not the stream,
+	// is what established the terminal job status - which is what makes the
+	// reconcile redundant. See the defer below.
+	var snapshotWasFinal bool
 
 	// emit prints one task's log and reports an incomplete one on errOut. One
 	// diagnostic per failing task, naming the task, the task id and the last
@@ -294,6 +300,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		emitSnapshot(job)
 		if jobIsTerminal(job.Status) {
 			finalStatus = job.Status
+			snapshotWasFinal = true
 			return false
 		}
 		return true
@@ -378,13 +385,40 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		return true
 	}
 
-	if err := c.StreamEvents(ctx, "/v1/events?job_id="+jobID, onSubscribed, handler); err != nil {
+	// Take the reconcile's obligation in the same breath as the call that can
+	// create it. A terminal status can only be established from inside
+	// onSubscribed or handler, both of which StreamEvents owns, and discharging
+	// it a hundred lines later at a single call site left the window between the
+	// two open to any early return added since: deleting the call is caught by a
+	// test, but a `return` added above it would not be. Armed here, every exit
+	// from this function passes through it.
+	//
+	// It is skipped when the SUBSCRIBE-time snapshot is what ended the watch,
+	// because then it is a pure duplicate request. That snapshot is
+	// authoritative and every task in a terminal job is terminal in it -
+	// RecomputeJobStatus yields `running` while any is not, and CancelJobTasks
+	// has already flipped the rest - so emitSnapshot has printed all of them
+	// already. Making the request anyway can only add a way to fail, and it did:
+	// a 500 on the duplicate read turned a run that printed every line into exit
+	// 1 telling the operator their logs may be missing. `relay logs
+	// <finished-job>` is this command's dominant invocation.
+	//
+	// The fail-closed argument that keeps this honest lives in onSubscribed: a
+	// snapshot that cannot be a valid answer never sets finalStatus, so it never
+	// reaches this skip.
+	defer func() {
+		if finalStatus == "" || snapshotWasFinal {
+			return
+		}
+		reconcileFinalSnapshot()
+	}()
+
+	if err = c.StreamEvents(ctx, "/v1/events?job_id="+jobID, onSubscribed, handler); err != nil {
 		return "", completeness, err
 	}
 	if finalStatus == "" {
 		return "", completeness, fmt.Errorf("connection lost — job %s may still be running", jobID)
 	}
-	reconcileFinalSnapshot()
 	return finalStatus, completeness, nil
 }
 

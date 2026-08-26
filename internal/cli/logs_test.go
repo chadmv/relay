@@ -1260,3 +1260,157 @@ func TestWatchJobLogs_NonTerminalTaskWhileJobRuns_IsNotPrintedOrFlagged(t *testi
 		"the task was printed exactly once, by the reconcile, once it had gone terminal")
 	require.Empty(t, errOut.String())
 }
+
+// fakeTerminalAtSubscribeServer serves a job that is already done with one
+// finished task, 500s every /v1/jobs read after the first, and reports how many
+// times that route was hit. The events route ends immediately, so onSubscribed
+// is the only thing that observes the job.
+func fakeTerminalAtSubscribeServer(t *testing.T, jobID, taskID string) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	reads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			reads++
+			first := reads == 1
+			mu.Unlock()
+			if !first {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			writeTaskLogPage(w, r, oneFrameRows())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return reads
+	}
+}
+
+// `relay logs <finished-job>` is the dominant invocation of this command, and on
+// it the reconcile is a pure duplicate request: onSubscribed already consumed an
+// authoritative terminal snapshot, and a terminal job's every task is terminal in
+// it (RecomputeJobStatus yields `running` while any is not; CancelJobTasks has
+// already flipped the rest). There is nothing left for a second read to add.
+//
+// Not free, either. Fail that duplicate read and the command turns a perfect run
+// - every log line printed, from the authoritative snapshot - into exit 1 telling
+// the operator their logs may be missing. "By reconcile time there is no stream
+// left to compensate" is true of the stream-terminated path and false of this
+// one, where the compensating read succeeded moments earlier.
+func TestWatchJobLogs_TerminalAtSubscribe_DoesNotReReadTheJob(t *testing.T) {
+	jobID, taskID := "job-noreread", "task-noreread"
+	srv, jobReads := fakeTerminalAtSubscribeServer(t, jobID, taskID)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+	require.True(t, completeness.complete(),
+		"every task in an authoritative terminal snapshot was printed from it")
+	require.Empty(t, errOut.String())
+	require.Equal(t, 1, jobReads(),
+		"the snapshot that ended the watch is the reconcile; asking again can only add a way to fail")
+
+	// And end to end, on its own server because the fixture above is spent: the
+	// command exits 0 on a finished job whose re-read would have failed.
+	srv2, _ := fakeTerminalAtSubscribeServer(t, jobID, taskID)
+	cfg := &Config{ServerURL: srv2.URL, Token: "tok"}
+	var out2, errOut2 strings.Builder
+	require.NoError(t, doLogs(ctx, cfg, []string{jobID}, &out2, &errOut2),
+		"reading a finished job's logs is this command's dominant use and it exits 0")
+	require.Contains(t, out2.String(), "[frame-001 stdout] frame rendered")
+	require.Empty(t, errOut2.String())
+}
+
+// The reconcile is still owed on the path where the STREAM ended the watch, and
+// this is the pin that stops the gate above from being widened into a bypass.
+// fakeCancelAfterSubscribeServer's first snapshot is non-terminal, so the
+// terminal status comes from the job frame and the second read is the only thing
+// that can produce the task.
+func TestWatchJobLogs_StreamEndedTheWatch_StillReconciles(t *testing.T) {
+	jobID, taskID := "job-stream-reconcile", "task-stream-reconcile"
+	srv := fakeCancelAfterSubscribeServer(t, jobID, taskID)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", status)
+	require.True(t, completeness.complete())
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+}
+
+// The reconcile's name-refresh is load-bearing exactly here: onSubscribed's
+// snapshot failed, so taskNames is empty; the cancel path publishes no task
+// frame, so the stream never names the task either; and the reconcile is the
+// only thing that can put a name on the diagnostic and on every printed line.
+// Without it the operator gets `[ stdout] ...` for a job whose tasks all have
+// names.
+func TestWatchJobLogs_SubscribeSnapshotFailed_ReconcileNamesTheTask(t *testing.T) {
+	jobID, taskID := "job-latename", "task-latename"
+	var mu sync.Mutex
+	reads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			reads++
+			first := reads == 1
+			mu.Unlock()
+			if first {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "cancelled",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "failed"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "event: job\ndata: {\"status\":\"cancelled\"}\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			writeTaskLogPage(w, r, oneFrameRows())
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", status)
+	require.True(t, completeness.complete())
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered",
+		"the reconcile is the only reader that ever saw this task's name")
+}
