@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 
 	"relay/internal/relayclient"
@@ -367,15 +368,27 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 	var progress logProgress
 	since := int64(0)
 	for pages := 1; ; pages++ {
+		// The id is escaped rather than concatenated. It is a gen_random_uuid()
+		// primary key that came from the same server this request goes to, so this
+		// is not exploitable today; escaping removes the class instead of resting
+		// the argument on that provenance, since a crafted id would otherwise
+		// reach a different endpoint on the host with the bearer token attached.
 		path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d",
-			taskID, since, relayclient.PageRequestLimit)
+			url.PathEscape(taskID), since, relayclient.PageRequestLimit)
 		var page taskLogPage
 		if err := c.Do(ctx, "GET", path, nil, &page); err != nil {
 			return progress, fmt.Errorf("fetching page %d: %w", pages, err)
 		}
 		progress.total = page.Total
 		for _, l := range page.Items {
-			fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content)
+			// The write is checked, and a failure stops the loop. Unchecked, a
+			// stdout that rejects every write (a full disk, a closed pipe, a `>`
+			// redirect onto something that refuses) reaches this slice's own
+			// symptom by the other door: the log pages to the end, nothing is
+			// printed, and the command exits 0 claiming it printed everything.
+			if _, werr := fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content); werr != nil {
+				return progress, fmt.Errorf("writing page %d: %w", pages, werr)
+			}
 			progress.lastSeq = l.Seq
 			progress.rows++
 		}

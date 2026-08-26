@@ -976,3 +976,58 @@ func TestWatchJobLogs_ExactlyCapManyPages_MessageDoesNotBlameTheServer(t *testin
 		"the cap is the client's, and this input is a server that behaved perfectly")
 	require.NotContains(t, errOut.String(), "the server never reported the log as drained")
 }
+
+// failingWriter is a stdout that cannot be written to: a full disk, a closed
+// pipe, or a `> file` redirect onto something that refuses the write. Every
+// Write fails, the way they would after the first ENOSPC.
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write(p []byte) (int, error) { return 0, f.err }
+
+// An unchecked Fprintf reaches this slice's own symptom by the other door: every
+// write fails silently, the loop pages the entire log anyway, and the command
+// exits 0 having printed nothing. The write error has to be as loud as a fetch
+// error, and it has to STOP the paging - there is no point pulling 91340 more
+// rows into a writer that is rejecting all of them.
+func TestWatchJobLogs_StdoutWriteFails_ReportsIncompleteAndStops(t *testing.T) {
+	jobID, taskID := "job-writefail", "task-writefail"
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(400), 0)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var errOut strings.Builder
+	out := failingWriter{err: errors.New("no space left on device")}
+	status, completeness, err := watchJobLogs(ctx, c, jobID, out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, completeness.failedTasks,
+		"a log that could not be written is exactly as incomplete as one that could not be fetched")
+	require.Contains(t, errOut.String(), "frame-001")
+	require.Contains(t, errOut.String(), "no space left on device")
+
+	requests, _, _ := srv.stats()
+	require.Equal(t, 1, requests,
+		"the loop must stop on the failing write, not page the whole log into a writer that rejects it")
+}
+
+// The task id is interpolated straight into a request path. It is not exploitable
+// today - it is a gen_random_uuid() primary key that came from the same server the
+// request goes to - but a crafted id would otherwise reach a different endpoint on
+// that host with the operator's bearer token attached. Escaping removes the class
+// rather than arguing about the current provenance.
+func TestPrintTaskLogs_TaskIDIsPathEscaped(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		writeTaskLogPage(w, r, nil)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	_, err := printTaskLogs(context.Background(), c, "../../v1/users", "frame-001", &strings.Builder{})
+	require.NoError(t, err)
+	require.Contains(t, gotURI, "%2F", "the id's separators must be escaped, not path segments")
+	require.NotContains(t, gotURI, "/v1/users")
+}
