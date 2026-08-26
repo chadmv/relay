@@ -201,3 +201,37 @@ func TestWaitForJob_PersistentServerError_GivesUpAfterTheBound(t *testing.T) {
 	require.Equal(t, int32(maxConsecutiveWaitFailures), atomic.LoadInt32(&n),
 		"the loop tolerates a bounded run of failures and then reports the last one")
 }
+
+// The bound is on CONSECUTIVE failures, and that word is the whole difference
+// between a tolerance and a budget. A backend that fails intermittently over a
+// long render produces far more than maxConsecutiveWaitFailures failures in
+// total, and every one of them is outlived by the next poll. Counting them
+// cumulatively would spend the allowance and kill the wait for a server that was
+// answering fine.
+//
+// Six failures here, one more than the bound, every one of them separated by a
+// good answer.
+func TestWaitForJob_IntermittentFailures_DoNotAccumulate(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&n, 1)
+		switch {
+		case current > 2*(maxConsecutiveWaitFailures+1):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "done"})
+		case current%2 == 0:
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "running"})
+		}
+	}))
+	defer srv.Close()
+
+	s, _ := NewServer(srv.URL, "t")
+	s.waitPoll = 10 * time.Millisecond
+
+	out, terr := s.callWaitForJob(context.Background(), waitForJobArgs{JobID: "j1", TimeoutSeconds: 10})
+	require.Nil(t, terr)
+	require.Equal(t, "done", out["status"])
+	require.Greater(t, atomic.LoadInt32(&n), int32(maxConsecutiveWaitFailures),
+		"the wait outlived more failures than the bound, because none of them were consecutive")
+}
