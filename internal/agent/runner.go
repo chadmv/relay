@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -268,26 +269,88 @@ func (r *Runner) sendStepMarker(step, total int32, argv []string) {
 var errForcedAbort = errors.New("relay: forced cancel aborted in-flight log write")
 
 // chunkWriter is the io.Writer exec copies subprocess stdout/stderr into. Each
-// Write copies its slice (exec reuses the buffer between calls), wraps it in a
-// TaskLogChunk stamped with the runner's stream/step/epoch, and pushes it
-// through r.sendOrAbort. On a successful enqueue Write returns (len(p), nil) so
-// exec keeps copying until EOF (unchanged slow-consumer behavior). If a per-task
-// cancel has closed r.forcedCh or r.cancelledCh (or the agent context is done),
-// the enqueue is abandoned and Write returns errForcedAbort so exec's io.Copy
-// stops and cmd.Wait() returns promptly instead of waiting out WaitDelay.
+// Write builds its own buffer (exec reuses the slice between calls), collapses
+// CRLF to LF in it, wraps it in a TaskLogChunk stamped with the runner's
+// stream/step/epoch, and pushes it through r.sendOrAbort.
+//
+// THE CRLF COLLAPSE IS EXACTLY \r\n -> \n, NOT \r+\n -> \n. The wider rule would
+// also remove the residue a CR-run before a newline leaves behind, but that is a
+// judgement about what is VISIBLE, which is a rendering decision, and rendering
+// decisions stay in the client that holds the opinion - the SPA already collapses
+// carriage returns (web/src/jobs/logBuffer.ts) and the CLI deliberately wants the
+// raw bytes. The narrow rule has one definition every consumer agrees on and one
+// statable cost: precisely the CR of each CRLF is removed, nothing else.
+//
+// THE INVARIANT IS OVER THE CONCATENATION, AGAINST THE ORIGINAL BYTE POSITIONS:
+// for one (step, stream) writer, the concatenation of every payload it emits
+// equals the subprocess's bytes with each \r\n OF THE ORIGINAL replaced by \n.
+// It is NOT the per-chunk property "no emitted chunk contains a CRLF", which is
+// false on purpose: a payload of "\r\r" emits a chunk ending in '\r' (correct -
+// that CR's successor is known to be another CR, not a LF), and a CR-run before
+// a newline emits a CRLF at a position that did not have one. A second pass would
+// be a different transform; see above.
+//
+// held is at most ONE byte, always: a trailing '\r' whose successor has not been
+// read yet. A CRLF can straddle a Write boundary - exec hands over whatever the
+// pipe had - so without the hold-back a per-Write replace silently misses every
+// pair split across two reads. The held byte is folded into the next Write's
+// buffer BEFORE the scan, so no pair straddles by the time the scan runs. mu
+// guards held; see flush for why the lock is insurance rather than correctness.
+//
+// Write has THREE outcomes, not two. On a successful enqueue it returns
+// (len(p), nil) so exec keeps copying until EOF (unchanged slow-consumer
+// behavior). On a payload consumed entirely into held - which happens on exactly
+// one input, a lone "\r" with nothing already held - it returns (len(p), nil)
+// having enqueued NOTHING; that is what bufio.Writer does, io.Writer requires
+// n < len(p) only alongside a non-nil error, and emitting no chunk strengthens
+// the never-emit-an-empty-chunk guard below rather than breaking it. If a
+// per-task cancel has closed r.forcedCh or r.cancelledCh (or the agent context
+// is done), the enqueue is abandoned and Write returns errForcedAbort so exec's
+// io.Copy stops and cmd.Wait() returns promptly instead of waiting out
+// WaitDelay; the held byte goes with the discarded chunk and is never re-armed.
 type chunkWriter struct {
 	r         *Runner
 	stream    relayv1.LogStream
 	stepIndex int32
 	stepTotal int32
+
+	mu   sync.Mutex
+	held []byte // at most one byte: a trailing '\r' whose successor is not yet known
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil // match the old pipeLog n>0 guard: never emit an empty chunk
 	}
-	chunk := make([]byte, len(p))
-	copy(chunk, p)
+
+	// Fold the held byte in and CLEAR it in the same breath. Its lifetime is
+	// exactly one Write, and newHeld below is armed only after a successful
+	// enqueue, so no early return - including the errForcedAbort one the abort
+	// path takes - can leave a byte owned by a writer nobody will call again.
+	w.mu.Lock()
+	chunk := make([]byte, 0, len(w.held)+len(p))
+	chunk = append(chunk, w.held...)
+	chunk = append(chunk, p...)
+	w.held = nil
+	w.mu.Unlock()
+
+	var newHeld []byte
+	if chunk[len(chunk)-1] == '\r' {
+		newHeld = []byte{'\r'}
+		chunk = chunk[:len(chunk)-1]
+	}
+	chunk = collapseCRLF(chunk)
+
+	if len(chunk) == 0 {
+		// Reachable on exactly one input: nothing held and p == "\r".
+		// collapseCRLF keeps a byte for every pair it collapses, so only the
+		// hold-back above can empty the buffer.
+		w.mu.Lock()
+		w.held = newHeld
+		w.mu.Unlock()
+		return len(p), nil
+	}
+
 	if !w.r.sendOrAbort(&relayv1.AgentMessage{
 		Payload: &relayv1.AgentMessage_TaskLog{
 			TaskLog: &relayv1.TaskLogChunk{
@@ -302,10 +365,37 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 	}) {
 		// Abandoned. On a forced cancel this stops io.Copy so cmd.Wait returns.
 		// On agent shutdown (ctx.Done) returning the sentinel is equally fine:
-		// the runner is tearing down regardless.
+		// the runner is tearing down regardless. newHeld is deliberately NOT
+		// armed - the writer must not send after the abort path decided to stop.
 		return 0, errForcedAbort
 	}
+	w.mu.Lock()
+	w.held = newHeld
+	w.mu.Unlock()
 	return len(p), nil
+}
+
+// collapseCRLF removes the CR of every CRLF pair in b IN PLACE and returns the
+// shortened prefix. b must be a buffer the caller owns - chunkWriter.Write
+// already has to copy exec's slice, so no second allocation is needed. The
+// compaction only ever skips bytes, so the write index never overtakes the read
+// index.
+//
+// The IndexByte fast path is not a micro-optimisation for its own sake: it is
+// every write on every Linux agent, where a full forward scan would buy nothing.
+func collapseCRLF(b []byte) []byte {
+	i := bytes.IndexByte(b, '\r')
+	if i < 0 {
+		return b
+	}
+	out := b[:i]
+	for ; i < len(b); i++ {
+		if b[i] == '\r' && i+1 < len(b) && b[i+1] == '\n' {
+			continue
+		}
+		out = append(out, b[i])
+	}
+	return out
 }
 
 func (r *Runner) sendFinalStatus(status relayv1.TaskStatus, exitCode *int32) {
