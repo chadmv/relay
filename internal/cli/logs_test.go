@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,11 +18,104 @@ import (
 	"relay/internal/relayclient"
 )
 
+// logRow is the wire shape handleGetTaskLogs writes for one row - the api
+// package's unexported logEntry (internal/api/tasks.go), reproduced here with
+// its own json tags.
+//
+// It is deliberately NOT the CLI's own taskLogEntry. A fixture built out of the
+// type under test cannot detect drift in that type: if taskLogEntry's tags were
+// wrong, the fixture would marshal the same wrong keys and the whole suite would
+// stay green against a CLI that cannot talk to the real server. That is exactly
+// the failure this file is being changed to fix, so do not "de-duplicate" these
+// two structs.
+type logRow struct {
+	Seq       int64     `json:"seq"`
+	Stream    string    `json:"stream"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// writeTaskLogPage serves rows the way handleGetTaskLogs (internal/api/tasks.go)
+// does. Four behaviours are load-bearing and each is asserted by a test below:
+//
+//   - ?since_seq is EXCLUSIVE: rows with Seq > since_seq, because the SQL is
+//     `WHERE task_id = $1 AND id > $2`. Asserted by
+//     TestWatchJobLogs_ExactPageMultiple_NoDropNoDuplicate.
+//   - ?limit defaults to 50, and a value outside 1..200 is a 400 - the handler
+//     rejects, it does not clamp.
+//   - next_seq is the last returned row's seq, or 0 when the page is short.
+//     Asserted by TestWatchJobLogs_PagesUntilDrained.
+//   - total is the full row count, independent of the page.
+//
+// Every fake server in this file routes its logs case through here, so editing
+// any of those four lines changes what every CLI log test means.
+func writeTaskLogPage(w http.ResponseWriter, r *http.Request, rows []logRow) {
+	writeErr := func(code int, msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	}
+
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 200 {
+			writeErr(http.StatusBadRequest, "limit must be 1..200")
+			return
+		}
+		limit = n
+	}
+
+	var since int64
+	if v := r.URL.Query().Get("since_seq"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeErr(http.StatusBadRequest, "since_seq must be a non-negative integer")
+			return
+		}
+		since = n
+	}
+
+	items := make([]logRow, 0, limit)
+	for _, row := range rows {
+		if row.Seq > since && len(items) < limit {
+			items = append(items, row)
+		}
+	}
+	var nextSeq int64
+	if len(items) > 0 {
+		nextSeq = items[len(items)-1].Seq
+	}
+	if len(items) < limit {
+		nextSeq = 0 // drained
+	}
+
+	// Marshalled through a local anonymous struct rather than the CLI's
+	// taskLogPage, for the same reason logRow is not taskLogEntry.
+	_ = json.NewEncoder(w).Encode(struct {
+		Items   []logRow `json:"items"`
+		NextSeq int64    `json:"next_seq"`
+		Total   int64    `json:"total"`
+	}{Items: items, NextSeq: nextSeq, Total: int64(len(rows))})
+}
+
+// oneFrameRows is the single row the four fake servers below used to hand-write
+// as a bare JSON array. The assertion "[frame-001 stdout] frame rendered" in the
+// tests below is this row.
+func oneFrameRows() []logRow {
+	return []logRow{{
+		Seq:       1,
+		Stream:    "stdout",
+		Content:   "frame rendered",
+		CreatedAt: time.Unix(0, 0).UTC(),
+	}}
+}
+
 // fakeJobServer serves:
 //
 //	GET /v1/jobs/<id>           → running job with one pending task
 //	GET /v1/events?job_id=<id>  → SSE stream ending with finalJobStatus
-//	GET /v1/tasks/<id>/logs     → log entries
+//	GET /v1/tasks/<id>/logs     -> one page of the handler's log envelope
 func fakeJobServer(t *testing.T, jobID, taskID, finalJobStatus string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,12 +139,7 @@ func fakeJobServer(t *testing.T, jobID, taskID, finalJobStatus string) *httptest
 			}
 
 		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
-			json.NewEncoder(w).Encode([]struct {
-				Stream  string `json:"stream"`
-				Content string `json:"content"`
-			}{
-				{Stream: "stdout", Content: "frame rendered"},
-			})
+			writeTaskLogPage(w, r, oneFrameRows())
 		}
 	}))
 }
@@ -68,12 +157,7 @@ func fakeCompletedJobServer(t *testing.T, jobID, taskID, jobStatus string) *http
 			})
 
 		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
-			json.NewEncoder(w).Encode([]struct {
-				Stream  string `json:"stream"`
-				Content string `json:"content"`
-			}{
-				{Stream: "stdout", Content: "frame rendered"},
-			})
+			writeTaskLogPage(w, r, oneFrameRows())
 		}
 	}))
 }
@@ -115,12 +199,7 @@ func fakeRaceJobServer(t *testing.T, jobID, taskID string) *httptest.Server {
 			<-r.Context().Done()
 
 		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
-			json.NewEncoder(w).Encode([]struct {
-				Stream  string `json:"stream"`
-				Content string `json:"content"`
-			}{
-				{Stream: "stdout", Content: "frame rendered"},
-			})
+			writeTaskLogPage(w, r, oneFrameRows())
 		}
 	}))
 }
@@ -165,12 +244,7 @@ func fakeOverlapJobServer(t *testing.T, jobID, taskID string) *httptest.Server {
 			}
 
 		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
-			json.NewEncoder(w).Encode([]struct {
-				Stream  string `json:"stream"`
-				Content string `json:"content"`
-			}{
-				{Stream: "stdout", Content: "frame rendered"},
-			})
+			writeTaskLogPage(w, r, oneFrameRows())
 		}
 	}))
 }

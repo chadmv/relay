@@ -11,6 +11,26 @@ import (
 	"relay/internal/relayclient"
 )
 
+// taskLogPage mirrors the envelope GET /v1/tasks/{id}/logs returns
+// (handleGetTaskLogs, internal/api/tasks.go). The handler has written this
+// object since 2026-05-08; the CLI decoded a bare array into a slice until
+// 2026-08-26, which fails and printed nothing for three and a half months.
+type taskLogPage struct {
+	Items   []taskLogEntry `json:"items"`
+	NextSeq int64          `json:"next_seq"`
+	Total   int64          `json:"total"`
+}
+
+// taskLogEntry is one row. created_at is deliberately not decoded: the CLI does
+// not print it, and an unused field is a maintenance claim this package cannot
+// keep. Seq is decoded because the incomplete-log diagnostic names the last seq
+// printed.
+type taskLogEntry struct {
+	Seq     int64  `json:"seq"`
+	Stream  string `json:"stream"`
+	Content string `json:"content"`
+}
+
 // LogsCommand returns the relay logs Command.
 func LogsCommand() Command {
 	return Command{
@@ -121,16 +141,13 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, w io
 }
 
 // printTaskLogs fetches and prints all log lines for a task.
-// Errors are silently ignored — best-effort output.
+// Errors are silently ignored - best-effort output.
 func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, w io.Writer) {
-	var logs []struct {
-		Stream  string `json:"stream"`
-		Content string `json:"content"`
-	}
-	if err := c.Do(ctx, "GET", "/v1/tasks/"+taskID+"/logs", nil, &logs); err != nil {
+	var page taskLogPage
+	if err := c.Do(ctx, "GET", "/v1/tasks/"+taskID+"/logs", nil, &page); err != nil {
 		return
 	}
-	for _, l := range logs {
+	for _, l := range page.Items {
 		fmt.Fprintf(w, "[%s %s] %s\n", taskName, l.Stream, l.Content)
 	}
 }
