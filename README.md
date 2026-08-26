@@ -802,11 +802,18 @@ happens once, as the task goes terminal; its agent may still append for up to
 `RELAY_TASKLOG_TRAILING_WINDOW` (default 15m) afterwards, so re-run `relay logs`
 on the finished job to pick up late output.
 
-When the job finishes, its task list is re-read once and any finished task not
-already printed is printed then. This is what makes a cancelled job print
-anything at all: `relay cancel` marks the job's in-flight tasks failed in a
-single statement and emits one event, for the job, so those tasks are never
-announced individually.
+When the job finishes, its task list is re-read once and any task not already
+printed is printed then. This is what makes a cancelled job print anything at
+all: `relay cancel` marks the job's in-flight tasks failed in a single statement
+and emits one event, for the job, so those tasks are never announced
+individually. If the job had **already** finished when the command started, that
+re-read is not made: the snapshot taken at subscribe time is itself the
+authoritative read, and every task in a finished job is finished in it.
+
+If a task is still **unfinished** in that final list - the job says it is over
+and the task says it is not - its log is printed anyway, since the rows that
+exist are worth more than silence, with a note on stderr saying the log is not
+final and a non-zero exit.
 
 If a page cannot be fetched, or cannot be written to stdout, `relay logs` prints
 a diagnostic on **stderr** naming the task, the last log sequence number it
@@ -818,9 +825,9 @@ relay: logs for task frame-001 (7e660488-...) are incomplete - stopped after seq
 error: logs incomplete for 1 of the job's tasks
 ```
 
-Exit codes: `0` when the job finishes `done` and every task that reached a
-terminal state had its log printed in full; `1` otherwise. A failed or cancelled
-job whose logs all printed exits 1 with no message - neither command prints the
+Exit codes: `0` when the job finishes `done`, every task's log printed in full,
+and no task was still unfinished when the job ended; `1` otherwise. A failed or
+cancelled job whose logs all printed exits 1 with no message - neither command prints the
 job's status (stdout carries task log lines, plus the job ID for `relay submit`),
 so run `relay get <job-id>` to see it. When the logs are incomplete as well, both
 facts are reported rather than one standing in for the other:
