@@ -178,9 +178,9 @@ func remoteAddr(ctx context.Context) string {
 // already has. THAT IS A CONSTRAINT ON WHERE THE FLUSH MAY BE CALLED, not an
 // observation about it: moving the flush after sendFinalStatus makes this
 // sentence false and pushes a one-byte chunk out of AppendTaskLog's status
-// allow-list and into the trailing-window carve-out this constant bounds. What can arrive after the terminal status is a
-// chunk enqueued after it: the WaitDelay orphan-writer race, and the
-// cancel/abandon cleanup paths.
+// allow-list and into the trailing-window carve-out this constant bounds.
+// What can arrive after the terminal status is a chunk enqueued after it: the
+// WaitDelay orphan-writer race, and the cancel/abandon cleanup paths.
 //
 // So: large enough that no ordinary agent-side delay truncates real output,
 // small enough that "forever" is genuinely closed. Override with
