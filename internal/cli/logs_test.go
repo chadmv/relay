@@ -1575,3 +1575,116 @@ func TestWatchJobLogs_ReconcileDoesNotAdoptANonTerminalStatus(t *testing.T) {
 	require.Empty(t, out.String())
 	require.Empty(t, errOut.String())
 }
+
+// fakeUUIDSpellingServer models the three things the real server does with a job
+// id, and the one thing it does not do.
+//
+//   - GET /v1/jobs/{id} accepts every spelling pgtype.UUID.Scan takes - hex is
+//     case-insensitive and the dashless 32-char form parses - and always answers
+//     with the canonical lowercase-dashed form uuidStr renders.
+//   - GET /v1/events?job_id= is deliberately NOT validated or canonicalised
+//     (there is a comment saying so at internal/api/events.go), and the broker's
+//     filter is an exact string compare (internal/events/broker.go), so a
+//     non-canonical spelling matches nothing that is published.
+//   - That stream is then held open with no heartbeat and no timeout, which is
+//     what turns "matches nothing" into a hang rather than an error.
+//
+// The accepted spellings are written out literally rather than derived from the
+// CLI's own canonicaliser. A fixture built out of the code under test cannot
+// detect drift in it.
+func fakeUUIDSpellingServer(t *testing.T, taskID string, terminalAtSubscribe bool) *httptest.Server {
+	t.Helper()
+	accepted := map[string]bool{
+		canonicalSpelling: true,
+		uppercaseSpelling: true,
+		dashlessSpelling:  true,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+			if !accepted[strings.TrimPrefix(r.URL.Path, "/v1/jobs/")] {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			status, taskStatus := "running", "running"
+			if terminalAtSubscribe {
+				status, taskStatus = "done", "done"
+			}
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     canonicalSpelling,
+				Status: status,
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: taskStatus}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if !terminalAtSubscribe && r.URL.Query().Get("job_id") == canonicalSpelling {
+				fmt.Fprintf(w, "event: task\ndata: {\"id\":%q,\"status\":\"done\"}\n\n", taskID)
+				fmt.Fprint(w, "event: job\ndata: {\"status\":\"done\"}\n\n")
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// No heartbeat, no timeout: exactly like handleEvents.
+			<-r.Context().Done()
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			writeTaskLogPage(w, r, oneFrameRows())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const (
+	canonicalSpelling = "7e660488-1234-4321-8888-abcdefabcdef"
+	uppercaseSpelling = "7E660488-1234-4321-8888-ABCDEFABCDEF"
+	dashlessSpelling  = "7e660488123443218888abcdefabcdef"
+)
+
+// A job id is argv, and an operator pastes whatever their source gave them. The
+// server takes all three spellings below and answers 200 with the right job, so
+// every one of them is a working `relay get`. Only the canonical one worked here,
+// and it failed in the worst way available: the id check compared the server's
+// canonical answer against the raw argv spelling and declared a correct response
+// unusable, and the SSE filter the non-canonical spelling subscribed to could
+// never match, so the command sat on an open stream forever with nothing on
+// either output.
+//
+// Both halves are covered: a job already FINISHED at subscribe time (where the
+// snapshot is the only reader) and one still RUNNING (where the stream is). The
+// running half is a hole this command shipped with; the finished half arrived
+// with the id check.
+func TestWatchJobLogs_NonCanonicalJobID_IsResolvedNotRejected(t *testing.T) {
+	for _, spelling := range []struct{ name, id string }{
+		{"canonical", canonicalSpelling},
+		{"uppercase", uppercaseSpelling},
+		{"dashless", dashlessSpelling},
+	} {
+		for _, phase := range []struct {
+			name     string
+			terminal bool
+		}{
+			{"already finished", true},
+			{"still running", false},
+		} {
+			t.Run(spelling.name+"/"+phase.name, func(t *testing.T) {
+				srv := fakeUUIDSpellingServer(t, "task-spelling", phase.terminal)
+				c := relayclient.NewClient(srv.URL, "tok")
+				// Its own deadline: a regression here is a HANG, and a hang
+				// without a bound wedges the suite instead of failing it.
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				var out, errOut strings.Builder
+				status, completeness, err := watchJobLogs(ctx, c, spelling.id, &out, &errOut)
+				require.NoError(t, err)
+				require.Equal(t, "done", status)
+				require.True(t, completeness.complete())
+				require.Equal(t, 1, strings.Count(out.String(), "[frame-001 stdout] frame rendered"))
+				require.Empty(t, errOut.String())
+			})
+		}
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"os"
 
 	"relay/internal/relayclient"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // taskLogPage mirrors the envelope GET /v1/tasks/{id}/logs returns
@@ -194,6 +196,44 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 	return ""
 }
 
+// canonicalJobID renders jobID in the one spelling the server uses for it, and
+// returns jobID unchanged when it is not a UUID at all (a typo, or a fixture id -
+// the server answers 400/404 for those and nothing downstream depends on the
+// value).
+//
+// The server accepts MORE spellings than it emits. parseUUID is
+// pgtype.UUID.Scan, which takes hex case-insensitively and takes the dashless
+// 32-char form too; uuidStr renders `%08x-%04x-%04x-%04x-%012x`, always
+// lowercase and always dashed. So `relay get 7E660488-...` and `relay get
+// 7e660488123443218888abcdefabcdef` are both working commands against the same
+// job.
+//
+// Two things here read the id and NEITHER tolerates a second spelling.
+// jobSnapshotUnusable compares the body's id against ours, so a canonical answer
+// to a non-canonical request reads as a response about a different job. And
+// handleEvents deliberately does not validate or canonicalise `?job_id=` (its own
+// comment says so, internal/api/events.go) while the broker filter is an exact
+// string compare (internal/events/broker.go), so a non-canonical subscription
+// matches nothing that is ever published - on a stream held open with no
+// heartbeat and no timeout, against a context with no deadline.
+//
+// Canonicalising ARGV, before either request line is built, is what covers both.
+// Adopting the id from the first usable snapshot instead would fix the
+// comparison and could not fix the subscription, since the subscription is
+// established before any snapshot is read - and reading one first to learn the id
+// reopens the terminal-before-subscribe race the snapshot exists to close. The
+// parse rule is not re-derived here: this calls the same pgtype.UUID.Scan the
+// server's parseUUID calls, so the two cannot drift.
+func canonicalJobID(jobID string) string {
+	var u pgtype.UUID
+	if err := u.Scan(jobID); err != nil || !u.Valid {
+		return jobID
+	}
+	b := u.Bytes
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 // jobPath and jobEventsPath build this command's two jobID-bearing request
 // lines. Both exist so the escaping is decided once, in the one place that knows
 // which context the id lands in.
@@ -234,6 +274,9 @@ func jobEventsPath(jobID string) string {
 // The returns are NAMED because the reconcile below is armed by a defer that
 // writes through them, not by a call at the bottom of the function.
 func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (finalStatus string, completeness logCompleteness, err error) {
+	// Once, before either request line is built and before anything compares an
+	// id. See canonicalJobID for the two readers that need it.
+	jobID = canonicalJobID(jobID)
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)
 	// snapshotWasFinal records that the SUBSCRIBE-time snapshot, not the stream,
