@@ -333,8 +333,10 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		return true
 	}
 
-	// reconcileFinalSnapshot runs once a terminal job status has been observed,
-	// and it is what makes the exit code's completeness claim true.
+	// reconcileFinalSnapshot runs when the STREAM is what reported the terminal
+	// job status, and it is what makes the exit code's completeness claim true on
+	// that path. When the subscribe-time snapshot reported it instead, that
+	// snapshot IS this read and no second one is made - see the defer below.
 	//
 	// A terminal job frame is the LAST thing the watch sees, and it is not preceded
 	// by a task frame for every task. Two paths reach a terminal job with tasks that
