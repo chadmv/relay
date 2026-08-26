@@ -535,6 +535,41 @@ def test_task_logs_page_cap_message_does_not_blame_the_server_when_total_is_reac
     assert "4 rows" in message
 
 
+def test_get_tasks_parses_a_bare_array() -> None:
+    """GET /v1/jobs/{id}/tasks is the SDK's ONLY bare-array read - it is the
+    last unpaginated list route the SDK calls, and handleListTasks writes a
+    make()d slice so an empty task list serializes as [] and never null.
+
+    It is not stable by construction. Its six paginated siblings all grew
+    page[T]; if this route follows them, get_tasks() breaks in exactly the way
+    task_logs() was broken, and today no test would notice. These four lines
+    make that a red suite instead of a red production.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "t1",
+                    "name": "cook",
+                    "status": "done",
+                    "commands": [["echo", "hi"]],
+                    "env": {},
+                    "requires": {},
+                    "timeout_seconds": None,
+                    "retries": 0,
+                    "retry_count": 0,
+                    "worker_id": None,
+                }
+            ],
+        )
+
+    client = _make_client(handler)
+    tasks = client.get_tasks("job-1")
+    assert [(t.id, t.name, t.status) for t in tasks] == [("t1", "cook", "done")]
+
+
 # ─── wait() ──────────────────────────────────────────────────────────────────
 
 
