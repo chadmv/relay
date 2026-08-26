@@ -98,6 +98,51 @@ def _log_rows(first: int, last: int) -> list[dict[str, Any]]:
 def _log_page(rows: list[dict[str, Any]], *, next_seq: int, total: int) -> dict[str, Any]:
     """The envelope: {items, next_seq, total}, keys hand-written."""
     return {"items": rows, "next_seq": next_seq, "total": total}
+def _serve_logs(
+    rows: list[dict[str, Any]], calls: list[dict[str, str]]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A behavioural simulator of handleGetTaskLogs (internal/api/tasks.go).
+
+    Four behaviours are load-bearing and each is asserted by a test below:
+
+      - ?since_seq is EXCLUSIVE - rows with seq > since_seq, because the SQL is
+        `WHERE task_id = $1 AND id > $2` (GetTaskLogsPage,
+        internal/store/query/tasks.sql).
+      - ?limit defaults to 50, and a value outside 1..200 is a 400. The handler
+        REJECTS, it does not clamp.
+      - next_seq is the last returned row's seq, zeroed whenever the page is
+        SHORT (len(items) < limit). So a full final page still carries a
+        non-zero cursor and one more request is needed to learn the log ended.
+      - total is the full row count, independent of the page.
+
+    Tests of the client's misbehaving-server stops do NOT use this - by
+    construction it cannot misbehave - and hand-write their own handler.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        calls.append(params)
+
+        limit = 50
+        if "limit" in params:
+            if not params["limit"].isdigit() or not 1 <= int(params["limit"]) <= 200:
+                return httpx.Response(400, json={"error": "limit must be 1..200"})
+            limit = int(params["limit"])
+
+        since = 0
+        if "since_seq" in params:
+            if not params["since_seq"].isdigit():
+                return httpx.Response(
+                    400, json={"error": "since_seq must be a non-negative integer"}
+                )
+            since = int(params["since_seq"])
+
+        page = [r for r in rows if r["seq"] > since][:limit]
+        next_seq = 0 if len(page) < limit else page[-1]["seq"]
+        return httpx.Response(200, json=_log_page(page, next_seq=next_seq, total=len(rows)))
+
+    return handler
+
 
 
 # ─── Auth & wiring ────────────────────────────────────────────────────────────
@@ -298,6 +343,75 @@ def test_task_logs_page_raises_on_a_bare_array_body() -> None:
     client = _make_client(handler)
     with pytest.raises(PydanticValidationError):
         client.task_logs_page("abc")
+
+
+def test_task_logs_pages_to_the_end_with_verbatim_cursor() -> None:
+    """450 rows at limit=200 is two full pages plus one short page.
+
+    The seq list is the strongest assertion available: it proves no row was
+    dropped AND none was returned twice. Because the seqs are contiguous, a
+    `since = next_seq + 1` mutation drops row 201 and a `- 1` returns row 200
+    twice, so both die here. The explicit since_seq assertions pin the same
+    property on the wire, where it cannot be argued about.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 450), calls))
+
+    logs = client.task_logs("abc")
+
+    assert [r.seq for r in logs] == list(range(1, 451))
+    assert len(calls) == 3
+    assert "since_seq" not in calls[0]
+    assert calls[1]["since_seq"] == "200"  # verbatim: next_seq, never next_seq + 1
+    assert calls[2]["since_seq"] == "400"
+
+
+def test_task_logs_sends_explicit_page_limit() -> None:
+    """Without an explicit limit the server default is 50 and a long log is
+    silently truncated at the first stop. Nothing else in this file would
+    notice, because the simulator still returns every row of a short fixture -
+    just in more requests. The wire assertion is the only kill.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 3), calls))
+
+    client.task_logs("abc")
+
+    assert calls[0]["limit"] == "200"
+
+
+def test_task_logs_exact_page_multiple_is_not_a_protocol_error() -> None:
+    """A log whose length is an exact multiple of the page size legitimately
+    produces a final EMPTY page - and that page reports drained, so the drained
+    arm returns before stop 1 can see it. This is the case stop 1 must NOT
+    catch, and it is the guard on the ORDER of those two arms.
+
+    The second request is not optional: a full final page always carries a
+    non-zero cursor, so the client cannot know it is done without asking again.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 200), calls))
+
+    logs = client.task_logs("abc")
+
+    assert [r.seq for r in logs] == list(range(1, 201))
+    assert len(calls) == 2
+    assert calls[1]["since_seq"] == "200"
+
+
+def test_task_logs_limit_caps_total_records() -> None:
+    """limit caps the TOTAL records, and it short-circuits: the fixture is 450
+    rows, so an implementation that walks the whole log and trims at the end
+    makes THREE requests. The request count is what proves the short-circuit;
+    the record count alone cannot.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 450), calls))
+
+    logs = client.task_logs("abc", limit=250)
+
+    assert [r.seq for r in logs] == list(range(1, 251))
+    assert len(calls) == 2
 
 
 # ─── wait() ──────────────────────────────────────────────────────────────────

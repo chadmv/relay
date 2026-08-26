@@ -55,6 +55,13 @@ class Client:
     # max limit and relayclient.PageRequestLimit so we minimize round-trips.
     _PAGE_REQUEST_LIMIT = 200
 
+    # Bounds the log paging loop against a server whose next_seq keeps advancing
+    # but which never reports the log as drained. 10000 pages at
+    # _PAGE_REQUEST_LIMIT rows is 2,000,000 rows: a hang bound, not a product
+    # limit. A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
+    # it - which means the loop must read it off `self`, not off a module global.
+    _MAX_LOG_PAGES = 10000
+
     def __init__(
         self,
         *,
@@ -284,11 +291,35 @@ class Client:
         # raises here rather than reading as "drained".
         return LogPage.model_validate(response.json())
 
-    def task_logs(self, task_id: str) -> list[LogRecord]:
-        self._require_token()
-        response = self._http.get(f"/v1/tasks/{task_id}/logs")
-        raise_for_response(response)
-        return [LogRecord.model_validate(item) for item in response.json()]
+    def task_logs(self, task_id: str, *, limit: Optional[int] = None) -> list[LogRecord]:
+        """Fetch a task's complete log, auto-paginating across pages.
+
+        ``limit`` caps the TOTAL number of records returned (None = all). Each
+        request fetches ``_PAGE_REQUEST_LIMIT`` rows; without that explicit
+        limit the server's default is 50 and a long log is silently truncated.
+
+        This accumulates the whole log in memory. ``relay logs`` does not - it
+        prints each page as it arrives - and this cannot, while returning a
+        list. On a very large log use :meth:`task_logs_page` (O(one page)) or
+        pass ``limit=``.
+        """
+        out: list[LogRecord] = []
+        since = 0
+        pages = 0
+        while True:
+            pages += 1
+            page = self.task_logs_page(
+                task_id, since_seq=since, limit=self._PAGE_REQUEST_LIMIT
+            )
+            out.extend(page.items)
+            if limit is not None and len(out) >= limit:
+                return out[:limit]
+            # Break on next_seq, never on len(items) < limit: the two agree
+            # today, but the second re-derives a rule the server already applied
+            # and desynchronizes the moment the drain rule moves.
+            if page.next_seq == 0:
+                return out
+            since = page.next_seq
 
     # ─── Following progress ───────────────────────────────────────────────
 
