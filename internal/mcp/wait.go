@@ -6,6 +6,8 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"relay/internal/relayclient"
 )
 
 const (
@@ -14,6 +16,13 @@ const (
 	defaultWaitPoll    = 2 * time.Second        // steady-state poll interval
 	fastWaitPoll       = 500 * time.Millisecond // poll interval during the fast phase
 	fastWaitCount      = 4                       // number of fast intervals before widening
+
+	// maxConsecutiveWaitFailures bounds how many polls in a row may fail
+	// transiently before the wait gives up and reports the last failure. It is
+	// consecutive, not cumulative: a server that answers in between resets it, so
+	// a flaky backend never exhausts it and a dead one is reported in about
+	// maxConsecutiveWaitFailures poll intervals instead of at the deadline.
+	maxConsecutiveWaitFailures = 5
 )
 
 // nextWaitInterval returns the inter-poll sleep for the given zero-based attempt.
@@ -74,44 +83,102 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 	path := fmt.Sprintf("/v1/jobs/%s", args.JobID)
 
 	var lastResp map[string]any
+	consecutiveFailures := 0
 	for attempt := 0; ; attempt++ {
-		if err := s.do(ctx, "GET", path, nil, &lastResp); err != nil {
-			return nil, MapError(err)
+		var resp map[string]any
+		if err := s.do(ctx, "GET", path, nil, &resp); err != nil {
+			// A poll failure is not automatically the wait's answer. This tool
+			// reads ONE field of this response, `status`, and a failure of
+			// anything else in it says nothing about the job being waited on -
+			// handleGetJob reads the task list on the same request and started
+			// reporting that read's failure as a 500 on 2026-08-26, where it had
+			// been a silently task-less 200 this loop never noticed. Ending a wait
+			// that may have been polling for minutes on one of those leaves the
+			// caller with nothing to do but start over.
+			//
+			// Only failures a later poll can outlive are tolerated. Everything
+			// else - a job that does not exist, an id the server rejects, a token
+			// that has expired, a permission the caller does not have - is as true
+			// on the hundredth read as on the first, so it ends the wait at once.
+			//
+			// The partition itself is relayclient.ErrorIsTransient, below both
+			// this loop and the identical decision `relay logs` makes about its
+			// subscribe-time snapshot. It used to be a copy here that read
+			// MapError's code; the two loops now share one, because two spellings
+			// of one partition drift.
+			terr := MapError(err)
+			if !relayclient.ErrorIsTransient(err) {
+				return nil, terr
+			}
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveWaitFailures {
+				return nil, terr
+			}
+			// lastResp is deliberately NOT cleared: it is the last thing actually
+			// known about the job, and it is what a timed_out answer reports.
+			switch waitUntilNextPoll(ctx, attempt, flatPoll, deadline) {
+			case waitPollCancelled:
+				return nil, &ToolError{Code: "cancelled", Message: "context cancelled"}
+			case waitPollDeadline:
+				if lastResp == nil {
+					// Nothing was ever learned about the job, so there is no state
+					// to hand back and the failure is the whole answer.
+					return nil, terr
+				}
+				return map[string]any{"timed_out": true, "last_state": lastResp}, nil
+			}
+			continue
 		}
+		consecutiveFailures = 0
+		lastResp = resp
 		status, _ := lastResp["status"].(string)
 		if terminalStatuses[status] {
 			return lastResp, nil
 		}
 
-		// Check if we've hit the deadline.
-		if !time.Now().Before(deadline) {
-			return map[string]any{
-				"timed_out":  true,
-				"last_state": lastResp,
-			}, nil
-		}
-
-		poll := flatPoll
-		if poll == 0 {
-			poll = nextWaitInterval(attempt)
-		}
-
-		remaining := time.Until(deadline)
-		waitFor := poll
-		if remaining < poll {
-			waitFor = remaining
-		}
-		if waitFor <= 0 {
-			return map[string]any{
-				"timed_out":  true,
-				"last_state": lastResp,
-			}, nil
-		}
-
-		select {
-		case <-ctx.Done():
+		switch waitUntilNextPoll(ctx, attempt, flatPoll, deadline) {
+		case waitPollCancelled:
 			return nil, &ToolError{Code: "cancelled", Message: "context cancelled"}
-		case <-time.After(waitFor):
+		case waitPollDeadline:
+			return map[string]any{
+				"timed_out":  true,
+				"last_state": lastResp,
+			}, nil
 		}
+	}
+}
+
+// waitPollOutcome is what the sleep between two polls decided.
+type waitPollOutcome int
+
+const (
+	waitPollContinue waitPollOutcome = iota
+	waitPollDeadline
+	waitPollCancelled
+)
+
+// waitUntilNextPoll sleeps until the next poll is due, the deadline arrives, or
+// the context is cancelled. Both callers in the loop share it: the successful
+// poll and the tolerated failure sleep on the same schedule and honour the same
+// deadline, and a copy of this at each site is a pair that can drift.
+func waitUntilNextPoll(ctx context.Context, attempt int, flatPoll time.Duration, deadline time.Time) waitPollOutcome {
+	if !time.Now().Before(deadline) {
+		return waitPollDeadline
+	}
+	poll := flatPoll
+	if poll == 0 {
+		poll = nextWaitInterval(attempt)
+	}
+	if remaining := time.Until(deadline); remaining < poll {
+		poll = remaining
+	}
+	if poll <= 0 {
+		return waitPollDeadline
+	}
+	select {
+	case <-ctx.Done():
+		return waitPollCancelled
+	case <-time.After(poll):
+		return waitPollContinue
 	}
 }

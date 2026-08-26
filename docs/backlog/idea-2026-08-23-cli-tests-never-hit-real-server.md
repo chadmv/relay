@@ -81,6 +81,26 @@ Raised `low` -> `medium` on 2026-08-25. The original priority was set before any
 instance existed; the measured cost is now one wholly broken subcommand plus one broken SDK
 method, both attributable to this gap.
 
+## Second instance, measured 2026-08-26
+
+`bug-2026-08-25-relay-logs-prints-nothing-envelope-drift` is now **fixed**, and fixing it is the
+sharpest measurement this item has. The point fix replaced four hand-written bare-array literals
+with one `writeTaskLogPage` helper that simulates `handleGetTaskLogs`, with json tags deliberately
+independent of the production types so a wrong tag cannot make both sides agree. That is a strictly
+better single point of failure and it is still a simulator: `internal/cli/logs_test.go` grew from 8
+tests to 42 and about 1,996 lines, so substantially MORE fixture logic now goes unexercised against
+a real server than before the fix.
+
+`writeTaskLogPage` is the seam a real-server lane would replace. It is the single place that shapes
+the fake envelope, so pointing the existing `httptest.NewServer` fixtures at a live `relay-server`
+plus a Postgres container keeps the assertions and swaps the seam, rather than a rewrite.
+
+**Priority should NOT move again.** It went `low` -> `medium` on two live instances, and both are
+now fixed or filed. The residual risk is prospective, and the closing cost is unchanged: `internal/cli`
+has zero `//go:build integration` files and no testcontainers usage, so a real-server lane means
+introducing that dependency into a package that has none. That is an infrastructure lift, correctly
+scoped as its own item rather than folded into a bugfix.
+
 ## Related
 - [[bug-2026-08-25-relay-logs-prints-nothing-envelope-drift]] and
   [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] - the two confirmed instances

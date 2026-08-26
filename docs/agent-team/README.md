@@ -7,7 +7,7 @@ relay. Design spec: `docs/superpowers/specs/2026-06-18-agent-team-design.md`.
 
 | Agent | Role | Edits code? |
 |-------|------|-------------|
-| `relay-tpm` | Spec, roadmap/strategy, design-time security/scalability, retro + backlog triage | No (docs only) |
+| `relay-tpm` | Spec, roadmap/strategy, design-time security/scalability, backlog triage | No (docs only) |
 | `relay-planner` | Implementation plan via writing-plans; declares FE/BE independence | No (docs only) |
 | `relay-backend-engineer` | Go backend under TDD + Invariants | Yes |
 | `relay-frontend-engineer` | React/Vite SPA | Yes |
@@ -26,7 +26,7 @@ Phase 2  PLAN         relay-planner (writing-plans)       -> impl plan         *
 Phase 3  IMPLEMENT    backend + frontend (parallel*)      -> code + tests
 Phase 4  VERIFY       /code-review + 4 agents (parallel)  -> findings          loop to 3 if fails
 Phase 5  INTEGRATE    finishing-a-development-branch       -> merge / PR        * GATE
-Phase 6  RETRO        relay-tpm (retro + backlog)         -> retro + backlog items
+Phase 6  RETRO        CONDUCTOR runs /retro (never an agent) -> retro + backlog items
 ```
 
 The conductor is the main interactive session. It runs one phase, reads the
@@ -98,8 +98,27 @@ plan").
   assertions the conductor could not check.
 
   Confirmed findings route back to the owning engineer, then re-verify until clean.
+
+  **After a fix round, the verify lens's primary subject is the FIX'S OWN DIFF, not
+  the original defect.** State it as the round's opening question: "what does this
+  round's new code do with the input that produced the original symptom?" On
+  2026-08-26 three consecutive fix rounds each introduced a regression in their own
+  newest code, and each was found by the NEXT round reviewing the previous round's
+  diff - a task-less 200 read as "nothing owed" by the reconcile written to close the
+  omission, a non-canonical id hanging on the SSE filter after that reconcile made the
+  snapshot authoritative, and a 404 retried by the retry added for transient failures.
+  The fourth round is the only evidence the sequence terminates. Scope the re-verify
+  to the new delta and say so, rather than re-reviewing ground two lenses already
+  covered.
 - **Phase 5** uses the finishing-a-development-branch skill.
-- **Phase 6** is TPM-owned; backlog acceptance keeps the human as final approver,
+- **Phase 6 runs in the CONDUCTOR's own session. Do NOT dispatch it to `relay-tpm`
+  or any other agent.** The `/retro` skill stops partway to present the human with
+  the backlog candidates and the promotion candidates, then waits for a decision. A
+  subagent has no one to present to, so dispatching it silently skips those steps -
+  and the promotion step is the only thing that gives a lesson a life beyond the next
+  session. Measured on 2026-08-26: the retro was dispatched to `relay-tpm`, eight
+  promotion candidates were never offered, and the conductor promoted one lesson
+  unilaterally without asking. Backlog acceptance keeps the human as final approver,
   and closing backlog items requires the git mv to docs/backlog/closed/.
 
 ## Read every handed-down artifact once for contradiction, before acting on it

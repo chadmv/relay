@@ -651,7 +651,17 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := store.Job{ID: row.ID, Name: row.Name, Priority: row.Priority, Status: row.Status, SubmittedBy: row.SubmittedBy, Labels: row.Labels, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
-	tasks, _ := s.q.ListTasksByJob(ctx, row.ID)
+	// Checked, like every other read on this handler. Discarded, a transient
+	// failure here (pool exhaustion, statement timeout, a cancelled context)
+	// answered 200 with `tasks` absent, since jobResponse's field is omitempty -
+	// and a task-less 200 is the one failure shape a client cannot tell from a
+	// real answer. relay logs' final reconcile was built on top of exactly that
+	// body and reported the job fully reconciled, exit 0 and silent.
+	tasks, err := s.q.ListTasksByJob(ctx, row.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
 
 	uuidToName := make(map[pgtype.UUID]string, len(tasks))
 	for _, t := range tasks {

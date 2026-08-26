@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,6 +21,41 @@ type ResponseError struct {
 }
 
 func (e *ResponseError) Error() string { return e.Message }
+
+// ErrorIsTransient reports whether an identical request made later could
+// plausibly get a different answer. err must be non-nil - it is the error one of
+// this package's own calls returned.
+//
+// It lives here rather than in either caller because two independent poll loops
+// need the SAME partition and a second copy of it would drift: internal/mcp's
+// relay_wait_for_job decides with it whether to keep polling, and internal/cli's
+// `relay logs` decides with it whether the subscribe-time job snapshot is worth
+// asking for again or is the command's answer. It is a property of the HTTP
+// response, which is this package's subject, and neither loop's own idea.
+//
+// Anything that is not a ResponseError never reached a handler at all - a dial
+// failure, a reset connection, a body that would not decode - so a later request
+// can outlive it. Among the answers a handler DID give, the permanent ones are
+// the ones that name a fact about the request rather than about the server's
+// moment: a malformed id, an expired token, a permission the caller does not
+// have, an entity that does not exist, a conflicting change.
+//
+// Everything else - 429, 5xx, and any status not enumerated - is transient.
+// That direction is deliberate: an unrecognised status keeps the caller waiting
+// on a server that may yet answer, where the other direction would report a
+// permanent failure nobody established.
+func ErrorIsTransient(err error) bool {
+	var re *ResponseError
+	if !errors.As(err, &re) {
+		return true
+	}
+	switch re.StatusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusConflict:
+		return false
+	}
+	return true
+}
 
 // Client wraps *http.Client with a base URL and Bearer token.
 type Client struct {

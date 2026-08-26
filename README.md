@@ -683,7 +683,7 @@ Set the printed token as `RELAY_AGENT_ENROLLMENT_TOKEN` when starting the agent 
 Submit a job from a JSON file.
 
 ```sh
-relay submit job.json          # submit and tail logs until done
+relay submit job.json          # submit, then print each task's log as it finishes
 relay submit --detach job.json # submit and print job ID, then exit
 ```
 
@@ -726,7 +726,7 @@ relay submit --detach job.json # submit and print job ID, then exit
 | `tasks[].depends_on` | No | List of task names that must complete before this one starts |
 | `tasks[].source` | No | Workspace source spec — agent prepares this before running the task. See [Source workspaces](#source-workspaces). |
 
-When submitted without `--detach`, the CLI streams logs to stdout and exits with code 0 when all tasks succeed, or non-zero if any fail.
+When submitted without `--detach`, the CLI prints the job ID and then waits for the job, printing each task's log to stdout once that task finishes. It is the same mechanism as [`relay logs`](#relay-logs) - not a live stream; log content is fetched over REST per finished task - and it has the same exit codes, so a job that finished `done` but whose log could not be fetched in full exits non-zero.
 
 ---
 
@@ -775,7 +775,14 @@ relay cancel <job-id> --force   # tree-kill, skip drain, skip cleanup
 
 #### `relay logs`
 
-Stream task logs for a running or completed job via Server-Sent Events.
+Watch a job until it finishes, printing each task's log once that task reaches a
+terminal state.
+
+The command subscribes to `/v1/events?job_id=<id>`, which carries job and task
+**status** frames only - `task_log` frames require a subscription that names an
+explicit `task_id` (see the event table under "Events"). Log content is fetched
+over REST from `GET /v1/tasks/{id}/logs` once a task goes terminal, so output
+arrives in a burst per finished task rather than live, line by line.
 
 ```sh
 relay logs <job-id>
@@ -787,6 +794,55 @@ Output format:
 [frame-001 stdout] Blender 4.0, blender.org
 [frame-001 stdout] Read blend: scene.blend
 [frame-001 stderr] Warning: deprecated API call
+```
+
+A task's log is paged to the end of what the server had stored **at the moment it
+was fetched**, so a log longer than one page is printed in full. That fetch
+happens once, as the task goes terminal; its agent may still append for up to
+`RELAY_TASKLOG_TRAILING_WINDOW` (default 15m) afterwards, so re-run `relay logs`
+on the finished job to pick up late output.
+
+When the job finishes, its task list is re-read once and any task not already
+printed is printed then. This is what makes a cancelled job print anything at
+all: `relay cancel` marks the job's in-flight tasks failed in a single statement
+and emits one event, for the job, so those tasks are never announced
+individually. The re-read is also what covers a subscribe-time snapshot that
+could not be read at all, since the command then knows nothing about the job
+until the stream ends.
+
+The one case that skips it is a job that had **already** finished when the
+command started: the snapshot taken at subscribe time is itself the authoritative
+read, and every task it listed has already been printed from it.
+
+If a task is still **unfinished** in the final list - the job says it is over and
+the task says it is not - its log is printed anyway, since the rows that exist
+are worth more than silence, with a note on stderr saying the log is not final
+and a non-zero exit. That note is printed whether or not the fetch itself
+succeeded; a log can be short for both reasons at once, and the task is still
+counted once.
+
+The job id may be given in any spelling the server accepts, including uppercase
+hex and the dashless 32-character form.
+
+If a page cannot be fetched, or cannot be written to stdout, `relay logs` prints
+a diagnostic on **stderr** naming the task, the last log sequence number it
+printed and how much of the log is missing, keeps watching the job's other tasks,
+and exits 1:
+
+```
+relay: logs for task frame-001 (7e660488-...) are incomplete - stopped after seq 4200 (4200 of 91340 rows): fetching page 22: get task logs failed
+error: logs incomplete for 1 of the job's tasks
+```
+
+Exit codes: `0` when the job finishes `done`, every task's log printed in full,
+and no task was still unfinished when the job ended; `1` otherwise. A failed or
+cancelled job whose logs all printed exits 1 with no message - neither command prints the
+job's status (stdout carries task log lines, plus the job ID for `relay submit`),
+so run `relay get <job-id>` to see it. When the logs are incomplete as well, both
+facts are reported rather than one standing in for the other:
+
+```
+error: job finished failed; logs incomplete for 1 of the job's tasks
 ```
 
 ---
@@ -1229,6 +1285,11 @@ Write tools (any logged-in user):
 | `relay_run_schedule_now` | Fire a schedule immediately (owner or admin). |
 
 Calls that map to admin-only endpoints return a `forbidden` error when invoked by a non-admin token.
+
+`relay_wait_for_job` tolerates a transient failure of its poll (a 5xx, a network
+error, a 429) and keeps waiting, giving up only after five consecutive failures
+or at the timeout. A failure a later poll cannot outlive - a 404, a 400, an
+expired token, a permission the caller does not have - ends the wait immediately.
 
 The four list tools (`relay_list_jobs`, `relay_list_workers`, `relay_list_schedules`, `relay_list_reservations`) accept an optional `sort` parameter; see [Configurable sort order](#configurable-sort-order) for the per-endpoint allowlist.
 
