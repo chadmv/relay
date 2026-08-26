@@ -1868,3 +1868,40 @@ func TestWatchJobLogs_UnfinishedTaskWithAFailingLogFetch_SaysBothAndCountsOne(t 
 	require.Contains(t, errOut.String(), "was still preparing when job",
 		"the task had not finished either, and that is a different fact about the same rows")
 }
+
+// A stream that never opened has an error, and that error is the answer. The
+// defer's `err != nil` guard is the whole of what keeps it: without it the
+// transport failure falls through to the connection-lost line below, which
+// overwrites the one actionable half of what happened. A 502 on the subscribe, a
+// 401, a reset connection and `bufio.Scanner: token too long` all arrive on this
+// path and all of them name a different remedy; "job may still be running" names
+// none.
+//
+// The guard's own comment argues for it correctly, and an argument is not a test:
+// mutating it to `if false` left every package in internal/cli green.
+func TestWatchJobLogs_StreamTransportFailure_KeepsItsOwnError(t *testing.T) {
+	jobID := "job-502"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/v1/events" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		t.Errorf("unexpected request %s %s - the subscribe never succeeded", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, _, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "502",
+		"the transport failure's own text is what tells the operator what to fix")
+	require.NotContains(t, err.Error(), "connection lost",
+		"a subscribe that never returned 200 is not a connection that was lost mid-watch")
+	require.Empty(t, status)
+	require.Empty(t, out.String())
+}
