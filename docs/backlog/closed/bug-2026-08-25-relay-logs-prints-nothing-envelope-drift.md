@@ -1,8 +1,10 @@
 ---
 title: relay logs prints nothing for any job - the CLI decodes a bare array from an envelope endpoint and swallows the error
 type: bug
-status: open
+status: closed
 created: 2026-08-25
+closed: 2026-08-26
+resolution: fixed
 priority: high
 source: Production use in another environment, 2026-08-25 - `relay logs` returned no output for a job whose logs the web UI could show
 ---
@@ -112,3 +114,38 @@ What remains CLI-local, and is in scope for THIS item's fix: `printTaskLogs` pri
 `[<task> <stream>] <content>`, so an interior `\r` in the content returns the terminal cursor over
 its own prefix. Decide what that line should do - the agent-side change does not address it,
 because an interior CR is legitimate progress-bar output rather than a line terminator.
+
+## Resolution
+Fixed across `b17e2c4..5e98f1a`. `printTaskLogs` decodes the envelope into a named
+`taskLogPage`, pages to the end on `next_seq` under two bounds (a non-advancing cursor
+and `maxLogPages`), and a fetch failure is now loud on stderr with a non-zero exit
+instead of a silent bare return. All four fixture servers in `internal/cli/logs_test.go`
+route through one `writeTaskLogPage` helper that simulates `handleGetTaskLogs`, with
+hand-written json tags deliberately independent of the production types, so a wrong tag
+cannot make both sides agree and stay green - proven by mutation.
+
+Four rounds of Phase 4 review widened the fix well past the decode, because each round
+found the item's own headline symptom ("prints nothing") still reachable by another door:
+
+- `relay submit` shares `watchJobLogs` and the spec missed it entirely.
+- A cancelled job printed nothing at all: `CancelJobTasks` flips tasks to `failed` in one
+  statement and publishes only a `job` frame, so no task event ever fires. Closed by
+  `reconcileFinalSnapshot`, which re-reads the authoritative final task list before
+  returning. The same fix closes a race where a `job done` frame overtakes a `task` frame.
+- `GET /v1/jobs/{id}` swallowed `ListTasksByJob`'s error and answered 200 with no tasks,
+  which the reconcile read as "nothing owed" - the original bug's shape, in the backstop
+  written to close it. Fixed on both sides.
+- A non-canonical job id (uppercase or dashless UUID) hung forever: the server canonicalises
+  what it returns while `handleEvents` does not canonicalise `?job_id=` and the broker
+  filter is an exact string compare. `canonicalJobID` resolves argv to the server's own
+  spelling, closing a pre-existing hole as well.
+- A job id the server rejects (404) was retried and then waited on forever. Now classified
+  via the shared `relayclient.ErrorIsTransient` and ended at once.
+
+The completeness signal is `logCompleteness{incompleteTasks, unreconciled}`, which covers
+omissions and not just fetch failures, so the documented exit-0 contract is true. `relay
+submit` and `relay logs` both got the loud path. Rendering (chunk reassembly, interior CR,
+terminal-escape neutralisation) was deliberately left out of scope and is filed separately.
+
+Confirms [[idea-2026-08-23-cli-tests-never-hit-real-server]] as a second production
+instance; the `writeTaskLogPage` helper is the seam a real-server lane would replace.
