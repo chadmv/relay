@@ -194,6 +194,27 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 	return ""
 }
 
+// jobPath and jobEventsPath build this command's two jobID-bearing request
+// lines. Both exist so the escaping is decided once, in the one place that knows
+// which context the id lands in.
+//
+// jobID is args[0]: typed by whoever ran the command, or pasted from wherever
+// they got it. It is the only untrusted input this file has, and it reached all
+// three of these request lines raw while printTaskLogs escaped the ONE id that
+// was a gen_random_uuid() primary key the server had just handed back.
+//
+// The two contexts need different escapers and the difference is not cosmetic.
+// In a path a `/` reroutes the request to another endpoint on the same host with
+// the operator's bearer token attached. In a query string an `&` or `#`
+// truncates the request or injects a parameter the handler will read.
+func jobPath(jobID string) string {
+	return "/v1/jobs/" + url.PathEscape(jobID)
+}
+
+func jobEventsPath(jobID string) string {
+	return "/v1/events?job_id=" + url.QueryEscape(jobID)
+}
+
 // watchJobLogs subscribes to SSE events for jobID, then takes a snapshot so a job
 // that went terminal before the subscribe is still caught (the broker has no replay).
 // When a task reaches a terminal state its logs are fetched and printed once.
@@ -286,7 +307,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// and handle it here. Returning false stops the stream when the job is done.
 	onSubscribed := func() bool {
 		var job jobResp
-		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+		if err := c.Do(ctx, "GET", jobPath(jobID), nil, &job); err != nil {
 			// Fall through to the stream; a transient snapshot error should not abort.
 			// taskNames stays empty here, so any subsequent stream task event prints
 			// with a blank name - acceptable on this degraded path (the stream event
@@ -337,7 +358,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// question, not this one's, and the answer differs by job status - see there.
 	reconcileFinalSnapshot := func() {
 		var job jobResp
-		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
+		if err := c.Do(ctx, "GET", jobPath(jobID), nil, &job); err != nil {
 			// Unlike the onSubscribed snapshot, this failure is NOT survivable by
 			// falling through. There the stream was still ahead and could deliver
 			// everything the snapshot would have; here there is no stream left, so a
@@ -419,7 +440,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		reconcileFinalSnapshot()
 	}()
 
-	if err = c.StreamEvents(ctx, "/v1/events?job_id="+jobID, onSubscribed, handler); err != nil {
+	if err = c.StreamEvents(ctx, jobEventsPath(jobID), onSubscribed, handler); err != nil {
 		return "", completeness, err
 	}
 	if finalStatus == "" {
@@ -493,10 +514,13 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 	since := int64(0)
 	for pages := 1; ; pages++ {
 		// The id is escaped rather than concatenated. It is a gen_random_uuid()
-		// primary key that came from the same server this request goes to, so this
-		// is not exploitable today; escaping removes the class instead of resting
-		// the argument on that provenance, since a crafted id would otherwise
-		// reach a different endpoint on the host with the bearer token attached.
+		// primary key that came from the same server this request goes to, so a
+		// crafted value does not reach here today; escaping means the argument does
+		// not rest on that provenance.
+		//
+		// It does NOT remove the class from this command, and the comment used to
+		// say it did. The class lives on jobID, which is args[0] - see jobPath and
+		// jobEventsPath, which are where it is actually covered.
 		path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d",
 			url.PathEscape(taskID), since, relayclient.PageRequestLimit)
 		var page taskLogPage

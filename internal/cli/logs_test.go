@@ -1457,3 +1457,58 @@ func TestWatchJobLogs_EveryTerminalTaskStatusPrintsCleanly(t *testing.T) {
 		})
 	}
 }
+
+// The job id is args[0] - typed by whoever ran the command, or pasted from
+// wherever they got it - and it reached three request lines raw while the ONE id
+// that was escaped was the gen_random_uuid() primary key the server itself had
+// just handed back. The exploit string below is the one the task-id test already
+// used, applied to the reachable argument.
+//
+// Two contexts, two escapers. On the two paths a `/` reroutes the request to
+// another endpoint on the same host with the operator's bearer token attached;
+// in the events query string an `&` or `#` truncates the request or injects a
+// parameter the handler will read.
+func TestWatchJobLogs_JobIDIsEscapedInEveryRequest(t *testing.T) {
+	var mu sync.Mutex
+	var uris []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		uris = append(uris, r.RequestURI)
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	// The empty bodies make every read fail, so this exercises the request lines
+	// and nothing else. The watch ends with "connection lost", which is expected.
+	_, _, err := watchJobLogs(ctx, c, "../admin/secret&x=1", &out, &errOut)
+	require.Error(t, err)
+
+	mu.Lock()
+	got := append([]string(nil), uris...)
+	mu.Unlock()
+	require.Len(t, got, 2, "one job snapshot and one events subscription")
+
+	var jobsURI, eventsURI string
+	for _, u := range got {
+		if strings.HasPrefix(u, "/v1/events") {
+			eventsURI = u
+		} else {
+			jobsURI = u
+		}
+	}
+	require.NotEmpty(t, jobsURI)
+	require.NotEmpty(t, eventsURI)
+
+	for _, u := range got {
+		require.NotContains(t, u, "/v1/admin/secret",
+			"a crafted id must not reroute the request to another endpoint on the host")
+	}
+	require.Contains(t, jobsURI, "%2F", "the id's separators must be escaped, not path segments")
+	require.NotContains(t, eventsURI, "&x=1",
+		"a crafted id must not inject a second query parameter")
+}
