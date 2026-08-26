@@ -296,9 +296,13 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// diagnostic per failing task, naming the task, the task id and the last
 	// seq written; the error's own text is the reason it stopped.
 	//
-	// It returns whether the whole log reached out, so a caller with its OWN
-	// reason to call that task's log incomplete does not count the same task
-	// twice.
+	// It returns whether the whole log reached out. That boolean has exactly one
+	// job: it stops a caller with its OWN reason to call the same task's log
+	// incomplete from COUNTING that task twice. incompleteTasks counts tasks, not
+	// reasons, and one task with two things wrong with it is still one task.
+	//
+	// It decides no diagnostic. A caller's reason is a different fact about the
+	// same rows and the operator is owed both of them.
 	emit := func(taskID, taskName string) bool {
 		progress, err := printTaskLogs(ctx, c, taskID, taskName, out)
 		if err != nil {
@@ -344,11 +348,21 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 				continue
 			}
 			printed[t.ID] = true
-			if emit(t.ID, taskNames[t.ID]) && !terminal {
+			whole := emit(t.ID, taskNames[t.ID])
+			if terminal {
+				continue
+			}
+			// Said whatever emit said, because it is a different fact: emit
+			// reports that the FETCH stopped early, this reports that the rows
+			// themselves were never final. An operator told only the first
+			// concludes the task had finished and its log was merely unavailable.
+			fmt.Fprintf(errOut,
+				"relay: task %s (%s) was still %s when job %s ended, so its log is not final\n",
+				taskNames[t.ID], t.ID, t.Status, jobID)
+			// Counted only if emit did not already count it. This is the whole
+			// purpose of emit's return value.
+			if whole {
 				completeness.incompleteTasks++
-				fmt.Fprintf(errOut,
-					"relay: task %s (%s) was still %s when job %s ended, so its log is not final\n",
-					taskNames[t.ID], t.ID, t.Status, jobID)
 			}
 		}
 	}

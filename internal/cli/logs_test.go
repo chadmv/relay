@@ -365,8 +365,11 @@ func TestWatchJobLogs_AlreadyCancelled_ReturnsCancelled(t *testing.T) {
 	require.Equal(t, "cancelled", status)
 }
 
-// fakeLogsFailServer serves a terminal job whose logs route always 500s.
-func fakeLogsFailServer(t *testing.T, jobID, taskID, jobStatus string) *httptest.Server {
+// fakeLogsFailServer serves a terminal job whose logs route always 500s. The
+// task's own status is a parameter because a task that is NOT terminal in a
+// terminal job is the input where the two reasons to call a log incomplete
+// coincide.
+func fakeLogsFailServer(t *testing.T, jobID, taskID, jobStatus, taskStatus string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -374,7 +377,7 @@ func fakeLogsFailServer(t *testing.T, jobID, taskID, jobStatus string) *httptest
 			json.NewEncoder(w).Encode(jobResp{
 				ID:     jobID,
 				Status: jobStatus,
-				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: taskStatus}},
 			})
 
 		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
@@ -390,7 +393,7 @@ func fakeLogsFailServer(t *testing.T, jobID, taskID, jobStatus string) *httptest
 // with nothing on either stream - the exact production symptom.
 func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 	jobID, taskID := "job-500", "task-500"
-	srv := fakeLogsFailServer(t, jobID, taskID, "done")
+	srv := fakeLogsFailServer(t, jobID, taskID, "done", "done")
 
 	c := relayclient.NewClient(srv.URL, "tok")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -861,7 +864,7 @@ func TestWatchJobLogs_FinalSnapshotUnreadable_RefusesToClaimCompleteness(t *test
 // is otherwise silent by design.
 func TestRunLogs_FailedJobWithIncompleteLogs_ReportsBoth(t *testing.T) {
 	jobID, taskID := "job-both", "task-both"
-	srv := fakeLogsFailServer(t, jobID, taskID, "failed")
+	srv := fakeLogsFailServer(t, jobID, taskID, "failed", "done")
 
 	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1830,4 +1833,38 @@ func TestWatchJobLogs_SubscribeSnapshotEstablishedNothing_ReconcileStillRuns(t *
 	var out2, errOut2 strings.Builder
 	require.NoError(t, doLogs(ctx, cfg, []string{jobID}, &out2, &errOut2))
 	require.Contains(t, out2.String(), "[frame-001 stdout] frame rendered")
+}
+
+// The one input where emitSnapshot's two reasons to call a task's log incomplete
+// coincide: a terminal job, a task still non-terminal in its snapshot, and a log
+// fetch that fails. Each reason had a test; their intersection had none, so
+// emit's return value could be inverted here and the whole suite stayed green.
+//
+// Two things are owed and they are not the same thing.
+//
+//   - The COUNT is one. incompleteTasks counts TASKS whose log is not fully on
+//     stdout, not reasons, and one task with two reasons is still one task. That
+//     is what emit's boolean is for and it is now its only job.
+//   - Both DIAGNOSTICS are owed. The operator who reads "logs for frame-001 are
+//     incomplete: fetching page 1 failed" and nothing else concludes the task
+//     finished and its log was unavailable. It had not finished. The rows they
+//     eventually retrieve will be short for a second reason nobody mentioned.
+func TestWatchJobLogs_UnfinishedTaskWithAFailingLogFetch_SaysBothAndCountsOne(t *testing.T) {
+	jobID, taskID := "job-both", "task-both"
+	srv := fakeLogsFailServer(t, jobID, taskID, "cancelled", "preparing")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", status)
+	require.Equal(t, 1, completeness.incompleteTasks,
+		"one task is one task however many things are wrong with it")
+	require.Contains(t, errOut.String(), "are incomplete",
+		"the log fetch failed and the operator is told so")
+	require.Contains(t, errOut.String(), "was still preparing when job",
+		"the task had not finished either, and that is a different fact about the same rows")
 }
