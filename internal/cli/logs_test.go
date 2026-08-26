@@ -987,6 +987,14 @@ func TestWatchJobLogs_ExactlyCapManyPages_MessageDoesNotBlameTheServer(t *testin
 	require.Contains(t, errOut.String(), "client",
 		"the cap is the client's, and this input is a server that behaved perfectly")
 	require.NotContains(t, errOut.String(), "the server never reported the log as drained")
+
+	// And it must not contradict the count printed in the same sentence. The
+	// caller prepends "(400 of 400 rows)" from the envelope's own total, so
+	// "the log may be longer than 400 rows" in the clause after it re-raises the
+	// exact ambiguity that pair exists to resolve.
+	require.Contains(t, errOut.String(), "(400 of 400 rows)")
+	require.NotContains(t, errOut.String(), "may be longer than 400 rows",
+		"the server's own total says 400 and 400 printed; nothing here is unknown")
 }
 
 // failingWriter is a stdout that cannot be written to: a full disk, a closed
@@ -1511,4 +1519,59 @@ func TestWatchJobLogs_JobIDIsEscapedInEveryRequest(t *testing.T) {
 	require.Contains(t, jobsURI, "%2F", "the id's separators must be escaped, not path segments")
 	require.NotContains(t, eventsURI, "&x=1",
 		"a crafted id must not inject a second query parameter")
+}
+
+// The reconcile makes an authoritative read of the whole job and used only its
+// task list. A job that emitted a `failed` frame and was then retried is
+// `running` again by the time that read lands, and reporting the stale frame is
+// a worse answer than the one already in hand.
+//
+// Only a TERMINAL fresh status is adopted. watchOutcomeError's vocabulary is
+// terminal-only - "job finished running" is nonsense - and a non-terminal fresh
+// status means the job was restarted after this watch's job frame, which does
+// not make that frame untrue about the moment it described.
+func TestWatchJobLogs_ReconcileAdoptsTheFresherJobStatus(t *testing.T) {
+	jobID, taskID := "job-restatus", "task-restatus"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		// The stream said `failed`; by the reconcile the last task had finished
+		// and RecomputeJobStatus had settled the job on `done`.
+		{ID: jobID, Status: "done", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}}},
+	}, "event: job\ndata: {\"status\":\"failed\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status,
+		"the reconcile looked straight at the job's current status; reporting the frame's is stale by choice")
+	require.True(t, completeness.complete())
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+}
+
+// The other direction. A non-terminal fresh status is NOT adopted: the job was
+// restarted after the frame this watch saw, and "job finished running" is not a
+// sentence watchOutcomeError can produce. The frame's status stays.
+func TestWatchJobLogs_ReconcileDoesNotAdoptANonTerminalStatus(t *testing.T) {
+	jobID, taskID := "job-retried", "task-retried"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+	}, "event: job\ndata: {\"status\":\"failed\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "failed", status)
+	require.True(t, completeness.complete(),
+		"the job is running again, so its non-terminal task is owed nothing")
+	require.Empty(t, out.String())
+	require.Empty(t, errOut.String())
 }

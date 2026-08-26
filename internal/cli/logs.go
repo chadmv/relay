@@ -379,6 +379,19 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			return
 		}
 		emitSnapshot(job)
+		// This read is the freshest thing the watch has, and the status came with
+		// it. A job that emitted a `failed` frame and was then retried can be
+		// `done` or `running` by now, and reporting the frame's status is stale by
+		// choice when the fresher one is already in hand.
+		//
+		// Only a TERMINAL status is adopted. watchOutcomeError's vocabulary is
+		// terminal-only, so "job finished running" is not a sentence it can
+		// produce; and a non-terminal status here means the job was restarted
+		// AFTER the frame this watch saw, which does not make that frame untrue
+		// about the moment it described.
+		if jobIsTerminal(job.Status) {
+			finalStatus = job.Status
+		}
 	}
 
 	handler := func(e relayclient.SSEEvent) bool {
@@ -571,6 +584,17 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 			// drains correctly, but its last page is full and so carries a non-zero
 			// next_seq: the client stops one request short of learning it was done,
 			// having in fact printed every row.
+			//
+			// And on that exact input the envelope's own total already settles the
+			// question, so do not re-raise it. The caller prepends "(400 of 400
+			// rows)" to this text, and "the log may be longer than 400 rows" in the
+			// clause after it contradicts the pair that exists to resolve exactly
+			// this ambiguity.
+			if progress.total > 0 && progress.rows >= progress.total {
+				return progress, fmt.Errorf(
+					"truncated after %d pages - hit the client's page cap; the server reported %d rows and every one printed, but it had not yet reported the log as drained",
+					maxLogPages, progress.total)
+			}
 			return progress, fmt.Errorf(
 				"truncated after %d pages - hit the client's page cap; the log may be longer than %d rows, or the server may never report it as drained",
 				maxLogPages, int64(maxLogPages)*relayclient.PageRequestLimit)
