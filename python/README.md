@@ -77,7 +77,7 @@ b = job.add_task("b", commands=[["echo", "2"]], depends_on=[a])  # or ["a"]
 | `cancel_job(id, force=False)` | DELETE `/v1/jobs/{id}` - graceful by default; `force=True` requests an immediate kill on the agent. The returned `Job` carries **no** task list; call `get_tasks` for that. |
 | `get_tasks(job_id)` | GET `/v1/jobs/{id}/tasks`. |
 | `get_task(id)` | GET `/v1/tasks/{id}`. |
-| `task_logs(id, limit=)` | GET `/v1/tasks/{id}/logs`, auto-paginating to the end of the log. `limit` caps the TOTAL records. See the note below. |
+| `task_logs(id, limit=)` | GET `/v1/tasks/{id}/logs`, auto-paginating to the end of the log. `limit` caps the TOTAL records and must be >= 1. See the note below. |
 | `task_logs_page(id, since_seq=, limit=)` | One page of a task's log as a `LogPage`. Pass the returned `next_seq` back as `since_seq=` **verbatim** - the cursor is exclusive. |
 | `follow_job(id)` | Iterator over SSE `Event` objects. The server does **not** end the stream when the job finishes - see Following a job. |
 | `wait(id, timeout=None, poll_interval=1.0)` | Block (polling `GET /v1/jobs/{id}`) until the job is terminal. |

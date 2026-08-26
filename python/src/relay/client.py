@@ -320,7 +320,8 @@ class Client:
     def task_logs(self, task_id: str, *, limit: Optional[int] = None) -> list[LogRecord]:
         """Fetch a task's complete log, auto-paginating across pages.
 
-        ``limit`` caps the TOTAL number of records returned (None = all). Each
+        ``limit`` caps the TOTAL number of records returned; None means all,
+        and anything below 1 raises :class:`ValidationError`. Each
         request fetches ``_PAGE_REQUEST_LIMIT`` rows; without that explicit
         limit the server's default is 50 and a long log is silently truncated.
 
@@ -336,6 +337,13 @@ class Client:
         returning a list is what makes the caveat and the rows arrive
         separately here.
         """
+        # Locally, before the loop. The cap is applied as `out[:limit]`, and
+        # Python slice semantics turn a negative limit into "all but the last
+        # N" - limit=-1 on a 5-row log returned 4 records, dropping the newest
+        # line rather than capping anything. limit=0 spent a request to
+        # return [].
+        if limit is not None and limit < 1:
+            raise ValidationError(f"limit must be >= 1, got {limit}")
         out: list[LogRecord] = []
         since = 0
         pages = 0

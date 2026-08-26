@@ -455,6 +455,65 @@ def test_task_logs_limit_caps_total_records() -> None:
     assert len(calls) == 2
 
 
+def test_task_logs_rejects_a_non_positive_limit() -> None:
+    """`limit` is documented as capping the TOTAL number of records returned,
+    and the loop implements that with `out[:limit]`. Python slice semantics
+    then make a NEGATIVE limit mean something else entirely: limit=-1 on a
+    5-row log returned 4 records, silently dropping the LAST one - the newest
+    line, which is the one an operator reading a log is usually after.
+
+    limit=0 was merely wasteful: a round trip to return [].
+
+    Both are rejected before the loop, so the assertion that no request was
+    made is half the test. The SDK validates locally first everywhere else
+    (submit() is the precedent), and a limit the caller cannot have meant
+    should not reach the server.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 5), calls))
+
+    for bad in (0, -1):
+        with pytest.raises(ValidationError, match="limit"):
+            client.task_logs("abc", limit=bad)
+    assert calls == []
+
+    # The boundary is admitted, and it is not a no-op.
+    assert [r.seq for r in client.task_logs("abc", limit=1)] == [1]
+
+
+def test_task_logs_page_404_raises_not_found() -> None:
+    """task_logs_page had no error-path test at all: deleting its
+    raise_for_response(...) left all 116 tests green. A 404 here is the
+    ordinary case - handleGetTaskLogs 404s on an unknown task id - and without
+    the translation it reached LogPage.model_validate as an {"error": ...}
+    body and surfaced as a pydantic error about a missing `items`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "task not found"})
+
+    client = _make_client(handler)
+    with pytest.raises(NotFound, match="task not found"):
+        client.task_logs_page("abc")
+
+
+def test_task_logs_page_without_a_token_raises_before_the_request(tmp_path: Any) -> None:
+    """The other untested gate on the same method: deleting its
+    _require_token() also left every test green.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json=_log_page([], next_seq=0, total=0))
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+    with pytest.raises(AuthError, match="relay login"):
+        client.task_logs_page("abc")
+    assert called is False
+
+
 def test_task_logs_raises_on_empty_page_that_is_not_drained() -> None:
     """Stop 1. Unreachable against the real handler, which sets next_seq = 0
     whenever the page is short - which is exactly why it must RAISE and not
