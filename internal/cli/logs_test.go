@@ -296,6 +296,11 @@ func TestWatchJobLogs_FailedReturnsFailed(t *testing.T) {
 	require.Equal(t, "failed", status)
 }
 
+// doLogs's two io.Writer arguments are same-typed and adjacent, so transposing
+// them compiles and passes anything that only checks a combined output. The real
+// mutant: `relay logs job 2>/dev/null` silences the logs instead of the
+// diagnostics. Assert POSITIVELY on one stream and EMPTY on the other; the
+// failure direction is pinned in TestWatchJobLogs_LogsFetchFails_ReportsOnStderr.
 func TestRunLogs_DoneExitsCleanly(t *testing.T) {
 	jobID, taskID := "job-3", "task-3"
 	srv := fakeJobServer(t, jobID, taskID, "done")
@@ -305,6 +310,10 @@ func TestRunLogs_DoneExitsCleanly(t *testing.T) {
 	var out, errOut strings.Builder
 	err := doLogs(context.Background(), cfg, []string{jobID}, &out, &errOut)
 	require.NoError(t, err)
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered",
+		"log lines belong on stdout so they can be redirected to a file")
+	require.Empty(t, errOut.String(),
+		"a fully successful run writes nothing to stderr")
 }
 
 func TestRunLogs_FailedReturnsSilentError(t *testing.T) {
@@ -399,6 +408,14 @@ func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 	require.False(t, errors.As(err, &se),
 		"a described log failure must not be silent - Dispatch has to print it")
 	require.Contains(t, err.Error(), "logs incomplete")
+
+	// The converse direction of the stdout/stderr split: on the failure path the
+	// diagnostic is on stderr and stdout is empty. Together with
+	// TestRunLogs_DoneExitsCleanly this pins both writers positionally, so
+	// transposing the two same-typed arguments cannot survive.
+	require.Empty(t, out2.String(), "nothing was fetched, so stdout stays empty")
+	require.Contains(t, errOut2.String(), "frame-001")
+	require.Contains(t, errOut2.String(), "incomplete")
 }
 
 // fakeLogPagingServer serves a job that is already done with one finished task,
