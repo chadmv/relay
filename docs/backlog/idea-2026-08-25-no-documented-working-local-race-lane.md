@@ -59,3 +59,33 @@ Not proposed: changing what CI does. The gate is correct; only its local reprodu
 - `CLAUDE.md` - where the other test commands live
 - `docs/retros/2026-08-25-handler-pool-seam.md` - section 7, what the outage left unverified
 - [[idea-2026-08-23-integration-only-guards-ci-never-runs]] - the sibling "CI runs a lane developers do not" problem, from the other direction
+
+## Notes
+
+**2026-08-25, windows-crlf-log-lines slice - a working invocation exists and was run green twice.**
+The container lane is not a fallback to be described in the abstract; this command works on this
+machine today:
+
+```
+MSYS_NO_PATHCONV=1 docker run --rm -v <abs-worktree-path>:/src -w /src \
+  -e CGO_ENABLED=1 golang:1.26 go test -race ./internal/agent/... -count=1
+```
+
+Run green at two different HEADs during that slice (before and after a refactor that changed the
+code under test), which is what makes it a verified recipe rather than a plausible one. That
+satisfies the first acceptance criterion with a command instead of a promise; what remains open is
+the CLAUDE.md edit itself and naming both failure modes.
+
+Two details that cost time and belong with the command:
+
+- **`MSYS_NO_PATHCONV=1` is not optional under Git Bash.** Without it, MSYS rewrites `-w /src` into
+  `C:/Program Files/Git/src` and Docker refuses with "the working directory ... is invalid". The
+  first attempt here failed exactly that way.
+- **Do not judge the run by its exit code through a pipe.** That same failed attempt reported
+  `exit 0`, because the `| tail` at the end of the pipeline supplied the status. The failure was
+  only visible in the output text.
+
+The same container run also executes the `//go:build !windows` files that `go test` skips wholesale
+on Windows (`internal/agent/runner_cancel_test.go`), so it closes two local gaps at once, not one.
+That is worth stating in CLAUDE.md alongside the command - see
+[[feedback_platform_gated_test_verification]] for the standing rule it satisfies.
