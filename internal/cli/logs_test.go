@@ -1052,10 +1052,22 @@ func TestPrintTaskLogs_TaskIDIsPathEscaped(t *testing.T) {
 	require.NotContains(t, gotURI, "/v1/users")
 }
 
+// sseServerClosesTheStream, passed as the sse argument, makes /v1/events return
+// as soon as the subscription is live: the SERVER dropped the connection, which
+// is the one way this watch ever ends without a job frame.
+//
+// It is a distinct value because the empty string used to mean it, and that made
+// the fixture model a server relay does not have. handleEvents holds the
+// connection open with no heartbeat and no timeout until the client goes away, so
+// "no frames" and "the stream ended" are not the same input - and a test whose
+// only reason for terminating is a stream the real handler would never close
+// cannot see a hang. That is precisely what hid the already-terminal case below.
+const sseServerClosesTheStream = "\x00server-closed"
+
 // fakeJobSnapshotServer answers GET /v1/jobs/<id> from bodies, one per read and
-// repeating the last entry once they run out; streams sse verbatim on
-// /v1/events (holding the connection open afterwards, unless sse is empty); and
-// serves oneFrameRows on the task's logs route.
+// repeating the last entry once they run out; writes sse verbatim on /v1/events
+// and then holds the connection open the way handleEvents does, unless sse is
+// sseServerClosesTheStream; and serves oneFrameRows on the task's logs route.
 //
 // It exists because the two snapshot readers' inputs are BODIES, not transport
 // outcomes. Every failure this fixture is used for is a 200 that decodes
@@ -1081,7 +1093,7 @@ func fakeJobSnapshotServer(t *testing.T, jobID, taskID string, bodies []jobResp,
 		case r.Method == "GET" && r.URL.Path == "/v1/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			if sse == "" {
+			if sse == sseServerClosesTheStream {
 				return
 			}
 			fmt.Fprint(w, sse)
@@ -1166,22 +1178,29 @@ func TestWatchJobLogs_FinalSnapshotIsADifferentJob_RefusesToClaimCompleteness(t 
 // Fail closed instead: the body establishes nothing, so the watch falls through
 // to the stream exactly as it does for a transport error, and the terminal
 // status is never taken from it.
+// The stream is one the SERVER closed, which is the only way this input ever ends:
+// every read of the job is unusable, so the watch never learns anything about it.
+// What must NOT happen is the quiet version - exit 0 with nothing on either
+// stream - so the completeness claim is asserted here as well as the error.
 func TestWatchJobLogs_SubscribeSnapshotHasNoTasks_EstablishesNothing(t *testing.T) {
 	jobID, taskID := "job-sub-notasks", "task-sub-notasks"
 	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
 		{ID: jobID, Status: "done"},
-	}, "")
+	}, sseServerClosesTheStream)
 
 	c := relayclient.NewClient(srv.URL, "tok")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	var out, errOut strings.Builder
-	status, _, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.Error(t, err, "a terminal status must not be taken from a body that carries no task list")
 	require.Contains(t, err.Error(), "connection lost")
 	require.Empty(t, status)
 	require.Empty(t, out.String())
+	require.False(t, completeness.complete(),
+		"nothing was ever established about this job, so nothing may claim its logs are whole")
+	require.Contains(t, errOut.String(), "logs may be missing")
 }
 
 // A task still non-terminal in the FINAL snapshot of a TERMINAL job is a
@@ -1499,18 +1518,21 @@ func TestWatchJobLogs_JobIDIsEscapedInEveryRequest(t *testing.T) {
 	mu.Lock()
 	got := append([]string(nil), uris...)
 	mu.Unlock()
-	require.Len(t, got, 2, "one job snapshot and one events subscription")
-
+	// Every request line, not a fixed number of them: how many times a failing
+	// snapshot is re-read is watchJobLogs' business and it has changed twice, but
+	// each of the two SHAPES must be escaped for its own context, so both have to
+	// be present and every one of them has to be checked.
 	var jobsURI, eventsURI string
+	var jobsCount, eventsCount int
 	for _, u := range got {
 		if strings.HasPrefix(u, "/v1/events") {
-			eventsURI = u
+			eventsURI, eventsCount = u, eventsCount+1
 		} else {
-			jobsURI = u
+			jobsURI, jobsCount = u, jobsCount+1
 		}
 	}
-	require.NotEmpty(t, jobsURI)
-	require.NotEmpty(t, eventsURI)
+	require.NotZero(t, jobsCount, "the job snapshot request line is under test")
+	require.NotZero(t, eventsCount, "the events subscription request line is under test")
 
 	for _, u := range got {
 		require.NotContains(t, u, "/v1/admin/secret",
@@ -1687,4 +1709,125 @@ func TestWatchJobLogs_NonCanonicalJobID_IsResolvedNotRejected(t *testing.T) {
 			})
 		}
 	}
+}
+
+// fakeSnapshotFailsThenRecoversServer 500s the first failFirst reads of
+// GET /v1/jobs/<id> and answers a TERMINAL job with a finished task afterwards.
+// Its events stream carries no frames and is held open the way handleEvents holds
+// it, unless the server closes it.
+//
+// It models what the server-side half of this slice created. handleGetJob used to
+// answer 200 with `tasks` absent when ListTasksByJob failed; it now 500s, which is
+// the honest answer and is also a transport error at every client. The broker has
+// no replay, so for a job that was already terminal when the command started there
+// is no frame coming, ever: every fact this command can learn it has to learn from
+// a snapshot.
+func fakeSnapshotFailsThenRecoversServer(t *testing.T, jobID, taskID string, failFirst int, closeStream bool) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	reads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			reads++
+			n := reads
+			mu.Unlock()
+			if n <= failFirst {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if closeStream {
+				return
+			}
+			// No heartbeat, no timeout: exactly like handleEvents.
+			<-r.Context().Done()
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			writeTaskLogPage(w, r, oneFrameRows())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// `relay logs <finished-job>` is this command's dominant invocation, and on it the
+// subscribe-time snapshot is the ONLY thing that can establish anything: the job
+// went terminal before the subscription existed and the broker has no replay, so
+// no frame is coming. Falling through to the stream on a failed read therefore
+// waits on something that will never arrive, forever - no heartbeat, no server
+// timeout, and no deadline on the command's context. Nothing is printed and
+// nothing is said, which is bit-for-bit the symptom this slice exists to fix,
+// reached through the guard written to make failures visible.
+//
+// A single transient failure is exactly the input the server-side half of this
+// slice created: a ListTasksByJob error that used to be a silent 200 is now a 500.
+// Ask again.
+func TestWatchJobLogs_TransientSnapshotFailure_DoesNotStrandAFinishedJob(t *testing.T) {
+	jobID, taskID := "job-transient", "task-transient"
+	srv := fakeSnapshotFailsThenRecoversServer(t, jobID, taskID, 1, false)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	// Its own deadline: the regression is a hang, and an unbounded hang wedges
+	// the suite instead of failing it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.True(t, completeness.complete())
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+	require.Empty(t, errOut.String())
+}
+
+// The backstop behind the retry, for the failure the retry did not outlast. A
+// subscribe-time snapshot that establishes NOTHING leaves the watch with no idea
+// whether the job is running or long finished, so it stays on the stream - and
+// when that stream ends, the reconcile is owed. It used to be skipped, because it
+// was armed on a terminal status having been observed and this path observed none;
+// the operator got "connection lost" and no output for a job that finished
+// yesterday.
+//
+// What the reconcile establishes replaces that message. What it does not
+// establish must stay loud: this is the same fall-through that must never become
+// exit 0 with nothing printed, which
+// TestWatchJobLogs_SubscribeSnapshotHasNoTasks_EstablishesNothing pins from the
+// other side.
+func TestWatchJobLogs_SubscribeSnapshotEstablishedNothing_ReconcileStillRuns(t *testing.T) {
+	jobID, taskID := "job-backstop", "task-backstop"
+	// Two failures outlast the retry, so the fall-through is what is under test.
+	srv := fakeSnapshotFailsThenRecoversServer(t, jobID, taskID, 2, true)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err,
+		"the reconcile read the job successfully, so 'connection lost' is no longer the answer")
+	require.Equal(t, "done", status)
+	require.True(t, completeness.complete())
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	srv2 := fakeSnapshotFailsThenRecoversServer(t, jobID, taskID, 2, true)
+	cfg.ServerURL = srv2.URL
+	var out2, errOut2 strings.Builder
+	require.NoError(t, doLogs(ctx, cfg, []string{jobID}, &out2, &errOut2))
+	require.Contains(t, out2.String(), "[frame-001 stdout] frame rendered")
 }
