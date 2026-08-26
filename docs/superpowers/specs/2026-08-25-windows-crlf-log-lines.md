@@ -407,8 +407,11 @@ complete and O(1).
 
 ### 6.1 The transform, stated exactly
 
-`chunkWriter` gains two fields: `held` (at most **one byte**, always) and a `sync.Mutex` guarding it
-(D9). The guarantee is R5's:
+`chunkWriter` gains two fields: the hold-back (at most **one byte**, always) and a `sync.Mutex` guarding
+it (D9). Because that byte is only ever `'\r'`, the shipped field is a `bool` named `heldCR` and the
+byte itself is a literal at the two places it is re-emitted; the prose below says "the held byte" for
+the design property, which is what matters here. The representation is not neutral, though - see the
+"No interior pointers across locks" row in section 10 for what it removes. The guarantee is R5's:
 
 > For one `(step, stream)` writer, the concatenation of every payload it emits equals the subprocess's
 > bytes with each `\r\n` of the original replaced by `\n`.
@@ -518,14 +521,18 @@ avoid, and delaying the terminal status indefinitely.
 
 ### 6.6 Load, failure modes, and threat model
 
-- **State:** one byte per writer, two writers per step. Not proportional to input. `os/exec`'s copy
+- **State:** one bit per writer, two writers per step. Not proportional to input. `os/exec`'s copy
   buffer is 32 KiB (`internal/relayclient/client.go:141-151`), so the payload grows by at most 1 byte
   over a 32 KiB chunk; the SSE scanner's 1 MiB limit against a ~192 KiB worst case is untouched.
 - **Work:** one branch plus one backward byte test per `Write`, and one forward scan only when the fast
   path finds a `\r`. In-place collapse, so no second allocation.
 - **Amplification:** a pathological producer writing one `\r` per `Write` emits at most one chunk per
-  write today and **fewer** with the hold-back (some writes emit nothing). No new unbounded queue, no
-  new goroutine, no new parse. `io.Copy` cannot spin, because a `Write` returning `(1, nil)` is followed
+  write today and **exactly as many** with the hold-back - not fewer, which an earlier draft of this
+  line claimed. Measured: 100,000 lone-`\r` writes produce 100,000 chunks, 99,999 from `Write` and 1
+  from `flush`. Only the FIRST write emits nothing; every later one folds the held `\r` in and emits,
+  and `flush` returns the one chunk the hold-back suppressed. The conclusion is unchanged and does not
+  depend on the wrong word: no new unbounded queue, no new goroutine, no new parse, and one extra
+  chunk is never created. `io.Copy` cannot spin, because a `Write` returning `(1, nil)` is followed
   by a blocking pipe read.
 - **Threat model:** log bytes are influenced by anyone authorized to submit a job, which is already
   "run code on a worker". The hold-back introduces no new signal, no counter and no operator-facing
@@ -755,7 +762,7 @@ in a row on this repo.
 | **Single job-spec pipeline** | Not implicated. No spec ingestion. |
 | **One bounded sender per gRPC stream** | **Directly implicated and it is D8.** `flush()` is a new enqueue site on the `Run` goroutine and must be bounded: `sendOrAbort` (bounded by `forcedCh`, `cancelledCh`, `ctx.Done`), never `r.send` (bounded only by the agent context). All writes still funnel through the single `sendCh` and the one send goroutine. No new sender. |
 | **Identity-checked teardown** | Not implicated: nothing is unregistered, no connection state is touched, no worker row is written. |
-| **No interior pointers across locks** | Satisfied by construction and worth stating because D9 adds a lock: `held` is a value copied into the outgoing buffer under the lock, and **the lock is never held across `sendOrAbort`** (6.4). No pointer to writer state escapes. |
+| **No interior pointers across locks** | Satisfied, and worth stating because D9 adds a lock - but **the two sites needed two different arguments, which is why the field is a `bool`**. In `Write` the hold-back is genuinely *copied*: the byte is appended into a freshly allocated `chunk` under the lock, so nothing the outgoing message points at is reachable from the writer. In `flush` a `[]byte` field would NOT have been copied - it would take the slice header out under the lock and put the same backing array into `Content`, safe only by a *sole-ownership* argument (clearing the field in the same critical section leaves exactly one owner), not by a copying one. Carrying the hold-back as a `bool` retires that second argument outright: no writer-owned slice header leaves the critical section at all, and `flush`'s `Content` is a fresh one-byte literal. In both, **the lock is never held across `sendOrAbort`** (6.4). |
 | **Single JSON entry point** | Not implicated. No HTTP body is read. |
 | **Status predicates as allow-lists** | Not implicated: no status predicate changes and no task status is added. Named because `AppendTaskLog`'s disjunction and `ListOverdueAssignedTasks`'s partition are the two carve-outs a log-path slice must be shown to have considered. Neither moves here. |
 
