@@ -1097,3 +1097,33 @@ def test_list_users_admin_403_raises_auth_error() -> None:
     client = _make_client(handler)
     with pytest.raises(AuthError):
         client.list_users()
+
+
+def test_fetch_all_rejects_a_non_positive_limit() -> None:
+    """The sibling walk carries test_task_logs_rejects_a_non_positive_limit's
+    defect on six public methods.
+
+    `_fetch_all` ends with the same `out[:limit]`, so `list_jobs(limit=-1)`
+    silently drops the LAST row - here, the newest job - exactly as
+    `task_logs(limit=-1)` did. Validating one and not the other is worse than
+    validating neither: the parameter has the same name and the same
+    documented meaning on all seven methods, so a caller who learns it is
+    checked on task_logs() reasonably assumes it is checked next door.
+
+    The discriminating input is the NEGATIVE limit against a multi-row page,
+    because limit=0 is caught by any `limit < 1` guard while limit=-1 is the
+    one that returns a plausible-looking short list instead of raising.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        rows = [{"id": f"j{i}", "name": f"job-{i}"} for i in range(1, 6)]
+        return httpx.Response(200, json={"items": rows, "next_cursor": "", "total": 5})
+
+    client = _make_client(handler)
+
+    for bad in (0, -1):
+        with pytest.raises(ValidationError, match="limit"):
+            client.list_jobs(limit=bad)
+    assert calls == []

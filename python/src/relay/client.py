@@ -195,7 +195,17 @@ class Client:
 
         ``limit`` caps the TOTAL rows returned across pages (None = all). Each
         request fetches ``_PAGE_REQUEST_LIMIT`` rows.
+
+        A limit below 1 is rejected here rather than passed on, for the same
+        reason task_logs() rejects it: the walk ends in ``out[:limit]``, and
+        Python slice semantics turn a negative limit into "everything but the
+        last N rows" - a plausible-looking short list rather than an error.
+        This guard is NOT duplicated in _get_page, where ``limit`` is the page
+        size and travels to the server, which answers 400 for anything outside
+        1..200. Validate locally only where the server never sees the value.
         """
+        if limit is not None and limit < 1:
+            raise ValidationError(f"limit must be >= 1, got {limit}")
         self._require_token()
         p: dict[str, str] = dict(params or {})
         if sort is not None:
