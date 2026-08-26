@@ -37,7 +37,8 @@ type logRow struct {
 }
 
 // writeTaskLogPage serves rows the way handleGetTaskLogs (internal/api/tasks.go)
-// does. Four behaviours are load-bearing and each is asserted by a test below:
+// does. Five behaviours are load-bearing. The first four are each asserted by a
+// test below; the fifth is a PRECONDITION on the caller and nothing checks it:
 //
 //   - ?since_seq is EXCLUSIVE: rows with Seq > since_seq, because the SQL is
 //     `WHERE task_id = $1 AND id > $2`. Asserted by
@@ -46,10 +47,18 @@ type logRow struct {
 //     rejects, it does not clamp.
 //   - next_seq is the last returned row's seq, or 0 when the page is short.
 //     Asserted by TestWatchJobLogs_PagesUntilDrained.
-//   - total is the full row count, independent of the page.
+//   - total is the full row count, independent of the page. Asserted by
+//     TestWatchJobLogs_IncompleteDiagnostic_NamesHowMuchIsMissing.
+//   - PRECONDITION: `rows` must already be sorted ascending by Seq. The handler
+//     gets its ordering from `ORDER BY id` in GetTaskLogsPage; here the order is
+//     inherited from the slice and never enforced, and `next_seq =
+//     items[len-1].Seq` is only the largest seq on the page if the input is
+//     sorted. An unsorted fixture would hand the client a cursor that silently
+//     re-returns or skips rows, and it would read as a client paging bug rather
+//     than as a broken fixture. genRows satisfies this; so does oneFrameRows.
 //
 // Every fake server in this file routes its logs case through here, so editing
-// any of those four lines changes what every CLI log test means.
+// any of those five lines changes what every CLI log test means.
 func writeTaskLogPage(w http.ResponseWriter, r *http.Request, rows []logRow) {
 	writeErr := func(code int, msg string) {
 		w.Header().Set("Content-Type", "application/json")

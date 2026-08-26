@@ -726,7 +726,7 @@ relay submit --detach job.json # submit and print job ID, then exit
 | `tasks[].depends_on` | No | List of task names that must complete before this one starts |
 | `tasks[].source` | No | Workspace source spec — agent prepares this before running the task. See [Source workspaces](#source-workspaces). |
 
-When submitted without `--detach`, the CLI streams logs to stdout and exits with code 0 when all tasks succeed, or non-zero if any fail.
+When submitted without `--detach`, the CLI prints the job ID and then waits for the job, printing each task's log to stdout once that task finishes. It is the same mechanism as [`relay logs`](#relay-logs) - not a live stream; log content is fetched over REST per finished task - and it has the same exit codes, so a job that finished `done` but whose log could not be fetched in full exits non-zero.
 
 ---
 
@@ -796,19 +796,38 @@ Output format:
 [frame-001 stderr] Warning: deprecated API call
 ```
 
-A task's log is paged to the end, so a log longer than one page is printed in
-full. If a page cannot be fetched, `relay logs` prints a diagnostic on **stderr**
-naming the task and the last log sequence number it printed, keeps watching the
-job's other tasks, and exits 1:
+A task's log is paged to the end of what the server had stored **at the moment it
+was fetched**, so a log longer than one page is printed in full. That fetch
+happens once, as the task goes terminal; its agent may still append for up to
+`RELAY_TASKLOG_TRAILING_WINDOW` (default 15m) afterwards, so re-run `relay logs`
+on the finished job to pick up late output.
+
+When the job finishes, its task list is re-read once and any finished task not
+already printed is printed then. This is what makes a cancelled job print
+anything at all: `relay cancel` marks the job's in-flight tasks failed in a
+single statement and emits one event, for the job, so those tasks are never
+announced individually.
+
+If a page cannot be fetched, or cannot be written to stdout, `relay logs` prints
+a diagnostic on **stderr** naming the task, the last log sequence number it
+printed and how much of the log is missing, keeps watching the job's other tasks,
+and exits 1:
 
 ```
-relay: logs for task frame-001 (7e660488-...) are incomplete - stopped after seq 4200: fetching page 22: get task logs failed
+relay: logs for task frame-001 (7e660488-...) are incomplete - stopped after seq 4200 (4200 of 91340 rows): fetching page 22: get task logs failed
 error: logs incomplete for 1 of the job's tasks
 ```
 
-Exit codes: `0` when the job finishes `done` and every task's log printed in
-full; `1` otherwise (a failed or cancelled job exits 1 silently, since the job
-status is already on stdout).
+Exit codes: `0` when the job finishes `done` and every task that reached a
+terminal state had its log printed in full; `1` otherwise. A failed or cancelled
+job whose logs all printed exits 1 with no message - neither command prints the
+job's status (stdout carries task log lines, plus the job ID for `relay submit`),
+so run `relay get <job-id>` to see it. When the logs are incomplete as well, both
+facts are reported rather than one standing in for the other:
+
+```
+error: job finished failed; logs incomplete for 1 of the job's tasks
+```
 
 ---
 
