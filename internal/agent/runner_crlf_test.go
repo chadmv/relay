@@ -123,7 +123,7 @@ func TestChunkWriter_AbandonedWriteDropsTheHeldByte(t *testing.T) {
 	n, err := w.Write([]byte("abc\r"))
 	require.NoError(t, err)
 	require.Equal(t, 4, n)
-	require.Len(t, w.held, 1, "the pre-arming write must leave a trailing CR held")
+	require.True(t, w.heldCR, "the pre-arming write must leave a trailing CR held")
 	require.Len(t, sendCh, 1, "the pre-arming write enqueues its own chunk and wedges the channel full")
 
 	r.Cancel(true)
@@ -131,7 +131,7 @@ func TestChunkWriter_AbandonedWriteDropsTheHeldByte(t *testing.T) {
 	n, err = w.Write([]byte("def\r"))
 	require.ErrorIs(t, err, errForcedAbort)
 	require.Equal(t, 0, n, "an abandoned Write reports zero bytes consumed alongside its error")
-	require.Empty(t, w.held,
+	require.False(t, w.heldCR,
 		"the held byte is discarded with the abandoned chunk; arming it before the enqueue re-emits it after the abort")
 	require.Len(t, sendCh, 1, "nothing may be enqueued once the chunk is abandoned")
 }
@@ -345,7 +345,7 @@ func TestChunkWriter_FlushIsBoundedByTheCancelChannels(t *testing.T) {
 	n, err := w.Write([]byte("abc\r"))
 	require.NoError(t, err)
 	require.Equal(t, 4, n)
-	require.Len(t, w.held, 1, "the trailing CR must be held for the next write")
+	require.True(t, w.heldCR, "the trailing CR must be held for the next write")
 
 	for len(sendCh) < cap(sendCh) {
 		sendCh <- &relayv1.AgentMessage{} // wedge it full
