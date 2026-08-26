@@ -235,3 +235,73 @@ func TestWaitForJob_IntermittentFailures_DoNotAccumulate(t *testing.T) {
 	require.Greater(t, atomic.LoadInt32(&n), int32(maxConsecutiveWaitFailures),
 		"the wait outlived more failures than the bound, because none of them were consecutive")
 }
+
+// The tolerated-failure branch sleeps through waitUntilNextPoll for three
+// reasons and only one of them was ever the sleep. It also checks the deadline
+// and it also honours cancellation, and nothing here was the subject of a test:
+// replacing that whole call with the constant waitPollContinue survived the
+// package, leaving a mutant that busy-loops on every tolerated failure with no
+// sleep, no deadline and no cancellation. The bound on consecutive failures is
+// what kept the blast radius to four immediate retries, which makes it a missing
+// guard rather than a live defect - and the guard is what is added here.
+//
+// This is the deadline arm. A run of tolerated failures that outlives the
+// timeout is a TIMEOUT, reported with the last state actually known about the
+// job, not the last failure: the caller asked to wait for a job and the failures
+// were of a field this tool does not read.
+func TestWaitForJob_ToleratedFailuresOutliveTheDeadline_ReportTheLastKnownState(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "j1", "status": "running"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s, _ := NewServer(srv.URL, "t")
+	// Wide enough that the 1 s timeout arrives before the fifth consecutive
+	// failure does; the bound is never reached on this input.
+	s.waitPoll = 400 * time.Millisecond
+
+	// Its own deadline: the mutation under test removes a sleep, so a regression
+	// here is a spin rather than a wrong answer.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	out, terr := s.callWaitForJob(ctx, waitForJobArgs{JobID: "j1", TimeoutSeconds: 1})
+	require.Nil(t, terr, "the wait timed out; it did not fail")
+	require.Equal(t, true, out["timed_out"])
+	require.Equal(t, map[string]any{"id": "j1", "status": "running"}, out["last_state"],
+		"the last thing actually known about the job survives the failures that followed it")
+	require.Less(t, atomic.LoadInt32(&n), int32(maxConsecutiveWaitFailures),
+		"the deadline, not the failure bound, is what ended this wait")
+}
+
+// The cancellation arm of the same call. A caller who gives up mid-wait is
+// answered at the next sleep, and a tolerated failure must not be a window in
+// which the context is ignored.
+func TestWaitForJob_CancelledDuringToleratedFailures_ReportsCancellation(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(whoamiHandler(true, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s, _ := NewServer(srv.URL, "t")
+	s.waitPoll = 500 * time.Millisecond
+
+	// The context's expiry IS the cancellation under test, and it is also this
+	// test's own bound.
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	_, terr := s.callWaitForJob(ctx, waitForJobArgs{JobID: "j1", TimeoutSeconds: 30})
+	require.NotNil(t, terr)
+	require.Equal(t, "cancelled", terr.Code,
+		"the caller gave up, and that is the answer - not the server error being tolerated")
+	require.Less(t, atomic.LoadInt32(&n), int32(maxConsecutiveWaitFailures),
+		"cancellation was honoured inside the tolerated-failure sleep, not raced to the bound")
+}
