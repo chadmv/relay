@@ -531,13 +531,15 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//
 	// It is skipped for exactly ONE of the three things the subscribe-time
 	// snapshot can settle: that the job was already terminal. Then it is a pure
-	// duplicate request. That snapshot is authoritative and every task in a
-	// terminal job is terminal in it - RecomputeJobStatus yields `running` while
-	// any is not, and CancelJobTasks has already flipped the rest - so
-	// emitSnapshot has printed all of them already. Making the request anyway can
-	// only add a way to fail, and it did: a 500 on the duplicate read turned a run
-	// that printed every line into exit 1 telling the operator their logs may be
-	// missing. `relay logs <finished-job>` is this command's dominant invocation.
+	// duplicate request. That snapshot is authoritative, and emitSnapshot has
+	// already printed every task it listed - note the argument is that, and NOT
+	// that every task in a terminal job is terminal. The stronger claim is what
+	// this file used to make, and emitSnapshot exists partly to handle the case
+	// that disproves it: once the job is terminal a non-terminal task is printed
+	// too, and flagged. Making the request anyway can only add a way to fail, and
+	// it did: a 500 on the duplicate read turned a run that printed every line
+	// into exit 1 telling the operator their logs may be missing. `relay logs
+	// <finished-job>` is this command's dominant invocation.
 	//
 	// The other two both owe a reconcile, and the gate has to name them
 	// SEPARATELY. Writing it as "a terminal status was observed" covers only the
