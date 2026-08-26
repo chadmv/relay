@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -213,9 +214,10 @@ func TestWatchJobLogs_TerminalBeforeSubscribe_DoesNotHang(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	var out strings.Builder
-	status, err := watchJobLogs(ctx, c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "done", status)
 	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
 }
@@ -258,9 +260,10 @@ func TestWatchJobLogs_TaskInSnapshotAndStream_PrintedOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	var out strings.Builder
-	status, err := watchJobLogs(ctx, c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "done", status)
 	require.Equal(t, 1, strings.Count(out.String(), "[frame-001 stdout] frame rendered"),
 		"task terminal in both snapshot and stream must print exactly once")
@@ -272,9 +275,10 @@ func TestWatchJobLogs_DoneExits0(t *testing.T) {
 	defer srv.Close()
 
 	c := relayclient.NewClient(srv.URL, "tok")
-	var out strings.Builder
-	status, err := watchJobLogs(context.Background(), c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(context.Background(), c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "done", status)
 	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
 }
@@ -285,9 +289,10 @@ func TestWatchJobLogs_FailedReturnsFailed(t *testing.T) {
 	defer srv.Close()
 
 	c := relayclient.NewClient(srv.URL, "tok")
-	var out strings.Builder
-	status, err := watchJobLogs(context.Background(), c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(context.Background(), c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "failed", status)
 }
 
@@ -297,8 +302,8 @@ func TestRunLogs_DoneExitsCleanly(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
-	var out strings.Builder
-	err := doLogs(context.Background(), cfg, []string{jobID}, &out)
+	var out, errOut strings.Builder
+	err := doLogs(context.Background(), cfg, []string{jobID}, &out, &errOut)
 	require.NoError(t, err)
 }
 
@@ -308,8 +313,8 @@ func TestRunLogs_FailedReturnsSilentError(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
-	var out strings.Builder
-	err := doLogs(context.Background(), cfg, []string{jobID}, &out)
+	var out, errOut strings.Builder
+	err := doLogs(context.Background(), cfg, []string{jobID}, &out, &errOut)
 	require.Error(t, err)
 	var se silentError
 	require.ErrorAs(t, err, &se)
@@ -321,9 +326,10 @@ func TestWatchJobLogs_AlreadyDone_PrintsLogsAndExits(t *testing.T) {
 	defer srv.Close()
 
 	c := relayclient.NewClient(srv.URL, "tok")
-	var out strings.Builder
-	status, err := watchJobLogs(context.Background(), c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(context.Background(), c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "done", status)
 	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
 }
@@ -334,8 +340,63 @@ func TestWatchJobLogs_AlreadyCancelled_ReturnsCancelled(t *testing.T) {
 	defer srv.Close()
 
 	c := relayclient.NewClient(srv.URL, "tok")
-	var out strings.Builder
-	status, err := watchJobLogs(context.Background(), c, jobID, &out)
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(context.Background(), c, jobID, &out, &errOut)
 	require.NoError(t, err)
+	require.Equal(t, 0, logFailures)
 	require.Equal(t, "cancelled", status)
+}
+
+// fakeLogsFailServer serves a terminal job whose logs route always 500s.
+func fakeLogsFailServer(t *testing.T, jobID, taskID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A failed log fetch must be distinguishable from an empty log. Before this
+// slice the job was "done", so doLogs returned nil and the shell saw exit 0
+// with nothing on either stream - the exact production symptom.
+func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
+	jobID, taskID := "job-500", "task-500"
+	srv := fakeLogsFailServer(t, jobID, taskID)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err, "a log-fetch failure must not abort the watch")
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, logFailures)
+	require.Empty(t, out.String())
+	require.Contains(t, errOut.String(), "frame-001", "the diagnostic names the task")
+	require.Contains(t, errOut.String(), taskID, "the diagnostic names the task id")
+	require.Contains(t, errOut.String(), "incomplete")
+
+	// And doLogs turns that count into a printed, non-silent error, so the
+	// shell sees exit 1 WITH a message rather than the bare exit 1 of
+	// silentError{}.
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	var out2, errOut2 strings.Builder
+	err = doLogs(ctx, cfg, []string{jobID}, &out2, &errOut2)
+	require.Error(t, err)
+	var se silentError
+	require.False(t, errors.As(err, &se),
+		"a described log failure must not be silent - Dispatch has to print it")
+	require.Contains(t, err.Error(), "logs incomplete")
 }

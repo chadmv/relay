@@ -148,8 +148,8 @@ func TestSubmitJob_DetachPrintsID(t *testing.T) {
 	f.Close()
 
 	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
-	var out strings.Builder
-	err = doSubmit(context.Background(), cfg, []string{"--detach", f.Name()}, &out)
+	var out, errOut strings.Builder
+	err = doSubmit(context.Background(), cfg, []string{"--detach", f.Name()}, &out, &errOut)
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "new-job-id")
 }

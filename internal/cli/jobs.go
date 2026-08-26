@@ -189,12 +189,12 @@ func SubmitCommand() Command {
 		Name:  "submit",
 		Usage: "submit <job.json> [--detach]",
 		Run: func(ctx context.Context, args []string, cfg *Config) error {
-			return doSubmit(ctx, cfg, args, os.Stdout)
+			return doSubmit(ctx, cfg, args, os.Stdout, os.Stderr)
 		},
 	}
 }
 
-func doSubmit(ctx context.Context, cfg *Config, args []string, w io.Writer) error {
+func doSubmit(ctx context.Context, cfg *Config, args []string, w, errOut io.Writer) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	detach := fs.Bool("detach", false, "print job ID and exit without waiting for completion")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
@@ -227,9 +227,14 @@ func doSubmit(ctx context.Context, cfg *Config, args []string, w io.Writer) erro
 		return nil
 	}
 
-	status, err := watchJobLogs(ctx, c, job.ID, w)
+	status, logFailures, err := watchJobLogs(ctx, c, job.ID, w, errOut)
 	if err != nil {
 		return err
+	}
+	// Same precedence as doLogs: a described failure beats silentError{}, and
+	// leaving relay submit silent would re-create this bug in the sibling command.
+	if logFailures > 0 {
+		return fmt.Errorf("logs incomplete for %d of the job's tasks", logFailures)
 	}
 	if status != "done" {
 		return silentError{}
