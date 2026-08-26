@@ -102,26 +102,31 @@ func watchOutcomeError(status string, completeness logCompleteness) error {
 // one this command shipped with. Both fields have to be able to say "incomplete",
 // or the exit code overstates what was printed.
 type logCompleteness struct {
-	// failedTasks counts tasks whose log fetch errored partway through.
-	failedTasks int
+	// incompleteTasks counts tasks whose log is not fully on stdout. Two
+	// distinct things put a task here and they share a count because they make
+	// the same claim about the output: the fetch (or the write) errored partway
+	// through, or the task was still non-terminal in the job's final snapshot so
+	// what was printed was never final. The per-task diagnostic on errOut is
+	// where the two are told apart.
+	incompleteTasks int
 	// unreconciled is set when the authoritative final job snapshot could not be
 	// read, so the CLI cannot know whether any task's log went unprinted.
 	unreconciled bool
 }
 
 func (lc logCompleteness) complete() bool {
-	return lc.failedTasks == 0 && !lc.unreconciled
+	return lc.incompleteTasks == 0 && !lc.unreconciled
 }
 
 // reason is the message for a non-complete outcome, and is empty when complete.
 func (lc logCompleteness) reason() string {
 	switch {
-	case lc.failedTasks > 0 && lc.unreconciled:
+	case lc.incompleteTasks > 0 && lc.unreconciled:
 		return fmt.Sprintf(
 			"logs incomplete for %d of the job's tasks, and the job's final task list could not be read",
-			lc.failedTasks)
-	case lc.failedTasks > 0:
-		return fmt.Sprintf("logs incomplete for %d of the job's tasks", lc.failedTasks)
+			lc.incompleteTasks)
+	case lc.incompleteTasks > 0:
+		return fmt.Sprintf("logs incomplete for %d of the job's tasks", lc.incompleteTasks)
 	case lc.unreconciled:
 		return "logs may be incomplete: the job's final task list could not be read"
 	}
@@ -206,12 +211,61 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// emit prints one task's log and reports an incomplete one on errOut. One
 	// diagnostic per failing task, naming the task, the task id and the last
 	// seq written; the error's own text is the reason it stopped.
-	emit := func(taskID, taskName string) {
+	//
+	// It returns whether the whole log reached out, so a caller with its OWN
+	// reason to call that task's log incomplete does not count the same task
+	// twice.
+	emit := func(taskID, taskName string) bool {
 		progress, err := printTaskLogs(ctx, c, taskID, taskName, out)
 		if err != nil {
-			completeness.failedTasks++
+			completeness.incompleteTasks++
 			fmt.Fprintf(errOut, "relay: logs for task %s (%s) are incomplete - stopped after seq %d%s: %v\n",
 				taskName, taskID, progress.lastSeq, progress.ofTotal(), err)
+			return false
+		}
+		return true
+	}
+
+	// emitSnapshot prints every not-yet-printed task in an authoritative job
+	// snapshot. Both readers below share it; the only thing that varies between
+	// them is the snapshot's own job status, which it reads for itself.
+	//
+	// While the job is RUNNING a non-terminal task is legitimately absent:
+	// nothing is owed for it, its output is not final, and the stream will
+	// deliver its terminal frame later.
+	//
+	// Once the job is TERMINAL the same task is a contradiction - the job says
+	// everything is over and the task says it is not - and skipping it silently
+	// printed nothing for it while the zero-value logCompleteness still claimed
+	// the whole log was on stdout. That is unreachable today only by accident:
+	// CancelJobTasks' allow-list is ('pending','queued','running','dispatched')
+	// and omits `preparing`, which is already in the proto as
+	// TASK_STATUS_PREPARING with the agent already streaming LOG_STREAM_PREPARE
+	// chunks for it, so a cancelled job with a preparing task reaches this line
+	// the day that status lands. Print the rows the server will give us - they
+	// are what the operator came for - and say on errOut and in the exit code
+	// that the log is not final. The failure direction has to be loud, not
+	// optimistic.
+	emitSnapshot := func(job jobResp) {
+		jobDone := jobIsTerminal(job.Status)
+		for _, t := range job.Tasks {
+			taskNames[t.ID] = t.Name
+		}
+		for _, t := range job.Tasks {
+			if printed[t.ID] {
+				continue
+			}
+			terminal := taskIsTerminal(t.Status)
+			if !terminal && !jobDone {
+				continue
+			}
+			printed[t.ID] = true
+			if emit(t.ID, taskNames[t.ID]) && !terminal {
+				completeness.incompleteTasks++
+				fmt.Fprintf(errOut,
+					"relay: task %s (%s) was still %s when job %s ended, so its log is not final\n",
+					taskNames[t.ID], t.ID, t.Status, jobID)
+			}
 		}
 	}
 
@@ -237,17 +291,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// status from such a body would end the watch, print nothing, and exit 0.
 			return true
 		}
-		for _, t := range job.Tasks {
-			taskNames[t.ID] = t.Name
-		}
-		for _, t := range job.Tasks {
-			if taskIsTerminal(t.Status) {
-				if !printed[t.ID] {
-					printed[t.ID] = true
-					emit(t.ID, t.Name)
-				}
-			}
-		}
+		emitSnapshot(job)
 		if jobIsTerminal(job.Status) {
 			finalStatus = job.Status
 			return false
@@ -276,10 +320,8 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//     an SSE status is a cache hint, not a source of truth. This is what stops
 	//     watchJobLogs from treating one as a source of truth.
 	//
-	// A task still NON-TERMINAL in the final snapshot is legitimately absent, not an
-	// omission: nothing is owed for it, because it has not reached the state that
-	// entitles it to a log print and its output is not final. So it neither prints
-	// nor counts here.
+	// What a task still NON-TERMINAL in this snapshot means is emitSnapshot's
+	// question, not this one's, and the answer differs by job status - see there.
 	reconcileFinalSnapshot := func() {
 		var job jobResp
 		if err := c.Do(ctx, "GET", "/v1/jobs/"+jobID, nil, &job); err != nil {
@@ -302,18 +344,7 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 				jobID, why)
 			return
 		}
-		for _, t := range job.Tasks {
-			if t.Name != "" {
-				taskNames[t.ID] = t.Name
-			}
-		}
-		for _, t := range job.Tasks {
-			if printed[t.ID] || !taskIsTerminal(t.Status) {
-				continue
-			}
-			printed[t.ID] = true
-			emit(t.ID, taskNames[t.ID])
-		}
+		emitSnapshot(job)
 	}
 
 	handler := func(e relayclient.SSEEvent) bool {

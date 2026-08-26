@@ -400,7 +400,7 @@ func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err, "a log-fetch failure must not abort the watch")
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 	require.Empty(t, out.String())
 	require.Contains(t, errOut.String(), "frame-001", "the diagnostic names the task")
 	require.Contains(t, errOut.String(), taskID, "the diagnostic names the task id")
@@ -581,7 +581,7 @@ func TestWatchJobLogs_FailsOnSecondPage_PrintsFirstPage(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 
 	// Printed as it went: page 1 survives the failure of page 2. An
 	// implementation that accumulates pages and discards them on error fails
@@ -661,7 +661,7 @@ func TestWatchJobLogs_ServerNeverDrains_StopsAtCap(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 
 	requests, _, _ := srv.stats()
 	require.Equal(t, 3, requests, "the loop must stop at maxLogPages requests")
@@ -690,7 +690,7 @@ func TestWatchJobLogs_CursorDoesNotAdvance_StopsImmediately(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 
 	requests, sinceSeqs, _ := srv.stats()
 	require.Equal(t, 2, requests,
@@ -834,7 +834,7 @@ func TestWatchJobLogs_FinalSnapshotUnreadable_RefusesToClaimCompleteness(t *test
 	require.Equal(t, "done", status)
 	require.False(t, completeness.complete())
 	require.True(t, completeness.unreconciled)
-	require.Equal(t, 0, completeness.failedTasks,
+	require.Equal(t, 0, completeness.incompleteTasks,
 		"no task log was attempted and failed - the hole is that none was attempted at all")
 	require.Contains(t, errOut.String(), jobID)
 	require.Contains(t, errOut.String(), "logs may be missing")
@@ -889,7 +889,7 @@ func TestWatchJobLogs_IncompleteDiagnostic_NamesHowMuchIsMissing(t *testing.T) {
 	var out, errOut strings.Builder
 	_, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 	require.Contains(t, errOut.String(), "stopped after seq 200")
 	require.Contains(t, errOut.String(), "(200 of 400 rows)",
 		"the envelope's total is what turns a stopping point into a measure of what is missing")
@@ -950,7 +950,7 @@ func TestWatchJobLogs_EmptyPageWithoutDrainedFlag_IsAnError(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks,
+	require.Equal(t, 1, completeness.incompleteTasks,
 		"an empty page that does not report the log as drained must not be read as drained")
 	require.Len(t, outLines(t, out.String()), 200, "the first page still prints")
 	require.Contains(t, errOut.String(), "empty page")
@@ -978,7 +978,7 @@ func TestWatchJobLogs_ExactlyCapManyPages_MessageDoesNotBlameTheServer(t *testin
 	var out, errOut strings.Builder
 	_, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
 	require.NoError(t, err)
-	require.Equal(t, 1, completeness.failedTasks)
+	require.Equal(t, 1, completeness.incompleteTasks)
 	require.Len(t, outLines(t, out.String()), 400, "every row was in fact printed")
 	require.Contains(t, errOut.String(), "truncated after 2 pages")
 	require.Contains(t, errOut.String(), "client",
@@ -1011,7 +1011,7 @@ func TestWatchJobLogs_StdoutWriteFails_ReportsIncompleteAndStops(t *testing.T) {
 	status, completeness, err := watchJobLogs(ctx, c, jobID, out, &errOut)
 	require.NoError(t, err)
 	require.Equal(t, "done", status)
-	require.Equal(t, 1, completeness.failedTasks,
+	require.Equal(t, 1, completeness.incompleteTasks,
 		"a log that could not be written is exactly as incomplete as one that could not be fetched")
 	require.Contains(t, errOut.String(), "frame-001")
 	require.Contains(t, errOut.String(), "no space left on device")
@@ -1171,4 +1171,92 @@ func TestWatchJobLogs_SubscribeSnapshotHasNoTasks_EstablishesNothing(t *testing.
 	require.Contains(t, err.Error(), "connection lost")
 	require.Empty(t, status)
 	require.Empty(t, out.String())
+}
+
+// A task still non-terminal in the FINAL snapshot of a TERMINAL job is a
+// contradiction, not an absence: the job says everything is over and the task
+// says it is not. Skipping it silently printed nothing for it and left the
+// zero-value logCompleteness claiming the whole log was on stdout - the
+// silent-and-optimistic direction, which is the wrong one.
+//
+// It is unreachable today only by accident. CancelJobTasks' allow-list is
+// ('pending','queued','running','dispatched') and omits `preparing`, which is
+// already in the proto as TASK_STATUS_PREPARING with the agent already
+// streaming LOG_STREAM_PREPARE chunks for it. On the day that status lands, a
+// cancelled job with a preparing task hits this line - so print the rows the
+// server will give us, and say on errOut and in the exit code that the log is
+// not final.
+func TestWatchJobLogs_NonTerminalTaskInFinalSnapshot_PrintsAndFlagsIt(t *testing.T) {
+	jobID, taskID := "job-nonterminal", "task-nonterminal"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		{ID: jobID, Status: "cancelled", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "preparing"}}},
+	}, "event: job\ndata: {\"status\":\"cancelled\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", status)
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered",
+		"the rows exist and are what the operator came for; withholding them is the same silence by another name")
+	require.False(t, completeness.complete(),
+		"a log that was still being written when the job ended is not a complete log")
+	require.Contains(t, errOut.String(), "preparing")
+	require.Contains(t, errOut.String(), "frame-001")
+	require.False(t, completeness.unreconciled,
+		"the final task list WAS read; what is incomplete is one task's log")
+}
+
+// The same rule at the other reader. onSubscribed sees the identical
+// contradiction whenever the job was already terminal at subscribe time, and
+// once the reconcile is gated on a terminal snapshot it is the ONLY reader that
+// sees it on relay logs' most common invocation.
+func TestWatchJobLogs_NonTerminalTaskInSubscribeSnapshot_PrintsAndFlagsIt(t *testing.T) {
+	jobID, taskID := "job-sub-nonterminal", "task-sub-nonterminal"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "cancelled", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "preparing"}}},
+	}, "")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", status)
+	require.Contains(t, out.String(), "[frame-001 stdout] frame rendered")
+	require.False(t, completeness.complete())
+	require.Contains(t, errOut.String(), "preparing")
+}
+
+// The mirror image, and the reason the rule is read off the JOB status rather
+// than applied unconditionally: while the job is still RUNNING a non-terminal
+// task is legitimately absent. Nothing is owed for it, its output is not final,
+// and the stream will deliver its terminal frame later. Printing it here would
+// duplicate it, and flagging it would make every ordinary watch report an
+// incomplete log.
+func TestWatchJobLogs_NonTerminalTaskWhileJobRuns_IsNotPrintedOrFlagged(t *testing.T) {
+	jobID, taskID := "job-still-running", "task-still-running"
+	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{
+		{ID: jobID, Status: "running", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "running"}}},
+		{ID: jobID, Status: "done", Tasks: []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}}},
+	}, "event: job\ndata: {\"status\":\"done\"}\n\n")
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.True(t, completeness.complete())
+	require.Equal(t, 1, strings.Count(out.String(), "[frame-001 stdout] frame rendered"),
+		"the task was printed exactly once, by the reconcile, once it had gone terminal")
+	require.Empty(t, errOut.String())
 }
