@@ -113,7 +113,17 @@ while True:
 
 A server that cannot be paged raises `ProtocolError`: an empty page that still
 advertises more rows, a cursor that does not advance, or a log that never
-reports itself drained within 10000 pages.
+reports itself drained within 10000 pages. The records collected before the
+walk was abandoned are on the exception, so a caller keeps the partial log and
+the reason it is partial:
+
+```python
+try:
+    logs = client.task_logs(task_id)
+except relay.ProtocolError as e:
+    logs = e.records          # never None; [] if nothing was collected
+    print(f"partial log ({len(logs)} records): {e}")
+```
 
 ## Following a job
 
@@ -154,7 +164,7 @@ gap is known and tracked separately.
 | `Conflict` | 409 (e.g. cancelling a terminal job) |
 | `ServerError` | 5xx |
 | `HTTPError` | Any other unexpected status |
-| `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained |
+| `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained. Carries `.records` (what the abandoned walk collected) instead of `.response` |
 | `TimeoutError` | `wait()` exceeded its wall-clock limit |
 
 The original `httpx.Response` is attached as `.response` on each instance

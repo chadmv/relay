@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
+
+if TYPE_CHECKING:
+    from .models import LogRecord
 
 
 class RelayError(Exception):
@@ -62,10 +65,32 @@ class ProtocolError(RelayError):
     response: a page that advertises more rows but carries none, a cursor that
     does not advance, or a log that never reports itself drained.
 
-    Message-only, like :class:`TimeoutError` and unlike the status-derived
-    errors above: it is raised from a walk across several responses, so there
-    is no single ``httpx.Response`` that explains it.
+    Carries no ``.response``, unlike the status-derived errors above: it is
+    raised from a walk across several responses, so there is no single
+    ``httpx.Response`` that explains it.
+
+    ``records`` is what the abandoned walk had already collected, and it is
+    the point of the raise rather than a debugging extra. printTaskLogs
+    (internal/cli/logs.go), which :meth:`relay.Client.task_logs` ports, has
+    already written every row to its output by the time it returns this error:
+    the error is a completeness caveat on rows the operator can already see.
+    A Python method that returns a list cannot deliver rows and raise, so it
+    delivers them HERE::
+
+        try:
+            logs = client.task_logs(task_id)
+        except relay.ProtocolError as e:
+            logs = e.records   # incomplete, and e says why
+
+    It is ``[]`` when nothing was collected, never ``None``, so a caller need
+    not test it before iterating.
     """
+
+    def __init__(
+        self, message: str, *, records: Optional[list["LogRecord"]] = None
+    ) -> None:
+        super().__init__(message)
+        self.records: list[LogRecord] = list(records) if records else []
 
 
 class TimeoutError(RelayError):

@@ -319,6 +319,13 @@ class Client:
         prints each page as it arrives - and this cannot, while returning a
         list. On a very large log use :meth:`task_logs_page` (O(one page)) or
         pass ``limit=``.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        records collected so far on ``.records``. printTaskLogs, which this
+        ports, has printed every row by the time it returns the equivalent
+        error, so the error is a caveat on output the operator already has;
+        returning a list is what makes the caveat and the rows arrive
+        separately here.
         """
         out: list[LogRecord] = []
         since = 0
@@ -347,15 +354,28 @@ class Client:
             if not page.items:
                 raise ProtocolError(
                     "server returned an empty page without reporting the log as "
-                    f"drained (next_seq {page.next_seq} after since_seq {since})"
+                    f"drained (next_seq {page.next_seq} after since_seq {since})",
+                    records=out,
                 )
             if page.next_seq <= since:
                 raise ProtocolError(
                     "server cursor did not advance "
-                    f"(next_seq {page.next_seq} after since_seq {since})"
+                    f"(next_seq {page.next_seq} after since_seq {since})",
+                    records=out,
                 )
             if pages >= self._MAX_LOG_PAGES:
-                if page.total > 0 and len(out) >= page.total:
+                # Count DISTINCT seqs, never len(out). `total` is server-supplied
+                # and so is the cursor, so a server that re-serves a page behind
+                # an advancing cursor drives len(out) up to total while half the
+                # log was never sent - and the message below would then tell the
+                # operator every row was collected. This is the first place
+                # LogRecord.seq is load-bearing for CORRECTNESS rather than for
+                # correlating a record with a cursor, and it is what the field's
+                # required-and-undefaulted declaration buys: a defaulted
+                # `seq: int = 0` would collapse every row of a seq-less page into
+                # one set member and under-count instead.
+                collected = len({r.seq for r in out})
+                if page.total > 0 and collected >= page.total:
                     # Do not blame the server here. A log of exactly
                     # _MAX_LOG_PAGES * _PAGE_REQUEST_LIMIT rows drains
                     # correctly, but its last page is full and so carries a
@@ -365,14 +385,18 @@ class Client:
                     raise ProtocolError(
                         f"truncated after {self._MAX_LOG_PAGES} pages - hit the "
                         f"client's page cap; the server reported {page.total} rows "
-                        "and every one was collected, but it had not yet reported "
-                        "the log as drained"
+                        f"and every one was collected ({collected} distinct rows), "
+                        "but it had not yet reported the log as drained",
+                        records=out,
                     )
                 raise ProtocolError(
                     f"truncated after {self._MAX_LOG_PAGES} pages - hit the client's "
                     "page cap; the log may be longer than "
                     f"{self._MAX_LOG_PAGES * self._PAGE_REQUEST_LIMIT} rows, or the "
-                    "server may never report it as drained"
+                    "server may never report it as drained "
+                    f"({collected} distinct rows collected, server reported "
+                    f"{page.total})",
+                    records=out,
                 )
             since = page.next_seq
 

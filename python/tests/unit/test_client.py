@@ -510,6 +510,13 @@ def test_task_logs_page_cap_message_does_not_blame_the_server_when_total_is_reac
     short of learning it was done, having in fact collected every row. The
     envelope's own total settles that case, so the message must not tell the
     operator their log may be longer.
+
+    The message is only half of it, and the half that was never checked is what
+    the CALLER RECEIVES. printTaskLogs (internal/cli/logs.go) has already
+    written every row to `out` by the time it returns this error - the error is
+    a completeness caveat on output the operator can already see. Assert the
+    records survive the raise, or the port keeps the Go wording and drops the
+    Go semantics.
     """
     monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
     calls: list[dict[str, str]] = []
@@ -532,7 +539,80 @@ def test_task_logs_page_cap_message_does_not_blame_the_server_when_total_is_reac
     message = str(excinfo.value)
     assert "may be longer" not in message
     assert "every one was collected" in message
-    assert "4 rows" in message
+    assert "4 distinct rows" in message
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 3, 4]
+
+
+def test_task_logs_page_cap_completeness_is_distinct_seqs_not_a_record_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completeness claim above is only sound if it counts DISTINCT rows.
+
+    `len(out)` counts records APPENDED and `total` is server-supplied, so a
+    server that serves the same page twice behind an advancing cursor drives
+    them equal while half the log was never sent. This handler does exactly
+    that: rows 1 and 2 twice, cursor 2 then 4, total 4. Rows 3 and 4 do not
+    exist on the wire at any point.
+
+    An implementation that tests `len(out) >= page.total` tells the operator
+    every row was collected. That is the original defect - a silently
+    incomplete log presented as complete - re-created inside the fix for it.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_log_page(
+                [_log_row(1), _log_row(2)], next_seq=len(calls) * 2, total=4
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    message = str(excinfo.value)
+    assert "every one was collected" not in message
+    assert "may be longer" in message
+    # Duplicates and all: the client does not know which of them the server
+    # meant, so it hands back exactly what it received.
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 1, 2]
+
+
+def test_task_logs_page_cap_hands_back_what_it_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generic cap arm - the one that fires on a log genuinely longer than
+    the cap - must not discard the records either.
+
+    _MAX_LOG_PAGES is PRIVATE, so a caller who hits this has no supported way
+    to raise the bound and re-run. Throwing away 2,000,000 collected records
+    leaves them with nothing but the message.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=9999),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    assert "may be longer" in str(excinfo.value)
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 3, 4]
 
 
 def test_get_tasks_parses_a_bare_array() -> None:
