@@ -424,12 +424,24 @@ class Client:
         return self._stream_events(job_id)
 
     def _stream_events(self, job_id: str) -> Iterator[Event]:
+        # All FOUR parameters, explicitly. httpx.Timeout takes its
+        # four-explicit branch only when connect, read, write and pool are all
+        # set; anything less and it raises ValueError, which is what
+        # `Timeout(connect=..., read=None)` did on every call. And it must be
+        # this form rather than `Timeout(self._http.timeout, read=None)`: the
+        # single-Timeout branch `assert read is UNSET`s, so that spelling
+        # raises AssertionError - and under `python -O`, where asserts are
+        # stripped, silently reinstates the read timeout the stream must not
+        # have. Only read is dropped; the caller's connect/write/pool stand.
+        base = self._http.timeout
         with self._http.stream(
             "GET",
             "/v1/events",
             params={"job_id": job_id},
             headers={"Accept": "text/event-stream"},
-            timeout=httpx.Timeout(connect=self._http.timeout.connect, read=None),
+            timeout=httpx.Timeout(
+                connect=base.connect, read=None, write=base.write, pool=base.pool
+            ),
         ) as response:
             raise_for_response(response)
             yield from parse_sse_stream(response.iter_lines())

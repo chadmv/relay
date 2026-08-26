@@ -650,6 +650,70 @@ def test_get_tasks_parses_a_bare_array() -> None:
     assert [(t.id, t.name, t.status) for t in tasks] == [("t1", "cook", "done")]
 
 
+# ─── follow_job() ────────────────────────────────────────────────────────────
+
+
+def test_follow_job_yields_events_and_disables_only_the_read_timeout() -> None:
+    """The first test this method has ever had. It shipped unusable: the stream
+    built `httpx.Timeout(connect=..., read=None)`, and httpx takes the
+    four-explicit-parameters branch only when connect, read, write and pool are
+    ALL set - otherwise it raises ValueError. So every caller who iterated
+    follow_job() got ValueError on the first frame, and the docstring's central
+    claim (that a caller who iterates to exhaustion blocks forever) described
+    behaviour no caller could reach.
+
+    The timeout assertion is not decoration: it is the only thing that pins
+    WHICH of the four the fix disables. `httpx.Timeout(self._http.timeout)`
+    alone parses fine and reinstates the 5 s read timeout the SSE stream must
+    not have; the read=None assertion is what kills that.
+    """
+    captured: dict[str, Any] = {}
+    body = (
+        'event: job\ndata: {"id": "j1", "status": "running"}\n\n'
+        'event: dropped\ndata: {"reason": "slow consumer"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        captured["accept"] = request.headers.get("accept", "")
+        captured["timeout"] = request.extensions["timeout"]
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    client = _make_client(handler)
+    events = list(client.follow_job("j1"))
+
+    assert [(e.type, e.data) for e in events] == [
+        ("job", {"id": "j1", "status": "running"}),
+        ("dropped", {"reason": "slow consumer"}),
+    ]
+    assert captured["path"] == "/v1/events"
+    assert captured["query"] == {"job_id": "j1"}
+    assert captured["accept"] == "text/event-stream"
+    assert captured["timeout"]["read"] is None
+    assert captured["timeout"]["connect"] == 5.0  # the client's own, unchanged
+
+
+def test_follow_job_without_a_token_raises_before_the_request(tmp_path: Any) -> None:
+    """follow_job returns a generator, so a _require_token inside the generator
+    body would not run until the first next() - and a caller who only builds
+    the iterator would see no error at all. It is checked eagerly instead.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, text="")
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+    with pytest.raises(AuthError, match="relay login"):
+        client.follow_job("j1")
+    assert called is False
+
+
 # ─── wait() ──────────────────────────────────────────────────────────────────
 
 
