@@ -806,14 +806,23 @@ When the job finishes, its task list is re-read once and any task not already
 printed is printed then. This is what makes a cancelled job print anything at
 all: `relay cancel` marks the job's in-flight tasks failed in a single statement
 and emits one event, for the job, so those tasks are never announced
-individually. If the job had **already** finished when the command started, that
-re-read is not made: the snapshot taken at subscribe time is itself the
-authoritative read, and every task in a finished job is finished in it.
+individually. The re-read is also what covers a subscribe-time snapshot that
+could not be read at all, since the command then knows nothing about the job
+until the stream ends.
 
-If a task is still **unfinished** in that final list - the job says it is over
-and the task says it is not - its log is printed anyway, since the rows that
-exist are worth more than silence, with a note on stderr saying the log is not
-final and a non-zero exit.
+The one case that skips it is a job that had **already** finished when the
+command started: the snapshot taken at subscribe time is itself the authoritative
+read, and every task it listed has already been printed from it.
+
+If a task is still **unfinished** in the final list - the job says it is over and
+the task says it is not - its log is printed anyway, since the rows that exist
+are worth more than silence, with a note on stderr saying the log is not final
+and a non-zero exit. That note is printed whether or not the fetch itself
+succeeded; a log can be short for both reasons at once, and the task is still
+counted once.
+
+The job id may be given in any spelling the server accepts, including uppercase
+hex and the dashless 32-character form.
 
 If a page cannot be fetched, or cannot be written to stdout, `relay logs` prints
 a diagnostic on **stderr** naming the task, the last log sequence number it
@@ -1276,6 +1285,11 @@ Write tools (any logged-in user):
 | `relay_run_schedule_now` | Fire a schedule immediately (owner or admin). |
 
 Calls that map to admin-only endpoints return a `forbidden` error when invoked by a non-admin token.
+
+`relay_wait_for_job` tolerates a transient failure of its poll (a 5xx, a network
+error, a 429) and keeps waiting, giving up only after five consecutive failures
+or at the timeout. A failure a later poll cannot outlive - a 404, a 400, an
+expired token, a permission the caller does not have - ends the wait immediately.
 
 The four list tools (`relay_list_jobs`, `relay_list_workers`, `relay_list_schedules`, `relay_list_reservations`) accept an optional `sort` parameter; see [Configurable sort order](#configurable-sort-order) for the per-endpoint allowlist.
 

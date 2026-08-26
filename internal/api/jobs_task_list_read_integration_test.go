@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"relay/internal/api"
@@ -36,13 +37,25 @@ var errInjectedQueryFailure = errors.New("injected query failure")
 // bind. This seam also keeps the failure to ONE statement: BearerAuth and
 // GetJobWithEmail run through the same *store.Queries and must still succeed,
 // or the request never reaches the line under test.
+//
+// SEAM: `name` is matched against sqlc's generated `-- name: <Name> :` header, so
+// renaming the query in internal/store/query/*.sql silently stops the injection.
+// The test would then fail with "expected 500, actual 200" - loud, but for the
+// wrong reason and with no hint that the seam broke. `fired` is what tells the
+// two apart: it is asserted non-zero, so a rename fails on the injector rather
+// than on the handler.
 type failOneQueryDB struct {
-	pool *pgxpool.Pool
-	name string
+	pool  *pgxpool.Pool
+	name  string
+	fired *atomic.Int64
 }
 
 func (d failOneQueryDB) fails(sql string) bool {
-	return strings.Contains(sql, "-- name: "+d.name+" :")
+	if !strings.Contains(sql, "-- name: "+d.name+" :") {
+		return false
+	}
+	d.fired.Add(1)
+	return true
 }
 
 func (d failOneQueryDB) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
@@ -91,7 +104,8 @@ func TestGetJob_TaskListReadFails_IsAnError(t *testing.T) {
 	jobID := submitTrivialJob(t, healthy, token)
 
 	// Same pool, same data; only ListTasksByJob is broken.
-	crippled := api.New(pool, store.New(failOneQueryDB{pool: pool, name: "ListTasksByJob"}),
+	var fired atomic.Int64
+	crippled := api.New(pool, store.New(failOneQueryDB{pool: pool, name: "ListTasksByJob", fired: &fired}),
 		events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	req := httptest.NewRequest("GET", "/v1/jobs/"+jobID, nil)
@@ -101,6 +115,9 @@ func TestGetJob_TaskListReadFails_IsAnError(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code,
 		"a task list that could not be read must not be reported as a job with no tasks")
+	require.NotZero(t, fired.Load(),
+		"the injector must have matched ListTasksByJob; a renamed query would make this "+
+			"test pass 200 and read as a handler regression instead of a broken seam")
 
 	// And the healthy server still answers with the task, so the injection is
 	// proven to be the failure under test and not a broken fixture.
