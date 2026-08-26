@@ -55,6 +55,50 @@ def _page_response(items: list[Any], *, next_cursor: str = "", total: Optional[i
     }
 
 
+# ─── task-log fixtures ────────────────────────────────────────────────────────
+#
+# These build the wire bodies GET /v1/tasks/{id}/logs returns (handleGetTaskLogs,
+# internal/api/tasks.go) from plain dict literals with HAND-WRITTEN keys.
+#
+# They are deliberately NOT built by dumping LogRecord or LogPage. A fixture
+# built out of the model under test cannot detect drift in that model: if
+# LogPage's field names were wrong, the fixture would emit the same wrong keys
+# and every test in this file would stay green against an SDK that cannot talk
+# to the real server. That is precisely the failure this file is being changed
+# to fix - the old test_task_logs_parses_records hand-wrote a bare array and so
+# asserted the SDK agreed with itself for three and a half months. Do NOT
+# "de-duplicate" these helpers against the models; doing so re-opens the bug.
+
+
+def _log_row(seq: int, *, stream: str = "stdout", content: str = "") -> dict[str, Any]:
+    """One row, shaped like api.logEntry: {seq, stream, content, created_at}."""
+    return {
+        "seq": seq,
+        "stream": stream,
+        "content": content or f"line {seq}\n",
+        "created_at": "2026-05-06T12:00:00Z",
+    }
+
+
+def _log_rows(first: int, last: int) -> list[dict[str, Any]]:
+    """Rows with CONTIGUOUS seqs, inclusive of both ends.
+
+    The contiguity is load-bearing. since_seq is exclusive server-side
+    (GetTaskLogsPage is `WHERE task_id = $1 AND id > $2`), so the cursor is the
+    previous page's next_seq verbatim. With contiguous ids a `since = next_seq
+    + 1` mutation skips exactly one row and a `- 1` returns one twice, and the
+    seq-list assertions below catch both. With a GAP in the ids (7 then 20)
+    both mutations land harmlessly between rows and are undetectable. Do not
+    "tidy" these into sparse ids.
+    """
+    return [_log_row(seq) for seq in range(first, last + 1)]
+
+
+def _log_page(rows: list[dict[str, Any]], *, next_seq: int, total: int) -> dict[str, Any]:
+    """The envelope: {items, next_seq, total}, keys hand-written."""
+    return {"items": rows, "next_seq": next_seq, "total": total}
+
+
 # ─── Auth & wiring ────────────────────────────────────────────────────────────
 
 
@@ -182,18 +226,34 @@ def test_cancel_job_409_raises_conflict() -> None:
 
 
 def test_task_logs_parses_records() -> None:
+    """The headline. The server has written {items, next_seq, total} since
+    2026-05-08 (a90c727); the SDK iterated the dict, which in Python yields its
+    KEYS, and validated the strings "items"/"next_seq"/"total" as LogRecords.
+
+    The assertion is POSITIVE and positional, never pytest.raises: a test that
+    asserts an exception is green against a client that raises for an unrelated
+    reason.
+    """
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json=[
-                {"stream": "stdout", "content": "hi\n", "created_at": "2026-05-06T12:00:00Z"},
-                {"stream": "stderr", "content": "warn\n", "created_at": "2026-05-06T12:00:01Z"},
-            ],
+            json=_log_page(
+                [
+                    _log_row(7, stream="stdout", content="hi\n"),
+                    _log_row(8, stream="stderr", content="warn\n"),
+                ],
+                next_seq=0,
+                total=2,
+            ),
         )
 
     client = _make_client(handler)
     logs = client.task_logs("abc")
-    assert [log.stream for log in logs] == ["stdout", "stderr"]
+    assert [(r.seq, r.stream, r.content) for r in logs] == [
+        (7, "stdout", "hi\n"),
+        (8, "stderr", "warn\n"),
+    ]
 
 
 # ─── wait() ──────────────────────────────────────────────────────────────────
