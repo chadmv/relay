@@ -864,3 +864,115 @@ func TestRunLogs_FailedJobWithIncompleteLogs_ReportsBoth(t *testing.T) {
 	require.Contains(t, err.Error(), "failed",
 		"the job's own outcome must survive alongside the log diagnostic")
 }
+
+// The envelope's `total` is the whole point of decoding it: "stopped after seq
+// 4200" tells an operator where the output stops, but not how much is missing.
+// 4200 of 4201 rows and 4200 of 91340 rows are very different situations and the
+// diagnostic has to distinguish them.
+func TestWatchJobLogs_IncompleteDiagnostic_NamesHowMuchIsMissing(t *testing.T) {
+	jobID, taskID := "job-total", "task-total"
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(400), 2)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	_, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, 1, completeness.failedTasks)
+	require.Contains(t, errOut.String(), "stopped after seq 200")
+	require.Contains(t, errOut.String(), "(200 of 400 rows)",
+		"the envelope's total is what turns a stopping point into a measure of what is missing")
+}
+
+// fakeEmptyPageServer is a MISBEHAVING server: it answers the first request with
+// a full page and a non-zero next_seq, and every later request with an EMPTY page
+// that still carries a non-zero next_seq.
+//
+// The real handler cannot do this - handleGetTaskLogs sets next_seq = 0 whenever
+// len(items) < limit, so an empty page always reports drained. That is exactly why
+// this shape must be an ERROR rather than a silent nil: a client that treats it as
+// "drained" converts a detectable server misbehaviour into a completeness claim it
+// cannot support.
+func fakeEmptyPageServer(t *testing.T, jobID, taskID string) *fakeLogPagingServer {
+	t.Helper()
+	f := &fakeLogPagingServer{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			f.mu.Lock()
+			f.requests++
+			n := f.requests
+			f.sinceSeqs = append(f.sinceSeqs, r.URL.Query().Get("since_seq"))
+			f.mu.Unlock()
+
+			items := []logRow{}
+			if n == 1 {
+				items = genRows(200)
+			}
+			_ = json.NewEncoder(w).Encode(struct {
+				Items   []logRow `json:"items"`
+				NextSeq int64    `json:"next_seq"`
+				Total   int64    `json:"total"`
+			}{Items: items, NextSeq: 200, Total: 500})
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func TestWatchJobLogs_EmptyPageWithoutDrainedFlag_IsAnError(t *testing.T) {
+	jobID, taskID := "job-emptypage", "task-emptypage"
+	srv := fakeEmptyPageServer(t, jobID, taskID)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, completeness.failedTasks,
+		"an empty page that does not report the log as drained must not be read as drained")
+	require.Len(t, outLines(t, out.String()), 200, "the first page still prints")
+	require.Contains(t, errOut.String(), "empty page")
+	require.Contains(t, errOut.String(), "(200 of 500 rows)")
+}
+
+// The page cap is the CLIENT's bound, and the old message blamed the server for
+// hitting it. A log of exactly maxLogPages * 200 rows drains correctly, but its
+// last page is full and so carries a non-zero next_seq: the client stops, and the
+// server did nothing wrong.
+func TestWatchJobLogs_ExactlyCapManyPages_MessageDoesNotBlameTheServer(t *testing.T) {
+	old := maxLogPages
+	maxLogPages = 2
+	defer func() { maxLogPages = old }()
+
+	jobID, taskID := "job-capboundary", "task-capboundary"
+	// 400 rows at limit=200 is exactly two full pages. Every row is fetched and
+	// printed; only the "is there more?" request is never made.
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(400), 0)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	_, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, 1, completeness.failedTasks)
+	require.Len(t, outLines(t, out.String()), 400, "every row was in fact printed")
+	require.Contains(t, errOut.String(), "truncated after 2 pages")
+	require.Contains(t, errOut.String(), "client",
+		"the cap is the client's, and this input is a server that behaved perfectly")
+	require.NotContains(t, errOut.String(), "the server never reported the log as drained")
+}

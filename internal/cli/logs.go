@@ -170,11 +170,11 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// diagnostic per failing task, naming the task, the task id and the last
 	// seq written; the error's own text is the reason it stopped.
 	emit := func(taskID, taskName string) {
-		lastSeq, err := printTaskLogs(ctx, c, taskID, taskName, out)
+		progress, err := printTaskLogs(ctx, c, taskID, taskName, out)
 		if err != nil {
 			completeness.failedTasks++
-			fmt.Fprintf(errOut, "relay: logs for task %s (%s) are incomplete - stopped after seq %d: %v\n",
-				taskName, taskID, lastSeq, err)
+			fmt.Fprintf(errOut, "relay: logs for task %s (%s) are incomplete - stopped after seq %d%s: %v\n",
+				taskName, taskID, progress.lastSeq, progress.ofTotal(), err)
 		}
 	}
 
@@ -314,15 +314,38 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 // configFilePathFn).
 var maxLogPages = 10000
 
+// logProgress is how far printTaskLogs got. The caller owns the diagnostic's
+// wording, so this carries numbers rather than a formatted string.
+type logProgress struct {
+	// lastSeq is the seq of the last row written, 0 when nothing was written.
+	lastSeq int64
+	// rows is how many rows were written.
+	rows int64
+	// total is the row count the server last reported for this task, 0 when no
+	// page was ever decoded and the count is therefore unknown.
+	total int64
+}
+
+// ofTotal renders how much of the task's log was printed, for a diagnostic that
+// otherwise names only a stopping point: 4200 of 4201 rows and 4200 of 91340 rows
+// are very different situations. It is empty when the server never told us a
+// total - the case when the very first request failed, where "(0 of 0 rows)"
+// would be noise dressed up as data.
+func (p logProgress) ofTotal() string {
+	if p.total <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d of %d rows)", p.rows, p.total)
+}
+
 // printTaskLogs pages GET /v1/tasks/{id}/logs and writes every line to out as
-// each page arrives. It returns the seq of the last row written (0 when nothing
-// was written) and the reason it stopped early, or a nil error when the server
-// reported the log as drained.
+// each page arrives. It returns how far it got and the reason it stopped early,
+// or a nil error when the server reported the log as drained.
 //
-// The last seq is returned rather than logged here because the caller owns the
-// diagnostic's wording, and the seq is what makes that diagnostic actionable:
-// it tells an operator where the output stops and what since_seq to resume from
-// by hand.
+// The progress is returned rather than logged here because the caller owns the
+// diagnostic's wording, and the numbers are what make that diagnostic actionable:
+// they tell an operator where the output stops, what since_seq to resume from by
+// hand, and how much of the log is missing.
 //
 // Printing per page rather than accumulating is deliberate twice over: memory
 // stays O(one page) on a multi-hundred-megabyte log, and a failure on page N
@@ -340,40 +363,56 @@ var maxLogPages = 10000
 // next_seq <= since catches a non-advancing cursor on the second request;
 // maxLogPages catches an ever-advancing cursor that never drains, which the
 // first guard cannot see.
-func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, out io.Writer) (int64, error) {
-	var lastSeq int64
+func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, out io.Writer) (logProgress, error) {
+	var progress logProgress
 	since := int64(0)
 	for pages := 1; ; pages++ {
 		path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d",
 			taskID, since, relayclient.PageRequestLimit)
 		var page taskLogPage
 		if err := c.Do(ctx, "GET", path, nil, &page); err != nil {
-			return lastSeq, fmt.Errorf("fetching page %d: %w", pages, err)
+			return progress, fmt.Errorf("fetching page %d: %w", pages, err)
 		}
+		progress.total = page.Total
 		for _, l := range page.Items {
 			fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content)
-			lastSeq = l.Seq
-		}
-		// Defensive, and ordered first because it is the one arm that is right
-		// no matter what the cursor claims. A correct handler assigns next_seq
-		// from a returned row, so an empty page always carries next_seq == 0
-		// and this never fires against the real server.
-		if len(page.Items) == 0 {
-			return lastSeq, nil
+			progress.lastSeq = l.Seq
+			progress.rows++
 		}
 		// Break on next_seq, never on len(items) < limit: the two agree today,
 		// but the second re-derives a rule the server already applied and
 		// desynchronizes the moment the server's drain rule changes.
 		if page.NextSeq == 0 {
-			return lastSeq, nil // the server says drained
+			return progress, nil // the server says drained
+		}
+		// An empty page that does NOT report the log as drained is a server the
+		// client cannot page. It is unreachable against the real handler, which
+		// sets next_seq = 0 whenever len(items) < limit, so an empty page always
+		// reports drained and the arm above returns first - including on the very
+		// common case of a log whose length is an exact multiple of the page size,
+		// where the final request legitimately comes back empty.
+		//
+		// Which is precisely why this must be an ERROR and not the silent nil it
+		// used to be: the only server that reaches this line is one that is
+		// misbehaving, and returning nil would launder that into a completeness
+		// claim the client cannot support.
+		if len(page.Items) == 0 {
+			return progress, fmt.Errorf(
+				"server returned an empty page without reporting the log as drained (next_seq %d after since_seq %d)",
+				page.NextSeq, since)
 		}
 		if page.NextSeq <= since {
-			return lastSeq, fmt.Errorf(
+			return progress, fmt.Errorf(
 				"server cursor did not advance (next_seq %d after since_seq %d)", page.NextSeq, since)
 		}
 		if pages >= maxLogPages {
-			return lastSeq, fmt.Errorf(
-				"truncated after %d pages - the server never reported the log as drained", maxLogPages)
+			// Do not blame the server here. A log of exactly maxLogPages * 200 rows
+			// drains correctly, but its last page is full and so carries a non-zero
+			// next_seq: the client stops one request short of learning it was done,
+			// having in fact printed every row.
+			return progress, fmt.Errorf(
+				"truncated after %d pages - hit the client's page cap; the log may be longer than %d rows, or the server may never report it as drained",
+				maxLogPages, int64(maxLogPages)*relayclient.PageRequestLimit)
 		}
 		since = page.NextSeq
 	}
