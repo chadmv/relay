@@ -400,3 +400,172 @@ func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 		"a described log failure must not be silent - Dispatch has to print it")
 	require.Contains(t, err.Error(), "logs incomplete")
 }
+
+// fakeLogPagingServer serves a job that is already done with one finished task,
+// and answers the logs route through writeTaskLogPage - so the paging contract
+// under test is the handler's, not a literal. It records one entry per logs
+// request so a test can assert how the client paged.
+type fakeLogPagingServer struct {
+	*httptest.Server
+
+	mu        sync.Mutex
+	requests  int
+	sinceSeqs []string
+	limits    []string
+	failFrom  int // when > 0, the Nth and later logs requests return 500
+}
+
+// There is no /v1/events case: an unmatched request returns 200 with an empty
+// body, which StreamEvents treats as a live subscription that immediately ends.
+// onSubscribed then sees the terminal job and prints. fakeCompletedJobServer
+// relies on the same thing.
+func newFakeLogPagingServer(t *testing.T, jobID, taskID string, rows []logRow, failFrom int) *fakeLogPagingServer {
+	t.Helper()
+	f := &fakeLogPagingServer{failFrom: failFrom}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			f.mu.Lock()
+			f.requests++
+			n := f.requests
+			f.sinceSeqs = append(f.sinceSeqs, r.URL.Query().Get("since_seq"))
+			f.limits = append(f.limits, r.URL.Query().Get("limit"))
+			f.mu.Unlock()
+			if f.failFrom > 0 && n >= f.failFrom {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			writeTaskLogPage(w, r, rows)
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *fakeLogPagingServer) stats() (int, []string, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests, append([]string(nil), f.sinceSeqs...), append([]string(nil), f.limits...)
+}
+
+// genRows returns n rows with CONTIGUOUS seq ids 1..n and content "line <seq>",
+// so an assertion naming a line names a specific row.
+//
+// The contiguity is load-bearing. task_logs.id is a global BIGSERIAL, so
+// per-task seqs are usually gapped - and a gapped fixture makes the classic
+// off-by-one invisible, because `id > lastSeq+1` and `id > lastSeq` return the
+// same rows when no id equals lastSeq+1. Contiguous ids are a legitimate
+// production state (one task logging alone) and are the discriminating input.
+// Do not "make this more realistic" by introducing gaps.
+func genRows(n int) []logRow {
+	rows := make([]logRow, n)
+	for i := range rows {
+		rows[i] = logRow{
+			Seq:       int64(i + 1),
+			Stream:    "stdout",
+			Content:   fmt.Sprintf("line %d", i+1),
+			CreatedAt: time.Unix(0, 0).UTC(),
+		}
+	}
+	return rows
+}
+
+func outLines(t *testing.T, out string) []string {
+	t.Helper()
+	if out == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+}
+
+func TestWatchJobLogs_PagesUntilDrained(t *testing.T) {
+	jobID, taskID := "job-page", "task-page"
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(450), 0)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 0, logFailures)
+	require.Empty(t, errOut.String())
+
+	require.Contains(t, out.String(), "[frame-001 stdout] line 450",
+		"the last row of the last page must be printed - a single-page client stops at 200")
+	lines := outLines(t, out.String())
+	require.Len(t, lines, 450)
+	require.Equal(t, "[frame-001 stdout] line 1", lines[0])
+	require.Equal(t, "[frame-001 stdout] line 450", lines[449])
+
+	requests, sinceSeqs, limits := srv.stats()
+	require.Equal(t, 3, requests, "450 rows at limit=200 is two full pages plus one short page")
+	require.Equal(t, []string{"0", "200", "400"}, sinceSeqs,
+		"the cursor is the previous page's next_seq verbatim - since_seq is exclusive")
+	require.Equal(t, []string{"200", "200", "200"}, limits)
+}
+
+func TestWatchJobLogs_ExactPageMultiple_NoDropNoDuplicate(t *testing.T) {
+	jobID, taskID := "job-exact", "task-exact"
+	// 400 CONTIGUOUS rows: page 1 and page 2 are both full, so both carry a
+	// non-zero next_seq, and a third request is needed to learn the log is
+	// drained. See genRows for why contiguity is the discriminating input.
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(400), 0)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 0, logFailures)
+
+	require.Contains(t, out.String(), "[frame-001 stdout] line 201\n",
+		"since_seq is EXCLUSIVE: paging with lastSeq+1 skips this row entirely")
+	require.Equal(t, 1, strings.Count(out.String(), "[frame-001 stdout] line 200\n"),
+		"paging with lastSeq-1 would re-return this row")
+	require.Len(t, outLines(t, out.String()), 400)
+
+	requests, sinceSeqs, _ := srv.stats()
+	require.Equal(t, 3, requests,
+		"a full second page carries a non-zero next_seq, so a third (empty) request is required")
+	require.Equal(t, []string{"0", "200", "400"}, sinceSeqs)
+}
+
+func TestWatchJobLogs_FailsOnSecondPage_PrintsFirstPage(t *testing.T) {
+	jobID, taskID := "job-midfail", "task-midfail"
+	srv := newFakeLogPagingServer(t, jobID, taskID, genRows(400), 2)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, logFailures)
+
+	// Printed as it went: page 1 survives the failure of page 2. An
+	// implementation that accumulates pages and discards them on error fails
+	// here and passes TestWatchJobLogs_LogsFetchFails.
+	require.Contains(t, out.String(), "[frame-001 stdout] line 1\n")
+	require.Contains(t, out.String(), "[frame-001 stdout] line 200\n")
+	require.NotContains(t, out.String(), "line 201")
+	require.Len(t, outLines(t, out.String()), 200)
+
+	require.Contains(t, errOut.String(), "stopped after seq 200",
+		"the diagnostic names where the output stops, so an operator can resume by hand")
+	require.Contains(t, errOut.String(), "frame-001")
+}

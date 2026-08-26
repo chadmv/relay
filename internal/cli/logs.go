@@ -164,24 +164,77 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	return finalStatus, logFailures, nil
 }
 
-// printTaskLogs fetches a task's log and writes every line to out. It returns
-// the seq of the last row written (0 when nothing was written) and the reason
-// it stopped early, or a nil error when the server reported the log as drained.
+// maxLogPages bounds the paging loop against a server whose next_seq keeps
+// advancing but which never reports the log as drained. 10000 pages at 200 rows
+// is 2,000,000 rows: this is a hang bound, not a product limit - no real task
+// log approaches it, and reaching it means the server is misbehaving.
+//
+// It is a var rather than a const so a test can shrink it, following this
+// package's testability-override convention (readPasswordFn, saveConfigFn,
+// configFilePathFn).
+var maxLogPages = 10000
+
+// printTaskLogs pages GET /v1/tasks/{id}/logs and writes every line to out as
+// each page arrives. It returns the seq of the last row written (0 when nothing
+// was written) and the reason it stopped early, or a nil error when the server
+// reported the log as drained.
 //
 // The last seq is returned rather than logged here because the caller owns the
 // diagnostic's wording, and the seq is what makes that diagnostic actionable:
 // it tells an operator where the output stops and what since_seq to resume from
 // by hand.
+//
+// Printing per page rather than accumulating is deliberate twice over: memory
+// stays O(one page) on a multi-hundred-megabyte log, and a failure on page N
+// still leaves pages 1..N-1 on the output.
+//
+// since_seq is EXCLUSIVE server-side - GetTaskLogsPage is
+// `WHERE task_id = $1 AND id > $2` - so the cursor is the previous page's
+// next_seq verbatim. Never lastSeq+1: task_logs.id is a global BIGSERIAL, so
+// when one task is logging alone its ids are contiguous and +1 skips the very
+// next row.
+//
+// The loop is bounded twice and both bounds are needed. The cursor is
+// server-supplied and drives a client loop, and the provenance of a value says
+// nothing about who controls its content or the timing of the writes behind it.
+// next_seq <= since catches a non-advancing cursor on the second request;
+// maxLogPages catches an ever-advancing cursor that never drains, which the
+// first guard cannot see.
 func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName string, out io.Writer) (int64, error) {
 	var lastSeq int64
-	var page taskLogPage
-	path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d", taskID, 0, relayclient.PageRequestLimit)
-	if err := c.Do(ctx, "GET", path, nil, &page); err != nil {
-		return lastSeq, err
+	since := int64(0)
+	for pages := 1; ; pages++ {
+		path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d",
+			taskID, since, relayclient.PageRequestLimit)
+		var page taskLogPage
+		if err := c.Do(ctx, "GET", path, nil, &page); err != nil {
+			return lastSeq, fmt.Errorf("fetching page %d: %w", pages, err)
+		}
+		for _, l := range page.Items {
+			fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content)
+			lastSeq = l.Seq
+		}
+		// Defensive, and ordered first because it is the one arm that is right
+		// no matter what the cursor claims. A correct handler assigns next_seq
+		// from a returned row, so an empty page always carries next_seq == 0
+		// and this never fires against the real server.
+		if len(page.Items) == 0 {
+			return lastSeq, nil
+		}
+		// Break on next_seq, never on len(items) < limit: the two agree today,
+		// but the second re-derives a rule the server already applied and
+		// desynchronizes the moment the server's drain rule changes.
+		if page.NextSeq == 0 {
+			return lastSeq, nil // the server says drained
+		}
+		if page.NextSeq <= since {
+			return lastSeq, fmt.Errorf(
+				"server cursor did not advance (next_seq %d after since_seq %d)", page.NextSeq, since)
+		}
+		if pages >= maxLogPages {
+			return lastSeq, fmt.Errorf(
+				"truncated after %d pages - the server never reported the log as drained", maxLogPages)
+		}
+		since = page.NextSeq
 	}
-	for _, l := range page.Items {
-		fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content)
-		lastSeq = l.Seq
-	}
-	return lastSeq, nil
 }
