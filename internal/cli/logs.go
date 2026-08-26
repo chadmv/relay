@@ -221,9 +221,20 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // Adopting the id from the first usable snapshot instead would fix the
 // comparison and could not fix the subscription, since the subscription is
 // established before any snapshot is read - and reading one first to learn the id
-// reopens the terminal-before-subscribe race the snapshot exists to close. The
-// parse rule is not re-derived here: this calls the same pgtype.UUID.Scan the
-// server's parseUUID calls, so the two cannot drift.
+// reopens the terminal-before-subscribe race the snapshot exists to close.
+//
+// Only the PARSE half is shared. This calls the same pgtype.UUID.Scan the
+// server's parseUUID calls, so what counts as a uuid cannot drift. The RENDER
+// below is a hand-written duplicate: the format string is the sixth production
+// copy of it (internal/api/server.go, cmd/relay-server/main.go,
+// internal/metrics/sweep.go, internal/scheduler/dispatch.go,
+// internal/worker/handler.go, plus this one), byte-identical today and unified
+// by nothing.
+//
+// Its only guard is one-directional. TestWatchJobLogs_NonCanonicalJobID_-
+// IsResolvedNotRejected hard-codes the expected spelling rather than deriving it
+// from this function, so a change HERE goes red. A change in the SERVER's uuidStr
+// is caught by nothing: it is unexported, so no test relates the two.
 func canonicalJobID(jobID string) string {
 	var u pgtype.UUID
 	if err := u.Scan(jobID); err != nil || !u.Valid {
@@ -514,8 +525,14 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// function exists to close. Fail closed - say so on errOut and refuse to
 			// claim completeness - rather than exiting 0 on an unverified guess.
 			completeness.unreconciled = true
+			// The message says what this read was FOR, not what it believes about
+			// the job. Two paths arm this reconcile and only one of them observed a
+			// terminal status; the other is the subscribe-time snapshot that
+			// established nothing, where the stream then ended without a word.
+			// "after it finished" on that path contradicts the error printed
+			// immediately beside it, which says the job may still be running.
 			fmt.Fprintf(errOut,
-				"relay: could not re-read job %s after it finished, so some tasks' logs may be missing: %s\n",
+				"relay: could not re-read job %s to find any task whose log went unprinted, so some logs may be missing: %s\n",
 				jobID, why)
 			return
 		}

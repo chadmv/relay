@@ -1965,3 +1965,32 @@ func TestWatchJobLogs_JobDoesNotExist_ReportsItInsteadOfWaitingOnTheStream(t *te
 	require.Equal(t, 1, jobReads,
 		"an answer that is the same on every later read is asked for once")
 }
+
+// The reconcile's diagnostic is printed on two paths and used to describe only
+// one of them. Here the subscribe-time snapshot established nothing, the stream
+// then ended without a word, and the reconcile failed too - so nothing in this
+// run ever established that the job had finished, while the message said "after
+// it finished" directly above an error saying the job may still be running.
+//
+// Cosmetic, because a non-nil watch error means doLogs discards the completeness
+// anyway. Both lines still reach the operator's terminal, and they contradicted
+// each other.
+func TestWatchJobLogs_NothingEstablishedTheJobEnded_DiagnosticDoesNotSayItDid(t *testing.T) {
+	jobID, taskID := "job-nostatus", "task-nostatus"
+	// Every job read fails, and the stream closes without a frame.
+	srv := fakeSnapshotFailsThenRecoversServer(t, jobID, taskID, 99, true)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, completeness, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "may still be running")
+	require.Empty(t, status)
+	require.True(t, completeness.unreconciled)
+	require.Contains(t, errOut.String(), "logs may be missing")
+	require.NotContains(t, errOut.String(), "finished",
+		"nothing in this run established that the job had ended, and the error beside this line says the opposite")
+}
