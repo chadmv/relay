@@ -683,7 +683,7 @@ Set the printed token as `RELAY_AGENT_ENROLLMENT_TOKEN` when starting the agent 
 Submit a job from a JSON file.
 
 ```sh
-relay submit job.json          # submit and tail logs until done
+relay submit job.json          # submit, then print each task's log as it finishes
 relay submit --detach job.json # submit and print job ID, then exit
 ```
 
@@ -775,7 +775,14 @@ relay cancel <job-id> --force   # tree-kill, skip drain, skip cleanup
 
 #### `relay logs`
 
-Stream task logs for a running or completed job via Server-Sent Events.
+Watch a job until it finishes, printing each task's log once that task reaches a
+terminal state.
+
+The command subscribes to `/v1/events?job_id=<id>`, which carries job and task
+**status** frames only - `task_log` frames require a subscription that names an
+explicit `task_id` (see the event table under "Events"). Log content is fetched
+over REST from `GET /v1/tasks/{id}/logs` once a task goes terminal, so output
+arrives in a burst per finished task rather than live, line by line.
 
 ```sh
 relay logs <job-id>
@@ -788,6 +795,20 @@ Output format:
 [frame-001 stdout] Read blend: scene.blend
 [frame-001 stderr] Warning: deprecated API call
 ```
+
+A task's log is paged to the end, so a log longer than one page is printed in
+full. If a page cannot be fetched, `relay logs` prints a diagnostic on **stderr**
+naming the task and the last log sequence number it printed, keeps watching the
+job's other tasks, and exits 1:
+
+```
+relay: logs for task frame-001 (7e660488-...) are incomplete - stopped after seq 4200: fetching page 22: get task logs failed
+error: logs incomplete for 1 of the job's tasks
+```
+
+Exit codes: `0` when the job finishes `done` and every task's log printed in
+full; `1` otherwise (a failed or cancelled job exits 1 silently, since the job
+status is already on stdout).
 
 ---
 
