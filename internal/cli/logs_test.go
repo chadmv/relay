@@ -348,14 +348,14 @@ func TestWatchJobLogs_AlreadyCancelled_ReturnsCancelled(t *testing.T) {
 }
 
 // fakeLogsFailServer serves a terminal job whose logs route always 500s.
-func fakeLogsFailServer(t *testing.T, jobID, taskID string) *httptest.Server {
+func fakeLogsFailServer(t *testing.T, jobID, taskID, jobStatus string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
 			json.NewEncoder(w).Encode(jobResp{
 				ID:     jobID,
-				Status: "done",
+				Status: jobStatus,
 				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
 			})
 
@@ -372,7 +372,7 @@ func fakeLogsFailServer(t *testing.T, jobID, taskID string) *httptest.Server {
 // with nothing on either stream - the exact production symptom.
 func TestWatchJobLogs_LogsFetchFails_ReportsOnStderr(t *testing.T) {
 	jobID, taskID := "job-500", "task-500"
-	srv := fakeLogsFailServer(t, jobID, taskID)
+	srv := fakeLogsFailServer(t, jobID, taskID, "done")
 
 	c := relayclient.NewClient(srv.URL, "tok")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -823,4 +823,27 @@ func TestWatchJobLogs_FinalSnapshotUnreadable_RefusesToClaimCompleteness(t *test
 	var se silentError
 	require.False(t, errors.As(err, &se))
 	require.Contains(t, err.Error(), "final task list could not be read")
+}
+
+// The two outcome facts are COMPOSED, not ranked. A message about logs alone
+// invites the reader to conclude the job itself was fine, which against a failed
+// job is the more important half of what happened and the half that was missing
+// from every stream: stdout carries only task log lines, and the failed-job case
+// is otherwise silent by design.
+func TestRunLogs_FailedJobWithIncompleteLogs_ReportsBoth(t *testing.T) {
+	jobID, taskID := "job-both", "task-both"
+	srv := fakeLogsFailServer(t, jobID, taskID, "failed")
+
+	cfg := &Config{ServerURL: srv.URL, Token: "tok"}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	err := doLogs(ctx, cfg, []string{jobID}, &out, &errOut)
+	require.Error(t, err)
+	var se silentError
+	require.False(t, errors.As(err, &se))
+	require.Contains(t, err.Error(), "logs incomplete")
+	require.Contains(t, err.Error(), "failed",
+		"the job's own outcome must survive alongside the log diagnostic")
 }

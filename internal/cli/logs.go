@@ -56,16 +56,39 @@ func doLogs(ctx context.Context, cfg *Config, args []string, out, errOut io.Writ
 	if err != nil {
 		return err
 	}
-	// A described failure takes precedence over silentError{}: both exit 1, and
-	// the described one is strictly more informative. Silence is the thing being
-	// fixed, so where the two compete silence loses.
-	if !completeness.complete() {
-		return errors.New(completeness.reason())
+	return watchOutcomeError(status, completeness)
+}
+
+// watchOutcomeError turns the two independent facts a watch produces - the job's
+// final status and how complete the printed output is - into the command's error.
+//
+// The two are COMPOSED, not ranked. They are not more and less informative
+// versions of the same thing; they are different things, and a message about logs
+// alone invites the reader to conclude the job itself was fine. Against a server
+// reporting a failed job whose logs route is down, "logs incomplete for 1 of the
+// job's tasks" was the entire output, and nothing on any stream said the job had
+// failed.
+//
+// silentError{} survives for the one case it was written for: a job that finished
+// non-done with complete output, where the exit code is the whole message and
+// Dispatch prints nothing.
+//
+// Note what does NOT reach here. Both callers return a non-nil watch error
+// directly, so a stream that aborts discards the completeness alongside it. The
+// real precedence is therefore transport error, then this composition, then
+// silence - and discarding is right: the per-task diagnostics already reached
+// errOut as they happened, and the transport error is the more actionable half.
+func watchOutcomeError(status string, completeness logCompleteness) error {
+	if completeness.complete() {
+		if status != "done" {
+			return silentError{}
+		}
+		return nil
 	}
 	if status != "done" {
-		return silentError{}
+		return fmt.Errorf("job finished %s; %s", status, completeness.reason())
 	}
-	return nil
+	return errors.New(completeness.reason())
 }
 
 // logCompleteness records why the printed output may not be the whole log. Its

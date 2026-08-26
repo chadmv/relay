@@ -4,7 +4,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -232,13 +231,8 @@ func doSubmit(ctx context.Context, cfg *Config, args []string, w, errOut io.Writ
 	if err != nil {
 		return err
 	}
-	// Same precedence as doLogs: a described failure beats silentError{}, and
-	// leaving relay submit silent would re-create this bug in the sibling command.
-	if !completeness.complete() {
-		return errors.New(completeness.reason())
-	}
-	if status != "done" {
-		return silentError{}
-	}
-	return nil
+	// Shared with doLogs. Leaving relay submit silent about an incomplete log
+	// would re-create this bug in the sibling command, and the two commands
+	// wording the same outcome differently is its own defect.
+	return watchOutcomeError(status, completeness)
 }
