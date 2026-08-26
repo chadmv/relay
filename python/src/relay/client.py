@@ -4,6 +4,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Optional, TypeVar, Union, cast
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel
@@ -301,7 +302,15 @@ class Client:
             params["since_seq"] = str(since_seq)
         if limit is not None:
             params["limit"] = str(limit)
-        response = self._http.get(f"/v1/tasks/{task_id}/logs", params=params)
+        # quote(safe="") is url.PathEscape, which printTaskLogs
+        # (internal/cli/logs.go:714) applies to this same argument. Raw, an id
+        # of "../../v1/users" resolves to /v1/users/logs - same host, bearer
+        # attached - and one containing "?" swallows the /logs suffix and the
+        # paging params into a query string. The escape means the request shape
+        # does not rest on where the id came from.
+        response = self._http.get(
+            f"/v1/tasks/{quote(task_id, safe='')}/logs", params=params
+        )
         raise_for_response(response)
         # The WHOLE body goes through the model, never a hand-picked
         # body["items"]. The model is the pin: a missing next_seq or total

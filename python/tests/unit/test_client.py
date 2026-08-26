@@ -346,6 +346,46 @@ def test_task_logs_page_raises_on_a_bare_array_body() -> None:
         client.task_logs_page("abc")
 
 
+def test_task_logs_page_escapes_the_task_id_into_one_path_segment() -> None:
+    """internal/cli/logs.go:714-723 - the exact function this method ports -
+    calls url.PathEscape(taskID), with a comment saying the escape means the
+    argument does not rest on its provenance. The port carried the reasoning
+    nowhere and interpolated the id raw.
+
+    Two things it bought, both measured against httpx 0.28.1:
+
+      - '../../v1/users' resolved to /v1/users/logs. Same host, bearer token
+        attached: the id chooses the ENDPOINT.
+      - 'abc?limit=1&x=' resolved to /v1/tasks/abc?limit=200&x=%2Flogs - the
+        /logs suffix and the paging params both gone, which is a silently wrong
+        request rather than a failure.
+
+    (SSRF and header injection do NOT reach: an absolute URL keeps the client's
+    host, and httpx rejects CR/LF in a URL. This is a path-shape defect.)
+
+    The assertions are on raw_path because that is what goes on the wire; a
+    check on .path would read the DECODED form and pass against no escape at
+    all. quote(safe="") matches url.PathEscape, and %2F survives undecoded, so
+    the traversal never reaches the server as a slash.
+    """
+    calls: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.raw_path)
+        return httpx.Response(200, json=_log_page([], next_seq=0, total=0))
+
+    client = _make_client(handler)
+    client.task_logs_page("../../v1/users")
+    client.task_logs_page("abc?limit=1&x=", limit=25)
+    client.task_logs_page("abc", since_seq=10)
+
+    assert calls == [
+        b"/v1/tasks/..%2F..%2Fv1%2Fusers/logs",
+        b"/v1/tasks/abc%3Flimit%3D1%26x%3D/logs?limit=25",
+        b"/v1/tasks/abc/logs?since_seq=10",
+    ]
+
+
 def test_task_logs_pages_to_the_end_with_verbatim_cursor() -> None:
     """450 rows at limit=200 is two full pages plus one short page.
 
