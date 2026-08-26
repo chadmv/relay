@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .config import Config, resolve_config
 from .errors import (
     AuthError,
+    ProtocolError,
     ValidationError,
     raise_for_response,
 )
@@ -317,8 +318,46 @@ class Client:
             # Break on next_seq, never on len(items) < limit: the two agree
             # today, but the second re-derives a rule the server already applied
             # and desynchronizes the moment the drain rule moves.
+            #
+            # This arm MUST stay above the empty-page stop below. A log whose
+            # length is an exact multiple of the page size legitimately produces
+            # a final empty page, and that page reports drained.
             if page.next_seq == 0:
                 return out
+            # Three stops beyond the server's own drained signal, and all three
+            # are needed. The cursor is server-supplied and drives a client
+            # loop, and the provenance of a value says nothing about who
+            # controls its content or the timing of the writes behind it.
+            if not page.items:
+                raise ProtocolError(
+                    "server returned an empty page without reporting the log as "
+                    f"drained (next_seq {page.next_seq} after since_seq {since})"
+                )
+            if page.next_seq <= since:
+                raise ProtocolError(
+                    "server cursor did not advance "
+                    f"(next_seq {page.next_seq} after since_seq {since})"
+                )
+            if pages >= self._MAX_LOG_PAGES:
+                if page.total > 0 and len(out) >= page.total:
+                    # Do not blame the server here. A log of exactly
+                    # _MAX_LOG_PAGES * _PAGE_REQUEST_LIMIT rows drains
+                    # correctly, but its last page is full and so carries a
+                    # non-zero cursor: we stopped one request short of learning
+                    # we were done, having collected every row. The envelope's
+                    # own total settles it, so do not re-raise the ambiguity.
+                    raise ProtocolError(
+                        f"truncated after {self._MAX_LOG_PAGES} pages - hit the "
+                        f"client's page cap; the server reported {page.total} rows "
+                        "and every one was collected, but it had not yet reported "
+                        "the log as drained"
+                    )
+                raise ProtocolError(
+                    f"truncated after {self._MAX_LOG_PAGES} pages - hit the client's "
+                    "page cap; the log may be longer than "
+                    f"{self._MAX_LOG_PAGES * self._PAGE_REQUEST_LIMIT} rows, or the "
+                    "server may never report it as drained"
+                )
             since = page.next_seq
 
     # ─── Following progress ───────────────────────────────────────────────

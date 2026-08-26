@@ -16,6 +16,7 @@ from relay import (
     NotFound,
     OverlapPolicy,
     Priority,
+    ProtocolError,
     ValidationError,
 )
 
@@ -412,6 +413,126 @@ def test_task_logs_limit_caps_total_records() -> None:
 
     assert [r.seq for r in logs] == list(range(1, 251))
     assert len(calls) == 2
+
+
+def test_task_logs_raises_on_empty_page_that_is_not_drained() -> None:
+    """Stop 1. Unreachable against the real handler, which sets next_seq = 0
+    whenever the page is short - which is exactly why it must RAISE and not
+    return quietly. The only server that reaches this line is misbehaving, and
+    a quiet return would launder that into a completeness claim the client
+    cannot support.
+
+    The DISCRIMINATING page is request 1, with a normal page after it. A bad
+    input placed LAST cannot detect an early-exit mutation; and the normal page
+    2 is what makes the mutant TERMINATE (returning []) rather than spin, so
+    deleting the stop is RED and not a hang.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(200, json=_log_page([], next_seq=5, total=3))
+        return httpx.Response(200, json=_log_page([_log_row(6)], next_seq=0, total=3))
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page"):
+        client.task_logs("abc")
+    assert len(calls) == 1
+
+
+def test_task_logs_raises_when_cursor_does_not_advance() -> None:
+    """Stop 2, and it is only expressible because this cursor is ORDERED - an
+    opaque string cursor cannot detect a non-advancing server.
+
+    Two things here are load-bearing and both were missing from the spec's
+    sketch. The discriminating page is request 2 BY CONSTRUCTION: on request 1
+    `since` is 0 and `next_seq == 0` is already consumed by the drained arm, so
+    stop 2 is unreachable there. And page 3 is a normal DRAINED page, so
+    deleting stop 2 makes the walk terminate and return records - without it the
+    mutant would spin to the page cap and raise ProtocolError from stop 3, and
+    a bare pytest.raises(ProtocolError) would pass against the mutant. The
+    match= is the other half of that same guard.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) <= 2:
+            # Asked for since_seq=7 on request 2, answers next_seq=7 again.
+            return httpx.Response(200, json=_log_page([_log_row(7)], next_seq=7, total=9))
+        return httpx.Response(200, json=_log_page([_log_row(8)], next_seq=0, total=9))
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="did not advance"):
+        client.task_logs("abc")
+    assert len(calls) == 2
+
+
+def test_task_logs_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop 3, which catches an ever-advancing cursor that never drains -
+    something neither of the other two stops can see.
+
+    The 500 past the cap is not decoration. Without it, deleting the cap check
+    leaves this handler advancing forever and the test HANGS rather than fails:
+    this project has no pytest-timeout. The 500 makes the mutant terminate with
+    ServerError, which is not ProtocolError, so the test is RED.
+
+    The request-count assertion is the other half: a test that only checks the
+    exception class cannot tell the cap from a different stop firing.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=9999),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="page cap"):
+        client.task_logs("abc")
+    assert len(calls) == 3
+
+
+def test_task_logs_page_cap_message_does_not_blame_the_server_when_total_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop 3's two-message split, ported from printTaskLogs.
+
+    A log of exactly _MAX_LOG_PAGES * 200 rows drains correctly, but its last
+    page is full and so carries a non-zero cursor: the client stops one request
+    short of learning it was done, having in fact collected every row. The
+    envelope's own total settles that case, so the message must not tell the
+    operator their log may be longer.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        # total == 4 == the rows this walk will have collected when the cap fires.
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=4),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    message = str(excinfo.value)
+    assert "may be longer" not in message
+    assert "every one was collected" in message
+    assert "4 rows" in message
 
 
 # ─── wait() ──────────────────────────────────────────────────────────────────
