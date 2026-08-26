@@ -291,6 +291,10 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//   - It established NOTHING: the read failed, or the body could not be this
 	//     job's answer. subscribeEstablishedNothing. See the defer.
 	var snapshotWasFinal, subscribeEstablishedNothing bool
+	// The subscribe-time read's fourth outcome, and the only one that is not about
+	// what the snapshot settled: the read failed in a way no later read and no
+	// stream frame can change. See onSubscribed and the defer.
+	var fatalSnapshotErr error
 
 	// emit prints one task's log and reports an incomplete one on errOut. One
 	// diagnostic per failing task, naming the task, the task id and the last
@@ -374,20 +378,35 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// value because they are one fact to every caller: nothing was established.
 	// Keeping them apart is what let the unusable body be handled as a lesser
 	// problem than the failed read in one reader and an equal one in the other.
-	readJobSnapshot := func() (jobResp, string) {
+	//
+	// The third return is the separate question of whether asking again could ever
+	// change the answer, and it is non-nil only when it CANNOT: the job does not
+	// exist, the id is malformed, the token is rejected. That is not a thinner
+	// version of "nothing was established" - it is the opposite, an answer so
+	// definite that no later read and no stream can improve on it. The partition
+	// is relayclient.ErrorIsTransient, shared with internal/mcp's wait loop, which
+	// makes the same decision about the same endpoint.
+	//
+	// An unusable BODY is never definite here. A 200 that carried no task list is
+	// exactly the transient server-side failure the retry below exists for, and a
+	// body describing another job is a server bug rather than a fact about the id.
+	readJobSnapshot := func() (jobResp, string, error) {
 		var job jobResp
 		if err := c.Do(ctx, "GET", jobPath(jobID), nil, &job); err != nil {
-			return jobResp{}, err.Error()
+			if !relayclient.ErrorIsTransient(err) {
+				return jobResp{}, err.Error(), err
+			}
+			return jobResp{}, err.Error(), nil
 		}
-		return job, jobSnapshotUnusable(job, jobID)
+		return job, jobSnapshotUnusable(job, jobID), nil
 	}
 
 	// onSubscribed runs after the SSE subscription is live. Any task or job already
 	// terminal at this point would never produce a future event, so we GET a snapshot
 	// and handle it here. Returning false stops the stream when the job is done.
 	onSubscribed := func() bool {
-		job, why := readJobSnapshot()
-		if why != "" {
+		job, why, fatal := readJobSnapshot()
+		if why != "" && fatal == nil {
 			// Ask once more before giving up on this read, because on the input
 			// that matters it is the ONLY reader: for a job that went terminal
 			// before the subscription existed, the broker has no replay and no
@@ -400,13 +419,35 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			//
 			// One retry, not a loop: a transient ListTasksByJob failure is exactly
 			// what the server-side half of this slice turned from a silent 200
-			// into a 500, and it is what this covers. A read that fails twice
-			// leaves the client genuinely unable to tell a finished job from a
-			// running one, so it falls through to the stream and waits - which is
+			// into a 500, and it is what this covers. A TRANSIENT read that fails
+			// twice leaves the client genuinely unable to tell a finished job from
+			// a running one, so it falls through to the stream and waits - which is
 			// the correct behaviour for the running case and is the residual hole
 			// for the finished one. Closing that needs the snapshot re-read while
 			// the stream is live, which this shape cannot express.
-			job, why = readJobSnapshot()
+			//
+			// That inability is what justifies the fall-through, and it is a claim
+			// about transient failures ONLY. Against a 404, a 400, a 401 or a 403
+			// the client knows definitively, and the branch below is where it says
+			// so instead of waiting.
+			job, why, fatal = readJobSnapshot()
+		}
+		if fatal != nil {
+			// A definite answer ends the watch here, and this is the arm the whole
+			// slice exists for. The stream cannot improve on it: handleEvents does
+			// not validate or canonicalise `?job_id=` (its own comment,
+			// internal/api/events.go), so an id naming no job gets an open,
+			// permanently empty stream with no heartbeat and no server-side
+			// timeout, against a context cmd/relay gives no deadline. Falling
+			// through would print nothing on either stream until Ctrl-C - and a
+			// well-formed uuid that names no job is the likeliest thing an operator
+			// mistypes into this command.
+			//
+			// The error is carried out through the defer rather than returned from
+			// here, because this is a StreamEvents callback and its only return is
+			// the bool that stops the stream.
+			fatalSnapshotErr = fatal
+			return false
 		}
 		if why != "" {
 			// Nothing was established, so nothing is printed and no status is
@@ -460,7 +501,11 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// What a task still NON-TERMINAL in this snapshot means is emitSnapshot's
 	// question, not this one's, and the answer differs by job status - see there.
 	reconcileFinalSnapshot := func() {
-		job, why := readJobSnapshot()
+		// Whether the failure was definite is not a question here. onSubscribed
+		// asks it to decide between waiting on the stream and answering now, and
+		// there is no stream left to wait on: every failure gets the same
+		// fail-closed treatment below.
+		job, why, _ := readJobSnapshot()
 		if why != "" {
 			// Unlike the onSubscribed snapshot, this failure is NOT survivable by
 			// falling through. There the stream was still ahead and could deliver
@@ -556,11 +601,21 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// transport-error path. Nothing below the stream call reads or writes the
 	// outcome now, so there is no ordering left to get wrong.
 	defer func() {
+		// A definite snapshot failure stopped the stream cleanly, so StreamEvents
+		// returned nil and there is no transport error to prefer. It is the
+		// command's answer: no reconcile (the same read would fail the same way)
+		// and not "connection lost" (nothing was lost - the server said what it
+		// knew and this is it).
+		if err == nil && fatalSnapshotErr != nil {
+			err = fatalSnapshotErr
+		}
 		if err != nil {
-			// A transport error is the answer and the more actionable half; the
-			// per-task diagnostics already reached errOut as they happened. It is
-			// also the one path on which finalStatus cannot have been set, since
-			// StreamEvents returns nil whenever either callback stops the stream.
+			// An error is the answer and the more actionable half; the per-task
+			// diagnostics already reached errOut as they happened. Neither error
+			// that reaches here can have a finalStatus beside it: StreamEvents
+			// returns nil whenever a callback stops the stream, so a transport
+			// error means no callback ever did, and the definite-failure branch
+			// returns from onSubscribed above the line that takes a status.
 			return
 		}
 		if !snapshotWasFinal && (finalStatus != "" || subscribeEstablishedNothing) {

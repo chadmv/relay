@@ -6,6 +6,8 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"relay/internal/relayclient"
 )
 
 const (
@@ -94,10 +96,18 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 			// that may have been polling for minutes on one of those leaves the
 			// caller with nothing to do but start over.
 			//
-			// Only failures a later poll can outlive are tolerated; see
-			// waitErrorIsTransient.
+			// Only failures a later poll can outlive are tolerated. Everything
+			// else - a job that does not exist, an id the server rejects, a token
+			// that has expired, a permission the caller does not have - is as true
+			// on the hundredth read as on the first, so it ends the wait at once.
+			//
+			// The partition itself is relayclient.ErrorIsTransient, below both
+			// this loop and the identical decision `relay logs` makes about its
+			// subscribe-time snapshot. It used to be a copy here that read
+			// MapError's code; the two loops now share one, because two spellings
+			// of one partition drift.
 			terr := MapError(err)
-			if !waitErrorIsTransient(terr) {
+			if !relayclient.ErrorIsTransient(err) {
 				return nil, terr
 			}
 			consecutiveFailures++
@@ -136,21 +146,6 @@ func (s *Server) callWaitForJob(ctx context.Context, args waitForJobArgs) (map[s
 			}, nil
 		}
 	}
-}
-
-// waitErrorIsTransient reports whether a later poll could plausibly get a
-// different answer. Everything else - a job that does not exist, an id the server
-// rejects, a token that has expired, a permission the caller does not have - is
-// as true on the hundredth read as on the first, so it ends the wait at once.
-//
-// It reads MapError's code rather than the HTTP status directly, so this stays in
-// step with the one place that classifies API failures for this package.
-func waitErrorIsTransient(terr *ToolError) bool {
-	switch terr.Code {
-	case "server_error", "network", "rate_limited":
-		return true
-	}
-	return false
 }
 
 // waitPollOutcome is what the sleep between two polls decided.

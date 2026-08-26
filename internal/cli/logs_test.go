@@ -1905,3 +1905,63 @@ func TestWatchJobLogs_StreamTransportFailure_KeepsItsOwnError(t *testing.T) {
 	require.Empty(t, status)
 	require.Empty(t, out.String())
 }
+
+// A well-formed uuid that names no job is the single most likely thing an
+// operator mistypes into this command, and it used to hang forever on both
+// streams. handleEvents deliberately does not validate `?job_id=` (its own
+// comment, internal/api/events.go), so an unknown job gets an open, permanently
+// empty stream with no heartbeat and no server-side timeout, and cmd/relay's
+// context has no deadline. The snapshot said 404 twice, the code shrugged, and
+// `relay logs <mistyped-uuid>` printed nothing on either stream until Ctrl-C.
+//
+// That is bit-for-bit the symptom this slice exists to remove. internal/mcp's
+// wait loop already states the rule this file broke: an answer that is as true on
+// the hundredth read as on the first ends the wait at once.
+func TestWatchJobLogs_JobDoesNotExist_ReportsItInsteadOfWaitingOnTheStream(t *testing.T) {
+	jobID := "9c8b5a4d-1e2f-4a3b-8c7d-6e5f4a3b2c1d"
+	var mu sync.Mutex
+	jobReads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			mu.Lock()
+			jobReads++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "job not found"})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// No heartbeat, no timeout: exactly like handleEvents.
+			<-r.Context().Done()
+
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	// Its own deadline: the defect is a hang, and an unbounded one wedges the
+	// suite instead of failing it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	_, _, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, ctx.Err(),
+		"the command must answer on its own, not be rescued by the test's deadline")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "job not found",
+		"the server's own answer is what the operator needs; it names the mistake")
+	require.NotContains(t, err.Error(), "connection lost")
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, jobReads,
+		"an answer that is the same on every later read is asked for once")
+}
