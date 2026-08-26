@@ -569,3 +569,107 @@ func TestWatchJobLogs_FailsOnSecondPage_PrintsFirstPage(t *testing.T) {
 		"the diagnostic names where the output stops, so an operator can resume by hand")
 	require.Contains(t, errOut.String(), "frame-001")
 }
+
+// fakeNeverDrainingServer is a deliberately MISBEHAVING server, so it does not
+// route through writeTaskLogPage (which is a correct simulator). Every logs
+// request returns a full page of 200 rows. When advance is true the cursor
+// strictly increases and the log never drains; when false the cursor is
+// constant, which is the shape that loops forever at zero cost to the server.
+func fakeNeverDrainingServer(t *testing.T, jobID, taskID string, advance bool) *fakeLogPagingServer {
+	t.Helper()
+	f := &fakeLogPagingServer{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/v1/jobs/"+jobID:
+			json.NewEncoder(w).Encode(jobResp{
+				ID:     jobID,
+				Status: "done",
+				Tasks:  []taskResp{{ID: taskID, Name: "frame-001", Status: "done"}},
+			})
+
+		case r.Method == "GET" && r.URL.Path == "/v1/tasks/"+taskID+"/logs":
+			f.mu.Lock()
+			f.requests++
+			f.sinceSeqs = append(f.sinceSeqs, r.URL.Query().Get("since_seq"))
+			f.mu.Unlock()
+
+			since, _ := strconv.ParseInt(r.URL.Query().Get("since_seq"), 10, 64)
+			base := since
+			if !advance {
+				base = 0 // always the same 200 rows, always the same next_seq
+			}
+			items := make([]logRow, 200)
+			for i := range items {
+				seq := base + int64(i) + 1
+				items[i] = logRow{Seq: seq, Stream: "stdout", Content: fmt.Sprintf("line %d", seq)}
+			}
+			_ = json.NewEncoder(w).Encode(struct {
+				Items   []logRow `json:"items"`
+				NextSeq int64    `json:"next_seq"`
+				Total   int64    `json:"total"`
+			}{Items: items, NextSeq: base + 200, Total: 1 << 30})
+		}
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+// These two tests mutate the maxLogPages package var, so they must never be
+// t.Parallel() (nothing in this package is).
+func TestWatchJobLogs_ServerNeverDrains_StopsAtCap(t *testing.T) {
+	old := maxLogPages
+	maxLogPages = 3
+	defer func() { maxLogPages = old }()
+
+	jobID, taskID := "job-nodrain", "task-nodrain"
+	srv := fakeNeverDrainingServer(t, jobID, taskID, true)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	// Bounded so that a missing cap is a failed assertion rather than a hung
+	// suite. If this test ever fails with "context deadline exceeded" in errOut,
+	// report that plainly: the cap did not fire.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, logFailures)
+
+	requests, _, _ := srv.stats()
+	require.Equal(t, 3, requests, "the loop must stop at maxLogPages requests")
+	require.Len(t, outLines(t, out.String()), 600, "everything fetched before the cap is still printed")
+	require.Contains(t, errOut.String(), "frame-001")
+	require.Contains(t, errOut.String(), "truncated after 3 pages")
+	require.NotContains(t, errOut.String(), "context deadline exceeded")
+}
+
+func TestWatchJobLogs_CursorDoesNotAdvance_StopsImmediately(t *testing.T) {
+	old := maxLogPages
+	// Well above 2. The point of this test is that the non-advancing guard
+	// fires long BEFORE the page cap; 50 proves that as well as 10000 does and
+	// keeps the mutation check below to 50 requests instead of 10000.
+	maxLogPages = 50
+	defer func() { maxLogPages = old }()
+
+	jobID, taskID := "job-stuck", "task-stuck"
+	srv := fakeNeverDrainingServer(t, jobID, taskID, false)
+
+	c := relayclient.NewClient(srv.URL, "tok")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var out, errOut strings.Builder
+	status, logFailures, err := watchJobLogs(ctx, c, jobID, &out, &errOut)
+	require.NoError(t, err)
+	require.Equal(t, "done", status)
+	require.Equal(t, 1, logFailures)
+
+	requests, sinceSeqs, _ := srv.stats()
+	require.Equal(t, 2, requests,
+		"a cursor that does not advance is caught on the second request, far below maxLogPages")
+	require.Equal(t, []string{"0", "200"}, sinceSeqs)
+	require.Contains(t, errOut.String(), "did not advance")
+	require.Contains(t, errOut.String(), "frame-001")
+}
