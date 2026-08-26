@@ -270,3 +270,66 @@ test('shouldFollow is true for a container smaller than its viewport', () => {
   // "scrolled away", or follow-tail would switch itself off on mount.
   expect(shouldFollow(0, 0, 0)).toBe(true)
 })
+
+// The IN-FLIGHT PARTIAL paths (spec T1-C), which are two of collapseCR's four
+// call sites and are NOT reached by the line split. A chunk boundary landing
+// between the \r and the \n leaves "text\r" in the partial buffer, so the live
+// tail flickers blank and then fills in; a task whose final line has no trailing
+// newline blanks that line permanently.
+//
+// BOTH STREAMS ON PURPOSE: visibleRows renders the stdout and stderr partials
+// through two SEPARATE call sites (logBuffer.ts:175 and :178), so a stdout-only
+// fixture passes against a fix applied to one of them.
+test('a partial ending in a carriage return renders its text, on stdout and on stderr', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'text\r', 'stdout'), chunk(2, 'oops\r', 'stderr')])
+
+  expect(visibleRows(s).map((r) => [r.stream, r.kind, r.text])).toEqual([
+    ['stdout', 'partial', 'text'],
+    ['stderr', 'partial', 'oops'],
+  ])
+
+  const f = finalizePartials(s)
+  expect(f.lines.map((l) => [l.stream, l.text])).toEqual([
+    ['stdout', 'text'],
+    ['stderr', 'oops'],
+  ])
+})
+
+// Spec T1-D. GREEN AT HEAD AND GREEN AFTER THE FIX - a non-regression pin, not a
+// RED test, and saying so is the point: an empty line is CONTENT, not an
+// absence, and a fix that started dropping rows whose text collapses to '' would
+// silently delete blank lines from the log. Mutation M3b is its kill.
+test('an empty or CR-only unit still renders a row', () => {
+  expect(appendEntries(createLogState(), [chunk(1, '\r\n')]).lines.map((l) => l.text)).toEqual([''])
+  expect(appendEntries(createLogState(), [chunk(1, '\n\n')]).lines.map((l) => l.text)).toEqual(['', ''])
+  const dangling = appendEntries(createLogState(), [chunk(1, '\r')])
+  expect(visibleRows(dangling).map((r) => r.text)).toEqual([''])
+})
+
+// Spec T1-E: an erase-line escape sequence sitting BETWEEN the carriage return
+// and the newline - which is exactly what a progress bar emits. stripAnsi runs
+// before the split (logBuffer.ts:139-142), so the sequence is gone by the time
+// the line is formed and the CR it was hiding behind is trailing after all.
+//
+// Without this test nothing pins that the strip runs AFTER stripAnsi: a strip
+// applied to e.content would see '\n' in the final position here and remove
+// nothing. The ESC byte is written as an escape rather than literally so this
+// test survives being copied out of a plan document.
+test('a carriage return revealed by stripping an ANSI erase-line sequence is still stripped', () => {
+  const ESC = '\u001B'
+  const s = appendEntries(createLogState(), [chunk(1, 'text\r' + ESC + '[K\n')])
+  expect(s.lines.map((l) => l.text)).toEqual(['text'])
+})
+
+// Spec T3-B, the render-invisibility claim (spec 4.4) made executable. The whole
+// reason Part 2 (the agent's CRLF collapse) can ship in the same slice without
+// changing what the SPA shows is that an UPGRADED agent's bytes and an
+// UN-UPGRADED agent's bytes render identically here. Under a strip-ONE rule they
+// would not, which is a second, independent reason not to narrow the rule.
+test('an upgraded and an un-upgraded agent render the same line', () => {
+  const upgraded = appendEntries(createLogState(), [chunk(1, 'x\r\n')])
+  const notUpgraded = appendEntries(createLogState(), [chunk(1, 'x\r\r\n')])
+  expect(upgraded.lines.map((l) => l.text)).toEqual(['x'])
+  expect(notUpgraded.lines.map((l) => l.text)).toEqual(['x'])
+})
