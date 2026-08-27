@@ -30,10 +30,20 @@ type jobResp struct {
 }
 
 type taskResp struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Status         string          `json:"status"`
-	Command        []string        `json:"command"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// `commands`, plural, and [][]string: migration 000008_task_commands
+	// dropped tasks.command (TEXT[]) and added tasks.commands (JSONB), and
+	// internal/api's taskResponse has emitted `commands` ever since.
+	//
+	// `command` (singular, []string) is still a live REQUEST key - internal/api's
+	// taskSpec accepts it and jobspec.Validate normalises it into Commands -
+	// which is exactly why the decoder here looked right. It is not a RESPONSE
+	// key and has not been one since 2026-05. Decoding it gave
+	// `relay get <job-id> --json` a "command":null and no task definition at
+	// all for three months, with the whole CLI suite green.
+	Commands       [][]string      `json:"commands"`
 	Env            json.RawMessage `json:"env"`
 	Requires       json.RawMessage `json:"requires"`
 	TimeoutSeconds *int32          `json:"timeout_seconds"`

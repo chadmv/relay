@@ -62,3 +62,29 @@ func TestIntegration_SubmitListGet_RoundTrip(t *testing.T) {
 	require.Contains(t, got, "Tasks:")
 	require.Contains(t, got, "t1")
 }
+
+// TestIntegration_GetJobJSON_CarriesTheTasksCommands is a REAL instance of the
+// defect class this lane exists for, not a synthetic mutation.
+//
+// internal/api's taskResponse emits `commands` (a [][]string, per migration
+// 000008_task_commands, which dropped tasks.command and added tasks.commands).
+// internal/cli's taskResp decoded `command` as []string - wrong key and wrong
+// type - so `relay get <job-id> --json` emitted "command":null and carried no
+// task definition at all, for every job, since 2026-05. The human-readable path
+// prints only name/status/worker, which is why nobody saw it.
+//
+// The assertion is on the exact compact-encoded substring because doGetJob's
+// --json path is json.NewEncoder(w).Encode(job) with no indent, so the key and
+// its value appear adjacent and unspaced.
+func TestIntegration_GetJobJSON_CarriesTheTasksCommands(t *testing.T) {
+	s := startRelayServer(t)
+	jobID := submitLaneJob(t, s)
+
+	var out bytes.Buffer
+	require.NoError(t, doGetJob(testCtx(t), s.adminCfg(), []string{jobID, "--json"}, &out))
+	got := out.String()
+
+	require.Contains(t, got, `"commands":[["echo","hello-from-the-lane"]]`)
+	require.NotContains(t, got, `"command":null`,
+		"the CLI must not re-emit a key the server stopped sending at migration 000008")
+}
