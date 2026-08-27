@@ -16,17 +16,47 @@ import (
 )
 
 // ─── Response types (mirror api package JSON output) ─────────────────────────
+//
+// These are MIRRORS, and doListJobs/doGetJob re-encode through them rather than
+// proxying the server's bytes, so a field missing here is deleted from output
+// the user was told is JSON - silently, with no error at any layer. Keep them
+// field-for-field and tag-for-tag identical to internal/api's jobResponse and
+// taskResponse, including omitempty, and do not compute anything client-side:
+// a mirror that derives a value stops being able to show drift.
 
+// jobResp mirrors internal/api's jobResponse. That is ONE struct on the server
+// side serving both GET /v1/jobs (list) and GET /v1/jobs/{id} (detail), with the
+// enrichment block below populated only on list rows by applyJobEnrichment - so
+// this is one struct here too. A separate list type would have to be kept in
+// sync with a server type that does not exist, and would reintroduce exactly the
+// hand-copy arity gap this shape closes.
 type jobResp struct {
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
-	Priority         string     `json:"priority"`
-	Status           string     `json:"status"`
-	SubmittedBy      string     `json:"submitted_by"`
-	SubmittedByEmail string     `json:"submitted_by_email"`
-	Tasks            []taskResp `json:"tasks,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Priority         string `json:"priority"`
+	Status           string `json:"status"`
+	SubmittedBy      string `json:"submitted_by"`
+	SubmittedByEmail string `json:"submitted_by_email,omitempty"`
+	// json.RawMessage, not map[string]string: a job submitted without labels has
+	// the literal JSONB `null` in the column (jobcreate.CreateJobFromSpec
+	// json.Marshals a nil map) and rawJSON only floors an EMPTY slice to {}, so
+	// `labels` really is null on the wire. RawMessage round-trips that; a typed
+	// map would quietly turn it into {} and misreport the server.
+	Labels    json.RawMessage `json:"labels"`
+	Tasks     []taskResp      `json:"tasks,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+
+	// Enrichment the server populates only on list rows (GET /v1/jobs). The
+	// detail handler leaves them zero, and total_tasks/done_tasks carry no
+	// omitempty server-side, so a detail body genuinely says 0/0 - mirror that
+	// rather than filling it in from len(Tasks).
+	TotalTasks       int32      `json:"total_tasks"`
+	DoneTasks        int32      `json:"done_tasks"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ScheduledJobID   string     `json:"scheduled_job_id,omitempty"`
+	ScheduledJobName string     `json:"scheduled_job_name,omitempty"`
 }
 
 type taskResp struct {
@@ -48,6 +78,7 @@ type taskResp struct {
 	Requires       json.RawMessage `json:"requires"`
 	TimeoutSeconds *int32          `json:"timeout_seconds"`
 	Retries        int32           `json:"retries"`
+	RetryCount     int32           `json:"retry_count"`
 	DependsOn      []string        `json:"depends_on,omitempty"`
 	WorkerID       string          `json:"worker_id,omitempty"`
 }
