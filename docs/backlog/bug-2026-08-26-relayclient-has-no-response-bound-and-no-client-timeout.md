@@ -86,3 +86,34 @@ Two adjacent facts, so the scope is not over-drawn:
 - The server-side analogue this mirrors: `readJSON` in `internal/api/server.go`
 - Why pointing at an untrusted server is not purely hypothetical:
   [[bug-2026-08-23-agent-grpc-plaintext-mdns-first-advertiser]]
+
+## Update 2026-08-27 - the Python SDK has the identical hole, now with numbers
+
+`python/src/relay/client.py` buffers every response through `response.json()` with no size bound,
+and its `_MAX_LOG_PAGES = 10000` bounds the request COUNT only. Measured against httpx 0.28.1, so
+the appending session does not have to re-derive them:
+
+- **No wall-clock bound.** httpx's `timeout` is per socket read, not per request. Against a real
+  trickling socket server, one request completed in **14.3 s under a 0.5 s read timeout** (29x).
+  Then multiply by 10,000 sequential pages.
+- **No byte bound.** httpx sends `accept-encoding: gzip, deflate` by default and decodes without a
+  bound: **89 KiB on the wire materialised as 31 MB**, a 343x ratio. Per page.
+- **Memory.** Roughly **0.5-1 KB retained per LogRecord**, so a benign 2,000,000-row log walk
+  retains well over a gigabyte before the call returns.
+
+**And the remedy has to be chosen carefully, because the obvious one does not exist.** The Python
+README initially told an operator to bound the first two axes with `Client(timeout=)` or an
+injected `http_client`. That is false and has been corrected: `httpx.Timeout` has exactly four
+axes (`connect`, `read`, `write`, `pool`), there is no total-time setting and no response-size
+setting anywhere in httpx, and a per-read bound is exactly what the 14.3 s measurement defeats.
+Closing either axis needs a caller-supplied `httpx.BaseTransport` wrapper or an out-of-band
+deadline. Whatever this item settles for Go, the Python half must not repeat that prescription.
+
+The right Python shape is one `_read_json(response)` chokepoint - the analogue of CLAUDE.md's
+single JSON entry point invariant, which the SDK currently drifts from at 13 sites. That is the
+same chokepoint [[bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy]] needs, so
+the two should probably be done together.
+
+Add to Related: `python/src/relay/client.py`;
+[[bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy]];
+[[bug-2026-08-27-python-sdk-fetch-all-has-no-termination-stops]].
