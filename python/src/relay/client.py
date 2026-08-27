@@ -57,13 +57,15 @@ class Client:
     and ``timeout`` is IGNORED - the caller who injects a client owns its
     policy. httpx's default for a bare ``httpx.Client()`` is 5 s; a client
     built with ``timeout=None`` has no bound at all and the SDK will not add
-    one. The injected client is also MUTATED once, at construction: the
-    ``Authorization`` header is written onto it permanently and
-    :meth:`close` does not undo it, correctly, because the SDK does not own
-    that client's lifetime. So the object you passed in carries the bearer
-    token for as long as you keep it. (httpx redacts ``authorization`` to
-    ``[secure]`` in ``Headers.__repr__``, so it does not reach tracebacks or
-    ``repr()``.)
+    one. The injected client is also MUTATED once, at construction: BOTH
+    ``Authorization`` and ``Accept: application/json`` are written onto it
+    permanently, and :meth:`close` does not undo either, correctly, because
+    the SDK does not own that client's lifetime. So the object you passed in
+    carries the bearer token for as long as you keep it - and note the
+    ``Accept`` write is DESTRUCTIVE where the ``Authorization`` write is
+    merely additive: an ``Accept`` you had set on that client is overwritten.
+    (httpx redacts ``authorization`` to ``[secure]`` in ``Headers.__repr__``,
+    so the token does not reach tracebacks or ``repr()``.)
     """
 
     # Per-request page size used when auto-paginating. Matches the server's
@@ -79,9 +81,10 @@ class Client:
     # open were measured:
     #
     #   - Wall clock. httpx's read timeout applies per SOCKET READ, not per
-    #     request, so a server dribbling one byte every 0.4 s never trips a
-    #     0.5 s read timeout: measured, one request completed in 14.3 s, 29x
-    #     the timeout. Multiply by 10000 sequential pages.
+    #     request, so a server that answers steadily enough need not trip it
+    #     at all: measured, one request dribbling a byte every 0.4 s completed
+    #     in 14.3 s under a 0.5 s read timeout, 29x. Multiply by 10000
+    #     sequential pages.
     #   - Bytes. httpx sends `accept-encoding: gzip, deflate` by default and
     #     decodes with no bound: measured, 89 KiB on the wire materialised as
     #     31 MB, a 343x ratio. Again per page.
@@ -89,10 +92,16 @@ class Client:
     #     length, so a full 2,000,000-row walk is well over a gigabyte,
     #     retained, before task_logs returns.
     #
-    # A wall-clock or byte bound belongs to the http_client the caller owns
-    # (Client(timeout=) or an injected client), which is where those two axes
-    # are actually configurable. A private total-row budget is DECLINED
-    # deliberately rather than omitted: `task_logs(limit=N)` already is that
+    # Do NOT point a reader at Client(timeout=) for the first two. That
+    # remedy was written here and it does not exist: httpx has no total-time
+    # and no response-size setting, and Client(timeout=) sets exactly the four
+    # per-operation values (connect, read, write, pool) that the 14.3 s
+    # measurement above defeats. Closing either axis needs a caller-supplied
+    # httpx.BaseTransport wrapper passed as http_client=, or a deadline
+    # enforced outside the SDK. Only the third axis has an in-SDK bound.
+    #
+    # That bound is `task_logs(limit=N)`, and a private total-row budget is
+    # DECLINED deliberately rather than omitted: limit= already is that
     # budget, it short-circuits the walk, and it is public and caller-chosen -
     # a second private one would bound the same axis twice while still
     # advertising nothing about the other two.
@@ -348,8 +357,12 @@ class Client:
             params["since_seq"] = str(since_seq)
         if limit is not None:
             params["limit"] = str(limit)
-        # quote(safe="") is url.PathEscape, which printTaskLogs
-        # (internal/cli/logs.go:714) applies to this same argument. Raw, an id
+        # quote(safe="") escapes AT LEAST as much as Go's url.PathEscape,
+        # which printTaskLogs (internal/cli/logs.go:714) applies to this same
+        # argument. Not an identity: Go leaves + : @ = & $ unescaped and
+        # Python percent-encodes them. The extra is harmless here (the two
+        # agree exactly on a UUID, and over-escaping a path segment is the
+        # safe direction), but they are not the same function. Raw, an id
         # of "../../v1/users" resolves to /v1/users/logs - same host, bearer
         # attached - and one containing "?" swallows the /logs suffix and the
         # paging params into a query string. The escape means the request shape
@@ -445,6 +458,13 @@ class Client:
                 # required-and-undefaulted declaration buys: a defaulted
                 # `seq: int = 0` would collapse every row of a seq-less page into
                 # one set member and under-count instead.
+                #
+                # This set is the one line in a memory-critical walk that adds
+                # memory: up to 2,000,000 ints, roughly 35-70 MB. It is built
+                # once, inside a block every path of which raises, so it is a
+                # transient peak at the end and not a per-page cost - which is
+                # why it is affordable against the gigabyte-plus of LogRecords
+                # already retained by then.
                 collected = len({r.seq for r in out})
                 if page.total > 0 and collected >= page.total:
                     # Do not blame the server here. A log of exactly

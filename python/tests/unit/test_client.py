@@ -366,8 +366,13 @@ def test_task_logs_page_escapes_the_task_id_into_one_path_segment() -> None:
 
     The assertions are on raw_path because that is what goes on the wire; a
     check on .path would read the DECODED form and pass against no escape at
-    all. quote(safe="") matches url.PathEscape, and %2F survives undecoded, so
-    the traversal never reaches the server as a slash.
+    all. %2F survives undecoded, so the traversal never reaches the server as
+    a slash.
+
+    quote(safe="") escapes at least as much as url.PathEscape, not exactly as
+    much: Go leaves + : @ = & $ alone and Python encodes them. The two agree
+    on a UUID, and the difference is in the safe direction, so this is a note
+    against a future reader assuming they are interchangeable.
     """
     calls: list[bytes] = []
 

@@ -36,6 +36,27 @@ def _empty_on_null(empty: Callable[[], Any]) -> BeforeValidator:
     A BEFORE validator, so the declared type stays ``dict``/``list`` rather
     than becoming Optional: a caller never has to test these for None, which
     is the whole point of the empty default they already carried.
+
+    TWO of the five are OBSERVED, three are DEFENCE IN DEPTH, and the split
+    was established against a running relay-server rather than by reading:
+
+      - ``Job.labels`` and ``Reservation.selector`` really do arrive as
+        ``null``. Confirmed by raw HTTP against a live server - submit a job
+        or create a reservation without the field and the handler marshals a
+        Go nil map. ``Job.labels`` is how this whole class was found: the
+        integration suite's list-jobs test failed on it and every
+        reading-based review had passed the same code.
+      - ``Worker.labels``, ``Task.commands`` and ``ScheduledJob.job_spec``
+        have no live path that produces ``null`` today. Worker registration
+        never assembles a nil map before marshalling, and jobspec.Validate
+        rejects a task with zero commands before storage. Their coercion was
+        verified by forcing ``'null'::jsonb`` in SQL, which is a synthetic
+        input, so it is insurance against a server change and NOT a fix for
+        an observed bug.
+
+    The distinction is recorded because it is the thing a future reader
+    cannot recover: all five look identical in the annotation, and only two
+    of them are evidence that the server does this.
     """
 
     def _coerce(value: Any) -> Any:

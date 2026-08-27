@@ -92,6 +92,15 @@ b = job.add_task("b", commands=[["echo", "2"]], depends_on=[a])  # or ["a"]
 | `list_agent_enrollments(sort=, limit=)` / `list_agent_enrollments_page(sort=, limit=, cursor=)` | GET `/v1/agent-enrollments`. Admin-only. |
 | `close()` | Close the SDK-owned HTTP client. A no-op when you passed `http_client=`. |
 
+On every auto-paginating method above - the seven that take a total-capping
+`limit=`, which is `task_logs` plus the six `list_*` - **`limit` must be >= 1**.
+A `limit` of 0 or below raises `ValidationError` locally, before any request.
+It is rejected rather than passed on because those walks end in `out[:limit]`,
+and Python slice semantics would turn a negative limit into "everything but
+the last N rows": a plausible-looking short list rather than an error. This
+does not apply to the `*_page` siblings, where `limit` is the page size and
+travels to the server, which answers 400 for anything outside 1-200.
+
 ### Reading a task's log
 
 `task_logs(id)` walks every page and returns the whole log as a list. It always
@@ -115,13 +124,22 @@ A server that cannot be paged raises `ProtocolError`: an empty page that still
 advertises more rows, a cursor that does not advance, or a log that never
 reports itself drained within 10000 pages. That page cap bounds the number of
 REQUESTS and nothing else. Not wall clock: httpx's read timeout is per socket
-read, so a slow-trickling server never trips it (measured: 14.3 s under a 0.5 s
-read timeout) and that is per page. Not bytes: gzip is decoded unbounded
-(measured: 89 KiB on the wire, 31 MB in memory). Not memory: a full 2,000,000
--row walk retains well over a gigabyte. Bound the first two with your own
-`Client(timeout=)` or an injected `http_client`, and the third with `limit=`. The records collected before the
-walk was abandoned are on the exception, so a caller keeps the partial log and
-the reason it is partial:
+read, not per request, so a server that answers steadily enough need not trip
+it (measured: one request completed in 14.3 s under a 0.5 s read timeout), and
+that is per page. Not bytes: gzip is decoded unbounded (measured: 89 KiB on
+the wire, 31 MB in memory). Not memory: a full 2,000,000-row walk retains well
+over a gigabyte.
+
+Only the third of those is bounded by anything the SDK offers, and that is
+`limit=`. **httpx has no total-time and no response-size setting**, so
+`Client(timeout=)` cannot close the other two: it sets httpx's four
+per-operation timeouts (`connect`, `read`, `write`, `pool`) and a per-read
+bound is exactly what the 14.3 s measurement defeats. Closing the wall-clock
+or byte axis takes a caller-supplied `httpx.BaseTransport` wrapper passed as
+`http_client=`, or a deadline enforced outside the SDK.
+
+The records collected before the walk was abandoned are on the exception, so a
+caller keeps the partial log and the reason it is partial:
 
 ```python
 try:
@@ -183,10 +201,18 @@ That gap is known and tracked separately.
 | `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained. Carries `.records` (what the abandoned walk collected) instead of `.response` |
 | `TimeoutError` | `wait()` exceeded its wall-clock limit |
 
-The original `httpx.Response` is attached as `.response` on the
-status-derived errors above - every row except `ProtocolError` and
-`TimeoutError`, which are raised across several responses (or none) and so
-have no single one to attach.
+`.response` carries the originating `httpx.Response`, but only where there was
+one, so it has three states and not two:
+
+- **The response**, whenever the error came from a server reply - every row
+  above raised from a status.
+- **`None`**, on the rows that also have LOCAL raise sites. `ValidationError`
+  is raised locally for a spec that fails `validate_spec()` or a `limit` below
+  1; `AuthError` is raised locally when no token is configured. Both reach the
+  caller before any request is made.
+- **Absent entirely** on `ProtocolError` and `TimeoutError` - they have no
+  `.response` attribute at all, so reading it is an `AttributeError`, not
+  `None`. `ProtocolError` carries `.records` in its place.
 
 ## Compatibility
 
