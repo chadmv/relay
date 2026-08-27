@@ -1,8 +1,10 @@
 ---
 title: internal/cli tests hand-write server responses, so a response-shape drift in internal/api is invisible to any CLI test
 type: idea
-status: open
+status: closed
 created: 2026-08-23
+closed: 2026-08-27
+resolution: fixed
 priority: medium
 source: 2026-08-23 deep roadmap refresh - integration-tester lens finding
 ---
@@ -138,3 +140,63 @@ value a `relay-agent` too - the paging boundary test that proved the cursor is p
 needed a task that actually produced 1221 log rows, which only a real agent does.
 
 Add to Related: `python/tests/integration/`, `.github/workflows/python.yml`.
+
+## Resolution
+
+Closed by the 2026-08-27 CLI real-server integration lane slice (spec + plan in
+`docs/superpowers/`; commits `2273656..b55438f`).
+
+`internal/cli` now has 18 `//go:build integration` tests that drive the real `internal/api`
+handlers over real HTTP against a real Postgres, covering all four Acceptance areas -
+workers (including `delete --yes` across its **four**-deep refusal ladder, 403/400/404/409;
+the item said two), jobs, schedules and admin - plus logs, which was not one of the four but
+had the confirmed live breakage.
+
+`.github/workflows/go-ci.yml` gains a `cli-integration` job that actually runs the lane, via
+a `services: postgres` block rather than testcontainers. **This half was not in the item's
+Proposal and is what makes the rest matter**: `go-ci.yml` ran `go test -race ./...` with no
+tags, so an integration-tagged lane would have landed in a dead zone
+([[idea-2026-08-23-integration-only-guards-ci-never-runs]] is the standing record of that gap;
+this slice does not close it, but supplies the mechanism that could).
+
+The harness (`newIntegrationDSN`) has two modes selected by `RELAY_TEST_DATABASE_URL`: a
+testcontainer per test when unset (every other integration package's model, zero-config for
+developers), and one freshly `CREATE`d `relaytest_<hex>` database per test on a supplied
+server when set. Measured: ~40s vs ~12s for the same 18 tests. CI uses the second.
+
+**The lane found two live user-facing bugs before any synthetic mutation was written**, which
+is stronger evidence than the discriminating mutation the Acceptance asked for, because nobody
+authored them to be caught:
+
+- `taskResp` decoded `json:"command"` (`[]string`) while `toTaskResponse` has emitted
+  `json:"commands"` (`[][]string`) since migration `000008_task_commands`, so
+  `relay get --json` printed `"command":null` and carried no task definitions for ~3 months.
+- `relay list/get --json` silently dropped 7 more server fields (`labels`, `retry_count`, and
+  the five populated list-enrichment fields). `--json` is a lossy re-encode through a
+  hand-written mirror, not a passthrough.
+
+The discriminating mutation was proven anyway and then some: M0 control, M1 (envelope -> bare
+array), M2 (`next_seq` -> `nextSeq`) all redden the lane while `CLI-DEFAULT` stays green - the
+half the item's Acceptance omitted, and the half that proves the lane is not redundant with the
+89 existing `httptest` fixtures. All 27 `jobResponse`/`taskResponse` json-tag renames are now
+killed; before the arity guards, 9 survived, one of which made `relay list` print
+`0001-01-01 00:00` for every job on the farm with all tests green.
+
+### What the item got wrong
+
+Verification refuted five of its claims. The sharpest: "the residual risk is prospective" was
+false - both bugs above were live at HEAD when it was written. Also: "the api package's
+testcontainer helpers exist" (they are `package api_test`, unimportable); "409 on a connected
+worker, 404 on a missing one" (the ladder is four deep, and 403 fires before both); "for full
+value a `relay-agent` too" (that measurement came from the Python lane; `GetTaskLogsPage` has
+no fence, so direct row insertion suffices); and "pointing the existing fixtures at a live
+server keeps the assertions and swaps the seam" (most of `logs_test.go`'s 42 tests assert
+behaviour a real server cannot be made to produce, so the division is per-test, not per-file).
+
+### Not closed by this slice
+
+The lane sits **beside** the fast `httptest` tests rather than replacing them, per the item's
+own division, and CLAUDE.md now carries the routing rule. 51 vacuous fixture bodies remain -
+see [[idea-2026-08-27-cli-default-lane-fixtures-encode-through-their-own-decoder]]. Counting
+them took three attempts (19, 29, 42, finally 51) because each used a text search for a
+structural property; the warning is recorded with the count.
