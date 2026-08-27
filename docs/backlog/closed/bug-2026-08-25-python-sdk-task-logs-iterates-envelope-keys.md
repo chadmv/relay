@@ -1,8 +1,10 @@
 ---
 title: Python SDK task_logs() iterates the pagination envelope's keys, so it cannot return log records
 type: bug
-status: open
+status: closed
 created: 2026-08-25
+closed: 2026-08-27
+resolution: fixed
 priority: high
 source: Complement search while filing the CLI envelope-drift bug, 2026-08-25 - three clients call this endpoint and two are broken
 ---
@@ -76,3 +78,47 @@ hides the Go CLI instance, in a second language.
 into `map[string]any` and passes the envelope through untouched. Worth noting because it means the
 handler change was not universally missed, and because a passthrough client is structurally immune
 to this class.
+
+## Resolution
+
+Fixed across 32c1b36..HEAD on branch claude/python-sdk-task-logs-envelope-0d53a7.
+
+`task_logs()` decodes the envelope, auto-pages `?since_seq=` with the cursor passed
+VERBATIM, and gained a `task_logs_page()` sibling plus a `LogPage` model whose
+`next_seq`/`total` are required so a missing key cannot read as "drained". Three
+termination stops beyond the server's drained signal, each separately pinned by a
+mutation that kills exactly one test.
+
+All three acceptance criteria are met, the third one literally:
+
+- **Against a real relay-server**: `tests/integration/test_smoke.py::test_submit_and_wait`
+  passes with a real `relay-agent` executing the task. A separate 1221-row log paged over
+  7 pages with zero gaps and zero duplicates at every page boundary.
+- **The fixture distinguishes the fix**: reverting the client body while keeping the new
+  envelope fixture turns 9 tests RED, 8 on the original `ValidationError` and 1 earlier.
+- **The sweep, with counts**: 25 HTTP-performing methods over 18 route+verb pairs, and
+  88 model fields across 11 response models, checked against the handler that serves each.
+
+The sweep found 14 findings (D1-D14); six were fixed here and eight named and declined,
+each now filed. It also MISSED one axis, which is the item's own lesson repeating: it
+checked each response's CONTAINER shape and never each FIELD's nullability. The live
+integration lane caught `Job.labels` arriving as `null` where the model required a dict -
+invisible to all four reading-based review lenses. Five `rawJSON` wire fields were then
+coerced; two (`Job.labels`, `Reservation.selector`) are confirmed reachable on a live wire,
+three are defence in depth.
+
+Four verify rounds. Round 1 found the page cap discarding a provably-complete log - the
+original "returns nothing" defect re-created inside the fix's own backstop - and round 2's
+obvious remedy (`return out`) was itself refuted, because `len(out)` counts records appended
+rather than distinct rows and a duplicate-serving server made the completeness claim false.
+Round 3 found `.records` unpinned at two of its four raise sites. Round 4 found the README
+prescribing a remedy that does not exist: httpx has no total-time and no response-size
+setting, so `Client(timeout=)` cannot bound the two axes it was said to bound.
+
+Separately fixed because this slice shipped new documentation for it: `follow_job()` raised
+`ValueError` on its first frame in every released version and had zero tests. It was observed
+working against a live server for the first time in the SDK's history.
+
+Version 0.1.2 -> 0.2.0, not 0.1.3: `LogRecord.seq` became required, which a patch bump would
+have advertised as no breakage.
+

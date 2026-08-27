@@ -4,6 +4,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Optional, TypeVar, Union, cast
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 from .config import Config, resolve_config
 from .errors import (
     AuthError,
+    ProtocolError,
     ValidationError,
     raise_for_response,
 )
@@ -23,6 +25,7 @@ from .models import (
     Event,
     Job,
     JobStatus,
+    LogPage,
     LogRecord,
     OverlapPolicy,
     Page,
@@ -48,11 +51,64 @@ class Client:
     at ``~/.relay/config.json`` (or ``%APPDATA%\\relay\\config.json`` on
     Windows). If no token is found, methods that require authentication
     raise :class:`AuthError` with a hint pointing at ``relay login``.
+
+    ``timeout`` applies only to the client the SDK builds for itself. When you
+    pass ``http_client=``, that client's own timeout policy is used unchanged
+    and ``timeout`` is IGNORED - the caller who injects a client owns its
+    policy. httpx's default for a bare ``httpx.Client()`` is 5 s; a client
+    built with ``timeout=None`` has no bound at all and the SDK will not add
+    one. The injected client is also MUTATED once, at construction: BOTH
+    ``Authorization`` and ``Accept: application/json`` are written onto it
+    permanently, and :meth:`close` does not undo either, correctly, because
+    the SDK does not own that client's lifetime. So the object you passed in
+    carries the bearer token for as long as you keep it - and note the
+    ``Accept`` write is DESTRUCTIVE where the ``Authorization`` write is
+    merely additive: an ``Accept`` you had set on that client is overwritten.
+    (httpx redacts ``authorization`` to ``[secure]`` in ``Headers.__repr__``,
+    so the token does not reach tracebacks or ``repr()``.)
     """
 
     # Per-request page size used when auto-paginating. Matches the server's
     # max limit and relayclient.PageRequestLimit so we minimize round-trips.
     _PAGE_REQUEST_LIMIT = 200
+
+    # Bounds the NUMBER OF REQUESTS the log paging loop makes against a server
+    # whose next_seq keeps advancing but which never reports the log as
+    # drained. 10000 pages at _PAGE_REQUEST_LIMIT rows is 2,000,000 rows.
+    #
+    # Requests is all it bounds. It was described here as a "hang bound" and
+    # it is not one, so read it as the count it is - the three axes it leaves
+    # open were measured:
+    #
+    #   - Wall clock. httpx's read timeout applies per SOCKET READ, not per
+    #     request, so a server that answers steadily enough need not trip it
+    #     at all: measured, one request dribbling a byte every 0.4 s completed
+    #     in 14.3 s under a 0.5 s read timeout, 29x. Multiply by 10000
+    #     sequential pages.
+    #   - Bytes. httpx sends `accept-encoding: gzip, deflate` by default and
+    #     decodes with no bound: measured, 89 KiB on the wire materialised as
+    #     31 MB, a 343x ratio. Again per page.
+    #   - Memory. A LogRecord retains roughly 0.5-1 KB depending on line
+    #     length, so a full 2,000,000-row walk is well over a gigabyte,
+    #     retained, before task_logs returns.
+    #
+    # Do NOT point a reader at Client(timeout=) for the first two. That
+    # remedy was written here and it does not exist: httpx has no total-time
+    # and no response-size setting, and Client(timeout=) sets exactly the four
+    # per-operation values (connect, read, write, pool) that the 14.3 s
+    # measurement above defeats. Closing either axis needs a caller-supplied
+    # httpx.BaseTransport wrapper passed as http_client=, or a deadline
+    # enforced outside the SDK. Only the third axis has an in-SDK bound.
+    #
+    # That bound is `task_logs(limit=N)`, and a private total-row budget is
+    # DECLINED deliberately rather than omitted: limit= already is that
+    # budget, it short-circuits the walk, and it is public and caller-chosen -
+    # a second private one would bound the same axis twice while still
+    # advertising nothing about the other two.
+    #
+    # A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
+    # it - which means the loop must read it off `self`, not off a module global.
+    _MAX_LOG_PAGES = 10000
 
     def __init__(
         self,
@@ -148,8 +204,24 @@ class Client:
 
         ``limit`` caps the TOTAL rows returned across pages (None = all). Each
         request fetches ``_PAGE_REQUEST_LIMIT`` rows.
+
+        A limit below 1 is rejected here rather than passed on, for the same
+        reason task_logs() rejects it: the walk ends in ``out[:limit]``, and
+        Python slice semantics turn a negative limit into "everything but the
+        last N rows" - a plausible-looking short list rather than an error.
+        This guard is NOT duplicated in _get_page, where ``limit`` is the page
+        size and travels to the server, which answers 400 for anything outside
+        1..200. Validate locally only where the server never sees the value.
+
+        BELOW ``_require_token()``, not above it. A client with no token cannot
+        make the request whatever the limit says, and every other method on it
+        reports :class:`AuthError` with a ``relay login`` hint; a limit guard in
+        front would make these six the only ones that answer a different
+        question first.
         """
         self._require_token()
+        if limit is not None and limit < 1:
+            raise ValidationError(f"limit must be >= 1, got {limit}")
         p: dict[str, str] = dict(params or {})
         if sort is not None:
             p["sort"] = sort
@@ -239,6 +311,15 @@ class Client:
         return params
 
     def cancel_job(self, job_id: str, *, force: bool = False) -> Job:
+        """Cancel a job. Graceful by default; ``force=True`` asks the agent to
+        kill the running task immediately.
+
+        The returned :class:`Job` carries NO task list. ``handleCancelJob``
+        serializes with ``tasks`` omitted (the field is ``omitempty``), so
+        ``job.tasks`` is ``[]`` here for EVERY job - including jobs that have
+        tasks, which is all of them, since the server rejects a spec with none.
+        Do not read ``.tasks`` off this value; call :meth:`get_tasks` instead.
+        """
         self._require_token()
         params = {"force": "true"} if force else {}
         response = self._http.delete(f"/v1/jobs/{job_id}", params=params)
@@ -259,18 +340,177 @@ class Client:
         raise_for_response(response)
         return Task.model_validate(response.json())
 
-    def task_logs(self, task_id: str) -> list[LogRecord]:
+    def task_logs_page(
+        self, task_id: str, *, since_seq: int = 0, limit: Optional[int] = None
+    ) -> LogPage:
+        """Fetch one page of a task's log.
+
+        ``limit`` is the PAGE SIZE (1-200); omitted, the server's default of 50
+        applies, which is visible here because ``next_seq`` tells the caller
+        there is more. Pass the returned ``next_seq`` back as ``since_seq=`` to
+        page forward - VERBATIM, never ``+ 1``: the server's predicate is
+        ``id > $2``, so the cursor is exclusive already.
+        """
         self._require_token()
-        response = self._http.get(f"/v1/tasks/{task_id}/logs")
+        params: dict[str, str] = {}
+        if since_seq:
+            params["since_seq"] = str(since_seq)
+        if limit is not None:
+            params["limit"] = str(limit)
+        # quote(safe="") escapes AT LEAST as much as Go's url.PathEscape,
+        # which printTaskLogs (internal/cli/logs.go:714) applies to this same
+        # argument. Not an identity: Go leaves + : @ = & $ unescaped and
+        # Python percent-encodes them. The extra is harmless here (the two
+        # agree exactly on a UUID, and over-escaping a path segment is the
+        # safe direction), but they are not the same function. Raw, an id
+        # of "../../v1/users" resolves to /v1/users/logs - same host, bearer
+        # attached - and one containing "?" swallows the /logs suffix and the
+        # paging params into a query string. The escape means the request shape
+        # does not rest on where the id came from.
+        response = self._http.get(
+            f"/v1/tasks/{quote(task_id, safe='')}/logs", params=params
+        )
         raise_for_response(response)
-        return [LogRecord.model_validate(item) for item in response.json()]
+        # The WHOLE body goes through the model, never a hand-picked
+        # body["items"]. The model is the pin: a missing next_seq or total
+        # raises here rather than reading as "drained".
+        return LogPage.model_validate(response.json())
+
+    def task_logs(self, task_id: str, *, limit: Optional[int] = None) -> list[LogRecord]:
+        """Fetch a task's complete log, auto-paginating across pages.
+
+        ``limit`` caps the TOTAL number of records returned; None means all,
+        and anything below 1 raises :class:`ValidationError`. Each
+        request fetches ``_PAGE_REQUEST_LIMIT`` rows; without that explicit
+        limit the server's default is 50 and a long log is silently truncated.
+
+        This accumulates the whole log in memory. ``relay logs`` does not - it
+        prints each page as it arrives - and this cannot, while returning a
+        list. On a very large log use :meth:`task_logs_page` (O(one page)) or
+        pass ``limit=``.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        records collected so far on ``.records``. printTaskLogs, which this
+        ports, has printed every row by the time it returns the equivalent
+        error, so the error is a caveat on output the operator already has;
+        returning a list is what makes the caveat and the rows arrive
+        separately here.
+        """
+        # Locally, before the loop. The cap is applied as `out[:limit]`, and
+        # Python slice semantics turn a negative limit into "all but the last
+        # N" - limit=-1 on a 5-row log returned 4 records, dropping the newest
+        # line rather than capping anything. limit=0 spent a request to
+        # return [].
+        #
+        # The token check is first and is repeated here on purpose. Every other
+        # method answers "no token" before anything else, and task_logs_page
+        # would too - but only on the first request, which the limit guard
+        # returns before. Asking here keeps the precedence the same on both
+        # walks; the second, redundant check inside task_logs_page costs
+        # nothing.
+        self._require_token()
+        if limit is not None and limit < 1:
+            raise ValidationError(f"limit must be >= 1, got {limit}")
+        out: list[LogRecord] = []
+        since = 0
+        pages = 0
+        while True:
+            pages += 1
+            page = self.task_logs_page(
+                task_id, since_seq=since, limit=self._PAGE_REQUEST_LIMIT
+            )
+            out.extend(page.items)
+            if limit is not None and len(out) >= limit:
+                return out[:limit]
+            # Break on next_seq, never on len(items) < limit: the two agree
+            # today, but the second re-derives a rule the server already applied
+            # and desynchronizes the moment the drain rule moves.
+            #
+            # This arm MUST stay above the empty-page stop below. A log whose
+            # length is an exact multiple of the page size legitimately produces
+            # a final empty page, and that page reports drained.
+            if page.next_seq == 0:
+                return out
+            # Three stops beyond the server's own drained signal, and all three
+            # are needed. The cursor is server-supplied and drives a client
+            # loop, and the provenance of a value says nothing about who
+            # controls its content or the timing of the writes behind it.
+            if not page.items:
+                raise ProtocolError(
+                    "server returned an empty page without reporting the log as "
+                    f"drained (next_seq {page.next_seq} after since_seq {since})",
+                    records=out,
+                )
+            if page.next_seq <= since:
+                raise ProtocolError(
+                    "server cursor did not advance "
+                    f"(next_seq {page.next_seq} after since_seq {since})",
+                    records=out,
+                )
+            if pages >= self._MAX_LOG_PAGES:
+                # Count DISTINCT seqs, never len(out). `total` is server-supplied
+                # and so is the cursor, so a server that re-serves a page behind
+                # an advancing cursor drives len(out) up to total while half the
+                # log was never sent - and the message below would then tell the
+                # operator every row was collected. This is the first place
+                # LogRecord.seq is load-bearing for CORRECTNESS rather than for
+                # correlating a record with a cursor, and it is what the field's
+                # required-and-undefaulted declaration buys: a defaulted
+                # `seq: int = 0` would collapse every row of a seq-less page into
+                # one set member and under-count instead.
+                #
+                # This set is the one line in a memory-critical walk that adds
+                # memory: up to 2,000,000 ints, roughly 35-70 MB. It is built
+                # once, inside a block every path of which raises, so it is a
+                # transient peak at the end and not a per-page cost - which is
+                # why it is affordable against the gigabyte-plus of LogRecords
+                # already retained by then.
+                collected = len({r.seq for r in out})
+                if page.total > 0 and collected >= page.total:
+                    # Do not blame the server here. A log of exactly
+                    # _MAX_LOG_PAGES * _PAGE_REQUEST_LIMIT rows drains
+                    # correctly, but its last page is full and so carries a
+                    # non-zero cursor: we stopped one request short of learning
+                    # we were done, having collected every row. The envelope's
+                    # own total settles it, so do not re-raise the ambiguity.
+                    raise ProtocolError(
+                        f"truncated after {self._MAX_LOG_PAGES} pages - hit the "
+                        f"client's page cap; the server reported {page.total} rows "
+                        f"and every one was collected ({collected} distinct rows), "
+                        "but it had not yet reported the log as drained",
+                        records=out,
+                    )
+                raise ProtocolError(
+                    f"truncated after {self._MAX_LOG_PAGES} pages - hit the client's "
+                    "page cap; the log may be longer than "
+                    f"{self._MAX_LOG_PAGES * self._PAGE_REQUEST_LIMIT} rows, or the "
+                    "server may never report it as drained "
+                    f"({collected} distinct rows collected, server reported "
+                    f"{page.total})",
+                    records=out,
+                )
+            since = page.next_seq
 
     # ─── Following progress ───────────────────────────────────────────────
 
     def follow_job(self, job_id: str) -> Iterator[Event]:
-        """Stream events for a single job over SSE. Yields :class:`Event`
-        objects until the server closes the connection (which it does when
-        the job reaches a terminal state) or the caller breaks out.
+        """Stream events for a single job over SSE.
+
+        **The server does not end the stream when the job finishes.**
+        ``handleEvents`` closes on exactly two conditions - the request context
+        is done, or the broker drops this subscriber for falling behind - and
+        it has no notion of job terminality. This iterator sets no read
+        timeout, so a caller that iterates to exhaustion blocks forever after
+        the job is done. Break out on a terminal ``job`` frame yourself, or use
+        :meth:`wait`, which polls and is immune.
+
+        A ``dropped`` frame (:attr:`relay.EventType.DROPPED`) means the broker
+        dropped this subscriber for falling behind: frames published in the gap
+        are gone, and the recovery is to re-read the job with :meth:`get_job`
+        and resume each task's log with
+        ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not
+        :meth:`task_logs`, which takes no ``since_seq`` and would restart at
+        row 0 and re-walk the whole log.
 
         The underlying HTTP connection is closed on generator exit.
         """
@@ -278,12 +518,24 @@ class Client:
         return self._stream_events(job_id)
 
     def _stream_events(self, job_id: str) -> Iterator[Event]:
+        # All FOUR parameters, explicitly. httpx.Timeout takes its
+        # four-explicit branch only when connect, read, write and pool are all
+        # set; anything less and it raises ValueError, which is what
+        # `Timeout(connect=..., read=None)` did on every call. And it must be
+        # this form rather than `Timeout(self._http.timeout, read=None)`: the
+        # single-Timeout branch `assert read is UNSET`s, so that spelling
+        # raises AssertionError - and under `python -O`, where asserts are
+        # stripped, silently reinstates the read timeout the stream must not
+        # have. Only read is dropped; the caller's connect/write/pool stand.
+        base = self._http.timeout
         with self._http.stream(
             "GET",
             "/v1/events",
             params={"job_id": job_id},
             headers={"Accept": "text/event-stream"},
-            timeout=httpx.Timeout(connect=self._http.timeout.connect, read=None),
+            timeout=httpx.Timeout(
+                connect=base.connect, read=None, write=base.write, pool=base.pool
+            ),
         ) as response:
             raise_for_response(response)
             yield from parse_sse_stream(response.iter_lines())

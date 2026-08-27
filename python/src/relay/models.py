@@ -1,11 +1,72 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
-from typing import Any, Generic, Optional, TypeVar, Union
+from typing import Annotated, Any, Generic, Optional, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+# ─── null-valued jsonb fields ─────────────────────────────────────────────────
+
+
+def _empty_on_null(empty: Callable[[], Any]) -> BeforeValidator:
+    """Coerce a wire ``null`` to the field's empty value, leaving absence alone.
+
+    ``Field(default_factory=dict)`` covers a MISSING key. It does nothing for a
+    key that is present and ``null``, which is a different wire shape and the
+    one five of the API's jsonb fields actually send.
+
+    internal/api/server.go has two helpers for those columns. ``rawObject``
+    normalises ``null`` to ``{}`` and its comment says why - "so a client never
+    receives a null where an object is expected" - but it is used at only 2
+    sites (Task.env, Task.requires). ``rawJSON`` passes ``null`` through, and
+    its 5 sites are the fields annotated with this below. Server-side that
+    asymmetry is a separate question; client-side the SDK must not raise on a
+    document the server legitimately produces today.
+
+    A BEFORE validator, so the declared type stays ``dict``/``list`` rather
+    than becoming Optional: a caller never has to test these for None, which
+    is the whole point of the empty default they already carried.
+
+    TWO of the five are OBSERVED, three are DEFENCE IN DEPTH, and the split
+    was established against a running relay-server rather than by reading:
+
+      - ``Job.labels`` and ``Reservation.selector`` really do arrive as
+        ``null``. Confirmed by raw HTTP against a live server - submit a job
+        or create a reservation without the field and the handler marshals a
+        Go nil map. ``Job.labels`` is how this whole class was found: the
+        integration suite's list-jobs test failed on it and every
+        reading-based review had passed the same code.
+      - ``Worker.labels``, ``Task.commands`` and ``ScheduledJob.job_spec``
+        have no live path that produces ``null`` today. Worker registration
+        never assembles a nil map before marshalling, and jobspec.Validate
+        rejects a task with zero commands before storage. Their coercion was
+        verified by forcing ``'null'::jsonb`` in SQL, which is a synthetic
+        input, so it is insurance against a server change and NOT a fix for
+        an observed bug.
+
+    The distinction is recorded because it is the thing a future reader
+    cannot recover: all five look identical in the annotation, and only two
+    of them are evidence that the server does this.
+    """
+
+    def _coerce(value: Any) -> Any:
+        return empty() if value is None else value
+
+    return BeforeValidator(_coerce)
+
+
+_NullIsEmptyDict = _empty_on_null(dict)
+_NullIsEmptyList = _empty_on_null(list)
 
 
 class Priority(str, Enum):
@@ -48,8 +109,26 @@ class OverlapPolicy(str, Enum):
 
 
 class EventType(str, Enum):
+    """The event types the server publishes on GET /v1/events.
+
+    ``Event.type`` is a plain ``str`` so an unknown future type still parses;
+    this enum is the vocabulary the server emits TODAY, for comparison and
+    autocomplete.
+
+    ``DROPPED`` is not a resource event. The server writes it directly
+    (handleEvents, internal/api/events.go) when the broker drops a subscriber
+    for falling behind, and its meaning is "you missed frames": anything
+    published in the gap is gone, so re-read the job with
+    :meth:`relay.Client.get_job` and resume each task's log with
+    ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not ``task_logs``,
+    which takes no ``since_seq``.
+    """
+
     JOB = "job"
     TASK = "task"
+    WORKER = "worker"
+    TASK_LOG = "task_log"
+    DROPPED = "dropped"
 
 
 # ─── Source specs (Perforce) ──────────────────────────────────────────────────
@@ -161,7 +240,7 @@ class Task(BaseModel):
 
     # Authoring fields
     name: str
-    commands: list[list[str]] = Field(default_factory=list)
+    commands: Annotated[list[list[str]], _NullIsEmptyList] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     requires: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: Optional[int] = None
@@ -245,7 +324,7 @@ class Job(BaseModel):
     # Authoring fields
     name: str
     priority: Priority = Priority.NORMAL
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: Annotated[dict[str, str], _NullIsEmptyDict] = Field(default_factory=dict)
     tasks: list[Task] = Field(default_factory=list)
 
     # Response-only fields
@@ -255,6 +334,18 @@ class Job(BaseModel):
     submitted_by_email: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    # List-only enrichment (GET /v1/jobs rows). The server computes these from
+    # the job's tasks and its scheduled-job source, and does not populate them
+    # on single-job routes. They are DEFAULTED because Job is the authoring
+    # model too - Job(name="nightly") must keep working - which is why the
+    # strict no-default rule LogPage follows does not apply here.
+    total_tasks: int = 0
+    done_tasks: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    scheduled_job_id: Optional[str] = None
+    scheduled_job_name: Optional[str] = None
 
     @field_validator("name")
     @classmethod
@@ -345,11 +436,44 @@ class Job(BaseModel):
 
 
 class LogRecord(BaseModel):
+    """One line of a task's log, as served by GET /v1/tasks/{id}/logs.
+
+    ``seq`` is the row's global ``task_logs.id``. It is REQUIRED and has no
+    default for three reasons: it is the only way a caller using
+    :meth:`relay.Client.task_logs_page` can correlate a record with a cursor,
+    every other field here is required, and a defaulted ``seq: int = 0`` reads
+    a missing key as row zero.
+    """
+
     model_config = ConfigDict(extra="ignore")
 
+    seq: int
     stream: str
     content: str
     created_at: datetime
+
+
+class LogPage(BaseModel):
+    """One page of a task's log, forward-only from ``since_seq``.
+
+    ``next_seq`` is 0 when the server reports the log drained; otherwise it is
+    the cursor for the next request, passed VERBATIM as ``?since_seq=`` because
+    the server's predicate is ``id > $2`` (exclusive - see GetTaskLogsPage in
+    internal/store/query/tasks.sql). Never ``next_seq + 1``: ``task_logs.id`` is
+    a global BIGSERIAL, so when one task logs alone its ids are contiguous and
+    +1 skips the very next row.
+
+    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`'s cursor,
+    which is read with ``body.get("next_cursor", "")``. A defaulted
+    ``next_seq: int = 0`` would read a missing key as "drained" and silently
+    return page 1 - the same shape as the defect this model exists to fix.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[LogRecord]
+    next_seq: int
+    total: int
 
 
 class Event(BaseModel):
@@ -372,7 +496,7 @@ class ScheduledJob(BaseModel):
     owner_id: str
     cron_expr: str
     timezone: str
-    job_spec: dict[str, Any]
+    job_spec: Annotated[dict[str, Any], _NullIsEmptyDict]
     overlap_policy: str
     enabled: bool
     next_run_at: datetime
@@ -414,11 +538,12 @@ class Worker(BaseModel):
     gpu_model: str
     os: str
     max_slots: int
-    labels: dict[str, Any] = Field(default_factory=dict)
+    labels: Annotated[dict[str, Any], _NullIsEmptyDict] = Field(default_factory=dict)
     status: str
     last_seen_at: Optional[datetime] = None
     last_sample_at: Optional[datetime] = None
     disabled_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
 
 
 class Reservation(BaseModel):
@@ -426,7 +551,7 @@ class Reservation(BaseModel):
 
     id: str
     name: str
-    selector: dict[str, Any] = Field(default_factory=dict)
+    selector: Annotated[dict[str, Any], _NullIsEmptyDict] = Field(default_factory=dict)
     worker_ids: list[str] = Field(default_factory=list)
     user_id: str
     project: Optional[str] = None

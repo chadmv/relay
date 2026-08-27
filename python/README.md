@@ -72,20 +72,123 @@ b = job.add_task("b", commands=[["echo", "2"]], depends_on=[a])  # or ["a"]
 |---|---|
 | `submit(job)` | POST `/v1/jobs`. Validates locally, returns the populated `Job`. |
 | `get_job(id)` | GET `/v1/jobs/{id}`. |
-| `list_jobs(status=, scheduled_job_id=)` | GET `/v1/jobs` with optional filters. |
-| `cancel_job(id, force=False)` | DELETE `/v1/jobs/{id}` — graceful by default; `force=True` requests an immediate kill on the agent. |
+| `list_jobs(status=, scheduled_job_id=, sort=, limit=)` | GET `/v1/jobs`, auto-paginating. `limit` caps the TOTAL jobs returned. |
+| `list_jobs_page(..., cursor=)` | One page of `/v1/jobs` as a `Page[Job]`. Here `limit` is the PAGE SIZE (1-200). |
+| `cancel_job(id, force=False)` | DELETE `/v1/jobs/{id}` - graceful by default; `force=True` requests an immediate kill on the agent. The returned `Job` carries **no** task list; call `get_tasks` for that. |
 | `get_tasks(job_id)` | GET `/v1/jobs/{id}/tasks`. |
 | `get_task(id)` | GET `/v1/tasks/{id}`. |
-| `task_logs(id)` | GET `/v1/tasks/{id}/logs`. |
-| `follow_job(id)` | Iterator over SSE `Event` objects until the job is terminal. |
-| `wait(id, timeout=None, poll_interval=1.0)` | Block (polling) until the job is terminal. |
+| `task_logs(id, limit=)` | GET `/v1/tasks/{id}/logs`, auto-paginating to the end of the log. `limit` caps the TOTAL records and must be >= 1. See the note below. |
+| `task_logs_page(id, since_seq=, limit=)` | One page of a task's log as a `LogPage`. Pass the returned `next_seq` back as `since_seq=` **verbatim** - the cursor is exclusive. |
+| `follow_job(id)` | Iterator over SSE `Event` objects. The server does **not** end the stream when the job finishes - see Following a job. |
+| `wait(id, timeout=None, poll_interval=1.0)` | Block (polling `GET /v1/jobs/{id}`) until the job is terminal. |
 | `create_schedule(...)` | POST `/v1/scheduled-jobs`. |
-| `list_schedules() / get_schedule(id) / update_schedule(id, ...) / delete_schedule(id)` | Standard CRUD. |
-| `run_schedule_now(id)` | POST `/v1/scheduled-jobs/{id}/run-now`. Allowed for the schedule's owner or an admin. |
+| `list_schedules(sort=, limit=)` | GET `/v1/scheduled-jobs`, auto-paginating. |
+| `list_schedules_page(sort=, limit=, cursor=)` | One page as a `Page[ScheduledJob]`. |
+| `get_schedule(id)` / `update_schedule(id, ...)` / `delete_schedule(id)` | GET / PATCH / DELETE `/v1/scheduled-jobs/{id}`. |
+| `run_schedule_now(id)` | POST `/v1/scheduled-jobs/{id}/run-now`. Owner or admin only. |
+| `list_workers(sort=, limit=)` / `list_workers_page(sort=, limit=, cursor=)` | GET `/v1/workers`. |
+| `list_users(sort=, limit=)` / `list_users_page(sort=, limit=, cursor=)` | GET `/v1/users`. Admin-only. |
+| `list_reservations(sort=, limit=)` / `list_reservations_page(sort=, limit=, cursor=)` | GET `/v1/reservations`. Admin-only. |
+| `list_agent_enrollments(sort=, limit=)` / `list_agent_enrollments_page(sort=, limit=, cursor=)` | GET `/v1/agent-enrollments`. Admin-only. |
+| `close()` | Close the SDK-owned HTTP client. A no-op when you passed `http_client=`. |
+
+On every auto-paginating method above - the seven that take a total-capping
+`limit=`, which is `task_logs` plus the six `list_*` - **`limit` must be >= 1**.
+A `limit` of 0 or below raises `ValidationError` locally, before any request.
+It is rejected rather than passed on because those walks end in `out[:limit]`,
+and Python slice semantics would turn a negative limit into "everything but
+the last N rows": a plausible-looking short list rather than an error. This
+does not apply to the `*_page` siblings, where `limit` is the page size and
+travels to the server, which answers 400 for anything outside 1-200.
+
+### Reading a task's log
+
+`task_logs(id)` walks every page and returns the whole log as a list. It always
+requests 200 rows per page; without an explicit limit the server's default is 50
+and a long log would be silently truncated. It accumulates the whole log in
+memory - `relay logs` does not, because it prints each page as it arrives, and
+the SDK cannot do that while returning a list. On a very large log, page by hand:
+
+```python
+since = 0
+while True:
+    page = client.task_logs_page(task_id, since_seq=since, limit=200)
+    for record in page.items:
+        print(record.content, end="")
+    if page.next_seq == 0:      # the server says the log is drained
+        break
+    since = page.next_seq       # VERBATIM - the cursor is exclusive
+```
+
+A server that cannot be paged raises `ProtocolError`: an empty page that still
+advertises more rows, a cursor that does not advance, or a log that never
+reports itself drained within 10000 pages. That page cap bounds the number of
+REQUESTS and nothing else. Not wall clock: httpx's read timeout is per socket
+read, not per request, so a server that answers steadily enough need not trip
+it (measured: one request completed in 14.3 s under a 0.5 s read timeout), and
+that is per page. Not bytes: gzip is decoded unbounded (measured: 89 KiB on
+the wire, 31 MB in memory). Not memory: a full 2,000,000-row walk retains well
+over a gigabyte.
+
+Only the third of those is bounded by anything the SDK offers, and that is
+`limit=`. **httpx has no total-time and no response-size setting**, so
+`Client(timeout=)` cannot close the other two: it sets httpx's four
+per-operation timeouts (`connect`, `read`, `write`, `pool`) and a per-read
+bound is exactly what the 14.3 s measurement defeats. Closing the wall-clock
+or byte axis takes a caller-supplied `httpx.BaseTransport` wrapper passed as
+`http_client=`, or a deadline enforced outside the SDK.
+
+The records collected before the walk was abandoned are on the exception, so a
+caller keeps the partial log and the reason it is partial:
+
+```python
+try:
+    logs = client.task_logs(task_id)
+except relay.ProtocolError as e:
+    logs = e.records          # never None; [] if nothing was collected
+    print(f"partial log ({len(logs)} records): {e}")
+```
+
+## Following a job
+
+`follow_job(id)` yields `Event` objects as the server publishes them. **The
+server does not end the stream when the job reaches a terminal state.**
+`handleEvents` closes on exactly two conditions - the client goes away, or the
+broker drops a subscriber for falling behind - and it has no notion of job
+terminality. The SDK sets no read timeout on the stream, so a caller that
+simply iterates to exhaustion blocks forever after the job is done. Break out
+yourself:
+
+```python
+terminal = {relay.JobStatus.DONE, relay.JobStatus.FAILED, relay.JobStatus.CANCELLED}
+for event in client.follow_job(job_id):
+    if event.type == relay.EventType.DROPPED:
+        # The broker dropped this subscriber for falling behind. Frames
+        # published in the gap are gone; re-read the job with get_job(), and
+        # resume each task's log with task_logs_page(id, since_seq=last_seq).
+        # Not task_logs(), which has no since_seq and restarts at row 0.
+        break
+    if event.type == relay.EventType.JOB and event.data.get("status") in terminal:
+        break
+```
+
+Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
+`Job`. Polling is immune to both of the above.
 
 ## Errors
 
-All exceptions descend from `relay.RelayError`:
+Errors raised by the SDK's own request handling descend from `relay.RelayError`.
+Response DECODING is the exception, and it escapes in two ways, neither of
+which descends from `RelayError`:
+
+- a body that is well-formed JSON but does not match the model raises
+  `pydantic.ValidationError`;
+- a body that JSON itself cannot read raises a plain `ValueError` first, before
+  any model is reached - `json.JSONDecodeError` for a 200 whose body is not
+  JSON at all (an ingress or proxy returning an HTML error page), and
+  `ValueError` for an integer over CPython's 4300-digit limit.
+
+That gap is known and tracked separately.
 
 | Class | When |
 |---|---|
@@ -95,10 +198,21 @@ All exceptions descend from `relay.RelayError`:
 | `Conflict` | 409 (e.g. cancelling a terminal job) |
 | `ServerError` | 5xx |
 | `HTTPError` | Any other unexpected status |
+| `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained. Carries `.records` (what the abandoned walk collected) instead of `.response` |
 | `TimeoutError` | `wait()` exceeded its wall-clock limit |
 
-The original `httpx.Response` is attached as `.response` on each instance
-for debugging.
+`.response` carries the originating `httpx.Response`, but only where there was
+one, so it has three states and not two:
+
+- **The response**, whenever the error came from a server reply - every row
+  above raised from a status.
+- **`None`**, on the rows that also have LOCAL raise sites. `ValidationError`
+  is raised locally for a spec that fails `validate_spec()` or a `limit` below
+  1; `AuthError` is raised locally when no token is configured. Both reach the
+  caller before any request is made.
+- **Absent entirely** on `ProtocolError` and `TimeoutError` - they have no
+  `.response` attribute at all, so reading it is an `AttributeError`, not
+  `None`. `ProtocolError` carries `.records` in its place.
 
 ## Compatibility
 

@@ -5,13 +5,18 @@ from pydantic import ValidationError as PydanticValidationError
 
 from relay import (
     AgentEnrollment,
+    EventType,
     Job,
     JobStatus,
+    LogPage,
+    LogRecord,
     Page,
     Priority,
     Reservation,
+    ScheduledJob,
     Source,
     Sync,
+    Task,
     TaskStatus,
     User,
     ValidationError,
@@ -344,3 +349,300 @@ def test_user_and_agent_enrollment_parse() -> None:
     )
     assert e.created_by == "u1"
     assert e.hostname_hint == "host-x"
+# ─── LogRecord / LogPage ──────────────────────────────────────────────────────
+
+
+def test_log_record_parses_a_server_row() -> None:
+    r = LogRecord.model_validate(
+        {
+            "seq": 42,
+            "stream": "stdout",
+            "content": "hello\n",
+            "created_at": "2026-05-06T12:00:00Z",
+        }
+    )
+    assert r.seq == 42
+    assert r.stream == "stdout"
+
+
+def test_log_record_requires_seq() -> None:
+    """seq has NO default. It is the only thing that correlates a record with a
+    LogPage.next_seq cursor, the server has emitted it since 2026-05-08, and a
+    defaulted `seq: int = 0` would read a missing key as row zero - the same
+    absent-field-benign-default shape as a defaulted next_seq.
+    """
+    with pytest.raises(PydanticValidationError):
+        LogRecord.model_validate(
+            {"stream": "stdout", "content": "hi\n", "created_at": "2026-05-06T12:00:00Z"}
+        )
+
+
+def test_log_page_parses_the_envelope() -> None:
+    page = LogPage.model_validate(
+        {
+            "items": [
+                {
+                    "seq": 7,
+                    "stream": "stdout",
+                    "content": "hi\n",
+                    "created_at": "2026-05-06T12:00:00Z",
+                }
+            ],
+            "next_seq": 7,
+            "total": 3,
+            "future_field": "ignored",
+        }
+    )
+    assert [r.seq for r in page.items] == [7]
+    assert page.next_seq == 7
+    assert page.total == 3
+
+
+@pytest.mark.parametrize("missing", ["next_seq", "total"])
+def test_log_page_requires_next_seq_and_total(missing: str) -> None:
+    """A deliberate departure from _get_page's body.get("next_cursor", "").
+
+    A defaulted next_seq: int = 0 would read a missing key as "drained" and
+    silently return page 1 - which is the same shape as the defect this whole
+    slice exists to fix, rebuilt inside the fix. The handler writes both keys
+    unconditionally from a map literal, so requiring them costs nothing.
+    """
+    body = {"items": [], "next_seq": 5, "total": 9}
+    del body[missing]
+    with pytest.raises(PydanticValidationError):
+        LogPage.model_validate(body)
+
+
+# ─── sweep findings D2 / D3 / D4 ──────────────────────────────────────────────
+
+
+def test_worker_parses_revoked_at() -> None:
+    """D2. workerResponse has emitted revoked_at since worker revocation
+    shipped (internal/api/workers.go, toWorkerResponse); Worker did not model
+    it, so extra="ignore" dropped it silently and a Python caller could not see
+    that a worker had been revoked.
+    """
+    w = Worker.model_validate(
+        {
+            "id": "w1",
+            "name": "worker-a",
+            "hostname": "host-a",
+            "cpu_cores": 8,
+            "ram_gb": 32,
+            "gpu_count": 1,
+            "gpu_model": "RTX",
+            "os": "linux",
+            "max_slots": 4,
+            "labels": {},
+            "status": "offline",
+            "revoked_at": "2026-08-25T09:00:00Z",
+        }
+    )
+    assert w.revoked_at is not None
+    assert w.revoked_at.year == 2026
+
+
+def test_job_parses_list_enrichment_fields() -> None:
+    """D3. jobResponse carries six list-only enrichment keys on GET /v1/jobs
+    rows. Job modeled none of them, so list_jobs() silently discarded the
+    progress and timing the server had already computed.
+    """
+    job = Job.model_validate(
+        {
+            "id": "j1",
+            "name": "nightly",
+            "priority": "normal",
+            "status": "running",
+            "labels": {},
+            "created_at": "2026-08-25T09:00:00Z",
+            "updated_at": "2026-08-25T09:05:00Z",
+            "total_tasks": 7,
+            "done_tasks": 3,
+            "started_at": "2026-08-25T09:01:00Z",
+            "finished_at": None,
+            "scheduled_job_id": "s1",
+            "scheduled_job_name": "nightly-cook",
+        }
+    )
+    assert job.total_tasks == 7
+    assert job.done_tasks == 3
+    assert job.started_at is not None
+    assert job.finished_at is None
+    assert job.scheduled_job_id == "s1"
+    assert job.scheduled_job_name == "nightly-cook"
+
+
+def test_job_authoring_does_not_require_enrichment_fields() -> None:
+    """The six D3 fields are DEFAULTED, and that is deliberate rather than a
+    lapse from the strict no-default rule LogPage follows.
+
+    Job is the AUTHORING model as well as the response model - Job(name=...) is
+    the README's first example - so a required total_tasks would break every
+    authoring call site. LogPage is response-only and has no authoring caller,
+    which is why the strict rule costs nothing there and everything here. Do
+    not "make these consistent".
+    """
+    job = Job(name="nightly")
+    assert job.total_tasks == 0
+    assert job.done_tasks == 0
+    assert job.started_at is None
+    assert job.scheduled_job_id is None
+
+
+def test_event_type_covers_every_type_the_server_publishes() -> None:
+    """D4. EventType had JOB and TASK only - an incomplete slicing of a
+    five-value vocabulary. The five publish sites, by symbol: "job"
+    (internal/api/jobs.go, internal/scheduler/dispatch.go), "task"
+    (dispatch.go, internal/worker/handler.go), "worker"
+    (internal/metrics/sweep.go, worker/handler.go), events.TypeTaskLog =
+    "task_log" (internal/events/broker.go), and "dropped", written as a raw
+    frame by handleEvents when the broker drops a slow subscriber.
+
+    Set EQUALITY, not a containment check, so it fails in both directions
+    against the literal below.
+
+    What it CANNOT do is notice a sixth type appearing server-side. Both sides
+    of the comparison are Python literals in this one file, and
+    .github/workflows/python.yml path-filters this lane to `python/**`, so a Go
+    commit adding an event type would not even run it. It pins the vocabulary
+    this file asserts, and the fact that a human transcribed it from the five
+    publish sites above; keeping the two in step is a cross-language
+    registration that does not exist yet and is tracked separately.
+    """
+    assert {e.value for e in EventType} == {
+        "job",
+        "task",
+        "worker",
+        "task_log",
+        "dropped",
+    }
+
+
+# ─── null-valued object fields (rawJSON, not rawObject) ───────────────────────
+#
+# internal/api/server.go has two helpers for the jsonb columns the API returns.
+# rawObject normalises `null` to `{}` and says why in its own comment ("so a
+# client never receives a null where an object is expected"); rawJSON passes
+# `null` straight through. rawObject is used at 2 sites (Task.env,
+# Task.requires); rawJSON at 5, and those 5 are the fields below.
+#
+# `Field(default_factory=dict)` covers an ABSENT key, not a null one, so every
+# one of these five raised against a real server. Job.labels is not
+# hypothetical: it is null on the wire for a job submitted without labels, and
+# it is what broke list_jobs() against a live relay-server.
+#
+# The full axis was swept, not just these five: of 61 non-Optional fields across
+# the 11 response models, 60 reject null, and exactly these 5 have a Go
+# counterpart that can emit it. The other 55 are backed by a Go non-pointer
+# scalar (never null), a slice tagged omitempty (omitted, never null), or a
+# slice built with make (always []).
+
+
+def _worker_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "w1", "name": "worker-a", "hostname": "host-a", "cpu_cores": 8,
+        "ram_gb": 32, "gpu_count": 1, "gpu_model": "RTX", "os": "linux",
+        "max_slots": 4, "labels": {}, "status": "online",
+    }
+    base.update(overrides)
+    return base
+
+
+def _reservation_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "r1", "name": "res-a", "selector": {}, "worker_ids": [],
+        "user_id": "u1", "created_at": "2026-08-26T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def _scheduled_job_wire(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "s1", "name": "hourly", "owner_id": "u1", "cron_expr": "@hourly",
+        "timezone": "UTC", "job_spec": {}, "overlap_policy": "skip",
+        "enabled": True, "next_run_at": "2026-08-26T13:00:00Z",
+        "created_at": "2026-08-26T12:00:00Z", "updated_at": "2026-08-26T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_job_labels_null_parses_as_empty_dict() -> None:
+    """rawJSON(j.Labels), internal/api/jobs.go:111. A job submitted with no
+    labels stores a nil map, which marshals to `null`. Confirmed live: this is
+    the field that made list_jobs() raise against a real relay-server.
+    """
+    job = Job.model_validate(
+        {
+            "id": "j1", "name": "nightly", "priority": "normal",
+            "status": "running", "labels": None,
+            "created_at": "2026-08-26T12:00:00Z",
+            "updated_at": "2026-08-26T12:00:00Z",
+        }
+    )
+    assert job.labels == {}
+
+
+def test_task_commands_null_parses_as_empty_list() -> None:
+    """rawJSON(t.Commands), internal/api/jobs.go:85. The one rawJSON site whose
+    field is an ARRAY, so its empty value is [] and not {}.
+    """
+    task = Task.model_validate(
+        {"id": "t1", "name": "cook", "status": "done", "commands": None}
+    )
+    assert task.commands == []
+
+
+def test_worker_labels_null_parses_as_empty_dict() -> None:
+    """rawJSON(w.Labels), internal/api/workers.go:92."""
+    assert Worker.model_validate(_worker_wire(labels=None)).labels == {}
+
+
+def test_reservation_selector_null_parses_as_empty_dict() -> None:
+    """rawJSON(res.Selector), internal/api/reservations.go:45."""
+    assert Reservation.model_validate(_reservation_wire(selector=None)).selector == {}
+
+
+def test_scheduled_job_spec_null_parses_as_empty_dict() -> None:
+    """rawJSON(sj.JobSpec), internal/api/scheduled_jobs.go:43.
+
+    job_spec is the one of the five with no default, and it STAYS required -
+    see the next test. Only the null is coerced, and `{}` is chosen because it
+    is the value rawJSON itself already returns for the adjacent empty case
+    (len(b) == 0), so both of the server's own "nothing here" spellings arrive
+    as the same Python value.
+    """
+    assert ScheduledJob.model_validate(_scheduled_job_wire(job_spec=None)).job_spec == {}
+
+
+def test_scheduled_job_spec_is_still_required_when_absent() -> None:
+    """The coercion must not become a default. An ABSENT job_spec is a response
+    the SDK cannot talk to and must stay loud; a NULL one is the server's own
+    spelling of an empty jsonb. Collapsing the two would make a rawJSON site
+    dropped from the response read as an empty schedule.
+    """
+    wire = _scheduled_job_wire()
+    del wire["job_spec"]
+    with pytest.raises(PydanticValidationError):
+        ScheduledJob.model_validate(wire)
+
+
+def test_task_env_and_requires_are_normalised_server_side() -> None:
+    """The control for the five above. Task.env and Task.requires are the only
+    two rawOBJECT sites (internal/api/jobs.go:86-87), so the server already
+    sends `{}` and no null ever reaches the model.
+
+    They are left uncoerced deliberately: a coercion here would be dead code
+    that reads as protection, and it would hide the day rawObject stops being
+    used at those sites. This test pins WHICH helper each field is behind, so
+    a server-side switch to rawJSON is a conversation and not a silence.
+    """
+    task = Task.model_validate(
+        {"id": "t1", "name": "cook", "status": "done", "commands": [], "env": {},
+         "requires": {}}
+    )
+    assert task.env == {}
+    assert task.requires == {}
+    with pytest.raises(PydanticValidationError):
+        Task.model_validate({"name": "cook", "env": None})

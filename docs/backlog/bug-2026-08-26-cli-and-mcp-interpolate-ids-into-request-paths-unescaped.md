@@ -112,3 +112,50 @@ remembered:
 - Already correct in the same package: `internal/mcp/resources.go` (`readEntityByID`)
 - The SPA sibling, separately scoped: [[bug-2026-08-12-unencoded-path-interpolation-api-clients]]
 - `docs/retros/2026-08-26-relay-logs-envelope-drift.md`
+
+## Update 2026-08-27 - the Python SDK is a third language here, and httpx's behaviour is now MEASURED
+
+Filed against the CLI and MCP. `python/src/relay/client.py` has the same shape at nine sites:
+`get_job`, `cancel_job`, `get_tasks`, `get_task`, `task_logs`, `get_schedule`, `update_schedule`,
+`delete_schedule`, `run_schedule_now`. One of them, `task_logs_page`, was escaped in
+[[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] because that slice rewrote the line
+and its Go upstream escapes; the other eight are untouched and are this item.
+
+**The measurement this item's own acceptance criteria asked for has now been done**, against
+httpx 0.28.1 with `base_url="http://relay.internal:8080"`. It bounds the severity in both
+directions, so a future session need not re-derive it:
+
+CONFIRMED - same-host path traversal, and query/fragment truncation:
+
+```
+'../../v1/users'       -> path='/v1/users/logs'    (bearer attached; the id chooses the ENDPOINT)
+'abc/../../v1/users'   -> path='/v1/v1/users/logs'
+'abc?limit=1&x='       -> path='/v1/tasks/abc'     (the /logs suffix AND the paging params gone)
+'abc#frag'             -> path='/v1/tasks/abc'
+base='http://h/relay', id='../../../admin' -> '/admin/logs'   (escapes a proxy sub-path prefix)
+```
+
+REFUTED - SSRF and header injection do NOT reach, which is the more important half:
+
+```
+'http://evil.example/steal'   -> host='relay.internal'   (httpx._merge_url makes it a PATH SEGMENT)
+'//evil.example/steal'        -> host='relay.internal'
+'%2f%2fevil.example%2fx'      -> host='relay.internal'
+'abc
+X-Injected: 1'        -> httpx.InvalidURL, before any socket is opened
+'abc def'                  -> httpx.InvalidURL
+'abc@evil.example'            -> host='relay.internal'   (userinfo is not parsed out of a path segment)
+```
+
+So the bearer token cannot be redirected to a foreign host by any spelling tried, and this is a
+path-shape defect rather than a credential-exfiltration one. Severity should be read accordingly.
+
+The Python remedy, measured to work: `urllib.parse.quote(task_id, safe="")`. Note it is NOT
+identical to Go's `url.PathEscape` - Python additionally escapes `+ : @ = & $` - but it escapes a
+strict superset, `%2F` survives into `raw_path` undecoded, and the two agree exactly on a UUID.
+
+One test-design note that cost a round to find: assert on `request.url.raw_path`, not `.path`.
+`.path` reads the DECODED form, so a `.path` assertion passes against no escape at all.
+
+Add to Related: `python/src/relay/client.py` (eight remaining sites);
+[[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] (the ninth, escaped).

@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from relay import (
     AuthError,
@@ -15,6 +16,7 @@ from relay import (
     NotFound,
     OverlapPolicy,
     Priority,
+    ProtocolError,
     ValidationError,
 )
 
@@ -53,6 +55,96 @@ def _page_response(items: list[Any], *, next_cursor: str = "", total: Optional[i
         "next_cursor": next_cursor,
         "total": len(items) if total is None else total,
     }
+
+
+# ─── task-log fixtures ────────────────────────────────────────────────────────
+#
+# These build the wire bodies GET /v1/tasks/{id}/logs returns (handleGetTaskLogs,
+# internal/api/tasks.go) from plain dict literals with HAND-WRITTEN keys.
+#
+# They are deliberately NOT built by dumping LogRecord or LogPage. A fixture
+# built out of the model under test cannot detect drift in that model: if
+# LogPage's field names were wrong, the fixture would emit the same wrong keys
+# and every test in this file would stay green against an SDK that cannot talk
+# to the real server. That is precisely the failure this file is being changed
+# to fix - the old test_task_logs_parses_records hand-wrote a bare array and so
+# asserted the SDK agreed with itself for three and a half months. Do NOT
+# "de-duplicate" these helpers against the models; doing so re-opens the bug.
+
+
+def _log_row(seq: int, *, stream: str = "stdout", content: str = "") -> dict[str, Any]:
+    """One row, shaped like api.logEntry: {seq, stream, content, created_at}."""
+    return {
+        "seq": seq,
+        "stream": stream,
+        "content": content or f"line {seq}\n",
+        "created_at": "2026-05-06T12:00:00Z",
+    }
+
+
+def _log_rows(first: int, last: int) -> list[dict[str, Any]]:
+    """Rows with CONTIGUOUS seqs, inclusive of both ends.
+
+    The contiguity is load-bearing. since_seq is exclusive server-side
+    (GetTaskLogsPage is `WHERE task_id = $1 AND id > $2`), so the cursor is the
+    previous page's next_seq verbatim. With contiguous ids a `since = next_seq
+    + 1` mutation skips exactly one row and a `- 1` returns one twice, and the
+    seq-list assertions below catch both. With a GAP in the ids (7 then 20)
+    both mutations land harmlessly between rows and are undetectable. Do not
+    "tidy" these into sparse ids.
+    """
+    return [_log_row(seq) for seq in range(first, last + 1)]
+
+
+def _log_page(rows: list[dict[str, Any]], *, next_seq: int, total: int) -> dict[str, Any]:
+    """The envelope: {items, next_seq, total}, keys hand-written."""
+    return {"items": rows, "next_seq": next_seq, "total": total}
+
+
+def _serve_logs(
+    rows: list[dict[str, Any]], calls: list[dict[str, str]]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """A behavioural simulator of handleGetTaskLogs (internal/api/tasks.go).
+
+    Four behaviours are load-bearing and each is asserted by a test below:
+
+      - ?since_seq is EXCLUSIVE - rows with seq > since_seq, because the SQL is
+        `WHERE task_id = $1 AND id > $2` (GetTaskLogsPage,
+        internal/store/query/tasks.sql).
+      - ?limit defaults to 50, and a value outside 1..200 is a 400. The handler
+        REJECTS, it does not clamp.
+      - next_seq is the last returned row's seq, zeroed whenever the page is
+        SHORT (len(items) < limit). So a full final page still carries a
+        non-zero cursor and one more request is needed to learn the log ended.
+      - total is the full row count, independent of the page.
+
+    Tests of the client's misbehaving-server stops do NOT use this - by
+    construction it cannot misbehave - and hand-write their own handler.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        calls.append(params)
+
+        limit = 50
+        if "limit" in params:
+            if not params["limit"].isdigit() or not 1 <= int(params["limit"]) <= 200:
+                return httpx.Response(400, json={"error": "limit must be 1..200"})
+            limit = int(params["limit"])
+
+        since = 0
+        if "since_seq" in params:
+            if not params["since_seq"].isdigit():
+                return httpx.Response(
+                    400, json={"error": "since_seq must be a non-negative integer"}
+                )
+            since = int(params["since_seq"])
+
+        page = [r for r in rows if r["seq"] > since][:limit]
+        next_seq = 0 if len(page) < limit else page[-1]["seq"]
+        return httpx.Response(200, json=_log_page(page, next_seq=next_seq, total=len(rows)))
+
+    return handler
 
 
 # ─── Auth & wiring ────────────────────────────────────────────────────────────
@@ -182,18 +274,570 @@ def test_cancel_job_409_raises_conflict() -> None:
 
 
 def test_task_logs_parses_records() -> None:
+    """The headline. The server has written {items, next_seq, total} since
+    2026-05-08 (a90c727); the SDK iterated the dict, which in Python yields its
+    KEYS, and validated the strings "items"/"next_seq"/"total" as LogRecords.
+
+    The assertion is POSITIVE and positional, never pytest.raises: a test that
+    asserts an exception is green against a client that raises for an unrelated
+    reason.
+    """
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json=[
-                {"stream": "stdout", "content": "hi\n", "created_at": "2026-05-06T12:00:00Z"},
-                {"stream": "stderr", "content": "warn\n", "created_at": "2026-05-06T12:00:01Z"},
-            ],
+            json=_log_page(
+                [
+                    _log_row(7, stream="stdout", content="hi\n"),
+                    _log_row(8, stream="stderr", content="warn\n"),
+                ],
+                next_seq=0,
+                total=2,
+            ),
         )
 
     client = _make_client(handler)
     logs = client.task_logs("abc")
-    assert [log.stream for log in logs] == ["stdout", "stderr"]
+    assert [(r.seq, r.stream, r.content) for r in logs] == [
+        (7, "stdout", "hi\n"),
+        (8, "stderr", "warn\n"),
+    ]
+
+
+def test_task_logs_page_returns_one_envelope_and_sends_its_params() -> None:
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=_log_page([_log_row(11)], next_seq=11, total=42))
+
+    client = _make_client(handler)
+    page = client.task_logs_page("abc", since_seq=10, limit=25)
+    assert [r.seq for r in page.items] == [11]
+    assert page.next_seq == 11
+    assert page.total == 42
+    assert calls[0]["since_seq"] == "10"
+    assert calls[0]["limit"] == "25"
+
+    # since_seq=0 means "from the beginning" and is not sent. limit is sent
+    # only when the caller gives one, so a hand-pager sees the server's default
+    # of 50 and is told there is more by next_seq. task_logs() is the opposite -
+    # it ALWAYS sends limit=200, because there the truncation would be silent.
+    # The asymmetry is deliberate.
+    client.task_logs_page("abc")
+    assert "since_seq" not in calls[1]
+    assert "limit" not in calls[1]
+
+
+def test_task_logs_page_raises_on_a_bare_array_body() -> None:
+    """A server rollback to the pre-2026-05-08 bare array must be LOUD, not an
+    empty log. The whole body goes through LogPage.model_validate, so the model
+    is the pin - the client never hand-picks keys.
+
+    pydantic's ValidationError does NOT descend from relay.RelayError. That is a
+    known, separately-tracked gap (the README says otherwise and is corrected in
+    this slice); do not "fix" it here by wrapping.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_log_row(1), _log_row(2)])
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.task_logs_page("abc")
+
+
+def test_task_logs_page_escapes_the_task_id_into_one_path_segment() -> None:
+    """internal/cli/logs.go:714-723 - the exact function this method ports -
+    calls url.PathEscape(taskID), with a comment saying the escape means the
+    argument does not rest on its provenance. The port carried the reasoning
+    nowhere and interpolated the id raw.
+
+    Two things it bought, both measured against httpx 0.28.1:
+
+      - '../../v1/users' resolved to /v1/users/logs. Same host, bearer token
+        attached: the id chooses the ENDPOINT.
+      - 'abc?limit=1&x=' resolved to /v1/tasks/abc?limit=200&x=%2Flogs - the
+        /logs suffix and the paging params both gone, which is a silently wrong
+        request rather than a failure.
+
+    (SSRF and header injection do NOT reach: an absolute URL keeps the client's
+    host, and httpx rejects CR/LF in a URL. This is a path-shape defect.)
+
+    The assertions are on raw_path because that is what goes on the wire; a
+    check on .path would read the DECODED form and pass against no escape at
+    all. %2F survives undecoded, so the traversal never reaches the server as
+    a slash.
+
+    quote(safe="") escapes at least as much as url.PathEscape, not exactly as
+    much: Go leaves + : @ = & $ alone and Python encodes them. The two agree
+    on a UUID, and the difference is in the safe direction, so this is a note
+    against a future reader assuming they are interchangeable.
+    """
+    calls: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.raw_path)
+        return httpx.Response(200, json=_log_page([], next_seq=0, total=0))
+
+    client = _make_client(handler)
+    client.task_logs_page("../../v1/users")
+    client.task_logs_page("abc?limit=1&x=", limit=25)
+    client.task_logs_page("abc", since_seq=10)
+
+    assert calls == [
+        b"/v1/tasks/..%2F..%2Fv1%2Fusers/logs",
+        b"/v1/tasks/abc%3Flimit%3D1%26x%3D/logs?limit=25",
+        b"/v1/tasks/abc/logs?since_seq=10",
+    ]
+
+
+def test_task_logs_pages_to_the_end_with_verbatim_cursor() -> None:
+    """450 rows at limit=200 is two full pages plus one short page.
+
+    The seq list is the strongest assertion available: it proves no row was
+    dropped AND none was returned twice. Because the seqs are contiguous, a
+    `since = next_seq + 1` mutation drops row 201 and a `- 1` returns row 200
+    twice, so both die here. The explicit since_seq assertions pin the same
+    property on the wire, where it cannot be argued about.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 450), calls))
+
+    logs = client.task_logs("abc")
+
+    assert [r.seq for r in logs] == list(range(1, 451))
+    assert len(calls) == 3
+    assert "since_seq" not in calls[0]
+    assert calls[1]["since_seq"] == "200"  # verbatim: next_seq, never next_seq + 1
+    assert calls[2]["since_seq"] == "400"
+
+
+def test_task_logs_sends_explicit_page_limit() -> None:
+    """Without an explicit limit the server default is 50 and a long log is
+    silently truncated at the first stop. Nothing else in this file would
+    notice, because the simulator still returns every row of a short fixture -
+    just in more requests. The wire assertion is the only kill.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 3), calls))
+
+    client.task_logs("abc")
+
+    assert calls[0]["limit"] == "200"
+
+
+def test_task_logs_exact_page_multiple_is_not_a_protocol_error() -> None:
+    """A log whose length is an exact multiple of the page size legitimately
+    produces a final EMPTY page - and that page reports drained, so the drained
+    arm returns before stop 1 can see it. This is the case stop 1 must NOT
+    catch, and it is the guard on the ORDER of those two arms.
+
+    The second request is not optional: a full final page always carries a
+    non-zero cursor, so the client cannot know it is done without asking again.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 200), calls))
+
+    logs = client.task_logs("abc")
+
+    assert [r.seq for r in logs] == list(range(1, 201))
+    assert len(calls) == 2
+    assert calls[1]["since_seq"] == "200"
+
+
+def test_task_logs_limit_caps_total_records() -> None:
+    """limit caps the TOTAL records, and it short-circuits: the fixture is 450
+    rows, so an implementation that walks the whole log and trims at the end
+    makes THREE requests. The request count is what proves the short-circuit;
+    the record count alone cannot.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 450), calls))
+
+    logs = client.task_logs("abc", limit=250)
+
+    assert [r.seq for r in logs] == list(range(1, 251))
+    assert len(calls) == 2
+
+
+def test_task_logs_rejects_a_non_positive_limit() -> None:
+    """`limit` is documented as capping the TOTAL number of records returned,
+    and the loop implements that with `out[:limit]`. Python slice semantics
+    then make a NEGATIVE limit mean something else entirely: limit=-1 on a
+    5-row log returned 4 records, silently dropping the LAST one - the newest
+    line, which is the one an operator reading a log is usually after.
+
+    limit=0 was merely wasteful: a round trip to return [].
+
+    Both are rejected before the loop, so the assertion that no request was
+    made is half the test. The SDK validates locally first everywhere else
+    (submit() is the precedent), and a limit the caller cannot have meant
+    should not reach the server.
+    """
+    calls: list[dict[str, str]] = []
+    client = _make_client(_serve_logs(_log_rows(1, 5), calls))
+
+    for bad in (0, -1):
+        with pytest.raises(ValidationError, match="limit"):
+            client.task_logs("abc", limit=bad)
+    assert calls == []
+
+    # The boundary is admitted, and it is not a no-op.
+    assert [r.seq for r in client.task_logs("abc", limit=1)] == [1]
+
+
+def test_task_logs_page_404_raises_not_found() -> None:
+    """task_logs_page had no error-path test at all: deleting its
+    raise_for_response(...) left all 116 tests green. A 404 here is the
+    ordinary case - handleGetTaskLogs 404s on an unknown task id - and without
+    the translation it reached LogPage.model_validate as an {"error": ...}
+    body and surfaced as a pydantic error about a missing `items`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "task not found"})
+
+    client = _make_client(handler)
+    with pytest.raises(NotFound, match="task not found"):
+        client.task_logs_page("abc")
+
+
+def test_task_logs_page_without_a_token_raises_before_the_request(tmp_path: Any) -> None:
+    """The other untested gate on the same method: deleting its
+    _require_token() also left every test green.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json=_log_page([], next_seq=0, total=0))
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+    with pytest.raises(AuthError, match="relay login"):
+        client.task_logs_page("abc")
+    assert called is False
+
+
+def test_task_logs_raises_on_empty_page_that_is_not_drained() -> None:
+    """Stop 1. Unreachable against the real handler, which sets next_seq = 0
+    whenever the page is short - which is exactly why it must RAISE and not
+    return quietly. The only server that reaches this line is misbehaving, and
+    a quiet return would launder that into a completeness claim the client
+    cannot support.
+
+    The DISCRIMINATING page is request 2 of 3, never the last. A bad input
+    placed LAST cannot detect an early-exit mutation; the normal drained page
+    3 after it is what makes a mutant that deletes the stop TERMINATE
+    (returning rows 1, 2, 6) rather than spin, so deleting the stop is RED and
+    not a hang, and `len(calls) == 2` is what distinguishes the stop firing
+    here from the walk simply running to the end.
+
+    Page 1 is a real page rather than the empty one this test used to open
+    with, because `.records` is the other half of the contract and `[]` cannot
+    tell a preserved envelope from a dropped one: deleting `records=out` at
+    this raise site left all 132 tests green. Rows 1 and 2 are collected before
+    the stop and must survive it.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200, json=_log_page([_log_row(1), _log_row(2)], next_seq=2, total=3)
+            )
+        if len(calls) == 2:
+            return httpx.Response(200, json=_log_page([], next_seq=5, total=3))
+        return httpx.Response(200, json=_log_page([_log_row(6)], next_seq=0, total=3))
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
+        client.task_logs("abc")
+    assert len(calls) == 2
+    assert [r.seq for r in excinfo.value.records] == [1, 2]
+
+
+def test_task_logs_raises_when_cursor_does_not_advance() -> None:
+    """Stop 2, and it is only expressible because this cursor is ORDERED - an
+    opaque string cursor cannot detect a non-advancing server.
+
+    Two things here are load-bearing and both were missing from the spec's
+    sketch. The discriminating page is request 2 BY CONSTRUCTION: on request 1
+    `since` is 0 and `next_seq == 0` is already consumed by the drained arm, so
+    stop 2 is unreachable there. And page 3 is a normal DRAINED page, so
+    deleting stop 2 makes the walk terminate and return records - without it the
+    mutant would spin to the page cap and raise ProtocolError from stop 3, and
+    a bare pytest.raises(ProtocolError) would pass against the mutant. The
+    match= is the other half of that same guard.
+
+    `.records` is pinned here too - deleting `records=out` at this raise site
+    left all 132 tests green. The expected value is [7, 7], the SAME ROW TWICE,
+    and that is not a fixture accident: `out.extend(page.items)` runs before the
+    cursor check, so the page whose cursor did not advance has already been
+    appended. This is the one stop where a duplicated tail in `.records` is
+    guaranteed rather than merely possible, which is why the docstrings say so.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) <= 2:
+            # Asked for since_seq=7 on request 2, answers next_seq=7 again.
+            return httpx.Response(200, json=_log_page([_log_row(7)], next_seq=7, total=9))
+        return httpx.Response(200, json=_log_page([_log_row(8)], next_seq=0, total=9))
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="did not advance") as excinfo:
+        client.task_logs("abc")
+    assert len(calls) == 2
+    assert [r.seq for r in excinfo.value.records] == [7, 7]
+
+
+def test_task_logs_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop 3, which catches an ever-advancing cursor that never drains -
+    something neither of the other two stops can see.
+
+    The 500 past the cap is not decoration. Without it, deleting the cap check
+    leaves this handler advancing forever and the test HANGS rather than fails:
+    this project has no pytest-timeout. The 500 makes the mutant terminate with
+    ServerError, which is not ProtocolError, so the test is RED.
+
+    The request-count assertion is the other half: a test that only checks the
+    exception class cannot tell the cap from a different stop firing.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=9999),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="page cap"):
+        client.task_logs("abc")
+    assert len(calls) == 3
+
+
+def test_task_logs_page_cap_message_does_not_blame_the_server_when_total_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop 3's two-message split, ported from printTaskLogs.
+
+    A log of exactly _MAX_LOG_PAGES * 200 rows drains correctly, but its last
+    page is full and so carries a non-zero cursor: the client stops one request
+    short of learning it was done, having in fact collected every row. The
+    envelope's own total settles that case, so the message must not tell the
+    operator their log may be longer.
+
+    The message is only half of it, and the half that was never checked is what
+    the CALLER RECEIVES. printTaskLogs (internal/cli/logs.go) has already
+    written every row to `out` by the time it returns this error - the error is
+    a completeness caveat on output the operator can already see. Assert the
+    records survive the raise, or the port keeps the Go wording and drops the
+    Go semantics.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        # total == 4 == the rows this walk will have collected when the cap fires.
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=4),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    message = str(excinfo.value)
+    assert "may be longer" not in message
+    assert "every one was collected" in message
+    assert "4 distinct rows" in message
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 3, 4]
+
+
+def test_task_logs_page_cap_completeness_is_distinct_seqs_not_a_record_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completeness claim above is only sound if it counts DISTINCT rows.
+
+    `len(out)` counts records APPENDED and `total` is server-supplied, so a
+    server that serves the same page twice behind an advancing cursor drives
+    them equal while half the log was never sent. This handler does exactly
+    that: rows 1 and 2 twice, cursor 2 then 4, total 4. Rows 3 and 4 do not
+    exist on the wire at any point.
+
+    An implementation that tests `len(out) >= page.total` tells the operator
+    every row was collected. That is the original defect - a silently
+    incomplete log presented as complete - re-created inside the fix for it.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_log_page(
+                [_log_row(1), _log_row(2)], next_seq=len(calls) * 2, total=4
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    message = str(excinfo.value)
+    assert "every one was collected" not in message
+    assert "may be longer" in message
+    # Duplicates and all: the client does not know which of them the server
+    # meant, so it hands back exactly what it received.
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 1, 2]
+
+
+def test_task_logs_page_cap_hands_back_what_it_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generic cap arm - the one that fires on a log genuinely longer than
+    the cap - must not discard the records either.
+
+    _MAX_LOG_PAGES is PRIVATE, so a caller who hits this has no supported way
+    to raise the bound and re-run. Throwing away 2,000,000 collected records
+    leaves them with nothing but the message.
+    """
+    monkeypatch.setattr(Client, "_MAX_LOG_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        seq = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_log_page([_log_row(seq - 1), _log_row(seq)], next_seq=seq, total=9999),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.task_logs("abc")
+
+    assert "may be longer" in str(excinfo.value)
+    assert [r.seq for r in excinfo.value.records] == [1, 2, 3, 4]
+
+
+def test_get_tasks_parses_a_bare_array() -> None:
+    """GET /v1/jobs/{id}/tasks is the SDK's ONLY bare-array read - it is the
+    last unpaginated list route the SDK calls, and handleListTasks writes a
+    make()d slice so an empty task list serializes as [] and never null.
+
+    It is not stable by construction. Its six paginated siblings all grew
+    page[T]; if this route follows them, get_tasks() breaks in exactly the way
+    task_logs() was broken, and today no test would notice. These four lines
+    make that a red suite instead of a red production.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "t1",
+                    "name": "cook",
+                    "status": "done",
+                    "commands": [["echo", "hi"]],
+                    "env": {},
+                    "requires": {},
+                    "timeout_seconds": None,
+                    "retries": 0,
+                    "retry_count": 0,
+                    "worker_id": None,
+                }
+            ],
+        )
+
+    client = _make_client(handler)
+    tasks = client.get_tasks("job-1")
+    assert [(t.id, t.name, t.status) for t in tasks] == [("t1", "cook", "done")]
+
+
+# ─── follow_job() ────────────────────────────────────────────────────────────
+
+
+def test_follow_job_yields_events_and_disables_only_the_read_timeout() -> None:
+    """The first test this method has ever had. It shipped unusable: the stream
+    built `httpx.Timeout(connect=..., read=None)`, and httpx takes the
+    four-explicit-parameters branch only when connect, read, write and pool are
+    ALL set - otherwise it raises ValueError. So every caller who iterated
+    follow_job() got ValueError on the first frame, and the docstring's central
+    claim (that a caller who iterates to exhaustion blocks forever) described
+    behaviour no caller could reach.
+
+    The timeout assertion is not decoration: it is the only thing that pins
+    WHICH of the four the fix disables. `httpx.Timeout(self._http.timeout)`
+    alone parses fine and reinstates the 5 s read timeout the SSE stream must
+    not have; the read=None assertion is what kills that.
+    """
+    captured: dict[str, Any] = {}
+    body = (
+        'event: job\ndata: {"id": "j1", "status": "running"}\n\n'
+        'event: dropped\ndata: {"reason": "slow consumer"}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        captured["accept"] = request.headers.get("accept", "")
+        captured["timeout"] = request.extensions["timeout"]
+        return httpx.Response(
+            200, text=body, headers={"content-type": "text/event-stream"}
+        )
+
+    client = _make_client(handler)
+    events = list(client.follow_job("j1"))
+
+    assert [(e.type, e.data) for e in events] == [
+        ("job", {"id": "j1", "status": "running"}),
+        ("dropped", {"reason": "slow consumer"}),
+    ]
+    assert captured["path"] == "/v1/events"
+    assert captured["query"] == {"job_id": "j1"}
+    assert captured["accept"] == "text/event-stream"
+    assert captured["timeout"]["read"] is None
+    assert captured["timeout"]["connect"] == 5.0  # the client's own, unchanged
+
+
+def test_follow_job_without_a_token_raises_before_the_request(tmp_path: Any) -> None:
+    """follow_job returns a generator, so a _require_token inside the generator
+    body would not run until the first next() - and a caller who only builds
+    the iterator would see no error at all. It is checked eagerly instead.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, text="")
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+    with pytest.raises(AuthError, match="relay login"):
+        client.follow_job("j1")
+    assert called is False
 
 
 # ─── wait() ──────────────────────────────────────────────────────────────────
@@ -479,3 +1123,63 @@ def test_list_users_admin_403_raises_auth_error() -> None:
     client = _make_client(handler)
     with pytest.raises(AuthError):
         client.list_users()
+
+
+def test_fetch_all_rejects_a_non_positive_limit() -> None:
+    """The sibling walk carries test_task_logs_rejects_a_non_positive_limit's
+    defect on six public methods.
+
+    `_fetch_all` ends with the same `out[:limit]`, so `list_jobs(limit=-1)`
+    silently drops the LAST row - here, the newest job - exactly as
+    `task_logs(limit=-1)` did. Validating one and not the other is worse than
+    validating neither: the parameter has the same name and the same
+    documented meaning on all seven methods, so a caller who learns it is
+    checked on task_logs() reasonably assumes it is checked next door.
+
+    The discriminating input is the NEGATIVE limit against a multi-row page,
+    because limit=0 is caught by any `limit < 1` guard while limit=-1 is the
+    one that returns a plausible-looking short list instead of raising.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        rows = [{"id": f"j{i}", "name": f"job-{i}"} for i in range(1, 6)]
+        return httpx.Response(200, json={"items": rows, "next_cursor": "", "total": 5})
+
+    client = _make_client(handler)
+
+    for bad in (0, -1):
+        with pytest.raises(ValidationError, match="limit"):
+            client.list_jobs(limit=bad)
+    assert calls == []
+
+
+def test_a_bad_limit_does_not_pre_empt_the_missing_token_error(tmp_path: Any) -> None:
+    """Precedence, on both walks. The limit guards were added ABOVE
+    `_require_token()`, so a token-less client calling `list_jobs(limit=0)`
+    reported a ValidationError about the limit while every other method on the
+    same client reported AuthError. `task_logs` had the same inversion relative
+    to `task_logs_page`, which checks the token itself.
+
+    Missing credentials are the condition the caller has to fix first and the
+    one the SDK already advertises with a `relay login` hint; a client that has
+    no token cannot make the request whatever the limit says. The two guards
+    disagreeing about which comes first is the defect, so the assertion is on
+    the CLASS, not on either guard firing.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json=_page_response([]))
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+
+    for bad in (0, -1):
+        with pytest.raises(AuthError, match="relay login"):
+            client.list_jobs(limit=bad)
+        with pytest.raises(AuthError, match="relay login"):
+            client.task_logs("abc", limit=bad)
+    assert called is False
