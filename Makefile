@@ -83,8 +83,17 @@ test-integration:
 # -p 1 is NOT needed: the pattern names one package. The 480s Go timeout is
 # deliberately distinct from the 10-minute job timeout in CI so a Go panic and a
 # GitHub job kill name themselves instead of looking identical.
+#
+# -count=1 disables Go's test result cache. Without it, CI's actions/setup-go
+# cache: true restores GOCACHE across runs, and the cache key covers the test
+# binary, its args, and observed env vars - nothing about whether a live TCP
+# connection to Postgres actually succeeded. A PR that edits only the
+# services.postgres block or the health check in go-ci.yml leaves the Go
+# inputs byte-identical, so without -count=1 this target can report
+# "ok (cached)" in well under a second while never having contacted the
+# database it names.
 test-cli-integration:
-	go test -tags integration ./internal/cli/... -timeout 480s
+	go test -tags integration -count=1 ./internal/cli/... -timeout 480s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`
