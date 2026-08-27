@@ -63,9 +63,9 @@ type taskResp struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Status string `json:"status"`
-	// `commands`, plural, and [][]string: migration 000008_task_commands
-	// dropped tasks.command (TEXT[]) and added tasks.commands (JSONB), and
-	// internal/api's taskResponse has emitted `commands` ever since.
+	// `commands`, plural: migration 000008_task_commands dropped tasks.command
+	// (TEXT[]) and added tasks.commands (JSONB), and internal/api's
+	// taskResponse has emitted `commands` ever since.
 	//
 	// `command` (singular, []string) is still a live REQUEST key - internal/api's
 	// taskSpec accepts it and jobspec.Validate normalises it into Commands -
@@ -73,7 +73,24 @@ type taskResp struct {
 	// key and has not been one since 2026-05. Decoding it gave
 	// `relay get <job-id> --json` a "command":null and no task definition at
 	// all for three months, with the whole CLI suite green.
-	Commands       [][]string      `json:"commands"`
+	//
+	// json.RawMessage, not [][]string, and this is a DELIBERATE decision, not
+	// an oversight this header's "field-for-field and tag-for-tag identical"
+	// claim would otherwise contradict: internal/api's taskResponse.Commands
+	// is json.RawMessage too (toTaskResponse: rawJSON(t.Commands)), so this
+	// now genuinely mirrors it rather than merely producing the same bytes
+	// for today's data. [][]string decoded correctly for every job this CLI
+	// binary has ever created - jobspec.Validate guarantees the shape and the
+	// tasks.commands column defaults to '[]'::jsonb - but there is no
+	// `CHECK (jsonb_typeof(commands) = 'array')` on that column, and this is a
+	// SHIPPED BINARY that talks to servers of other versions. A [][]string
+	// field turns any future server-side shape change into a hard decode
+	// error in readJobSnapshot (internal/cli/logs.go), which backs not only
+	// `relay get` but `relay logs` and non-detached `relay submit` too.
+	// json.RawMessage can't diverge from the wire either way, and it keeps
+	// this field covered by the JSONEq total guard in
+	// jobs_integration_test.go the same way Labels already is.
+	Commands       json.RawMessage `json:"commands"`
 	Env            json.RawMessage `json:"env"`
 	Requires       json.RawMessage `json:"requires"`
 	TimeoutSeconds *int32          `json:"timeout_seconds"`

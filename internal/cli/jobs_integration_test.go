@@ -98,8 +98,20 @@ func TestIntegration_GetJobJSON_CarriesTheTasksCommands(t *testing.T) {
 // doListJobs --json and doGetJob --json do not proxy the server's bytes: they
 // DECODE into internal/cli's jobResp/taskResp and RE-ENCODE that. Every field
 // the mirror lacks is therefore deleted from output the user was told is JSON,
-// silently and with no error anywhere. `command` was one instance; the tests
-// below cover the rest of internal/api's jobResponse and taskResponse.
+// silently and with no error anywhere. `command` was one instance.
+//
+// The named-key assertions below (TestIntegration_ListJobsJSON_..., etc.) do
+// NOT cover the rest of internal/api's jobResponse and taskResponse - a
+// mutation battery run against this file found 9 surviving json-tag renames
+// (Env, Requires, TimeoutSeconds, Retries, DependsOn, WorkerID on
+// taskResponse; SubmittedBy, CreatedAt, UpdatedAt on jobResponse) that no
+// assertion here touches. `created_at` -> `createdAt` alone left the whole
+// package green while `relay list` rendered "0001-01-01 00:00" for every job
+// on the farm. TestIntegration_GetJobJSON_MirrorsServerBodyExactly and
+// TestIntegration_ListJobsJSON_MirrorsServerItemsExactly below are the total
+// guard that actually closes that gap - keep the named-key assertions for
+// their failure messages, but treat the JSONEq tests as the ones that fail
+// closed on the next field added to either struct.
 
 // enrichedJobSpec is the subject of the arity tests. It differs from
 // laneJobSpec in exactly the ways the assertions need:
@@ -108,13 +120,21 @@ func TestIntegration_GetJobJSON_CarriesTheTasksCommands(t *testing.T) {
 //     differ from each other AND from a zero value AND from each other's
 //     transposition - a defaulted or swapped pair is visible.
 //   - labels, so `labels` carries a value only correct decoding produces.
+//   - t2 depends_on t1, so taskResponse.DependsOn carries a value on the wire.
+//     Both DependsOn and WorkerID (assigned in seedEnrichedJob) are
+//     omitempty: a job graph with no dependency and no task ever assigned to
+//     a worker would leave those two keys absent from EVERY response this
+//     lane produces, which would make a json-tag rename on either one
+//     invisible to TestIntegration_GetJobJSON_MirrorsServerBodyExactly's
+//     whole-body JSONEq comparison - an absent key compares equal to an
+//     absent key no matter what either side calls it.
 const enrichedJobSpec = `{
   "name": "enriched-job",
   "priority": "high",
   "labels": {"crew": "nightshift", "tier": "platinum"},
   "tasks": [
     {"name": "t1", "command": ["echo", "one"]},
-    {"name": "t2", "command": ["echo", "two"]},
+    {"name": "t2", "command": ["echo", "two"], "depends_on": ["t1"]},
     {"name": "t3", "command": ["echo", "three"]}
   ]
 }`
@@ -143,6 +163,15 @@ const (
 // harness has no scheduler or agent to produce: task completion, task timing, a
 // retry count, and a scheduled-job source. Every one of those feeds a
 // jobResponse or taskResponse field.
+//
+// The direct `UPDATE tasks SET status = 'done', ...` below bypasses
+// UpdateTaskStatus's epoch/worker_id/terminality fence entirely - same
+// uncovered-axis cost seedLogRows below states for AppendTaskLog's fence, and
+// noted here for the same reason: so this lane is not later misread as
+// exercising the status-write fence, which it does not. It also produces a
+// state production cannot reach on its own: a `pending` job with 2 of its 3
+// tasks `done`, since RecomputeJobStatus never runs against data written this
+// way.
 func seedEnrichedJob(t *testing.T, s *relayServer) (jobID, schedID string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -157,6 +186,14 @@ func seedEnrichedJob(t *testing.T, s *relayServer) (jobID, schedID string) {
 		UPDATE tasks SET status = 'done', started_at = $2, finished_at = $3, retry_count = $4
 		WHERE job_id = $1::uuid AND name = 't1'`,
 		jobID, wantJobStartedAt, wantJobStartedAt.Add(time.Hour), wantRetryCount)
+	require.NoError(t, err)
+
+	// t1 carries a worker assignment too, so taskResponse.WorkerID is
+	// non-empty on the wire - see the omitempty note on enrichedJobSpec.
+	workerID := seedWorker(t, s, "enriched-job-worker", "enriched-job-worker-host", "offline")
+	_, err = s.Pool.Exec(t.Context(), `
+		UPDATE tasks SET worker_id = $2::uuid WHERE job_id = $1::uuid AND name = 't1'`,
+		jobID, workerID)
 	require.NoError(t, err)
 	_, err = s.Pool.Exec(t.Context(), `
 		UPDATE tasks SET status = 'done', started_at = $2, finished_at = $3
@@ -305,4 +342,88 @@ func TestIntegration_GetJobJSON_LabelsWhenTheJobHasNone(t *testing.T) {
 	v, ok := job["labels"]
 	require.True(t, ok, "labels must be present even when the job has none")
 	require.Nil(t, v, "an unlabelled job's labels is JSON null on the wire, not {}")
+}
+
+// rawGET issues an authenticated GET against the live server and returns the
+// raw response body, bypassing internal/cli entirely.
+func rawGET(t *testing.T, s *relayServer, path string) []byte {
+	t.Helper()
+	req, err := http.NewRequestWithContext(testCtx(t), "GET", s.BaseURL+path, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+s.AdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	return raw
+}
+
+// TestIntegration_GetJobJSON_MirrorsServerBodyExactly is the total guard the
+// named-key tests above cannot be: it does not enumerate fields, it compares
+// the CLI's --json output against the server's own response body for the
+// SAME request, byte-for-byte modulo JSON-insignificant formatting. Any field
+// jobResp/taskResp lacks, or any json tag that drifts from internal/api's,
+// fails this the moment it exists - it does not wait for someone to add a
+// named assertion for it. seedEnrichedJob is used so the compared body is
+// not near-empty: labels, a retry count, task timing and a scheduled-job
+// link are all present on the wire this test walks.
+func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
+	s := startRelayServer(t)
+	jobID, _ := seedEnrichedJob(t, s)
+
+	raw := rawGET(t, s, "/v1/jobs/"+jobID)
+
+	var cliOut bytes.Buffer
+	require.NoError(t, doGetJob(testCtx(t), s.adminCfg(), []string{jobID, "--json"}, &cliOut))
+
+	require.JSONEq(t, string(raw), cliOut.String(),
+		"relay get --json must reproduce the server's body exactly; a field missing from "+
+			"internal/cli's jobResp is silently deleted from output the user was told is JSON")
+}
+
+// TestIntegration_ListJobsJSON_MirrorsServerItemsExactly is the list-path
+// half of the same total guard. doListJobs --json prints only the decoded
+// []jobResp (json.NewEncoder(w).Encode(jobs)), not the full page envelope,
+// so the comparison is against the server's own `items` array rather than
+// its whole body.
+func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
+	s := startRelayServer(t)
+	seedEnrichedJob(t, s)
+
+	raw := rawGET(t, s, "/v1/jobs")
+	var envelope struct {
+		Items json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &envelope))
+
+	var cliOut bytes.Buffer
+	require.NoError(t, doListJobs(testCtx(t), s.adminCfg(), []string{"--json"}, &cliOut))
+
+	require.JSONEq(t, string(envelope.Items), cliOut.String(),
+		"relay list --json must reproduce the server's items array exactly; a field missing from "+
+			"internal/cli's jobResp is silently deleted from output the user was told is JSON")
+}
+
+// TestIntegration_ListJobs_CreatedColumnIsRendered pins the human-readable
+// render the JSONEq guards above do not cover: --json is one path through
+// jobResp, but doListJobs' default table render is another, and it reads
+// j.CreatedAt directly rather than round-tripping through JSON at all. The
+// created_at json-tag mutant that JSONEq (and every named-key assertion in
+// this file) misses entirely lands here - a mis-tagged CreatedAt decodes as
+// the zero value, and doListJobs prints it as literally "0001-01-01 00:00"
+// for every job on the farm.
+func TestIntegration_ListJobs_CreatedColumnIsRendered(t *testing.T) {
+	s := startRelayServer(t)
+	submitLaneJob(t, s)
+
+	var out bytes.Buffer
+	require.NoError(t, doListJobs(testCtx(t), s.adminCfg(), nil, &out))
+	list := out.String()
+
+	require.Regexp(t, `\d{4}-\d{2}-\d{2} \d{2}:\d{2}`, list,
+		"CREATED must be rendered as a real timestamp")
+	require.NotContains(t, list, "0001-01-01 00:00",
+		"CREATED must not be the zero time - a dropped/mis-tagged created_at decodes to this")
 }

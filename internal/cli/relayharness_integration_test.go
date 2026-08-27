@@ -182,6 +182,14 @@ func firstTaskID(t *testing.T, s *relayServer, jobID string) string {
 // content. A distinctive input placed only at the END cannot detect an
 // early-exit defect ([[reference_mutation_proof_position]]), so both ends are
 // distinctive and both are asserted.
+//
+// This depends on `INSERT ... SELECT ... ORDER BY g` assigning the BIGSERIAL
+// id column in scan order, so that row g=1 really is the row with the lowest
+// id and lines[0] in a caller's assertion really is "line-1". Measured (not
+// assumed): 6/6 trials at n=250 held, and the plan shape is a serial
+// ModifyTable consuming a sorted generate_series, which is why. A future edit
+// that adds a WHERE clause or a join here could change the scan order without
+// changing this comment - re-verify if one is added.
 func seedLogRows(t *testing.T, s *relayServer, taskID string, n int) {
 	t.Helper()
 	_, err := s.Pool.Exec(t.Context(), `
