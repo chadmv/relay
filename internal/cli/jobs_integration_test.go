@@ -175,10 +175,16 @@ const (
 // uncovered-axis cost seedLogRows below states for AppendTaskLog's fence, and
 // noted here for the same reason: so this lane is not later misread as
 // exercising the status-write fence, which it does not. The worker_id write
-// in particular sets a column no production statement other than
-// ClaimTaskForWorker writes. It also produces a state production cannot
-// reach on its own: a `pending` job with 2 of its 3 tasks `done`, since
-// RecomputeJobStatus never runs against data written this way.
+// in particular sets a NON-NULL value no production statement other than
+// ClaimTaskForWorker sets: internal/store/query/tasks.sql has 8 statements
+// that write tasks.worker_id at all (IncrementTaskRetryCount,
+// ClaimTaskForWorker, RequeueTask, RequeueTaskByID, CancelJobTasks,
+// RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, RetryJobTasks), but 7 of
+// those 8 only ever write NULL - ClaimTaskForWorker is the sole one that
+// assigns a real id, which is the property this fixture leans on. It also
+// produces a state production cannot reach on its own: a `pending` job with 2
+// of its 3 tasks `done`, since RecomputeJobStatus never runs against data
+// written this way.
 func seedEnrichedJob(t *testing.T, s *relayServer) (jobID, schedID string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -377,12 +383,18 @@ func rawGET(t *testing.T, s *relayServer, path string) []byte {
 // absent key compares equal to an absent key no matter what either side
 // calls it, so a json-tag rename on any of those four passes here for
 // exactly the reason DependsOn/WorkerID's omitempty used to hide them from
-// this same test before that was fixed. This test is the SOLE guard for the
-// nested `tasks` array and every one of taskResponse's 11 tags (id, name,
-// status, commands, env, requires, timeout_seconds, retries, retry_count,
-// depends_on, worker_id) - jobResponse.Tasks is itself omitempty and absent
-// from every list row, so TestIntegration_ListJobsJSON_MirrorsServerItemsExactly
-// cannot see any of them. See that test's comment for the fields it alone
+// this same test before that was fixed. This is the only guard that fails
+// CLOSED on the nested `tasks` array and on whichever of taskResponse's 11
+// tags (id, name, status, commands, env, requires, timeout_seconds, retries,
+// retry_count, depends_on, worker_id) no named assertion elsewhere in this
+// file already covers - it is NOT the sole guard for every one of them: name
+// and retry_count are pinned by TestIntegration_GetJobJSON_CarriesLabelsAndTaskRetryCount
+// and commands by TestIntegration_GetJobJSON_CarriesTheTasksCommands. This
+// file's header comment records the measured surviving set for the rest (six
+// taskResponse tags, as of the 2026-08-27 mutation battery). jobResponse.Tasks
+// is itself omitempty and absent from every list row, so
+// TestIntegration_ListJobsJSON_MirrorsServerItemsExactly cannot see any of
+// taskResponse's tags at all - see that test's comment for the fields it
 // guards.
 func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 	s := startRelayServer(t)
@@ -406,13 +418,22 @@ func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 // comparison is against the server's own `items` array rather than its whole
 // body.
 //
-// This test is the SOLE guard for jobResponse's list-only enrichment block:
-// started_at, finished_at, scheduled_job_id and scheduled_job_name.
-// applyJobEnrichment populates all four only on list rows; the detail test
-// never sees a non-zero value for any of them, so a json-tag rename on one
-// would pass the detail comparison (absent key vs absent key) and is caught
-// here instead, where seedEnrichedJob gives each of the four a real,
-// non-default value.
+// This is NOT the sole guard for jobResponse's list-only enrichment block
+// (started_at, finished_at, scheduled_job_id, scheduled_job_name): all four
+// are already pinned by name in TestIntegration_ListJobsJSON_CarriesTheListEnrichment
+// above, whose map lookups (row["started_at"], etc.) fail closed on a
+// json-tag rename on their own - a prior version of this comment claimed
+// otherwise. What this test IS the only guard for is whichever list-row tag
+// no named assertion covers: applyJobEnrichment runs only on list rows, so
+// the detail test (TestIntegration_GetJobJSON_MirrorsServerBodyExactly) never
+// sees a non-zero value for any of the enrichment fields and a rename there
+// would pass its comparison (absent key vs absent key) undetected; and
+// jobResponse's SubmittedBy/CreatedAt/UpdatedAt tags carry no named
+// assertion on the list path at all - this file's header comment records
+// them among the measured surviving mutants before this test existed.
+// seedEnrichedJob gives the enrichment fields a real, non-default value so
+// this comparison is not vacuous even where a named assertion also covers
+// the same field.
 func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
 	s := startRelayServer(t)
 	seedEnrichedJob(t, s)
@@ -475,17 +496,39 @@ func TestIntegration_ListJobs_CreatedColumnIsRendered(t *testing.T) {
 	require.NotEmpty(t, match, "CREATED must be rendered as a real timestamp")
 
 	// ParseInLocation, not Parse: doListJobs' j.CreatedAt.Format carries
-	// whatever offset the server's created_at arrived with, which is this
-	// process's own Local zone (the server in this lane runs in-process, via
-	// httptest - measured: the wire body carries e.g.
-	// "2026-08-27T13:30:51-07:00", not a "Z"/UTC suffix). The rendered
-	// "15:04" text therefore has no zone marker of its own; parsing it with
-	// plain time.Parse silently defaults to UTC and manufactures a
+	// whatever offset the server's created_at arrived with. The MECHANISM,
+	// not just a this-machine observation of it: pgtype's TimestamptzCodec
+	// has ScanLocation: nil by default, so the binary scan path builds the
+	// decoded value with time.Unix(...), which returns a time.Time in the
+	// CLIENT PROCESS's own time.Local - whatever that is. This lane runs the
+	// API server in-process via httptest, so the encode side (the server
+	// formatting created_at onto the wire) and the decode side (this test
+	// parsing it back) share that one process-wide time.Local, which is why
+	// the test is TZ-invariant BY CONSTRUCTION and not by luck. Verified by
+	// running this test in a real golang:1.26 Linux container under both
+	// TZ=UTC and TZ=Asia/Tokyo - both passed. (TZ has no effect on time.Local
+	// on Windows at all, so a local TZ sweep here would not have been a valid
+	// check - recorded so the next person does not spend an hour on it.) The
+	// rendered "15:04" text has no zone marker of its own; parsing it with
+	// plain time.Parse would silently default to UTC and manufacture a
 	// same-digits-different-zone mismatch of exactly the local UTC offset,
 	// which is not the defect this test exists to catch.
+	//
+	// DST note: ParseInLocation on a zone-less wall-clock string that falls
+	// inside a fall-back-transition's repeated hour has an unspecified offset
+	// choice - once a year, for that one hour, `got` can land up to 1h away
+	// from the instant time.Now() actually reports, which would blow a
+	// 5-minute budget for a reason that has nothing to do with the defect
+	// this test guards. WithinDuration below is widened to 1h5m to absorb
+	// that window rather than comparing against a truncated time.Now(),
+	// since truncation only removes the (already-covered) sub-minute slack
+	// from "15:04" dropping seconds and does nothing for the DST case. The
+	// 5-minute portion of that budget is otherwise tight: "15:04" drops
+	// seconds so got is at most 59.999s behind, and the defect this budget
+	// separates it from (0001-01-01 00:00) is 2000 years away.
 	got, err := time.ParseInLocation("2006-01-02 15:04", match, time.Local)
 	require.NoError(t, err, "CREATED value %q must parse with doListJobs' own format", match)
-	require.WithinDuration(t, time.Now(), got, 5*time.Minute,
+	require.WithinDuration(t, time.Now(), got, time.Hour+5*time.Minute,
 		"CREATED must be close to now, not the zero time - a dropped/mis-tagged "+
 			"created_at decodes to 0001-01-01 00:00, which is nowhere near this window")
 }

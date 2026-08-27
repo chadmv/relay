@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"os/user"
 	"regexp"
 	"strconv"
 	"strings"
@@ -136,10 +137,13 @@ type dsnAssertT interface {
 	Helper()
 }
 
-// pgConnectionTargetQueryKeys is the closed set of pgconn URL query keys that
-// participate in choosing WHERE a connection lands and AS WHOM, enumerated
-// from the pinned github.com/jackc/pgx/v5@v5.9.1 source
-// (pgconn/config.go). Two things in that file establish this exact set:
+// pgConnectionTargetQueryKeys is NOT the closed set of every pgconn URL query
+// key that can affect WHO or WHERE a connection ends up as - see the two
+// documented gaps below. It is the set of keys that can redirect the
+// AUTHORITY-DERIVED target (the host/port/user/database this harness itself
+// names in the DSN's userinfo, authority and path), enumerated from the
+// pinned github.com/jackc/pgx/v5@v5.9.1 source (pgconn/config.go). Two things
+// in that file establish this set:
 //
 //   - parseURLSettings ends with an unconditional
 //     `for k, v := range parsedURL.Query() { settings[k] = v[0] }` (only after
@@ -161,6 +165,38 @@ type dsnAssertT interface {
 // passfile matters because pgconn substitutes it for config.Password only
 // when the URL carries no password - defence in depth for a future call site
 // that omits one.
+//
+// Two members of the true "affects who/where" set are deliberately left OUT
+// of this map, and each is a distinct kind of gap:
+//
+//   - `options` is NOT in pgconn's notRuntimeParams, so it is NOT
+//     intercepted here - it falls through to config.RuntimeParams and is
+//     sent verbatim in the startup packet. Postgres accepts `-c NAME=VALUE`
+//     there, so `?options=-c%20role%3Dpostgres` changes AS WHOM the session
+//     runs (measured: RuntimeParams carries `options:-c role=postgres`, and
+//     Postgres applies it at session start). Not an escalation under this
+//     threat model - whoever controls RELAY_TEST_DATABASE_URL already
+//     controls its credentials - but it is a real member of "AS WHOM" that
+//     this set does not name.
+//   - `target_session_attrs` IS in notRuntimeParams (so it does NOT leak into
+//     RuntimeParams) but is intentionally absent from THIS map: it sets
+//     config.ValidateConnect (read-write/read-only/primary/standby), which
+//     selects WHICH of config.Fallbacks a multi-host connection actually
+//     uses - so with more than one host it does affect where a connection
+//     lands, contrary to the parenthetical above that files it as
+//     targeting-inert alongside sslmode/connect_timeout.
+//
+// Separately, note where a multi-host authority's coverage actually comes
+// from: `?host=` and friends above are the query-string axis, but a DSN
+// whose AUTHORITY itself names multiple hosts
+// (postgres://u:p@host1:5432,host2:6666/wanted) is caught by
+// assertDSNTargetsDatabase below only INCIDENTALLY - url.URL.Hostname()
+// returns the whole comma-joined blob ("host1:5432,host2"), which then
+// mismatches cfg.Host (pgx.ParseConfig resolves that to just "host1", with
+// "host2" moved into cfg.Fallbacks). The guard never inspects cfg.Fallbacks
+// itself; do not "clean up" the Hostname() comparison to tolerate this shape
+// without re-adding an explicit Fallbacks check, or the multi-host axis
+// reopens silently.
 var pgConnectionTargetQueryKeys = map[string]bool{
 	"host":        true,
 	"port":        true,
@@ -182,10 +218,35 @@ var pgConnectionTargetQueryKeys = map[string]bool{
 // `?user=` and `?password=` free to redirect CREATE DATABASE, DROP DATABASE
 // ... WITH (FORCE), migrations and the admin-token seed to a different server
 // while that check still reported "postgres, as intended".
+//
+// Called only from newSharedServiceDSN, i.e. only when RELAY_TEST_DATABASE_URL
+// is set. newContainerDSN (the unset/testcontainer path) never calls this: its
+// DSN comes from tcpostgres.Run/pg.ConnectionString, not from the environment,
+// so there is nothing here for an operator's env var to redirect. That
+// exemption is deliberate, not an oversight - do not add a call on the
+// container path.
+//
+// This narrows the set of DSNs RELAY_TEST_DATABASE_URL may legitimately use:
+// a unix-socket DSN such as postgres:///wanted?host=/var/run/postgresql is a
+// valid pgconn spelling (pgconn treats a leading-slash `host` value as a
+// socket directory) and is now rejected, because `host` is in
+// pgConnectionTargetQueryKeys regardless of what value it carries. Failing
+// closed on that shape is arguably the right tradeoff - a socket path is
+// itself a redirection vector - but it is a newly narrowed input surface
+// relative to before this guard existed, and is recorded here so it is not
+// mistaken for an oversight if someone hits it.
 func assertNoConnectionTargetOverride(t dsnAssertT, parsedURL *url.URL) {
 	t.Helper()
 	for k := range parsedURL.Query() {
-		require.False(t, pgConnectionTargetQueryKeys[k],
+		// pgConnectionTargetQueryKeys is lowercase-only. pgconn's own nameMap
+		// and notRuntimeParams are exact-case lowercase maps too, so pgx does
+		// not honour a mixed-case key like `HOST` either - it falls through to
+		// RuntimeParams and the connection dies on an unrecognized startup
+		// parameter. That means a mixed-case key is harmless today, but only
+		// because of Postgres's happenstance rejection, not because this
+		// guard's own assertion closes the axis. Lower-case before the lookup
+		// so the guard is the thing doing the rejecting.
+		require.False(t, pgConnectionTargetQueryKeys[strings.ToLower(k)],
 			"%s must not carry a %q query parameter - it can override which "+
 				"server, database, or user this harness's CREATE/DROP DATABASE "+
 				"and migrations target", dsnEnvVar, k)
@@ -224,16 +285,52 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 	require.Equal(t, wantDB, cfg.Database,
 		"dsn would connect to database %q, not %q - a query parameter "+
 			"(dbname/database) is overriding the intended path", cfg.Database, wantDB)
+	// host/port/user mismatches are reported cause-agnostically: pgconn merges
+	// a query parameter, a service file (service/servicefile), and PG*
+	// environment variables (PGHOST/PGPORT/PGUSER) into these same three
+	// settings (see pgConnectionTargetQueryKeys's doc comment above), so
+	// naming "a query parameter" as though it were the only possible cause is
+	// itself wrong whenever one of the other two is what actually moved the
+	// value - and an operator who greps the DSN for a query string that was
+	// never there wastes real time on it.
 	require.Equal(t, wantHost, cfg.Host,
-		"dsn would connect to host %q, not %q - a query parameter is "+
-			"overriding the intended host", cfg.Host, wantHost)
+		"dsn would connect to host %q, not %q - a query parameter, a service "+
+			"file, or a PG* environment variable is overriding the intended "+
+			"host", cfg.Host, wantHost)
 	gotPort := strconv.Itoa(int(cfg.Port))
 	require.Equal(t, wantPort, gotPort,
-		"dsn would connect to port %q, not %q - a query parameter is "+
-			"overriding the intended port", gotPort, wantPort)
+		"dsn would connect to port %q, not %q - a query parameter, a service "+
+			"file, or a PG* environment variable is overriding the intended "+
+			"port", gotPort, wantPort)
 	require.Equal(t, wantUser, cfg.User,
-		"dsn would connect as user %q, not %q - a query parameter is "+
-			"overriding the intended user", cfg.User, wantUser)
+		"dsn would connect as user %q, not %q - a query parameter, a service "+
+			"file, or a PG* environment variable is overriding the intended "+
+			"user", cfg.User, wantUser)
+}
+
+// wantDefaultUser returns the user a connection to parsedBase will actually
+// authenticate as: the DSN's own userinfo when present, otherwise the same
+// default pgconn's defaultSettings() applies (os/user.Current(), stripped of
+// a Windows DOMAIN\ prefix - see pgconn/defaults.go and
+// pgconn/defaults_windows.go in the pinned jackc/pgx@v5.9.1). Deriving it via
+// pgx.ParseConfig, the same entry point pgx.Connect uses, rather than
+// hand-rolling a second OS-username lookup, is what keeps this from drifting
+// out of sync with pgconn's own default the way the previous zero-value
+// wantUser did: assertDSNTargetsDatabase then compared pgconn's real default
+// user against an empty string and rejected an ordinary, portless-userinfo
+// DSN such as postgres://localhost:5432/postgres.
+//
+// parsedBase must have already passed assertNoConnectionTargetOverride, so
+// its query string carries no key that could redirect host/port/user - this
+// parse is safe to lean on for the default this DSN itself left unstated.
+func wantDefaultUser(t dsnAssertT, parsedBase *url.URL) string {
+	t.Helper()
+	if u := parsedBase.User.Username(); u != "" {
+		return u
+	}
+	cfg, err := pgx.ParseConfig(parsedBase.String())
+	require.NoError(t, err, "parse dsn as a pgx config")
+	return cfg.User
 }
 
 func newSharedServiceDSN(t *testing.T, base string) string {
@@ -263,7 +360,7 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	if wantPort == "" {
 		wantPort = "5432" // pgconn's default when the DSN carries no port.
 	}
-	wantUser := parsedBase.User.Username()
+	wantUser := wantDefaultUser(t, parsedBase)
 
 	// Connect to /postgres to issue CREATE/DROP DATABASE - the same move
 	// web/e2e/ensure-db.mjs makes with adminUrl.pathname. Whatever database the
@@ -289,14 +386,26 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	// between CREATE and t.Cleanup: a successful CREATE followed by a FailNow
 	// (Goexit, so nothing after it runs) previously leaked a relaytest_
 	// database on the shared server permanently.
-	// created tracks whether the CREATE below actually succeeded. The DROP
-	// cleanup stays unconditional either way (that is the whole point of
-	// arming it before the CREATE - see the comment above), but a connect
-	// failure in the cleanup is only a real problem when a database might
-	// exist to drop. Without this, a Postgres that is down or unreachable at
-	// CREATE time makes the cleanup connect again, fail again, and t.Errorf
-	// a database that was never created - a second, misleading error on top
-	// of the real one that buries it under a flaky server.
+	// created is a LOWER BOUND on whether the CREATE below actually
+	// succeeded, not a certainty: execErr == nil only proves the response was
+	// received, and CREATE DATABASE can commit server-side while its response
+	// is lost (a deadline firing, or the connection resetting, in the window
+	// after the server commits but before the client reads the reply). In
+	// that window created is false even though the database now exists, which
+	// downgrades the cleanup's connect failure below from t.Errorf to
+	// t.Logf - silently leaking a relaytest_ database exactly the class the
+	// arm-before-CREATE ordering above exists to prevent. The DROP itself is
+	// still attempted whenever the cleanup's connect succeeds regardless of
+	// created; only the SEVERITY of a connect failure depends on it. Accepted
+	// as a lower bound rather than closed, because closing it would mean
+	// treating every CREATE as having possibly succeeded, which reintroduces
+	// the "flaky server buries the real error" problem this variable exists
+	// to solve: a connect failure in the cleanup is only a real problem when a
+	// database might exist to drop. Without created, a Postgres that is down
+	// or unreachable at CREATE time makes the cleanup connect again, fail
+	// again, and t.Errorf a database that was never created - a second,
+	// misleading error on top of the real one that buries it under a flaky
+	// server.
 	var created bool
 	t.Cleanup(func() {
 		// Fail closed rather than widen: see dbNamePattern.
@@ -510,6 +619,19 @@ func TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys(t *testing
 		require.False(t, runAssertNoOverride(u),
 			"must accept ordinary connection-tuning query params")
 	})
+
+	// Mixed case must not slip past the map lookup. pgconn's own nameMap and
+	// notRuntimeParams are exact-case lowercase maps, so pgx does not honour
+	// `HOST` either - a mixed-case key currently escapes only because Postgres
+	// happens to reject an unrecognized startup parameter, not because this
+	// guard's own assertion closes the axis. See the case-fold comment on
+	// assertNoConnectionTargetOverride.
+	t.Run("mixed_case_key", func(t *testing.T) {
+		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?HOST=evil.example")
+		require.NoError(t, err)
+		require.True(t, runAssertNoOverride(u),
+			"must reject a dsn whose query string carries a mixed-case connection-target key")
+	})
 }
 
 // TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs measures the shapes of
@@ -520,9 +642,9 @@ func TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys(t *testing
 // should reject any of these.
 func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
 	cases := []struct {
-		name                              string
-		dsn                               string
-		wantHost, wantPort, wantUser      string
+		name                         string
+		dsn                          string
+		wantHost, wantPort, wantUser string
 	}{
 		{
 			name: "ipv6_host", wantHost: "::1", wantPort: "5432", wantUser: "u",
@@ -531,7 +653,7 @@ func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
 		{
 			// Password is p@/pw, percent-encoded so url.Parse does not treat
 			// the @ or / as delimiters.
-			name: "percent_encoded_password_with_at_and_slash",
+			name:     "percent_encoded_password_with_at_and_slash",
 			wantHost: "example.invalid", wantPort: "5432", wantUser: "u",
 			dsn: "postgres://u:p%40%2Fpw@example.invalid:5432/wanted",
 		},
@@ -546,4 +668,47 @@ func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
 				"legitimate dsn must pass assertDSNTargetsDatabase")
 		})
 	}
+}
+
+// TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone is the regression test
+// for the 2026-08-27 review's finding A: wantPort got a "5432" default when
+// the DSN carries no port, but wantUser got no analogous treatment, so a
+// portless-userinfo DSN like postgres://localhost:5432/postgres - a normal
+// peer/trust-auth local-dev shape - made newSharedServiceDSN compare pgconn's
+// real default user (from os/user.Current(), see pgconn/defaults_windows.go
+// and pgconn/defaults.go) against wantUser's zero value and reject the DSN
+// with a message blaming a query parameter that was never there.
+//
+// wantDefaultUser must derive the same default pgx.ParseConfig itself would
+// apply, not hand-roll a second, independent OS-username lookup that could
+// drift from pgconn's.
+func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
+	t.Run("no_userinfo", func(t *testing.T) {
+		u, err := url.Parse("postgres://localhost:5432/wanted")
+		require.NoError(t, err)
+
+		osUser, err := user.Current()
+		require.NoError(t, err)
+		wantOSUsername := osUser.Username
+		if idx := strings.LastIndex(wantOSUsername, `\`); idx >= 0 {
+			// Windows gives DOMAIN\user or LOCALPCNAME\user; pgconn strips the
+			// domain (see defaults_windows.go) and this test must match that,
+			// not assert the raw os/user value.
+			wantOSUsername = wantOSUsername[idx+1:]
+		}
+
+		got := wantDefaultUser(t, u)
+		require.Equal(t, wantOSUsername, got,
+			"a DSN with no userinfo must derive the same default user pgconn itself applies")
+		require.NotEmpty(t, got,
+			"an empty wantUser is what let assertDSNTargetsDatabase compare pgconn's real "+
+				"default user against a blank and reject a legitimate DSN")
+	})
+
+	t.Run("explicit_userinfo_wins", func(t *testing.T) {
+		u, err := url.Parse("postgres://explicit-user@localhost:5432/wanted")
+		require.NoError(t, err)
+		require.Equal(t, "explicit-user", wantDefaultUser(t, u),
+			"a DSN that names a user explicitly must not be overridden by the OS default")
+	})
 }

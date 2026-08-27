@@ -64,13 +64,24 @@ test:
 # The timeout is deliberately generous: every integration test spins up its own
 # real Postgres container, so internal/api alone runs ~320-340s.
 #
-# -count=1 disables Go's test result cache, for the same reason
-# test-cli-integration below carries it: this target now includes
-# ./internal/cli/..., whose two modes can differ only in an env var the Go
-# test cache does not key on, so without -count=1 an edit to CI's Postgres
-# service config could report "ok (cached)" without ever having run.
+# Deliberately NOT -count=1: Go's test cache DOES key on env vars a test
+# actually reads via os.Getenv during that run (newIntegrationDSN reads
+# RELAY_TEST_DATABASE_URL), so a real mode change here is not a
+# cache-invalidation gap. Measured directly: with a shared GOCACHE, changing
+# RELAY_TEST_DATABASE_URL between two runs of TestIntegration_HarnessDSNIsMigratedAndEmpty
+# reliably busts the cache, and the unchanged-env rerun in between reports
+# "(cached)" as expected. A prior version of this comment claimed the cache
+# does not key on env vars at all; that was wrong (see test-cli-integration's
+# own comment below for what the cache key actually covers - it does not
+# include whether a live TCP connection succeeded, which is a different
+# claim). This target is also not what CI runs for ./internal/cli/... -
+# .github/workflows/go-ci.yml never calls test-integration - so the
+# CI-Postgres-config scenario the old comment invoked cannot apply here
+# either. Adding -count=1 back would only cost real time: repeated local runs
+# would stop hitting the cache for every untouched package under ./... at the
+# integration tag.
 test-integration:
-	go test -tags integration -p 1 -count=1 ./... -timeout 900s
+	go test -tags integration -p 1 ./... -timeout 900s
 
 # Run the CLI real-server integration lane. Every test in it drives a live
 # internal/api server over HTTP against a real Postgres, so a response-shape
