@@ -107,16 +107,25 @@ func TestIntegration_GetJobJSON_CarriesTheTasksCommands(t *testing.T) {
 //
 // The named-key assertions below (TestIntegration_ListJobsJSON_..., etc.) do
 // NOT cover the rest of internal/api's jobResponse and taskResponse - a
-// mutation battery run against this file found 9 surviving json-tag renames
+// mutation battery run against this file found 8 surviving json-tag renames
 // (Env, Requires, TimeoutSeconds, Retries, DependsOn, WorkerID on
-// taskResponse; SubmittedBy, CreatedAt, UpdatedAt on jobResponse) that no
-// assertion here touches. `created_at` -> `createdAt` alone left the whole
-// package green while `relay list` rendered "0001-01-01 00:00" for every job
-// on the farm. TestIntegration_GetJobJSON_MirrorsServerBodyExactly and
+// taskResponse; SubmittedBy, UpdatedAt on jobResponse) that no assertion
+// here touches. jobResponse.CreatedAt is NOT among them: a one-sided
+// `created_at` -> `createdAt` rename (server or client alone) produces a key
+// mismatch require.JSONEq catches on its own, and
+// TestIntegration_ListJobs_CreatedColumnIsRendered below independently pins
+// the human-readable render, which decodes j.CreatedAt directly rather than
+// round-tripping through JSON at all - that test's own comment documents the
+// "0001-01-01 00:00" incident this paragraph used to (incorrectly) attribute
+// to no assertion anywhere. What JSONEq does NOT catch is a TWO-SIDED
+// rename, where server and client tags drift to the same new name together;
+// that failure mode is caught by neither the named-key assertions nor the
+// JSONEq tests, for any field including CreatedAt.
+// TestIntegration_GetJobJSON_MirrorsServerBodyExactly and
 // TestIntegration_ListJobsJSON_MirrorsServerItemsExactly below are the total
-// guard that actually closes that gap - keep the named-key assertions for
-// their failure messages, but treat the JSONEq tests as the ones that fail
-// closed on the next field added to either struct.
+// guard that actually closes the one-sided-rename gap - keep the named-key
+// assertions for their failure messages, but treat the JSONEq tests as the
+// ones that fail closed on the next field added to either struct.
 
 // enrichedJobSpec is the subject of the arity tests. It differs from
 // laneJobSpec in exactly the ways the assertions need:
@@ -386,16 +395,23 @@ func rawGET(t *testing.T, s *relayServer, path string) []byte {
 // this same test before that was fixed. This is the only guard that fails
 // CLOSED on the nested `tasks` array and on whichever of taskResponse's 11
 // tags (id, name, status, commands, env, requires, timeout_seconds, retries,
-// retry_count, depends_on, worker_id) no named assertion elsewhere in this
-// file already covers - it is NOT the sole guard for every one of them: name
-// and retry_count are pinned by TestIntegration_GetJobJSON_CarriesLabelsAndTaskRetryCount
-// and commands by TestIntegration_GetJobJSON_CarriesTheTasksCommands. This
-// file's header comment records the measured surviving set for the rest (six
-// taskResponse tags, as of the 2026-08-27 mutation battery). jobResponse.Tasks
-// is itself omitempty and absent from every list row, so
-// TestIntegration_ListJobsJSON_MirrorsServerItemsExactly cannot see any of
-// taskResponse's tags at all - see that test's comment for the fields it
-// guards.
+// retry_count, depends_on, worker_id) no named assertion elsewhere in the
+// PACKAGE already covers - not just this file. name and retry_count are
+// pinned by TestIntegration_GetJobJSON_CarriesLabelsAndTaskRetryCount and
+// commands by TestIntegration_GetJobJSON_CarriesTheTasksCommands, both in
+// this file; id and status are pinned outside it, by
+// internal/cli/logs_integration_test.go - doLogs consumes job.Tasks[].ID and
+// .Status (runLaneLogs), so a rename to either empties every per-task log
+// fetch (id) or makes taskIsTerminal("") false and breaks the
+// require.Empty(errOut) assertion (status). This file's header comment
+// records the measured surviving set for the remaining six taskResponse tags
+// (Env, Requires, TimeoutSeconds, Retries, DependsOn, WorkerID), as of the
+// 2026-08-27 mutation battery - id and status are deliberately excluded from
+// that six because the package already covers them, even though this file
+// does not. jobResponse.Tasks is itself omitempty and absent from every list
+// row, so TestIntegration_ListJobsJSON_MirrorsServerItemsExactly cannot see
+// any of taskResponse's tags at all - see that test's comment for the fields
+// it guards.
 func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 	s := startRelayServer(t)
 	jobID, _ := seedEnrichedJob(t, s)
@@ -428,9 +444,12 @@ func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 // the detail test (TestIntegration_GetJobJSON_MirrorsServerBodyExactly) never
 // sees a non-zero value for any of the enrichment fields and a rename there
 // would pass its comparison (absent key vs absent key) undetected; and
-// jobResponse's SubmittedBy/CreatedAt/UpdatedAt tags carry no named
-// assertion on the list path at all - this file's header comment records
-// them among the measured surviving mutants before this test existed.
+// jobResponse's SubmittedBy/UpdatedAt tags carry no named assertion on the
+// list path at all - this file's header comment records them among the
+// measured surviving mutants before this test existed. CreatedAt is NOT one
+// of those two: TestIntegration_ListJobs_CreatedColumnIsRendered pins it
+// independently, on the same list path, by reading doListJobs' rendered
+// CREATED column rather than a --json key.
 // seedEnrichedJob gives the enrichment fields a real, non-default value so
 // this comparison is not vacuous even where a named assertion also covers
 // the same field.
@@ -469,11 +488,23 @@ var createdColumnPattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}`)
 // TestIntegration_ListJobs_CreatedColumnIsRendered pins the human-readable
 // render the JSONEq guards above do not cover: --json is one path through
 // jobResp, but doListJobs' default table render is another, and it reads
-// j.CreatedAt directly rather than round-tripping through JSON at all. The
-// created_at json-tag mutant that JSONEq (and every named-key assertion in
-// this file) misses entirely lands here - a mis-tagged CreatedAt decodes as
-// the zero value, and doListJobs prints it as literally "0001-01-01 00:00"
-// for every job on the farm.
+// j.CreatedAt directly rather than round-tripping through JSON at all.
+//
+// This is NOT the sole guard for a created_at json-tag mutant, and an
+// earlier version of this comment overclaimed that JSONEq (and every
+// named-key assertion in this file) "misses it entirely" - wrong in the
+// other direction from the header comment's old miscount above. A
+// ONE-SIDED rename (server's tag, or the client's, alone) always produces a
+// key mismatch require.JSONEq catches on the --json path, via a different
+// symptom than this test's. What JSONEq (and this test) genuinely cannot
+// catch is a TWO-SIDED rename - server and client tags drifting to the same
+// new name together - which is caught by neither, because a consistent
+// rename on both sides round-trips correctly and is not actually broken.
+// What this test adds on top of JSONEq is coverage of the table-render code
+// path itself, which the JSONEq tests never exercise (they only call
+// doListJobs with --json): a mis-tagged CreatedAt on the CLIENT side alone
+// decodes as the zero value, and doListJobs prints it as literally
+// "0001-01-01 00:00" for every job on the farm.
 //
 // The assertion parses the matched substring and checks it is close to
 // time.Now(), rather than only pattern-matching plus a substring deny-list on
@@ -517,10 +548,13 @@ func TestIntegration_ListJobs_CreatedColumnIsRendered(t *testing.T) {
 	// DST note: ParseInLocation on a zone-less wall-clock string that falls
 	// inside a fall-back-transition's repeated hour has an unspecified offset
 	// choice - once a year, for that one hour, `got` can land up to 1h away
-	// from the instant time.Now() actually reports, which would blow a
-	// 5-minute budget for a reason that has nothing to do with the defect
-	// this test guards. WithinDuration below is widened to 1h5m to absorb
-	// that window rather than comparing against a truncated time.Now(),
+	// from the instant time.Now() actually reports, in every zone this lane
+	// will realistically run in (not universally - Antarctica/Troll's single
+	// annual transition shifts a full 2h - but this repo runs nowhere near
+	// that zone), which would blow a 5-minute budget for a reason that has
+	// nothing to do with the defect this test guards. WithinDuration below is
+	// widened to 1h5m to absorb that window rather than comparing against a
+	// truncated time.Now(),
 	// since truncation only removes the (already-covered) sub-minute slack
 	// from "15:04" dropping seconds and does nothing for the DST case. The
 	// 5-minute portion of that budget is otherwise tight: "15:04" drops

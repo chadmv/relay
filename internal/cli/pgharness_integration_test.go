@@ -124,14 +124,26 @@ func newContainerDSN(t *testing.T) string {
 	return dsn
 }
 
-// dsnAssertT is the minimal surface assertDSNTargetsDatabase needs. It is an
-// interface, not *testing.T, only so its own regression test can substitute
-// a fake and observe pass/fail as a returned value - Go's testing package
-// marks a parent test permanently failed the moment any t.Run child inside
-// it fails, with no way to un-fail it afterward, which would make this
-// file's own "this must be rejected" case red forever instead of proving the
-// rejection happened. Every real call site passes a genuine *testing.T,
-// which satisfies this interface unchanged.
+// dsnAssertT is the minimal surface two different callers need, for two
+// different reasons, neither of which is "the minimal surface
+// assertDSNTargetsDatabase needs" alone:
+//
+//   - assertDSNTargetsDatabase and assertNoConnectionTargetOverride (this
+//     file) are typed against it, not *testing.T, so their own regression
+//     tests can substitute a fake and observe pass/fail as a returned value -
+//     Go's testing package marks a parent test permanently failed the moment
+//     any t.Run child inside it fails, with no way to un-fail it afterward,
+//     which would make this file's own "this must be rejected" case red
+//     forever instead of proving the rejection happened.
+//   - boundedCleanup (relayharness_integration_test.go, same package) is
+//     typed against it for a different reason: there is no way to prove a
+//     real *testing.T did NOT crash the process on a panic by making it
+//     crash the process, so its own regression test
+//     (TestBoundedCleanup_RecoversPanicAndAttributesToNamedTest) needs the
+//     same substitutable fake, not a smaller assertion surface.
+//
+// Every real call site, in both cases, passes a genuine *testing.T, which
+// satisfies this interface unchanged.
 type dsnAssertT interface {
 	require.TestingT
 	Helper()
@@ -238,15 +250,29 @@ var pgConnectionTargetQueryKeys = map[string]bool{
 func assertNoConnectionTargetOverride(t dsnAssertT, parsedURL *url.URL) {
 	t.Helper()
 	for k := range parsedURL.Query() {
-		// pgConnectionTargetQueryKeys is lowercase-only. pgconn's own nameMap
-		// and notRuntimeParams are exact-case lowercase maps too, so pgx does
-		// not honour a mixed-case key like `HOST` either - it falls through to
-		// RuntimeParams and the connection dies on an unrecognized startup
-		// parameter. That means a mixed-case key is harmless today, but only
-		// because of Postgres's happenstance rejection, not because this
-		// guard's own assertion closes the axis. Lower-case before the lookup
-		// so the guard is the thing doing the rejecting.
-		require.False(t, pgConnectionTargetQueryKeys[strings.ToLower(k)],
+		// pgConnectionTargetQueryKeys is lowercase-only, and pgconn's own
+		// nameMap/notRuntimeParams are exact-case lowercase maps too - pgx
+		// does not honour a mixed-case key like `HOST` either, so it falls
+		// through to RuntimeParams and the connection dies on an unrecognized
+		// startup parameter. That means case is harmless to pgx today, but
+		// only because of Postgres's happenstance rejection, not because this
+		// guard's own assertion closes the axis - normalize case here so the
+		// guard is the thing doing the rejecting.
+		//
+		// TrimSpace closes a second, narrower gap: `?host+=x` decodes (net/
+		// url treats a literal `+` in the query STRING as an encoded space,
+		// RFC 1866) to the key "host " with a trailing space, which ToLower
+		// alone leaves unmatched against the map's "host". This closes case
+		// and whitespace padding; it does not attempt every OTHER
+		// non-canonical spelling pgconn might tolerate (a stray query-string
+		// separator variant, for instance) - those remain pgx-inert by
+		// construction, per pgConnectionTargetQueryKeys's own doc comment: a
+		// spelling this guard's exact-match lookup misses is, by the same
+		// exact-match logic, also a spelling pgconn's nameMap/notRuntimeParams
+		// miss, so it falls through to RuntimeParams and Postgres rejects it
+		// as an unrecognized startup parameter rather than silently applying
+		// it.
+		require.False(t, pgConnectionTargetQueryKeys[strings.ToLower(strings.TrimSpace(k))],
 			"%s must not carry a %q query parameter - it can override which "+
 				"server, database, or user this harness's CREATE/DROP DATABASE "+
 				"and migrations target", dsnEnvVar, k)
@@ -285,14 +311,19 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 	require.Equal(t, wantDB, cfg.Database,
 		"dsn would connect to database %q, not %q - a query parameter "+
 			"(dbname/database) is overriding the intended path", cfg.Database, wantDB)
-	// host/port/user mismatches are reported cause-agnostically: pgconn merges
-	// a query parameter, a service file (service/servicefile), and PG*
-	// environment variables (PGHOST/PGPORT/PGUSER) into these same three
-	// settings (see pgConnectionTargetQueryKeys's doc comment above), so
-	// naming "a query parameter" as though it were the only possible cause is
-	// itself wrong whenever one of the other two is what actually moved the
-	// value - and an operator who greps the DSN for a query string that was
-	// never there wastes real time on it.
+	// host/port mismatches are reported cause-agnostically: pgconn merges a
+	// query parameter, a service file (service/servicefile), and PG*
+	// environment variables (PGHOST/PGPORT) into these same two settings (see
+	// pgConnectionTargetQueryKeys's doc comment above), so naming "a query
+	// parameter" as though it were the only possible cause is itself wrong
+	// whenever one of the other two is what actually moved the value - and an
+	// operator who greps the DSN for a query string that was never there
+	// wastes real time on it. wantHost/wantPort themselves come straight from
+	// parsedBase.Hostname()/Port() (see newSharedServiceDSN below), never
+	// through pgx.ParseConfig, so unlike wantUser below they carry none of
+	// PGHOST/PGPORT/a service file's host or port - a real one of either can
+	// therefore genuinely move cfg.Host/cfg.Port away from these wantHost/
+	// wantPort values.
 	require.Equal(t, wantHost, cfg.Host,
 		"dsn would connect to host %q, not %q - a query parameter, a service "+
 			"file, or a PG* environment variable is overriding the intended "+
@@ -302,10 +333,16 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 		"dsn would connect to port %q, not %q - a query parameter, a service "+
 			"file, or a PG* environment variable is overriding the intended "+
 			"port", gotPort, wantPort)
+	// wantUser, unlike wantHost/wantPort, is derived via wantDefaultUser -
+	// either the DSN's own userinfo, or (for a userinfo-less DSN) the same
+	// pgx.ParseConfig call this function makes, on a QUERY-STRIPPED copy (see
+	// wantDefaultUser's doc comment). A service file's user and PGUSER apply
+	// identically to that derivation and to cfg.User's own parse below, since
+	// neither side strips those - so neither can ever be the true cause of a
+	// mismatch here, and the message says so, unlike host/port's above.
 	require.Equal(t, wantUser, cfg.User,
-		"dsn would connect as user %q, not %q - a query parameter, a service "+
-			"file, or a PG* environment variable is overriding the intended "+
-			"user", cfg.User, wantUser)
+		"dsn would connect as user %q, not %q - a query parameter is "+
+			"overriding the intended user", cfg.User, wantUser)
 }
 
 // wantDefaultUser returns the user a connection to parsedBase will actually
@@ -323,12 +360,32 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 // parsedBase must have already passed assertNoConnectionTargetOverride, so
 // its query string carries no key that could redirect host/port/user - this
 // parse is safe to lean on for the default this DSN itself left unstated.
+//
+// The parse is done on a QUERY-STRIPPED copy, deliberately, even though a
+// real call site's query has already passed assertNoConnectionTargetOverride
+// by the time it gets here. If it parsed parsedBase.String() unstripped, this
+// function would derive its default via the exact same pgx.ParseConfig call
+// that assertDSNTargetsDatabase's user arm later re-parses to get cfg.User -
+// so for a userinfo-less DSN, a `?user=` in the query would move BOTH sides
+// of that require.Equal identically and the arm could never fail (2026-08-27
+// review, finding M1). Stripping the query here means only pgconn's genuine
+// environment/service default survives into wantUser, restoring the arm as
+// an independent check rather than a tautology - see
+// TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN.
+//
+// PG* environment variables (PGUSER) and a service file's user are NOT
+// stripped out here, unlike the query - both still apply, identically, to
+// this parse and to the real dsn's later parse in assertDSNTargetsDatabase,
+// so they can never be the cause of a mismatch on the user arm and
+// assertDSNTargetsDatabase's user message says so.
 func wantDefaultUser(t dsnAssertT, parsedBase *url.URL) string {
 	t.Helper()
 	if u := parsedBase.User.Username(); u != "" {
 		return u
 	}
-	cfg, err := pgx.ParseConfig(parsedBase.String())
+	stripped := *parsedBase
+	stripped.RawQuery = ""
+	cfg, err := pgx.ParseConfig(stripped.String())
 	require.NoError(t, err, "parse dsn as a pgx config")
 	return cfg.User
 }
@@ -387,8 +444,10 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	// (Goexit, so nothing after it runs) previously leaked a relaytest_
 	// database on the shared server permanently.
 	// created is a LOWER BOUND on whether the CREATE below actually
-	// succeeded, not a certainty: execErr == nil only proves the response was
-	// received, and CREATE DATABASE can commit server-side while its response
+	// succeeded, not a certainty: execErr == nil proves the server REPORTED
+	// success, not merely that a response arrived, and that is not the gap -
+	// the gap is the converse, execErr != nil does not prove the CREATE did
+	// not commit: CREATE DATABASE can commit server-side while its response
 	// is lost (a deadline firing, or the connection resetting, in the window
 	// after the server commits but before the client reads the reply). In
 	// that window created is false even though the database now exists, which
@@ -632,6 +691,20 @@ func TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys(t *testing
 		require.True(t, runAssertNoOverride(u),
 			"must reject a dsn whose query string carries a mixed-case connection-target key")
 	})
+
+	// Regression test for the 2026-08-27 review's finding L5: `?host+=evil`
+	// decodes (net/url treats `+` in a query STRING, not a query VALUE, as an
+	// encoded space - RFC 1866 application/x-www-form-urlencoded) to the key
+	// "host " (trailing space), which strings.ToLower alone leaves as "host "
+	// - a miss on the map lookup that let this padded spelling through
+	// unrejected.
+	t.Run("padded_key", func(t *testing.T) {
+		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?host+=evil.example")
+		require.NoError(t, err)
+		require.True(t, runAssertNoOverride(u),
+			"must reject a dsn whose query string carries a connection-target key "+
+				"padded with whitespace")
+	})
 }
 
 // TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs measures the shapes of
@@ -684,6 +757,20 @@ func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
 // drift from pgconn's.
 func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
 	t.Run("no_userinfo", func(t *testing.T) {
+		// Pin the environment this test's own expectation (the OS user) must
+		// win against. Without this, an entirely ordinary PGUSER/PGSERVICE/
+		// PGSERVICEFILE in a developer's or CI's shell (anyone who uses psql
+		// sets PGUSER routinely) makes pgx.ParseConfig return THAT value
+		// instead of the OS default, and this test goes red for a reason that
+		// has nothing to do with wantDefaultUser - a false failure the
+		// 2026-08-27 review's finding M2 caught by exporting PGUSER=attacker
+		// and watching this red. parseEnvSettings skips empty values, so
+		// setting these to "" (not unsetting them) reliably restores the OS
+		// default regardless of what the ambient shell carries.
+		t.Setenv("PGUSER", "")
+		t.Setenv("PGSERVICE", "")
+		t.Setenv("PGSERVICEFILE", "")
+
 		u, err := url.Parse("postgres://localhost:5432/wanted")
 		require.NoError(t, err)
 
@@ -711,4 +798,34 @@ func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
 		require.Equal(t, "explicit-user", wantDefaultUser(t, u),
 			"a DSN that names a user explicitly must not be overridden by the OS default")
 	})
+}
+
+// TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN is
+// the regression test for the 2026-08-27 review's finding M1: wantDefaultUser
+// used to derive its default by calling pgx.ParseConfig on the FULL dsn,
+// query string included - the exact same parse assertDSNTargetsDatabase's
+// user arm then compares cfg.User against. For a userinfo-less DSN carrying
+// `?user=`, both sides of that require.Equal came from the same parse of the
+// same string, so the arm could never fail: wantUser moved with the query
+// exactly as far as cfg.User did.
+//
+// This drives wantDefaultUser directly against a DSN
+// TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys already
+// proves assertNoConnectionTargetOverride rejects, so that this test proves
+// the user arm's OWN discrimination, not its upstream guard's - the arm is
+// documented as defence in depth "independent of how the guard is (or isn't)
+// wired in", and this is what makes that claim true again.
+func TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN(t *testing.T) {
+	const dsn = "postgres://example.invalid:5432/wanted?user=root"
+	u, err := url.Parse(dsn)
+	require.NoError(t, err)
+
+	wantUser := wantDefaultUser(t, u)
+	require.NotEqual(t, "root", wantUser,
+		"wantDefaultUser must not itself adopt the query override it exists to let "+
+			"assertDSNTargetsDatabase detect")
+
+	require.True(t, runAssertDSN(dsn, "wanted", "example.invalid", "5432", wantUser),
+		"assertDSNTargetsDatabase's user arm must reject a dsn whose query overrides "+
+			"the user, independent of assertNoConnectionTargetOverride")
 }

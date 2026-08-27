@@ -80,6 +80,16 @@ test:
 # either. Adding -count=1 back would only cost real time: repeated local runs
 # would stop hitting the cache for every untouched package under ./... at the
 # integration tag.
+#
+# Residual axis, not addressed by the reasoning above: test-cli-integration's
+# own justification for -count=1 ("the cache key says nothing about whether a
+# live TCP connection succeeded") applies verbatim to THIS target too when run
+# in shared-service mode (RELAY_TEST_DATABASE_URL set) - newIntegrationDSN
+# reads that env var, so a value CHANGE busts the cache as this comment
+# measured, but a change to the SHARED SERVER ITSELF (its Postgres version,
+# its health check, its container config) with RELAY_TEST_DATABASE_URL left
+# unchanged would not. Left as is: this target's normal (unset) mode is a
+# fresh testcontainer per test, which has no equivalent gap.
 test-integration:
 	go test -tags integration -p 1 ./... -timeout 900s
 
