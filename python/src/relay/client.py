@@ -203,10 +203,16 @@ class Client:
         This guard is NOT duplicated in _get_page, where ``limit`` is the page
         size and travels to the server, which answers 400 for anything outside
         1..200. Validate locally only where the server never sees the value.
+
+        BELOW ``_require_token()``, not above it. A client with no token cannot
+        make the request whatever the limit says, and every other method on it
+        reports :class:`AuthError` with a ``relay login`` hint; a limit guard in
+        front would make these six the only ones that answer a different
+        question first.
         """
+        self._require_token()
         if limit is not None and limit < 1:
             raise ValidationError(f"limit must be >= 1, got {limit}")
-        self._require_token()
         p: dict[str, str] = dict(params or {})
         if sort is not None:
             p["sort"] = sort
@@ -382,6 +388,14 @@ class Client:
         # N" - limit=-1 on a 5-row log returned 4 records, dropping the newest
         # line rather than capping anything. limit=0 spent a request to
         # return [].
+        #
+        # The token check is first and is repeated here on purpose. Every other
+        # method answers "no token" before anything else, and task_logs_page
+        # would too - but only on the first request, which the limit guard
+        # returns before. Asking here keeps the precedence the same on both
+        # walks; the second, redundant check inside task_logs_page costs
+        # nothing.
+        self._require_token()
         if limit is not None and limit < 1:
             raise ValidationError(f"limit must be >= 1, got {limit}")
         out: list[LogRecord] = []

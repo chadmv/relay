@@ -522,23 +522,36 @@ def test_task_logs_raises_on_empty_page_that_is_not_drained() -> None:
     a quiet return would launder that into a completeness claim the client
     cannot support.
 
-    The DISCRIMINATING page is request 1, with a normal page after it. A bad
-    input placed LAST cannot detect an early-exit mutation; and the normal page
-    2 is what makes the mutant TERMINATE (returning []) rather than spin, so
-    deleting the stop is RED and not a hang.
+    The DISCRIMINATING page is request 2 of 3, never the last. A bad input
+    placed LAST cannot detect an early-exit mutation; the normal drained page
+    3 after it is what makes a mutant that deletes the stop TERMINATE
+    (returning rows 1, 2, 6) rather than spin, so deleting the stop is RED and
+    not a hang, and `len(calls) == 2` is what distinguishes the stop firing
+    here from the walk simply running to the end.
+
+    Page 1 is a real page rather than the empty one this test used to open
+    with, because `.records` is the other half of the contract and `[]` cannot
+    tell a preserved envelope from a dropped one: deleting `records=out` at
+    this raise site left all 132 tests green. Rows 1 and 2 are collected before
+    the stop and must survive it.
     """
     calls: list[dict[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(dict(request.url.params))
         if len(calls) == 1:
+            return httpx.Response(
+                200, json=_log_page([_log_row(1), _log_row(2)], next_seq=2, total=3)
+            )
+        if len(calls) == 2:
             return httpx.Response(200, json=_log_page([], next_seq=5, total=3))
         return httpx.Response(200, json=_log_page([_log_row(6)], next_seq=0, total=3))
 
     client = _make_client(handler)
-    with pytest.raises(ProtocolError, match="empty page"):
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
         client.task_logs("abc")
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert [r.seq for r in excinfo.value.records] == [1, 2]
 
 
 def test_task_logs_raises_when_cursor_does_not_advance() -> None:
@@ -553,6 +566,13 @@ def test_task_logs_raises_when_cursor_does_not_advance() -> None:
     mutant would spin to the page cap and raise ProtocolError from stop 3, and
     a bare pytest.raises(ProtocolError) would pass against the mutant. The
     match= is the other half of that same guard.
+
+    `.records` is pinned here too - deleting `records=out` at this raise site
+    left all 132 tests green. The expected value is [7, 7], the SAME ROW TWICE,
+    and that is not a fixture accident: `out.extend(page.items)` runs before the
+    cursor check, so the page whose cursor did not advance has already been
+    appended. This is the one stop where a duplicated tail in `.records` is
+    guaranteed rather than merely possible, which is why the docstrings say so.
     """
     calls: list[dict[str, str]] = []
 
@@ -564,9 +584,10 @@ def test_task_logs_raises_when_cursor_does_not_advance() -> None:
         return httpx.Response(200, json=_log_page([_log_row(8)], next_seq=0, total=9))
 
     client = _make_client(handler)
-    with pytest.raises(ProtocolError, match="did not advance"):
+    with pytest.raises(ProtocolError, match="did not advance") as excinfo:
         client.task_logs("abc")
     assert len(calls) == 2
+    assert [r.seq for r in excinfo.value.records] == [7, 7]
 
 
 def test_task_logs_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1127,3 +1148,33 @@ def test_fetch_all_rejects_a_non_positive_limit() -> None:
         with pytest.raises(ValidationError, match="limit"):
             client.list_jobs(limit=bad)
     assert calls == []
+
+
+def test_a_bad_limit_does_not_pre_empt_the_missing_token_error(tmp_path: Any) -> None:
+    """Precedence, on both walks. The limit guards were added ABOVE
+    `_require_token()`, so a token-less client calling `list_jobs(limit=0)`
+    reported a ValidationError about the limit while every other method on the
+    same client reported AuthError. `task_logs` had the same inversion relative
+    to `task_logs_page`, which checks the token itself.
+
+    Missing credentials are the condition the caller has to fix first and the
+    one the SDK already advertises with a `relay login` hint; a client that has
+    no token cannot make the request whatever the limit says. The two guards
+    disagreeing about which comes first is the defect, so the assertion is on
+    the CLASS, not on either guard firing.
+    """
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json=_page_response([]))
+
+    client = _make_client(handler, token=None, config_path=tmp_path / "x")
+
+    for bad in (0, -1):
+        with pytest.raises(AuthError, match="relay login"):
+            client.list_jobs(limit=bad)
+        with pytest.raises(AuthError, match="relay login"):
+            client.task_logs("abc", limit=bad)
+    assert called is False
