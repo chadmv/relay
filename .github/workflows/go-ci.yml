@@ -34,3 +34,59 @@ jobs:
         # fixed (docs/backlog/closed/bug-2026-06-20-agent-proctree-windows-race.md,
         # closed 2026-06-20) and the comment was not. Corrected 2026-08-25.
         run: go test -race ./... -timeout 180s
+
+  cli-integration:
+    name: cli integration (real server)
+    runs-on: ubuntu-latest
+    # DELIBERATELY NOT 15. The `test` job above uses timeout-minutes: 15 and
+    # `make test-integration` uses -timeout 900s - the same number - so today a
+    # Go panic and a GitHub job kill are indistinguishable in the log. 10
+    # minutes here against the target's -timeout 480s means the two failures
+    # name themselves.
+    timeout-minutes: 10
+    services:
+      # Same image, user, password and port as web-ci.yml's service and as the
+      # relay-postgres container scripts/dev.ps1 manages locally, so
+      # postgres://relay:relay@127.0.0.1:5432 is one string in all three.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Setting this selects the harness's shared-service mode: one freshly
+      # CREATEd database per test on the service above. No Docker API, no image
+      # pull, no Ryuk reaper. The path names `postgres` because
+      # newIntegrationDSN connects there only to issue CREATE/DROP DATABASE; no
+      # test ever uses that database.
+      #
+      # 127.0.0.1, never localhost: localhost can resolve to ::1 first and a
+      # published Docker port may not answer there. web/e2e/ensure-db.mjs
+      # carries the same note.
+      RELAY_TEST_DATABASE_URL: postgres://relay:relay@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      # A SEPARATE JOB, not a step in `test`. A step would inherit required-check
+      # status for free, which is a real advantage, but it would also attach this
+      # Postgres service to the race job (making every race run wait on a health
+      # check) and put both lanes on one 15-minute clock, which makes worse
+      # exactly the ambiguity the timeout above is fixing.
+      #
+      # ACTION REQUIRED AFTER MERGE: a new job does NOT automatically become a
+      # required status check. Until a human adds "cli integration (real
+      # server)" to the required status checks for main, this job runs on every
+      # PR and can show red without blocking a merge.
+      - name: CLI integration lane (real relay-server, real Postgres)
+        run: make test-cli-integration

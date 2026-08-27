@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
+.PHONY: build test test-integration test-cli-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
 
 # `go build -o` writes exactly the name it is given, and Windows shells will not
 # execute an extensionless file. web/playwright.config.ts picks the same two names
@@ -65,6 +65,26 @@ test:
 # real Postgres container, so internal/api alone runs ~320-340s.
 test-integration:
 	go test -tags integration -p 1 ./... -timeout 900s
+
+# Run the CLI real-server integration lane. Every test in it drives a live
+# internal/api server over HTTP against a real Postgres, so a response-shape
+# drift in a handler reddens here instead of staying invisible to
+# internal/cli's httptest fixtures.
+#
+# Two modes, selected by RELAY_TEST_DATABASE_URL:
+#   unset - one Postgres testcontainer per test (needs Docker), like every
+#           other integration package in this repo.
+#   set   - one freshly CREATEd database per test on the supplied server, e.g.
+#           postgres://relay:relay@127.0.0.1:5432/postgres?sslmode=disable (the
+#           relay-postgres container scripts/dev.ps1 already manages). This is
+#           what .github/workflows/go-ci.yml's cli-integration job uses, and the
+#           command there is this same target so the two cannot drift.
+#
+# -p 1 is NOT needed: the pattern names one package. The 480s Go timeout is
+# deliberately distinct from the 10-minute job timeout in CI so a Go panic and a
+# GitHub job kill name themselves instead of looking identical.
+test-cli-integration:
+	go test -tags integration ./internal/cli/... -timeout 480s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`
