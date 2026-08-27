@@ -116,3 +116,39 @@ runs is not the missing signal alone; it is the elaborate and fragile substitute
   assertion could run in the default lane. That trades "what the database actually has" for "what the
   repo says it should have", which is the weaker claim but the one that catches the drift this guard
   exists to catch.
+
+## 2026-08-27: the first CI lane exists, and a sixth instance - `internal/api`'s default lane is structurally blind
+
+Two updates from the CLI real-server integration lane slice
+([[idea-2026-08-23-cli-tests-never-hit-real-server]], now closed).
+
+**A mechanism now exists, and it is not the one this item priced.** The item's remedy menu offered
+"stand up a Docker-capable CI lane for the integration suite (cost: p4d image pulls, ~10min)".
+`.github/workflows/go-ci.yml` now has a `cli-integration` job that runs `internal/cli`'s
+integration-tagged tests **without Docker-in-CI at all** - a `services: postgres` block plus a
+harness that takes an externally-supplied DSN (`RELAY_TEST_DATABASE_URL`) and creates one database
+per test, falling back to a testcontainer when the variable is unset. Measured: **54s in CI**,
+against the 15-20 minutes a whole-suite testcontainers lane was priced at.
+
+That is the generalisable half. Any package whose integration tests need only Postgres could join
+the same job by pointing at the same harness; `newIntegrationDSN` was deliberately written to import
+nothing from `internal/cli` or `internal/api` so the extraction is a file move rather than a
+redesign. The packages that need **p4d** (`internal/agent/source/perforce`) or a real gRPC agent
+still are not covered by this, and that distinction is what the original pricing conflated.
+
+**A sixth instance, and the sharpest form yet: `internal/api`'s default lane cannot observe its own
+handlers.** During the slice's mutation battery, every mutation of an `internal/api` handler left
+`API-DEFAULT` green. That is not resilience - `internal/api/api_test.go`, which holds
+`TestListWorkers` and effectively every test that drives a live server, is itself
+`//go:build integration`. `go test ./internal/api/... -run TestListWorkers -v` reports
+`testing: warning: no tests to run`. The handful of genuinely untagged files (`cors_test.go`,
+`pagination_test.go`, `ratelimit_test.go`) are unit tests that never reach a handler.
+
+So for `internal/api` the gap is not "some security guards are integration-only" - it is that the
+**entire handler surface** is, and a reader looking at a green `go test ./...` has no signal about
+it whatsoever. This is worse than the `internal/worker` instance recorded above (fixed 2026-08-25 by
+the `txBeginner` seam), because there is no single seam to narrow: the tests need a real database,
+not a mockable dependency. The `services: postgres` mechanism above is the plausible route.
+
+Add to Related: `.github/workflows/go-ci.yml` (`cli-integration`),
+`internal/cli/pgharness_integration_test.go` (`newIntegrationDSN`).
