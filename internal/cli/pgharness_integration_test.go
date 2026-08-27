@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,49 +136,147 @@ type dsnAssertT interface {
 	Helper()
 }
 
+// pgConnectionTargetQueryKeys is the closed set of pgconn URL query keys that
+// participate in choosing WHERE a connection lands and AS WHOM, enumerated
+// from the pinned github.com/jackc/pgx/v5@v5.9.1 source
+// (pgconn/config.go). Two things in that file establish this exact set:
+//
+//   - parseURLSettings ends with an unconditional
+//     `for k, v := range parsedURL.Query() { settings[k] = v[0] }` (only after
+//     name-mapping "dbname" to "database"), so ANY of these keys in the query
+//     string overwrites what the URL's userinfo/authority/path already
+//     established, with no "path/authority wins" branch anywhere.
+//   - ParseConfigWithOptions's notRuntimeParams map (the set pgconn treats as
+//     connection settings rather than passthrough RuntimeParams) names host,
+//     port, database, user, password, passfile, service, servicefile
+//     alongside TLS/kerberos/protocol-tuning keys that do NOT affect which
+//     server/db/user is targeted (sslmode, connect_timeout, etc.) and are
+//     deliberately left out of this set.
+//
+// service/servicefile matter even though a service file's own dbname loses
+// to a non-empty path (mergeSettings puts connStringSettings, i.e. the query
+// string, last - see the doc comment on assertDSNTargetsDatabase below and
+// M2 in the 2026-08-27 review): a service block can still redirect host,
+// port, or user, none of which either call site below ever sets explicitly.
+// passfile matters because pgconn substitutes it for config.Password only
+// when the URL carries no password - defence in depth for a future call site
+// that omits one.
+var pgConnectionTargetQueryKeys = map[string]bool{
+	"host":        true,
+	"port":        true,
+	"user":        true,
+	"password":    true,
+	"dbname":      true,
+	"database":    true,
+	"service":     true,
+	"servicefile": true,
+	"passfile":    true,
+}
+
+// assertNoConnectionTargetOverride rejects a DSN whose query string carries
+// any key in pgConnectionTargetQueryKeys. It exists to be run once, on the
+// harness's own base DSN, BEFORE either the admin URL or the per-test URL is
+// built from it - closing the whole axis rather than the one member
+// (`dbname`) the original H1 finding demonstrated. Checking only cfg.Database
+// after the fact (assertDSNTargetsDatabase below) left `?host=`, `?port=`,
+// `?user=` and `?password=` free to redirect CREATE DATABASE, DROP DATABASE
+// ... WITH (FORCE), migrations and the admin-token seed to a different server
+// while that check still reported "postgres, as intended".
+func assertNoConnectionTargetOverride(t dsnAssertT, parsedURL *url.URL) {
+	t.Helper()
+	for k := range parsedURL.Query() {
+		require.False(t, pgConnectionTargetQueryKeys[k],
+			"%s must not carry a %q query parameter - it can override which "+
+				"server, database, or user this harness's CREATE/DROP DATABASE "+
+				"and migrations target", dsnEnvVar, k)
+	}
+}
+
 // assertDSNTargetsDatabase parses dsn and requires that it will actually
-// connect to wantDB.
+// connect to wantDB, as wantUser, at wantHost:wantPort.
 //
 // This exists because pgx's parseURLSettings sets settings["database"] from
 // the URL PATH and then unconditionally iterates the URL's query string and
 // OVERWRITES it - dbname is name-mapped onto database, and there is no "path
 // wins" branch. So building a DSN by only reassigning url.URL.Path (as both
 // call sites below do) is not enough to know, let alone guarantee, which
-// database it opens: a stray `?dbname=` (or `?database=` or `?service=`,
-// which resolve to the same setting) in the supplied RELAY_TEST_DATABASE_URL
-// silently wins over the path. Confirmed with a standalone pgx program:
+// database it opens: a stray `?dbname=` (or `?database=`) in the supplied
+// RELAY_TEST_DATABASE_URL silently wins over the path. Confirmed with a
+// standalone pgx program:
 // pgx.ParseConfig("postgres://u:p@h:5432/wanted?dbname=attacker").Database
-// == "attacker". Only pgx.ParseConfig, which is the same parser
-// pgx.Connect uses internally, tells the truth about what a DSN will do.
-func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB string) {
+// == "attacker". `?service=` is NOT an instance of this - a service file's
+// dbname is merged in BEFORE connStringSettings (mergeSettings(defaultSettings,
+// envSettings, serviceSettings, connStringSettings)), so it can never beat a
+// path-derived database; only an empty path would let it win, and neither
+// call site below ever builds one. Only pgx.ParseConfig, which is the same
+// parser pgx.Connect uses internally, tells the truth about what a DSN will
+// do.
+//
+// Host/port/user are checked here too, as defence in depth alongside
+// assertNoConnectionTargetOverride above: that guard closes the query-key
+// axis at the harness's one entry point, but this function is what a caller
+// actually relies on for the specific DSN it is about to use, and pins the
+// same properties independent of how the guard is (or isn't) wired in.
+func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wantUser string) {
 	t.Helper()
 	cfg, err := pgx.ParseConfig(dsn)
 	require.NoError(t, err, "parse dsn as a pgx config")
 	require.Equal(t, wantDB, cfg.Database,
 		"dsn would connect to database %q, not %q - a query parameter "+
-			"(dbname/database/service) is overriding the intended path", cfg.Database, wantDB)
+			"(dbname/database) is overriding the intended path", cfg.Database, wantDB)
+	require.Equal(t, wantHost, cfg.Host,
+		"dsn would connect to host %q, not %q - a query parameter is "+
+			"overriding the intended host", cfg.Host, wantHost)
+	gotPort := strconv.Itoa(int(cfg.Port))
+	require.Equal(t, wantPort, gotPort,
+		"dsn would connect to port %q, not %q - a query parameter is "+
+			"overriding the intended port", gotPort, wantPort)
+	require.Equal(t, wantUser, cfg.User,
+		"dsn would connect as user %q, not %q - a query parameter is "+
+			"overriding the intended user", cfg.User, wantUser)
 }
 
 func newSharedServiceDSN(t *testing.T, base string) string {
 	t.Helper()
-	parsedBase, err := url.Parse(base)
-	require.NoError(t, err, "%s must be a URL", dsnEnvVar)
+	parsedBase, parseErr := url.Parse(base)
+	// require.NoError would append parseErr.Error() to the failure output, and
+	// url.Error.Error() renders as `parse "<url>": <reason>` - the raw URL,
+	// password included, verbatim. Strip it down to the underlying reason
+	// before handing it to require: the *url.Error wrapper is the only thing
+	// carrying the raw string, so unwrapping it once is enough.
+	var urlErr *url.Error
+	if errors.As(parseErr, &urlErr) {
+		parseErr = urlErr.Err
+	}
+	require.NoError(t, parseErr, "%s must be a URL", dsnEnvVar)
 	require.Equal(t, "postgres", parsedBase.Scheme,
 		"%s must start with postgres:// (not postgresql://), got %s",
 		dsnEnvVar, parsedBase.Redacted())
 
+	// Reject any query key that could redirect where/who this harness's
+	// CREATE/DROP DATABASE and migrations target, before either URL below is
+	// built from it.
+	assertNoConnectionTargetOverride(t, parsedBase)
+
+	wantHost := parsedBase.Hostname()
+	wantPort := parsedBase.Port()
+	if wantPort == "" {
+		wantPort = "5432" // pgconn's default when the DSN carries no port.
+	}
+	wantUser := parsedBase.User.Username()
+
 	// Connect to /postgres to issue CREATE/DROP DATABASE - the same move
 	// web/e2e/ensure-db.mjs makes with adminUrl.pathname. Whatever database the
 	// supplied DSN names on its OWN PATH is never touched; a query parameter
-	// that overrides that path is caught below, before either connection is
+	// that overrides that path is caught above, before either connection is
 	// opened.
 	adminURL := *parsedBase
 	adminURL.Path = "/postgres"
 	adminDSN := adminURL.String()
-	assertDSNTargetsDatabase(t, adminDSN, "postgres")
+	assertDSNTargetsDatabase(t, adminDSN, "postgres", wantHost, wantPort, wantUser)
 
 	nameBytes := make([]byte, 8)
-	_, err = rand.Read(nameBytes)
+	_, err := rand.Read(nameBytes)
 	require.NoError(t, err)
 	dbName := testDBPrefix + hex.EncodeToString(nameBytes)
 	require.True(t, dbNamePattern.MatchString(dbName),
@@ -189,6 +289,15 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	// between CREATE and t.Cleanup: a successful CREATE followed by a FailNow
 	// (Goexit, so nothing after it runs) previously leaked a relaytest_
 	// database on the shared server permanently.
+	// created tracks whether the CREATE below actually succeeded. The DROP
+	// cleanup stays unconditional either way (that is the whole point of
+	// arming it before the CREATE - see the comment above), but a connect
+	// failure in the cleanup is only a real problem when a database might
+	// exist to drop. Without this, a Postgres that is down or unreachable at
+	// CREATE time makes the cleanup connect again, fail again, and t.Errorf
+	// a database that was never created - a second, misleading error on top
+	// of the real one that buries it under a flaky server.
+	var created bool
 	t.Cleanup(func() {
 		// Fail closed rather than widen: see dbNamePattern.
 		if !dbNamePattern.MatchString(dbName) {
@@ -199,7 +308,11 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 		defer tcancel()
 		conn, err := pgx.Connect(tctx, adminDSN)
 		if err != nil {
-			t.Errorf("connect to drop database %s: %v", dbName, err)
+			if created {
+				t.Errorf("connect to drop database %s: %v", dbName, err)
+			} else {
+				t.Logf("connect to drop database %s: %v (database was never created)", dbName, err)
+			}
 			return
 		}
 		defer conn.Close(tctx)
@@ -217,6 +330,7 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	adminConn, err := pgx.Connect(tctx, adminDSN)
 	require.NoError(t, err)
 	_, execErr := adminConn.Exec(tctx, `CREATE DATABASE "`+dbName+`"`)
+	created = execErr == nil
 	closeErr := adminConn.Close(tctx)
 	// execErr checked before closeErr: a genuine CREATE failure (out of disk,
 	// permission, name collision) must be reported as what it is, not
@@ -227,7 +341,7 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	testURL := *parsedBase
 	testURL.Path = "/" + dbName
 	dsn := testURL.String()
-	assertDSNTargetsDatabase(t, dsn, dbName)
+	assertDSNTargetsDatabase(t, dsn, dbName, wantHost, wantPort, wantUser)
 
 	// One migration run per database, exactly as newTestPool already pays per
 	// test. golang-migrate takes pg_advisory_lock keyed on the DATABASE NAME
@@ -285,7 +399,7 @@ type fakeDSNAssertFailNow struct{}
 // runAssertDSN runs assertDSNTargetsDatabase against a fake T and reports
 // whether it failed, without that failure propagating to the *testing.T
 // calling this helper.
-func runAssertDSN(dsn, wantDB string) (failed bool) {
+func runAssertDSN(dsn, wantDB, wantHost, wantPort, wantUser string) (failed bool) {
 	ft := &fakeDSNAssertT{}
 	defer func() {
 		if r := recover(); r != nil {
@@ -296,7 +410,25 @@ func runAssertDSN(dsn, wantDB string) (failed bool) {
 			panic(r)
 		}
 	}()
-	assertDSNTargetsDatabase(ft, dsn, wantDB)
+	assertDSNTargetsDatabase(ft, dsn, wantDB, wantHost, wantPort, wantUser)
+	return ft.failed
+}
+
+// runAssertNoOverride runs assertNoConnectionTargetOverride against a fake T
+// and reports whether it failed, using the same non-propagating pattern as
+// runAssertDSN above.
+func runAssertNoOverride(parsedURL *url.URL) (failed bool) {
+	ft := &fakeDSNAssertT{}
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(fakeDSNAssertFailNow); ok {
+				failed = true
+				return
+			}
+			panic(r)
+		}
+	}()
+	assertNoConnectionTargetOverride(ft, parsedURL)
 	return ft.failed
 }
 
@@ -305,13 +437,23 @@ func runAssertDSN(dsn, wantDB string) (failed bool) {
 // It needs no Docker and no reachable Postgres: pgx.ParseConfig only parses
 // the connection string, it never dials, so this runs in every mode of the
 // integration lane in milliseconds.
+//
+// It drives host=, port=, user= and database= in addition to the original
+// dbname= case - assertDSNTargetsDatabase checked only cfg.Database until the
+// 2026-08-27 review found that the exact same pgx override loop lets any of
+// these four win too (H1): a guard that closes one axis and leaves its
+// siblings open is worse than the finding it descends from, since it reports
+// success while a different server, port, or user is actually in play.
 func TestAssertDSNTargetsDatabase_CatchesQueryOverridingPath(t *testing.T) {
-	require.False(t, runAssertDSN("postgres://u:p@example.invalid:5432/wanted", "wanted"),
-		"must accept a dsn that actually targets the wanted database")
+	const goodDSN = "postgres://u:p@example.invalid:5432/wanted"
+	const wantDB, wantHost, wantPort, wantUser = "wanted", "example.invalid", "5432", "u"
+
+	require.False(t, runAssertDSN(goodDSN, wantDB, wantHost, wantPort, wantUser),
+		"must accept a dsn that actually targets the wanted database, host, port and user")
 
 	require.False(t, runAssertDSN(
 		"postgres://u:p@example.invalid:5432/wanted?sslmode=disable&connect_timeout=5&pool_max_conns=3",
-		"wanted"),
+		wantDB, wantHost, wantPort, wantUser),
 		"must accept ordinary connection-tuning query params alongside a correct path")
 
 	// Characterization: proves the pgx behaviour this whole guard exists for,
@@ -321,11 +463,87 @@ func TestAssertDSNTargetsDatabase_CatchesQueryOverridingPath(t *testing.T) {
 	cfg, err := pgx.ParseConfig("postgres://u:p@example.invalid:5432/wanted?dbname=attacker")
 	require.NoError(t, err)
 	require.Equal(t, "attacker", cfg.Database,
-		"pgx must let dbname win over the path - this is the defect F1 closes, "+
+		"pgx must let dbname win over the path - this is the defect the guard closes, "+
 			"not a property assertDSNTargetsDatabase should try to prevent")
 
-	require.True(t, runAssertDSN(
-		"postgres://u:p@example.invalid:5432/wanted?dbname=attacker", "wanted"),
-		"assertDSNTargetsDatabase must reject a dsn whose actual database "+
-			"differs from wanted, even though its path names the right one")
+	cases := []struct {
+		name string
+		dsn  string
+	}{
+		{"dbname", goodDSN + "?dbname=attacker"},
+		{"database", goodDSN + "?database=attacker"},
+		{"host", goodDSN + "?host=evil.invalid"},
+		{"port", goodDSN + "?port=6666"},
+		{"user", goodDSN + "?user=root"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.True(t, runAssertDSN(c.dsn, wantDB, wantHost, wantPort, wantUser),
+				"assertDSNTargetsDatabase must reject a dsn whose actual %s "+
+					"differs from wanted, even though its path/authority names "+
+					"the right one", c.name)
+		})
+	}
+}
+
+// TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys drives
+// every member of pgConnectionTargetQueryKeys - not just the one spelling
+// (dbname) the original finding demonstrated - and proves ordinary
+// connection-tuning params are left alone. This is the guard H1 added to
+// close the axis at the harness's one entry point, ahead of either URL
+// (admin or per-test) being built from the supplied base DSN.
+func TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys(t *testing.T) {
+	for key := range pgConnectionTargetQueryKeys {
+		t.Run(key, func(t *testing.T) {
+			u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?" + key + "=x")
+			require.NoError(t, err)
+			require.True(t, runAssertNoOverride(u),
+				"must reject a dsn whose query string carries %q", key)
+		})
+	}
+
+	t.Run("ordinary_tuning_params", func(t *testing.T) {
+		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted" +
+			"?sslmode=disable&connect_timeout=5&pool_max_conns=3" +
+			"&application_name=cli-lane&search_path=public")
+		require.NoError(t, err)
+		require.False(t, runAssertNoOverride(u),
+			"must accept ordinary connection-tuning query params")
+	})
+}
+
+// TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs measures the shapes of
+// RELAY_TEST_DATABASE_URL the 2026-08-27 review named as needing to keep
+// working after H1: an IPv6 host and a percent-encoded password containing
+// both `@` and `/`, on top of the tuning params already covered above.
+// Neither assertNoConnectionTargetOverride nor assertDSNTargetsDatabase
+// should reject any of these.
+func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
+	cases := []struct {
+		name                              string
+		dsn                               string
+		wantHost, wantPort, wantUser      string
+	}{
+		{
+			name: "ipv6_host", wantHost: "::1", wantPort: "5432", wantUser: "u",
+			dsn: "postgres://u:p@[::1]:5432/wanted",
+		},
+		{
+			// Password is p@/pw, percent-encoded so url.Parse does not treat
+			// the @ or / as delimiters.
+			name: "percent_encoded_password_with_at_and_slash",
+			wantHost: "example.invalid", wantPort: "5432", wantUser: "u",
+			dsn: "postgres://u:p%40%2Fpw@example.invalid:5432/wanted",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u, err := url.Parse(c.dsn)
+			require.NoError(t, err)
+			require.False(t, runAssertNoOverride(u),
+				"legitimate dsn must not be rejected by the query-key guard")
+			require.False(t, runAssertDSN(c.dsn, "wanted", c.wantHost, c.wantPort, c.wantUser),
+				"legitimate dsn must pass assertDSNTargetsDatabase")
+		})
+	}
 }

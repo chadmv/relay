@@ -63,8 +63,14 @@ test:
 # Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows.
 # The timeout is deliberately generous: every integration test spins up its own
 # real Postgres container, so internal/api alone runs ~320-340s.
+#
+# -count=1 disables Go's test result cache, for the same reason
+# test-cli-integration below carries it: this target now includes
+# ./internal/cli/..., whose two modes can differ only in an env var the Go
+# test cache does not key on, so without -count=1 an edit to CI's Postgres
+# service config could report "ok (cached)" without ever having run.
 test-integration:
-	go test -tags integration -p 1 ./... -timeout 900s
+	go test -tags integration -p 1 -count=1 ./... -timeout 900s
 
 # Run the CLI real-server integration lane. Every test in it drives a live
 # internal/api server over HTTP against a real Postgres, so a response-shape

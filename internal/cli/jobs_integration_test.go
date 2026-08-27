@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -70,12 +71,16 @@ func TestIntegration_SubmitListGet_RoundTrip(t *testing.T) {
 // TestIntegration_GetJobJSON_CarriesTheTasksCommands is a REAL instance of the
 // defect class this lane exists for, not a synthetic mutation.
 //
-// internal/api's taskResponse emits `commands` (a [][]string, per migration
-// 000008_task_commands, which dropped tasks.command and added tasks.commands).
-// internal/cli's taskResp decoded `command` as []string - wrong key and wrong
-// type - so `relay get <job-id> --json` emitted "command":null and carried no
-// task definition at all, for every job, since 2026-05. The human-readable path
-// prints only name/status/worker, which is why nobody saw it.
+// internal/api's taskResponse emits `commands` as json.RawMessage
+// (toTaskResponse: rawJSON(t.Commands), where store.Task.Commands is the raw
+// []byte JSONB column added by migration 000008_task_commands, which dropped
+// tasks.command and added tasks.commands). internal/cli's taskResp used to
+// decode `command` (singular) as []string - wrong key and wrong type - so
+// `relay get <job-id> --json` emitted "command":null and carried no task
+// definition at all, for every job, since 2026-05. The human-readable path
+// prints only name/status/worker, which is why nobody saw it. internal/cli's
+// taskResp now declares Commands as json.RawMessage tagged `json:"commands"`,
+// matching the server exactly - see internal/cli/jobs.go.
 //
 // The assertion is on the exact compact-encoded substring because doGetJob's
 // --json path is json.NewEncoder(w).Encode(job) with no indent, so the key and
@@ -164,14 +169,16 @@ const (
 // retry count, and a scheduled-job source. Every one of those feeds a
 // jobResponse or taskResponse field.
 //
-// The direct `UPDATE tasks SET status = 'done', ...` below bypasses
+// The direct `UPDATE tasks SET status = 'done', ...` below, and the direct
+// `UPDATE tasks SET worker_id = ...` beside it, both bypass
 // UpdateTaskStatus's epoch/worker_id/terminality fence entirely - same
 // uncovered-axis cost seedLogRows below states for AppendTaskLog's fence, and
 // noted here for the same reason: so this lane is not later misread as
-// exercising the status-write fence, which it does not. It also produces a
-// state production cannot reach on its own: a `pending` job with 2 of its 3
-// tasks `done`, since RecomputeJobStatus never runs against data written this
-// way.
+// exercising the status-write fence, which it does not. The worker_id write
+// in particular sets a column no production statement other than
+// ClaimTaskForWorker writes. It also produces a state production cannot
+// reach on its own: a `pending` job with 2 of its 3 tasks `done`, since
+// RecomputeJobStatus never runs against data written this way.
 func seedEnrichedJob(t *testing.T, s *relayServer) (jobID, schedID string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
@@ -320,15 +327,7 @@ func TestIntegration_GetJobJSON_LabelsWhenTheJobHasNone(t *testing.T) {
 	// the CLI's output would not settle this: a nil json.RawMessage marshals to
 	// `null` too, so "null out" alone cannot tell a null the server sent from a
 	// key the server omitted. This arm is what makes it a measurement.
-	req, err := http.NewRequestWithContext(testCtx(t), "GET", s.BaseURL+"/v1/jobs/"+jobID, nil)
-	require.NoError(t, err)
-	req.Header.Set("Authorization", "Bearer "+s.AdminToken)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	raw := rawGET(t, s, "/v1/jobs/"+jobID)
 	require.Contains(t, string(raw), `"labels":null`,
 		"GET /v1/jobs/{id} emits a JSON null for an unlabelled job")
 
@@ -360,7 +359,7 @@ func rawGET(t *testing.T, s *relayServer, path string) []byte {
 	return raw
 }
 
-// TestIntegration_GetJobJSON_MirrorsServerBodyExactly is the total guard the
+// TestIntegration_GetJobJSON_MirrorsServerBodyExactly is a total guard the
 // named-key tests above cannot be: it does not enumerate fields, it compares
 // the CLI's --json output against the server's own response body for the
 // SAME request, byte-for-byte modulo JSON-insignificant formatting. Any field
@@ -369,6 +368,22 @@ func rawGET(t *testing.T, s *relayServer, path string) []byte {
 // named assertion for it. seedEnrichedJob is used so the compared body is
 // not near-empty: labels, a retry count, task timing and a scheduled-job
 // link are all present on the wire this test walks.
+//
+// NEITHER THIS TEST NOR TestIntegration_ListJobsJSON_MirrorsServerItemsExactly
+// IS TOTAL ALONE - only their union is. handleGetJob runs toJobResponse and
+// never applyJobEnrichment, so on THIS (detail) body jobResponse's
+// StartedAt/FinishedAt/ScheduledJobID/ScheduledJobName are all zero,
+// omitempty, and therefore absent from BOTH sides of this comparison - an
+// absent key compares equal to an absent key no matter what either side
+// calls it, so a json-tag rename on any of those four passes here for
+// exactly the reason DependsOn/WorkerID's omitempty used to hide them from
+// this same test before that was fixed. This test is the SOLE guard for the
+// nested `tasks` array and every one of taskResponse's 11 tags (id, name,
+// status, commands, env, requires, timeout_seconds, retries, retry_count,
+// depends_on, worker_id) - jobResponse.Tasks is itself omitempty and absent
+// from every list row, so TestIntegration_ListJobsJSON_MirrorsServerItemsExactly
+// cannot see any of them. See that test's comment for the fields it alone
+// guards.
 func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 	s := startRelayServer(t)
 	jobID, _ := seedEnrichedJob(t, s)
@@ -384,10 +399,20 @@ func TestIntegration_GetJobJSON_MirrorsServerBodyExactly(t *testing.T) {
 }
 
 // TestIntegration_ListJobsJSON_MirrorsServerItemsExactly is the list-path
-// half of the same total guard. doListJobs --json prints only the decoded
-// []jobResp (json.NewEncoder(w).Encode(jobs)), not the full page envelope,
-// so the comparison is against the server's own `items` array rather than
-// its whole body.
+// half of the pair with TestIntegration_GetJobJSON_MirrorsServerBodyExactly -
+// see that test's comment for why neither is total alone; only their union
+// is. doListJobs --json prints only the decoded []jobResp
+// (json.NewEncoder(w).Encode(jobs)), not the full page envelope, so the
+// comparison is against the server's own `items` array rather than its whole
+// body.
+//
+// This test is the SOLE guard for jobResponse's list-only enrichment block:
+// started_at, finished_at, scheduled_job_id and scheduled_job_name.
+// applyJobEnrichment populates all four only on list rows; the detail test
+// never sees a non-zero value for any of them, so a json-tag rename on one
+// would pass the detail comparison (absent key vs absent key) and is caught
+// here instead, where seedEnrichedJob gives each of the four a real,
+// non-default value.
 func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
 	s := startRelayServer(t)
 	seedEnrichedJob(t, s)
@@ -398,6 +423,13 @@ func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(raw, &envelope))
 
+	// Non-emptiness floor: JSONEq's []-vs-[] is vacuously true, so without this
+	// a list handler regressed to `items: []` would pass the "total guard"
+	// below while `relay list --json` printed nothing at all.
+	var items []json.RawMessage
+	require.NoError(t, json.Unmarshal(envelope.Items, &items))
+	require.Len(t, items, 1, "the server's items array must carry the one job seedEnrichedJob submitted")
+
 	var cliOut bytes.Buffer
 	require.NoError(t, doListJobs(testCtx(t), s.adminCfg(), []string{"--json"}, &cliOut))
 
@@ -405,6 +437,13 @@ func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
 		"relay list --json must reproduce the server's items array exactly; a field missing from "+
 			"internal/cli's jobResp is silently deleted from output the user was told is JSON")
 }
+
+// createdColumnPattern matches ONLY the shape doListJobs' `time.Format(
+// "2006-01-02 15:04")` produces. It also matches the zero time rendered the
+// same way (0001-01-01 00:00), which is deliberate: that is what the
+// TestIntegration_ListJobs_CreatedColumnIsRendered's own assertion below
+// tests for directly, rather than relying on this pattern to reject it.
+var createdColumnPattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}`)
 
 // TestIntegration_ListJobs_CreatedColumnIsRendered pins the human-readable
 // render the JSONEq guards above do not cover: --json is one path through
@@ -414,6 +453,16 @@ func TestIntegration_ListJobsJSON_MirrorsServerItemsExactly(t *testing.T) {
 // this file) misses entirely lands here - a mis-tagged CreatedAt decodes as
 // the zero value, and doListJobs prints it as literally "0001-01-01 00:00"
 // for every job on the farm.
+//
+// The assertion parses the matched substring and checks it is close to
+// time.Now(), rather than only pattern-matching plus a substring deny-list on
+// "0001-01-01 00:00": that pair matches the zero time TOO
+// (`\d{4}-\d{2}-\d{2} \d{2}:\d{2}` fires on "0001-01-01 00:00" just as
+// readily as on a real date), so the regex assertion alone proves nothing -
+// only the NotContains line was ever doing the work, while the regex's
+// failure message claimed a job it did not do. A within-window check catches
+// both the tag-rename mutant AND a format regression (a differently shaped
+// render fails to match the pattern at all, or fails to parse).
 func TestIntegration_ListJobs_CreatedColumnIsRendered(t *testing.T) {
 	s := startRelayServer(t)
 	submitLaneJob(t, s)
@@ -422,8 +471,21 @@ func TestIntegration_ListJobs_CreatedColumnIsRendered(t *testing.T) {
 	require.NoError(t, doListJobs(testCtx(t), s.adminCfg(), nil, &out))
 	list := out.String()
 
-	require.Regexp(t, `\d{4}-\d{2}-\d{2} \d{2}:\d{2}`, list,
-		"CREATED must be rendered as a real timestamp")
-	require.NotContains(t, list, "0001-01-01 00:00",
-		"CREATED must not be the zero time - a dropped/mis-tagged created_at decodes to this")
+	match := createdColumnPattern.FindString(list)
+	require.NotEmpty(t, match, "CREATED must be rendered as a real timestamp")
+
+	// ParseInLocation, not Parse: doListJobs' j.CreatedAt.Format carries
+	// whatever offset the server's created_at arrived with, which is this
+	// process's own Local zone (the server in this lane runs in-process, via
+	// httptest - measured: the wire body carries e.g.
+	// "2026-08-27T13:30:51-07:00", not a "Z"/UTC suffix). The rendered
+	// "15:04" text therefore has no zone marker of its own; parsing it with
+	// plain time.Parse silently defaults to UTC and manufactures a
+	// same-digits-different-zone mismatch of exactly the local UTC offset,
+	// which is not the defect this test exists to catch.
+	got, err := time.ParseInLocation("2006-01-02 15:04", match, time.Local)
+	require.NoError(t, err, "CREATED value %q must parse with doListJobs' own format", match)
+	require.WithinDuration(t, time.Now(), got, 5*time.Minute,
+		"CREATED must be close to now, not the zero time - a dropped/mis-tagged "+
+			"created_at decodes to 0001-01-01 00:00, which is nowhere near this window")
 }

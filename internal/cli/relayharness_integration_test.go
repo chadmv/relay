@@ -57,13 +57,37 @@ func testCtx(t *testing.T) context.Context {
 	return ctx
 }
 
+// boundedCleanup runs fn in a goroutine and fails the named step if fn does
+// not return within teardownTimeout (defined in pgharness_integration_test.go,
+// same package), instead of letting it hang the whole test binary into the
+// nameless panic: banner docs/backlog/bug-2026-08-26-integration-lane-times-out-on-docker-teardown
+// describes. It exists because pgxpool.Pool.Close and httptest.Server.Close
+// both take no context - unlike the pgx.Connect/Exec calls elsewhere in this
+// lane, which accept one directly, these two have no argument to bound with,
+// so a goroutine plus a timeout is the only lever available. A goroutine that
+// never returns leaks past the failed test; that is an accepted cost of
+// turning an indefinite hang into a named, bounded failure.
+func boundedCleanup(t *testing.T, name string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(teardownTimeout):
+		t.Errorf("%s did not complete within %s", name, teardownTimeout)
+	}
+}
+
 func startRelayServer(t *testing.T) *relayServer {
 	t.Helper()
 	dsn := newIntegrationDSN(t)
 
 	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() { boundedCleanup(t, "pool.Close", pool.Close) })
 
 	q := store.New(pool)
 	// The four trailing zeros disable the login and register rate limiters.
@@ -79,7 +103,7 @@ func startRelayServer(t *testing.T) *relayServer {
 	apiSrv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	httpSrv := httptest.NewServer(apiSrv.Handler())
-	t.Cleanup(httpSrv.Close)
+	t.Cleanup(func() { boundedCleanup(t, "httpSrv.Close", httpSrv.Close) })
 
 	s := &relayServer{
 		BaseURL:    httpSrv.URL,
