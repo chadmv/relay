@@ -679,13 +679,22 @@ Each is checkable against this design, not against an imagined one.
 - **R-i. Existing fixture vacuity survives this slice.** 29 sites still encode through the CLI's own
   structs. The lane makes them cheaper to be wrong about; it does not fix them. B2.
 
-  **Corrected in Phase 4 verification: the number is 42, and 29 is not reproducible from the tree
-  on any axis.** Measured: 19 paged (`PageEnvelope[workerResp|jobResp|scheduleResp|reservationResp]`)
-  plus 23 unpaged (`Encode(jobResp{...})` and siblings), with a further 7 `PageEnvelope[map[string]any]`
-  that are simulators on the item axis and tautologies on the envelope axis. The count is stated with
-  its axis in CLAUDE.md rather than as a bare total, because 19 is the easy derivation and reads as
-  though the exposure were half what it is. 14 of the 23 are in `internal/cli/logs_test.go` - the file
-  the routing rule holds up as the pattern to copy.
+  **Corrected TWICE in Phase 4 verification, and the second correction is the interesting one.**
+  The spec's 29 is not reproducible on any axis. The first correction said 42 (19 paged + 23 unpaged)
+  and was also wrong: it was derived by grepping `Encode(<cliType>{`, and `logs_test.go`'s
+  `fakeJobSnapshotServer` takes a `[]jobResp` **parameter**, routing nine call sites' literals through
+  a single `Encode(bodies[i])` that no such grep can see.
+
+  Measured: **51 vacuous fixture bodies across 43 `Encode` statements** - 19 paged plus 32 unpaged
+  by body, 19 plus 24 by statement - with a further 7 `PageEnvelope[map[string]any]` that are
+  simulators on the item axis and tautologies on the envelope axis. 23 of the bodies are in
+  `internal/cli/logs_test.go`, the file the routing rule holds up as the pattern to copy.
+
+  The lesson is bigger than the number, and it is why CLAUDE.md now carries the warning rather than
+  just the total: **three successive attempts to count this used a text search to establish a
+  structural property, and all three were wrong.** The fixture type travels through a function
+  signature, so the shape to search for is the type in any fixture position, not the encode call.
+  See [[reference_match_the_instrument_to_the_claim]].
 
 ---
 
