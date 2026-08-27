@@ -113,3 +113,28 @@ scoped as its own item rather than folded into a bugfix.
   [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] - the two confirmed instances
 - [[idea-2026-06-03-web-e2e-harness]] - the same verification gap for the SPA client
 - [[bug-2026-08-15-cli-prints-unvalidated-worker-hostname-unescaped]] - open CLI-output item a real-server lane would exercise for real
+
+## Update 2026-08-27 - instance in a second language, and the lane earned its keep on first contact
+
+`python/tests/integration/` has **never executed in CI**. `.github/workflows/python.yml` has two
+jobs, `test` (which runs `pytest tests/unit` across 15 matrix cells) and `lint`. Neither touches
+`tests/integration`, so `test_smoke.py::test_submit_and_wait` - the only test that calls
+`task_logs()` against a real server - had never run anywhere.
+
+That is exactly why [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]] survived three
+and a half months AND survived a previous fix aimed at the same file and the same defect class.
+
+**The strongest evidence yet for this item: the lane was stood up by hand during that fix, and it
+immediately found a bug that four separate reading-based review lenses had passed.** `Job.labels`
+arrives on the wire as `null` (a handler marshals a Go nil map when the field is omitted) while the
+SDK modelled it as a required dict, so `list_jobs()` raised for any job submitted without labels.
+No amount of code reading found it, because the SDK-vs-handler sweep that slice ran checked each
+response's CONTAINER shape and never each FIELD's nullability. Only a real server sends a real
+`null`. It also found an unrelated live server bug
+([[bug-2026-08-27-scheduled-jobs-null-job-spec-bypasses-required-guard]]).
+
+Standing it up needs a Postgres service plus a built `relay-server` in the workflow, and for full
+value a `relay-agent` too - the paging boundary test that proved the cursor is passed verbatim
+needed a task that actually produced 1221 log rows, which only a real agent does.
+
+Add to Related: `python/tests/integration/`, `.github/workflows/python.yml`.
