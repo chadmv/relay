@@ -15,6 +15,11 @@ make test
 # spins up Postgres and p4d containers; -p 1 prevents parallel container conflicts)
 make test-integration
 
+# CLI real-server integration lane (internal/cli only): every test drives a live
+# internal/api server over HTTP. Needs Docker, or set RELAY_TEST_DATABASE_URL to a
+# running Postgres for one fresh database per test instead of one container per test.
+make test-cli-integration
+
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
 make generate
 
@@ -95,6 +100,8 @@ Code map:
 **Email enumeration prevention.** `handleLogin` always calls `bcrypt.CompareHashAndPassword`, even on unknown emails, against a pre-computed dummy hash (`getDummyHash()` via `sync.Once`).
 
 **Testability overrides** (no build tags). `internal/cli` exposes `saveConfigFn`, `configFilePathFn`, `readPasswordFn` as package vars for swapping in tests.
+
+**Where a CLI test goes.** Ask whether the assertion's truth depends on what the SERVER puts on the wire. Yes (status codes from real handlers, response container shape, field names and types, cursor behaviour across a real page boundary, authorization outcomes) -> the integration lane, `internal/cli/*_integration_test.go`, `make test-cli-integration`. No (flag parsing, argument reordering, a refusal issued before any request, output formatting given a known input, error wording, adversarial or impossible server responses) -> the default lane with an `httptest` fixture. **And a default-lane fixture must never encode its response through the CLI's own response struct.** A fixture marshalled from `relayclient.PageEnvelope[workerResp]` agrees with the decoder by construction, on both the envelope keys and the item fields, and can never detect drift in either direction - 19 such sites remain. Hand-write the JSON, or marshal through a locally declared struct whose json tags are deliberately independent of the production type, as `writeTaskLogPage`'s `logRow` in `internal/cli/logs_test.go` does.
 
 **Task DAG.** `task_dependencies` table; `FailDependentTasks` recursive CTE for transitive cascade on failure.
 
