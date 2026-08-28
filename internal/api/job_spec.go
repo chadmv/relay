@@ -19,6 +19,18 @@ type (
 )
 
 // ValidateJobSpec preserves existing call sites (takes value, not pointer).
+//
+// THE VALUE PARAMETER DOES NOT MAKE THIS NON-MUTATING, and this comment is the
+// only place that contract is written down. Only JobSpec's top-level fields are
+// copied. Tasks is a slice, so the copy shares its backing array, and
+// jobspec.Validate normalizes each element IN PLACE through `&spec.Tasks[i]`: a
+// caller's task goes from Command=[echo hi] Commands=[] to Command=[]
+// Commands=[[echo hi]] across this call.
+//
+// Harmless at all four call sites today - each either discards spec afterwards
+// or reads only DependsOn, which normalization does not touch, and
+// normalization is idempotent so the second pass inside CreateJobFromSpec is a
+// no-op. A new caller that reads Command back must expect the normalized form.
 func ValidateJobSpec(spec JobSpec) error {
 	return jobspec.Validate(&spec)
 }
