@@ -264,7 +264,7 @@ asking to record a constraint on `feature-2026-06-26-web-enabler-backend-endpoin
 **The DB `CHECK` constraint the item suggested was declined deliberately** - migrations run on
 startup, so `ADD CONSTRAINT` refuses to boot the binary on exactly the population that has the bug,
 and `NOT VALID` converts that loud failure into a silently stuck task. Filed as
-[[idea-2026-08-28-db-check-constraint-on-retries-and-timeout-seconds]] with the pre-existing-row
+[[idea-2026-08-27-db-check-constraint-on-retries-and-timeout-seconds]] with the pre-existing-row
 decision as its subject. A caller-side AST guard stands in for it.
 
 **One defect was found in the fix's own blast radius and closed in the same branch.** Bounding a
