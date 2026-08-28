@@ -47,39 +47,9 @@ func TestScheduledJobRowStillCarriesNoFailureSurface(t *testing.T) {
 		got = append(got, f.Name)
 	}
 
-	if len(got) == len(scheduledJobFields) {
-		same := true
-		for i := range got {
-			if got[i] != scheduledJobFields[i] {
-				same = false
-				break
-			}
-		}
-		if same {
-			return
-		}
-	}
-
-	// Name the difference in both directions. A REMOVED field matters too: it
-	// means a read the hazard test relies on has gone away.
-	inWant := make(map[string]bool, len(scheduledJobFields))
-	for _, n := range scheduledJobFields {
-		inWant[n] = true
-	}
-	inGot := make(map[string]bool, len(got))
-	for _, n := range got {
-		inGot[n] = true
-	}
-	var added, removed []string
-	for _, n := range got {
-		if !inWant[n] {
-			added = append(added, n)
-		}
-	}
-	for _, n := range scheduledJobFields {
-		if !inGot[n] {
-			removed = append(removed, n)
-		}
+	ok, added, removed := scheduledJobFieldSetDiff(got, scheduledJobFields)
+	if ok {
+		return
 	}
 
 	var hint string
@@ -99,4 +69,74 @@ func TestScheduledJobRowStillCarriesNoFailureSurface(t *testing.T) {
 		"header comment - and this list must be updated in the same commit. The substring hint "+
 		"above is colour only: this test gates on the SET, so a column called anything at all "+
 		"lands here.", added, removed, got, hint)
+}
+
+// scheduledJobFieldSetDiff reports whether got and want agree, and names the
+// difference in both directions. A REMOVED field matters too: it means a read
+// the hazard test relies on has gone away.
+//
+// AGREEMENT IS DECIDED BY THE SET, NOT THE ORDER, and ok is derived from the two
+// difference lists rather than computed separately, so the answer and its
+// explanation cannot disagree. A positional check made a pure reorder of
+// store.ScheduledJob fail with `added [], removed []`: sqlc emits models.go in
+// column order, column order is no part of what this file gates on, and a
+// failure naming nothing is one nobody can act on. Field names from
+// reflect.VisibleFields are unique, so set semantics lose nothing here.
+func scheduledJobFieldSetDiff(got, want []string) (ok bool, added, removed []string) {
+	inWant := make(map[string]bool, len(want))
+	for _, n := range want {
+		inWant[n] = true
+	}
+	inGot := make(map[string]bool, len(got))
+	for _, n := range got {
+		inGot[n] = true
+	}
+	for _, n := range got {
+		if !inWant[n] {
+			added = append(added, n)
+		}
+	}
+	for _, n := range want {
+		if !inGot[n] {
+			removed = append(removed, n)
+		}
+	}
+	return len(added) == 0 && len(removed) == 0, added, removed
+}
+
+// TestScheduledJobFieldSetDiff_GatesOnTheSetNotTheOrder is the PERMANENT
+// discriminating input for the comparison above.
+//
+// The header of TestScheduledJobRowStillCarriesNoFailureSurface says it "gates
+// on the SET". It did not: the agreement check was positional, so a pure reorder
+// of store.ScheduledJob - no field added, none removed - failed with the
+// literally unactionable message `added [], removed []`. sqlc emits models.go
+// fields in column order, and column order is not part of the property this file
+// gates on, so a reorder is not a change anybody can act on.
+//
+// THE REORDER CASE IS FIRST. A poisoned input placed last cannot distinguish a
+// comparison that examined it from one that returned before reaching it.
+func TestScheduledJobFieldSetDiff_GatesOnTheSetNotTheOrder(t *testing.T) {
+	reordered := []string{
+		"Name", "ID", "OwnerID", "CronExpr", "Timezone", "JobSpec", "OverlapPolicy",
+		"Enabled", "NextRunAt", "LastRunAt", "LastJobID", "CreatedAt", "UpdatedAt",
+	}
+	ok, added, removed := scheduledJobFieldSetDiff(reordered, scheduledJobFields)
+	if !ok {
+		t.Errorf("a pure reorder was reported as a change: added %v, removed %v. Neither list can "+
+			"name what to do about it, which is the whole defect.", added, removed)
+	}
+
+	// Both real directions must still be reported, or the fix above would have
+	// bought order-insensitivity by making the guard inert.
+	ok, added, removed = scheduledJobFieldSetDiff(
+		[]string{"ID", "Name", "LastFireStatus"}, []string{"ID", "Name"})
+	if ok || len(added) != 1 || added[0] != "LastFireStatus" || len(removed) != 0 {
+		t.Errorf("an ADDED field must be reported: ok=%v added=%v removed=%v", ok, added, removed)
+	}
+	ok, added, removed = scheduledJobFieldSetDiff(
+		[]string{"ID"}, []string{"ID", "NextRunAt"})
+	if ok || len(removed) != 1 || removed[0] != "NextRunAt" || len(added) != 0 {
+		t.Errorf("a REMOVED field must be reported: ok=%v added=%v removed=%v", ok, added, removed)
+	}
 }
