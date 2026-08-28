@@ -78,9 +78,14 @@ var (
 // contention is a reservation, not a retry count.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. Validate runs on STORED scheduled-job specs
-// on BOTH paths that materialize one: schedrunner.fireOne at fire time and
-// handleRunScheduledJobNow on demand, each reaching Validate through
-// jobcreate.CreateJobFromSpec. An env-tunable bound would therefore make
+// on BOTH paths that materialize one: schedrunner.fireOne at fire time, which
+// reaches Validate only through jobcreate.CreateJobFromSpec, and
+// handleRunScheduledJobNow on demand, which calls it DIRECTLY through
+// api.ValidateJobSpec ahead of the transaction and then again inside
+// CreateJobFromSpec. That direct call is the site that decides the status code:
+// it answers a stored spec's failure with 400 and the per-task message, where
+// CreateJobFromSpec's error collapses into a 500. An env-tunable bound would
+// therefore make
 // retroactive schedule invalidation environment-dependent: the same stored spec
 // fires on one replica's configuration and silently stops on another's, and
 // lowering the knob would disable schedules with no signal anywhere. A
