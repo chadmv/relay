@@ -721,8 +721,8 @@ relay submit --detach job.json # submit and print job ID, then exit
 | `tasks[].command` | Yes | Executable and arguments as an array |
 | `tasks[].env` | No | Extra environment variables for this task |
 | `tasks[].requires` | No | Worker label selector (task only runs on matching workers) |
-| `tasks[].timeout_seconds` | No | Kill task after this many seconds |
-| `tasks[].retries` | No | Retry up to this many times on failure (default 0) |
+| `tasks[].timeout_seconds` | No | Kill task after this many seconds. Max `604800` (7 days); a larger or negative value is rejected at submission. **Omitted or `0` both mean "no deadline"** - the field is optional and `0` is its second spelling. Independent of `RELAY_TASK_MAX_ASSIGNMENT`, which bounds how long a task may stay ASSIGNED rather than how long it may RUN; a task whose own timeout exceeds that cap is simply swept by the other arm. |
+| `tasks[].retries` | No | Retry up to this many times on failure (default `0`, max `10`). A larger or negative value is rejected at submission. There is no backoff between a failed task and its redispatch, so a deterministically-failing command burns the whole budget in seconds; for a contended resource use a reservation rather than a large retry count. |
 | `tasks[].depends_on` | No | List of task names that must complete before this one starts |
 | `tasks[].source` | No | Workspace source spec — agent prepares this before running the task. See [Source workspaces](#source-workspaces). |
 
