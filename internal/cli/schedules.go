@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -23,6 +24,64 @@ type scheduleResp struct {
 	Enabled       bool       `json:"enabled"`
 	NextRunAt     *time.Time `json:"next_run_at,omitempty"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
+	// Absent means healthy. The server omits both keys entirely, never "" and
+	// never null, so a nil pointer is the whole test.
+	//
+	// A POINTER RATHER THAN A PLAIN string, deliberately, even though the server
+	// sends a plain string: absent, empty and present are THREE states and the
+	// original defect was exactly the failure to distinguish two of them. A plain
+	// string would collapse absent and "" into one value here, and the collapse
+	// would be invisible - which is the shape of the bug this field exists to
+	// report. Every read is `!= nil && *p != ""`.
+	//
+	// NOTE THIS STRUCT IS ALREADY A LOSSY VIEW of scheduledJobResponse: it
+	// carries no owner_email and no last_job_id. That is pre-existing and this
+	// slice does not fix it. It adds these two because a schedule that has
+	// silently stopped producing jobs is otherwise indistinguishable from a
+	// working one in every CLI output there is.
+	LastError   *string    `json:"last_error,omitempty"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+}
+
+// hasFailure reports whether the schedule carries a recorded fire failure.
+//
+// ABSENT, EMPTY AND PRESENT ARE THREE STATES and this is the one place that
+// partitions them, so that `relay schedules list` and `relay schedules show`
+// cannot drift apart on the question they both answer. The server's write site
+// never stores an empty string precisely so `omitempty` on a string is safe, but
+// the CLI cannot verify that from here - it decodes whatever a remote server
+// sent - so an explicit "" reads as healthy rather than as a labelled blank.
+func (s scheduleResp) hasFailure() bool {
+	return s.LastError != nil && *s.LastError != ""
+}
+
+// terminalSafeLine renders one server-supplied string as a single terminal line,
+// replacing every C0 control character and DEL with a space.
+//
+// THE SERVER ALREADY DOES THIS AT THE WRITE SITE and this is still not
+// redundant, for two reasons that are about the CLI rather than about doubt:
+//
+//   - THAT SANITIZER IS IN ANOTHER PROCESS, reached over a ServerURL the
+//     operator sets from ~/.relay/config.json or RELAY_URL. `relay` renders
+//     whatever that endpoint decodes to. "The server strips control characters"
+//     is a claim about a peer; a client that echoes a response to a terminal
+//     cannot verify it, so it enforces it.
+//   - A NEWLINE DEFEATS THE PROVENANCE PREFIX. doSchedulesShow prints one
+//     "Label: value" per line, so a value carrying \n forges further lines in
+//     relay's own output; the prefix names the provenance of the first line and
+//     says nothing about the ones the value invented. Collapsing the value to
+//     one line is what makes the label a mitigation rather than a decoration.
+//
+// It does not truncate: the server bounds the stored text at 1 KB, and a second
+// bound here would silently disagree with the "use run-now for the full message"
+// remedy the caller prints two lines later.
+func terminalSafeLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // SchedulesCommand returns the relay schedules Command.
@@ -148,6 +207,26 @@ func doSchedulesShow(ctx context.Context, c *relayclient.Client, args []string, 
 	fmt.Fprintf(w, "Enabled:  %t\n", out.Enabled)
 	if out.NextRunAt != nil {
 		fmt.Fprintf(w, "Next:     %s\n", out.NextRunAt.Format(time.RFC3339))
+	}
+	if out.LastRunAt != nil {
+		fmt.Fprintf(w, "Last run: %s\n", out.LastRunAt.Format(time.RFC3339))
+	}
+	if out.hasFailure() {
+		// THE PROVENANCE PREFIX IS DELIBERATE. The message is derived from the
+		// stored job_spec and embeds a task name the schedule's owner chose, so
+		// an admin inspecting another user's schedule is reading partly
+		// attacker-chosen prose, and the one real risk is text crafted to read
+		// like relay's own output. Naming where it came from is what closes that.
+		fmt.Fprintf(w, "Last error (from the stored job_spec, operator-supplied): %s\n",
+			terminalSafeLine(*out.LastError))
+		if out.LastErrorAt != nil {
+			fmt.Fprintf(w, "Failed at: %s\n", out.LastErrorAt.Format(time.RFC3339))
+		}
+		// The stored text is truncated to 1 KB; run-now returns it in full and
+		// re-checks the spec live. Naming a command that exists is the point:
+		// before `relay schedules update --spec`, the fix this signal points at
+		// was reachable only from the Python SDK or curl.
+		fmt.Fprintf(w, "Re-check with: relay schedules run-now %s\n", out.ID)
 	}
 	return nil
 }
