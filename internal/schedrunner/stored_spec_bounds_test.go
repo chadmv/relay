@@ -5,8 +5,6 @@ package schedrunner_test
 import (
 	"context"
 	"encoding/json"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -60,18 +58,34 @@ func makeOverBudgetSpecJSON(t *testing.T) []byte {
 // for this slice was to ship the bounds alone, with this test plus an upgrade
 // note in the PR body as the agreed mitigation.
 //
-// WHAT EACH ASSERTION BECOMES WHEN THE SIBLING SHIPS:
+// WHAT EACH ASSERTION BECOMES WHEN THE SIBLING SHIPS. All six are listed,
+// because an assertion left out of this list is the one that reddens later as a
+// mystery whose failure message reads like a product claim:
+//   - the control, "a still-valid stored spec still fires", STAYS. It is what
+//     stops every assertion below from passing vacuously.
 //   - "the poisoned schedule fires no job" STAYS. It is correct behaviour: a
 //     spec that does not validate must not produce a job.
 //   - "next_run_at still advances" STAYS. It is what stops a poisoned schedule
 //     hot-looping every tick.
-//   - "the row exposes no field that could record the failure" INVERTS. Require
-//     the new field to EXIST, require it to carry the validation error this tick
-//     produced, and drop the _DocumentedHazard suffix from this test's name.
+//   - "last_run_at stays unset" STAYS. No run happened. A design that stamped it
+//     on a failed fire would make "when did this last run" mean two things.
+//   - "last_job_id stays unset" STAYS, for the same reason: no job exists to
+//     point at.
+//   - "the schedule is still Enabled" MAY INVERT, and is the one to think about
+//     hardest. Auto-disabling after N consecutive validation failures is a
+//     perfectly reasonable alternative to a last_error column, and it would turn
+//     this line RED with a message that reads like a claim about how relay ought
+//     to behave. If the sibling chooses that design, this assertion becomes
+//     "the schedule is disabled AND something says why", and the
+//     _DocumentedHazard suffix comes off this test's name.
 //
-// DO NOT satisfy the last assertion by adding the sibling's new field to a
-// deny-list. It is written to go RED on ANY new failure-shaped field precisely
-// so that the sibling's implementer has to come here.
+// The row's FAILURE SURFACE is guarded separately and OUTSIDE this file, in
+// internal/schedrunner/scheduled_job_surface_test.go, which is untagged so it
+// runs in the plain `go test ./...` gate rather than only under Docker. It
+// asserts store.ScheduledJob's whole field SET, so any new column - whatever it
+// is called - sends the sibling's implementer here. Do not re-add a
+// failure-shaped-name check to this file: a deny-list of spellings fails open on
+// the next addition, which is how the first version of it was written.
 func TestTickOnce_AStoredSpecOverTheBoundStopsFiringInvisibly_DocumentedHazard(t *testing.T) {
 	h := newRunnerHarness(t)
 	ctx := context.Background()
@@ -120,21 +134,4 @@ func TestTickOnce_AStoredSpecOverTheBoundStopsFiringInvisibly_DocumentedHazard(t
 	assert.True(t, row.Enabled,
 		"THE HAZARD, STATED POSITIVELY: nothing disables the schedule either, so it stays in every "+
 			"'enabled' listing forever while producing nothing")
-
-	// THE TRIPWIRE. Every user-visible read of a schedule is built from this row -
-	// GET /v1/scheduled-jobs/{id}, `relay schedules`, the SPA - so asserting that
-	// the row has no field capable of carrying the failure is what turns "nothing
-	// user-visible records it" from prose into a checked claim.
-	//
-	// WHEN bug-2026-08-23-unfireable-schedule-is-invisible SHIPS ITS COLUMN AND
-	// models.go IS REGENERATED, THIS GOES RED. That is the point. Invert it as
-	// described in this test's header comment; do not exempt the new field.
-	for _, f := range reflect.VisibleFields(reflect.TypeOf(store.ScheduledJob{})) {
-		name := strings.ToLower(f.Name)
-		assert.NotContains(t, name, "error",
-			"store.ScheduledJob gained field %q. If that is the sibling item's failure surface, this "+
-				"test's last block must INVERT - see its header comment - not grow an exemption.", f.Name)
-		assert.NotContains(t, name, "fail",
-			"store.ScheduledJob gained field %q. Same instruction as above.", f.Name)
-	}
 }
