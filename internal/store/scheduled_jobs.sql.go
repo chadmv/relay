@@ -13,10 +13,12 @@ import (
 
 const advanceScheduledJob = `-- name: AdvanceScheduledJob :exec
 UPDATE scheduled_jobs
-SET next_run_at = $2,
-    last_run_at = NOW(),
-    last_job_id = COALESCE($3, last_job_id),
-    updated_at  = NOW()
+SET next_run_at   = $2,
+    last_run_at   = NOW(),
+    last_job_id   = COALESCE($3, last_job_id),
+    last_error    = NULL,
+    last_error_at = NULL,
+    updated_at    = NOW()
 WHERE id = $1
 `
 
@@ -26,16 +28,69 @@ type AdvanceScheduledJobParams struct {
 	LastJobID pgtype.UUID        `json:"last_job_id"`
 }
 
-// AdvanceScheduledJob
+// THE SUCCESS STATEMENT, and the ONLY thing that clears a recorded failure.
+// Called from fireOne after CreateJobFromSpec returned a job, which is the only
+// event that proves the stored spec both validates and inserts.
+//
+// Its COALESCE($3, last_job_id) is now vestigial: after the skip path was split
+// out into AdvanceScheduledJobSkipped, this statement's single caller always
+// passes a valid job id. LEAVE IT. Removing it is an unrelated behaviour change.
 //
 //	UPDATE scheduled_jobs
-//	SET next_run_at = $2,
-//	    last_run_at = NOW(),
-//	    last_job_id = COALESCE($3, last_job_id),
-//	    updated_at  = NOW()
+//	SET next_run_at   = $2,
+//	    last_run_at   = NOW(),
+//	    last_job_id   = COALESCE($3, last_job_id),
+//	    last_error    = NULL,
+//	    last_error_at = NULL,
+//	    updated_at    = NOW()
 //	WHERE id = $1
 func (q *Queries) AdvanceScheduledJob(ctx context.Context, arg AdvanceScheduledJobParams) error {
 	_, err := q.db.Exec(ctx, advanceScheduledJob, arg.ID, arg.NextRunAt, arg.LastJobID)
+	return err
+}
+
+const advanceScheduledJobAfterFailure = `-- name: AdvanceScheduledJobAfterFailure :exec
+UPDATE scheduled_jobs
+SET next_run_at   = $2,
+    last_error    = $3,
+    last_error_at = NOW(),
+    updated_at    = NOW()
+WHERE id = $1
+`
+
+type AdvanceScheduledJobAfterFailureParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	NextRunAt pgtype.Timestamptz `json:"next_run_at"`
+	LastError *string            `json:"last_error"`
+}
+
+// The failure statement. Called from TickOnce's fireErr branch, on the OUTER
+// transaction, for the three PERMANENT failure classes only (an undecodable
+// job_spec, an unparseable cron, a spec that fails jobspec.Validate).
+//
+// IT MUST NOT BE CALLED FROM INSIDE fireOne. fireOne runs against a nested
+// transaction (a savepoint) that TickOnce ROLLS BACK on failure, so a write
+// issued there is discarded silently - the row would simply never carry an error
+// and the test would fail with no clue why. See internal/schedrunner/runner.go's
+// TickOnce for the write site.
+//
+// It does NOT touch last_run_at or last_job_id: no run completed and no job
+// exists to point at. It DOES advance next_run_at, so a poisoned schedule does
+// not hot-loop every tick.
+//
+// NOW() rather than a Go clock, matching last_run_at immediately beside it.
+// Within one transaction NOW() is the transaction start time, which for a
+// 100-row tick is at most a few seconds stale. Consistency with the field it
+// sits next to beats that; do not "fix" this to time.Now() in isolation.
+//
+//	UPDATE scheduled_jobs
+//	SET next_run_at   = $2,
+//	    last_error    = $3,
+//	    last_error_at = NOW(),
+//	    updated_at    = NOW()
+//	WHERE id = $1
+func (q *Queries) AdvanceScheduledJobAfterFailure(ctx context.Context, arg AdvanceScheduledJobAfterFailureParams) error {
+	_, err := q.db.Exec(ctx, advanceScheduledJobAfterFailure, arg.ID, arg.NextRunAt, arg.LastError)
 	return err
 }
 
@@ -59,6 +114,42 @@ type AdvanceScheduledJobNextRunParams struct {
 //	WHERE id = $1
 func (q *Queries) AdvanceScheduledJobNextRun(ctx context.Context, arg AdvanceScheduledJobNextRunParams) error {
 	_, err := q.db.Exec(ctx, advanceScheduledJobNextRun, arg.ID, arg.NextRunAt)
+	return err
+}
+
+const advanceScheduledJobSkipped = `-- name: AdvanceScheduledJobSkipped :exec
+UPDATE scheduled_jobs
+SET next_run_at = $2,
+    last_run_at = NOW(),
+    updated_at  = NOW()
+WHERE id = $1
+`
+
+type AdvanceScheduledJobSkippedParams struct {
+	ID        pgtype.UUID        `json:"id"`
+	NextRunAt pgtype.Timestamptz `json:"next_run_at"`
+}
+
+// The overlap_policy = 'skip' branch, split out of AdvanceScheduledJob so the
+// clearing rule is not hidden behind a parameter overload.
+//
+// IT DELIBERATELY DOES NOT CLEAR. The skip branch returns BEFORE
+// jobspec.Validate runs, so reaching it is no evidence the stored spec is valid.
+// Clearing here would make a poisoned schedule whose predecessor is long-running
+// flicker between "failing" and "healthy" on alternate ticks.
+//
+// It DOES stamp last_run_at, preserving the behaviour AdvanceScheduledJob had on
+// this path. That means last_run_at has always meant "the runner reached the end
+// of a fire attempt", not "a job was produced". That is pre-existing and is
+// filed separately; do not change it here.
+//
+//	UPDATE scheduled_jobs
+//	SET next_run_at = $2,
+//	    last_run_at = NOW(),
+//	    updated_at  = NOW()
+//	WHERE id = $1
+func (q *Queries) AdvanceScheduledJobSkipped(ctx context.Context, arg AdvanceScheduledJobSkippedParams) error {
+	_, err := q.db.Exec(ctx, advanceScheduledJobSkipped, arg.ID, arg.NextRunAt)
 	return err
 }
 
@@ -113,7 +204,7 @@ INSERT INTO scheduled_jobs (
     name, owner_id, cron_expr, timezone, job_spec,
     overlap_policy, enabled, next_run_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at
+RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at
 `
 
 type CreateScheduledJobParams struct {
@@ -133,7 +224,7 @@ type CreateScheduledJobParams struct {
 //	    name, owner_id, cron_expr, timezone, job_spec,
 //	    overlap_policy, enabled, next_run_at
 //	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-//	RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at
+//	RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at
 func (q *Queries) CreateScheduledJob(ctx context.Context, arg CreateScheduledJobParams) (ScheduledJob, error) {
 	row := q.db.QueryRow(ctx, createScheduledJob,
 		arg.Name,
@@ -160,6 +251,8 @@ func (q *Queries) CreateScheduledJob(ctx context.Context, arg CreateScheduledJob
 		&i.LastJobID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }
@@ -203,12 +296,12 @@ func (q *Queries) DisableScheduledJobsByOwner(ctx context.Context, ownerID pgtyp
 }
 
 const getScheduledJob = `-- name: GetScheduledJob :one
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs WHERE id = $1
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs WHERE id = $1
 `
 
 // GetScheduledJob
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs WHERE id = $1
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs WHERE id = $1
 func (q *Queries) GetScheduledJob(ctx context.Context, id pgtype.UUID) (ScheduledJob, error) {
 	row := q.db.QueryRow(ctx, getScheduledJob, id)
 	var i ScheduledJob
@@ -226,12 +319,14 @@ func (q *Queries) GetScheduledJob(ctx context.Context, id pgtype.UUID) (Schedule
 		&i.LastJobID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }
 
 const listEligibleScheduledJobs = `-- name: ListEligibleScheduledJobs :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
  WHERE enabled
    AND next_run_at <= NOW()
  ORDER BY next_run_at ASC
@@ -241,7 +336,7 @@ SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enable
 
 // ListEligibleScheduledJobs
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	 WHERE enabled
 //	   AND next_run_at <= NOW()
 //	 ORDER BY next_run_at ASC
@@ -270,6 +365,60 @@ func (q *Queries) ListEligibleScheduledJobs(ctx context.Context, limit int32) ([
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEnabledScheduledJobs = `-- name: ListEnabledScheduledJobs :many
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+ WHERE enabled
+ ORDER BY id
+`
+
+// EVERY enabled schedule, not just the overdue ones. The startup sweep's whole
+// point is the schedules NEITHER existing loop sees: ListEligibleScheduledJobs
+// and ListOverdueScheduledJobsForCatchup both require next_run_at to have
+// passed, so a healthy-looking @monthly schedule broken by a retroactive
+// validation change stays invisible for up to a month after the fix deploys.
+// Ordered by id purely for a deterministic sweep order in tests.
+//
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+//	 WHERE enabled
+//	 ORDER BY id
+func (q *Queries) ListEnabledScheduledJobs(ctx context.Context) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listEnabledScheduledJobs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ScheduledJob
+	for rows.Next() {
+		var i ScheduledJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.OwnerID,
+			&i.CronExpr,
+			&i.Timezone,
+			&i.JobSpec,
+			&i.OverlapPolicy,
+			&i.Enabled,
+			&i.NextRunAt,
+			&i.LastRunAt,
+			&i.LastJobID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -282,14 +431,14 @@ func (q *Queries) ListEligibleScheduledJobs(ctx context.Context, limit int32) ([
 }
 
 const listOverdueScheduledJobsForCatchup = `-- name: ListOverdueScheduledJobsForCatchup :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
  WHERE enabled
    AND next_run_at < NOW()
 `
 
 // ListOverdueScheduledJobsForCatchup
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	 WHERE enabled
 //	   AND next_run_at < NOW()
 func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]ScheduledJob, error) {
@@ -315,6 +464,8 @@ func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]Sch
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -327,7 +478,7 @@ func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]Sch
 }
 
 const listScheduledJobsByOwnerPage = `-- name: ListScheduledJobsByOwnerPage :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND ($2::bool = FALSE
        OR (created_at, id) < ($3::timestamptz, $4::uuid))
@@ -345,7 +496,7 @@ type ListScheduledJobsByOwnerPageParams struct {
 
 // ListScheduledJobsByOwnerPage
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND ($2::bool = FALSE
 //	       OR (created_at, id) < ($3::timestamptz, $4::uuid))
@@ -380,6 +531,8 @@ func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListSche
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -392,7 +545,7 @@ func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListSche
 }
 
 const listScheduledJobsByOwnerPageByCreatedAsc = `-- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
 ORDER BY created_at ASC, id ASC
@@ -409,7 +562,7 @@ type ListScheduledJobsByOwnerPageByCreatedAscParams struct {
 
 // ListScheduledJobsByOwnerPageByCreatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
 //	ORDER BY created_at ASC, id ASC
@@ -443,6 +596,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, 
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -455,7 +610,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByNameAsc = `-- name: ListScheduledJobsByOwnerPageByNameAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
 ORDER BY name ASC, id ASC
@@ -472,7 +627,7 @@ type ListScheduledJobsByOwnerPageByNameAscParams struct {
 
 // ListScheduledJobsByOwnerPageByNameAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
 //	ORDER BY name ASC, id ASC
@@ -506,6 +661,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -518,7 +675,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg
 }
 
 const listScheduledJobsByOwnerPageByNameDesc = `-- name: ListScheduledJobsByOwnerPageByNameDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
 ORDER BY name DESC, id DESC
@@ -535,7 +692,7 @@ type ListScheduledJobsByOwnerPageByNameDescParams struct {
 
 // ListScheduledJobsByOwnerPageByNameDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
 //	ORDER BY name DESC, id DESC
@@ -569,6 +726,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, ar
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -581,7 +740,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, ar
 }
 
 const listScheduledJobsByOwnerPageByNextRunAsc = `-- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
 ORDER BY next_run_at ASC, id ASC
@@ -598,7 +757,7 @@ type ListScheduledJobsByOwnerPageByNextRunAscParams struct {
 
 // ListScheduledJobsByOwnerPageByNextRunAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
 //	ORDER BY next_run_at ASC, id ASC
@@ -632,6 +791,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, 
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -644,7 +805,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByNextRunDesc = `-- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
 ORDER BY next_run_at DESC, id DESC
@@ -661,7 +822,7 @@ type ListScheduledJobsByOwnerPageByNextRunDescParams struct {
 
 // ListScheduledJobsByOwnerPageByNextRunDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
 //	ORDER BY next_run_at DESC, id DESC
@@ -695,6 +856,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context,
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -707,7 +870,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context,
 }
 
 const listScheduledJobsByOwnerPageByUpdatedAsc = `-- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
 ORDER BY updated_at ASC, id ASC
@@ -724,7 +887,7 @@ type ListScheduledJobsByOwnerPageByUpdatedAscParams struct {
 
 // ListScheduledJobsByOwnerPageByUpdatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
 //	ORDER BY updated_at ASC, id ASC
@@ -758,6 +921,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, 
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -770,7 +935,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByUpdatedDesc = `-- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE owner_id = $1::uuid
   AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
 ORDER BY updated_at DESC, id DESC
@@ -787,7 +952,7 @@ type ListScheduledJobsByOwnerPageByUpdatedDescParams struct {
 
 // ListScheduledJobsByOwnerPageByUpdatedDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
 //	ORDER BY updated_at DESC, id DESC
@@ -821,6 +986,8 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context,
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -833,7 +1000,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context,
 }
 
 const listScheduledJobsPage = `-- name: ListScheduledJobsPage :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE ($1::bool = FALSE
        OR (created_at, id) < ($2::timestamptz, $3::uuid))
 ORDER BY created_at DESC, id DESC
@@ -849,7 +1016,7 @@ type ListScheduledJobsPageParams struct {
 
 // ListScheduledJobsPage
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE ($1::bool = FALSE
 //	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
 //	ORDER BY created_at DESC, id DESC
@@ -882,6 +1049,8 @@ func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJo
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -894,7 +1063,7 @@ func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJo
 }
 
 const listScheduledJobsPageByCreatedAsc = `-- name: ListScheduledJobsPageByCreatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
 ORDER BY created_at ASC, id ASC
 LIMIT $4+ 1
@@ -909,7 +1078,7 @@ type ListScheduledJobsPageByCreatedAscParams struct {
 
 // ListScheduledJobsPageByCreatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
 //	ORDER BY created_at ASC, id ASC
 //	LIMIT $4+ 1
@@ -941,6 +1110,8 @@ func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg Lis
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -953,7 +1124,7 @@ func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByNameAsc = `-- name: ListScheduledJobsPageByNameAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
 ORDER BY name ASC, id ASC
 LIMIT $4+ 1
@@ -968,7 +1139,7 @@ type ListScheduledJobsPageByNameAscParams struct {
 
 // ListScheduledJobsPageByNameAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
 //	ORDER BY name ASC, id ASC
 //	LIMIT $4+ 1
@@ -1000,6 +1171,8 @@ func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListSc
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1012,7 +1185,7 @@ func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListSc
 }
 
 const listScheduledJobsPageByNameDesc = `-- name: ListScheduledJobsPageByNameDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
 ORDER BY name DESC, id DESC
 LIMIT $4+ 1
@@ -1027,7 +1200,7 @@ type ListScheduledJobsPageByNameDescParams struct {
 
 // ListScheduledJobsPageByNameDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
 //	ORDER BY name DESC, id DESC
 //	LIMIT $4+ 1
@@ -1059,6 +1232,8 @@ func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListS
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1071,7 +1246,7 @@ func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListS
 }
 
 const listScheduledJobsPageByNextRunAsc = `-- name: ListScheduledJobsPageByNextRunAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
 ORDER BY next_run_at ASC, id ASC
 LIMIT $4+ 1
@@ -1086,7 +1261,7 @@ type ListScheduledJobsPageByNextRunAscParams struct {
 
 // ListScheduledJobsPageByNextRunAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
 //	ORDER BY next_run_at ASC, id ASC
 //	LIMIT $4+ 1
@@ -1118,6 +1293,8 @@ func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg Lis
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1130,7 +1307,7 @@ func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByNextRunDesc = `-- name: ListScheduledJobsPageByNextRunDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
 ORDER BY next_run_at DESC, id DESC
 LIMIT $4+ 1
@@ -1145,7 +1322,7 @@ type ListScheduledJobsPageByNextRunDescParams struct {
 
 // ListScheduledJobsPageByNextRunDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
 //	ORDER BY next_run_at DESC, id DESC
 //	LIMIT $4+ 1
@@ -1177,6 +1354,8 @@ func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg Li
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1189,7 +1368,7 @@ func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg Li
 }
 
 const listScheduledJobsPageByUpdatedAsc = `-- name: ListScheduledJobsPageByUpdatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
 ORDER BY updated_at ASC, id ASC
 LIMIT $4+ 1
@@ -1204,7 +1383,7 @@ type ListScheduledJobsPageByUpdatedAscParams struct {
 
 // ListScheduledJobsPageByUpdatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
 //	ORDER BY updated_at ASC, id ASC
 //	LIMIT $4+ 1
@@ -1236,6 +1415,8 @@ func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg Lis
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1248,7 +1429,7 @@ func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByUpdatedDesc = `-- name: ListScheduledJobsPageByUpdatedDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
 ORDER BY updated_at DESC, id DESC
 LIMIT $4+ 1
@@ -1263,7 +1444,7 @@ type ListScheduledJobsPageByUpdatedDescParams struct {
 
 // ListScheduledJobsPageByUpdatedDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at FROM scheduled_jobs
+//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
 //	ORDER BY updated_at DESC, id DESC
 //	LIMIT $4+ 1
@@ -1295,6 +1476,8 @@ func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg Li
 			&i.LastJobID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1306,6 +1489,42 @@ func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg Li
 	return items, nil
 }
 
+const recordScheduledJobFailure = `-- name: RecordScheduledJobFailure :exec
+UPDATE scheduled_jobs
+SET last_error    = $2,
+    last_error_at = NOW(),
+    updated_at    = NOW()
+WHERE id = $1
+`
+
+type RecordScheduledJobFailureParams struct {
+	ID        pgtype.UUID `json:"id"`
+	LastError *string     `json:"last_error"`
+}
+
+// The startup validation sweep's statement (schedrunner.ValidateStoredSpecsOnStartup).
+// Failure fields ONLY.
+//
+// next_run_at MUST NOT MOVE HERE. ReconcileOnStartup already owns the
+// never-catch-up policy at boot; a second statement advancing it would skip a
+// fire the operator was entitled to.
+//
+// RECORD-ONLY: there is no clearing sibling for the sweep, on purpose. A spec
+// that validates at boot has not been proven to FIRE - the insert could still
+// fail - so clearing on a boot-time pass would assert something the sweep did
+// not observe. Clearing stays the exclusive job of a successful fire and of a
+// PATCH that changed the inputs.
+//
+//	UPDATE scheduled_jobs
+//	SET last_error    = $2,
+//	    last_error_at = NOW(),
+//	    updated_at    = NOW()
+//	WHERE id = $1
+func (q *Queries) RecordScheduledJobFailure(ctx context.Context, arg RecordScheduledJobFailureParams) error {
+	_, err := q.db.Exec(ctx, recordScheduledJobFailure, arg.ID, arg.LastError)
+	return err
+}
+
 const updateScheduledJob = `-- name: UpdateScheduledJob :one
 UPDATE scheduled_jobs
 SET name           = $2,
@@ -1315,9 +1534,11 @@ SET name           = $2,
     overlap_policy = $6,
     enabled        = $7,
     next_run_at    = $8,
+    last_error     = CASE WHEN $9::bool THEN NULL ELSE last_error END,
+    last_error_at  = CASE WHEN $9::bool THEN NULL ELSE last_error_at END,
     updated_at     = NOW()
 WHERE id = $1
-RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at
+RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at
 `
 
 type UpdateScheduledJobParams struct {
@@ -1329,9 +1550,27 @@ type UpdateScheduledJobParams struct {
 	OverlapPolicy string             `json:"overlap_policy"`
 	Enabled       bool               `json:"enabled"`
 	NextRunAt     pgtype.Timestamptz `json:"next_run_at"`
+	ClearFailure  bool               `json:"clear_failure"`
 }
 
-// UpdateScheduledJob
+// handlePatchScheduledJob's write. It rewrites every mutable column, which is
+// where the "PUT handler" impression comes from; the HANDLER is a genuine PATCH
+// (patchScheduledJobRequest is all pointers, an omitted key means leave alone)
+// and builds every value in Go before calling this.
+//
+// clear_failure IS A BOOLEAN ARGUMENT, NOT A READ-MODIFY-WRITE, and that is the
+// whole design. The handler reads the row through ownedScheduledJob WITHOUT a
+// lock. Reading last_error into Go and writing it back would let a PATCH carry a
+// stale error forward over a failure a tick recorded in between; expressing it
+// as a CASE means the row's own value is never round-tripped through the
+// application and there is no window.
+//
+// The handler sets it from `req.JobSpec != nil || req.CronExpr != nil ||
+// req.Timezone != nil` - exactly the three inputs the three recorded failure
+// classes are about, all of which the handler has already validated before
+// reaching here. A PATCH of `name`, `overlap_policy` or `enabled` PRESERVES the
+// record: renaming a schedule must not erase the only signal that it is broken,
+// and on an @monthly schedule nothing would rewrite it for a month.
 //
 //	UPDATE scheduled_jobs
 //	SET name           = $2,
@@ -1341,9 +1580,11 @@ type UpdateScheduledJobParams struct {
 //	    overlap_policy = $6,
 //	    enabled        = $7,
 //	    next_run_at    = $8,
+//	    last_error     = CASE WHEN $9::bool THEN NULL ELSE last_error END,
+//	    last_error_at  = CASE WHEN $9::bool THEN NULL ELSE last_error_at END,
 //	    updated_at     = NOW()
 //	WHERE id = $1
-//	RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at
+//	RETURNING id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at
 func (q *Queries) UpdateScheduledJob(ctx context.Context, arg UpdateScheduledJobParams) (ScheduledJob, error) {
 	row := q.db.QueryRow(ctx, updateScheduledJob,
 		arg.ID,
@@ -1354,6 +1595,7 @@ func (q *Queries) UpdateScheduledJob(ctx context.Context, arg UpdateScheduledJob
 		arg.OverlapPolicy,
 		arg.Enabled,
 		arg.NextRunAt,
+		arg.ClearFailure,
 	)
 	var i ScheduledJob
 	err := row.Scan(
@@ -1370,6 +1612,8 @@ func (q *Queries) UpdateScheduledJob(ctx context.Context, arg UpdateScheduledJob
 		&i.LastJobID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }
