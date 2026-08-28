@@ -81,6 +81,26 @@ what one slice used instead, and it is NOT equivalent: it re-runs tests under th
 and cannot observe an unsynchronised access that never happens to interleave badly. It raises
 confidence in flakiness, not in race-freedom. State plainly that `-race` did not run.
 
+### Line endings: this is a CRLF repo and the tooling normalizes inconsistently
+
+The `make generate` note under `internal/store/` below is the best-known instance, **but this is not
+a `make generate` problem.** It bites any programmatic edit to a tracked text file, and the two
+commands you would use to check disagree by design.
+
+- **`git diff` and `git status` do not agree.** `core.autocrlf=true` makes `git diff` normalize LF
+  churn away while `git status` still lists the files as modified. On 2026-08-28 a `make generate`
+  step produced identical file lists at two stages, which reads as "nothing to revert" - and 13
+  generated files were modified. **Never conclude "nothing to revert" from `git diff` alone.**
+- **A programmatic rewrite can silently reclassify a file as binary.** The same day, a
+  `.replace('\n','\r\n')` applied to a string whose anchor line already ended `\r\n` produced
+  `\r\r\n`; git's lone-CR heuristic marked `README.md` binary, `autocrlf` stopped normalizing it, and
+  a two-line change committed as **1845 insertions**. It was caught from the diffstat, not by any
+  gate.
+- **After ANY programmatic edit to a tracked text file**, before committing: check the diffstat
+  against the size of the change you intended, and run `git ls-files --eol` on the touched paths -
+  every one should read `i/lf`. `gofmt -l` is useless as a signal here; it lists ~349 files under
+  `internal/` on a clean tree purely because of working-copy CRLF.
+
 ## Architecture
 
 Three binaries: **`relay-server`** (HTTP `:8080` + gRPC `:9090` + scheduler), **`relay-agent`** (worker; gRPC stream to server; runs tasks as subprocesses), **`relay`** (CLI client). Full architecture, env vars, REST API, and CLI reference live in [README.md](README.md).
