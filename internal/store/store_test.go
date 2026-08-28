@@ -1254,10 +1254,21 @@ func TestUpdateTaskStatus_AssigneeGuarded(t *testing.T) {
 }
 
 // IncrementTaskRetryCount burns one retry on a task whose CURRENT generation
-// just failed, and returns it to the queue. Three predicates guard it - epoch
-// (currency), worker_id (identity) and status (terminality) - and every case
-// below names the one that rejects it, because a case that could be rejected by
-// two predicates isolates neither.
+// just failed, and returns it to the queue. FOUR predicates guard it - epoch
+// (currency), worker_id (identity), status (terminality) and retry_count
+// (budget) - and every case below names the one that rejects it, because a case
+// that could be rejected by two predicates isolates neither.
+//
+// THE BUDGET PREDICATE IS NOT ISOLATED BY ANY CASE IN THIS TEST, deliberately.
+// Every task here is created with Retries: 1, and every case except case 5 calls
+// at retry_count = 0 - so the budget predicate PASSES throughout those and each
+// still isolates the predicate it names. (Case 5 is the exception and is not an
+// isolating case at all; its own comment says so and now names the budget as a
+// third independent rejector.) The budget predicate's own cases live in
+// TestIncrementTaskRetryCount_BudgetPredicate_AnExhaustedTaskMovesZeroRows
+// (increment_task_retry_count_budget_integration_test.go). Keep the Retries: 1:
+// dropping it to 0 would let the budget predicate reject every case here and
+// silently make the whole test vacuous.
 //
 // Cases 2 and 3 land first and alone: they are the only two that compile
 // against the pre-change single-argument signature, which is what makes their
@@ -1320,11 +1331,13 @@ func TestIncrementTaskRetryCount_StatusEpochAndAssigneeGuarded(t *testing.T) {
 	// lock and the second re-evaluates its WHERE against the already-updated row
 	// - with no goroutines and no sleeps.
 	//
-	// Read this case honestly: it does NOT isolate one predicate. The first retry
-	// both bumped the epoch and NULLed worker_id, so epoch and worker each reject
-	// it independently, and it goes red only if BOTH are removed (matrix row M6).
-	// That is the same defense-in-depth shape as the two .Valid checks in
-	// handleTaskStatus's Go gate. Do not read it as an epoch test.
+	// Read this case honestly: it does NOT isolate one predicate, and it now
+	// isolates even less than it used to. The first retry bumped the epoch, NULLed
+	// worker_id AND spent the task's only retry, so epoch, worker and BUDGET each
+	// reject it independently: it goes red only if all THREE are removed (matrix
+	// row M6 covered the first two). That is the same defense-in-depth shape as
+	// the two .Valid checks in handleTaskStatus's Go gate. Do not read it as an
+	// epoch test.
 	_, err = q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
 		ID: live.ID, AssignmentEpoch: live.AssignmentEpoch, WorkerID: live.WorkerID,
 	})

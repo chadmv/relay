@@ -1460,6 +1460,34 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// UpdateTaskStatus call site. If a cancel or a requeue landed in between, or
 	// the task is already finished, the statement affects zero rows and the
 	// retry is dropped.
+	//
+	// THE BUDGET TERM HAS A SECOND JOB SINCE THE SQL PREDICATE LANDED, and it is
+	// not the one the statement duplicates. IncrementTaskRetryCount now carries
+	// `AND retry_count < retries` too, so deleting `task.RetryCount <
+	// task.Retries` does NOT let an exhausted task burn another retry - the
+	// statement refuses it. What it does is send every budget-exhausted terminal
+	// report INTO this branch, where the refusal arrives as pgx.ErrNoRows and the
+	// branch RETURNS, before UpdateTaskStatus. The task is then never marked
+	// failed, never stamped finished_at, never cascaded through
+	// FailDependentTasks and never recomputed; it sits there until the
+	// coordinator watchdog stamps `timed_out` at RELAY_TASK_MAX_ASSIGNMENT (24h
+	// default). Because `retries` defaults to 0, that is EVERY ordinary failing
+	// task in the system.
+	//
+	// And the COUNT would be wrong as well as the state.
+	// classifyStatusFenceRejection returns fenceReasonRaced for any row that was
+	// still writable at T0, and a budget-exhausted task is `running` - so each of
+	// those refusals would land on raced_total, whose published meaning
+	// (internal/api/server_counters.go) is "a concurrent writer ended the
+	// generation inside this handler's own read-to-write window" and which is
+	// documented as a FLOOR on concurrent-writer activity. A budget exhaustion is
+	// none of those things. Keeping this term is what makes that unreachable,
+	// because the statement is never called at all.
+	//
+	// Pinned by
+	// TestHandleTaskStatus_AnExhaustedBudgetStillEndsTheTaskAndCountsNoFenceRejection
+	// (handler_retry_budget_integration_test.go), whose fence-counter assertion is
+	// the only thing in the tree that discriminates this second job.
 	if terminal && task.RetryCount < task.Retries {
 		if _, err := h.q.IncrementTaskRetryCount(ctx, store.IncrementTaskRetryCountParams{
 			ID:              taskID,

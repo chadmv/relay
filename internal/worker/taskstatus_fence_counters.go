@@ -75,7 +75,7 @@ const (
 // refuted before slice 4 shipped.) The total is Raced+Duplicate+Conflicting;
 // derive it, do not publish it.
 //
-// A FINER SPLIT - WHICH OF THE THREE SQL PREDICATES ACTUALLY FIRED - IS
+// A FINER SPLIT - WHICH SQL PREDICATE ACTUALLY FIRED - IS
 // DECLINED, WITH THE PRICE, NOT IMPOSSIBLE. Both statements are single-row
 // UPDATE ... WHERE forms that return no row on any predicate failure, so there
 // is nothing to carry a reason. Recovering it needs a second round trip
