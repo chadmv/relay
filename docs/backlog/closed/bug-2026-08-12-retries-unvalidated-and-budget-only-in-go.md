@@ -1,9 +1,11 @@
 ---
 title: "`retries` is unvalidated end to end, and the retry budget is enforced only in Go"
 type: bug
-status: open
+status: closed
 created: 2026-08-12
-updated: 2026-08-20
+updated: 2026-08-28
+closed: 2026-08-28
+resolution: fixed
 priority: medium
 source: Phase 4 review of the retry-resurrect status-guard iteration (2026-08-12)
 ---
@@ -230,3 +232,58 @@ the longest legitimate task. Seven days is a defensible starting point and is co
 the absolute cap is simply swept by the other arm, so the cap here is about rejecting nonsense at
 submission, not about making the two knobs agree. Say that explicitly in the error message or the
 next reader will try to couple them.
+
+## Resolution
+
+Both halves shipped, on branch `claude/retries-unvalidated-budget-go-34419f` (spec `fbc87e7`, plan
+`284075e`, implementation and two fix rounds through `d82d2d1`).
+
+**A.** `jobspec.Validate` now bounds `Retries` to `[0, 10]` and `TimeoutSeconds` to `[0, 604800]`,
+rejecting negatives on both; nil and `0` remain the two accepted spellings of "no deadline". Both
+constants carry their arguments as doc comments, including why the retries cap is deliberately low
+(there is no backoff on the retry path, so a large N buys a faster burn rather than more waiting) and
+why the timeout cap sits deliberately ABOVE `RELAY_TASK_MAX_ASSIGNMENT`'s 24h default so the two are
+not read as coupled.
+
+**B.** `IncrementTaskRetryCount` gained `AND retry_count < retries` as a fourth predicate, **and the
+Go gate in `handleTaskStatus` was kept byte-for-byte.** The item proposed the predicate as an
+alternative to the Go gate, on the grounds that "the existing `pgx.ErrNoRows` silent-drop branch
+already handles the rejection correctly with no restructuring". **That is false and following it
+would have been a severe regression:** the retry branch ends in an unconditional `return`, so a
+budget-exhausted task entering it would get `ErrNoRows` and return before `UpdateTaskStatus` - no
+`failed`, no `finished_at`, no dependent cascade, no job recompute, no SSE - and since `retries`
+defaults to 0 that is every failing task in the system. It would also have mis-counted: a
+budget-exhausted task is `running`, so `classifyStatusFenceRejection` would label the rejection
+`raced`, inflating a counter documented as a near-zero floor on concurrent-writer activity.
+
+**The item's open question about `POST /v1/jobs/{id}/retry` was already settled.** That endpoint
+shipped after this item was filed; `RetryJobTasks` sets `retry_count = 0` and names the Go gate as its
+reason, so the two remain independent and the predicate constrains nothing. The acceptance bullet
+asking to record a constraint on `feature-2026-06-26-web-enabler-backend-endpoints` is retired.
+
+**The DB `CHECK` constraint the item suggested was declined deliberately** - migrations run on
+startup, so `ADD CONSTRAINT` refuses to boot the binary on exactly the population that has the bug,
+and `NOT VALID` converts that loud failure into a silently stuck task. Filed as
+[[idea-2026-08-28-db-check-constraint-on-retries-and-timeout-seconds]] with the pre-existing-row
+decision as its subject. A caller-side AST guard stands in for it.
+
+**One defect was found in the fix's own blast radius and closed in the same branch.** Bounding a
+stored value made `jobspec.Validate` retroactive over `scheduled_jobs` rows, and
+`handleRunScheduledJobNow` mapped every `CreateJobFromSpec` failure to `500 "create job failed"` -
+discarding the per-task message on the only interactive path that can explain why a schedule stopped
+firing, and, because `ErrorIsTransient` reads 5xx as transient, telling a polling caller to retry a
+permanently broken schedule forever. Now a 400 with the message. The retroactivity itself is shipped
+as a documented hazard, pinned by a test and an upgrade note, per the gate decision to ship this item
+without its paired sibling.
+
+Verification: `/code-review` plus four parallel lenses, two fix rounds, and a re-verify scoped to the
+fix rounds' own diffs. Gates at final HEAD: 22 packages green untagged, `go vet` and
+`go vet -tags integration` clean, `-race` green in the Linux container (zero races), and every
+integration lane green - `internal/store` 102/102, `internal/worker`+`schedrunner`+`jobspec` 225/225,
+`internal/cli` 186/186, `internal/api` 329/329, with no container leaks.
+
+Residual, stated rather than implied: this **bounds** the multiplier, it does not retire the item's
+"one small request produces unbounded work" framing. `Tasks` and `Commands` remain unbounded and
+`POST /v1/jobs` is unrated-limited - filed as
+[[bug-2026-08-28-task-and-command-counts-are-unbounded-multipliers]]. Pre-deploy `tasks` rows with
+`retries > 10` are untouched by design; no migration clamps them.
