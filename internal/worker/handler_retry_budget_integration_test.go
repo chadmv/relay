@@ -109,3 +109,79 @@ func TestHandleTaskStatus_AnExhaustedBudgetStillEndsTheTaskAndCountsNoFenceRejec
 			"GET /v1/server/counters publishes as a FLOOR on concurrent-writer activity - a signal whose "+
 			"entire value is that it sits near zero, driven steadily by every failing task in the fleet.")
 }
+
+// TestHandleTaskStatus_ATaskRetriesExactlyItsBudgetThenGoesTerminalAndCascades is
+// the backlog item's own positive control, in its own wording: "a task with a
+// normal budget still retries exactly as many times as configured and then goes
+// terminal."
+//
+// IT IS THE OFF-BY-ONE TEST. The `< / <=` boundary in the Go gate is the one
+// place where a plausible edit changes how many times work is repeated in
+// production, and this is what pins it: retries = 2 must produce exactly TWO
+// retries and a third failure that ends the task, not three retries and a fourth.
+//
+// The dependent and the job status are asserted because the retry branch's
+// `return` skips ALL of them: FailDependentTasks, RecomputeJobStatus,
+// NotifyTaskCompleted and the SSE publish are downstream of UpdateTaskStatus, so
+// "the row says failed" understates what a gate defect actually costs. A
+// dependent left `pending` behind a `failed` dependency is unreachable forever -
+// GetEligibleTasks will not dispatch a task whose dependency is not `done`.
+func TestHandleTaskStatus_ATaskRetriesExactlyItsBudgetThenGoesTerminalAndCascades(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	jobID, taskAID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "budget-loop", 2)
+	taskB, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: jobID, Name: "t-b", Commands: []byte(`[["true"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.CreateTaskDependency(ctx, store.CreateTaskDependencyParams{
+		TaskID: taskB.ID, DependsOnTaskID: taskAID,
+	}))
+
+	// RETRY 1 of 2.
+	first := claimRunAndFail(t, ctx, q, h, taskAID, w1)
+	assert.Equal(t, "pending", first.Status, "retry 1 must requeue the task")
+	assert.Equal(t, int32(1), first.RetryCount)
+	assert.Equal(t, int32(2), first.AssignmentEpoch)
+
+	// RETRY 2 of 2.
+	second := claimRunAndFail(t, ctx, q, h, taskAID, w1)
+	assert.Equal(t, "pending", second.Status, "retry 2 must requeue the task")
+	assert.Equal(t, int32(2), second.RetryCount)
+	assert.Equal(t, int32(4), second.AssignmentEpoch)
+
+	dependentBefore, err := q.GetTask(ctx, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", dependentBefore.Status,
+		"fixture: the dependent must still be pending, or the cascade assertion below proves nothing")
+
+	// THE THIRD FAILURE. The budget is spent; this one must END the task.
+	final := claimRunAndFail(t, ctx, q, h, taskAID, w1)
+	assert.Equal(t, "failed", final.Status,
+		"exactly as many retries as configured, THEN terminal - not one more")
+	assert.Equal(t, int32(2), final.RetryCount,
+		"retry_count must stop at retries. A `<=` on either side of this budget check gives a third "+
+			"retry, which is one extra full execution of the task's commands on real hardware.")
+	assert.True(t, final.FinishedAt.Valid, "the terminal transition must stamp finished_at")
+	assert.Equal(t, int32(5), final.AssignmentEpoch,
+		"claim/retry twice then claim once more is 1->2->3->4->5, and the terminal transition adds none")
+
+	dependent, err := q.GetTask(ctx, taskB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", dependent.Status,
+		"FailDependentTasks runs AFTER UpdateTaskStatus, so a retry branch that swallows the terminal "+
+			"report leaves this pending behind a failed dependency - unreachable forever, because "+
+			"GetEligibleTasks will not dispatch a task whose dependency is not done")
+
+	job, err := q.GetJob(ctx, jobID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", job.Status,
+		"and the job must reach a terminal status: RecomputeJobStatus is downstream of the same write")
+
+	assert.Equal(t, worker.TaskStatusFenceCounts{}, h.TaskStatusFenceRejections(),
+		"three generations, every one of them a legitimate report from the task's own assignee at the "+
+			"current epoch: not one of them may be counted as a fence rejection")
+}
