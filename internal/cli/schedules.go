@@ -257,11 +257,22 @@ func doSchedulesUpdate(ctx context.Context, c *relayclient.Client, args []string
 	enable := fs.Bool("enable", false, "enable the schedule")
 	disable := fs.Bool("disable", false, "disable the schedule")
 	overlap := fs.String("overlap", "", "new overlap policy: skip|allow")
+	// --spec is THE REMEDY for a schedule whose stored job_spec no longer
+	// validates, which is what `relay schedules list`'s FAILING marker and
+	// `relay schedules show`'s Last error line point an operator at. Before it,
+	// the only routes were the Python SDK and curl: the SPA's Job spec panel is
+	// read-only and this command had no spec flag, so relay advertised a failure
+	// whose fix relay could not perform.
+	//
+	// SYNTAX ONLY, mirroring doSchedulesCreate: this unmarshals to confirm the
+	// file PARSES and sends the object. The server is the validator of record and
+	// its 400 renders verbatim.
+	specFile := fs.String("spec", "", "path to a replacement job spec JSON file")
 	if err := fs.Parse(reorderArgs(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: relay schedules update <id> [--cron EXPR] [--tz ZONE] [--enable|--disable] [--overlap ...]")
+		return fmt.Errorf("usage: relay schedules update <id> [--cron EXPR] [--tz ZONE] [--spec FILE] [--enable|--disable] [--overlap skip|allow]")
 	}
 	id := fs.Arg(0)
 
@@ -274,6 +285,17 @@ func doSchedulesUpdate(ctx context.Context, c *relayclient.Client, args []string
 	}
 	if *overlap != "" {
 		body["overlap_policy"] = *overlap
+	}
+	if *specFile != "" {
+		data, err := os.ReadFile(*specFile)
+		if err != nil {
+			return fmt.Errorf("read spec file: %w", err)
+		}
+		var spec map[string]any
+		if err := json.Unmarshal(data, &spec); err != nil {
+			return fmt.Errorf("invalid spec JSON: %w", err)
+		}
+		body["job_spec"] = spec
 	}
 	if *enable {
 		body["enabled"] = true

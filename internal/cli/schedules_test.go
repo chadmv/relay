@@ -375,3 +375,114 @@ func TestSchedulesList_AnEmptyLastErrorStringIsNotAFailure(t *testing.T) {
 	require.NotContains(t, buf.String(), "FAILING")
 	require.Contains(t, buf.String(), "OK")
 }
+
+// It mirrors doSchedulesCreate's read-parse-send exactly: read the file,
+// json.Unmarshal into map[string]any to confirm it PARSES, put the object on the
+// body. THE SERVER REMAINS THE VALIDATOR OF RECORD - the CLI checks syntax,
+// never semantics - so the bound the operator tripped is reported by the one
+// place that owns it, and its 400 renders verbatim.
+func TestSchedulesUpdate_SpecFlagSendsTheJobSpec(t *testing.T) {
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "PATCH", r.Method)
+		require.Equal(t, "/v1/scheduled-jobs/abc", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"abc","name":"nightly","cron_expr":"@hourly","timezone":"UTC","enabled":true,"next_run_at":"2099-01-01T00:00:00Z"}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "spec.json")
+	require.NoError(t, os.WriteFile(specPath,
+		[]byte(`{"name":"repaired","tasks":[{"name":"t","command":["echo","hi"],"retries":3}]}`), 0600))
+
+	var buf bytes.Buffer
+	require.NoError(t, doSchedules(context.Background(), cfg,
+		[]string{"update", "abc", "--spec", specPath}, &buf))
+
+	spec, ok := receivedBody["job_spec"].(map[string]any)
+	require.True(t, ok, "the PATCH body must carry job_spec as an object, got %#v", receivedBody["job_spec"])
+	require.Equal(t, "repaired", spec["name"])
+
+	// NOTHING ELSE MAY RIDE ALONG. Sending cron_expr or timezone the user did not
+	// supply recomputes next_run_at server-side, pushing the next fire out by up
+	// to a full period on a schedule the operator is trying to REPAIR, not
+	// reschedule. patchScheduledJobRequest is all pointers, so an omitted key
+	// means leave alone - which is only true if the CLI actually omits it.
+	require.NotContains(t, receivedBody, "cron_expr")
+	require.NotContains(t, receivedBody, "timezone")
+	require.NotContains(t, receivedBody, "enabled")
+	require.NotContains(t, receivedBody, "overlap_policy")
+}
+
+// SYNTAX ONLY, AND THE REFUSAL COMES BEFORE ANY REQUEST. That is why this test
+// belongs in the default lane by definition: no server is involved in the
+// outcome.
+func TestSchedulesUpdate_SpecFlagRefusesUnparseableJSONWithoutCallingTheServer(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "spec.json")
+	require.NoError(t, os.WriteFile(specPath, []byte(`{"name": `), 0600))
+
+	err := doSchedules(context.Background(), cfg,
+		[]string{"update", "abc", "--spec", specPath}, io.Discard)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid spec JSON")
+	require.False(t, called, "an unparseable spec must be refused before any request is made")
+}
+
+func TestSchedulesUpdate_SpecFlagReportsAMissingFile(t *testing.T) {
+	cfg := &Config{ServerURL: "http://127.0.0.1:1", Token: "tkn"}
+	err := doSchedules(context.Background(), cfg,
+		[]string{"update", "abc", "--spec", filepath.Join(t.TempDir(), "nope.json")}, io.Discard)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read spec file")
+}
+
+// --spec COMBINES with the existing flags rather than replacing them, so an
+// operator can repair the spec and re-enable in one call.
+func TestSchedulesUpdate_SpecFlagCombinesWithEnable(t *testing.T) {
+	var receivedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"abc","name":"nightly","cron_expr":"@hourly","timezone":"UTC","enabled":true,"next_run_at":"2099-01-01T00:00:00Z"}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "spec.json")
+	require.NoError(t, os.WriteFile(specPath,
+		[]byte(`{"name":"repaired","tasks":[{"name":"t","command":["echo","hi"]}]}`), 0600))
+
+	require.NoError(t, doSchedules(context.Background(), cfg,
+		[]string{"update", "abc", "--spec", specPath, "--enable"}, io.Discard))
+
+	require.Contains(t, receivedBody, "job_spec")
+	require.Equal(t, true, receivedBody["enabled"])
+}
+
+// THE ADVERTISEMENT, PINNED. README names `relay schedules update <id> --spec
+// FILE` in two places and `relay schedules show` prints a remedy that assumes
+// this command can repair a spec. "The remedy is named" and "the remedy exists"
+// are different properties, and the second is the one an operator finds out
+// about at the worst moment. This asserts the spelling the docs promise, in the
+// default lane, so a rename of the flag reddens the same commit that breaks the
+// prose rather than being discovered by a human reading it.
+func TestSchedulesUpdate_UsageNamesTheSpecFlag(t *testing.T) {
+	cfg := &Config{ServerURL: "http://127.0.0.1:1", Token: "tkn"}
+	err := doSchedules(context.Background(), cfg, []string{"update"}, io.Discard)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--spec FILE",
+		"README tells an operator to run `relay schedules update <id> --spec FILE`; the usage "+
+			"string is the CLI's own statement of that spelling")
+}
