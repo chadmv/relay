@@ -1081,7 +1081,9 @@ relay schedules list --sort name           # alphabetical
 relay schedules list --sort next_run_at    # next-to-fire first
 ```
 
-Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time).
+Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time), `STATE`.
+
+`STATE` is `OK`, or `FAILING` when the scheduler last failed to produce a job from the schedule's stored spec. It is a separate axis from `ENABLED`: a failing schedule is still enabled, because relay does not disable one on its own. Run `relay schedules show <id>` for the reason.
 
 ---
 
@@ -1118,6 +1120,8 @@ Print details for a single schedule.
 relay schedules show <schedule-id>
 ```
 
+Prints the id, name, cron expression, timezone, enabled flag, next run and last run. When the schedule's last fire failed it also prints `Last error`, when it failed, and the `run-now` command that re-checks it. The error text is derived from the stored `job_spec` and is operator-supplied, and the label says so; it is truncated to 1 KB, so use `run-now` for the full message.
+
 ---
 
 #### `relay schedules update`
@@ -1128,12 +1132,14 @@ Modify a schedule in place. Only supplied flags are changed.
 relay schedules update <schedule-id> --cron "0 4 * * *"
 relay schedules update <schedule-id> --disable
 relay schedules update <schedule-id> --enable --tz UTC
+relay schedules update <schedule-id> --spec repaired-job.json
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--cron EXPR` | New cron expression |
 | `--tz ZONE` | New IANA timezone |
+| `--spec FILE` | Replace the stored job spec with the contents of FILE (same format as `relay schedules create --spec`). The server validates it and reports any problem verbatim. This is the repair for a schedule whose `STATE` reads `FAILING`. |
 | `--overlap skip\|allow` | New overlap policy |
 | `--enable` | Re-enable a disabled schedule |
 | `--disable` | Pause the schedule without deleting it |
