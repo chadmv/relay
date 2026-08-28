@@ -287,3 +287,91 @@ func TestSchedulesShow_TheFailureTextCannotForgeLinesOrEmitEscapes(t *testing.T)
 	require.Contains(t, out, "bad")
 	require.Contains(t, out, "done")
 }
+
+// A SEVENTH COLUMN, NOT A MARKER APPENDED TO THE NEXT CELL. The spec left the
+// choice to the planner; a separate column is taken because NEXT is a timestamp
+// that internal/cli/schedules_integration_test.go matches with a regex, and
+// appending prose to it would make one cell mean two things. tabwriter has no
+// layout budget to blow, unlike the SPA's nine-column grid, so the argument that
+// forced a chip there does not apply here.
+//
+// It must be TEXT and it must be visible WITHOUT --json: the whole point is that
+// an operator scanning the list sees WHICH schedule to suspect. run-now already
+// explains one you have already picked out.
+func TestSchedulesList_StateColumnDistinguishesAFailingSchedule(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// HAND-WRITTEN, not marshalled through relayclient.PageEnvelope[scheduleResp].
+		_, _ = io.WriteString(w, `{"items":[
+			{"id":"s1","name":"broken","cron_expr":"@hourly","timezone":"UTC","enabled":true,
+			 "next_run_at":"2099-01-01T00:00:00Z",
+			 "last_error":"task t: retries must be between 0 and 10",
+			 "last_error_at":"2026-08-28T12:00:00Z"},
+			{"id":"s2","name":"fine","cron_expr":"@hourly","timezone":"UTC","enabled":true,
+			 "next_run_at":"2099-01-01T00:00:00Z"}
+		],"next_cursor":"","total":2}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	var buf bytes.Buffer
+	require.NoError(t, doSchedules(context.Background(), cfg, []string{"list"}, &buf))
+	out := buf.String()
+
+	require.Contains(t, out, "STATE", "the header must name the new column")
+	require.Contains(t, out, "FAILING")
+
+	// A COLUMN, NOT A SUFFIX ON NEXT. Asserted on the header rather than on a row
+	// because the row's own cells cannot be split reliably (NEXT renders as
+	// "2099-01-01 00:00", which contains a space). If STATE were appended to the
+	// NEXT cell the header would still read "... NEXT" and this goes red.
+	var header string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "CRON") {
+			header = l
+		}
+	}
+	require.NotEmpty(t, header)
+	fields := strings.Fields(header)
+	require.Equal(t, []string{"ID", "NAME", "CRON", "TZ", "ENABLED", "NEXT", "STATE"}, fields,
+		"STATE is its own trailing column; NEXT must keep meaning exactly one thing")
+
+	// PER-ROW, NOT PER-TABLE. Without this the two assertions above would pass on
+	// an implementation that marked every row.
+	var brokenLine, fineLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "broken") {
+			brokenLine = l
+		}
+		if strings.Contains(l, "fine") {
+			fineLine = l
+		}
+	}
+	require.NotEmpty(t, brokenLine)
+	require.NotEmpty(t, fineLine)
+	require.Contains(t, brokenLine, "FAILING")
+	require.NotContains(t, fineLine, "FAILING",
+		"a healthy row must not be marked, or the marker tells an operator nothing")
+	require.Contains(t, fineLine, "OK")
+}
+
+// THE EMPTY-STRING ROW, on the DISCOVERY surface. list and show must partition
+// absent/empty/present identically or an operator gets a FAILING row whose show
+// output says nothing is wrong. Both read scheduleResp.hasFailure for exactly
+// this reason; this test is what makes that shared read load-bearing.
+func TestSchedulesList_AnEmptyLastErrorStringIsNotAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[
+			{"id":"s3","name":"blank","cron_expr":"@hourly","timezone":"UTC","enabled":true,
+			 "next_run_at":"2099-01-01T00:00:00Z","last_error":"","last_error_at":"2026-08-28T12:00:00Z"}
+		],"next_cursor":"","total":1}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	var buf bytes.Buffer
+	require.NoError(t, doSchedules(context.Background(), cfg, []string{"list"}, &buf))
+	require.NotContains(t, buf.String(), "FAILING")
+	require.Contains(t, buf.String(), "OK")
+}

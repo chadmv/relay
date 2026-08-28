@@ -143,13 +143,32 @@ func doSchedulesList(ctx context.Context, c *relayclient.Client, args []string, 
 	}
 	fmt.Fprintf(w, "Total: %d\n", total)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tCRON\tTZ\tENABLED\tNEXT")
+	fmt.Fprintln(tw, "ID\tNAME\tCRON\tTZ\tENABLED\tNEXT\tSTATE")
 	for _, s := range schedules {
 		next := ""
 		if s.NextRunAt != nil {
 			next = s.NextRunAt.Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\n", s.ID, s.Name, s.CronExpr, s.Timezone, s.Enabled, next)
+		// STATE IS A SEPARATE AXIS FROM ENABLED. A schedule that has stopped
+		// producing jobs is still enabled - relay does not auto-disable one - so
+		// ENABLED keeps telling the truth about the operator's own setting and
+		// this column says whether the scheduler can actually use the schedule.
+		//
+		// PUTTING IT IN THE LIST IS THE POINT. run-now already explains a
+		// schedule you SUSPECT; what was missing was any way to see which one to
+		// suspect without suspecting anything first.
+		//
+		// ITS OWN COLUMN rather than a marker appended to NEXT: NEXT is a
+		// timestamp that schedules_integration_test.go matches with a regex, and
+		// appending prose would make one cell mean two things. tabwriter has no
+		// width budget to blow, so the argument that forced a chip rather than a
+		// tenth column in the SPA does not apply here.
+		state := "OK"
+		if s.hasFailure() {
+			state = "FAILING"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n",
+			s.ID, s.Name, s.CronExpr, s.Timezone, s.Enabled, next, state)
 	}
 	return tw.Flush()
 }
