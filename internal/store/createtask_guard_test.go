@@ -44,6 +44,12 @@ import (
 // the .sql that sqlc compiles makes the guard notice the statement itself, not
 // just a spelling somebody remembered.
 //
+// The derivation moved that hazard one layer down rather than removing it: the
+// SQL pattern is itself a spelling, and `INSERT INTO public.tasks` and
+// `INSERT INTO "tasks"` are both accepted by sqlc while reading as neither.
+// insertIntoTasksRe now accepts every such form, and
+// TestInsertIntoTasksRe_MatchesEverySpellingSqlcAccepts holds it there.
+//
 // Known weakness, accepted, and identical to the weakness on
 // TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath: a rename defeats it,
 // and an identifier reached reflectively through a string literal is invisible to
@@ -133,6 +139,67 @@ func TestScanForIdentReferences_FindsAPlantedCreateTaskCallAndHonoursTheAllowLis
 	}
 }
 
+// TestInsertIntoTasksRe_MatchesEverySpellingSqlcAccepts is the PERMANENT
+// discriminating input for insertIntoTasksRe.
+//
+// The derived identifier list closed the "a spelling somebody remembered" hole
+// on the Go side and re-opened it one layer down, in SQL. A pattern anchored on
+// the bare word `tasks` is itself a spelling: sqlc.yaml runs `engine:
+// postgresql` and `tasks` lives in `public`, so `INSERT INTO public.tasks` and
+// `INSERT INTO "tasks"` are both accepted by sqlc, generate a method, and used
+// to slip past this guard with zero coverage - exactly the failure the
+// derivation was added to prevent.
+//
+// Note the asymmetry this pins, because only half of it was ever broken.
+// RENAMING AN EXISTING statement's target already failed closed: the
+// slices.Equal cross-check in TestCreateTaskHasNoCallerOutsideJobcreate turns a
+// dropped name into a loud RED. Only ADDITIONS evaded. Both directions are
+// asserted below so neither half can regress into the other.
+func TestInsertIntoTasksRe_MatchesEverySpellingSqlcAccepts(t *testing.T) {
+	match := []struct{ name, sql string }{
+		{"bare", "INSERT INTO tasks (job_id) VALUES ($1)"},
+		{"schema qualified", "INSERT INTO public.tasks (job_id) VALUES ($1)"},
+		{"quoted table", `INSERT INTO "tasks" (job_id) VALUES ($1)`},
+		{"quoted schema and table", `INSERT INTO "public"."tasks" (job_id) VALUES ($1)`},
+		{"dot spaced", "INSERT INTO public . tasks (job_id) VALUES ($1)"},
+		{"newline wrapped", "INSERT INTO\n    tasks\n    (job_id) VALUES ($1)"},
+		{"lowercase keywords", "insert into public.tasks (job_id) values ($1)"},
+		{"no space before paren", "INSERT INTO tasks(job_id) VALUES ($1)"},
+	}
+	for _, tc := range match {
+		if !insertIntoTasksRe.MatchString(tc.sql) {
+			t.Errorf("%s: %q did not match, so a statement spelled this way would get a generated "+
+				"method with zero coverage and silently falsify the \"exactly one caller\" claim in "+
+				"TestCreateTaskHasNoCallerOutsideJobcreate's header", tc.name, tc.sql)
+		}
+	}
+
+	// The neighbours. These tables share the prefix and have their own INSERTs in
+	// internal/store/query/tasks.sql; matching one would put an unrelated
+	// statement under a bound that does not apply to it.
+	noMatch := []struct{ name, sql string }{
+		{"task_logs", "INSERT INTO task_logs (task_id, stream, content)"},
+		{"task_dependencies", "INSERT INTO task_dependencies (task_id, depends_on_task_id)"},
+		{"task_reservations", "INSERT INTO task_reservations (task_id)"},
+		{"tasks_archive", "INSERT INTO tasks_archive (job_id)"},
+		{"qualified tasks_archive", "INSERT INTO public.tasks_archive (job_id)"},
+		{"quoted tasks_archive", `INSERT INTO "tasks_archive" (job_id)`},
+		{"other table entirely", "INSERT INTO jobs (name) VALUES ($1)"},
+	}
+	for _, tc := range noMatch {
+		if insertIntoTasksRe.MatchString(tc.sql) {
+			t.Errorf("%s: %q matched, but it does not insert a tasks row", tc.name, tc.sql)
+		}
+	}
+}
+
+// insertIntoTasksRe matches an INSERT whose target table is `tasks`.
+//
+// It is a package-level var rather than a local so
+// TestInsertIntoTasksRe_MatchesEverySpellingSqlcAccepts can exercise it
+// directly. Testing a copy of the pattern would prove nothing about the guard.
+var insertIntoTasksRe = regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+(?:"?[a-z_][a-z0-9_]*"?\s*\.\s*)?"?tasks"?\b`)
+
 // insertIntoTasksQueryNames returns, sorted, the names of every sqlc statement
 // under internal/store/query that INSERTs a row into `tasks`.
 //
@@ -142,12 +209,14 @@ func TestScanForIdentReferences_FindsAPlantedCreateTaskCallAndHonoursTheAllowLis
 // Scanning the whole query directory rather than tasks.sql alone is deliberate -
 // nothing forces a tasks INSERT to be filed under that name.
 //
-// The table match is anchored on a word boundary so `task_logs`,
-// `task_dependencies` and `task_reservations` do not read as `tasks`.
+// The table match tolerates an optional schema qualifier and optional double
+// quotes on either identifier, and is anchored on a word boundary so
+// `task_logs`, `task_dependencies`, `task_reservations` and a hypothetical
+// `tasks_archive` do not read as `tasks`. Both halves are pinned by
+// TestInsertIntoTasksRe_MatchesEverySpellingSqlcAccepts.
 func insertIntoTasksQueryNames(t *testing.T, root string) []string {
 	t.Helper()
 	nameRe := regexp.MustCompile(`(?m)^-- name:\s+(\w+)\s`)
-	insertRe := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+tasks\b`)
 
 	dir := filepath.Join(root, "internal", "store", "query")
 	entries, err := os.ReadDir(dir)
@@ -172,7 +241,7 @@ func insertIntoTasksQueryNames(t *testing.T, root string) []string {
 			if i+1 < len(locs) {
 				end = locs[i+1][0]
 			}
-			if insertRe.Match(src[loc[1]:end]) {
+			if insertIntoTasksRe.Match(src[loc[1]:end]) {
 				names = append(names, string(src[loc[2]:loc[3]]))
 			}
 		}
