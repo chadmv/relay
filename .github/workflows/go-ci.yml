@@ -84,9 +84,14 @@ jobs:
       # check) and put both lanes on one 15-minute clock, which makes worse
       # exactly the ambiguity the timeout above is fixing.
       #
-      # ACTION REQUIRED AFTER MERGE: a new job does NOT automatically become a
-      # required status check. Until a human adds "cli integration (real
-      # server)" to the required status checks for main, this job runs on every
-      # PR and can show red without blocking a merge.
+      # This job is ADVISORY, and so is every other job in this repo. Verified
+      # 2026-08-27: `main` carries no branch protection and no rulesets, so no
+      # check anywhere blocks a merge - a red result reports and nothing more.
+      # That is a deliberate choice for a solo repo; the gate is running the
+      # lane locally (`make test-cli-integration`) and not merging red. An
+      # earlier version of this comment told a human to add the check to
+      # branch protection; that was declined on 2026-08-27 in favour of the
+      # local-gate convention. Do not re-add that instruction, and do not
+      # describe any job here as a "merge gate".
       - name: CLI integration lane (real relay-server, real Postgres)
         run: make test-cli-integration

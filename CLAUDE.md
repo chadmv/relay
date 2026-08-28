@@ -29,8 +29,15 @@ make generate
 # Read web/e2e/README.md first - it is the live document for what is and is not covered.
 make test-e2e
 
-# Race detector. CI gates on this (.github/workflows/go-ci.yml, `race + integration-build`),
-# so it is a merge gate, not an optional lane.
+# Race detector. CI runs this (.github/workflows/go-ci.yml, `race + integration-build`).
+# NOTHING ON THIS REPO BLOCKS A MERGE. Verified 2026-08-27: `main` has no branch
+# protection and no rulesets (the protection API returns 404 "Branch not protected";
+# the rulesets API returns []), so every check reports red or green and the merge
+# button works either way, and a direct push to `main` bypasses PRs entirely. This is a
+# deliberate choice for a solo repo, not an oversight - the gate is the convention that
+# you run these locally and do not merge red, which is why the local invocation below
+# matters more here than it would on a protected repo. Do not describe any check as a
+# "merge gate": it was described that way for two months and it was never true.
 make test-race
 
 # ...but on Windows the native lane is unreliable, and the container below is the

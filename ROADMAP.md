@@ -236,9 +236,9 @@ placed in the theme sections below. What remains here are amendments to existing
 refreshes, and merge/split calls - none acted on by this refresh; each ends with the command that
 would perform it.
 
-**Untracked follow-up from this refresh's closure - nothing in `docs/backlog/` covers it:**
+**Resolved during this refresh - recorded here so it is not re-raised:**
 
-- **`cli integration (real server)` is not a required status check.** A new CI *job* does not inherit required-check status; only a new step inside an existing job does. Until it is added to branch protection for `main` it runs on every PR and can go red without blocking a merge - which reproduces, at the workflow level, the exact defect the item it came from describes at the test level. There is a comment saying so in `.github/workflows/go-ci.yml`, and a comment is not a check. It is a repo-settings change rather than code, so it may be better done than filed; file it only if it is not going to be done alongside the merge of [#157](https://github.com/chadmv/relay/pull/157). `/backlog bug cli-integration job is not a required status check -- <summary>`
+- **~~`cli integration (real server)` is not a required status check~~ - decided, no action.** Checking the setting rather than assuming it found something bigger: `main` has **no branch protection and no rulesets at all** (`gh api .../branches/main/protection` returns 404 "Branch not protected"; `.../rulesets` returns `[]`). So it was never one check missing from a list - there is no list, and **no check on this repo has ever blocked a merge**, including `race + integration-build`. Decided 2026-08-27 to keep it that way: this is a solo repo, the checks are run locally, and branch protection's friction (no direct pushes to `main`, rebasing when it moves) is not worth buying here. **The real defect was the documentation**, which asserted the opposite in CLAUDE.md ("so it is a merge gate, not an optional lane") for two months. Fixed in the same sitting, along with a comment in `go-ci.yml` that prescribed the now-declined action.
 
 **Fold into existing items (amendments, not new files):**
 
