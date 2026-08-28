@@ -15,12 +15,15 @@ import (
 // guard, deliberately NOT integration-tagged so it runs in the plain
 // `go test ./...` gate on every change.
 //
-// IncrementTaskRetryCount (query/tasks.sql) is the AGENT-DRIVEN retry. Its three
-// predicates - assignment_epoch, worker_id, and
-// status IN ('pending','dispatched','running') - are the exact inverse of an
-// operator re-run's preconditions: POST /v1/jobs/{id}/retry reopens tasks that
-// ARE terminal and has no worker identity to supply, so both the status and the
-// worker predicate would reject every call it made. The symptom of that mistake
+// IncrementTaskRetryCount (query/tasks.sql) is the AGENT-DRIVEN retry. Its four
+// predicates - assignment_epoch, worker_id,
+// status IN ('pending','dispatched','running') and retry_count < retries - are
+// the exact inverse of an operator re-run's preconditions:
+// POST /v1/jobs/{id}/retry reopens tasks that ARE terminal and has no worker
+// identity to supply, so both the status and the worker predicate would reject
+// every call it made, and the budget predicate would additionally refuse any task
+// whose retries the agent path had already spent - which is precisely the task an
+// operator presses Retry on. The symptom of that mistake
 // is not a crash: it is "the endpoint silently does nothing", which a test
 // asserting only a 200 would not catch.
 //

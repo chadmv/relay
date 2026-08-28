@@ -63,6 +63,53 @@ var (
 	clientTmplRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
+// maxRetries bounds TaskSpec.Retries. Chosen for a render and task farm: the
+// failures a retry actually rescues are the ones that clear BETWEEN dispatches -
+// a flaky network mount, a p4 sync that hit a transient server error, one
+// unhealthy node in a fleet - and eleven attempts covers all of them.
+//
+// DO NOT RAISE THIS FOR A CONTENDED-RESOURCE CASE. A saturated license server is
+// the argument that will be made, and it argues the other way: there is no
+// backoff anywhere between a retry and its next dispatch, because
+// IncrementTaskRetryCount returns the task to `pending` and handleTaskStatus
+// immediately calls NotifyTaskSubmitted, which wakes the dispatcher. N retries
+// against a saturated pool are therefore N immediate failures inside a few
+// seconds; a larger N buys no waiting, only a faster burn. The instrument for
+// contention is a reservation, not a retry count.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. Validate runs on STORED scheduled-job specs
+// on BOTH paths that materialize one: schedrunner.fireOne at fire time, which
+// reaches Validate only through jobcreate.CreateJobFromSpec, and
+// handleRunScheduledJobNow on demand, which calls it DIRECTLY through
+// api.ValidateJobSpec ahead of the transaction and then again inside
+// CreateJobFromSpec. That direct call is the site that decides the status code:
+// it answers a stored spec's failure with 400 and the per-task message, where
+// CreateJobFromSpec's error collapses into a 500. An env-tunable bound would
+// therefore make
+// retroactive schedule invalidation environment-dependent: the same stored spec
+// fires on one replica's configuration and silently stops on another's, and
+// lowering the knob would disable schedules with no signal anywhere. A
+// validation vocabulary shared by four ingest paths is a property of the binary,
+// exactly as the priority set is.
+const maxRetries = 10
+
+// maxTimeoutSeconds bounds TaskSpec.TimeoutSeconds. Seven days: comfortably
+// above the outer edge of a plausible relay task (a full P4 sync of a workspace
+// that can exceed 1 TB, followed by a heavy bake, cook or render, is plausibly
+// 24 to 72 hours) and far below the ~68 years int32's maximum buys today.
+//
+// THIS IS NOT RELAY_TASK_MAX_ASSIGNMENT AND MUST NOT BE COUPLED TO IT. The two
+// are independent bounds. timeout_seconds is the TASK's own execution deadline,
+// enforced by the agent (newRunner, internal/agent/runner.go) and by the
+// watchdog's execution arm (ListOverdueAssignedTasks);
+// RELAY_TASK_MAX_ASSIGNMENT is the COORDINATOR's absolute assignment bound and
+// sweeps the task regardless of this value. A task whose own timeout exceeds the
+// absolute cap is simply swept by the other arm. Seven days is deliberately
+// ABOVE that knob's 24h default so the independence is visible in the numbers - a
+// cap chosen below it would read as agreement and be maintained as if it were
+// one. Do not derive this from that env var at runtime.
+const maxTimeoutSeconds = 604800
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -99,6 +146,30 @@ func Validate(spec *JobSpec) error {
 			return fmt.Errorf("duplicate task name: %s", ts.Name)
 		}
 		nameSet[ts.Name] = struct{}{}
+		// Bounds last in this loop body, so command-form and duplicate-name
+		// errors keep the precedence they have today.
+		//
+		// A nil TimeoutSeconds is SKIPPED, not defaulted: nil is the documented
+		// "no deadline" and 0 is its second, equally valid spelling. Negatives
+		// are rejected rather than documented as a third synonym, because
+		// today's equivalence is an accident of THREE independent sites that
+		// each happen to guard on `> 0`, none of them deriving that from the
+		// others: newRunner sets a deadline only `if timeoutSec > 0`;
+		// ListOverdueAssignedTasks's execution arm requires
+		// `timeout_seconds IS NOT NULL AND timeout_seconds > 0`; and
+		// overdueReason gates its time.Duration(*t.TimeoutSeconds)*time.Second
+		// behind `*t.TimeoutSeconds > 0` in the same `if`, so it never renders
+		// the negative duration it otherwise would. Three sites agreeing by
+		// coincidence is not a contract, and nothing obliges a fourth to join
+		// them - so the value is refused at the door rather than written down
+		// as a synonym that only holds by luck.
+		if ts.Retries < 0 || ts.Retries > maxRetries {
+			return fmt.Errorf("task %s: retries must be between 0 and %d", ts.Name, maxRetries)
+		}
+		if ts.TimeoutSeconds != nil && (*ts.TimeoutSeconds < 0 || *ts.TimeoutSeconds > maxTimeoutSeconds) {
+			return fmt.Errorf("task %s: timeout_seconds must be between 0 and %d (0 or omitted means no deadline)",
+				ts.Name, maxTimeoutSeconds)
+		}
 	}
 	for _, ts := range spec.Tasks {
 		for _, dep := range ts.DependsOn {

@@ -496,11 +496,21 @@ type taskLogFenceCounts struct {
 //
 // WHY THE ARMS ARE NOT SPLIT BY STATEMENT, which is the split the filing item
 // proposed: IncrementTaskRetryCount and UpdateTaskStatus carry the IDENTICAL
-// three predicates, which of the two runs is decided by the reported status and
-// the row's retry budget rather than by anything about the rejection, and both
-// mean the same thing to an operator - the agent's report of this task's outcome
-// was discarded. Splitting by reason answers the question the item actually
-// asked (which of these is alarming); splitting by statement does not.
+// THREE FENCE predicates - epoch, worker id, terminality - which of the two runs
+// is decided by the reported status and the row's retry budget rather than by
+// anything about the rejection, and both mean the same thing to an operator - the
+// agent's report of this task's outcome was discarded. Splitting by reason
+// answers the question the item actually asked (which of these is alarming);
+// splitting by statement does not.
+//
+// IncrementTaskRetryCount carries a FOURTH predicate, `retry_count < retries`,
+// and it can never reach these counters. The Go gate in handleTaskStatus refuses
+// to enter the retry branch on an exhausted budget, so the statement is not
+// called at all. That is deliberate rather than incidental: a budget exhaustion
+// is deterministic, single-writer and the normal end of a task's life, and
+// classifyStatusFenceRejection would label it `raced` - putting a steady,
+// agent-driven, unbudgeted increment on the one key here that is meant to sit
+// near zero. See the gate's own comment in internal/worker/handler.go.
 //
 // A FINER SPLIT - WHICH SQL PREDICATE FIRED - IS DECLINED WITH THE PRICE, NOT
 // IMPOSSIBLE. Both statements yield no row on any predicate failure, so nothing

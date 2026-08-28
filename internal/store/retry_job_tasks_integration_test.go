@@ -45,11 +45,21 @@ func newRetryFixture(t *testing.T) *retryFixture {
 }
 
 // pending creates a task and leaves it at epoch 0 with worker_id NULL.
+//
+// RETRIES IS 1, NOT 0, AND THAT IS LOAD-BEARING FOR TWO TESTS IN THIS FILE.
+// IncrementTaskRetryCount carries `AND retry_count < retries`, so a task created
+// with retries = 0 is refused by the BUDGET predicate. That would break
+// TestRetryJobTasks_ReopenedRowFields_EpochIncrementsByExactlyOne outright (its
+// agent-retry step asserts NoError) and would silently hollow out
+// TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected, whose
+// retry leg exists to isolate the epoch and worker predicates and would instead
+// pass on the budget alone - green with both of the predicates it names removed.
+// Nothing in this file asserts on `retries`, so a budget of 1 costs nothing.
 func (f *retryFixture) pending(t *testing.T, name string) store.Task {
 	t.Helper()
 	task, err := f.q.CreateTask(f.ctx, store.CreateTaskParams{
 		JobID: f.job.ID, Name: name, Commands: []byte(`[["echo","x"]]`),
-		Env: []byte("{}"), Requires: []byte("{}"), Retries: 0,
+		Env: []byte("{}"), Requires: []byte("{}"), Retries: 1,
 	})
 	require.NoError(t, err)
 	return task

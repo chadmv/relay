@@ -152,3 +152,33 @@ not a mockable dependency. The `services: postgres` mechanism above is the plaus
 
 Add to Related: `.github/workflows/go-ci.yml` (`cli-integration`),
 `internal/cli/pgharness_integration_test.go` (`newIntegrationDSN`).
+
+## Appended 2026-08-28 - a seventh instance, and the first where a SHIPPED SECURITY FIX has zero CI coverage
+
+The retry-bounds slice (`bug-2026-08-12-retries-unvalidated-and-budget-only-in-go`) added
+`AND retry_count < retries` to `IncrementTaskRetryCount`. The only test in the tree that can isolate
+that predicate is `TestIncrementTaskRetryCount_BudgetPredicate_AnExhaustedTaskMovesZeroRows`, in
+`internal/store`, under `//go:build integration`. `.github/workflows/go-ci.yml` runs `go test -race
+./...` and `make test-cli-integration`, and nothing else - so **the predicate has no CI coverage at
+all.** Its correctness rests entirely on a human remembering to run
+`go test -tags integration -p 1 ./internal/store/...` locally, which needs Docker.
+
+That is a step beyond the six instances above. Those are guards whose coverage is invisible; this is a
+security fix whose proof is invisible. The distinction matters for prioritisation: a guard that
+silently stops guarding degrades slowly, while a predicate that silently stops holding re-opens the
+defect it closed.
+
+**The same slice supplied direct evidence that reading is not a substitute for running it.** The
+predicate BROKE two existing tests in that lane - `retryFixture.pending` created tasks with
+`Retries: 0`, so `TestRetryJobTasks_ReopenedRowFields_EpochIncrementsByExactlyOne` would have failed
+outright, and its sibling rejection test would have gone silently vacuous, passing on the budget
+predicate alone while claiming to isolate epoch and worker identity. The planner caught both by
+reading, before any code was written. Nothing in CI would have caught either, and a `go test ./...`
+run stays green through both.
+
+`internal/store` is a strong candidate for the `services: postgres` mechanism: like `internal/cli` it
+needs only Postgres, no Docker API, no p4d and no live agent. Its full integration lane runs in
+roughly 200 seconds locally.
+
+Add to Related: `internal/store/increment_task_retry_count_budget_integration_test.go`,
+`internal/store/retry_job_tasks_integration_test.go`.

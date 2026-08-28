@@ -661,9 +661,38 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// 400, not 500, for the same reason the validation refusal below is: an
+	// identical request made later gets an identical answer, which is exactly the
+	// partition relayclient.ErrorIsTransient documents, so a 500 here told a
+	// polling caller to retry a permanently broken schedule forever. The
+	// operator's remedy is the same too - PATCH a new job_spec, or delete and
+	// recreate.
+	//
+	// The two branches DO differ, and it does not change the code: a validation
+	// failure is reachable with nothing corrupt (a later release tightened a
+	// bound), whereas a decode failure is not reachable through any current write
+	// path, since POST and PATCH both unmarshal before they validate. That makes
+	// it rarer, not transient, and no caller can tell the two apart from outside.
 	var spec JobSpec
 	if err := json.Unmarshal(row.JobSpec, &spec); err != nil {
-		writeError(w, http.StatusInternalServerError, "stored job_spec is invalid")
+		writeError(w, http.StatusBadRequest, "stored job_spec is invalid")
+		return
+	}
+
+	// Validate the STORED spec explicitly, ahead of the transaction, so a spec
+	// that no longer passes is answered as a fact about the request rather than
+	// as a server fault. CreateJobFromSpec validates too, but every error it
+	// returns collapses into one 500 below - which would both discard the
+	// per-task message and, because relayclient.ErrorIsTransient reads 5xx as
+	// transient, tell a polling caller to retry a permanently broken schedule
+	// forever. The bounds in jobspec.Validate are retroactive over specs stored
+	// by earlier releases, so this is reachable without anything being corrupt.
+	//
+	// run-now is the ONLY interactive path that can explain why a schedule
+	// stopped producing jobs: schedrunner's fireOne logs one server-side line
+	// and advances next_run_at, leaving nothing user-visible behind.
+	if err := ValidateJobSpec(spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
