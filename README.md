@@ -721,8 +721,8 @@ relay submit --detach job.json # submit and print job ID, then exit
 | `tasks[].command` | Yes | Executable and arguments as an array |
 | `tasks[].env` | No | Extra environment variables for this task |
 | `tasks[].requires` | No | Worker label selector (task only runs on matching workers) |
-| `tasks[].timeout_seconds` | No | Kill task after this many seconds. Max `604800` (7 days); a larger or negative value is rejected at submission. **Omitted or `0` both mean "no deadline"** - the field is optional and `0` is its second spelling. Independent of `RELAY_TASK_MAX_ASSIGNMENT`, which bounds how long a task may stay ASSIGNED rather than how long it may RUN; a task whose own timeout exceeds that cap is simply swept by the other arm. |
-| `tasks[].retries` | No | Retry up to this many times on failure (default `0`, max `10`). A larger or negative value is rejected at submission. There is no backoff between a failed task and its redispatch, so a deterministically-failing command burns the whole budget in seconds; for a contended resource use a reservation rather than a large retry count. |
+| `tasks[].timeout_seconds` | No | Kill task after this many seconds. Max `604800` (7 days); a larger or negative value is rejected at submission, and re-checked every time a stored schedule fires - see [Scheduled jobs](#scheduled-jobs), because that makes the bound retroactive over schedules created by earlier releases. **Omitted or `0` both mean "no deadline"** - the field is optional and `0` is its second spelling. Independent of `RELAY_TASK_MAX_ASSIGNMENT`, which bounds how long a task may stay ASSIGNED rather than how long it may RUN; a task whose own timeout exceeds that cap is simply swept by the other arm. |
+| `tasks[].retries` | No | Retry up to this many times on failure (default `0`, max `10`). A larger or negative value is rejected at submission, and re-checked every time a stored schedule fires - see [Scheduled jobs](#scheduled-jobs), because that makes the bound retroactive over schedules created by earlier releases. The cap bounds this one per-task multiplier and nothing else: a job's `tasks` and a task's `commands` are themselves unlimited, so this is not a bound on how much work one request can ask for. There is no backoff between a failed task and its redispatch, so a deterministically-failing command burns the whole budget in seconds; for a contended resource use a reservation rather than a large retry count. |
 | `tasks[].depends_on` | No | List of task names that must complete before this one starts |
 | `tasks[].source` | No | Workspace source spec — agent prepares this before running the task. See [Source workspaces](#source-workspaces). |
 
@@ -1048,6 +1048,12 @@ Recurring jobs are defined as **schedules** — a cron expression plus a stored 
 The server reconciles `next_run_at` on startup: any firings that fell during downtime are skipped (no catch-up), and the schedule resumes on its next eligible fire. A polling loop ticks every 10 s.
 
 Schedules are owned by the user who created them; non-admins see only their own. Admins can list and operate on all of them. The schedule's owner (or an admin) can use `run-now` to fire a schedule immediately.
+
+**A stored spec is re-validated on every fire, so job-spec rules are retroactive.** A schedule keeps the spec it was created with, and the server validates that spec again on each fire rather than grandfathering it for having been accepted once. A spec that a later release refuses therefore stops producing jobs while the schedule still *looks* healthy: `next_run_at` keeps advancing, nothing disables it, `enabled` stays true, and the only record is one line in the server log. `tasks[].retries` (max `10`) and `tasks[].timeout_seconds` (max `604800`) are the first rules with this property, so a schedule created before they existed with, say, `"retries": 50` stops firing on upgrade.
+
+**To check a schedule you suspect, fire it by hand.** `relay schedules run-now <id>` runs exactly the same validation and answers `400` with the per-task message (`task t: retries must be between 0 and 10`) instead of failing quietly, so it is the way to turn a schedule that has gone silent into a specific reason. Replacing the stored spec is a `PATCH /v1/scheduled-jobs/{id}` with a new `job_spec`; `relay schedules update` has no `--spec` flag, so from the CLI it is delete plus `relay schedules create --spec`.
+
+**Tasks already in the database are deliberately left alone.** No migration clamps or rejects a `retries` or `timeout_seconds` value that an earlier release already stored on a `tasks` row. The bound applies to job creation from here on; a task that was created with `retries: 2000000000` keeps it and still retries that many times.
 
 ---
 
