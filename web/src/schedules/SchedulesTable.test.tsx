@@ -203,3 +203,108 @@ test('the ACTIONS cell still holds exactly nine cells per row after the Edit lin
   const firstDataRow = screen.getAllByRole('row')[1]
   expect(within(firstDataRow).getAllByRole('cell')).toHaveLength(9)
 })
+
+// A CHIP IN THE NAME CELL, NOT A TENTH COLUMN. COLS already has nine tracks and
+// 580px of fixed width before any fr gets a pixel - the worst case in the app -
+// so a tenth would push the 1040px floor up again. The NAME cell is already a
+// flex row with a gap and already holds the status dot, so a chip fits without
+// touching the grid template at all.
+//
+// TEXT, NOT A COLOUR CHANGE TO THE DOT. A bare colour is not accessible, and the
+// dot's two states are already spoken for by `enabled` - failure is a separate
+// axis from the operator's own on/off setting and gets a separate element.
+test('a schedule carrying last_error shows a FAILING chip inside the NAME cell', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_error: 'task render: retries must be between 0 and 10' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  const link = screen.getByRole('link', { name: 'nightly-build' })
+  const cell = link.closest('[role="cell"]')
+  expect(cell).not.toBeNull()
+  expect(within(cell as HTMLElement).getByText('FAILING')).toBeInTheDocument()
+})
+
+// THE ABSENCE CASE. A healthy schedule's row must be identical to what it was
+// before this slice: the chip is the only new element and it must not render.
+test('a healthy schedule renders no FAILING chip', () => {
+  renderTable(
+    <SchedulesTable schedules={[sched()]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />,
+  )
+  expect(screen.queryByText('FAILING')).toBeNull()
+})
+
+// ABSENT, EMPTY STRING AND PRESENT ARE THREE DIFFERENT THINGS, and the middle one
+// is the shape of the defect this slice exists to close. The server omits the key
+// entirely for a healthy schedule and never stores "", but a truthiness test is
+// the only read that gets all three right for free; a `last_error !== undefined`
+// read would mark a schedule FAILING on an empty string, which carries no reason
+// an operator could act on. Pinned so a later "more explicit" rewrite to an
+// undefined check goes red here rather than shipping.
+test('an empty last_error is not a failure', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_error: '' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.queryByText('FAILING')).toBeNull()
+})
+
+// THE ENABLED AXIS IS UNTOUCHED, deliberately. A failing schedule IS still
+// enabled - relay does not auto-disable one, see the spec's section 9.1 - so the
+// dot and the Disable button keep telling the truth about the operator's own
+// setting, and the chip carries the other axis.
+test('a failing schedule is still rendered as enabled', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ enabled: true, last_error: 'task render: retries must be between 0 and 10' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument()
+  expect(screen.getByText('FAILING')).toBeInTheDocument()
+})
+
+// PER-ROW, NOT PER-TABLE. Without this the first test would pass on an
+// implementation that marked every row.
+test('only the failing row carries the chip', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[
+        sched({ id: 's1', name: 'broken', last_error: 'task render: retries must be between 0 and 10' }),
+        sched({ id: 's2', name: 'fine' }),
+      ]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.getAllByText('FAILING')).toHaveLength(1)
+  const fineCell = screen.getByRole('link', { name: 'fine' }).closest('[role="cell"]')
+  expect(within(fineCell as HTMLElement).queryByText('FAILING')).toBeNull()
+})
+
+// THE CHIP DOES NOT BECOME A TENTH COLUMN. The nine-cells-per-row assertion above
+// runs on healthy rows only, so it cannot see a chip that was added as its own
+// TableCell instead of inside the NAME cell.
+test('a failing row still holds exactly nine cells', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_error: 'task render: retries must be between 0 and 10' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  const dataRow = screen.getAllByRole('row')[1]
+  expect(within(dataRow).getAllByRole('cell')).toHaveLength(9)
+  expect(screen.getAllByRole('columnheader')).toHaveLength(9)
+})

@@ -62,6 +62,40 @@ export function SchedulesTable({
                 >
                   {s.name}
                 </Link>
+                {/* THE FAILURE MARKER LIVES INSIDE THE NAME CELL RATHER THAN IN A
+                    TENTH COLUMN. COLS above is already nine tracks with 580px of
+                    fixed width, the worst case in the app; a tenth would push
+                    MIN_W up again and this table is already the app's widest.
+                    This cell is already a flex row with a gap, so the chip costs
+                    no grid change at all.
+
+                    TEXT, NOT A COLOUR. A bare colour is not accessible, and the
+                    dot's two states are already spoken for by `enabled`. A
+                    failing schedule IS still enabled - relay does not
+                    auto-disable one - so this is a second, independent axis with
+                    its own element.
+
+                    A TRUTHINESS TEST, NOT `!== undefined`. The server omits
+                    last_error entirely for a healthy schedule (omitempty) and
+                    never stores an empty string, but the three cases - absent,
+                    "" and present - must stay distinguishable at the read, and
+                    an empty string carries no reason an operator could act on.
+                    Marking a row FAILING with nothing to show would re-create
+                    this slice's own defect one layer up.
+
+                    The marker does not shrink: the Link beside it truncates, so
+                    under a narrow viewport the NAME should lose characters
+                    before the marker disappears. Measured in a real browser by
+                    web/e2e/layout.spec.ts's `schedules-failing` surface; jsdom
+                    performs no layout and can say nothing about it. */}
+                {s.last_error ? (
+                  <span
+                    title="The scheduler could not produce a job from this schedule. Open it for the reason."
+                    className="shrink-0 rounded-full border border-err/40 bg-err/10 px-1.5 py-0.5 text-[9.5px] tracking-wider text-err"
+                  >
+                    FAILING
+                  </span>
+                ) : null}
               </TableCell>
               <TableCell className="text-fg">{s.cron_expr}</TableCell>
               <TableCell className="truncate text-[10.5px] text-fg-mute">{s.timezone}</TableCell>
