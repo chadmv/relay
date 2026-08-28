@@ -29,8 +29,28 @@ type scheduledJobResponse struct {
 	NextRunAt     time.Time       `json:"next_run_at"`
 	LastRunAt     *time.Time      `json:"last_run_at,omitempty"`
 	LastJobID     string          `json:"last_job_id,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	// The last time the SCHEDULER failed to produce a job from this schedule,
+	// and why. ABSENT MEANS HEALTHY - not "" and not null - which is what makes
+	// `omitempty` on a string safe here: the write site
+	// (internal/schedrunner/failure.go) never stores an empty string, precisely
+	// so that an empty one cannot be confused with an absent one.
+	//
+	// THE TEXT IS OPERATOR-SUPPLIED. It is derived from the stored job_spec: a
+	// task name the schedule's owner chose flows verbatim into jobspec.Validate's
+	// "task %s: ..." message. An admin reading someone else's schedule is
+	// therefore reading partly attacker-chosen prose. It is sanitized at the
+	// write site (control characters stripped, truncated to 1 KB on a rune
+	// boundary), and every renderer must treat it as untrusted text: a React text
+	// child, never chrome, never dangerouslySetInnerHTML, and prefixed with its
+	// provenance in the CLI.
+	//
+	// It is safe to serve because the read is owner-or-admin: ownedScheduledJob
+	// 404s everyone else and both non-admin list arms are owner-scoped.
+	LastError   string     `json:"last_error,omitempty"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func toScheduledJobResponse(sj store.ScheduledJob) scheduledJobResponse {
@@ -53,6 +73,13 @@ func toScheduledJobResponse(sj store.ScheduledJob) scheduledJobResponse {
 	}
 	if sj.LastJobID.Valid {
 		out.LastJobID = uuidStr(sj.LastJobID)
+	}
+	if sj.LastError != nil {
+		out.LastError = *sj.LastError
+	}
+	if sj.LastErrorAt.Valid {
+		t := sj.LastErrorAt.Time
+		out.LastErrorAt = &t
 	}
 	return out
 }
