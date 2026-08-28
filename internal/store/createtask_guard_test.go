@@ -3,7 +3,10 @@ package store_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -21,11 +24,25 @@ import (
 // line and a task stuck until the 24h watchdog.
 //
 // What makes that trade acceptable is that the bound has exactly one enforcement
-// point and these two statements have exactly one caller. This test is what
-// keeps the second half of that sentence true. If it goes RED, the new caller
-// must either route through jobcreate.CreateJobFromSpec (which calls
-// jobspec.Validate first) or validate the spec itself and say so here - do not
-// add an exemption without doing one of those two.
+// point and these two statements have exactly one caller. This test keeps the
+// second half of that sentence true. If it goes RED, the new caller must either
+// route through jobcreate.CreateJobFromSpec (which calls jobspec.Validate first)
+// or validate the spec itself and say so here - do not add an exemption without
+// doing one of those two.
+//
+// THE FIRST HALF IS NOT CHECKED HERE, AND IT IS NOT UNCHECKED EITHER. Deleting
+// the jobspec.Validate call from jobcreate.CreateJobFromSpec left this test, and
+// the whole plain lane, green. Its subject is
+// TestCreateJobFromSpec_RefusesAnOverBoundSpecBeforeTouchingTheDatabase in
+// internal/jobcreate, added for exactly that mutant and in this same untagged
+// lane. Neither test proves the sentence alone.
+//
+// THE IDENTIFIER LIST IS DERIVED, NOT WRITTEN DOWN. It used to be a literal
+// []string{"CreateTask", "CreateTaskWithSource"}, which meant a THIRD statement
+// inserting a tasks row would get a generated method, zero coverage, and would
+// silently falsify this comment's "exactly one caller" claim. Deriving it from
+// the .sql that sqlc compiles makes the guard notice the statement itself, not
+// just a spelling somebody remembered.
 //
 // Known weakness, accepted, and identical to the weakness on
 // TestIncrementTaskRetryCountHasNoCallerOutsideTheAgentPath: a rename defeats it,
@@ -42,7 +59,16 @@ func TestCreateTaskHasNoCallerOutsideJobcreate(t *testing.T) {
 		filepath.Join(root, "internal", "jobcreate", "jobcreate.go"): true,
 	}
 
-	for _, ident := range []string{"CreateTask", "CreateTaskWithSource"} {
+	idents := insertIntoTasksQueryNames(t, root)
+	if want := []string{"CreateTask", "CreateTaskWithSource"}; !slices.Equal(idents, want) {
+		t.Fatalf("the set of sqlc statements that INSERT INTO tasks is %v, want %v.\n"+
+			"A statement was added, removed or renamed. There is NO CHECK constraint on tasks.retries "+
+			"or tasks.timeout_seconds, so every such statement must be reachable only from a caller "+
+			"that has run jobspec.Validate. Route it through internal/jobcreate, then update this "+
+			"list in the same commit.", idents, want)
+	}
+
+	for _, ident := range idents {
 		offenders, unparseable, err := scanForIdentReferences(root, ident, allowed)
 		if err != nil {
 			t.Fatalf("walking %s for %s: %v", root, ident, err)
@@ -105,4 +131,59 @@ func TestScanForIdentReferences_FindsAPlantedCreateTaskCallAndHonoursTheAllowLis
 		t.Errorf("offenders = %v, want %v. Either the guard cannot see a plain method call on a "+
 			"non-allowed file, or it is reporting the allowed one.", offenders, want)
 	}
+}
+
+// insertIntoTasksQueryNames returns, sorted, the names of every sqlc statement
+// under internal/store/query that INSERTs a row into `tasks`.
+//
+// It parses the SQL rather than the generated Go because the .sql files are the
+// authored artifact: a new statement exists here one `make generate` before its
+// method does, and the point of the guard above is to meet it on the way in.
+// Scanning the whole query directory rather than tasks.sql alone is deliberate -
+// nothing forces a tasks INSERT to be filed under that name.
+//
+// The table match is anchored on a word boundary so `task_logs`,
+// `task_dependencies` and `task_reservations` do not read as `tasks`.
+func insertIntoTasksQueryNames(t *testing.T, root string) []string {
+	t.Helper()
+	nameRe := regexp.MustCompile(`(?m)^-- name:\s+(\w+)\s`)
+	insertRe := regexp.MustCompile(`(?is)\bINSERT\s+INTO\s+tasks\b`)
+
+	dir := filepath.Join(root, "internal", "store", "query")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+
+	var names []string
+	seenAnyStatement := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		locs := nameRe.FindAllSubmatchIndex(src, -1)
+		for i, loc := range locs {
+			seenAnyStatement = true
+			end := len(src)
+			if i+1 < len(locs) {
+				end = locs[i+1][0]
+			}
+			if insertRe.Match(src[loc[1]:end]) {
+				names = append(names, string(src[loc[2]:loc[3]]))
+			}
+		}
+	}
+
+	// A regex that silently matched nothing would make this guard pass for every
+	// possible repository state, which is the failure mode a derived list invites.
+	if !seenAnyStatement {
+		t.Fatalf("found no `-- name:` statements at all under %s: the statement-splitting regex no "+
+			"longer matches sqlc's format, so this guard is inert rather than satisfied", dir)
+	}
+	sort.Strings(names)
+	return names
 }
