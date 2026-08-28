@@ -639,6 +639,30 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		nextRunAt = pgtype.Timestamptz{Time: sched.Next(time.Now()), Valid: true}
 	}
 
+	// CLEAR THE FAILURE RECORD IF, AND ONLY IF, THIS PATCH CHANGED ONE OF THE
+	// THREE INPUTS THE THREE RECORDED FAILURE CLASSES ARE ABOUT.
+	//
+	// job_spec, cron_expr and timezone are exactly what an undecodable spec, an
+	// unparseable cron and a failed jobspec.Validate are about, and all three have
+	// already been validated above before reaching here - so any recorded failure
+	// about the OLD values is stale by construction.
+	//
+	// A patch of name, overlap_policy or enabled PRESERVES the record. Renaming a
+	// schedule must not erase the only signal that it is broken, and on an
+	// @monthly schedule nothing would rewrite it for a month. Enabling and
+	// disabling preserve it too: nothing about the spec changed, and a re-enabled
+	// schedule that still carries its failure is showing the truth at the most
+	// useful moment to see it.
+	//
+	// It is a BOOLEAN ARGUMENT rather than a read-modify-write. The row was read
+	// through ownedScheduledJob without a lock, so reading last_error into Go and
+	// writing it back would let this PATCH carry a stale error forward over a
+	// failure a tick recorded in between. The SQL CASE means the row's own value
+	// is never round-tripped through the application. (next_run_at in this same
+	// handler DOES have that read-modify-write hazard; this slice does not fix it
+	// and does not join it.)
+	clearFailure := req.JobSpec != nil || req.CronExpr != nil || req.Timezone != nil
+
 	updated, err := s.q.UpdateScheduledJob(r.Context(), store.UpdateScheduledJobParams{
 		ID:            id,
 		Name:          name,
@@ -648,6 +672,7 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		OverlapPolicy: overlap,
 		Enabled:       enabled,
 		NextRunAt:     nextRunAt,
+		ClearFailure:  clearFailure,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update failed")
