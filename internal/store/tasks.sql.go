@@ -763,6 +763,7 @@ WHERE id = $1
   AND assignment_epoch = $2
   AND worker_id = $3
   AND status IN ('pending', 'dispatched', 'running')
+  AND retry_count < retries
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
@@ -773,7 +774,7 @@ type IncrementTaskRetryCountParams struct {
 }
 
 // Burns one retry on a task whose CURRENT generation just failed, and returns it
-// to the queue. Three predicates, each answering a different question; none is
+// to the queue. Four predicates, each answering a different question; none is
 // redundant with the others and none may be deleted:
 //
 //	assignment_epoch - CURRENCY. The caller decided to retry from a row it read
@@ -801,8 +802,46 @@ type IncrementTaskRetryCountParams struct {
 //	  equivalent deny-list, which set it must stay in lockstep with, and why the
 //	  fix is a predicate and never an epoch bump on terminal transitions. Change
 //	  both or neither.
+//	retry_count    - BUDGET. The task must have a retry left. This completes the
+//	  statement's precondition: before it, the budget was the one part of the
+//	  caller's decision that stayed in Go
+//	  (`terminal && task.RetryCount < task.Retries`, internal/worker/handler.go),
+//	  so a SECOND caller could take a task past its budget by omission. That was
+//	  the 2026-08-12 audit's remaining gap at this end of the retry path.
+//	  Written `retry_count < retries` and NOT `retry_count <= retries - 1`:
+//	  jobspec.Validate now rejects a negative `retries` at ingest, and this
+//	  spelling does not depend on that having been true for every row ever
+//	  written. TestIncrementTaskRetryCount_BudgetPredicate_AnExhaustedTaskMovesZeroRows
+//	  pins it, and is the only test in the tree that can - see the two paragraphs
+//	  below for why nothing at the handler layer can distinguish this predicate.
 //
-// pgx.ErrNoRows means "one of the three failed": drop, do not recompute the job
+// THIS PREDICATE CHANGES NO PRODUCTION ROWCOUNT TODAY, and that is checkable
+// rather than hopeful. For it to be the SOLE reason a row fails to match,
+// retry_count would have to advance (or retries shrink) between
+// handleTaskStatus's GetTask and this UPDATE without the epoch moving. Searched
+// by shape across query/: retry_count has exactly TWO writers, this statement
+// (retry_count + 1) and RetryJobTasks (retry_count = 0), and BOTH bump
+// assignment_epoch in the same statement; `retries` has no UPDATE writer at all,
+// only the two INSERTs (CreateTask, CreateTaskWithSource). So wherever this
+// predicate would reject, the currency predicate rejects too and the rowcount is
+// identical. It is a precondition completed for a FUTURE caller, not a behaviour
+// change - which is also why the mutation that removes it can only be caught at
+// the store layer.
+// THE GO GATE IN handleTaskStatus MUST STAY, AND THIS PREDICATE IS NOT A REASON
+// TO DEMOTE IT TO AN EARLY RETURN. If the retry branch were entered for a
+// budget-exhausted task, this statement's refusal would arrive as pgx.ErrNoRows
+// and the handler would RETURN BEFORE UpdateTaskStatus: no `failed`, no
+// finished_at, no FailDependentTasks cascade, no RecomputeJobStatus, no SSE
+// frame, until the coordinator watchdog stamps `timed_out` at
+// RELAY_TASK_MAX_ASSIGNMENT (24h default). Because `retries` defaults to 0 that
+// is EVERY ordinary failing task in the system. It would also mis-COUNT:
+// classifyStatusFenceRejection labels a row that was still writable at T0
+// `raced`, and a budget-exhausted task is `running`, so every routine budget
+// exhaustion would inflate task_status_fence.raced_total - a signal
+// internal/api/server_counters.go publishes as "a concurrent writer ended the
+// generation inside this handler's own read-to-write window" and whose whole
+// value is that it sits near zero.
+// pgx.ErrNoRows means "one of the four failed": drop, do not recompute the job
 // status, do not wake the dispatcher.
 // This statement is for the AGENT-DRIVEN retry only, and its preconditions are
 // the exact opposite of an operator re-run. POST /v1/jobs/{id}/retry must NOT
@@ -828,6 +867,7 @@ type IncrementTaskRetryCountParams struct {
 //	  AND assignment_epoch = $2
 //	  AND worker_id = $3
 //	  AND status IN ('pending', 'dispatched', 'running')
+//	  AND retry_count < retries
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTaskRetryCountParams) (Task, error) {
 	row := q.db.QueryRow(ctx, incrementTaskRetryCount, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
@@ -1810,8 +1850,9 @@ type UpdateTaskStatusParams struct {
 // regression - but do not read this predicate as connection-scoped.
 // handleTaskStatus's retry branch calls IncrementTaskRetryCount and returns
 // before ever reaching this statement, so this predicate never sees that path.
-// That statement now carries the same three predicates, so the two together
-// cover every production writer. The Go identity gate in handleTaskStatus stays
+// That statement carries these same three predicates plus a FOURTH on the retry
+// budget (`retry_count < retries`), so the two together cover every production
+// writer. The Go identity gate in handleTaskStatus stays
 // as well: after the retry statement was fenced it is no longer the correctness
 // control, but it still answers a different question ("may this sender drive
 // this task's status machine at all") one round trip earlier. It does NOT save
