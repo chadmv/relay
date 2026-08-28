@@ -661,9 +661,21 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// 400, not 500, for the same reason the validation refusal below is: an
+	// identical request made later gets an identical answer, which is exactly the
+	// partition relayclient.ErrorIsTransient documents, so a 500 here told a
+	// polling caller to retry a permanently broken schedule forever. The
+	// operator's remedy is the same too - PATCH a new job_spec, or delete and
+	// recreate.
+	//
+	// The two branches DO differ, and it does not change the code: a validation
+	// failure is reachable with nothing corrupt (a later release tightened a
+	// bound), whereas a decode failure is not reachable through any current write
+	// path, since POST and PATCH both unmarshal before they validate. That makes
+	// it rarer, not transient, and no caller can tell the two apart from outside.
 	var spec JobSpec
 	if err := json.Unmarshal(row.JobSpec, &spec); err != nil {
-		writeError(w, http.StatusInternalServerError, "stored job_spec is invalid")
+		writeError(w, http.StatusBadRequest, "stored job_spec is invalid")
 		return
 	}
 
