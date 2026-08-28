@@ -32,7 +32,30 @@ import (
 //
 // The offending task is SECOND so this also cannot pass by way of a validator
 // that only looks at Tasks[0].
+//
+// THE PANIC IS THE MUTANT'S FAILURE MODE, NOT THIS TEST'S MECHANISM - the
+// property is established by the three assertions below, which is why the
+// recover exists rather than being relied on. An unrecovered panic takes down
+// the whole jobcreate_test BINARY, so under the mutant every OTHER test in this
+// package would silently not run. The package has one test file today, so that
+// cost is currently zero and the recover is there so it stays zero as the
+// package grows. Containing it here changes nothing about how loudly the mutant
+// dies: it still fails, and now it names its own cause.
+//
+// The nil q stays nil. It is what proves a correct implementation never
+// dereferences it, and a stub that answered queries would give that up to buy
+// containment the recover already provides.
 func TestCreateJobFromSpec_RefusesAnOverBoundSpecBeforeTouchingTheDatabase(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("CreateJobFromSpec panicked instead of refusing the spec: %v\n"+
+				"q is a nil *store.Queries, so this is what reaching a query on it looks like: "+
+				"jobspec.Validate is no longer running before the first database call, which is "+
+				"the entire enforcement of the retries and timeout_seconds bounds for a caller "+
+				"that does not validate first.", r)
+		}
+	}()
+
 	spec := jobspec.JobSpec{
 		Name: "over-budget",
 		Tasks: []jobspec.TaskSpec{
