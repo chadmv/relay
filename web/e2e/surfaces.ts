@@ -22,6 +22,16 @@ export interface Surface {
   // default 3000ms), so the network never goes idle on those pages and the wait
   // would hang for the full test timeout.
   ready: (page: Page, seed: Seed) => Promise<void>
+  // Optional per-surface setup run BEFORE page.goto, for a surface whose state
+  // the seeded REST fixtures cannot produce. A function of Page and Seed for the
+  // same collection-vs-execution reason as `path` and `ready`.
+  //
+  // USE THIS SPARINGLY AND JUSTIFY IT AT THE CALL SITE. fixtures.ts's rule is
+  // that fixtures go through the REST API so a surface cannot assert about a
+  // state production cannot produce. A `prepare` that fabricates data is a
+  // deliberate exception and must name (a) why no REST path can produce the
+  // state and (b) where the real wire contract for that state is pinned instead.
+  prepare?: (page: Page, seed: Seed) => Promise<void>
   // DECLARED COVERAGE LIMIT, not a discovered one. Slice 1 runs NO relay-agent,
   // so no worker row can exist. A surface marked 'empty' is covered in its EMPTY
   // STATE ONLY - do not read a pass here as a populated-state pass. Closing this
@@ -39,6 +49,69 @@ export interface Surface {
 
 const h1 = (name: string) => async (page: Page) => {
   await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible()
+}
+
+// injectScheduleFailure rewrites the REAL GET /v1/scheduled-jobs response so ONE
+// real seeded row carries a last_error, letting the schedules list be measured
+// with the FAILING chip present.
+//
+// WHY IT IS NOT SEEDED THROUGH THE REST API like every other fixture in this
+// harness: it cannot be. handleCreateScheduledJob and handlePatchScheduledJob
+// both run jobspec.Validate BEFORE storing, so a spec that fails validation
+// cannot be written through either. last_error is produced only by schedrunner,
+// from a row an earlier release stored under a rule a later release tightened.
+// The alternatives are a direct-SQL seed (which needs the pg driver in a .ts
+// file, and web/tsconfig.json type-checks e2e/ under strict while pg ships no
+// types - ensure-db.mjs is a .mjs file for exactly that reason) or racing the
+// 10-second ticker after planting an invalid spec by SQL. Both cost more than
+// the property is worth HERE.
+//
+// WHAT THIS SURFACE IS FOR IS LAYOUT, and the interception leaves layout
+// entirely real: a real request to a real server, a real response envelope,
+// every other field real, the real router, the real query client, the real
+// production CSS bundle. One field's value is fabricated.
+//
+// WHERE THE REAL CONTRACT IS PINNED INSTEAD, both in CI:
+//   - internal/api/scheduled_jobs_response_test.go (untagged, go-ci `test` job):
+//     the field names, absent-not-zero, and the row/response arity.
+//   - internal/cli/schedules_failure_integration_test.go (go-ci
+//     `cli-integration` job): last_error planted in a real database and read
+//     back through a real internal/api server over HTTP.
+//
+// DO NOT "FIX" THIS INTO A REAL-DATA TEST. There is no REST path that can
+// produce the state, so the real-data version of this surface does not exist to
+// be written.
+//
+// THE ROUTE STAYS INSTALLED FOR THE PAGE'S LIFETIME, which matters: useSchedules
+// sets a refetchInterval, so the list re-fetches every few seconds and an
+// interception that fired once would let the chip vanish mid-measurement.
+async function injectScheduleFailure(page: Page, scheduleName: string): Promise<void> {
+  await page.route(/\/v1\/scheduled-jobs\?/, async (route) => {
+    const response = await route.fetch()
+    const body = (await response.json()) as { items?: Array<Record<string, unknown>> }
+    let hits = 0
+    for (const item of body.items ?? []) {
+      if (item.name === scheduleName) {
+        item.last_error = 'task nightly: retries must be between 0 and 10'
+        item.last_error_at = new Date().toISOString()
+        hits++
+      }
+    }
+    // FULFILL FIRST, THROW SECOND, and the order is the diagnostic. A silent
+    // zero-hit interception would make this surface measure the HEALTHY table
+    // while wearing the failing one's name - the empty-table misdiagnosis this
+    // whole file exists to avoid, one level up. `ready` gates on the chip, so
+    // it catches that on its own; this throw only adds a message naming the
+    // cause. Throwing BEFORE the fulfill would leave the request hanging and
+    // the page stuck in its loading state, so `ready` would then fail for a
+    // second, unrelated-looking reason and hide the first.
+    await route.fulfill({ response, json: body })
+    if (hits !== 1) {
+      throw new Error(
+        `injectScheduleFailure matched ${hits} rows named ${JSON.stringify(scheduleName)}, want exactly 1`,
+      )
+    }
+  })
 }
 
 // NO Seed PARAMETER. The list of surfaces (names, titles, count) is static and
@@ -96,6 +169,57 @@ export function surfaces(): Surface[] {
         // substring-matching default resolves two elements here. Measured, not
         // assumed - the ambiguous form threw a strict-mode violation.
         await expect(p.getByRole('link', { name: seed.scheduleName, exact: true })).toBeVisible()
+      },
+    },
+    {
+      // THE SAME PATH as `schedules` above, deliberately. The question is what
+      // the FAILING chip does to a nine-column grid at a 1040px floor - the
+      // widest table in the app, 580px of fixed track before any fr gets a
+      // pixel. The healthy surface above is the CONTROL: if both overflow, the
+      // chip is not the cause.
+      //
+      // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH, measured 2026-08-28 rather
+      // than argued. Widening SchedulesTable's own MIN_W to 2400px changes
+      // NOTHING here: all 54 tests still pass. That is not a hole in this
+      // surface, it is the documented limit in e2e/README.md - a
+      // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped behind
+      // a scroller", and Table wraps the whole role="table" subtree in an
+      // overflow-x-auto div, so anything that widens the GRID scrolls inside
+      // that wrapper instead of widening the document. Do not re-attempt that
+      // mutation expecting a red; it cannot go red by construction.
+      //
+      // What DID go red, and what each one buys:
+      //   - a 2400px min-width on the GlassPanel OUTSIDE the scroll wrapper
+      //     fails `schedules` AND `schedules-failing` at all three widths with
+      //     "document overflows". The gate really does measure this page.
+      //   - renaming the chip's text fails ONLY `schedules-failing`, all three
+      //     widths, while `schedules` stays green. This surface's gate is
+      //     chip-specific and the attribution is clean.
+      //   - making injectScheduleFailure match nothing fails only this surface,
+      //     and its named error leads the report.
+      // So this surface pins that the chip RENDERS in a real browser against a
+      // populated table, and that it does not push the page past the document
+      // edge. It cannot pin what the chip does INSIDE the table's scroller;
+      // nothing in this harness can, until that gap's own backlog item lands.
+      name: 'schedules-failing',
+      path: () => '/schedules',
+      population: 'populated',
+      prepare: (p, seed) => injectScheduleFailure(p, seed.scheduleName),
+      ready: async (p, seed) => {
+        // GATED ON THE CHIP, not merely on the row. A ready() that waited only
+        // for the schedule link would pass on a table with no chip in it at all,
+        // which is a measurement of the HEALTHY state wearing this surface's
+        // name - the "measure the populated state" lesson applied to the
+        // specific population this surface claims.
+        //
+        // exact:true on the link for the same reason the surface above uses it:
+        // SchedulesTable also renders an Edit link per row whose accessible name
+        // contains the schedule name, so the substring-matching default resolves
+        // two elements here.
+        const row = p
+          .getByRole('row')
+          .filter({ has: p.getByRole('link', { name: seed.scheduleName, exact: true }) })
+        await expect(row.getByText('FAILING')).toBeVisible()
       },
     },
     {
