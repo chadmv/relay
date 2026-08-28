@@ -172,6 +172,34 @@ export function ScheduleDetailPage() {
             </Link>
           </>
         ) : null}
+        {/* WITHOUT SCROLLING is the whole point of putting it here. The line above
+            already reads created / updated / next fire / last run, and a dead
+            schedule's tell is that "last run" stopped moving while "next fire"
+            kept going - a pair the reader has to interpret. "last failure 4
+            minutes ago" beside "last run 22 days ago" is the sentence an
+            operator understands immediately.
+
+            GATED ON BOTH FIELDS, not on the timestamp alone. last_error and
+            last_error_at are separate nullable columns, so both one-sided states
+            are reachable, and this marker's only job is to point at the Last
+            failure panel below - which renders on last_error. A marker with no
+            panel to point at would say a failure happened and then refuse to say
+            what it was. The truthiness test also keeps absent, "" and present
+            apart: an empty last_error is not a failure worth pointing at.
+
+            No id guard needed here beyond the one the page already does: the
+            `schedule.id !== id` check above returns before this renders, so
+            keepPreviousData cannot paint a previous schedule's failure under this
+            route's name. */}
+        {schedule.last_error && schedule.last_error_at ? (
+          <>
+            {' '}
+            · last failure{' '}
+            <span data-testid="last-failure-rel" className="text-err">
+              {formatRelativeTime(schedule.last_error_at)}
+            </span>
+          </>
+        ) : null}
       </div>
 
       {actionError ? (
@@ -219,6 +247,53 @@ export function ScheduleDetailPage() {
         </div>
 
         <div className="flex flex-col gap-3">
+          {/* TOP OF THE COLUMN, and conditional, so a healthy schedule's layout is
+              unchanged. The heading names the text's PROVENANCE because the text
+              is operator-supplied: it is derived from the stored job_spec and
+              embeds a task name the schedule's owner chose, and an admin reading
+              someone else's schedule is reading partly attacker-chosen prose.
+              There is no counter here to inflate and nothing an owner gains by
+              breaking their own schedule; the one real risk is display-layer
+              impersonation, text crafted to read like relay's own chrome. So it
+              renders as a React TEXT CHILD in a preformatted block, never through
+              dangerouslySetInnerHTML, and it goes into no URL, no title
+              attribute and no log line. Same rule as the Job spec panel beside it.
+
+              A TRUTHINESS TEST, matching the list's chip: the server omits
+              last_error entirely for a healthy schedule and never stores "", and
+              opening a panel headed "Last failure" over an empty string would show
+              a heading with no reason under it.
+
+              The time line is separately conditional because last_error and
+              last_error_at are separate nullable columns and nothing in the
+              database forces them to move together; reading last_error_at
+              unconditionally would render "Invalid Date".
+
+              The remedy copy names Run now first because it returns the
+              UNTRUNCATED message: the stored value is capped at 1 KB server-side
+              and this is the only place that says so. */}
+          {schedule.last_error ? (
+            <Panel title="Last failure" meta="FROM THE STORED JOB SPEC">
+              <div className="flex flex-col gap-2 px-4 py-3">
+                <pre
+                  data-testid="last-error-text"
+                  className="max-h-[180px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-err"
+                >
+                  {schedule.last_error}
+                </pre>
+                {schedule.last_error_at ? (
+                  <span data-testid="last-error-when" className="font-mono text-[11px] text-fg-mute">
+                    {formatRelativeTime(schedule.last_error_at)} · {formatStarted(schedule.last_error_at)}
+                  </span>
+                ) : null}
+                <span className="text-[11px] text-fg-mute">
+                  The scheduler re-validates the stored job spec on every fire. Use Run now to re-check and
+                  see the message in full, then repair the spec, or disable the schedule if it should not run.
+                </span>
+              </div>
+            </Panel>
+          ) : null}
+
           {/* ONE entry, the server's own next_run_at. The hi-fi previews five
               (hifi3-holo-pages.jsx:1814-1828), which needs a cron parser: web/ has
               none (package.json:13-20), so a preview would be a second implementation
