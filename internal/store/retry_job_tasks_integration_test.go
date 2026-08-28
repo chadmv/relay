@@ -48,8 +48,7 @@ func newRetryFixture(t *testing.T) *retryFixture {
 //
 // RETRIES IS 1, NOT 0, AND THAT IS LOAD-BEARING FOR TWO TESTS IN THIS FILE.
 // IncrementTaskRetryCount carries `AND retry_count < retries`, so a task created
-// with retries = 0 is refused by the BUDGET predicate before any other predicate
-// is consulted. That would break
+// with retries = 0 is refused by the BUDGET predicate. That would break
 // TestRetryJobTasks_ReopenedRowFields_EpochIncrementsByExactlyOne outright (its
 // agent-retry step asserts NoError) and would silently hollow out
 // TestRetryJobTasks_PreviousGenerationIsDead_StatusLogAndRetryAllRejected, whose

@@ -147,13 +147,17 @@ func Validate(spec *JobSpec) error {
 		// A nil TimeoutSeconds is SKIPPED, not defaulted: nil is the documented
 		// "no deadline" and 0 is its second, equally valid spelling. Negatives
 		// are rejected rather than documented as a third synonym, because
-		// today's equivalence is an accident of two independent sites agreeing
-		// (newRunner sets a deadline only `if timeoutSec > 0`;
+		// today's equivalence is an accident of THREE independent sites that
+		// each happen to guard on `> 0`, none of them deriving that from the
+		// others: newRunner sets a deadline only `if timeoutSec > 0`;
 		// ListOverdueAssignedTasks's execution arm requires
-		// `timeout_seconds IS NOT NULL AND timeout_seconds > 0`) and a third
-		// consumer is already close - overdueReason computes
-		// time.Duration(*t.TimeoutSeconds)*time.Second, which for a negative
-		// value yields a negative duration and a nonsense operator string.
+		// `timeout_seconds IS NOT NULL AND timeout_seconds > 0`; and
+		// overdueReason gates its time.Duration(*t.TimeoutSeconds)*time.Second
+		// behind `*t.TimeoutSeconds > 0` in the same `if`, so it never renders
+		// the negative duration it otherwise would. Three sites agreeing by
+		// coincidence is not a contract, and nothing obliges a fourth to join
+		// them - so the value is refused at the door rather than written down
+		// as a synonym that only holds by luck.
 		if ts.Retries < 0 || ts.Retries > maxRetries {
 			return fmt.Errorf("task %s: retries must be between 0 and %d", ts.Name, maxRetries)
 		}
