@@ -231,15 +231,16 @@ would perform it.
 
 **New 2026-08-28.**
 
-- **[unfireable-schedule](docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md) states a
-  mechanism this session disproved.** Its Context says `ValidateJobSpec` "takes a value, so
+- **DONE 2026-08-28 (`631fa6a`), at the user's request, outside the refresh.**
+  [unfireable-schedule](docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md) stated a
+  mechanism this session disproved: its Context said `ValidateJobSpec` "takes a value, so
   normalization is discarded and the stored spec is exactly what the client sent". `JobSpec.Tasks`
   is a slice, so the value copy shares the backing array and `jobspec.Validate` normalizes the
   caller's tasks in place - proven empirically, and `internal/api/job_spec.go`'s comment was
-  corrected to say so. **The conclusion is still right for a different reason**: the handler stores
-  `req.JobSpec`, the client's raw bytes, so normalization never reaches the stored row either way.
-  Worth fixing before someone scopes the item from the wrong mechanism.
-  `/backlog` - edit the file directly and commit as `backlog: update bug-2026-08-23-unfireable-schedule-is-invisible`.
+  corrected to say so. The conclusion survives for a different reason, now in the item: the handler
+  stores `req.JobSpec`, the client's raw bytes, and never re-marshals the validated struct. The
+  refuted sentence is left visible per convention, and the item also now records that the bound
+  shipped without it and names the three artifacts waiting for its implementer.
 - **The retries item's amendment convention worked and is worth reusing.** Its 2026-08-20 amendment
   claimed `timeout_seconds` for an item that had explicitly disclaimed it, left the refuted sentence
   visible with a pointer, and argued why a sibling item would have been worse. Both fields were then
