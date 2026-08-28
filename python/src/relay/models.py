@@ -502,6 +502,17 @@ class ScheduledJob(BaseModel):
     next_run_at: datetime
     last_run_at: Optional[datetime] = None
     last_job_id: Optional[str] = None
+    # Why the scheduler last failed to produce a job from this schedule, and
+    # when. ABSENT MEANS HEALTHY: the server omits both keys entirely
+    # (scheduledJobResponse carries `omitempty` on each) and never sends "" or
+    # null, so `is None` is the correct and only test.
+    #
+    # last_error is derived from the stored job_spec and is OPERATOR-SUPPLIED -
+    # it embeds a task name the schedule's owner chose - so treat it as untrusted
+    # text. It is sanitized and truncated to 1 KB server-side;
+    # run_scheduled_job_now() returns the untruncated message.
+    last_error: Optional[str] = None
+    last_error_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
