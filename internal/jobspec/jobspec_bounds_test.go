@@ -31,21 +31,44 @@ func twoTaskSpec(bad TaskSpec) *JobSpec {
 	}
 }
 
-// TestValidate_RetriesAndTimeoutOutOfRangeAreRejected is the half-A rejection
-// table. RED at HEAD: Validate reads neither field.
+// offenderSecondSpec builds a valid two-task spec with a HEALTHY task FIRST and
+// the offending task SECOND. It is twoTaskSpec's mirror, and BOTH are needed.
 //
-// The assertion is on the WHOLE message, not on a substring, because the
-// per-task naming is the property the backlog item asks for - a caller with a
-// fifty-task spec has to be told which task is wrong.
-func TestValidate_RetriesAndTimeoutOutOfRangeAreRejected(t *testing.T) {
-	const retriesMsg = "task bad-task: retries must be between 0 and 10"
-	const timeoutMsg = "task bad-task: timeout_seconds must be between 0 and 604800 (0 or omitted means no deadline)"
+// An offender at index 0 defeats a loop body that never runs at all. An offender
+// at index 1 defeats a loop that stops after one element, and that second mutant
+// SURVIVED this whole file before these cases existed: guarding both bound checks
+// with `i == 0` left every other test here green, while a control mutation
+// (maxRetries 10 -> 9) died. Nothing else in the tree covered a later index
+// either - the api and cli bounds tests both put their offender first, for
+// twoTaskSpec's reason. Do not "simplify" by keeping only one position.
+func offenderSecondSpec(bad TaskSpec) *JobSpec {
+	bad.Name = "bad-task"
+	bad.Command = []string{"echo", "x"}
+	return &JobSpec{
+		Name: "bounds",
+		Tasks: []TaskSpec{
+			{Name: "healthy-task", Command: []string{"echo", "y"}},
+			bad,
+		},
+	}
+}
 
-	cases := []struct {
-		name string
-		task TaskSpec
-		want string
-	}{
+const (
+	retriesMsg = "task bad-task: retries must be between 0 and 10"
+	timeoutMsg = "task bad-task: timeout_seconds must be between 0 and 604800 (0 or omitted means no deadline)"
+)
+
+type boundsCase struct {
+	name string
+	task TaskSpec
+	want string
+}
+
+// outOfRangeCases is shared by the two position tests below so a case added for
+// one position is automatically covered at the other. Both builders name the
+// offending task "bad-task", so one `want` serves both.
+func outOfRangeCases() []boundsCase {
+	return []boundsCase{
 		{"retries one over the cap", TaskSpec{Retries: 11}, retriesMsg},
 		{"retries negative", TaskSpec{Retries: -1}, retriesMsg},
 		{"retries at the item's own repro value", TaskSpec{Retries: 2000000000}, retriesMsg},
@@ -53,7 +76,16 @@ func TestValidate_RetriesAndTimeoutOutOfRangeAreRejected(t *testing.T) {
 		{"timeout negative", TaskSpec{TimeoutSeconds: i32(-1)}, timeoutMsg},
 		{"timeout at int32 max", TaskSpec{TimeoutSeconds: i32(2147483647)}, timeoutMsg},
 	}
-	for _, tc := range cases {
+}
+
+// TestValidate_RetriesAndTimeoutOutOfRangeAreRejected is the half-A rejection
+// table. RED at HEAD: Validate reads neither field.
+//
+// The assertion is on the WHOLE message, not on a substring, because the
+// per-task naming is the property the backlog item asks for - a caller with a
+// fifty-task spec has to be told which task is wrong.
+func TestValidate_RetriesAndTimeoutOutOfRangeAreRejected(t *testing.T) {
+	for _, tc := range outOfRangeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Validate(twoTaskSpec(tc.task))
 			require.Error(t, err,
@@ -62,6 +94,27 @@ func TestValidate_RetriesAndTimeoutOutOfRangeAreRejected(t *testing.T) {
 			require.Equal(t, tc.want, err.Error(),
 				"the message must NAME the offending task and STATE the range, matching this file's "+
 					"existing per-task error style")
+		})
+	}
+}
+
+// TestValidate_AnOutOfRangeTaskIsRejectedAtAnyIndex runs the same table with the
+// offender at index 1 instead of index 0.
+//
+// It is not a duplicate of the test above: it is the only thing in the tree that
+// distinguishes "the bounds are checked for every task" from "the bounds are
+// checked for the first task". The distinguishing input is the POSITION, so the
+// assertion that carries the weight is the one on the message naming
+// "bad-task" - the second task - rather than merely that some error occurred.
+func TestValidate_AnOutOfRangeTaskIsRejectedAtAnyIndex(t *testing.T) {
+	for _, tc := range outOfRangeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Validate(offenderSecondSpec(tc.task))
+			require.Error(t, err,
+				"the bound must apply to EVERY task, not just the first one the loop sees")
+			require.Equal(t, tc.want, err.Error(),
+				"the message must name the SECOND task: a loop that checks only spec.Tasks[0] either "+
+					"returns nil here or names the healthy one")
 		})
 	}
 }
