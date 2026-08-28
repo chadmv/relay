@@ -23,6 +23,12 @@ import (
 // retry-bounds change; jobspec.Validate now refuses it, and schedrunner
 // re-validates the stored spec on EVERY fire because fireOne calls
 // jobcreate.CreateJobFromSpec, which calls jobspec.Validate.
+//
+// fireOne is not the only path that re-validates a stored spec. run-now
+// (handleRunScheduledJobNow) reaches the same Validate, and unlike this one it
+// ANSWERS: it refuses with 400 and the per-task message, which is what makes it
+// the operator's remedy for the hazard below. See
+// internal/api/scheduled_jobs_run_now_bounds_integration_test.go.
 func makeOverBudgetSpecJSON(t *testing.T) []byte {
 	t.Helper()
 	spec, err := json.Marshal(map[string]any{
@@ -43,6 +49,11 @@ func makeOverBudgetSpecJSON(t *testing.T) []byte {
 // TickOnce logs one line and calls advanceNextRun - so next_run_at keeps
 // marching and GET /v1/scheduled-jobs/{id}, `relay schedules` and the SPA all
 // show a healthy schedule whose last_run_at has quietly stopped moving.
+//
+// WHAT IS NOT PINNED HERE, BECAUSE IT IS NOT BROKEN: an operator who already
+// SUSPECTS a given schedule can ask `relay schedules run-now <id>` and get the
+// validation error back verbatim. That closes the DIAGNOSIS, not the DISCOVERY:
+// nothing points at which schedule to suspect, which is the hazard.
 //
 // THAT IS THE SUBJECT OF docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md,
 // which ROADMAP.md pairs with the retry-bounds item. The human's gate decision

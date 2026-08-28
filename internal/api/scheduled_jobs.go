@@ -667,6 +667,23 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Validate the STORED spec explicitly, ahead of the transaction, so a spec
+	// that no longer passes is answered as a fact about the request rather than
+	// as a server fault. CreateJobFromSpec validates too, but every error it
+	// returns collapses into one 500 below - which would both discard the
+	// per-task message and, because relayclient.ErrorIsTransient reads 5xx as
+	// transient, tell a polling caller to retry a permanently broken schedule
+	// forever. The bounds in jobspec.Validate are retroactive over specs stored
+	// by earlier releases, so this is reachable without anything being corrupt.
+	//
+	// run-now is the ONLY interactive path that can explain why a schedule
+	// stopped producing jobs: schedrunner's fireOne logs one server-side line
+	// and advances next_run_at, leaving nothing user-visible behind.
+	if err := ValidateJobSpec(spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

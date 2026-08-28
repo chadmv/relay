@@ -78,12 +78,14 @@ var (
 // contention is a reservation, not a retry count.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. Validate runs on STORED scheduled-job specs
-// at fire time (schedrunner.fireOne -> jobcreate.CreateJobFromSpec -> Validate),
-// so an env-tunable bound would make retroactive schedule invalidation
-// environment-dependent: the same stored spec fires on one replica's
-// configuration and silently stops on another's, and lowering the knob would
-// disable schedules with no signal anywhere. A validation vocabulary shared by
-// four ingest paths is a property of the binary, exactly as the priority set is.
+// on BOTH paths that materialize one: schedrunner.fireOne at fire time and
+// handleRunScheduledJobNow on demand, each reaching Validate through
+// jobcreate.CreateJobFromSpec. An env-tunable bound would therefore make
+// retroactive schedule invalidation environment-dependent: the same stored spec
+// fires on one replica's configuration and silently stops on another's, and
+// lowering the knob would disable schedules with no signal anywhere. A
+// validation vocabulary shared by four ingest paths is a property of the binary,
+// exactly as the priority set is.
 const maxRetries = 10
 
 // maxTimeoutSeconds bounds TaskSpec.TimeoutSeconds. Seven days: comfortably
