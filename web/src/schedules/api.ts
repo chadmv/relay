@@ -15,6 +15,22 @@ export interface Schedule {
   next_run_at: string
   last_run_at?: string
   last_job_id?: string
+  // Why the last SCHEDULER fire failed, and when. ABSENT MEANS HEALTHY - the
+  // server omits both keys entirely (scheduledJobResponse carries `omitempty` on
+  // each), never "" and never null, so `schedule.last_error ? ... : null` is the
+  // correct and only test. A schedule that has never failed renders exactly as
+  // it did before these fields existed.
+  //
+  // THE TEXT IS OPERATOR-SUPPLIED, and partly attacker-chosen in the admin case:
+  // it is derived from the stored job_spec and embeds a task name the schedule's
+  // owner picked, and an admin can read any user's schedule. The server strips
+  // control characters and truncates it, and the SPA must render it as a React
+  // TEXT CHILD inside a panel whose heading names its provenance - never as
+  // chrome, never through dangerouslySetInnerHTML, and never into a URL, a title
+  // attribute or a log line. Same rule, same reason, as the Job spec panel on the
+  // detail page.
+  last_error?: string
+  last_error_at?: string
   created_at: string
   updated_at: string
 }
@@ -61,7 +77,7 @@ export function runScheduleNow(id: string): Promise<unknown> {
 // must not substitute owner_id (36 opaque characters).
 //
 // Rejects with ApiError(404) both for a missing row and for a non-owner non-admin:
-// ownedScheduledJob hides rather than refuses (:147-169). The two are indistinguishable
+// ownedScheduledJob hides rather than refuses. The two are indistinguishable
 // on the wire by design; do not try to tell them apart.
 // The id is encoded; see the note on runScheduleNow above - the same traversal
 // risk applies to every call site in this file.
@@ -70,13 +86,19 @@ export function getSchedule(id: string): Promise<Schedule> {
 }
 
 // Every field optional. An OMITTED key means "leave alone" server-side, because
-// patchScheduledJobRequest is all pointers (internal/api/scheduled_jobs.go:521-528).
+// patchScheduledJobRequest is all pointers.
 //
-// SENDING A KEY YOU DID NOT CHANGE IS NOT A NO-OP. next_run_at is recomputed from
-// time.Now() whenever the body merely CARRIES cron_expr or timezone, changed or not
-// (:585, :595). Re-sending an unchanged cron on an `@every 1h` schedule whose next
-// fire is five minutes away pushes that fire out by 55 minutes. Always build this
-// from a diff against the loaded row, never from the whole form.
+// SENDING A KEY YOU DID NOT CHANGE IS NOT A NO-OP, AND THERE ARE NOW TWO
+// CONSEQUENCES. next_run_at is recomputed from time.Now() whenever the body
+// merely CARRIES cron_expr or timezone, changed or not - see
+// handlePatchScheduledJob - so re-sending an unchanged cron on an `@every 1h`
+// schedule whose next fire is five minutes away pushes that fire out by 55
+// minutes. AND a body carrying job_spec, cron_expr or timezone CLEARS
+// last_error/last_error_at, on the reasoning that the handler validated the new
+// values before storing them so any record about the OLD ones is stale by
+// construction. Re-sending an unchanged cron therefore also erases the only
+// signal that the schedule is broken. Always build this from a diff against the
+// loaded row, never from the whole form.
 export interface SchedulePatch {
   name?: string
   cron_expr?: string
@@ -86,19 +108,20 @@ export interface SchedulePatch {
   job_spec?: unknown
 }
 
-// 200 with the full updated row, including the recomputed next_run_at (:598-612).
+// 200 with the full updated row, including the recomputed next_run_at - see
+// handlePatchScheduledJob.
 // Concurrent edits are last-writer-wins: UpdateScheduledJob is a bare WHERE id = $1
-// (internal/store/query/scheduled_jobs.sql:32-43) with no version column and there is
+// (internal/store/query/scheduled_jobs.sql) with no version column and there is
 // no 409. The changed-fields-only body narrows the overlap to fields actually touched.
 export function updateSchedule(id: string, patch: SchedulePatch): Promise<Schedule> {
   return apiFetch<Schedule>(`/scheduled-jobs/${encodeURIComponent(id)}`, { method: 'PATCH', json: patch })
 }
 
-// 204 with no body (internal/api/scheduled_jobs.go:633); apiFetch returns undefined for
-// 204 (lib/api.ts:57), so no special handling is needed here.
+// 204 with no body (handleDeleteScheduledJob); apiFetch returns undefined for
+// 204 (lib/api.ts), so no special handling is needed here.
 //
 // What it does to history: jobs.scheduled_job_id is ON DELETE SET NULL
-// (internal/store/migrations/000006_scheduled_jobs.up.sql:20-21), so jobs the schedule
+// (internal/store/migrations/000006_scheduled_jobs.up.sql), so jobs the schedule
 // already produced SURVIVE but are unlinked from it - the run history becomes
 // unreachable. A run already in flight is not cancelled. That is the confirm copy.
 export function deleteSchedule(id: string): Promise<void> {
@@ -109,7 +132,7 @@ export function deleteSchedule(id: string): Promise<void> {
 // PATCH client; the exported signature is byte-identical, so no call site and no
 // existing test moved. It sends ONLY { enabled }: adding cron_expr or timezone here
 // would recompute next_run_at on every toggle. Note the server recomputes anyway on a
-// disabled -> enabled transition (internal/api/scheduled_jobs.go:585), which is the
+// disabled -> enabled transition (handlePatchScheduledJob), which is the
 // intended never-catch-up semantic.
 export function setScheduleEnabled(id: string, enabled: boolean): Promise<Schedule> {
   return updateSchedule(id, { enabled })
