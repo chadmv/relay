@@ -15,6 +15,11 @@ make test
 # spins up Postgres and p4d containers; -p 1 prevents parallel container conflicts)
 make test-integration
 
+# CLI real-server integration lane (internal/cli only): every test drives a live
+# internal/api server over HTTP. Needs Docker, or set RELAY_TEST_DATABASE_URL to a
+# running Postgres for one fresh database per test instead of one container per test.
+make test-cli-integration
+
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
 make generate
 
@@ -24,8 +29,15 @@ make generate
 # Read web/e2e/README.md first - it is the live document for what is and is not covered.
 make test-e2e
 
-# Race detector. CI gates on this (.github/workflows/go-ci.yml, `race + integration-build`),
-# so it is a merge gate, not an optional lane.
+# Race detector. CI runs this (.github/workflows/go-ci.yml, `race + integration-build`).
+# NOTHING ON THIS REPO BLOCKS A MERGE. Verified 2026-08-27: `main` has no branch
+# protection and no rulesets (the protection API returns 404 "Branch not protected";
+# the rulesets API returns []), so every check reports red or green and the merge
+# button works either way, and a direct push to `main` bypasses PRs entirely. This is a
+# deliberate choice for a solo repo, not an oversight - the gate is the convention that
+# you run these locally and do not merge red, which is why the local invocation below
+# matters more here than it would on a protected repo. Do not describe any check as a
+# "merge gate": it was described that way for two months and it was never true.
 make test-race
 
 # ...but on Windows the native lane is unreliable, and the container below is the
@@ -95,6 +107,8 @@ Code map:
 **Email enumeration prevention.** `handleLogin` always calls `bcrypt.CompareHashAndPassword`, even on unknown emails, against a pre-computed dummy hash (`getDummyHash()` via `sync.Once`).
 
 **Testability overrides** (no build tags). `internal/cli` exposes `saveConfigFn`, `configFilePathFn`, `readPasswordFn` as package vars for swapping in tests.
+
+**Where a CLI test goes.** Ask whether the assertion's truth depends on what the SERVER puts on the wire. Yes (status codes from real handlers, response container shape, field names and types, cursor behaviour across a real page boundary, authorization outcomes) -> the integration lane, `internal/cli/*_integration_test.go`, `make test-cli-integration`. Note the lane crosses a real *log* page boundary and has never crossed a *list* one - every list in it holds one or two rows against a 200-row limit, so `page[T].NextCursor` survives being renamed. No (flag parsing, argument reordering, a refusal issued before any request, output formatting given a known input, error wording, adversarial or impossible server responses) -> the default lane with an `httptest` fixture. **And a default-lane fixture must never encode its response through the CLI's own response struct.** A fixture marshalled from `relayclient.PageEnvelope[workerResp]` agrees with the decoder by construction, on both the envelope keys and the item fields, and can never detect drift in either direction. **51 vacuous fixture bodies remain, across 43 `Encode` statements** - and both numbers are given because neither alone is honest. By body: 19 paged (`PageEnvelope[workerResp|jobResp|scheduleResp|reservationResp]`) + 32 unpaged. By statement: the same 19 + 24, because `logs_test.go`'s `fakeJobSnapshotServer` takes a `[]jobResp` parameter and routes **nine** call sites' literals through one `Encode(bodies[i])`. A further 7 use `PageEnvelope[map[string]any]`: a genuine simulator on the item axis, a tautology on the envelope axis. **Do not count these with a text search.** Two earlier attempts got 19 and 29; both grepped for `Encode(<cliType>{` and neither could see the parameter indirection, which is exactly the instrument-to-claim mismatch a structural property demands - the fixture type travels through a function signature, so the shape to search for is the *type in any fixture position*, not the encode call. Hand-write the JSON, or marshal through a locally declared struct whose json tags are deliberately independent of the production type, as `writeTaskLogPage`'s `logRow` in `internal/cli/logs_test.go` does. **Read that exemplar narrowly**: the same file gets it right for the log page and wrong 23 times for the job body, which is the largest single concentration of the defect in the repo.
 
 **Task DAG.** `task_dependencies` table; `FailDependentTasks` recursive CTE for transitive cascade on failure.
 

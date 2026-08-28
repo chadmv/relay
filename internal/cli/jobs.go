@@ -16,28 +16,86 @@ import (
 )
 
 // ─── Response types (mirror api package JSON output) ─────────────────────────
+//
+// These are MIRRORS, and doListJobs/doGetJob re-encode through them rather than
+// proxying the server's bytes, so a field missing here is deleted from output
+// the user was told is JSON - silently, with no error at any layer. Keep them
+// field-for-field and tag-for-tag identical to internal/api's jobResponse and
+// taskResponse, including omitempty, and do not compute anything client-side:
+// a mirror that derives a value stops being able to show drift.
 
+// jobResp mirrors internal/api's jobResponse. That is ONE struct on the server
+// side serving both GET /v1/jobs (list) and GET /v1/jobs/{id} (detail), with the
+// enrichment block below populated only on list rows by applyJobEnrichment - so
+// this is one struct here too. A separate list type would have to be kept in
+// sync with a server type that does not exist, and would reintroduce exactly the
+// hand-copy arity gap this shape closes.
 type jobResp struct {
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
-	Priority         string     `json:"priority"`
-	Status           string     `json:"status"`
-	SubmittedBy      string     `json:"submitted_by"`
-	SubmittedByEmail string     `json:"submitted_by_email"`
-	Tasks            []taskResp `json:"tasks,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Priority         string `json:"priority"`
+	Status           string `json:"status"`
+	SubmittedBy      string `json:"submitted_by"`
+	SubmittedByEmail string `json:"submitted_by_email,omitempty"`
+	// json.RawMessage, not map[string]string: a job submitted without labels has
+	// the literal JSONB `null` in the column (jobcreate.CreateJobFromSpec
+	// json.Marshals a nil map) and rawJSON only floors an EMPTY slice to {}, so
+	// `labels` really is null on the wire. RawMessage round-trips that; a typed
+	// map would quietly turn it into {} and misreport the server.
+	Labels    json.RawMessage `json:"labels"`
+	Tasks     []taskResp      `json:"tasks,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+
+	// Enrichment the server populates only on list rows (GET /v1/jobs). The
+	// detail handler leaves them zero, and total_tasks/done_tasks carry no
+	// omitempty server-side, so a detail body genuinely says 0/0 - mirror that
+	// rather than filling it in from len(Tasks).
+	TotalTasks       int32      `json:"total_tasks"`
+	DoneTasks        int32      `json:"done_tasks"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ScheduledJobID   string     `json:"scheduled_job_id,omitempty"`
+	ScheduledJobName string     `json:"scheduled_job_name,omitempty"`
 }
 
 type taskResp struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Status         string          `json:"status"`
-	Command        []string        `json:"command"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// `commands`, plural: migration 000008_task_commands dropped tasks.command
+	// (TEXT[]) and added tasks.commands (JSONB), and internal/api's
+	// taskResponse has emitted `commands` ever since.
+	//
+	// `command` (singular, []string) is still a live REQUEST key - internal/api's
+	// taskSpec accepts it and jobspec.Validate normalises it into Commands -
+	// which is exactly why the decoder here looked right. It is not a RESPONSE
+	// key and has not been one since 2026-05. Decoding it gave
+	// `relay get <job-id> --json` a "command":null and no task definition at
+	// all for three months, with the whole CLI suite green.
+	//
+	// json.RawMessage, not [][]string, and this is a DELIBERATE decision, not
+	// an oversight this header's "field-for-field and tag-for-tag identical"
+	// claim would otherwise contradict: internal/api's taskResponse.Commands
+	// is json.RawMessage too (toTaskResponse: rawJSON(t.Commands)), so this
+	// now genuinely mirrors it rather than merely producing the same bytes
+	// for today's data. [][]string decoded correctly for every job this CLI
+	// binary has ever created - jobspec.Validate guarantees the shape and the
+	// tasks.commands column defaults to '[]'::jsonb - but there is no
+	// `CHECK (jsonb_typeof(commands) = 'array')` on that column, and this is a
+	// SHIPPED BINARY that talks to servers of other versions. A [][]string
+	// field turns any future server-side shape change into a hard decode
+	// error in readJobSnapshot (internal/cli/logs.go), which backs not only
+	// `relay get` but `relay logs` and non-detached `relay submit` too.
+	// json.RawMessage can't diverge from the wire either way, and it keeps
+	// this field covered by the JSONEq total guard in
+	// jobs_integration_test.go the same way Labels already is.
+	Commands       json.RawMessage `json:"commands"`
 	Env            json.RawMessage `json:"env"`
 	Requires       json.RawMessage `json:"requires"`
 	TimeoutSeconds *int32          `json:"timeout_seconds"`
 	Retries        int32           `json:"retries"`
+	RetryCount     int32           `json:"retry_count"`
 	DependsOn      []string        `json:"depends_on,omitempty"`
 	WorkerID       string          `json:"worker_id,omitempty"`
 }

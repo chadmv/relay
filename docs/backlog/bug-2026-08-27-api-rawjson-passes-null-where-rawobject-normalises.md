@@ -69,3 +69,35 @@ site.
 - `python/src/relay/models.py` `_empty_on_null` - the client-side defence, which records which two
   of the five are observed on a live wire and which three are insurance
 - [[bug-2026-08-25-python-sdk-task-logs-iterates-envelope-keys]]
+
+## 2026-08-27: a third client hit it, and the workaround is now load-bearing in Go too
+
+From the CLI real-server integration lane slice ([[idea-2026-08-23-cli-tests-never-hit-real-server]]).
+
+The item was filed off the Python SDK. The Go CLI has now hit the same field. `relay get --json`
+and `relay list --json` were silently dropping `labels` entirely (along with six other fields);
+adding it forced the same decision the Python SDK faced, and for the same reason:
+
+`internal/cli/jobs.go`'s `jobResp.Labels` had to be typed `json.RawMessage` rather than
+`map[string]string`. A typed map decodes the wire's `null` to a nil map and re-encodes it as
+`null` too, which happens to round-trip - but any consumer typing it as a required object breaks,
+which is exactly the Python failure. `json.RawMessage` is the only mirror type that carries the
+server's actual bytes without a client-side opinion.
+
+Measured on a live server, a job submitted with no labels:
+
+```
+"labels":null, ... "env":{}, "requires":{}
+```
+
+`env` and `requires` go through `rawObject` and are normalised; `labels` goes through `rawJSON` and
+is not. Three clients now defend against this separately - the Python SDK via `_empty_on_null`, the
+web SPA via `?? []`-style guards, and the Go CLI via `json.RawMessage` - which is precisely the
+"every client has to defend itself separately" cost the Summary predicts.
+
+The mechanical detail, confirmed while writing the CLI comment: `jobcreate.CreateJobFromSpec` does
+`json.Marshal` on a **nil map**, producing the four bytes `null`, and `rawJSON` floors only an
+**empty** slice to `{}` - four bytes is not empty, so the literal null survives to the wire.
+
+Add to Related: `internal/cli/jobs.go` (`jobResp.Labels`),
+`internal/cli/jobs_integration_test.go` (`TestIntegration_GetJobJSON_LabelsWhenTheJobHasNone`).

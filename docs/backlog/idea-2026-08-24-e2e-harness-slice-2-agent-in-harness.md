@@ -48,7 +48,10 @@ Decisions this needs and slice 1 deliberately did not make:
   rather than on time.
 - **Determinism.** Task execution is asynchronous and the suite is serialized at `workers: 1`. Every
   assertion must wait on an observable state transition, never a duration - this is the classic source
-  of a flaky required check, and slice 1's zero-flake record is worth protecting.
+  of a flaky CI check, and slice 1's zero-flake record is worth protecting. (Corrected 2026-08-27:
+  this said "required check". No check on this repo is required - `main` carries no branch protection
+  and no rulesets, verified against the API - so a flake costs attention and trust rather than a
+  blocked merge. The argument for determinism is unchanged; only the stated stake was wrong.)
 - **Whether the agent runs on the same host as CI's `webServer`.** It needs a working subprocess
   environment; on ubuntu that is fine, on a developer's Windows box it is the harness's first real
   platform divergence.

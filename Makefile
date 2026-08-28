@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
+.PHONY: build test test-integration test-cli-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
 
 # `go build -o` writes exactly the name it is given, and Windows shells will not
 # execute an extensionless file. web/playwright.config.ts picks the same two names
@@ -63,8 +63,64 @@ test:
 # Run integration tests (requires Docker); -p 1 prevents parallel container conflicts on Windows.
 # The timeout is deliberately generous: every integration test spins up its own
 # real Postgres container, so internal/api alone runs ~320-340s.
+#
+# Deliberately NOT -count=1: Go's test cache DOES key on env vars a test
+# actually reads via os.Getenv during that run (newIntegrationDSN reads
+# RELAY_TEST_DATABASE_URL), so a real mode change here is not a
+# cache-invalidation gap. Measured directly: with a shared GOCACHE, changing
+# RELAY_TEST_DATABASE_URL between two runs of TestIntegration_HarnessDSNIsMigratedAndEmpty
+# reliably busts the cache, and the unchanged-env rerun in between reports
+# "(cached)" as expected. A prior version of this comment claimed the cache
+# does not key on env vars at all; that was wrong (see test-cli-integration's
+# own comment below for what the cache key actually covers - it does not
+# include whether a live TCP connection succeeded, which is a different
+# claim). This target is also not what CI runs for ./internal/cli/... -
+# .github/workflows/go-ci.yml never calls test-integration - so the
+# CI-Postgres-config scenario the old comment invoked cannot apply here
+# either. Adding -count=1 back would only cost real time: repeated local runs
+# would stop hitting the cache for every untouched package under ./... at the
+# integration tag.
+#
+# Residual axis, not addressed by the reasoning above: test-cli-integration's
+# own justification for -count=1 ("the cache key says nothing about whether a
+# live TCP connection succeeded") applies verbatim to THIS target too when run
+# in shared-service mode (RELAY_TEST_DATABASE_URL set) - newIntegrationDSN
+# reads that env var, so a value CHANGE busts the cache as this comment
+# measured, but a change to the SHARED SERVER ITSELF (its Postgres version,
+# its health check, its container config) with RELAY_TEST_DATABASE_URL left
+# unchanged would not. Left as is: this target's normal (unset) mode is a
+# fresh testcontainer per test, which has no equivalent gap.
 test-integration:
 	go test -tags integration -p 1 ./... -timeout 900s
+
+# Run the CLI real-server integration lane. Every test in it drives a live
+# internal/api server over HTTP against a real Postgres, so a response-shape
+# drift in a handler reddens here instead of staying invisible to
+# internal/cli's httptest fixtures.
+#
+# Two modes, selected by RELAY_TEST_DATABASE_URL:
+#   unset - one Postgres testcontainer per test (needs Docker), like every
+#           other integration package in this repo.
+#   set   - one freshly CREATEd database per test on the supplied server, e.g.
+#           postgres://relay:relay@127.0.0.1:5432/postgres?sslmode=disable (the
+#           relay-postgres container scripts/dev.ps1 already manages). This is
+#           what .github/workflows/go-ci.yml's cli-integration job uses, and the
+#           command there is this same target so the two cannot drift.
+#
+# -p 1 is NOT needed: the pattern names one package. The 480s Go timeout is
+# deliberately distinct from the 10-minute job timeout in CI so a Go panic and a
+# GitHub job kill name themselves instead of looking identical.
+#
+# -count=1 disables Go's test result cache. Without it, CI's actions/setup-go
+# cache: true restores GOCACHE across runs, and the cache key covers the test
+# binary, its args, and observed env vars - nothing about whether a live TCP
+# connection to Postgres actually succeeded. A PR that edits only the
+# services.postgres block or the health check in go-ci.yml leaves the Go
+# inputs byte-identical, so without -count=1 this target can report
+# "ok (cached)" in well under a second while never having contacted the
+# database it names.
+test-cli-integration:
+	go test -tags integration -count=1 ./internal/cli/... -timeout 480s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`
