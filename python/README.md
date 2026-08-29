@@ -212,11 +212,28 @@ Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
 
 Errors raised by the SDK's own request handling descend from `relay.RelayError`.
 Response DECODING is the exception, and it escapes in two ways, neither of
-which descends from `RelayError`. Two is the whole list only because every
-response body now goes through a model in one piece - a decode that hand-picks
-fields out of the raw dict and uses them untyped adds `TypeError` and `KeyError`
-to this list, which is what `_fetch_all` did until it was routed through
-`Page[model]`:
+which descends from `RelayError`. Two is the whole list only for the bodies that
+go through a model in ONE PIECE - every paged envelope now does, which is what
+`_fetch_all` did not do until it was routed through `Page[model]`. A decode that
+hand-picks fields out of the raw result and uses them untyped adds `TypeError`
+and `KeyError`, and the claim has to be scoped because one such decode remains.
+
+Counted across `relay/`, twelve call sites read `response.json()`. Ten hand the
+whole body to a model. Two do not, and only one of them widens this list:
+
+- `get_tasks(job_id)` iterates the raw result
+  (`[Task.model_validate(item) for item in response.json()]`), so a 200 whose
+  body is not a JSON array raises `TypeError` - exactly the escape class the
+  paragraph above says the paged envelopes no longer have. `handleListTasks`
+  builds `make([]taskResponse, len(tasks))`, so a correct server never sends
+  one; that is a statement about the server, not about the decode, and it is
+  tracked separately.
+- `_extract_message` in `errors.py` reads `payload.get("error")`, but every step
+  is guarded - `try/except ValueError` around the parse, `isinstance` on both
+  the payload and the field - and it falls back to `response.text`. It cannot
+  raise, so it adds nothing here.
+
+The two escapes are:
 
 - a body that is well-formed JSON but does not match the model raises
   `pydantic.ValidationError`;

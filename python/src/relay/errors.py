@@ -91,8 +91,8 @@ class ProtocolError(RelayError):
     is the ONLY route by which up to 2,000,000 collected rows reach the caller.
     Not because the page cap cannot be moved: ``Client._MAX_LIST_PAGES`` is a
     single-underscore CLASS attribute, which is a convention and not a barrier,
-    and the SDK's own tests raise and lower it with ``monkeypatch.setattr`` five
-    times over. It is because raising it and calling again starts a NEW walk at
+    and the SDK's own tests lower it with ``monkeypatch.setattr`` six times
+    over. It is because raising it and calling again starts a NEW walk at
     page 1 and re-fetches every row; nothing carries the abandoned walk's rows
     forward.
 
