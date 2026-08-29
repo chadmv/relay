@@ -144,6 +144,30 @@ const maxTimeoutSeconds = 604800
 // to every bound in this file.
 const maxTasksPerJob = 5000
 
+// maxCommandsPerTask bounds len(TaskSpec.Commands) after normalization.
+//
+// `commands` exists so several steps share ONE prepared workspace and
+// environment: sync, build, render, publish, clean up. The realistic shape is
+// single digits. The plausible high end is a task that iterates a fixed list
+// inside one prepared workspace - export N assets from a scene, bake N maps -
+// which is tens. 500 is roughly 20x that.
+//
+// THIS IS THE CONCENTRATION CONTROL. It bounds how much sequential work a single
+// request can pin to a single worker slot: at the bound, one task is 500
+// subprocess spawns per attempt and 5500 across a full maxRetries budget.
+//
+// A USER AT THIS BOUND IS BEING TOLD TO USE THE BETTER MODEL, NOT TOLD NO. Past a
+// few hundred, one task per unit is better anyway: separate tasks parallelize
+// across the fleet, retry independently and report per-unit status, which is the
+// entire point of a task graph. Tasks sharing a `source` reuse the same workspace
+// (workspace_exclusive defaults to false), so splitting does not cost the
+// workspace sharing that motivates `commands` in the first place.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// to every bound in this file.
+const maxCommandsPerTask = 500
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -198,8 +222,31 @@ func Validate(spec *JobSpec) error {
 		}
 		nameSet[ts.Name] = struct{}{}
 		// Bounds last in this loop body, so command-form and duplicate-name
-		// errors keep the precedence they have today.
+		// errors keep the precedence they have today. That promise is about
+		// precedence WITHIN one iteration. A bound has always been able to preempt
+		// a form error on a LATER task - a bad `retries` at index 3 has always
+		// outrun a duplicate name at index 90 - and the running total below is one
+		// more instance of that rather than a change to it.
 		//
+		// THE COMMAND CHECK READS THE NORMALIZED VALUE, i.e. it sits AFTER
+		// normalizeTaskCommands, which rewrites a legacy single Command into a
+		// one-element Commands and clears Command. That covers both spellings by
+		// construction. BE HONEST ABOUT WHAT THAT BUYS TODAY: a legacy Command can
+		// only ever produce one command, so hoisting THIS check above the
+		// normalization would behave identically and NO INPUT DISTINGUISHES THE TWO
+		// POSITIONS. The position is correct rather than merely lucky the moment the
+		// legacy form gains a second element. The ACCUMULATOR below is the half that
+		// IS testable, because above the normalization a legacy task contributes 0.
+		//
+		// IT COMES BEFORE THE TOTAL so a task that is itself over the per-task cap
+		// gets the specific, task-naming message rather than the job-level one. That
+		// is the whole ordering argument; it says nothing about the retries and
+		// timeout_seconds checks below, whose relative order is unchanged and
+		// unimportant.
+		if len(ts.Commands) > maxCommandsPerTask {
+			return fmt.Errorf("task %s: at most %d commands are allowed, got %d",
+				ts.Name, maxCommandsPerTask, len(ts.Commands))
+		}
 		// A nil TimeoutSeconds is SKIPPED, not defaulted: nil is the documented
 		// "no deadline" and 0 is its second, equally valid spelling. Negatives
 		// are rejected rather than documented as a third synonym, because
