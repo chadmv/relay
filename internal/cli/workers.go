@@ -256,6 +256,18 @@ func resolveWorkerIDIn(ctx context.Context, c *relayclient.Client, target string
 			// did not ask for. Keyed on the INDEX, not on the path string: a
 			// literal comparison would silently turn a third path's 500 or 403
 			// into "no worker found".
+			//
+			// KNOWN CONSEQUENCE, recorded rather than discovered in review.
+			// Since FetchAllPages grew termination stops, this branch can now
+			// swallow a PAGINATION error on a fallback path - a repeated cursor
+			// or a page cap on /v1/workers/revoked - and report it to the
+			// operator as `no worker found with hostname "..."`, which is a
+			// wrong diagnosis rather than merely a terse one. The soft rule is
+			// right for the 403 it was written for and wrong for this; narrowing
+			// it means deciding which error classes are soft (plausibly: a
+			// relayclient.ResponseError with 401/403 stays soft, everything else
+			// becomes fatal), which is a separate judgement with its own tests
+			// and is deliberately NOT made here.
 			if i == 0 {
 				return "", fmt.Errorf("list workers: %w", err)
 			}
