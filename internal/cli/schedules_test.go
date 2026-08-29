@@ -626,6 +626,7 @@ func TestTerminalSafeLine_CoversC1AndBidiControlsNotJustC0(t *testing.T) {
 	require.Equal(t, "café 日本語 ✓ \u00a0", terminalSafeLine("café 日本語 ✓ \u00a0"),
 		"printable non-ASCII, U+00A0 included, must survive verbatim")
 }
+
 // RUN-NOW IS THE REMEDY THIS SLICE ADVERTISES, AND IT WAS THE UNSANITIZED ROUTE.
 // `relay schedules show` prints the stored failure through terminalSafeLine and
 // then prints "Re-check with: relay schedules run-now <id>" underneath it. That
