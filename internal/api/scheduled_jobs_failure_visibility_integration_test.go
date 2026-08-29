@@ -229,3 +229,117 @@ func assertNoFailureKeys(t *testing.T, m map[string]any, subject string) {
 		assert.False(t, present, "%s must omit %q entirely, got %#v", subject, k, v)
 	}
 }
+
+// TestScheduledJobFailure_PatchClearsOnlyWhenTheEffectiveRowValidates pins the
+// SECOND half of the clearing rule, which the handler asserted and did not
+// check.
+//
+// THE CLEAR FIRED ON KEY PRESENCE WHILE ITS JUSTIFICATION REQUIRED VALIDITY.
+// handlePatchScheduledJob validates job_spec only inside `if req.JobSpec != nil`
+// and re-parses cron/tz only when one of them is supplied, but cleared the
+// record whenever ANY of the three keys was present. So a PATCH could erase a
+// record that was still true about an input it never looked at, and the prose at
+// five sites said the record was "stale by construction" - a claim about the
+// values the patch SUPPLIED, silently generalized to the row.
+//
+// BOTH DIRECTIONS ARE LIVE AND BOTH ARE REACHED FROM AN ORDINARY OPERATOR
+// ACTION (`relay schedules update <id> --cron ...`, and the SPA's edit form):
+//   - spec broken, cron patched. A schedule storing retries: 50 has the only
+//     signal that it is unfireable erased by a cron change, and nothing
+//     re-records it until the next fire - a month on @monthly, which is exactly
+//     the population this whole item exists for.
+//   - cron broken, spec patched. A stored IANA zone dropped by a later tzdata
+//     makes ParseSchedule fail; a job_spec-only PATCH erases that record without
+//     re-parsing the cron at all.
+//
+// THE PATCH ITSELF STILL SUCCEEDS in both directions, deliberately. The handler
+// validates what it is GIVEN, and an operator repairing a broken schedule one
+// field at a time is a legitimate sequence; answering 400 because some OTHER
+// stored field is still broken would make a two-step repair impossible. The
+// change is to what the write CLEARS, not to what it accepts.
+//
+// EACH LEG CARRIES ITS OWN POSITIVE CONTROL - the PATCH that repairs the LAST
+// broken input, which must clear. Without those, a handler that had stopped
+// clearing altogether would satisfy every preservation assertion here, and the
+// leg in the test above cannot supply the control because it repairs the spec
+// before it touches the cron.
+func TestScheduledJobFailure_PatchClearsOnlyWhenTheEffectiveRowValidates(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Bob", "failclear-bob@example.com", false)
+	token := createTestToken(t, q, user.ID)
+
+	overBound := []byte(`{"name":"legacy","tasks":[{"name":"t","command":["echo","hi"],"retries":50}]}`)
+	healthySpec := []byte(`{"name":"fine","tasks":[{"name":"t","command":["echo","hi"]}]}`)
+	const goodSpecBody = `{"job_spec":{"name":"repaired","tasks":[{"name":"t","command":["echo","hi"]}]}}`
+
+	plant := func(id pgtype.UUID, text string) {
+		t.Helper()
+		_, err := pool.Exec(t.Context(),
+			`UPDATE scheduled_jobs SET last_error = $1, last_error_at = NOW() WHERE id = $2`, text, id)
+		require.NoError(t, err)
+		require.Contains(t, getScheduleBody(t, srv, token, uuidString(id)), "last_error",
+			"precondition: the planted record must be visible before the PATCH under test")
+	}
+
+	// ---- DIRECTION 1: the SPEC is broken and the patch changes the CRON ----
+	//
+	// The row is stored directly, as in the test above: POST validates before
+	// storing, so the API cannot create the row this test is about. retries: 50
+	// was accepted by every relay release before the retry-bounds change.
+	specBroken, err := q.CreateScheduledJob(t.Context(), store.CreateScheduledJobParams{
+		Name: "failclear-spec-broken", OwnerID: user.ID, CronExpr: "@hourly", Timezone: "UTC",
+		JobSpec: overBound, OverlapPolicy: "skip", Enabled: true,
+		NextRunAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	plant(specBroken.ID, "task t: retries must be between 0 and 10")
+
+	patchSchedule(t, srv, token, uuidString(specBroken.ID), `{"cron_expr":"@daily"}`)
+	afterCron := getScheduleBody(t, srv, token, uuidString(specBroken.ID))
+	require.Equal(t, "@daily", afterCron["cron_expr"], "precondition: the cron change must have applied")
+	kept, present := afterCron["last_error"].(string)
+	require.True(t, present,
+		"the stored job_spec is STILL over the bound, so the record about it is still TRUE. "+
+			"Nothing in this PATCH looked at job_spec, so nothing in it made the record stale")
+	assert.Contains(t, kept, "retries must be between 0 and 10",
+		"the preserved record must be the ORIGINAL text, not a rewrite")
+	assert.Contains(t, afterCron, "last_error_at",
+		"last_error_at must be preserved with it; one column without the other is a half-cleared row")
+
+	// CONTROL for direction 1: repairing the spec makes the WHOLE row valid, so
+	// now it clears.
+	patchSchedule(t, srv, token, uuidString(specBroken.ID), goodSpecBody)
+	assertNoFailureKeys(t, getScheduleBody(t, srv, token, uuidString(specBroken.ID)),
+		"a PATCH after which every one of job_spec, cron_expr and timezone validates")
+
+	// ---- DIRECTION 2: the CRON is broken and the patch changes the SPEC ----
+	//
+	// The unparseable cron is planted with SQL because POST and PATCH both refuse
+	// one, which is the same reason the cron leg above plants its record.
+	cronBroken, err := q.CreateScheduledJob(t.Context(), store.CreateScheduledJobParams{
+		Name: "failclear-cron-broken", OwnerID: user.ID, CronExpr: "@hourly", Timezone: "UTC",
+		JobSpec: healthySpec, OverlapPolicy: "skip", Enabled: true,
+		NextRunAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(),
+		`UPDATE scheduled_jobs SET cron_expr = $1 WHERE id = $2`, "0 2 * *", cronBroken.ID)
+	require.NoError(t, err)
+	plant(cronBroken.ID, "parse cron: expected 5 fields, found 4")
+
+	patchSchedule(t, srv, token, uuidString(cronBroken.ID), goodSpecBody)
+	afterSpec := getScheduleBody(t, srv, token, uuidString(cronBroken.ID))
+	require.Equal(t, "0 2 * *", afterSpec["cron_expr"],
+		"precondition: a job_spec-only PATCH must leave the broken cron in place")
+	keptCron, present := afterSpec["last_error"].(string)
+	require.True(t, present,
+		"the stored cron_expr is STILL unparseable, and this PATCH never called ParseSchedule at all - "+
+			"the nextRunAt block runs only when cron_expr or timezone is supplied")
+	assert.Contains(t, keptCron, "parse cron",
+		"the preserved record must be the ORIGINAL text, not a rewrite")
+
+	// CONTROL for direction 2: repairing the cron makes the WHOLE row valid.
+	patchSchedule(t, srv, token, uuidString(cronBroken.ID), `{"cron_expr":"@daily"}`)
+	assertNoFailureKeys(t, getScheduleBody(t, srv, token, uuidString(cronBroken.ID)),
+		"a PATCH that repaired the last broken input of the three")
+}

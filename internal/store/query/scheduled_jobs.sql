@@ -42,12 +42,19 @@ SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1;
 -- as a CASE means the row's own value is never round-tripped through the
 -- application and there is no window.
 --
--- The handler sets it from `req.JobSpec != nil || req.CronExpr != nil ||
--- req.Timezone != nil` - exactly the three inputs the three recorded failure
--- classes are about, all of which the handler has already validated before
--- reaching here. A PATCH of `name`, `overlap_policy` or `enabled` PRESERVES the
--- record: renaming a schedule must not erase the only signal that it is broken,
--- and on an @monthly schedule nothing would rewrite it for a month.
+-- THE HANDLER SETS IT FROM TWO ARMS, AND THE SECOND ONE MATTERS. The first is
+-- `req.JobSpec != nil || req.CronExpr != nil || req.Timezone != nil` - the three
+-- inputs the three recorded failure classes are about. A PATCH of `name`,
+-- `overlap_policy` or `enabled` fails it and PRESERVES the record: renaming a
+-- schedule must not erase the only signal that it is broken, and on an @monthly
+-- schedule nothing would rewrite it for a month.
+--
+-- The second arm is `schedrunner.ValidateStoredSchedule` over the EFFECTIVE
+-- post-patch values. The handler validates PER KEY - job_spec only inside
+-- `if req.JobSpec != nil`, cron and timezone only when one of them is supplied -
+-- so the first arm alone cleared records about the two inputs the patch never
+-- looked at. It is NOT true that everything is "validated before reaching here";
+-- only what the request supplied is.
 UPDATE scheduled_jobs
 SET name           = $2,
     cron_expr      = $3,

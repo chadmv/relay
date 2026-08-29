@@ -639,20 +639,40 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		nextRunAt = pgtype.Timestamptz{Time: sched.Next(time.Now()), Valid: true}
 	}
 
-	// CLEAR THE FAILURE RECORD IF, AND ONLY IF, THIS PATCH CHANGED ONE OF THE
-	// THREE INPUTS THE THREE RECORDED FAILURE CLASSES ARE ABOUT.
+	// CLEAR THE FAILURE RECORD IF, AND ONLY IF, THIS PATCH TOUCHED ONE OF THE
+	// THREE INPUTS THE RECORDED FAILURE CLASSES ARE ABOUT *AND* THE ROW IT
+	// LEAVES BEHIND ACTUALLY VALIDATES. Both arms are load-bearing and they
+	// answer different questions.
 	//
-	// job_spec, cron_expr and timezone are exactly what an undecodable spec, an
-	// unparseable cron and a failed jobspec.Validate are about, and all three have
-	// already been validated above before reaching here - so any recorded failure
-	// about the OLD values is stale by construction.
-	//
-	// A patch of name, overlap_policy or enabled PRESERVES the record. Renaming a
-	// schedule must not erase the only signal that it is broken, and on an
-	// @monthly schedule nothing would rewrite it for a month. Enabling and
-	// disabling preserve it too: nothing about the spec changed, and a re-enabled
+	// THE FIRST ARM asks whether this PATCH is entitled to revisit the record at
+	// all. A patch of name, overlap_policy or enabled PRESERVES it unconditionally:
+	// renaming a schedule must not erase the only signal that it is broken, and on
+	// an @monthly schedule nothing would rewrite it for a month. Enabling and
+	// disabling preserve it too - nothing about the spec changed, and a re-enabled
 	// schedule that still carries its failure is showing the truth at the most
 	// useful moment to see it.
+	//
+	// THE SECOND ARM asks whether the record is actually stale, and it exists
+	// because the first arm alone was ASSERTING that rather than checking it. The
+	// validation above runs per key: job_spec is checked only inside
+	// `if req.JobSpec != nil`, and the nextRunAt block re-parses cron/tz only when
+	// one of them is supplied. So presence of ANY of the three keys was clearing a
+	// record about the two the patch never looked at. Both directions were live
+	// and both are reached from `relay schedules update`: a cron-only PATCH erased
+	// a still-true "retries must be between 0 and 10", and a job_spec-only PATCH
+	// erased a still-true "parse cron: ..." without ever calling ParseSchedule.
+	//
+	// IT ASKS schedrunner, NOT A LOCAL COPY. schedrunner.ValidateStoredSchedule is
+	// the same unmarshal -> ParseSchedule -> Validate, in the same order, that
+	// fireOne and the startup sweep use to WRITE the record. A second
+	// implementation here could clear on a verdict the writer disagrees with,
+	// which is the defect in a new spelling.
+	//
+	// A PATCH WHOSE EFFECTIVE ROW STILL DOES NOT VALIDATE IS STILL A 200. The
+	// handler validates what it is GIVEN; an operator repairing a broken schedule
+	// one field at a time is a legitimate sequence, and refusing it because some
+	// other stored field is still broken would make a two-step repair impossible.
+	// Only what the write CLEARS is conditional.
 	//
 	// It is a BOOLEAN ARGUMENT rather than a read-modify-write. The row was read
 	// through ownedScheduledJob without a lock, so reading last_error into Go and
@@ -661,7 +681,8 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 	// is never round-tripped through the application. (next_run_at in this same
 	// handler DOES have that read-modify-write hazard; this slice does not fix it
 	// and does not join it.)
-	clearFailure := req.JobSpec != nil || req.CronExpr != nil || req.Timezone != nil
+	clearFailure := (req.JobSpec != nil || req.CronExpr != nil || req.Timezone != nil) &&
+		schedrunner.ValidateStoredSchedule(jobSpecJSON, cronExpr, tz) == nil
 
 	updated, err := s.q.UpdateScheduledJob(r.Context(), store.UpdateScheduledJobParams{
 		ID:            id,
