@@ -7,7 +7,8 @@
 > review filed **three** new items, two of which are defects the slice created and fixed, and one of
 > which is a class it declined to close. The prior refresh's caveat that the retries bound was
 > "branch-local and unmerged" is resolved: it merged as
-> [#158](https://github.com/chadmv/relay/pull/158). Open count 143 -> 145 (three filed, one closed).
+> [#158](https://github.com/chadmv/relay/pull/158). Open count 143 -> 146 (four filed, one closed);
+> the fourth was filed after the refresh, from its own suggested action.
 > This light run does no re-verification; the 2026-08-23 deep-run verdicts stand for every item it
 > covered. Source of truth is docs/backlog/ - edit items there, then re-run /roadmap. Manual edits
 > may be overwritten.
@@ -234,16 +235,19 @@ would perform it.
 
 **New 2026-08-28 (second run).** Two grouping calls, no closes. Neither is acted on here.
 
-- **Decide the three unescaped-identifier items as ONE slice, not three.**
-  [schedrunner-logs-raw](docs/backlog/bug-2026-08-28-schedrunner-logs-operator-controlled-schedule-names-raw.md)
-  (filed this refresh),
-  [cli-prints-unvalidated-worker-hostname](docs/backlog/bug-2026-08-15-cli-prints-unvalidated-worker-hostname-unescaped.md)
-  and [hostname-is-unvalidated](docs/backlog/bug-2026-08-25-hostname-is-unvalidated-and-reaches-a-unique-index.md)
-  are the same predicate on three surfaces. The schedule-failure slice already had to write that rune
-  set three times in one PR (`schedrunner`, `cli`, `relayclient`), each comment naming the others,
-  which is the strongest available evidence that deciding these apart produces divergent spellings.
-  Settle one rune set and one argument first; the call-site edits are the easy half.
-  `/backlog` - amend whichever is scheduled first to name the other two as its subject.
+- **DONE 2026-08-28, at the user's request, immediately after the refresh.** The suggestion was to
+  amend whichever of the three unescaped-identifier items got scheduled first. That was the repo's
+  existing convention and its track record here is poor: the same "decide these together" note
+  sits in [[idea-2026-08-09-sse-revoked-token-keeps-streaming]] and its 2026-08-21 sibling and has
+  moved nothing since August 9th, because a note inside an item is not schedulable. So the decision
+  was filed as an item of its own instead - [Settle one rune set for operator-controlled text](docs/backlog/idea-2026-08-28-settle-one-rune-set-operator-identifiers.md) -
+  and it is placed in **api-auth** below. **It covers FOUR surfaces, not the three the suggestion
+  named**: the item's own duplicate check surfaced
+  [relay-logs-treats-a-chunk-as-a-line](docs/backlog/bug-2026-08-26-relay-logs-treats-a-chunk-as-a-line-and-forges-lines.md),
+  where a job's own stdout forges log lines with a bare newline. That one is adjacent rather than
+  identical - its primary fix is structural, not a character filter - but it must not land on a
+  different answer to "what is a dangerous character" than the other three.
+
 - **Re-decide whether the Python SDK `high` items belong in Now**, deliberately rather than by
   inheritance. All three of the tree's `high` items are Python SDK bugs and only
   [_fetch_all](docs/backlog/bug-2026-08-27-python-sdk-fetch-all-has-no-termination-stops.md) is in
@@ -331,6 +335,8 @@ would perform it.
 31. [A wire-keyed dedupe key lets a peer drain the shared budget and suppress its own diagnostics](docs/backlog/bug-2026-08-24-wire-keyed-dedupe-lets-a-peer-suppress-its-own-diagnostics.md) (bug, medium) - **new 2026-08-24**, reproduced twice against real Postgres. A NUL byte in chunk content makes Postgres reject at Bind BEFORE the fence's `WHERE`, so neither task id nor epoch constrains the key; 16 such chunks drain the 16-token bucket shared by all eight kinds. Per-connection only and itself counted, so it is detectable - but the slice that closed the budget-bypass bug is what made it load-bearing, since those three lines previously fired unconditionally.
 32. [Should the coordinator's own fence rejections have a section?](docs/backlog/idea-2026-08-24-failclaimedtask-is-a-ready-uncounted-fence-site.md) (idea, low) - **new 2026-08-24.** `task_status_fence` is the agent-reported path only; `Dispatcher.failClaimedTask` and `Watchdog.SweepOnce` are refused by the same statements and counted nowhere. Declined on merit rather than cost - `failClaimedTask`'s target is `dispatched` by construction, so its three-way partition degenerates to one value. **Closing this as a written decision is an acceptable outcome** and the item is framed as the question rather than the remedy.
 33. [`POST /v1/jobs` echoes a raw internal error in its 500 body](docs/backlog/idea-2026-08-28-create-job-echoes-a-raw-internal-error-in-its-500-body.md) (idea, low) - **new 2026-08-28, and filed with its own motivating repro already refuted.** `handleCreateJob` answers a `CreateJobFromSpec` failure with `err.Error()` while every other 500 in the file writes a fixed string, so a pgx error would carry a constraint name, a table and a SQLSTATE to the caller. The Phase 4 security lens reported it as live via duplicate `depends_on`; `CreateTaskDependency` carries `ON CONFLICT DO NOTHING`, so that path returns no error at all. **No reachable trigger is currently known**, which is why this is `idea`/low rather than a security bug - the surviving finding is the asymmetry, and the acceptable outcome is either a fixed string or an enumeration recorded at the call site.
+
+35. [Settle one rune set for operator-controlled text rendered to a human](docs/backlog/idea-2026-08-28-settle-one-rune-set-operator-identifiers.md) (idea, medium) - **new 2026-08-28, filed from this refresh's own suggested action, and it is the DECISION the three items around it each have to make before they can be fixed.** When relay prints text a user chose into somewhere a human reads, which characters are dangerous, what does it do with them, and at which boundary? Every one of those fixes has to answer that, so fixing them separately means answering it separately - and the answers will be nearly identical, which is worse than obviously different because nobody notices. **The divergence is measured rather than predicted**: the schedule-failure slice wrote one rune set into three packages in a single PR, because they cannot cleanly share a helper, and the best mitigation available was to make each copy's comment name the other two. Scope is four surfaces - the two hostname items and the schedrunner log sites below, plus [relay-logs-treats-a-chunk-as-a-line](docs/backlog/bug-2026-08-26-relay-logs-treats-a-chunk-as-a-line-and-forges-lines.md), which is adjacent rather than identical. **Schedule this before whichever of the four is picked up first**; it blocks none of them formally, and taking one first without it re-opens the question that item cannot avoid answering.
 
 34. [schedrunner logs operator-controlled schedule names raw at 13 sites](docs/backlog/bug-2026-08-28-schedrunner-logs-operator-controlled-schedule-names-raw.md) (bug, low) - **new 2026-08-28, and it lands here to sit beside the two items it must be decided with.** The schedule-failure slice closed this class for every RENDERED surface - it widened two sanitizers to cover C1 controls and bidi overrides and added a third in `relayclient.Do` - and closed none of it for values the server LOGS, which reach an operator's terminal by a different route and are read with the same eyes. 13 sites interpolate `row.Name` raw; `handleCreateScheduledJob` checks only that a name is non-empty and the PATCH handler does not check it at all. One of the 13 was added by that slice and is internally incoherent, logging the sanitized failure text beside the unsanitized name - deliberately left that way, because making one line the exception among 11 siblings raises a question the file cannot answer. **Decide it together with** [cli-prints-unvalidated-worker-hostname](docs/backlog/bug-2026-08-15-cli-prints-unvalidated-worker-hostname-unescaped.md) and [hostname-is-unvalidated](docs/backlog/bug-2026-08-25-hostname-is-unvalidated-and-reaches-a-unique-index.md): three items, one rune set, one argument - deciding them apart guarantees three spellings of the same predicate. The durable fix is a property-level test (no log site interpolates a name without the helper), not 13 call-site edits.
 
