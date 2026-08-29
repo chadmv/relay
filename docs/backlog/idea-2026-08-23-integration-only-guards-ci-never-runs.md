@@ -182,3 +182,36 @@ roughly 200 seconds locally.
 
 Add to Related: `internal/store/increment_task_retry_count_budget_integration_test.go`,
 `internal/store/retry_job_tasks_integration_test.go`.
+
+## Appended 2026-08-28 - an eighth instance, and the first where the UNCOVERED half is the WRITE path
+
+From the Phase 4 review of [[bug-2026-08-23-unfireable-schedule-is-invisible]]. The slice that added
+`scheduled_jobs.last_error` split cleanly into a write path (the schedrunner records a permanent fire
+failure) and a read path (four clients render it). **CI runs the read half and not the write half**,
+and the split is worth recording because it is not the usual shape.
+
+The read half is genuinely covered. `internal/cli/schedules_failure_integration_test.go` runs in the
+`cli-integration` CI job that the 2026-08-27 entry above describes, and `startRelayServer` gives it a
+real `internal/api` server against a real Postgres - so column -> handler -> JSON -> client is proven
+on every push. The slice's planner found this and corrected the spec, which had assumed the whole
+thing was CI-invisible.
+
+The write half has nothing. `internal/schedrunner`'s lane is integration-tagged and no CI job runs
+it, so the headline regression test - a stored spec that stops validating, driven through a real
+`TickOnce`, asserted visible via the API - is local-only. Its own comment says so.
+
+**The concrete cost was measured during the same review, not predicted.** A reviewer mutated
+`TickOnce`'s transient arm to call `advanceAfterFailure` instead of `advanceNextRun`, so a database
+blip stamps garbage over an operator's real failure record - the exact behaviour README promises
+cannot happen. It survived `go test ./...`, the schedrunner integration lane AND the api integration
+lane, because no test existed for that branch at all. The gap was closed in the same PR, but note
+what the sequence shows: the branch had no coverage, and no CI signal could have said so, because the
+lane that would have carried the missing test is one CI never runs.
+
+`internal/schedrunner` needs only Postgres - no Docker API, no p4d, no live agent - so it is a direct
+candidate for the same `services: postgres` mechanism as `internal/cli` and `internal/store`. Its
+full integration lane runs in roughly 20 seconds locally, the cheapest of the three.
+
+Add to Related: `internal/schedrunner/stored_spec_bounds_test.go`,
+`internal/schedrunner/startup_validation_integration_test.go`,
+`internal/api/scheduled_jobs_failure_visibility_integration_test.go`.
