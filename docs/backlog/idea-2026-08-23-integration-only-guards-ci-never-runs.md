@@ -187,7 +187,7 @@ Add to Related: `internal/store/increment_task_retry_count_budget_integration_te
 
 From the Phase 4 review of [[bug-2026-08-23-unfireable-schedule-is-invisible]]. The slice that added
 `scheduled_jobs.last_error` split cleanly into a write path (the schedrunner records a permanent fire
-failure) and a read path (four clients render it). **CI runs the read half and not the write half**,
+failure) and a read path rendered by the SPA, the CLI, the Python SDK and the MCP server). **CI runs the read half and not the write half**,
 and the split is worth recording because it is not the usual shape.
 
 The read half is genuinely covered. `internal/cli/schedules_failure_integration_test.go` runs in the
