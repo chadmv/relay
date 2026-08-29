@@ -386,14 +386,20 @@ func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
 	assert.Contains(t, err.Error(), "6 rows collected")
 	assert.Contains(t, err.Error(), "9999", "the FIRST page's total, not page 3's 1")
 	// The three negatives are the acceptance criterion, one per thing the
-	// message must not say. Each quotes wording that IS in the Python SDK's
-	// cap message, where a distinct-id count earns it:
-	//   "every one was collected"                 - a completeness claim
-	//   "N distinct row ids"                      - the count Go cannot compute
-	//   "the server may never report it as drained" - blame
-	// Copying any of those onto len(out) would be a claim the number cannot
-	// support, because a server re-serving a page behind an advancing cursor
-	// drives rows-appended and distinct-rows-received apart.
+	// message must not say. Each quotes wording that IS in a Python SDK cap
+	// message, where a distinct-row count earns it - but no longer all in the
+	// same one, since Python's LIST walk dropped its completeness arm:
+	//   "every one was collected"                 - a completeness claim; only
+	//                                               task_logs' message now
+	//   "N distinct row ids"                      - the count Go cannot compute;
+	//                                               _fetch_all's list message
+	//   "the server may never report it as drained" - blame; only task_logs'
+	//                                               message now
+	// The split survives for logs because a full last LOG page really does carry
+	// a cursor, and not for lists, which over-fetch by one - see the cap comment
+	// in page.go. Copying any of those onto len(out) would be a claim the number
+	// cannot support, because a server re-serving a page behind an advancing
+	// cursor drives rows-appended and distinct-rows-received apart.
 	assert.NotContains(t, err.Error(), "every one")
 	assert.NotContains(t, err.Error(), "distinct")
 	assert.NotContains(t, err.Error(), "may never")

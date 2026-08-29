@@ -192,21 +192,42 @@ func FetchAllPages[T any](
 			// it does not blame the server, and it does not claim every row was
 			// collected.
 			//
-			// That is a DELIBERATE difference from the Python SDK's equivalent
-			// message, which does split on completeness. Python can count
-			// DISTINCT row ids and compare them against the envelope's total;
-			// this package cannot. T is a bare type parameter with no
-			// constraint and no id, so reading one out would take reflection or
-			// a decode change, either of which couples this leaf package to its
-			// callers' row shapes. A count of rows APPENDED is not a count of
-			// distinct rows received - a server re-serving a page behind an
-			// advancing cursor drives them apart - so claiming completeness
-			// from len(out) would be a claim the number cannot support. Do NOT
-			// "fix" this asymmetry by copying Python's wording onto this count.
+			// The Python SDK's LIST walk says the same, and no longer splits
+			// on completeness either: its `distinct >= total` arm was removed
+			// once the premise behind it was measured against the wire. Every
+			// list query is `LIMIT sqlc.arg(page_limit)::int + 1` and every
+			// list handler goes through buildPage (internal/api/pagination.go),
+			// which emits a cursor only when that extra row came back - so a
+			// list whose length is an exact multiple of the page size drains at
+			// its last full page and never reaches a cap at all. Reaching this
+			// cap on a LIST means the server is misbehaving, and settling
+			// completeness would settle it with `total`, a number that same
+			// actor supplies.
+			//
+			// The completeness split survives in exactly one message, Python's
+			// task_logs, and it is CORRECT there: GetTaskLogsPage
+			// (internal/store/query/tasks.sql) is `LIMIT $3` with no over-fetch
+			// and handleGetTaskLogs (internal/api/tasks.go) zeroes next_seq
+			// only when `len(items) < limit`, so a FULL last log page really
+			// does carry a cursor and that walk really can stop one request
+			// short of learning it was done.
+			//
+			// Do NOT copy task_logs' wording onto this count. That warning is
+			// unchanged; only its referent moved. Beyond the wire asymmetry
+			// above, this package could not count it honestly anyway: T is a
+			// bare type parameter with no constraint and no id, so reading one
+			// out would take reflection or a decode change, either of which
+			// couples this leaf package to its callers' row shapes. That is why
+			// Python's list message reports a DISTINCT-id count beside its row
+			// count and this one reports only len(out) - and a count of rows
+			// APPENDED is not a count of distinct rows received, since a server
+			// re-serving a page behind an advancing cursor drives them apart.
 			//
 			// `total` is the FIRST page's total (see `if first` above) - the
 			// existing contract of this function's return value - so the message
 			// says which page it came from rather than implying it is current.
+			// Python's equivalent says "last page" and means it: that walk returns
+			// no total at all, so it reads one off whichever page it stopped on.
 			return nil, 0, fmt.Errorf(
 				"paginate %s: truncated after %d pages - hit the client's page cap; %d rows collected, the server's first page reported %d, and it had not yet reported the list as drained",
 				basePath, maxListPages, len(out), total)

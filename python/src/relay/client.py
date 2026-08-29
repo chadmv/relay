@@ -396,6 +396,16 @@ class Client:
             # arm is the obvious candidate - would silently stop populating
             # `seen` from the old position, and the only symptom is 10000
             # requests where there should have been 2.
+            #
+            # The rule is general; its APPLICATION here is not. task_logs' walk
+            # ends its loop body with `since = page.next_seq`, which looks like
+            # the same statement and must NOT be moved up to match: two of that
+            # walk's stops interpolate the PRE-update `since` into their
+            # messages ("next_seq N after since_seq M"), so advancing it early
+            # would make both messages report the cursor the server just sent as
+            # the one we had asked from. Different statement, different
+            # constraint - `seen` is only ever read by the membership test above
+            # it, while `since` is read by the messages below it.
             seen.add(cursor)
             if pages >= self._MAX_LIST_PAGES:
                 # Count DISTINCT ids, never len(out). `total` is server-supplied
@@ -463,8 +473,13 @@ class Client:
                 # and reports total: 1000 on a five-million-row list got this to
                 # tell the operator every row was collected on a walk 0.02%
                 # complete. internal/relayclient/page.go reached the same
-                # conclusion first and warns against copying the wording it does
-                # not use; this is the side that had copied it.
+                # conclusion first - it never had the arm, because T is a bare
+                # type parameter with no id and it could not have counted
+                # honestly anyway - and its comment warns against copying the
+                # completeness wording onto a list count. This is the side that
+                # had copied it. After this removal the only message in either
+                # SDK still carrying that wording is task_logs' below, where the
+                # premise above holds.
                 #
                 # Both numbers are still reported, and separately: `len(out)`
                 # counts rows APPENDED while `distinct` counts rows RECEIVED, and
