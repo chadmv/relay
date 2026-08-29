@@ -2,6 +2,7 @@ package jobcreate_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"relay/internal/jobcreate"
@@ -72,5 +73,60 @@ func TestCreateJobFromSpec_RefusesAnOverBoundSpecBeforeTouchingTheDatabase(t *te
 			"constraint, so this call is the entire enforcement for any caller that does not validate "+
 			"first - schedrunner.fireOne is one such caller")
 	require.Empty(t, tasks, "a refused spec must insert no tasks")
+	require.False(t, job.ID.Valid, "a refused spec must insert no job")
+}
+
+// TestCreateJobFromSpec_RefusesAnOverCountSpecBeforeTouchingTheDatabase is the
+// count-axis sibling of the test above and exists for the same reason: this call
+// is the entire enforcement for any caller that does not validate first.
+// schedrunner.fireOne is such a caller for its SECOND reach at Validate, and
+// CreateJobFromSpec is retroactivity site 5 - the one whose every error collapses
+// into "create job: %w", which is exactly why fireOne and handleRunScheduledJobNow
+// both validate ahead of it.
+//
+// THE SUBJECT IS THE JOB-WIDE TOTAL rather than either per-axis bound, because it
+// is the bound with no per-row analogue anywhere: tasks.retries and
+// tasks.timeout_seconds are columns a CHECK constraint could in principle guard,
+// and a per-JOB command total is not expressible as a row CHECK at all. If any
+// bound is going to be enforced only here, it is this one.
+//
+// THE NIL *store.Queries IS THE POINT, NOT A SHORTCUT. Validate runs before any
+// field of q is read, so a correct implementation never dereferences it. Delete
+// the Validate call and the very next statements reach q.CreateJob on a nil
+// receiver, which panics - so the mutant fails LOUDLY here instead of passing
+// silently. The recover contains it so the mutant does not take down every other
+// test in this package's binary; the property is established by the three
+// assertions, not by the panic.
+func TestCreateJobFromSpec_RefusesAnOverCountSpecBeforeTouchingTheDatabase(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("CreateJobFromSpec panicked instead of refusing the spec: %v\n"+
+				"q is a nil *store.Queries, so this is what reaching a query on it looks like: "+
+				"jobspec.Validate is no longer running before the first database call, which is the "+
+				"entire enforcement of the count bounds for a caller that does not validate first.", r)
+		}
+	}()
+
+	// 51 tasks x 500 commands is 25,500. Every task is inside maxCommandsPerTask
+	// and the count is inside maxTasksPerJob, so only the job-wide total refuses
+	// this.
+	tasks := make([]jobspec.TaskSpec, 51)
+	for i := range tasks {
+		cmds := make([][]string, 500)
+		for j := range cmds {
+			cmds[j] = []string{"true"}
+		}
+		tasks[i] = jobspec.TaskSpec{Name: fmt.Sprintf("t%d", i), Commands: cmds}
+	}
+
+	job, created, err := jobcreate.CreateJobFromSpec(
+		context.Background(), nil, jobspec.JobSpec{Name: "over-count", Tasks: tasks},
+		pgtype.UUID{}, pgtype.UUID{})
+
+	require.EqualError(t, err, "at most 25000 commands in total across all tasks are allowed",
+		"CreateJobFromSpec must refuse an over-count spec itself: no CHECK constraint can express a "+
+			"per-job total, so this call is the entire enforcement for any caller that does not "+
+			"validate first - schedrunner.fireOne is one such caller")
+	require.Empty(t, created, "a refused spec must insert no tasks")
 	require.False(t, job.ID.Valid, "a refused spec must insert no job")
 }

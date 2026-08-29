@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +68,39 @@ func TestRunScheduledJobNow_AStoredOverBoundSpecIsRefusedAsPermanent(t *testing.
 		"the per-task message must reach the operator verbatim - run-now is the ONLY interactive path "+
 			"that can explain why this schedule stopped firing, and a generic 'create job failed' "+
 			"throws that explanation away")
+
+	// THE COUNT AXIS, on the same server. A stored spec whose per-task command
+	// count an older release accepted is refused by the same 400 and the same
+	// verbatim message, and this is the leg that proves the count bounds inherit
+	// run-now's permanence rather than merely POST /v1/jobs'.
+	//
+	// 501 entries at nine bytes is about 4.6 KB of stored JSONB - deliberately the
+	// cheapest of the three count axes to express, since the property under test is
+	// the status code and the message, not the size of the row.
+	var cmds strings.Builder
+	for i := 0; i < 501; i++ {
+		if i > 0 {
+			cmds.WriteString(",")
+		}
+		cmds.WriteString(`["true"]`)
+	}
+	overCount := `{"name":"legacy","tasks":[` +
+		`{"name":"healthy-task","command":["echo","y"]},` +
+		`{"name":"bad-task","commands":[` + cmds.String() + `]}]}`
+	countSched, err := q.CreateScheduledJob(context.Background(), store.CreateScheduledJobParams{
+		Name: "legacy-commands", OwnerID: user.ID, CronExpr: "@hourly", Timezone: "UTC",
+		JobSpec: []byte(overCount), OverlapPolicy: "skip", Enabled: true,
+		NextRunAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true},
+	})
+	require.NoError(t, err)
+
+	code, body = postRunNow(t, srv, token, uuidString(countSched.ID))
+	require.Equal(t, http.StatusBadRequest, code,
+		"a stored spec over a COUNT bound is as permanent as one over a value bound: "+
+			"relayclient.ErrorIsTransient reads 5xx as transient and a polling caller would never stop")
+	assert.Equal(t, "task bad-task: at most 500 commands are allowed, got 501", body["error"],
+		"the per-task message must reach the operator verbatim - run-now is how they turn a schedule "+
+			"that has gone silent into a specific reason")
 
 	// POSITIVE CONTROL on the same server: a schedule whose spec still validates
 	// must still fire. Without it, a run-now that had started refusing every
