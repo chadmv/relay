@@ -264,3 +264,81 @@ func TestFetchAllPages_OverLongCursorIsTruncatedInTheWalksError(t *testing.T) {
 	assert.Less(t, len(err.Error()), 500, "the message is bounded even though the cursor is not")
 	assert.Equal(t, 2, calls)
 }
+
+// maxListPages is package-global state. A test that shrinks it must NOT call
+// t.Parallel(). Neither of the two below does; do not add it.
+
+func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
+	original := maxListPages
+	defer func() { maxListPages = original }()
+	maxListPages = 3
+
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > 3 {
+			http.Error(w, `{"error":"past the cap"}`, http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"}],"next_cursor":"CUR-%d","total":9999}`, calls, calls)
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	got, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "page cap")
+	// The message reports what it has and asserts NEITHER completeness nor
+	// incompleteness. T is a bare type parameter with no id, so this package
+	// cannot compute the distinct-row count the Python SDK's equivalent message
+	// uses, and must not claim one.
+	assert.Contains(t, err.Error(), "3 rows collected")
+	assert.Contains(t, err.Error(), "9999")
+	// The three negatives are the acceptance criterion, one per thing the
+	// message must not say. Each quotes wording that IS in the Python SDK's
+	// cap message, where a distinct-id count earns it:
+	//   "every one was collected"                 - a completeness claim
+	//   "N distinct row ids"                      - the count Go cannot compute
+	//   "the server may never report it as drained" - blame
+	// Copying any of those onto len(out) would be a claim the number cannot
+	// support, because a server re-serving a page behind an advancing cursor
+	// drives rows-appended and distinct-rows-received apart.
+	assert.NotContains(t, err.Error(), "every one")
+	assert.NotContains(t, err.Error(), "distinct")
+	assert.NotContains(t, err.Error(), "may never")
+	assert.Nil(t, got)
+	assert.Equal(t, 3, calls)
+}
+
+func TestFetchAllPages_UserLimitSatisfiedOnPageTwoByAPageThatRepeatsACursor(t *testing.T) {
+	// The userLimit short-circuit stays ABOVE every stop. A caller who asked for
+	// 3 rows and has 3 rows has been served.
+	//
+	// TestFetchAllPages_RespectsUserLimit above LOOKS like it covers this and
+	// does not: its userLimit=3 is satisfied on page 1, and neither the
+	// repeated-cursor stop nor the cap can fire on request 1. The discriminating
+	// case needs the limit satisfied on page 2 or later, by a page that also
+	// trips a stop - hence CUR-A on both pages.
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > 2 {
+			http.Error(w, `{"error":"past the stop"}`, http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"},{"id":"b%d"}],"next_cursor":"CUR-A","total":99}`, calls, calls)
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	got, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 3)
+	require.NoError(t, err)
+	assert.Equal(t, []item{{ID: "a1"}, {ID: "b1"}, {ID: "a2"}}, got)
+	assert.Equal(t, 2, calls)
+}

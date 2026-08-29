@@ -41,10 +41,42 @@ func quoteCursor(cursor string) string {
 		strconv.Quote(cursor[:maxCursorInMessage]), len(cursor))
 }
 
+// maxListPages bounds the NUMBER OF REQUESTS FetchAllPages makes against a
+// server whose next_cursor keeps advancing but which never reports the list as
+// drained - the case neither the empty-page stop nor the repeated-cursor stop
+// can see. 10000 pages at PageRequestLimit rows is 2,000,000 rows.
+//
+// Requests is all it bounds. NewClient returns &http.Client{} with no Timeout
+// and cmd/relay/main.go builds its context with signal.NotifyContext and no
+// deadline, so wall clock, response bytes and the memory of one response are
+// all open; they belong to
+// bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
+//
+// A var rather than a const so a test can shrink it, matching internal/cli's
+// maxLogPages, which is a var for exactly this reason and says so. It is
+// package-global state: a test that shrinks it must NOT call t.Parallel().
+var maxListPages = 10000
+
 // FetchAllPages walks ?cursor= until next_cursor is empty, or until userLimit
 // rows have been collected (when userLimit > 0). Returns the merged slice and
 // the total reported by the first page response. Caller-supplied params are
 // forwarded on every page request alongside ?limit=200&cursor=<...>.
+//
+// Beyond the server's own drained signal the loop has THREE stops, and all
+// three are needed. The cursor is server-supplied and drives a client loop, and
+// the provenance of a value says nothing about who controls its content. An
+// empty page that still advertises more catches a server the client cannot page
+// at all; a repeated cursor catches a self-loop on request 2 and an A,B,A cycle
+// on request 3; maxListPages catches an ever-advancing cursor that never drains,
+// which neither of the other two can see.
+//
+// On any of those the return is `nil, 0, err` - NOT the partial slice. That is
+// a deliberate asymmetry with the Python SDK, whose ProtocolError carries the
+// collected rows on .records: its caller is a program that can use partial rows
+// and has no other route to them, while this function's callers are five
+// renderers that have printed nothing yet plus one id-resolver, none of which
+// has anywhere to put a partial list - and the existing transport-error path
+// already returns nil, 0.
 func FetchAllPages[T any](
 	ctx context.Context,
 	c *Client,
@@ -125,6 +157,30 @@ func FetchAllPages[T any](
 			return nil, 0, fmt.Errorf(
 				"paginate %s: server cursor did not advance - it repeated a cursor this walk had already requested (%s) after %d pages",
 				basePath, quoteCursor(resp.NextCursor), pages)
+		}
+		if pages >= maxListPages {
+			// This message reports what it has and asserts NEITHER possibility:
+			// it does not blame the server, and it does not claim every row was
+			// collected.
+			//
+			// That is a DELIBERATE difference from the Python SDK's equivalent
+			// message, which does split on completeness. Python can count
+			// DISTINCT row ids and compare them against the envelope's total;
+			// this package cannot. T is a bare type parameter with no
+			// constraint and no id, so reading one out would take reflection or
+			// a decode change, either of which couples this leaf package to its
+			// callers' row shapes. A count of rows APPENDED is not a count of
+			// distinct rows received - a server re-serving a page behind an
+			// advancing cursor drives them apart - so claiming completeness
+			// from len(out) would be a claim the number cannot support. Do NOT
+			// "fix" this asymmetry by copying Python's wording onto this count.
+			//
+			// `total` is the FIRST page's total (see `if first` above) - the
+			// existing contract of this function's return value - so the message
+			// says which page it came from rather than implying it is current.
+			return nil, 0, fmt.Errorf(
+				"paginate %s: truncated after %d pages - hit the client's page cap; %d rows collected, the server's first page reported %d, and it had not yet reported the list as drained",
+				basePath, maxListPages, len(out), total)
 		}
 		seen[resp.NextCursor] = struct{}{}
 		cursor = resp.NextCursor
