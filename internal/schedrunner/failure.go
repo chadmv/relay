@@ -75,11 +75,31 @@ func recordableFailure(err error) (string, bool) {
 // sanitizeFailureText makes an error message safe to store and to render, at the
 // SINGLE write site. One place, four readers (REST, SPA, CLI, Python SDK).
 //
-// Every rune below U+0020 and U+007F becomes a space. Newlines are not needed by
-// any of the three recorded classes, and this closes ANSI escape injection into
-// `relay schedules show`'s terminal output. The text is operator-controlled - a
-// task name flows verbatim into "task %s: retries must be between 0 and %d" -
-// and a new sink is the right moment to close the class rather than widen it.
+// THREE CLASSES BECOME A SPACE, and the second and third are here because the
+// first alone did not close the class this comment claims it closes. The text is
+// operator-controlled - a task name flows verbatim into "task %s: retries must
+// be between 0 and %d" - so every one of them is reachable by a schedule owner
+// and rendered to an admin.
+//
+//   - C0 and DEL (below U+0020, and U+007F). Newlines are not needed by any of
+//     the three recorded classes, and stripping ESC is what closes ANSI escape
+//     injection into `relay schedules show`'s terminal output.
+//   - C1 (U+0080-U+009F). U+009B is the single-byte CSI: a terminal that decodes
+//     the stream as Latin-1, or any consumer that narrows the text to bytes,
+//     treats it exactly as ESC-[, so leaving C1 in place leaves the escape class
+//     half-closed rather than closed.
+//   - The bidirectional formatting controls (U+200E, U+200F, U+202A-U+202E,
+//     U+2066-U+2069). U+202E RIGHT-TO-LEFT OVERRIDE has no terminator: it
+//     reorders every character after it, so one of them in a task name rewrites
+//     how the REST of an admin's line renders, in the SPA panel and in the
+//     terminal alike. That is a display attack, not an escape sequence, which is
+//     why stripping C0 does nothing about it.
+//
+// internal/cli/schedules.go's terminalSafeLine makes the BYTE-IDENTICAL mapping
+// on the read side, for the same reason, and the two are deliberately NOT
+// shared: internal/cli is a client package and importing internal/schedrunner
+// from it to reach one predicate would be a worse coupling than the duplication.
+// IF THIS SET MOVES, MOVE THAT ONE WITH IT.
 //
 // Invalid UTF-8 in the input is replaced with U+FFFD by the range-over-string
 // plus WriteRune round trip, so the output is always valid UTF-8. That matters:
@@ -88,7 +108,10 @@ func sanitizeFailureText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
+			r == 0x200e || r == 0x200f ||
+			(r >= 0x202a && r <= 0x202e) ||
+			(r >= 0x2066 && r <= 0x2069) {
 			b.WriteRune(' ')
 			continue
 		}

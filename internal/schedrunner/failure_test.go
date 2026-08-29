@@ -101,6 +101,44 @@ func TestSanitizeFailureText(t *testing.T) {
 		}
 	})
 
+	// THE EXISTING CASE ABOVE COULD NOT DETECT THIS CHANGE IN EITHER DIRECTION.
+	// It feeds ESC and other C0 bytes only, so a predicate of `r < 0x20 ||
+	// r == 0x7f` and one that additionally covers C1 and the bidi controls are
+	// indistinguishable to it. This case is what makes the widening load-bearing.
+	//
+	// U+202E RIGHT-TO-LEFT OVERRIDE has no terminator: it reorders every
+	// character after it until the end of the paragraph, so a task name carrying
+	// one rewrites how the REST of an admin's line renders - in the SPA panel and
+	// in `relay schedules show`'s terminal alike. The isolates (U+2066-U+2069)
+	// and the marks (U+200E/U+200F) are the same class.
+	//
+	// U+009B is the single-byte C1 CSI. A terminal that decodes the stream as
+	// Latin-1, or any consumer that narrows the text to bytes, treats it exactly
+	// as ESC-[ - so stripping ESC alone leaves the escape class half-closed,
+	// which is precisely what the comment on sanitizeFailureText claimed it had
+	// finished.
+	t.Run("bidi overrides and C1 controls become spaces too", func(t *testing.T) {
+		const bad = "\u202a\u202b\u202c\u202d\u202e" + // embeddings and the RLO
+			"\u2066\u2067\u2068\u2069" + // isolates
+			"\u200e\u200f" + // marks
+			"\u0080\u0085\u009b\u009f" // C1, including NEL and the single-byte CSI
+		got := sanitizeFailureText("task " + bad + "evil: retries must be between 0 and 10")
+		for _, r := range bad {
+			if strings.ContainsRune(got, r) {
+				t.Errorf("sanitizeFailureText left U+%04X in %q", r, got)
+			}
+		}
+		if !strings.Contains(got, "retries must be between 0 and 10") {
+			t.Errorf("sanitizeFailureText dropped legible content: %q", got)
+		}
+	})
+
+	// internal/cli/schedules.go's terminalSafeLine makes the byte-identical
+	// mapping for the same reason on the read side. The two are NOT shared and
+	// must not become shared: internal/cli is a client package and importing
+	// internal/schedrunner from it to reach one predicate would be a worse
+	// coupling than the duplication. If this set moves, move that one with it.
+
 	t.Run("a message that sanitizes to nothing becomes the fixed fallback", func(t *testing.T) {
 		got := sanitizeFailureText("\x00\x01 \t\r\n")
 		if got != failureTextUnavailable {
