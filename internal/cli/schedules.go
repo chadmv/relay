@@ -75,9 +75,43 @@ func (s scheduleResp) hasFailure() bool {
 // It does not truncate: the server bounds the stored text at 1 KB, and a second
 // bound here would silently disagree with the "use run-now for the full message"
 // remedy the caller prints two lines later.
+// THE RUNE SET IS WIDER THAN C0 AND DEL, and each family is here for its own
+// reason:
+//
+//   - C0 (U+0000-U+001F) AND DEL. ESC starts an ANSI sequence and newline forges
+//     a line. TAB is in this range and is covered by it deliberately: a raw tab
+//     inside a cell shifts tabwriter's column boundaries in doSchedulesList, so
+//     narrowing this arm would reopen a column-forging hole and not only an
+//     escape one.
+//   - C1 (U+0080-U+009F). U+009B IS the single-character CSI. A terminal that
+//     accepts it starts an escape sequence with no ESC byte anywhere in the
+//     stream, so stripping ESC alone does not strip escape sequences.
+//   - BIDI OVERRIDES AND ISOLATES (U+200E, U+200F, U+202A-U+202E,
+//     U+2066-U+2069). These reorder the glyphs that follow them without changing
+//     any byte a reader can find, which is how a value swallows the provenance
+//     prefix printed before it into a right-to-left run.
+//
+// EVERY OTHER RUNE ABOVE U+007F IS LEFT ALONE. Mapping the whole non-ASCII range
+// would be simpler and would destroy the field for every operator who does not
+// write in English.
+//
+// internal/schedrunner/failure.go's sanitizeFailureText makes the byte-identical
+// mapping at the server's write site, and internal/relayclient's
+// sanitizeServerText makes it for server-supplied error messages. THE THREE MUST
+// STAY IN STEP. They are three functions rather than one because internal/cli
+// must not import internal/schedrunner - a client package importing the
+// scheduler to borrow ten lines is a worse defect than the duplication - and
+// because relayclient's copy runs on a different subject.
 func terminalSafeLine(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return ' '
+		case r == 0x200e, r == 0x200f:
+			return ' '
+		case r >= 0x202a && r <= 0x202e:
+			return ' '
+		case r >= 0x2066 && r <= 0x2069:
 			return ' '
 		}
 		return r
@@ -167,8 +201,20 @@ func doSchedulesList(ctx context.Context, c *relayclient.Client, args []string, 
 		if s.hasFailure() {
 			state = "FAILING"
 		}
+		// EVERY SERVER-SUPPLIED CELL GOES THROUGH terminalSafeLine, not only the
+		// one carrying last_error. STATE is a trust signal and the other cells on
+		// its row are chosen by the party it reports on: schedule names are
+		// unvalidated - create rejects only "" and PATCH does not even do that -
+		// so a name carrying a newline ends the row early, pushes the real STATE
+		// cell onto a junk continuation line, and supplies a forged line reading
+		// OK under the attacker's own ID. A tab does the narrower version of the
+		// same thing by shifting tabwriter's column boundaries.
+		//
+		// next and state are relay's own strings and are passed through
+		// unwrapped, so a reader can see which cells are attacker-chosen.
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n",
-			s.ID, s.Name, s.CronExpr, s.Timezone, s.Enabled, next, state)
+			terminalSafeLine(s.ID), terminalSafeLine(s.Name), terminalSafeLine(s.CronExpr),
+			terminalSafeLine(s.Timezone), s.Enabled, next, state)
 	}
 	return tw.Flush()
 }
@@ -219,10 +265,14 @@ func doSchedulesShow(ctx context.Context, c *relayclient.Client, args []string, 
 	if err := c.Do(ctx, "GET", "/v1/scheduled-jobs/"+args[0], nil, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "ID:       %s\n", out.ID)
-	fmt.Fprintf(w, "Name:     %s\n", out.Name)
-	fmt.Fprintf(w, "Cron:     %s\n", out.CronExpr)
-	fmt.Fprintf(w, "Timezone: %s\n", out.Timezone)
+	// SAME REASON AS THE list TABLE, one shape down: this prints one
+	// "Label: value" per line, so any unsanitized value carrying a newline
+	// forges a further line - a "Last error ..." line included, which is the
+	// one whose provenance prefix this command added.
+	fmt.Fprintf(w, "ID:       %s\n", terminalSafeLine(out.ID))
+	fmt.Fprintf(w, "Name:     %s\n", terminalSafeLine(out.Name))
+	fmt.Fprintf(w, "Cron:     %s\n", terminalSafeLine(out.CronExpr))
+	fmt.Fprintf(w, "Timezone: %s\n", terminalSafeLine(out.Timezone))
 	fmt.Fprintf(w, "Enabled:  %t\n", out.Enabled)
 	if out.NextRunAt != nil {
 		fmt.Fprintf(w, "Next:     %s\n", out.NextRunAt.Format(time.RFC3339))

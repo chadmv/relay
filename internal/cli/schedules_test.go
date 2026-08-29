@@ -486,3 +486,186 @@ func TestSchedulesUpdate_UsageNamesTheSpecFlag(t *testing.T) {
 		"README tells an operator to run `relay schedules update <id> --spec FILE`; the usage "+
 			"string is the CLI's own statement of that spelling")
 }
+
+// THE STATE COLUMN IS A TRUST SIGNAL AND EVERY OTHER CELL ON ITS ROW IS
+// ATTACKER-CHOSEN. Schedule names are unvalidated - handleCreateScheduledJob
+// rejects only "" and the PATCH handler does not even do that - so the name a
+// schedule's owner picked is rendered into the same line as the STATE cell that
+// says whether relay can still use that schedule.
+//
+// The forge is not subtle: a newline in the name ends the row early, so the real
+// FAILING cell is pushed onto a junk continuation line and the attacker supplies
+// their own line carrying their own ID and "OK". An operator scanning `relay
+// schedules list` for what to suspect reads the forged line and moves on. The
+// attacker can tune the padding exactly by running the command against their own
+// account first.
+//
+// ASSERTED STRUCTURALLY, on the LINE COUNT, because that is the property the
+// forge violates and no assertion about the CONTENT of a line can cover it: the
+// attacker chooses the content. Two schedules render two rows, plus Total and
+// the header, and nothing a schedule's own fields contain may add a fifth line.
+//
+// The content assertions after it are load-bearing in the other direction: a
+// sanitizer that returned "" would satisfy the line count and destroy the
+// signal.
+func TestSchedulesList_AScheduleSOwnFieldsCannotForgeARow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// HAND-WRITTEN, never marshalled through the CLI's own scheduleResp.
+		// s1 is really FAILING and its NAME carries the forged row.
+		_, _ = io.WriteString(w, `{"items":[
+			{"id":"s1","name":"evil\ns1        pwned     @hourly  UTC  true   2099-01-01 00:00  OK","cron_expr":"@hourly","timezone":"UTC","enabled":true,
+			 "next_run_at":"2099-01-01T00:00:00Z",
+			 "last_error":"task t: retries must be between 0 and 10"},
+			{"id":"s2","name":"fine","cron_expr":"@ho\u202eurly","timezone":"\u001b[2Kbogus","enabled":true,
+			 "next_run_at":"2099-01-01T00:00:00Z"}
+		],"next_cursor":"","total":2}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	var buf bytes.Buffer
+	require.NoError(t, doSchedules(context.Background(), cfg, []string{"list"}, &buf))
+	out := buf.String()
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	require.Len(t, lines, 4,
+		"Total + header + one line per schedule; a schedule's own fields must not be able to add a line:\n%s", out)
+
+	require.NotContains(t, out, "\x1b",
+		"an ESC in any rendered cell is ANSI injection, not only in last_error")
+	require.NotContains(t, out, "\u202e",
+		"a bidi override in any cell reorders every glyph after it on that line, the STATE cell included")
+
+	// THE REAL STATE STAYS ON THE REAL ROW. Without the line-count assertion above
+	// this would still pass on the forged output, because the junk continuation
+	// line also contains "s1".
+	require.Contains(t, lines[2], "FAILING")
+	require.Contains(t, lines[3], "OK")
+
+	// CONTROL: the legible part of every poisoned cell survives.
+	require.Contains(t, out, "evil")
+	require.Contains(t, out, "pwned", "the sanitizer neuters the newline, it does not censor the name")
+	require.Contains(t, out, "bogus")
+}
+
+// SHOW HAS THE SAME GAP AND IT WAS NOT CLOSED. doSchedulesShow prints one
+// "Label: value" per line and passes terminalSafeLine over exactly one of those
+// values. Name, Cron and Timezone come from the same untrusted row and are
+// printed raw, so any of them can forge a "Last error ..." line - the very line
+// whose provenance prefix this slice added.
+func TestSchedulesShow_TheOtherFieldsCannotForgeLinesEither(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"abc","name":"nightly\nEnabled:  false","cron_expr":"@hourly",
+			"timezone":"UTC\u001b[31m","overlap_policy":"skip","enabled":true,
+			"next_run_at":"2099-01-01T00:00:00Z"
+		}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	var buf bytes.Buffer
+	require.NoError(t, doSchedules(context.Background(), cfg, []string{"show", "abc"}, &buf))
+	out := buf.String()
+
+	require.NotContains(t, out, "\x1b")
+	for _, line := range strings.Split(out, "\n") {
+		require.NotEqual(t, "Enabled:  false", line,
+			"a schedule's name must not be able to impersonate one of relay's own field lines")
+	}
+	require.Contains(t, out, "Enabled:  true", "CONTROL: the real Enabled line is untouched")
+	require.Contains(t, out, "nightly", "CONTROL: the legible name survives")
+}
+
+// C0 AND DEL WERE NOT THE WHOLE CLASS. The original predicate was
+// `r < 0x20 || r == 0x7f`, which lets two further families through:
+//
+//   - C1 CONTROLS (U+0080-U+009F). U+009B IS the single-character CSI: a
+//     terminal decoding the stream as Latin-1, and some that accept the UTF-8
+//     spelling directly, start an escape sequence on it with no ESC in sight.
+//     Asserting only "no \x1b" is therefore not asserting "no escape sequence".
+//   - BIDI OVERRIDES (U+200E/U+200F, U+202A-U+202E, U+2066-U+2069). These reorder
+//     the glyphs AFTER them without changing any byte the eye can find, so
+//     "FAILING" can be made to render as "GNILIAF" - or, more usefully to an
+//     attacker, a name can swallow the provenance prefix that precedes it into a
+//     right-to-left run.
+//
+// TAB IS DELIBERATELY IN THIS TEST AND IS ALREADY GREEN. It matters for a
+// different reason - a raw tab in a cell shifts tabwriter's columns - and the
+// existing `r < 0x20` predicate already covers it at 0x09. Pinning it here says
+// the column-shift property is covered by the C0 arm on purpose rather than by
+// accident, so nobody narrows that arm later.
+func TestTerminalSafeLine_CoversC1AndBidiControlsNotJustC0(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"C1 CSI U+009B", "a\u009b31mb", "a 31mb"},
+		{"C1 range low U+0080", "a\u0080b", "a b"},
+		{"C1 range high U+009F", "a\u009fb", "a b"},
+		{"DEL U+007F", "a\u007fb", "a b"},
+		{"RLO U+202E", "a\u202eb", "a b"},
+		{"LRE U+202A", "a\u202ab", "a b"},
+		{"PDF U+202C", "a\u202cb", "a b"},
+		{"RLM U+200F", "a\u200fb", "a b"},
+		{"LRM U+200E", "a\u200eb", "a b"},
+		{"LRI U+2066", "a\u2066b", "a b"},
+		{"PDI U+2069", "a\u2069b", "a b"},
+		{"tab U+0009 (already covered by the C0 arm)", "a\tb", "a b"},
+		{"newline U+000A (already covered by the C0 arm)", "a\nb", "a b"},
+	} {
+		require.Equal(t, tc.want, terminalSafeLine(tc.in), tc.name)
+	}
+
+	// CONTROL: PRINTABLE NON-ASCII IS NOT A CONTROL CHARACTER. A predicate that
+	// mapped everything above U+007F would satisfy every case above and destroy
+	// the field for every operator who does not write in English.
+	require.Equal(t, "café 日本語 ✓ \u00a0", terminalSafeLine("café 日本語 ✓ \u00a0"),
+		"printable non-ASCII, U+00A0 included, must survive verbatim")
+}
+// RUN-NOW IS THE REMEDY THIS SLICE ADVERTISES, AND IT WAS THE UNSANITIZED ROUTE.
+// `relay schedules show` prints the stored failure through terminalSafeLine and
+// then prints "Re-check with: relay schedules run-now <id>" underneath it. That
+// second command answers a stored-spec validation failure with the raw
+// jobspec.Validate message, task name and all - so before this fix the same
+// attacker-chosen prose had two paths to an admin's terminal, one sanitized and
+// one not, and the PR pointed the operator at the unsanitized one as
+// authoritative.
+//
+// THE ASSERTION IS ON THE ERROR doSchedules RETURNS, which is what
+// cli.Dispatch prints as "error: <msg>". A newline in it forges a line that
+// carries no prefix at all.
+//
+// The sanitizer itself lives in internal/relayclient, at the point where
+// json.Decode turns the wire's escapes back into bytes; this test is the wiring
+// guard that says the CLI actually gets the sanitized value, which no test in
+// that package can establish.
+func TestSchedulesRunNow_ServerErrorReachesTheTerminalSanitized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/scheduled-jobs/abc/run-now", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid job_spec: task \u001b[31mevil\u001b[0m: retries must be between 0 and 10\nSchedule abc is healthy.\u009b2K"}`)
+	}))
+	defer srv.Close()
+	cfg := &Config{ServerURL: srv.URL, Token: "tkn"}
+
+	err := doSchedules(context.Background(), cfg, []string{"run-now", "abc"}, io.Discard)
+	require.Error(t, err)
+	msg := err.Error()
+
+	require.NotContains(t, msg, "\x1b", "an ESC in a printed error is ANSI injection")
+	require.NotContains(t, msg, "\u009b", "U+009B is the single-character CSI")
+	require.NotContains(t, msg, "\n",
+		"a newline forges a line under no \"error: \" prefix at all")
+
+	// CONTROL: the message an operator needs is intact and untruncated - run-now
+	// is documented as returning the full message, unlike the stored 1 KB value.
+	require.Contains(t, msg, "invalid job_spec: task ")
+	require.Contains(t, msg, "retries must be between 0 and 10")
+	require.Contains(t, msg, "Schedule abc is healthy.",
+		"the forged sentence is neutered by losing its line, not by being censored")
+}
