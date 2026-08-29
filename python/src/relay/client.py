@@ -42,6 +42,33 @@ _TERMINAL_JOB_STATUSES = frozenset(
 
 M = TypeVar("M", bound=BaseModel)
 
+# How much of a server-supplied cursor a ProtocolError message may quote.
+#
+# The cursor is chosen by the SERVER and its length is unbounded, so a message
+# that interpolates it whole is unbounded too - the same "provenance says
+# nothing about content" argument that makes the stops below necessary, applied
+# to the diagnostic rather than the loop.
+#
+# 200 characters. A real relay cursor is base64url of a ~96-byte {t,i,s} JSON
+# (encodeCursorV2, internal/api/pagination.go), so ~128 characters: every
+# legitimate cursor is quoted in full, including a text-sort cursor that carries
+# a row's name, and only a cursor no correct server emits is ever cut.
+_CURSOR_MESSAGE_CHARS = 200
+
+
+def _quote_cursor(cursor: str) -> str:
+    """Render a server-supplied cursor for an error message, bounded.
+
+    Longer than the bound, the prefix is quoted and the TRUE length reported -
+    a truncated string with no length would let a 5 MB cursor and a 201-byte one
+    produce the same message.
+    """
+    if len(cursor) <= _CURSOR_MESSAGE_CHARS:
+        return repr(cursor)
+    head = cursor[:_CURSOR_MESSAGE_CHARS]
+    return f"{head!r} (truncated from {len(cursor)} characters)"
+
+
 
 class Client:
     """Synchronous client for the relay REST API.

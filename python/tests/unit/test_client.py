@@ -1183,3 +1183,31 @@ def test_a_bad_limit_does_not_pre_empt_the_missing_token_error(tmp_path: Any) ->
         with pytest.raises(AuthError, match="relay login"):
             client.task_logs("abc", limit=bad)
     assert called is False
+
+
+# ─── cursor quoting ──────────────────────────────────────────────────────────
+
+
+def test_quote_cursor_returns_a_short_cursor_verbatim() -> None:
+    """A real relay cursor is base64url of a ~96-byte {t,i,s} JSON, so about 128
+    characters. The threshold is 200, so every legitimate cursor is quoted in
+    full and an operator can paste it back.
+    """
+    from relay.client import _quote_cursor
+
+    assert _quote_cursor("eyJ0IjoiMjAyNi0wOC0yOCJ9") == "'eyJ0IjoiMjAyNi0wOC0yOCJ9'"
+
+
+def test_quote_cursor_bounds_a_long_cursor() -> None:
+    """The cursor is SERVER-SUPPLIED and its length is unbounded, so a message
+    built from it is unbounded too. The bound must still leave the message
+    diagnosable, so the true length is reported alongside the prefix.
+    """
+    from relay.client import _quote_cursor
+
+    quoted = _quote_cursor("a" * 5000)
+
+    assert len(quoted) < 300
+    assert "truncated from 5000 characters" in quoted
+    assert "a" * 5000 not in quoted
+    assert "a" * 200 in quoted
