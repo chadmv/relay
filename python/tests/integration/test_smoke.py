@@ -67,10 +67,33 @@ def test_a_list_with_no_matching_rows_returns_empty_and_does_not_raise(
     A fixture proves the client handles `{"items": [], "next_cursor": ""}`; only
     a live handler proves that is what buildPage actually sends for zero rows.
 
-    The filter is a random scheduled_job_id, so the result set is empty on any
-    server regardless of what else is in the database.
-    """
-    import uuid
+    The filter is a schedule created here and never fired, so the result set is
+    empty on any server regardless of what else is in the database.
 
-    jobs = client.list_jobs(scheduled_job_id=str(uuid.uuid4()))
-    assert jobs == []
+    NOT a random UUID, which is what this test was first written against and
+    which does NOT reach the empty page: handleListJobs' scheduled_job_id branch
+    (internal/api/jobs.go) calls ownedScheduledJob BEFORE it paginates, and that
+    answers 404 "scheduled job not found" for an id no row carries. Measured -
+    the random-uuid version failed with relay.errors.NotFound, never touching
+    buildPage. The schedule has to exist and be owned by this token for the walk
+    to get as far as the zero-row page this test is about.
+    """
+    schedule = client.create_schedule(
+        name=f"sdk-empty-list-{int(time.time())}",
+        # 03:00 on the 1st of January: it will not fire during this test.
+        cron_expr="0 3 1 1 *",
+        job_spec=_never_fires_job_spec(),
+        enabled=False,
+    )
+    assert schedule.id is not None
+    try:
+        jobs = client.list_jobs(scheduled_job_id=schedule.id)
+        assert jobs == []
+    finally:
+        client.delete_schedule(schedule.id)
+
+
+def _never_fires_job_spec() -> relay.Job:
+    job = relay.Job(name="sdk-empty-list-spec")
+    job.add_task("echo", commands=[["echo", "never-runs"]])
+    return job
