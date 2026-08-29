@@ -38,7 +38,15 @@ func TestFetchAllPages_WalksTwoPages(t *testing.T) {
 			json.NewEncoder(w).Encode(PageEnvelope[item]{
 				Items:      []item{{ID: "c"}},
 				NextCursor: "",
-				Total:      3,
+				// 7, NOT 3. FetchAllPages returns the FIRST page's total, and every
+				// fixture in this file used to send one constant total on every
+				// page - so no test could tell the first page's total from the
+				// current one, and the `if first` guard was unpinned: measured,
+				// replacing it with an unconditional `total = resp.Total` survived
+				// the whole package (mutation GM_G). A server whose count moves
+				// between requests is the ordinary case, not an adversarial one:
+				// rows are being inserted and deleted while the walk runs.
+				Total:      7,
 			})
 		}
 	}))
@@ -48,7 +56,7 @@ func TestFetchAllPages_WalksTwoPages(t *testing.T) {
 	got, total, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []item{{ID: "a"}, {ID: "b"}, {ID: "c"}}, got)
-	assert.EqualValues(t, 3, total)
+	assert.EqualValues(t, 3, total, "the FIRST page's total, not page 2's 7")
 	assert.Equal(t, 2, calls)
 }
 
@@ -338,7 +346,16 @@ func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
 		// message passes len(out) survived the whole package (mutation GM_F).
 		// That mutant tells an operator "10000 rows collected" when 2,000,000
 		// were. 2 x 3 = 6 collides with neither of the other two numbers.
-		fmt.Fprintf(w, `{"items":[{"id":"a%d"},{"id":"b%d"}],"next_cursor":"CUR-%d","total":9999}`, calls, calls, calls)
+		// The total DIFFERS after page 1. The cap message says "the server's
+		// first page reported %d", so the sentence is pinned where it is
+		// written: a variant that keeps the `if first` guard for the return
+		// value but interpolates resp.Total into the message survives
+		// TestFetchAllPages_WalksTwoPages, and dies here.
+		total := 1
+		if calls == 1 {
+			total = 9999
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"},{"id":"b%d"}],"next_cursor":"CUR-%d","total":%d}`, calls, calls, calls, total)
 	}))
 	defer srv.Close()
 
@@ -354,7 +371,7 @@ func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
 	// cannot compute the distinct-row count the Python SDK's equivalent message
 	// uses, and must not claim one.
 	assert.Contains(t, err.Error(), "6 rows collected")
-	assert.Contains(t, err.Error(), "9999")
+	assert.Contains(t, err.Error(), "9999", "the FIRST page's total, not page 3's 1")
 	// The three negatives are the acceptance criterion, one per thing the
 	// message must not say. Each quotes wording that IS in the Python SDK's
 	// cap message, where a distinct-id count earns it:
