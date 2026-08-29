@@ -1,9 +1,11 @@
 ---
 title: A permanently un-fireable schedule is invisible - a spec that stops validating advances next_run_at forever with only a log line
 type: bug
-status: open
+status: closed
 created: 2026-08-23
 updated: 2026-08-28
+closed: 2026-08-28
+resolution: fixed
 priority: medium
 source: 2026-08-23 deep roadmap refresh - backend invariants lens finding N4
 ---
@@ -80,3 +82,41 @@ error means the fields are absent, not empty strings.
 - `internal/schedrunner/runner.go:80-127`, `internal/jobcreate/jobcreate.go:32`, `internal/api/scheduled_jobs.go:19-34,134`
 - [[bug-2026-08-12-retries-unvalidated-and-budget-only-in-go]] - land together; its bound is what makes this visible-failure surface urgent
 - [[idea-2026-08-12-schedule-next-fires-preview]] - same response struct, different field
+
+## Resolution
+Fixed on `claude/unfireable-schedule-invisible-7ba5fb` (42 commits). `scheduled_jobs` gains
+`last_error` and `last_error_at` (migration 000022, nullable, catalog-only, no backfill, so it
+cannot refuse to boot). `TickOnce` records them on the OUTER transaction beside `advanceNextRun`
+- never inside `fireOne`, whose savepoint rollback would discard the write silently - for the
+three PERMANENT failure classes only, and clears them on a successful fire. Wrapped pgx errors are
+logged and not recorded, so a database blip neither becomes a fact about the schedule nor
+overwrites a real record. A record-only startup sweep covers the long-cadence schedules neither
+existing loop sees. Surfaced on the REST response, the SPA list chip and detail panel, the CLI
+`STATE` column and `show`, the Python SDK, and the MCP server. `relay schedules update --spec FILE`
+was added so the remedy the signal points at is reachable from relay's own CLI.
+
+**Two of the item's own claims were refuted before any code was written**, and both changed the
+design. `last_run_at` does not mean "a job was produced": `fireOne` called `advance` from two
+sites, and the second was the `overlap_policy=skip` branch, which stamps `last_run_at` while
+returning BEFORE validation - so the obvious clearing rule would have cleared on zero evidence.
+The statement was split. And the route is `PATCH` with an all-pointer request struct, not `PUT`,
+so the clear is a boolean SQL argument rather than a read-modify-write that could carry a stale
+error over a failure a tick recorded in between.
+
+**The `_DocumentedHazard` test left by #158 was inverted as its header instructed**: auto-disable
+was rejected at the spec gate, so all six of its original assertions stay TRUE including "still
+Enabled", and none was flipped. The field-set tripwire's list was updated rather than exempted.
+
+Phase 4 found ten further defects, eight fixed here. The two largest were not in the original
+diagnosis at all: a PATCH of `cron_expr` alone erased a `job_spec` failure that was still true
+(re-creating this very bug through the fix's own clearing rule, reproduced with a live probe and
+now gated on the effective post-patch row validating), and MCP was an unenumerated fifth renderer
+feeding attacker-chosen prose to a model holding destructive write tools. Deferred, with items
+filed: [[bug-2026-08-28-run-now-neither-clears-nor-records-the-failure]],
+[[bug-2026-08-28-boot-sweep-lists-every-schedule-ahead-of-the-listener]] and
+[[bug-2026-08-28-schedrunner-logs-operator-controlled-schedule-names-raw]].
+
+The headline regression test runs in a lane CI does not execute; that is recorded as an eighth
+instance on [[idea-2026-08-23-integration-only-guards-ci-never-runs]] rather than papered over.
+The CI-visible witness is `internal/cli/schedules_failure_integration_test.go`, which covers the
+read half only.
