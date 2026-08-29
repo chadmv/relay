@@ -256,6 +256,7 @@ class Client:
         out: list[M] = []
         cursor: Optional[str] = None
         pages = 0
+        seen: set[str] = set()
         while True:
             pages += 1
             if cursor:
@@ -288,6 +289,41 @@ class Client:
                     f"rows (next_cursor {_quote_cursor(cursor)})",
                     records=out,
                 )
+            # The stop is: this walk already requested this cursor. A SET, not a
+            # comparison against the previous cursor - the two catch different
+            # things and a two-cycle (A,B,A,B, which two replicas behind a load
+            # balancer produce) is invisible to the comparison and runs to the
+            # page cap. This is not a second stop; it is the one stop, with the
+            # container that implements it. Previous-cursor-only is this set
+            # restricted to its last element.
+            #
+            # A repeated cursor is UNREACHABLE on a correct server: the server's
+            # cursor (encodeCursorV2, internal/api/pagination.go) encodes the
+            # LAST KEPT row's key and the next page's predicate is strictly past
+            # it with id as tiebreaker, so cursor keys strictly decrease along a
+            # walk. Comparison is byte-exact on the base64 string; the SDK never
+            # decodes it, and deliberately so - decoding would make a
+            # server-internal encoding a cross-language contract to keep in step.
+            #
+            # Memory, stated rather than hidden: at most one entry per page, so
+            # the entry COUNT is bounded by _MAX_LIST_PAGES. The BYTE cost is
+            # entries x cursor length, and cursor length is server-supplied and
+            # unbounded - roughly 0.1% of a real walk (~128 bytes against ~100 KB
+            # of models per page), and dominant only against a server sending
+            # one-item pages with multi-megabyte cursors. A digest per entry
+            # would close that term and is DECLINED: the same attacker already
+            # has an equal retention channel through `items`, and the
+            # unbounded-response-bytes axis belongs to
+            # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout
+            # at the right layer.
+            if cursor in seen:
+                raise ProtocolError(
+                    "server cursor did not advance - it repeated a cursor this "
+                    f"walk had already requested ({_quote_cursor(cursor)}) after "
+                    f"{pages} pages",
+                    records=out,
+                )
+            seen.add(cursor)
 
     # ─── Jobs ─────────────────────────────────────────────────────────────
 

@@ -1289,3 +1289,106 @@ def test_fetch_all_zero_matching_rows_is_not_an_error() -> None:
     client = _make_client(handler)
     assert client.list_jobs() == []
     assert len(calls) == 1
+
+
+def test_fetch_all_raises_when_the_server_repeats_a_cursor() -> None:
+    """Stop 2, self-loop. The repro from the backlog item: a server answering
+    the same cursor forever drove 2000 requests and counting.
+
+    The cursor here is an opaque base64 string with no order, so "did not
+    advance" cannot be a comparison the way task_logs' `next_seq <= since` is.
+    The stop is membership: this walk already requested this cursor.
+
+    Membership is tested BEFORE the cursor is recorded, so a self-loop fires on
+    request 2 - hence `len(calls) == 2`, not 3.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")], next_cursor="CUR-SAME", total=99
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="already requested") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert "CUR-SAME" in str(excinfo.value)
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2"]
+
+
+def test_fetch_all_raises_on_a_two_cycle_of_cursors() -> None:
+    """THIS is the test that discriminates a seen-SET from a comparison against
+    the immediately previous cursor.
+
+    Under previous-cursor-only, A,B,A,B never fires: it runs to the page cap,
+    10000 requests and up to 2,000,000 retained rows later. That is not an
+    exotic adversarial construction - two replicas behind a load balancer with
+    different data, or a caching proxy alternating two cached bodies, produce
+    exactly this.
+
+    The set fires on request 3, when A comes round again.
+    """
+    calls: list[dict[str, str]] = []
+    cursors = ["CUR-A", "CUR-B", "CUR-A"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > len(cursors):
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=cursors[len(calls) - 1],
+                total=99,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="already requested") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 3
+    assert "CUR-A" in str(excinfo.value)
+
+
+def test_fetch_all_truncates_an_over_long_cursor_in_its_message() -> None:
+    """The message quotes a value the SERVER chose, so the message's length is
+    the server's to choose unless the client bounds it.
+
+    This is the WIRING half of the _quote_cursor tests: asserting the helper
+    truncates proves nothing about the code that builds the message.
+
+    Note this fixture is also a self-loop, so deleting the repeated-cursor stop
+    (M1) reddens this test too. That is expected and recorded in the mutation
+    table; it is not a sign the truncation is unpinned - M8 kills this test
+    while leaving the stop intact.
+    """
+    huge = "z" * 5000
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response([_job_response(id="j1")], next_cursor=huge, total=99),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(message) < 1000
+    assert "truncated from 5000 characters" in message
+    assert huge not in message
