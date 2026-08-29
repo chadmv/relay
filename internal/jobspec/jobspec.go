@@ -110,6 +110,40 @@ const maxRetries = 10
 // one. Do not derive this from that env var at runtime.
 const maxTimeoutSeconds = 604800
 
+// maxTasksPerJob bounds len(JobSpec.Tasks). A task in relay is a frame, a frame
+// chunk, a build step, or one unit of a fan-out, so the realistic high end for a
+// single submission is a full animation submitted one task per frame: a 1000 to
+// 2000 frame sequence. Chunking frames - the usual practice, because per-task
+// dispatch and workspace-prep overhead dominates for fast frames - puts the same
+// sequence at a couple of hundred tasks. A build with a few hundred steps and a
+// parameter sweep of a few hundred units both land far below. 5000 is 2.5x to 5x
+// above that high end, so no submission a user plausibly wants is refused.
+//
+// IT STILL BINDS. A realistic task with a real command line is around 100 bytes
+// of JSON, so maxBodyBytes (1 MiB, internal/api/server.go) already caps a
+// realistic request near 10,000 tasks and this cap binds at half of that. Against
+// minimal JSON - a short unique name and a one-element argv, on the order of 30
+// to 35 bytes - the body permits on the order of 30,000, so this is roughly a 6x
+// reduction on the worst case.
+//
+// DO NOT RAISE THIS WITHOUT A REFUSED REAL SUBMISSION. "The number looks small"
+// is not the reason; a job somebody actually wanted to run being rejected is. And
+// before raising it, look at the two costs this number stands in for, because
+// fixing either is a better answer than a larger cap:
+//   - jobcreate.CreateJobFromSpec inserts tasks ONE AT A TIME, one round trip
+//     each, inside the caller's transaction. 5000 tasks is 5000 sequential round
+//     trips - a slow request. 30,000 is a different thing entirely.
+//   - store.GetEligibleTasks has NO LIMIT, and scheduler.Dispatcher.dispatch runs
+//     it on every Trigger() and every 30 seconds, so a large pending backlog is
+//     re-read in full on every tick until it drains. That is a fleet-wide
+//     property, so a per-request cap bounds one request's contribution to it and
+//     nothing about repetition.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// to every bound in this file.
+const maxTasksPerJob = 5000
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -121,6 +155,23 @@ func Validate(spec *JobSpec) error {
 	}
 	if len(spec.Tasks) == 0 {
 		return errors.New("at least one task is required")
+	}
+	// The other end of the SAME range, deliberately adjacent to it, so a reader
+	// changing either bound sees the other - the same adjacency argument that keeps
+	// the retries and timeout_seconds bounds together. It is a JOB-level property,
+	// so it has no task name to interpolate and does not belong in the per-task
+	// loop. And it refuses the spec BEFORE the work it bounds: before nameSet is
+	// allocated at len(spec.Tasks) capacity and before one normalizeTaskCommands
+	// call per task.
+	//
+	// PRECEDENCE CONSEQUENCE, TAKEN DELIBERATELY. A spec that is over this bound
+	// AND carries an invalid priority, a nameless task, a duplicate task name or a
+	// bad command form now reports the task count, where the older code reported
+	// whichever of those came first. No test can depend on the old order, since the
+	// bound is new, and nothing reads these messages positionally. The wording
+	// mirrors "at least one task is required" so the pair reads as one range.
+	if len(spec.Tasks) > maxTasksPerJob {
+		return fmt.Errorf("at most %d tasks are allowed, got %d", maxTasksPerJob, len(spec.Tasks))
 	}
 	// Priority is optional. Empty is allowed (jobcreate defaults it to "normal").
 	// A non-empty value must be one of the known levels; this rejects typos that
