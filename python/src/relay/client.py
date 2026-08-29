@@ -223,7 +223,7 @@ class Client:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> Page[M]:
-        """Fetch a single page envelope and validate each item into ``model``."""
+        """Fetch a single page envelope and validate it into ``Page[model]``."""
         self._require_token()
         p: dict[str, str] = dict(params or {})
         if sort is not None:
@@ -234,12 +234,28 @@ class Client:
             p["cursor"] = cursor
         response = self._http.get(path, params=p)
         raise_for_response(response)
-        body = response.json()
-        items = [model.model_validate(item) for item in body["items"]]
-        return cast(
-            "Page[M]",
-            Page(items=items, next_cursor=body.get("next_cursor", ""), total=body.get("total", 0)),
-        )
+        # The WHOLE body goes through the model, never a hand-picked
+        # body["items"] with next_cursor and total read off the raw dict beside
+        # it. The model is the pin, the same way it is in task_logs_page:
+        # `items` is required so a missing or null one raises instead of
+        # reading as an empty page, and `next_cursor` and `total` are TYPED, so
+        # a server answering next_cursor: 12345 or total: "many" fails here as
+        # one decoding error rather than as a raw TypeError from wherever the
+        # value is first used - which for the _fetch_all walk below was four
+        # different lines in three different shapes.
+        #
+        # `next_cursor: str = ""` and `total: int = 0` keep their DEFAULTS, so a
+        # MISSING key still reads as drained / zero exactly as `body.get(...)`
+        # did. That default is the subject of the separate open item
+        # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained and is not
+        # closed here; only a WRONG-TYPED value changes behaviour.
+        #
+        # `Page.__class_getitem__(model)` rather than `Page[model]`: the two are
+        # the same call, but mypy reads the subscript form as a type application
+        # and rejects a variable in that position. The cast restores M, which
+        # the runtime call erases.
+        page_model = cast("type[Page[M]]", Page.__class_getitem__(model))
+        return page_model.model_validate(response.json())
 
     def _fetch_all(
         self,
@@ -272,41 +288,42 @@ class Client:
         self._require_token()
         if limit is not None and limit < 1:
             raise ValidationError(f"limit must be >= 1, got {limit}")
-        p: dict[str, str] = dict(params or {})
-        if sort is not None:
-            p["sort"] = sort
-        p["limit"] = str(self._PAGE_REQUEST_LIMIT)
         out: list[M] = []
         cursor: Optional[str] = None
         pages = 0
         seen: set[str] = set()
         while True:
             pages += 1
-            if cursor:
-                p["cursor"] = cursor
-            response = self._http.get(path, params=p)
-            raise_for_response(response)
-            body = response.json()
-            # Bound to a local rather than re-read below: the emptiness test
-            # must ask about THIS page, and `out` is cumulative. (These six
-            # routes never send JSON null here - buildPage returns a non-nil
-            # empty slice - so no null-coercion is needed.)
-            items = body["items"]
-            out.extend(model.model_validate(item) for item in items)
+            # Through _get_page, which decodes the whole envelope into
+            # Page[model]. This loop used to build the request itself and read
+            # next_cursor and total off the raw dict, and that hand-picking was
+            # the defect: it made every stop below operate on a value of a type
+            # the server chose. `page.next_cursor` is a str and `page.total` an
+            # int by construction here, so `len()`, `in seen` and `>` are all
+            # asking a question their operand can answer.
+            page = self._get_page(
+                path,
+                model,
+                params=params,
+                sort=sort,
+                limit=self._PAGE_REQUEST_LIMIT,
+                cursor=cursor,
+            )
+            out.extend(page.items)
             if limit is not None and len(out) >= limit:
                 return out[:limit]
             # NOT changed by this slice: a MISSING next_cursor key still reads
             # as drained here, and that is the subject of the open item
             # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained, which
             # also covers _get_page and is therefore wider than this loop.
-            cursor = body.get("next_cursor", "")
+            cursor = page.next_cursor
+            # THE DRAINED RETURN BELOW MUST STAY ABOVE THE EMPTY-PAGE STOP. A
+            # list with no matching rows legitimately answers items: [] - and it
+            # reports itself drained, so it never reaches the stop. Inverted,
+            # list_jobs() against an empty jobs table raises.
             if not cursor:
                 return out
-            # This arm MUST stay above the empty-page stop below. A list with no
-            # matching rows legitimately answers items: [] - and it reports
-            # itself drained, so it never reaches the stop. Inverted, list_jobs()
-            # against an empty jobs table raises.
-            if not items:
+            if not page.items:
                 raise ProtocolError(
                     "server returned an empty page while still advertising more "
                     f"rows (next_cursor {_quote_cursor(cursor)})",
@@ -376,11 +393,11 @@ class Client:
                         ids.add(row_id)
                 distinct = len(ids)
                 # From the CURRENT page, matching task_logs' use of page.total.
-                # A MISSING total defaults to 0 and so falls into the blaming arm
-                # below - the safe direction, and deliberately NOT the same class
-                # of default as the next_cursor one above, where a missing key
-                # reads as "drained" and silently truncates.
-                total = body.get("total", 0)
+                # A MISSING total still defaults to 0, via Page's own default -
+                # deliberately NOT the same class of default as the next_cursor
+                # one above, where a missing key reads as "drained" and silently
+                # truncates. Here it only makes a reported number smaller.
+                total = page.total
                 if distinct == 0:
                     # Reaching here means every collected row lacked a usable id;
                     # `out` itself is non-empty, because the empty-page stop above

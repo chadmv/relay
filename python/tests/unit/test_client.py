@@ -1590,3 +1590,132 @@ def test_fetch_all_limit_satisfied_on_page_two_by_a_page_that_repeats_a_cursor()
 
     assert [j.id for j in jobs] == ["j1", "j2", "j3"]
     assert len(calls) == 2
+
+
+# ─── _fetch_all envelope typing ──────────────────────────────────────────────
+#
+# _page_response cannot express any of these bodies: it is typed
+# `next_cursor: str, total: Optional[int]`, which is exactly why nothing in this
+# file had ever varied the TYPE of an envelope field. The envelope is chosen by
+# the SERVER, so its field TYPES are the server's to choose in the same sense
+# its values are - the argument the termination stops already rest on, applied
+# one level up. These bodies are therefore hand-written inline.
+#
+# The contract asserted is pydantic's ValidationError, NOT a relay error.
+# ValidationError escaping the RelayError hierarchy is a separate, tracked
+# defect (bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy);
+# what these pin is that a wrong-typed envelope reaches ONE documented decoding
+# failure instead of a raw TypeError from deep inside the loop.
+
+
+def test_fetch_all_rejects_a_non_string_next_cursor() -> None:
+    """Fires on request 2, with no page cap involved: an int cursor is hashable,
+    so it survives the `in seen` membership test on request 2 and reaches
+    _quote_cursor, which asks it for a len().
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200,
+            json={"items": [_job_response(id="j1")], "next_cursor": 12345, "total": 5},
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_list_next_cursor() -> None:
+    """The other half of the cursor-type pair, and it fails EARLIER than the int
+    one on the un-fixed code: a list is unhashable, so `cursor in seen` raises
+    before _quote_cursor is ever reached. Two crash sites, one shape.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200,
+            json={"items": [_job_response(id="j1")], "next_cursor": ["x"], "total": 5},
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+@pytest.mark.parametrize("bad_total", ["many", None, {"n": 1}])
+def test_fetch_all_rejects_a_non_integer_total(
+    bad_total: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`total` is only READ at the page cap on the un-fixed code, so the cap is
+    what this fixture drives - that is where the TypeError was measured.
+
+    Routed through the model, `total` is validated on EVERY page, so the fix
+    moves the failure forward to request 1. The assertion is deliberately about
+    the exception, not the request count: both are correct outcomes and pinning
+    the count here would pin the un-fixed code's laziness as a contract.
+
+    "many" is not simply "a string": pydantic coerces a NUMERIC string, so
+    `total: "5"` stays acceptable. It is the non-numeric string that must fail.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json={
+                "items": [_job_response(id=f"j{len(calls)}")],
+                "next_cursor": f"CUR-{len(calls)}",
+                "total": bad_total,
+            },
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_null_items() -> None:
+    """`items: null` is a live defect that PRE-DATES this slice - the line it
+    crashed on is the same subscript that was there before - so it is fixed here
+    incidentally, by the same routing, rather than as a regression.
+
+    `Page.items` is required and undefaulted, so null is a ValidationError and
+    not an empty page: coercing null to [] would invent a drained-looking page
+    out of a body the server never sent.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"items": None, "next_cursor": "", "total": 0}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_missing_items_key() -> None:
+    """The absent-key sibling of the null case. `items` has NO default, unlike
+    `next_cursor` and `total`, whose defaults are deliberate and preserved - so
+    an absent `items` is an error while an absent `next_cursor` still reads as
+    drained.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"next_cursor": "", "total": 0})
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
