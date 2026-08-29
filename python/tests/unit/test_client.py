@@ -1427,17 +1427,43 @@ def test_fetch_all_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(calls) == 3
 
 
-def test_fetch_all_page_cap_does_not_blame_the_server_when_total_is_reached(
+def test_fetch_all_page_cap_makes_no_completeness_claim_when_total_is_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stop 3's message arms. A list of exactly _MAX_LIST_PAGES * 200 rows
-    drains correctly, but its last page is FULL and so carries a cursor: the
-    walk stopped one request short of learning it was done, having collected
-    every row. The envelope's own total settles that, so the message must not
-    tell the caller their list may be longer.
+    """Stop 3's message asserts NEITHER possibility: it does not blame the
+    server, and it does not claim every row was collected. It REPORTS the two
+    numbers it has, which is not the same thing.
+
+    It used to split on completeness whenever `distinct >= total`, justified by
+    "a list of exactly _MAX_LIST_PAGES * _PAGE_REQUEST_LIMIT rows drains
+    correctly, but its last page is full and so carries a cursor". That premise
+    is true for task_logs and FALSE for a list walk, and the asymmetry is on the
+    wire:
+
+      - GetTaskLogsPage (internal/store/query/tasks.sql) is `LIMIT $3` - no
+        over-fetch - and handleGetTaskLogs (internal/api/tasks.go) sets
+        next_seq = 0 only when `len(items) < limit`. A FULL last log page does
+        carry a non-zero cursor, so the log walk really does stop one request
+        short. The premise holds there.
+      - Every list query is `LIMIT sqlc.arg(page_limit)::int + 1`, and every
+        list handler goes through buildPage (internal/api/pagination.go), which
+        does `hasMore := int32(len(rows)) > limit` and returns an empty cursor
+        when that is false. A list page carries a cursor only when a row
+        genuinely exists BEYOND it, so a list that is an exact multiple of the
+        page size drains at its last full page and never reaches the cap.
+
+    So on a list, reaching the cap means the server IS misbehaving - and the
+    removed arm then settled completeness using `total`, a number that same
+    misbehaving actor supplies. A server that keeps advancing cursors and
+    reports total: 1000 on a five-million-row list got the SDK to tell the
+    operator every row was collected on a walk 0.02% complete.
+
+    This fixture is the exact input that used to trigger the claim: distinct ==
+    total == 4. The Go side reached the same conclusion first and says so at
+    internal/relayclient/page.go.
 
     The outcome assertion is not optional. The sibling's version of this test
-    was green BECAUSE OF the bug until `.records` was asserted.
+    was green BECAUSE OF a different bug until `.records` was asserted.
     """
     monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
     calls: list[dict[str, str]] = []
@@ -1461,23 +1487,30 @@ def test_fetch_all_page_cap_does_not_blame_the_server_when_total_is_reached(
         client.list_jobs()
 
     message = str(excinfo.value)
-    assert "may be longer" not in message
-    assert "every one was collected" in message
-    assert "4 distinct row ids" in message
+    assert "every one was collected" not in message
+    assert "completeness" not in message
+    assert "4 rows were collected (4 distinct row ids)" in message
+    assert "the server's last page reported 4" in message
     assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j3", "j4"]
 
 
-def test_fetch_all_page_cap_completeness_is_distinct_ids_not_a_row_count(
+def test_fetch_all_page_cap_reports_distinct_ids_alongside_the_row_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The completeness claim above is only sound if it counts DISTINCT ids.
+    """The message reports rows APPENDED and DISTINCT ids as two separate
+    numbers, because they are two different measurements and their disagreement
+    is the whole diagnostic value of the second one.
 
-    `len(out)` counts rows APPENDED and `total` is server-supplied, so a server
-    that re-serves a page behind an ADVANCING cursor drives them equal while
-    half the list was never sent - and the new repeated-cursor stop cannot see
-    it, because the cursor genuinely advances. This handler does exactly that:
-    ids j1 and j2 twice, cursors CUR-1 then CUR-2, total 4. Rows 3 and 4 do not
-    exist on the wire at any point.
+    A server that re-serves a page behind an ADVANCING cursor drives len(out) up
+    while sending nothing new - and the repeated-cursor stop cannot see it,
+    because the cursor genuinely advances. This handler does exactly that: ids
+    j1 and j2 twice, cursors CUR-1 then CUR-2, total 4. Rows 3 and 4 do not
+    exist on the wire at any point, and an operator reading "4 rows collected"
+    alone would never know.
+
+    Pinning both numbers in ONE substring is what makes this discriminating: a
+    mutant that reports len(out) as the distinct count says "(4 distinct row
+    ids)" and dies here.
     """
     monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
     calls: list[dict[str, str]] = []
@@ -1501,8 +1534,8 @@ def test_fetch_all_page_cap_completeness_is_distinct_ids_not_a_row_count(
 
     message = str(excinfo.value)
     assert "every one was collected" not in message
-    assert "may be longer" in message
-    assert "2 distinct row ids" in message
+    assert "completeness" not in message
+    assert "4 rows were collected (2 distinct row ids)" in message
     # Duplicates and all: the client does not know which of them the server
     # meant, so it hands back exactly what it received.
     assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j1", "j2"]
@@ -1521,8 +1554,8 @@ def test_fetch_all_page_cap_says_so_when_no_row_carried_an_id(
     method that can reach here, which is why this fixture is a jobs walk.
 
     The message must NOT print "0 distinct row ids": that is a computed-looking
-    number standing in for a measurement that did not happen. It says
-    completeness could not be checked, and why.
+    number standing in for a measurement that did not happen. It says no
+    distinct-row count can be given, and why.
     """
     monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
     calls: list[dict[str, str]] = []
@@ -1551,6 +1584,8 @@ def test_fetch_all_page_cap_says_so_when_no_row_carried_an_id(
     assert "carry no id" in message
     assert "0 distinct" not in message
     assert "every one was collected" not in message
+    assert "completeness" not in message
+    assert "4 rows were collected" in message
     assert [j.name for j in excinfo.value.records] == ["n1", "n2", "n3", "n4"]
 
 

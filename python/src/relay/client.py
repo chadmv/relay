@@ -392,45 +392,70 @@ class Client:
                     if isinstance(row_id, str) and row_id:
                         ids.add(row_id)
                 distinct = len(ids)
-                # From the CURRENT page, matching task_logs' use of page.total.
-                # A MISSING total still defaults to 0, via Page's own default -
-                # deliberately NOT the same class of default as the next_cursor
-                # one above, where a missing key reads as "drained" and silently
-                # truncates. Here it only makes a reported number smaller.
+                # From the CURRENT page, and the message says so rather than
+                # implying the number is authoritative. A MISSING total still
+                # defaults to 0, via Page's own default - deliberately NOT the
+                # same class of default as the next_cursor one above, where a
+                # missing key reads as "drained" and silently truncates. Here it
+                # only makes a reported number smaller.
                 total = page.total
+                # The message REPORTS what it has and asserts NEITHER
+                # possibility: it does not blame the server, and it does not
+                # claim every row was collected.
+                #
+                # There used to be a `distinct >= total` arm that did claim
+                # completeness, justified by "a list of exactly _MAX_LIST_PAGES *
+                # _PAGE_REQUEST_LIMIT rows drains correctly, but its last page is
+                # full and so carries a cursor". That premise is TRUE for
+                # task_logs and FALSE here, and the asymmetry is an over-fetch:
+                #
+                #   - GetTaskLogsPage (internal/store/query/tasks.sql) is
+                #     `LIMIT $3`, and handleGetTaskLogs (internal/api/tasks.go)
+                #     zeroes next_seq only when `len(items) < limit`. A FULL last
+                #     log page carries a non-zero cursor, so that walk really does
+                #     stop one request short of learning it was done. Do NOT
+                #     "unify" task_logs' equivalent arm onto this one.
+                #   - Every LIST query is `LIMIT sqlc.arg(page_limit)::int + 1`,
+                #     and every list handler goes through buildPage
+                #     (internal/api/pagination.go), which emits a cursor only when
+                #     that extra row came back. A list page carries a cursor only
+                #     when a row genuinely exists BEYOND it, so a list whose
+                #     length is an exact multiple of the page size drains at its
+                #     last full page and never reaches this cap.
+                #
+                # So reaching the cap on a list means the server IS misbehaving,
+                # and the removed arm settled completeness with `total` - a number
+                # that same actor supplies. A server that keeps advancing cursors
+                # and reports total: 1000 on a five-million-row list got this to
+                # tell the operator every row was collected on a walk 0.02%
+                # complete. internal/relayclient/page.go reached the same
+                # conclusion first and warns against copying the wording it does
+                # not use; this is the side that had copied it.
+                #
+                # Both numbers are still reported, and separately: `len(out)`
+                # counts rows APPENDED while `distinct` counts rows RECEIVED, and
+                # their disagreement is the diagnostic. Reporting is not
+                # asserting.
                 if distinct == 0:
                     # Reaching here means every collected row lacked a usable id;
                     # `out` itself is non-empty, because the empty-page stop above
                     # rejects any page that contributed no rows. Do NOT print
-                    # "0 distinct rows collected" - that is a computed-looking
-                    # number standing in for a measurement that did not happen.
+                    # "0 distinct row ids" - that is a computed-looking number
+                    # standing in for a measurement that did not happen.
                     raise ProtocolError(
                         f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
                         f"client's page cap; {len(out)} rows were collected and "
-                        f"the server reported {total}, but completeness could not "
-                        "be checked because the rows carry no id",
-                        records=out,
-                    )
-                if total > 0 and distinct >= total:
-                    # Do not blame the server here. A list of exactly
-                    # _MAX_LIST_PAGES * _PAGE_REQUEST_LIMIT rows drains correctly,
-                    # but its last page is full and so carries a cursor: we
-                    # stopped one request short of learning we were done, having
-                    # collected every row. The envelope's own total settles it.
-                    raise ProtocolError(
-                        f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
-                        f"client's page cap; the server reported {total} rows and "
-                        f"every one was collected ({distinct} distinct row ids), "
-                        "but it had not yet reported the list as drained",
+                        f"the server's last page reported {total}, and it had not "
+                        "yet reported the list as drained - the rows carry no id, "
+                        "so no distinct-row count can be given",
                         records=out,
                     )
                 raise ProtocolError(
                     f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
-                    "client's page cap; the list may be longer than "
-                    f"{self._MAX_LIST_PAGES * self._PAGE_REQUEST_LIMIT} rows, or "
-                    "the server may never report it as drained "
-                    f"({distinct} distinct row ids collected, server reported "
-                    f"{total})",
+                    f"client's page cap; {len(out)} rows were collected "
+                    f"({distinct} distinct row ids) and the server's last page "
+                    f"reported {total}, and it had not yet reported the list as "
+                    "drained",
                     records=out,
                 )
             seen.add(cursor)
