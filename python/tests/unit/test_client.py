@@ -1552,3 +1552,41 @@ def test_fetch_all_page_cap_says_so_when_no_row_carried_an_id(
     assert "0 distinct" not in message
     assert "every one was collected" not in message
     assert [j.name for j in excinfo.value.records] == ["n1", "n2", "n3", "n4"]
+
+
+def test_fetch_all_limit_satisfied_on_page_two_by_a_page_that_repeats_a_cursor() -> None:
+    """The `limit` short-circuit stays ABOVE every stop.
+
+    A caller who asked for 3 rows and has 3 rows has been served. Turning that
+    into an error because the page that completed the order also repeated a
+    cursor would make a correct result depend on a defect the caller never
+    observes.
+
+    The discriminating case is narrower than it looks and no existing test
+    covers it. Neither the cursor-repeat stop nor the page cap can fire on
+    request 1 - there is no previous cursor, and pages == 1 < cap - so a walk
+    satisfied on page 1 proves nothing about the ordering. `limit` must be
+    satisfied on page 2 OR LATER, by a page that also trips a stop. That is why
+    both pages return cursor CUR-A.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the stop"})
+        n = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{n - 1}"), _job_response(id=f"j{n}")],
+                next_cursor="CUR-A",
+                total=99,
+            ),
+        )
+
+    client = _make_client(handler)
+    jobs = client.list_jobs(limit=3)
+
+    assert [j.id for j in jobs] == ["j1", "j2", "j3"]
+    assert len(calls) == 2
