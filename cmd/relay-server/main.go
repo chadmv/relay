@@ -293,10 +293,22 @@ func main() {
 	//
 	// BEFORE the runner goroutine, because the sweep and TickOnce's fire path
 	// write the same two columns on the same rows. With the runner not yet
-	// started, nothing can interleave between the sweep's LIST and its UPDATEs,
-	// so a row whose fire succeeds seconds later cannot have its fresh clear
-	// stamped back over with a failure the sweep read before that fire happened.
-	// No lock is needed for a pass that runs while nothing else is running.
+	// started, nothing in THIS PROCESS can interleave between the sweep's LIST
+	// and its UPDATEs, so a row whose fire succeeds seconds later cannot have its
+	// fresh clear stamped back over with a failure the sweep read before that
+	// fire happened.
+	//
+	// THAT ARGUMENT COVERS ONE PROCESS AND ONLY ONE. It is not the reason the
+	// sweep is safe, and an earlier version of this comment claimed it was ("no
+	// lock is needed for a pass that runs while nothing else is running"), which
+	// is false the moment a second replica exists - and README documents
+	// multi-replica as supported, which is why ListEligibleScheduledJobs is
+	// FOR UPDATE SKIP LOCKED. What actually makes the sweep safe across replicas
+	// is that RecordScheduledJobFailure is FENCED on the job_spec, cron_expr and
+	// timezone the sweep validated, so a row repaired through another replica
+	// between the LIST and the UPDATE cannot have the stale verdict stamped back
+	// onto it. See that statement's header. Placement is a cost and ordering
+	// choice; the fence is the correctness argument.
 	//
 	// AFTER ReconcileOnStartup only for cost, not for correctness: the two
 	// commute (the sweep never reads or writes next_run_at, reconcile never reads

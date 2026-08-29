@@ -43,6 +43,16 @@ import (
 // in step. This function is about schedules that are NOT overdue and are
 // therefore seen by neither loop for a full cron period.
 //
+// ITS WRITE IS FENCED ON THE GENERATION IT VALIDATED, because this is a
+// read-then-write across two implicit transactions: q is pool-backed, so the
+// LIST and every UPDATE are separate statements with anything at all allowed to
+// happen in between. Single-process placement (see cmd/relay-server) keeps
+// THIS server's tick out of that window and nothing else, and relay supports
+// multiple replicas. RecordScheduledJobFailure therefore matches on job_spec,
+// cron_expr and timezone, so a schedule repaired through another replica cannot
+// have this pass's stale verdict stamped back onto it. A non-match is an
+// expected outcome, not an error.
+//
 // IT MUST NOT BE ABLE TO STOP THE SERVER BOOTING, and it is written so that it
 // cannot. A per-row record failure is logged and the sweep continues, so one bad
 // row costs one log line rather than the remaining schedules; the only returned
@@ -63,12 +73,34 @@ func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
 		if !ok {
 			continue
 		}
-		if err := q.RecordScheduledJobFailure(ctx, store.RecordScheduledJobFailureParams{
+		// THE THREE COLUMNS PASSED BACK ARE THE FENCE, and they are exactly the
+		// three validateStoredRow read. The write lands only if the row is still
+		// the generation this verdict is about; see RecordScheduledJobFailure's
+		// own header for why the fence is the content rather than updated_at.
+		n, err := q.RecordScheduledJobFailure(ctx, store.RecordScheduledJobFailureParams{
 			ID:        row.ID,
 			LastError: &text,
-		}); err != nil {
+			JobSpec:   row.JobSpec,
+			CronExpr:  row.CronExpr,
+			Timezone:  row.Timezone,
+		})
+		if err != nil {
 			log.Printf("schedrunner: startup validation record for %s: %v", row.Name, err)
+			continue
 		}
+		if n == 0 {
+			// EITHER the row changed between the LIST and this UPDATE - another
+			// replica, or an operator repairing it through one - OR the identical
+			// message is already recorded. Neither is news, and the second is the
+			// steady state for the entire life of a broken schedule, so logging
+			// here would put a line in every boot's output forever.
+			//
+			// THIS IS THE WHOLE REASON THE QUERY IS :execrows. With :exec a fence
+			// that said no and a database fault are the same nil, and the branch
+			// below could not exist.
+			continue
+		}
+		log.Printf("schedrunner: startup validation recorded a new failure for schedule %s: %s", row.Name, text)
 	}
 	return nil
 }

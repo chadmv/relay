@@ -1489,17 +1489,24 @@ func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg Li
 	return items, nil
 }
 
-const recordScheduledJobFailure = `-- name: RecordScheduledJobFailure :exec
+const recordScheduledJobFailure = `-- name: RecordScheduledJobFailure :execrows
 UPDATE scheduled_jobs
-SET last_error    = $2,
+SET last_error    = $1,
     last_error_at = NOW(),
     updated_at    = NOW()
-WHERE id = $1
+WHERE id = $2
+  AND job_spec = $3
+  AND cron_expr = $4
+  AND timezone = $5
+  AND last_error IS DISTINCT FROM $1
 `
 
 type RecordScheduledJobFailureParams struct {
-	ID        pgtype.UUID `json:"id"`
 	LastError *string     `json:"last_error"`
+	ID        pgtype.UUID `json:"id"`
+	JobSpec   []byte      `json:"job_spec"`
+	CronExpr  string      `json:"cron_expr"`
+	Timezone  string      `json:"timezone"`
 }
 
 // The startup validation sweep's statement (schedrunner.ValidateStoredSpecsOnStartup).
@@ -1515,14 +1522,67 @@ type RecordScheduledJobFailureParams struct {
 // not observe. Clearing stays the exclusive job of a successful fire and of a
 // PATCH that changed the inputs.
 //
+// IT IS FENCED ON THE GENERATION THE SWEEP ACTUALLY VALIDATED, which is the
+// three columns validateStoredRow reads and nothing else. The sweep takes a
+// pool-backed *store.Queries, so its LIST and its UPDATEs are separate implicit
+// transactions; with `WHERE id = $1` alone, replica B could list schedule S as
+// broken, an operator could repair S through replica A, and B's UPDATE would
+// stamp the stale failure back - leaving a repaired schedule reading FAILING
+// until its next successful fire, up to a month on @monthly. That is the
+// invisibility bug's exact inverse on the same surface, and a false alarm is
+// what teaches an operator to ignore the field. Single-process placement (the
+// sweep runs before the runner goroutine) does not cover it: README documents
+// multi-replica as supported, which is why ListEligibleScheduledJobs is
+// FOR UPDATE SKIP LOCKED.
+//
+// THE FENCE IS THE CONTENT, NOT updated_at, and the choice is not a wash.
+// updated_at is a PROXY for "the row I validated", and it is wrong in the
+// direction that costs the most: ReconcileOnStartup runs immediately before this
+// sweep in EVERY process and bumps updated_at on every overdue row, so on a
+// two-replica rolling deploy - exactly the moment a retroactive validation
+// change lands - replica A's reconcile between B's LIST and B's UPDATE would
+// silently suppress B's record, and the sweep would be least reliable precisely
+// when it is needed. Fencing on job_spec, cron_expr and timezone is narrower,
+// immune to unrelated churn, and is literally the question the verdict was
+// about. It costs one equality per row already located by primary key, and
+// job_spec is JSONB, whose equality is semantic - so a re-serialization that did
+// not change the spec correctly does NOT invalidate the verdict.
+//
+// AND A RE-RECORD OF AN IDENTICAL MESSAGE IS A NO-OP. Without the last_error
+// predicate this statement stamped last_error_at = NOW() for every broken row on
+// every boot, with no fire attempt behind it - while migration 000022's own
+// comment says "is it still being tried" is readable from last_error_at MOVING.
+// The sweep's audience is long-cadence schedules that are NOT being
+// fire-attempted, so a @monthly schedule last attempted three weeks ago rendered
+// "last failure 2 minutes ago" after any restart, and a crash-looping server
+// manufactured fresh timestamps for rows nothing was trying to fire.
+//
+// :execrows, NOT :exec, for the same reason markWorkerOffline returns
+// (rows, error): a fence that said no and a database fault must be
+// distinguishable at the call site. The caller logs the fault, stays silent on
+// the no-op, and logs the one case that is news - a newly recorded failure.
+//
 //	UPDATE scheduled_jobs
-//	SET last_error    = $2,
+//	SET last_error    = $1,
 //	    last_error_at = NOW(),
 //	    updated_at    = NOW()
-//	WHERE id = $1
-func (q *Queries) RecordScheduledJobFailure(ctx context.Context, arg RecordScheduledJobFailureParams) error {
-	_, err := q.db.Exec(ctx, recordScheduledJobFailure, arg.ID, arg.LastError)
-	return err
+//	WHERE id = $2
+//	  AND job_spec = $3
+//	  AND cron_expr = $4
+//	  AND timezone = $5
+//	  AND last_error IS DISTINCT FROM $1
+func (q *Queries) RecordScheduledJobFailure(ctx context.Context, arg RecordScheduledJobFailureParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordScheduledJobFailure,
+		arg.LastError,
+		arg.ID,
+		arg.JobSpec,
+		arg.CronExpr,
+		arg.Timezone,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateScheduledJob = `-- name: UpdateScheduledJob :one

@@ -147,7 +147,7 @@ SET next_run_at   = $2,
     updated_at    = NOW()
 WHERE id = $1;
 
--- name: RecordScheduledJobFailure :exec
+-- name: RecordScheduledJobFailure :execrows
 -- The startup validation sweep's statement (schedrunner.ValidateStoredSpecsOnStartup).
 -- Failure fields ONLY.
 --
@@ -160,11 +160,55 @@ WHERE id = $1;
 -- fail - so clearing on a boot-time pass would assert something the sweep did
 -- not observe. Clearing stays the exclusive job of a successful fire and of a
 -- PATCH that changed the inputs.
+--
+-- IT IS FENCED ON THE GENERATION THE SWEEP ACTUALLY VALIDATED, which is the
+-- three columns validateStoredRow reads and nothing else. The sweep takes a
+-- pool-backed *store.Queries, so its LIST and its UPDATEs are separate implicit
+-- transactions; with `WHERE id = $1` alone, replica B could list schedule S as
+-- broken, an operator could repair S through replica A, and B's UPDATE would
+-- stamp the stale failure back - leaving a repaired schedule reading FAILING
+-- until its next successful fire, up to a month on @monthly. That is the
+-- invisibility bug's exact inverse on the same surface, and a false alarm is
+-- what teaches an operator to ignore the field. Single-process placement (the
+-- sweep runs before the runner goroutine) does not cover it: README documents
+-- multi-replica as supported, which is why ListEligibleScheduledJobs is
+-- FOR UPDATE SKIP LOCKED.
+--
+-- THE FENCE IS THE CONTENT, NOT updated_at, and the choice is not a wash.
+-- updated_at is a PROXY for "the row I validated", and it is wrong in the
+-- direction that costs the most: ReconcileOnStartup runs immediately before this
+-- sweep in EVERY process and bumps updated_at on every overdue row, so on a
+-- two-replica rolling deploy - exactly the moment a retroactive validation
+-- change lands - replica A's reconcile between B's LIST and B's UPDATE would
+-- silently suppress B's record, and the sweep would be least reliable precisely
+-- when it is needed. Fencing on job_spec, cron_expr and timezone is narrower,
+-- immune to unrelated churn, and is literally the question the verdict was
+-- about. It costs one equality per row already located by primary key, and
+-- job_spec is JSONB, whose equality is semantic - so a re-serialization that did
+-- not change the spec correctly does NOT invalidate the verdict.
+--
+-- AND A RE-RECORD OF AN IDENTICAL MESSAGE IS A NO-OP. Without the last_error
+-- predicate this statement stamped last_error_at = NOW() for every broken row on
+-- every boot, with no fire attempt behind it - while migration 000022's own
+-- comment says "is it still being tried" is readable from last_error_at MOVING.
+-- The sweep's audience is long-cadence schedules that are NOT being
+-- fire-attempted, so a @monthly schedule last attempted three weeks ago rendered
+-- "last failure 2 minutes ago" after any restart, and a crash-looping server
+-- manufactured fresh timestamps for rows nothing was trying to fire.
+--
+-- :execrows, NOT :exec, for the same reason markWorkerOffline returns
+-- (rows, error): a fence that said no and a database fault must be
+-- distinguishable at the call site. The caller logs the fault, stays silent on
+-- the no-op, and logs the one case that is news - a newly recorded failure.
 UPDATE scheduled_jobs
-SET last_error    = $2,
+SET last_error    = sqlc.arg(last_error),
     last_error_at = NOW(),
     updated_at    = NOW()
-WHERE id = $1;
+WHERE id = sqlc.arg(id)
+  AND job_spec = sqlc.arg(job_spec)
+  AND cron_expr = sqlc.arg(cron_expr)
+  AND timezone = sqlc.arg(timezone)
+  AND last_error IS DISTINCT FROM sqlc.arg(last_error);
 
 -- name: ListEnabledScheduledJobs :many
 -- EVERY enabled schedule, not just the overdue ones. The startup sweep's whole
