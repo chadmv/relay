@@ -83,7 +83,8 @@ func TestCreateJobFromSpec_RefusesAnOverBoundSpecBeforeTouchingTheDatabase(t *te
 // count-axis sibling of the test above and exists for the same reason: this call
 // is the entire enforcement for any caller that does not validate first.
 // schedrunner.fireOne is such a caller for its SECOND reach at Validate, and
-// CreateJobFromSpec is retroactivity site 5 - the one whose every error collapses
+// CreateJobFromSpec is the innermost of the stored-spec re-validation sites
+// enumerated in jobspec.go's maxRetries comment - the one whose every error collapses
 // into "create job: %w", which is exactly why fireOne and handleRunScheduledJobNow
 // both validate ahead of it.
 //
