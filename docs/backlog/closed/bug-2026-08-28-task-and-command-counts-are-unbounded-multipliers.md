@@ -1,7 +1,9 @@
 ---
 title: "`tasks` and `commands` counts are unbounded per-request multipliers on an unrated-limited route"
 type: bug
-status: open
+status: closed
+closed: 2026-08-29
+resolution: fixed
 created: 2026-08-28
 priority: medium
 source: Security lens of the Phase 4 review of the retry-bounds slice (2026-08-28)
@@ -89,3 +91,49 @@ Sketch only. Two independent halves, either shippable alone:
   backoff, the 11 attempts run back to back rather than spread over time.
 - Invariant in contact: Single job-spec pipeline - a count bound belongs in `jobspec.Validate` for the
   same reason the retries bound did.
+
+## Resolution
+
+Half 1 shipped: `jobspec.Validate` now bounds `len(JobSpec.Tasks)` at `maxTasksPerJob = 5000`,
+`len(TaskSpec.Commands)` at `maxCommandsPerTask = 500`, and the job-wide command total at
+`maxCommandsPerJob = 25000`. All four ingest paths inherit them through the Single job-spec pipeline
+invariant, as the proposal predicted.
+
+**A third bound was added that the proposal did not ask for, and it is the only one that moves the
+number.** The proposal named two axes. Two per-axis caps whose product exceeds what the body limit
+already permits reduce the aggregate by *nothing* - the cost is `total_commands x (1 + retries)` and
+does not care how commands are distributed, since the retry budget is per task; and
+`5000 x 500 = 2,500,000` is ~15x more than a 1 MiB body can express anyway, so `maxBodyBytes` would
+have stayed the binding constraint. `maxCommandsPerJob` is what takes the worst case from ~150,000-
+175,000 commands to 25,000, and from ~1.6-1.9M subprocess spawns to 275,000.
+
+**Half 2 is deferred, not abandoned**, and the cap VALUES are conditional on that:
+[[bug-2026-08-29-post-v1-jobs-is-not-rate-limited]]. The generous set was chosen on the argument that
+a count cap low enough to be the DoS control is also low enough to refuse a real 2000-frame render.
+If that item is ever closed `wontfix`, these three constants should be revisited downward.
+
+**Corrections to this item, recorded because it was substantially right and wrong in specifics.**
+`sendStepMarker` is not called "unconditionally" - it sits after the empty-argv guard and a command
+whose `Start` or `Wait` fails breaks the loop, so an attacker must supply *runnable* commands. The
+~8-bytes-per-entry figure was wrong in both directions: the cheapest entry that costs anything is
+6-9 bytes depending on what is on the agent's PATH, so the pre-fix ceiling was 116,000-175,000 rather
+than the ~130,000 stated. The `DependsOn` dismissal was too quick - correct about the validator,
+silent about the writer - and became
+[[bug-2026-08-29-createjobfromspec-inserts-one-dependency-edge-per-round-trip]].
+
+**Residual, stated because this bounds the value rather than making unbounded work impossible.** One
+authenticated 1 MiB request still buys 275,000 spawns and 275,000 `task_logs` rows, nothing prunes
+that table, and `POST /v1/jobs` remains unrate-limited so every figure is per-request. The Phase 4
+security lens enumerated four further axes no count bound reaches, each now its own item:
+[[bug-2026-08-29-source-unshelves-is-one-subprocess-per-entry-and-unbounded]],
+[[bug-2026-08-29-perforce-workspace-admission-is-quadratic-under-the-mutex]],
+[[bug-2026-08-29-mcp-labels-the-last-error-excerpt-but-not-the-job-spec]], and
+[[bug-2026-08-29-a-schedule-outlives-its-owners-credentials]]. The `requires`/`labels` per-tick
+re-parse was appended to [[bug-2026-08-23-dispatch-cycle-unbounded-per-tick]] with measurements.
+
+**These bounds are NOT a mitigation for
+[[bug-2026-08-28-boot-sweep-lists-every-schedule-ahead-of-the-listener]].** They bound counts; nothing
+bounds stored spec BYTES, and a 1 MiB spec passes all three trivially.
+
+The bounds are retroactive over stored `scheduled_jobs.job_spec` rows on every path that re-validates
+one, so a schedule created before this release with more than 5000 tasks stops firing on upgrade.
