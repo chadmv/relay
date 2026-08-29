@@ -231,8 +231,10 @@ func TestFetchAllPages_OverLongCursorIsTruncatedInTheWalksError(t *testing.T) {
 	// this repo has been bitten by before: TestQuoteCursor_BoundsAnOverLongCursor
 	// proves the helper truncates, and nothing proves the helper is what the
 	// walk calls. A mutant that swaps `quoteCursor(resp.NextCursor)` for
-	// `strconv.Quote(resp.NextCursor)` at the two message sites survives the
+	// `strconv.Quote(resp.NextCursor)` at the REPEATED-CURSOR site survives the
 	// whole suite without this test - measured, not assumed (mutation GM7).
+	// That is the ONLY site this fixture reaches, because a self-loop stops
+	// there; the empty-page site needs its own fixture and has one below.
 	//
 	// The quoted-form assertions in the two tests above are NOT a substitute:
 	// they prove the cursor is QUOTED, which strconv.Quote also does. Only an
@@ -262,6 +264,55 @@ func TestFetchAllPages_OverLongCursorIsTruncatedInTheWalksError(t *testing.T) {
 	assert.Contains(t, err.Error(), "truncated from 5000 bytes")
 	assert.NotContains(t, err.Error(), huge, "the whole server-chosen cursor must not reach the message")
 	assert.Less(t, len(err.Error()), 500, "the message is bounded even though the cursor is not")
+	assert.Equal(t, 2, calls)
+}
+
+func TestFetchAllPages_OverLongCursorIsTruncatedInTheEmptyPageError(t *testing.T) {
+	// The SECOND site that interpolates a server-chosen cursor into a message,
+	// and it was the unpinned one. The test above reaches only the
+	// repeated-cursor site: its fixture is a self-loop, so that walk never gets
+	// as far as the empty-page stop. Measured, swapping quoteCursor for
+	// strconv.Quote at the EMPTY-PAGE site alone survived the whole package
+	// (mutation GM8) - the same shape as GM7, which was fixed at one of its two
+	// sites.
+	//
+	// TestFetchAllPages_EmptyPageAdvertisingMoreIsAnError's `"CUR-TWO"`
+	// assertion is not a substitute: it proves the cursor is QUOTED, and
+	// strconv.Quote quotes too. Only an over-long cursor separates the two
+	// functions, so the bound has to be pinned at each raise site separately -
+	// a helper that truncates proves nothing about a caller that does not call
+	// it.
+	//
+	// Page 1 is non-empty with a SHORT cursor that differs from page 2's, so
+	// neither the drained return nor the repeated-cursor stop is a second
+	// possible explanation for the error; the "empty page" assertion is the
+	// other half of that.
+	huge := strings.Repeat("z", 5000)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			_, _ = io.WriteString(w, `{"items":[{"id":"a"}],"next_cursor":"CUR-SHORT","total":99}`)
+		case 2:
+			fmt.Fprintf(w, `{"items":[],"next_cursor":%q,"total":99}`, huge)
+		default:
+			http.Error(w, `{"error":"past the stop"}`, http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	got, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty page")
+	assert.Contains(t, err.Error(), "truncated from 5000 bytes")
+	assert.NotContains(t, err.Error(), huge, "the whole server-chosen cursor must not reach the message")
+	assert.Less(t, len(err.Error()), 500, "the message is bounded even though the cursor is not")
+	assert.Nil(t, got)
 	assert.Equal(t, 2, calls)
 }
 
