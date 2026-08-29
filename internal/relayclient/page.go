@@ -63,6 +63,7 @@ func FetchAllPages[T any](
 		cursor string
 		first  = true
 		pages  int
+		seen   = map[string]struct{}{}
 	)
 	for {
 		pages++
@@ -99,6 +100,33 @@ func FetchAllPages[T any](
 				"paginate %s: server returned an empty page while still advertising more rows (next_cursor %s)",
 				basePath, quoteCursor(resp.NextCursor))
 		}
+		// The stop is: this walk already requested this cursor. A SET, not a
+		// comparison against the previous cursor - the two catch different
+		// things, and a two-cycle (A,B,A,B, which two replicas behind a load
+		// balancer produce) is invisible to the comparison and runs to the page
+		// cap. This is not a second stop; it is the container that implements
+		// the one stop. Previous-cursor-only is this set restricted to its last
+		// element.
+		//
+		// A repeated cursor is UNREACHABLE on a correct server: encodeCursorV2
+		// (internal/api/pagination.go) encodes the LAST KEPT row's key, and the
+		// next page's predicate is strictly past it with id as tiebreaker, so
+		// cursor keys strictly decrease along a walk. Comparison is byte-exact
+		// on the base64 string; this package never decodes it.
+		//
+		// No digest per entry. Beyond costing an exception to CLAUDE.md's rule
+		// that all hashing goes through internal/tokenhash.Hash, the residual it
+		// would close - a server sending one-item pages with multi-megabyte
+		// cursors - is the unbounded-response-bytes axis owned by
+		// bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout,
+		// and the same attacker already has an equal retention channel through
+		// Items.
+		if _, ok := seen[resp.NextCursor]; ok {
+			return nil, 0, fmt.Errorf(
+				"paginate %s: server cursor did not advance - it repeated a cursor this walk had already requested (%s) after %d pages",
+				basePath, quoteCursor(resp.NextCursor), pages)
+		}
+		seen[resp.NextCursor] = struct{}{}
 		cursor = resp.NextCursor
 	}
 }

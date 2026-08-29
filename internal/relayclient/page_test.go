@@ -3,6 +3,7 @@ package relayclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -165,4 +166,101 @@ func TestQuoteCursor_BoundsAnOverLongCursor(t *testing.T) {
 	assert.Less(t, len(quoted), 300)
 	assert.Contains(t, quoted, "truncated from 5000 bytes")
 	assert.NotContains(t, quoted, huge)
+}
+
+func TestFetchAllPages_RepeatedCursorIsAnError(t *testing.T) {
+	// The repro shape: a server answering the same cursor forever. Membership is
+	// tested BEFORE the cursor is recorded, so a self-loop fires on request 2.
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > 3 {
+			http.Error(w, `{"error":"past the stop"}`, http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"}],"next_cursor":"CUR-SAME","total":99}`, calls)
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	got, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already requested")
+	assert.Contains(t, err.Error(), `"CUR-SAME"`)
+	assert.Nil(t, got)
+	assert.Equal(t, 2, calls)
+}
+
+func TestFetchAllPages_TwoCycleOfCursorsIsAnError(t *testing.T) {
+	// THIS is the test that discriminates the seen-SET from a comparison against
+	// the immediately previous cursor. Under previous-cursor-only, A,B,A,B never
+	// fires and runs to the page cap - 10000 requests and up to 2,000,000
+	// retained rows later. Two replicas behind a load balancer with different
+	// data, or a caching proxy alternating two cached bodies, produce exactly
+	// this.
+	cursors := []string{"CUR-A", "CUR-B", "CUR-A"}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > len(cursors) {
+			http.Error(w, `{"error":"past the stop"}`, http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"}],"next_cursor":%q,"total":99}`, calls, cursors[calls-1])
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	_, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already requested")
+	assert.Contains(t, err.Error(), `"CUR-A"`)
+	assert.Equal(t, 3, calls)
+}
+
+func TestFetchAllPages_OverLongCursorIsTruncatedInTheWalksError(t *testing.T) {
+	// ADDED BEYOND THE PLAN, which recorded that Go has no walk-level
+	// truncation test and offered it as four lines if a reviewer wanted it.
+	// Taking it, because the gap it leaves is a WIRING gap of exactly the kind
+	// this repo has been bitten by before: TestQuoteCursor_BoundsAnOverLongCursor
+	// proves the helper truncates, and nothing proves the helper is what the
+	// walk calls. A mutant that swaps `quoteCursor(resp.NextCursor)` for
+	// `strconv.Quote(resp.NextCursor)` at the two message sites survives the
+	// whole suite without this test - measured, not assumed (mutation GM7).
+	//
+	// The quoted-form assertions in the two tests above are NOT a substitute:
+	// they prove the cursor is QUOTED, which strconv.Quote also does. Only an
+	// over-long cursor separates the two functions.
+	//
+	// Self-loop, so this fixture is also a second witness for deleting the
+	// repeated-cursor stop - the same relationship Python's T9 has to its M1.
+	huge := strings.Repeat("z", 5000)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > 2 {
+			http.Error(w, `{"error":"past the stop"}`, http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"}],"next_cursor":%q,"total":99}`, calls, huge)
+	}))
+	defer srv.Close()
+
+	type item struct {
+		ID string `json:"id"`
+	}
+	c := NewClient(srv.URL, "tok")
+	_, _, err := FetchAllPages[item](context.Background(), c, "/v1/things", url.Values{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already requested")
+	assert.Contains(t, err.Error(), "truncated from 5000 bytes")
+	assert.NotContains(t, err.Error(), huge, "the whole server-chosen cursor must not reach the message")
+	assert.Less(t, len(err.Error()), 500, "the message is bounded even though the cursor is not")
+	assert.Equal(t, 2, calls)
 }
