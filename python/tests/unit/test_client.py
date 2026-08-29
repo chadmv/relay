@@ -1394,6 +1394,52 @@ def test_fetch_all_truncates_an_over_long_cursor_in_its_message() -> None:
     assert huge not in message
 
 
+def test_fetch_all_truncates_an_over_long_cursor_in_the_empty_page_message() -> None:
+    """The SECOND raise site that interpolates a cursor, and it was unpinned.
+
+    _fetch_all quotes a server-chosen cursor in two messages, and the test above
+    reaches only one of them: its fixture is a self-loop, so it always arrives at
+    the repeated-cursor message. Measured, replacing _quote_cursor(cursor) with
+    cursor!r at the EMPTY-PAGE site alone survived the entire suite.
+
+    The bound belongs to the raise site, not to the helper - a helper that
+    truncates proves nothing about a caller that does not use it - so each site
+    needs its own fixture. This one reaches the empty-page stop: page 1 is
+    non-empty with a short cursor, page 2 is empty with a 5000-character one.
+
+    The two cursors differ, so the repeated-cursor stop is not a second possible
+    explanation for the raise; the match= is the other half of that.
+    """
+    huge = "q" * 5000
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1")], next_cursor="CUR-SHORT", total=99
+                ),
+            )
+        if len(calls) == 2:
+            return httpx.Response(
+                200, json=_page_response([], next_cursor=huge, total=99)
+            )
+        return httpx.Response(500, json={"error": "past the stop"})
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(calls) == 2
+    assert len(message) < 1000
+    assert "truncated from 5000 characters" in message
+    assert huge not in message
+    assert [j.id for j in excinfo.value.records] == ["j1"]
+
+
 def test_fetch_all_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop 3, which catches an ever-advancing, never-repeating cursor that
     never drains - something neither of the other two stops can see.
