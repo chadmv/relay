@@ -363,6 +363,24 @@ class Client:
                     f"{pages} pages",
                     records=out,
                 )
+            # Recorded HERE, adjacent to the membership test it feeds, and not
+            # as the last statement of the loop body 60 lines below - the
+            # acquire direction of CLAUDE.md's "take the state and arm its
+            # release in the same breath, so no early return added later can
+            # forget to".
+            #
+            # The move is behaviour-identical, and that was PROVEN rather than
+            # argued: a sentinel raise placed as the final statement inside the
+            # page-cap block below leaves the suite green, while the same
+            # sentinel as that block's FIRST statement kills four tests. The
+            # block is entered and every arm of it raises, so the old position
+            # was never reached on any path the new one is not.
+            #
+            # It matters because a `continue` added later - a transient-retry
+            # arm is the obvious candidate - would silently stop populating
+            # `seen` from the old position, and the only symptom is 10000
+            # requests where there should have been 2.
+            seen.add(cursor)
             if pages >= self._MAX_LIST_PAGES:
                 # Count DISTINCT ids, never len(out). `total` is server-supplied
                 # and so is the cursor, so a server that re-serves a page behind
@@ -458,7 +476,6 @@ class Client:
                     "drained",
                     records=out,
                 )
-            seen.add(cursor)
 
     # ─── Jobs ─────────────────────────────────────────────────────────────
 
