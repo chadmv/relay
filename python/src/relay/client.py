@@ -136,6 +136,29 @@ class Client:
     # A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
     # it - which means the loop must read it off `self`, not off a module global.
     _MAX_LOG_PAGES = 10000
+    # Bounds the NUMBER OF REQUESTS the LIST paging loop (_fetch_all) makes
+    # against a server whose next_cursor keeps advancing but which never reports
+    # the list as drained. 10000 pages at _PAGE_REQUEST_LIMIT rows is 2,000,000
+    # rows - a jobs table on a long-lived farm can plausibly reach that, and a
+    # cap that truncates a legitimate list is worse than the hang it prevents is
+    # frequent, so this is the wrong place to be clever with a smaller number.
+    # The public, caller-chosen bound on ROWS is `limit=`.
+    #
+    # Requests is all it bounds. Wall clock, response bytes and the memory of a
+    # single response are all open; those three axes are MEASURED in the
+    # _MAX_LOG_PAGES comment above - read them there. They are not restated
+    # here, because a second copy is a second thing that can go stale. Closing
+    # them belongs to
+    # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
+    #
+    # SEPARATE from _MAX_LOG_PAGES rather than a shared _MAX_PAGES: the two
+    # loops bound different populations, and that comment's measurements are
+    # log-specific and would become wrong if the constant were shared.
+    #
+    # A CLASS attribute, like _MAX_LOG_PAGES, so a test can shrink it - which
+    # means the loop must read it off `self`, not off a module global.
+    _MAX_LIST_PAGES = 10000
+
 
     def __init__(
         self,
@@ -321,6 +344,76 @@ class Client:
                     "server cursor did not advance - it repeated a cursor this "
                     f"walk had already requested ({_quote_cursor(cursor)}) after "
                     f"{pages} pages",
+                    records=out,
+                )
+            if pages >= self._MAX_LIST_PAGES:
+                # Count DISTINCT ids, never len(out). `total` is server-supplied
+                # and so is the cursor, so a server that re-serves a page behind
+                # an ADVANCING cursor drives len(out) up to total while half the
+                # list was never sent - and the repeated-cursor stop above cannot
+                # see that, because the cursor genuinely advances.
+                #
+                # M is bound only to BaseModel, so nothing structural guarantees
+                # an id: the accessor is getattr with a default. Five of the six
+                # walked models declare `id: str` (required, undefaulted), so
+                # against them a row without an id fails in model_validate long
+                # before this line. `Job` declares `id: Optional[str] = None`
+                # because it is the authoring model too, so list_jobs is the one
+                # method that can reach the "no id" arm below.
+                #
+                # The failure direction is UNDER-count, which is safe: it can
+                # only push the code into the blaming arm. It can never
+                # over-count - the set holds at most one entry per row received.
+                #
+                # Built ONCE, inside a block every path of which raises. The
+                # common path - a walk that finishes - pays nothing. Do not
+                # accumulate this per page: that would put a string per row on
+                # 100% of walks to serve a message that fires at 2,000,000 rows.
+                ids: set[str] = set()
+                for row in out:
+                    row_id = getattr(row, "id", None)
+                    if isinstance(row_id, str) and row_id:
+                        ids.add(row_id)
+                distinct = len(ids)
+                # From the CURRENT page, matching task_logs' use of page.total.
+                # A MISSING total defaults to 0 and so falls into the blaming arm
+                # below - the safe direction, and deliberately NOT the same class
+                # of default as the next_cursor one above, where a missing key
+                # reads as "drained" and silently truncates.
+                total = body.get("total", 0)
+                if distinct == 0:
+                    # Reaching here means every collected row lacked a usable id;
+                    # `out` itself is non-empty, because the empty-page stop above
+                    # rejects any page that contributed no rows. Do NOT print
+                    # "0 distinct rows collected" - that is a computed-looking
+                    # number standing in for a measurement that did not happen.
+                    raise ProtocolError(
+                        f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
+                        f"client's page cap; {len(out)} rows were collected and "
+                        f"the server reported {total}, but completeness could not "
+                        "be checked because the rows carry no id",
+                        records=out,
+                    )
+                if total > 0 and distinct >= total:
+                    # Do not blame the server here. A list of exactly
+                    # _MAX_LIST_PAGES * _PAGE_REQUEST_LIMIT rows drains correctly,
+                    # but its last page is full and so carries a cursor: we
+                    # stopped one request short of learning we were done, having
+                    # collected every row. The envelope's own total settles it.
+                    raise ProtocolError(
+                        f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
+                        f"client's page cap; the server reported {total} rows and "
+                        f"every one was collected ({distinct} distinct row ids), "
+                        "but it had not yet reported the list as drained",
+                        records=out,
+                    )
+                raise ProtocolError(
+                    f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
+                    "client's page cap; the list may be longer than "
+                    f"{self._MAX_LIST_PAGES * self._PAGE_REQUEST_LIMIT} rows, or "
+                    "the server may never report it as drained "
+                    f"({distinct} distinct row ids collected, server reported "
+                    f"{total})",
                     records=out,
                 )
             seen.add(cursor)

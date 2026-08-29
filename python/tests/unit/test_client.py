@@ -1392,3 +1392,163 @@ def test_fetch_all_truncates_an_over_long_cursor_in_its_message() -> None:
     assert len(message) < 1000
     assert "truncated from 5000 characters" in message
     assert huge not in message
+
+
+def test_fetch_all_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop 3, which catches an ever-advancing, never-repeating cursor that
+    never drains - something neither of the other two stops can see.
+
+    _MAX_LIST_PAGES is a CLASS attribute so this monkeypatch works, which means
+    the loop must read it off `self` and never off a module global.
+
+    The request-count assertion is not decoration: a test that only checks the
+    exception class cannot tell the cap from a different stop firing, and it
+    cannot see an off-by-one in the cap's own predicate.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=9999,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="page cap"):
+        client.list_jobs()
+    assert len(calls) == 3
+
+
+def test_fetch_all_page_cap_does_not_blame_the_server_when_total_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop 3's message arms. A list of exactly _MAX_LIST_PAGES * 200 rows
+    drains correctly, but its last page is FULL and so carries a cursor: the
+    walk stopped one request short of learning it was done, having collected
+    every row. The envelope's own total settles that, so the message must not
+    tell the caller their list may be longer.
+
+    The outcome assertion is not optional. The sibling's version of this test
+    was green BECAUSE OF the bug until `.records` was asserted.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        n = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{n - 1}"), _job_response(id=f"j{n}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "may be longer" not in message
+    assert "every one was collected" in message
+    assert "4 distinct row ids" in message
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j3", "j4"]
+
+
+def test_fetch_all_page_cap_completeness_is_distinct_ids_not_a_row_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completeness claim above is only sound if it counts DISTINCT ids.
+
+    `len(out)` counts rows APPENDED and `total` is server-supplied, so a server
+    that re-serves a page behind an ADVANCING cursor drives them equal while
+    half the list was never sent - and the new repeated-cursor stop cannot see
+    it, because the cursor genuinely advances. This handler does exactly that:
+    ids j1 and j2 twice, cursors CUR-1 then CUR-2, total 4. Rows 3 and 4 do not
+    exist on the wire at any point.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id="j1"), _job_response(id="j2")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "every one was collected" not in message
+    assert "may be longer" in message
+    assert "2 distinct row ids" in message
+    # Duplicates and all: the client does not know which of them the server
+    # meant, so it hands back exactly what it received.
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j1", "j2"]
+
+
+def test_fetch_all_page_cap_says_so_when_no_row_carried_an_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third message arm, and it exists for list_jobs SPECIFICALLY.
+
+    Of the six models _fetch_all walks, five declare `id: str` - required and
+    undefaulted - so a row missing `id` fails inside model_validate long before
+    the cap arm runs, and this arm is unreachable for them BY CONSTRUCTION.
+    `Job` declares `id: Optional[str] = None`, because Job is the authoring
+    model too and Job(name="nightly") must keep working. So list_jobs is the one
+    method that can reach here, which is why this fixture is a jobs walk.
+
+    The message must NOT print "0 distinct row ids": that is a computed-looking
+    number standing in for a measurement that did not happen. It says
+    completeness could not be checked, and why.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        n = len(calls) * 2
+        # Hand-written rows that deliberately carry NO "id" key. Job's only
+        # required field is `name`.
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [{"name": f"n{n - 1}"}, {"name": f"n{n}"}],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "carry no id" in message
+    assert "0 distinct" not in message
+    assert "every one was collected" not in message
+    assert [j.name for j in excinfo.value.records] == ["n1", "n2", "n3", "n4"]
