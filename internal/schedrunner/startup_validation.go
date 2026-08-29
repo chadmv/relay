@@ -53,13 +53,25 @@ import (
 // have this pass's stale verdict stamped back onto it. A non-match is an
 // expected outcome, not an error.
 //
-// IT MUST NOT BE ABLE TO STOP THE SERVER BOOTING, and it is written so that it
-// cannot. A per-row record failure is logged and the sweep continues, so one bad
-// row costs one log line rather than the remaining schedules; the only returned
-// error is the list query's, which the caller in cmd/relay-server logs as a
-// warning. Converting an operator-visible schedule problem into a server that
-// will not start would be strictly worse than the invisibility this sweep exists
-// to fix.
+// A PER-ROW FAILURE MUST NOT STOP THE SERVER BOOTING, and it cannot. A per-row
+// record failure is logged and the sweep continues, so one bad row costs one log
+// line rather than the remaining schedules; the only returned error is the list
+// query's, which the caller in cmd/relay-server logs as a warning. Converting an
+// operator-visible schedule problem into a server that will not start would be
+// strictly worse than the invisibility this sweep exists to fix.
+//
+// THAT IS NARROWER THAN "THIS SWEEP CANNOT STOP THE BOOT", which is what this
+// comment used to claim, and the difference is the unbounded read in FRONT of
+// the loop rather than anything inside it. ListEnabledScheduledJobs has no
+// LIMIT, this function consumes it into one slice synchronously, and the caller
+// runs it before srv.ListenAndServe() - so a large enough scheduled_jobs table
+// delays or exhausts the boot, and the HTTP API an operator would use to delete
+// the offending rows is exactly what never comes up. There is no per-user
+// schedule quota and no rate limit on POST /v1/scheduled-jobs, so growing it is
+// an ordinary authenticated user's privilege. Paging this sweep and the quota
+// policy are the scope of
+// docs/backlog/bug-2026-08-28-boot-sweep-lists-every-schedule-ahead-of-the-listener.md,
+// not of this comment; what is fixed here is the claim.
 //
 // Cost: one pass over N enabled schedules at boot, with no I/O per row beyond
 // the read that lists them and one UPDATE per BROKEN row.
