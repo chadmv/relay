@@ -193,8 +193,9 @@ func TestValidate_TheJobWideCommandTotalIsBounded(t *testing.T) {
 		//
 		// Checking inside the loop reports the total. Completing the pass and
 		// checking afterwards reports the duplicate. This pins the "fail as soon as
-		// it is exceeded" decision, which is what stops a 116,000-command spec being
-		// walked in full before it is refused - and the message is the only
+		// it is exceeded" decision, which is what stops a body-sized spec of
+		// 150,000-plus commands being walked in full before it is refused - and the
+		// message is the only
 		// observable trace of "as soon as".
 		spec := totalSpec(70, 400)
 		spec.Tasks[65].Name = spec.Tasks[0].Name

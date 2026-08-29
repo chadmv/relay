@@ -35,8 +35,11 @@ import (
 // that only looks at Tasks[0].
 //
 // THE PANIC IS THE MUTANT'S FAILURE MODE, NOT THIS TEST'S MECHANISM - the
-// property is established by the three assertions below, which is why the
-// recover exists rather than being relied on. An unrecovered panic takes down
+// property is established by the require.EqualError below, which is why the
+// recover exists rather than being relied on. (Not by the three assertions as a
+// set: the only return carrying that message returns store.Job{} and a nil task
+// slice, so the other two are implied whenever the first passes.) An unrecovered
+// panic takes down
 // the whole jobcreate_test BINARY, so under the mutant every OTHER test in this
 // package would silently not run. The package has one test file today, so that
 // cost is currently zero and the recover is there so it stays zero as the
@@ -95,8 +98,15 @@ func TestCreateJobFromSpec_RefusesAnOverBoundSpecBeforeTouchingTheDatabase(t *te
 // the Validate call and the very next statements reach q.CreateJob on a nil
 // receiver, which panics - so the mutant fails LOUDLY here instead of passing
 // silently. The recover contains it so the mutant does not take down every other
-// test in this package's binary; the property is established by the three
-// assertions, not by the panic.
+// test in this package's binary.
+//
+// THE PROPERTY IS ESTABLISHED BY THE require.EqualError ALONE, not by the panic
+// and not by the two assertions after it. The only return that carries this
+// message is jobspec.Validate's, at the top of CreateJobFromSpec, and it returns
+// store.Job{} with a nil task slice - so `created` being empty and job.ID being
+// invalid are IMPLIED the moment the message matches, and neither can fail
+// independently. They stay because they mirror the sibling test above and cost
+// nothing, not because they carry the argument.
 func TestCreateJobFromSpec_RefusesAnOverCountSpecBeforeTouchingTheDatabase(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {

@@ -78,8 +78,9 @@ var (
 // contention is a reservation, not a retry count.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE, AND THE SAME GOES FOR EVERY BOUND BELOW.
-// Validate runs on STORED scheduled_jobs.spec rows on five paths, and the older
-// version of this paragraph named two of them and got one of those wrong:
+// Validate runs on STORED scheduled_jobs.job_spec rows on the paths enumerated
+// here, and the older version of this paragraph named two of them and got one of
+// those wrong:
 //   - schedrunner.fireOne calls Validate DIRECTLY, hoisted above the overlap
 //     check, and then reaches it again inside jobcreate.CreateJobFromSpec. (It
 //     used to reach it only through CreateJobFromSpec; that changed and this
@@ -99,7 +100,7 @@ var (
 // An env-tunable bound would therefore make retroactive schedule invalidation
 // environment-dependent: the same stored spec fires on one replica's
 // configuration and silently stops on another's, and lowering the knob would
-// disable schedules with no signal anywhere. Two of the five sites make that
+// disable schedules with no signal anywhere. Two of the sites above make that
 // worse in ways that postdate the original argument. The startup sweep WRITES the
 // returned message into last_error, so the recorded failure text would become a
 // function of which replica happened to boot, and the number in a stored,
@@ -117,8 +118,34 @@ var (
 // of this sentence said "four ingest paths"; there are api.handleCreateJob,
 // api.handleCreateScheduledJob, api.handlePatchScheduledJob when the request body
 // carries a job_spec, mcp.submit, and mcp.schedules_write on both create and
-// update. The CLI, the SPA and the Python SDK post JSON and hold no parallel
-// validation, so they inherit through the API.)
+// update. The CLI is not one of them: doSubmit unmarshals the file into an opaque
+// map[string]any and POSTs it, so it inherits every rule through the API.)
+//
+// TWO CLIENTS DO HOLD A PARALLEL VALIDATOR, and an earlier version of the sentence
+// above claimed neither did. Neither is an ingest path - both still POST to the
+// API, which stays the validator of record - but a rule ADDED here, and a message
+// REWORDED here, has to be checked against them:
+//
+//   - python/src/relay/models.py. JobSpec.validate_spec, whose own docstring says
+//     "Mirrors server-side ValidateJobSpec", plus the Task field validators
+//     _name_required and _commands_argv_nonempty, reproduce five of this file's
+//     message texts verbatim: "at least one task is required", "duplicate task
+//     name: {name}", "task {name}: commands is required", "task name is required",
+//     "commands[{i}]: argv must not be empty". Reword one of those here and a
+//     Python caller gets two different texts for one condition depending on
+//     whether the SDK or the server refused. That drift is already live on the
+//     dependency rules, which is what the hazard looks like in practice: the SDK
+//     emits "task {name}: unknown depends_on: {dep}" where this file emits
+//     "unknown depends_on: %s" with no task prefix, and the SDK has a "cannot
+//     depend on itself" message that has no counterpart here at all (a self-edge
+//     reaches detectCycle instead). The count bounds are deliberately NOT mirrored
+//     there; adding them would put a number from this file into a separately
+//     released package.
+//   - web/src/jobs/specTemplate.ts, validateSpecText - the /jobs/new editor's
+//     pre-check. It is deliberately shallow and worded independently, so it cannot
+//     drift on a message: it duplicates only the LOWER end of the task-count range
+//     ("Spec must have a non-empty \"tasks\" array."). Its own comment records why
+//     the upper bounds must not be copied into it.
 const maxRetries = 10
 
 // maxTimeoutSeconds bounds TaskSpec.TimeoutSeconds. Seven days: comfortably
@@ -168,7 +195,7 @@ const maxTimeoutSeconds = 604800
 //     nothing about repetition.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
-// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
 // to every bound in this file.
 const maxTasksPerJob = 5000
 
@@ -192,7 +219,7 @@ const maxTasksPerJob = 5000
 // workspace sharing that motivates `commands` in the first place.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
-// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
 // to every bound in this file.
 const maxCommandsPerTask = 500
 
@@ -207,19 +234,26 @@ const maxCommandsPerTask = 500
 // total_commands x (1 + retries), and it does not care how the commands are
 // distributed across tasks, because the retry budget is per task and every task's
 // commands re-run on every attempt. maxTasksPerJob x maxCommandsPerTask is
-// 2,500,000, roughly 21x more than a 1 MiB body can express with the cheapest
-// RUNNABLE entry, so with only those two in place the binding constraint on the
-// total would remain maxBodyBytes - exactly as it was before any of these three
-// existed.
+// 2,500,000, roughly 15x more than a 1 MiB body can express with the cheapest
+// RUNNABLE entry (see the range below), so with only those two in place the
+// binding constraint on the total would remain maxBodyBytes - exactly as it was
+// before any of these three existed.
 //
 // WHY THE ENTRY MUST BE RUNNABLE, since the arithmetic above turns on it:
 // internal/agent/runner.go emits its step marker once per command EXECUTED, at
 // the top of the loop body and AFTER the empty-argv guard, and a command whose
 // Start or Wait fails breaks the loop. So a body full of entries that cannot
-// execute costs one failed exec and one marker, not one per entry. The cheapest
-// entry that costs anything is `["true"],` at 9 bytes, which puts about 116,000
-// of them in 1 MiB. This bound takes that to 25,000 and takes 1.28 million spawns
-// to 275,000.
+// execute costs one failed exec and one marker, not one per entry.
+//
+// THE CHEAPEST RUNNABLE ENTRY IS A RANGE, NOT A NUMBER, AND THE RANGE IS NOT A
+// PROPERTY OF RELAY: it depends on what is on the agent's PATH and exits 0.
+// `["ls"],` is 7 bytes and puts about 149,800 entries in a 1 MiB body; a
+// one-character command that exits 0 is 6 bytes and puts about 174,800. An
+// earlier version of this paragraph offered `["true"],` at 9 bytes and 116,000 as
+// though it were the floor. It is not, and the error ran in the direction that
+// UNDERSTATES the case for the bound. So: roughly 150,000 to 175,000 commands per
+// body before this bound and 25,000 after, a 6x to 7x reduction, and 1.6 to 1.9
+// million spawns across a full maxRetries budget taken to 275,000.
 //
 // THE PER-AXIS CAPS ARE NOT REDUNDANT ONCE THIS EXISTS. This one implies
 // tasks <= 25000, since normalizeTaskCommands refuses a task with zero commands -
@@ -246,7 +280,7 @@ const maxCommandsPerTask = 500
 // workaround inside the product.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
-// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
 // to every bound in this file.
 const maxCommandsPerJob = 25000
 
@@ -332,8 +366,8 @@ func Validate(spec *JobSpec) error {
 		}
 		totalCommands += len(ts.Commands)
 		// CHECKED INSIDE THE LOOP, not after it, so a spec far over the budget is
-		// refused partway through traversal rather than after a full pass over
-		// 116,000 entries.
+		// refused partway through traversal rather than after a full pass over the
+		// 150,000-plus entries a 1 MiB body can hold.
 		//
 		// JOB-LEVEL MESSAGE, NO TASK PREFIX. The budget is a property of the job,
 		// and naming whichever task the accumulator happened to cross on would read
