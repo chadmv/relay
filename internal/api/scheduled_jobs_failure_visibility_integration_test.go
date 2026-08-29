@@ -23,7 +23,7 @@ import (
 // headline regression test for
 // docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md.
 //
-// ################ THIS TEST DOES NOT RUN IN CI. ################
+// ############ THE TESTS IN THIS FILE DO NOT RUN IN CI. ############
 //
 // .github/workflows/go-ci.yml runs `go test -race ./...` with NO TAGS and
 // `make test-cli-integration` (which names ./internal/cli/... only). This file
@@ -55,9 +55,23 @@ import (
 //     covers column -> handler -> JSON -> client in CI. (Slice C. If that slice
 //     is dropped, this bullet is false and must go with it.)
 //
-// WHAT NOTHING IN CI COVERS, and this test is the only witness: that the
-// SCHEDRUNNER writes the record at all. That half needs a tick, and a tick needs
-// Postgres.
+// WHAT NOTHING IN CI COVERS: that the SCHEDRUNNER writes the record at all.
+// That half needs a tick, and a tick needs Postgres.
+//
+// THIS FILE IS NO LONGER THE ONLY WITNESS TO THAT, and the correction is
+// recorded rather than quietly applied, because the claim was true when written
+// and went stale inside the same PR. The Phase 4 fix round added three more, all
+// in internal/schedrunner's own integration lane, which CI does not run either:
+// transient_preserves_failure_integration_test.go pins that TickOnce ROUTES on
+// the classification rather than merely computing it, and
+// startup_validation_fence_integration_test.go covers the sweep's fence and its
+// re-stamp idempotency. So the uncovered SURFACE is unchanged and the number of
+// witnesses to it is not.
+//
+// A uniqueness claim is a claim about the complement: it cannot be checked by
+// re-reading the file that makes it, only by searching for the shape elsewhere.
+// If you add another witness, correct this paragraph or delete the claim - do
+// not leave a sentence that says "only" next to four.
 //
 // WHY internal/api RATHER THAN internal/schedrunner. The criterion requires
 // asserting the error is visible VIA THE API, which crosses two packages.

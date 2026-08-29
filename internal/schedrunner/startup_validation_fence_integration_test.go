@@ -26,7 +26,30 @@ import (
 // the precondition the whole test depends on: if the repair landed before the
 // LIST, the sweep would see a healthy row, write nothing for an ordinary reason,
 // and the test would pass without exercising the fence at all.
-func waitForBlockedScheduledJobsUpdate(t *testing.T, pool *pgxpool.Pool, within time.Duration) {
+// waitForBlockedScheduledJobsUpdate blocks until some backend is waiting on a
+// lock held by holderPID while running an UPDATE against scheduled_jobs.
+//
+// IT IS PREDICATED ON THE HOLDER'S PID, AND THAT PREDICATE IS THE WHOLE POINT.
+// An earlier version asked only whether ANY backend was blocked on an
+// `UPDATE scheduled_jobs`, and inferred from that that the sweep's LIST had
+// already run. That inference was true, but only because newRunnerHarness gives
+// every test its own container, so the only possible blocked update was this
+// one - a property of the harness that this file never asserted and does not
+// own. RELAY_TEST_DATABASE_URL already makes the CLI lane share a database
+// across tests; the moment anything does that here, a sibling test's blocked
+// update would satisfy the wait, this function would return before the sweep
+// had listed anything, the repair would commit first, and the sweep would then
+// read an already-healthy row and correctly write nothing.
+//
+// The test would go GREEN while exercising none of the fence. That is the
+// fail-open direction, and it is invisible: nothing about a passing run would
+// look different. pg_blocking_pids ties the blocked backend to THIS test's own
+// lock holder, so the wait cannot be satisfied by anybody else's contention.
+//
+// The mutation kill recorded for the fence is evidence about today's harness,
+// not about this helper's robustness - which is exactly why the predicate is
+// here rather than a comment saying "each test gets its own container".
+func waitForBlockedScheduledJobsUpdate(t *testing.T, pool *pgxpool.Pool, holderPID int32, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
@@ -34,14 +57,16 @@ func waitForBlockedScheduledJobsUpdate(t *testing.T, pool *pgxpool.Pool, within 
 		require.NoError(t, pool.QueryRow(context.Background(),
 			`SELECT count(*) FROM pg_stat_activity
 			  WHERE wait_event_type = 'Lock'
-			    AND query ILIKE '%UPDATE scheduled_jobs%'`).Scan(&n))
+			    AND query ILIKE '%UPDATE scheduled_jobs%'
+			    AND $1 = ANY(pg_blocking_pids(pid))`, holderPID).Scan(&n))
 		if n > 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("the sweep's UPDATE never blocked on the held row lock, so this test could not establish " +
-		"that its LIST ran before the repair; the race it exists to demonstrate was not reproduced")
+	t.Fatalf("no backend blocked on the row lock held by pid %d while running an UPDATE against "+
+		"scheduled_jobs, so this test could not establish that the sweep's LIST ran before the "+
+		"repair; the race it exists to demonstrate was not reproduced", holderPID)
 }
 
 // TestValidateStoredSpecsOnStartup_DoesNotStampAStaleFailureOverAConcurrentRepair
@@ -95,10 +120,16 @@ func TestValidateStoredSpecsOnStartup_DoesNotStampAStaleFailureOverAConcurrentRe
 	require.NoError(t, repair.QueryRow(ctx,
 		`SELECT id FROM scheduled_jobs WHERE id = $1 FOR UPDATE`, broken.ID).Scan(&lockedID))
 
+	// The holder's backend pid, read on the SAME connection the transaction owns,
+	// so the wait below can name whose lock it is waiting on rather than trusting
+	// that no other test is contending for scheduled_jobs at the same moment.
+	var holderPID int32
+	require.NoError(t, repair.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPID))
+
 	done := make(chan error, 1)
 	go func() { done <- schedrunner.ValidateStoredSpecsOnStartup(ctx, h.q) }()
 
-	waitForBlockedScheduledJobsUpdate(t, h.pool, 30*time.Second)
+	waitForBlockedScheduledJobsUpdate(t, h.pool, holderPID, 30*time.Second)
 
 	// The repair itself: exactly what a PATCH through replica A does - a new,
 	// validating job_spec, and the failure record cleared with it.
