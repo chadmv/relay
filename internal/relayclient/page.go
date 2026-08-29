@@ -22,9 +22,26 @@ const PageRequestLimit = 200
 // message may quote. The cursor is chosen by the SERVER and its length is
 // unbounded, so a message that interpolates it whole is unbounded too.
 //
-// 200 bytes. A real relay cursor is base64url of a ~96-byte {t,i,s} JSON
-// (encodeCursorV2, internal/api/pagination.go), so ~128 bytes: every legitimate
-// cursor is quoted in full and only a cursor no correct server emits is cut.
+// 200 bytes - and that does NOT cover every legitimate cursor. The claim that
+// it did was measured false against the real encoder. encodeCursorV2
+// (internal/api/pagination.go) emits base64url of a {t,i,s,v} JSON, so:
+//
+//   - a TIME-sort cursor is ~128 bytes at microsecond precision, and every
+//     one of those is quoted whole;
+//   - a TEXT-sort cursor carries the row's sort value as well, so
+//     `relay jobs list --sort name` crosses 200 at a job name of 89
+//     characters: measured, 85 gives 196, 88 gives 200 (the last that fits),
+//     89 gives 202, 100 gives 216. jobs.name is TEXT NOT NULL with no length
+//     constraint (internal/store/migrations/000001_initial.up.sql) and
+//     jobspec.Validate rejects only the empty name, so those are cursors a
+//     CORRECT server emits and this code truncates.
+//
+// The number stays at 200 anyway. "Every legitimate cursor fits" is not
+// achievable at ANY number against an unbounded sort value, and the cost of
+// cutting one is cosmetic: quoteCursor reports the TRUE length beside the
+// prefix, so a 216-byte cursor stays distinguishable from a 5 MB one. What the
+// bound buys is that the message length is the CLIENT's to choose, which was
+// always the point.
 const maxCursorInMessage = 200
 
 // quoteCursor renders a server-supplied cursor for an error message, bounded.
@@ -51,6 +68,17 @@ func quoteCursor(cursor string) string {
 // deadline, so wall clock, response bytes and the memory of one response are
 // all open; they belong to
 // bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
+//
+// Client EGRESS is open too, and it is the axis the CURSOR uniquely creates:
+// the server picks the cursor and this loop echoes it straight back in the
+// request URI, uncompressed, once per page, up to maxListPages times.
+// Measured, a 1 MiB cursor outside the base64url alphabet produces a
+// 3,145,754-byte URI - percent-encoding triples it - while the server can gzip
+// the same bytes to about 1 KB inbound. A cursor that IS base64url does not
+// expand at all, and a real relay-server answers 431, so the practical reach
+// is a hostile endpoint the operator chose to point at. Named here because
+// enumerating the open axes is what this comment is for, and because the
+// tracked item above names response bytes and timeouts, not this.
 //
 // A var rather than a const so a test can shrink it, matching internal/cli's
 // maxLogPages, which is a var for exactly this reason and says so. It is

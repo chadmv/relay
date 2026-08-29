@@ -99,10 +99,23 @@ func TestFetchAllPages_ForwardsParams(t *testing.T) {
 }
 
 // The fixtures below write JSON BYTES. They deliberately do NOT marshal a
-// PageEnvelope[T] the way TestFetchAllPages_ForwardsParams above does: a
-// fixture encoded through the production envelope type agrees with the decoder
-// by construction, on the envelope keys AND on the item fields, and can detect
-// drift in neither direction.
+// PageEnvelope[T]: a fixture encoded through the production envelope type
+// agrees with the decoder by construction, on the envelope keys AND on the
+// item fields, and can detect drift in neither direction.
+//
+// THREE pre-existing tests above do it, in FOUR Encode statements - not the
+// one this comment used to name. Both numbers, because neither alone is
+// honest: TestFetchAllPages_WalksTwoPages (two statements),
+// TestFetchAllPages_RespectsUserLimit and TestFetchAllPages_ForwardsParams.
+// Counted by searching for the TYPE in any position rather than for an encode
+// call, which is the instrument the claim needs; naming a single test was a
+// uniqueness claim, and on this project correcting one of those has twice
+// regenerated a fresh wrong count.
+//
+// They are tautological on the ENVELOPE axis only. `item` is a locally
+// declared struct in each of the three, so they are honest about the item
+// fields, and they are not on the list of vacuous fixtures CLAUDE.md tracks
+// for internal/cli.
 //
 // Each fixture also has a TERMINATOR - a 500 past the request count the correct
 // implementation makes - so a mutant that drops the stop under test fails with
