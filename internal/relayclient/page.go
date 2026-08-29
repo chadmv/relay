@@ -18,6 +18,29 @@ type PageEnvelope[T any] struct {
 // 200 matches the server's max so we minimize round-trips.
 const PageRequestLimit = 200
 
+// maxCursorInMessage bounds how much of a server-supplied cursor an error
+// message may quote. The cursor is chosen by the SERVER and its length is
+// unbounded, so a message that interpolates it whole is unbounded too.
+//
+// 200 bytes. A real relay cursor is base64url of a ~96-byte {t,i,s} JSON
+// (encodeCursorV2, internal/api/pagination.go), so ~128 bytes: every legitimate
+// cursor is quoted in full and only a cursor no correct server emits is cut.
+const maxCursorInMessage = 200
+
+// quoteCursor renders a server-supplied cursor for an error message, bounded.
+// The prefix is cut at a BYTE boundary and may split a UTF-8 rune;
+// strconv.Quote escapes the resulting invalid bytes rather than emitting them,
+// which is the safe direction for a value the client does not control. The true
+// length is reported, so a 5 MB cursor and a 201-byte one do not produce the
+// same message.
+func quoteCursor(cursor string) string {
+	if len(cursor) <= maxCursorInMessage {
+		return strconv.Quote(cursor)
+	}
+	return fmt.Sprintf("%s (truncated from %d bytes)",
+		strconv.Quote(cursor[:maxCursorInMessage]), len(cursor))
+}
+
 // FetchAllPages walks ?cursor= until next_cursor is empty, or until userLimit
 // rows have been collected (when userLimit > 0). Returns the merged slice and
 // the total reported by the first page response. Caller-supplied params are
@@ -39,8 +62,10 @@ func FetchAllPages[T any](
 		total  int64
 		cursor string
 		first  = true
+		pages  int
 	)
 	for {
+		pages++
 		if cursor != "" {
 			params.Set("cursor", cursor)
 		} else {
@@ -64,6 +89,15 @@ func FetchAllPages[T any](
 		}
 		if resp.NextCursor == "" {
 			return out, total, nil
+		}
+		// This arm MUST stay above the empty-page stop below. buildPage
+		// (internal/api/pagination.go) returns ([]Out{}, "") for zero rows, so a
+		// list with no matching rows is an empty page that reports itself
+		// drained. Inverted, `relay list` fails against an empty jobs table.
+		if len(resp.Items) == 0 {
+			return nil, 0, fmt.Errorf(
+				"paginate %s: server returned an empty page while still advertising more rows (next_cursor %s)",
+				basePath, quoteCursor(resp.NextCursor))
 		}
 		cursor = resp.NextCursor
 	}
