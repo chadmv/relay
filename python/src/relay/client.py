@@ -449,6 +449,9 @@ class Client:
         ``limit`` caps the TOTAL number of jobs returned (None = all).
         ``sort`` is forwarded to ?sort= and validated server-side; an
         unknown key raises :class:`ValidationError`.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
         """
         return self._fetch_all(
             "/v1/jobs", Job,
@@ -791,6 +794,9 @@ class Client:
 
         ``limit`` caps the TOTAL rows returned (None = all). ``sort`` is
         validated server-side; an unknown key raises :class:`ValidationError`.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
         """
         return self._fetch_all("/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit)
 
@@ -868,7 +874,11 @@ class Client:
     def list_workers(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[Worker]:
-        """List workers, auto-paginating across all pages. ``limit`` caps total rows."""
+        """List workers, auto-paginating across all pages. ``limit`` caps total rows.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
+        """
         return self._fetch_all("/v1/workers", Worker, sort=sort, limit=limit)
 
     def list_workers_page(
@@ -883,7 +893,11 @@ class Client:
     def list_users(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[User]:
-        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError."""
+        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
+        """
         return self._fetch_all("/v1/users", User, sort=sort, limit=limit)
 
     def list_users_page(
@@ -898,7 +912,11 @@ class Client:
     def list_reservations(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[Reservation]:
-        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError."""
+        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
+        """
         return self._fetch_all("/v1/reservations", Reservation, sort=sort, limit=limit)
 
     def list_reservations_page(
@@ -915,7 +933,11 @@ class Client:
     def list_agent_enrollments(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[AgentEnrollment]:
-        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError."""
+        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError.
+
+        A walk that cannot be completed raises :class:`ProtocolError` with the
+        rows collected so far on ``.records``.
+        """
         return self._fetch_all("/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit)
 
     def list_agent_enrollments_page(
