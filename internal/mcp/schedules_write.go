@@ -67,12 +67,25 @@ func (s *Server) callCreateSchedule(ctx context.Context, args createScheduleArgs
 
 // ---- update ----
 
+// job_spec IS THE NON-DESTRUCTIVE REMEDY AND IT WAS THE MISSING ONE. Without
+// it this tool offered cron_expr, timezone, overlap_policy and enabled, so a
+// model told by relay_get_schedule that a schedule's stored spec no longer
+// validates could reach `enabled: false` and relay_delete_schedule and nothing
+// else - the destructive rungs only, for a signal whose text the schedule's
+// owner wrote. relay_create_schedule has taken a full spec since it was
+// written; this closes the asymmetry.
+//
+// A POINTER so that omitting it leaves the stored spec alone: a zero JobSpec
+// is a legal Go value and would otherwise be indistinguishable from "not
+// supplied", which is the same absent-versus-empty collapse last_error exists
+// to report.
 type updateScheduleArgs struct {
-	ScheduleID    string  `json:"schedule_id"    jsonschema:"The scheduled job ID to update (required)."`
-	CronExpr      *string `json:"cron_expr"      jsonschema:"New cron expression (omit to leave unchanged)."`
-	Timezone      *string `json:"timezone"       jsonschema:"New IANA timezone (omit to leave unchanged)."`
-	OverlapPolicy *string `json:"overlap_policy" jsonschema:"New overlap policy (omit to leave unchanged)."`
-	Enabled       *bool   `json:"enabled"        jsonschema:"Enable or disable the schedule (omit to leave unchanged)."`
+	ScheduleID    string           `json:"schedule_id"    jsonschema:"The scheduled job ID to update (required)."`
+	CronExpr      *string          `json:"cron_expr"      jsonschema:"New cron expression (omit to leave unchanged)."`
+	Timezone      *string          `json:"timezone"       jsonschema:"New IANA timezone (omit to leave unchanged)."`
+	OverlapPolicy *string          `json:"overlap_policy" jsonschema:"New overlap policy (omit to leave unchanged)."`
+	Enabled       *bool            `json:"enabled"        jsonschema:"Enable or disable the schedule (omit to leave unchanged)."`
+	JobSpec       *jobspec.JobSpec `json:"job_spec"       jsonschema:"Replacement job template, sent whole (omit to leave unchanged). Use this to repair a schedule whose stored spec no longer validates."`
 }
 
 func (s *Server) callUpdateSchedule(ctx context.Context, args updateScheduleArgs) (map[string]any, *ToolError) {
@@ -92,6 +105,15 @@ func (s *Server) callUpdateSchedule(ctx context.Context, args updateScheduleArgs
 	}
 	if args.Enabled != nil {
 		body["enabled"] = *args.Enabled
+	}
+	if args.JobSpec != nil {
+		// THE SINGLE JOB-SPEC PIPELINE: callCreateSchedule validates here too, so
+		// an obviously bad spec fails without a round trip. The server remains the
+		// validator of record and its 400 renders verbatim.
+		if err := jobspec.Validate(args.JobSpec); err != nil {
+			return nil, &ToolError{Code: "validation", Message: err.Error(), Hint: "fix the job spec and try again"}
+		}
+		body["job_spec"] = args.JobSpec
 	}
 
 	if len(body) == 0 {

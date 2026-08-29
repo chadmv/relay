@@ -1,0 +1,31 @@
+-- last_error records the reason the SCHEDULER last failed to produce a job from
+-- this schedule, and last_error_at when it did. Both are NULL for a schedule
+-- that has never failed, and both are cleared by a successful fire.
+--
+-- WHY THIS EXISTS. schedrunner re-validates the stored job_spec on EVERY fire,
+-- because fireOne reaches jobspec.Validate. A validation rule added by a later
+-- release is therefore retroactive over stored rows: a schedule accepted years
+-- ago stops producing jobs the instant the new bound deploys, while next_run_at
+-- keeps advancing and nothing anywhere says why. Before these columns the only
+-- record was one line in the server log.
+--
+-- NULLABLE, NO DEFAULT, NO CHECK, NO BACKFILL - AND THAT IS A REQUIREMENT, NOT A
+-- STYLE CHOICE. Migrations are embedded and run on startup, so a migration that
+-- can fail is a deployment that cannot start. These two statements have no
+-- existing row they can reject and no expression they can fail to evaluate. In
+-- Postgres a nullable ADD COLUMN with no default is a catalog-only change: a
+-- brief ACCESS EXCLUSIVE lock, no table rewrite, whatever the table's size.
+--
+-- NULL IS LOAD-BEARING. It means "no recorded failure", and the API response
+-- relies on being able to distinguish it from an empty string: scheduledJobResponse
+-- carries `omitempty` on both fields, so absent means healthy. The write site
+-- (internal/schedrunner/failure.go, sanitizeFailureText) never stores an empty
+-- string for exactly this reason.
+--
+-- NO CONSECUTIVE-FAILURE COUNT, deliberately. "How long has this been dead" is
+-- readable from the interval last_run_at -> now given clear-on-success semantics,
+-- and "is it still being tried" is readable from last_error_at moving. A counter
+-- would add a column a restart or a manual edit can desynchronize from reality,
+-- and a semantic question ("does a skip reset it?") with no good answer.
+ALTER TABLE scheduled_jobs ADD COLUMN last_error TEXT NULL;
+ALTER TABLE scheduled_jobs ADD COLUMN last_error_at TIMESTAMPTZ NULL;

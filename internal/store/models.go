@@ -76,6 +76,8 @@ type ScheduledJob struct {
 	LastJobID     pgtype.UUID        `json:"last_job_id"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	LastError     *string            `json:"last_error"`
+	LastErrorAt   pgtype.Timestamptz `json:"last_error_at"`
 }
 
 type Task struct {

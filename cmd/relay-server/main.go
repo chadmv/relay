@@ -283,6 +283,45 @@ func main() {
 	if err := schedrunner.ReconcileOnStartup(ctx, q); err != nil {
 		log.Printf("warn: schedrunner reconcile: %v", err)
 	}
+
+	// Re-validate every enabled schedule's stored spec once, so a schedule that a
+	// retroactive validation change killed is visible within seconds of this
+	// deploy rather than at its next scheduled fire - which for @monthly is up to
+	// a month away. Record-only: it never clears and it never moves next_run_at.
+	//
+	// PLACEMENT IS PART OF THE CONTRACT, in two directions.
+	//
+	// BEFORE the runner goroutine, because the sweep and TickOnce's fire path
+	// write the same two columns on the same rows. With the runner not yet
+	// started, nothing in THIS PROCESS can interleave between the sweep's LIST
+	// and its UPDATEs, so a row whose fire succeeds seconds later cannot have its
+	// fresh clear stamped back over with a failure the sweep read before that
+	// fire happened.
+	//
+	// THAT ARGUMENT COVERS ONE PROCESS AND ONLY ONE. It is not the reason the
+	// sweep is safe, and an earlier version of this comment claimed it was ("no
+	// lock is needed for a pass that runs while nothing else is running"), which
+	// is false the moment a second replica exists - and README documents
+	// multi-replica as supported, which is why ListEligibleScheduledJobs is
+	// FOR UPDATE SKIP LOCKED. What actually makes the sweep safe across replicas
+	// is that RecordScheduledJobFailure is FENCED on the job_spec, cron_expr and
+	// timezone the sweep validated, so a row repaired through another replica
+	// between the LIST and the UPDATE cannot have the stale verdict stamped back
+	// onto it. See that statement's header. Placement is a cost and ordering
+	// choice; the fence is the correctness argument.
+	//
+	// AFTER ReconcileOnStartup only for cost, not for correctness: the two
+	// commute (the sweep never reads or writes next_run_at, reconcile never reads
+	// or writes the failure columns), and reconcile is what the runner needs to
+	// be correct, so the purely diagnostic pass does not delay it.
+	//
+	// A FAILURE HERE MUST NOT STOP THE BOOT. Per-row record failures are logged
+	// inside and the sweep continues; the list query's error is logged here as a
+	// warning and the server carries on. Turning a schedule problem into a server
+	// that will not start would be worse than the invisibility this closes.
+	if err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q); err != nil {
+		log.Printf("warn: schedrunner startup validation: %v", err)
+	}
 	go schedrunner.NewRunner(pool, q).Run(ctx)
 
 	// Mark connected-but-silent workers stale based on telemetry age.

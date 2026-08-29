@@ -56,7 +56,7 @@ stays clean, but that means a bare `go build ./cmd/relay-server` run afterwards
 - outside `make test-e2e`, for instance while iterating on a Go change - embeds
 that 7-line "has not been built" page instead of the SPA. The suite then fails
 with dozens of generic `expect(locator).toBeVisible()` / "element(s) not found"
-errors - `layout.spec.ts` alone contributes 39 (13 surfaces x 3 widths) -
+errors - `layout.spec.ts` alone contributes 42 (14 surfaces x 3 widths) -
 whose real cause (no `#root` on the page at all) is nowhere in any individual
 failure message. Reproducible every time; if a run comes back with a wall of
 unrelated-looking timeouts, rerun `make web-build` first.
@@ -80,7 +80,7 @@ SSE task-log tailing is not exercised. `surfaces.ts` records the limit per
 surface in a `population` field - do not read an empty-state pass as a
 populated-state pass. Closing this is slice 2.
 
-**Not in `surfaces.ts` at all - 13 entries.** `/workers/:id` (no worker
+**Not in `surfaces.ts` at all - five pages, out of the 14 entries it does carry.** `/workers/:id` (no worker
 row exists to link to, per the limit above; this is a stronger gap than
 "empty-state only" - the page is never visited), `/jobs/:id/tasks/:taskId`,
 `/register`, and the `password` and `sessions` profile tabs. `/workers/:id` is

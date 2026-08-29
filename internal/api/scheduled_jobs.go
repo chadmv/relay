@@ -29,8 +29,28 @@ type scheduledJobResponse struct {
 	NextRunAt     time.Time       `json:"next_run_at"`
 	LastRunAt     *time.Time      `json:"last_run_at,omitempty"`
 	LastJobID     string          `json:"last_job_id,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	// The last time the SCHEDULER failed to produce a job from this schedule,
+	// and why. ABSENT MEANS HEALTHY - not "" and not null - which is what makes
+	// `omitempty` on a string safe here: the write site
+	// (internal/schedrunner/failure.go) never stores an empty string, precisely
+	// so that an empty one cannot be confused with an absent one.
+	//
+	// THE TEXT IS OPERATOR-SUPPLIED. It is derived from the stored job_spec: a
+	// task name the schedule's owner chose flows verbatim into jobspec.Validate's
+	// "task %s: ..." message. An admin reading someone else's schedule is
+	// therefore reading partly attacker-chosen prose. It is sanitized at the
+	// write site (control characters stripped, truncated to 1 KB on a rune
+	// boundary), and every renderer must treat it as untrusted text: a React text
+	// child, never chrome, never dangerouslySetInnerHTML, and prefixed with its
+	// provenance in the CLI.
+	//
+	// It is safe to serve because the read is owner-or-admin: ownedScheduledJob
+	// 404s everyone else and both non-admin list arms are owner-scoped.
+	LastError   string     `json:"last_error,omitempty"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func toScheduledJobResponse(sj store.ScheduledJob) scheduledJobResponse {
@@ -53,6 +73,13 @@ func toScheduledJobResponse(sj store.ScheduledJob) scheduledJobResponse {
 	}
 	if sj.LastJobID.Valid {
 		out.LastJobID = uuidStr(sj.LastJobID)
+	}
+	if sj.LastError != nil {
+		out.LastError = *sj.LastError
+	}
+	if sj.LastErrorAt.Valid {
+		t := sj.LastErrorAt.Time
+		out.LastErrorAt = &t
 	}
 	return out
 }
@@ -612,6 +639,51 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		nextRunAt = pgtype.Timestamptz{Time: sched.Next(time.Now()), Valid: true}
 	}
 
+	// CLEAR THE FAILURE RECORD IF, AND ONLY IF, THIS PATCH TOUCHED ONE OF THE
+	// THREE INPUTS THE RECORDED FAILURE CLASSES ARE ABOUT *AND* THE ROW IT
+	// LEAVES BEHIND ACTUALLY VALIDATES. Both arms are load-bearing and they
+	// answer different questions.
+	//
+	// THE FIRST ARM asks whether this PATCH is entitled to revisit the record at
+	// all. A patch of name, overlap_policy or enabled PRESERVES it unconditionally:
+	// renaming a schedule must not erase the only signal that it is broken, and on
+	// an @monthly schedule nothing would rewrite it for a month. Enabling and
+	// disabling preserve it too - nothing about the spec changed, and a re-enabled
+	// schedule that still carries its failure is showing the truth at the most
+	// useful moment to see it.
+	//
+	// THE SECOND ARM asks whether the record is actually stale, and it exists
+	// because the first arm alone was ASSERTING that rather than checking it. The
+	// validation above runs per key: job_spec is checked only inside
+	// `if req.JobSpec != nil`, and the nextRunAt block re-parses cron/tz only when
+	// one of them is supplied. So presence of ANY of the three keys was clearing a
+	// record about the two the patch never looked at. Both directions were live
+	// and both are reached from `relay schedules update`: a cron-only PATCH erased
+	// a still-true "retries must be between 0 and 10", and a job_spec-only PATCH
+	// erased a still-true "parse cron: ..." without ever calling ParseSchedule.
+	//
+	// IT ASKS schedrunner, NOT A LOCAL COPY. schedrunner.ValidateStoredSchedule is
+	// the same unmarshal -> ParseSchedule -> Validate, in the same order, that
+	// fireOne and the startup sweep use to WRITE the record. A second
+	// implementation here could clear on a verdict the writer disagrees with,
+	// which is the defect in a new spelling.
+	//
+	// A PATCH WHOSE EFFECTIVE ROW STILL DOES NOT VALIDATE IS STILL A 200. The
+	// handler validates what it is GIVEN; an operator repairing a broken schedule
+	// one field at a time is a legitimate sequence, and refusing it because some
+	// other stored field is still broken would make a two-step repair impossible.
+	// Only what the write CLEARS is conditional.
+	//
+	// It is a BOOLEAN ARGUMENT rather than a read-modify-write. The row was read
+	// through ownedScheduledJob without a lock, so reading last_error into Go and
+	// writing it back would let this PATCH carry a stale error forward over a
+	// failure a tick recorded in between. The SQL CASE means the row's own value
+	// is never round-tripped through the application. (next_run_at in this same
+	// handler DOES have that read-modify-write hazard; this slice does not fix it
+	// and does not join it.)
+	clearFailure := (req.JobSpec != nil || req.CronExpr != nil || req.Timezone != nil) &&
+		schedrunner.ValidateStoredSchedule(jobSpecJSON, cronExpr, tz) == nil
+
 	updated, err := s.q.UpdateScheduledJob(r.Context(), store.UpdateScheduledJobParams{
 		ID:            id,
 		Name:          name,
@@ -621,6 +693,7 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		OverlapPolicy: overlap,
 		Enabled:       enabled,
 		NextRunAt:     nextRunAt,
+		ClearFailure:  clearFailure,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update failed")

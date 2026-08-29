@@ -9,23 +9,31 @@ import (
 )
 
 // scheduledJobFields is store.ScheduledJob's COMPLETE field set as of the
-// retry-bounds change. Adding a row here is the deliberate act the test below
+// last_error change. Adding a row here is the deliberate act the test below
 // exists to force.
 var scheduledJobFields = []string{
 	"ID", "Name", "OwnerID", "CronExpr", "Timezone", "JobSpec", "OverlapPolicy",
 	"Enabled", "NextRunAt", "LastRunAt", "LastJobID", "CreatedAt", "UpdatedAt",
+	"LastError", "LastErrorAt",
 }
 
-// TestScheduledJobRowStillCarriesNoFailureSurface is the TRIPWIRE for
-// docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md.
+// TestScheduledJobRowStillCarriesNoFailureSurface is the field-set guard over
+// store.ScheduledJob.
 //
-// Every user-visible read of a schedule is built from this row - GET
-// /v1/scheduled-jobs/{id}, `relay schedules`, the SPA - so asserting that the
-// row has no field capable of carrying a fire-time failure is what turns
-// "nothing user-visible records it" from prose into a checked claim. When the
-// sibling item ships its column and models.go is regenerated, this goes RED.
-// That is the point. Go and INVERT the hazard test named below; do not exempt
-// the new field here.
+// IT WAS FILED AS A TRIPWIRE FOR
+// docs/backlog/bug-2026-08-23-unfireable-schedule-is-invisible.md, whose whole
+// claim was that no field on this row could carry a fire-time failure. That item
+// shipped on 2026-08-28: last_error and last_error_at are in the list above, and
+// the hazard test in internal/schedrunner/stored_spec_bounds_test.go had its
+// hazard framing removed in the same commit rather than being exempted, exactly
+// as this header instructed.
+//
+// THE NAME IS NOW WRONG AND IS KEPT ON PURPOSE. Renaming it would break the
+// only link between this guard and the item that explains why an exact-set
+// assertion over a generated struct is worth its maintenance cost. What the
+// guard buys from here on is unchanged: every user-visible read of a schedule -
+// GET /v1/scheduled-jobs/{id}, `relay schedules`, the SPA - is built from this
+// row, so a column added or removed without a deliberate act lands here first.
 //
 // IT ASSERTS THE WHOLE SET, NOT A DENY-LIST, AND THAT IS THE WHOLE DESIGN. The
 // first version of this check asserted only that no field name contained
@@ -64,11 +72,11 @@ func TestScheduledJobRowStillCarriesNoFailureSurface(t *testing.T) {
 	}
 
 	t.Fatalf("store.ScheduledJob's field set moved: added %v, removed %v (have %v).%s\n"+
-		"If this is bug-2026-08-23-unfireable-schedule-is-invisible shipping its column, the "+
-		"hazard test in internal/schedrunner/stored_spec_bounds_test.go must INVERT - see its "+
-		"header comment - and this list must be updated in the same commit. The substring hint "+
-		"above is colour only: this test gates on the SET, so a column called anything at all "+
-		"lands here.", added, removed, got, hint)
+		"That item already shipped (2026-08-28), so a NEW addition here is a NEW "+
+		"deliberate act: update this list in the same commit that adds the column, and "+
+		"check whether internal/schedrunner/stored_spec_bounds_test.go needs to say "+
+		"anything about it. The substring hint above is colour only: this test gates on "+
+		"the SET, so a column called anything at all lands here.", added, removed, got, hint)
 }
 
 // scheduledJobFieldSetDiff reports whether got and want agree, and names the
@@ -119,7 +127,8 @@ func scheduledJobFieldSetDiff(got, want []string) (ok bool, added, removed []str
 func TestScheduledJobFieldSetDiff_GatesOnTheSetNotTheOrder(t *testing.T) {
 	reordered := []string{
 		"Name", "ID", "OwnerID", "CronExpr", "Timezone", "JobSpec", "OverlapPolicy",
-		"Enabled", "NextRunAt", "LastRunAt", "LastJobID", "CreatedAt", "UpdatedAt",
+		"Enabled", "NextRunAt", "LastRunAt", "LastJobID", "LastError", "LastErrorAt",
+		"CreatedAt", "UpdatedAt",
 	}
 	ok, added, removed := scheduledJobFieldSetDiff(reordered, scheduledJobFields)
 	if !ok {

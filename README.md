@@ -1049,9 +1049,23 @@ The server reconciles `next_run_at` on startup: any firings that fell during dow
 
 Schedules are owned by the user who created them; non-admins see only their own. Admins can list and operate on all of them. The schedule's owner (or an admin) can use `run-now` to fire a schedule immediately.
 
-**A stored spec is re-validated on every fire, so job-spec rules are retroactive.** A schedule keeps the spec it was created with, and the server validates that spec again on each fire rather than grandfathering it for having been accepted once. A spec that a later release refuses therefore stops producing jobs while the schedule still *looks* healthy: `next_run_at` keeps advancing, nothing disables it, `enabled` stays true, and the only record is one line in the server log. `tasks[].retries` (max `10`) and `tasks[].timeout_seconds` (max `604800`) are the newest rules with this property, so a schedule created before they existed with, say, `"retries": 50` stops firing on upgrade. They are not the first: `scheduled_jobs` shipped 2026-04-22, and both the `source` validator (2026-04-24) and the `priority` allow-list (2026-06-20) landed after it, so a schedule storing `{"priority":"urgent"}` accepted between those dates fails today with the identical symptom.
+**A stored spec is re-validated on every fire, so job-spec rules are retroactive.** A schedule keeps the spec it was created with, and the server validates that spec again on each fire rather than grandfathering it for having been accepted once. A spec that a later release refuses therefore stops producing jobs while the schedule still *looks* healthy: `next_run_at` keeps advancing, nothing disables it, `enabled` stays true, and until 2026-08-28 the only record was one line in the server log. `tasks[].retries` (max `10`) and `tasks[].timeout_seconds` (max `604800`) are the newest rules with this property, so a schedule created before they existed with, say, `"retries": 50` stops firing on upgrade. They are not the first: `scheduled_jobs` shipped 2026-04-22, and both the `source` validator (2026-04-24) and the `priority` allow-list (2026-06-20) landed after it, so a schedule storing `{"priority":"urgent"}` accepted between those dates fails today with the identical symptom.
 
-**To check a schedule you suspect, fire it by hand.** `relay schedules run-now <id>` runs exactly the same validation and answers `400` with the per-task message (`task t: retries must be between 0 and 10`) instead of failing quietly, so it is the way to turn a schedule that has gone silent into a specific reason. Replacing the stored spec is a `PATCH /v1/scheduled-jobs/{id}` with a new `job_spec`; `relay schedules update` has no `--spec` flag, so from the CLI it is delete plus `relay schedules create --spec`.
+**A schedule that stops firing now says so.** `GET /v1/scheduled-jobs/{id}` and `GET /v1/scheduled-jobs` both carry two optional fields: `last_error`, the reason the scheduler last failed to produce a job, and `last_error_at`, when it failed. **Absent means healthy** - a schedule that has never failed carries neither key, not an empty string and not `null`. Because the list carries them too, an operator scanning `relay schedules` or the SPA's schedules table can see *which* schedule to suspect without suspecting anything first.
+
+Only permanent failures are recorded: a `job_spec` that will not decode, a `cron_expr` that will not parse, and a spec that fails validation. A transient database fault is logged and not recorded, and it does not overwrite an existing record - a blip is not news about the schedule. `last_error` is **cleared by a successful fire**, and by a `PATCH` that supplies a new `job_spec`, `cron_expr` or `timezone` **and leaves a schedule whose stored `job_spec`, `cron_expr` and `timezone` all validate**. A `PATCH` that changes one of the three while another is still broken keeps the record: the handler validates only what the request supplied, so a record about an input it never looked at is not stale, and erasing it would leave nothing to rewrite it until the next fire. It is **preserved** by a skipped fire (`overlap_policy: skip` with the previous run still active), by a `PATCH` that only renames the schedule or changes `overlap_policy` or `enabled`, and by disabling and re-enabling.
+
+`last_error` is **derived from the stored `job_spec` and is operator-supplied**: the message embeds a task name the schedule's owner chose. It is sanitized at the write site - C0 controls and DEL, the C1 range `U+0080`-`U+009F` (which includes the single-byte CSI), and the bidirectional formatting controls (`U+200E`/`U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`) are all replaced with spaces - and truncated to 1 KB on a rune boundary; `run-now` returns the untruncated message. Render it as text, never as markup.
+
+**When a schedule reports a failure:**
+
+1. `POST /v1/scheduled-jobs/{id}/run-now`, or `relay schedules run-now <id>`, or the SPA's **Run now**, to re-check interactively and get the current message in full and untruncated.
+2. Repair the stored spec: `PATCH /v1/scheduled-jobs/{id}` with a new `job_spec`, or `relay schedules update <id> --spec FILE`.
+3. Disable the schedule if it should not run: `relay schedules update <id> --disable`.
+
+There is no fourth step. In particular there is no "relax the validator" step: the bounds are not environment-configurable by design, because an env-tunable bound would make retroactive schedule invalidation environment-dependent - the same stored spec would fire on one replica's configuration and silently stop on another's.
+
+**To check a schedule you suspect, fire it by hand.** `relay schedules run-now <id>` runs exactly the same validation and answers `400` with the per-task message (`task t: retries must be between 0 and 10`) instead of failing quietly, so it is the way to turn a schedule that has gone silent into a specific reason. Replacing the stored spec is a `PATCH /v1/scheduled-jobs/{id}` with a new `job_spec`, or `relay schedules update <id> --spec FILE`.
 
 **Tasks already in the database are deliberately left alone.** No migration clamps or rejects a `retries` or `timeout_seconds` value that an earlier release already stored on a `tasks` row. The bound applies to job creation from here on; a task that was created with `retries: 2000000000` keeps it and still retries that many times.
 
@@ -1067,7 +1081,9 @@ relay schedules list --sort name           # alphabetical
 relay schedules list --sort next_run_at    # next-to-fire first
 ```
 
-Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time).
+Output columns: `ID`, `NAME`, `CRON`, `TZ`, `ENABLED`, `NEXT` (next scheduled run time), `STATE`.
+
+`STATE` is `OK`, or `FAILING` when the scheduler last failed to produce a job from the schedule's stored spec. It is a separate axis from `ENABLED`: a failing schedule is still enabled, because relay does not disable one on its own. Run `relay schedules show <id>` for the reason.
 
 ---
 
@@ -1104,6 +1120,8 @@ Print details for a single schedule.
 relay schedules show <schedule-id>
 ```
 
+Prints the id, name, cron expression, timezone, enabled flag, next run and last run. When the schedule's last fire failed it also prints `Last error`, when it failed, and the `run-now` command that re-checks it. The error text is derived from the stored `job_spec` and is operator-supplied, and the label says so; it is truncated to 1 KB, so use `run-now` for the full message.
+
 ---
 
 #### `relay schedules update`
@@ -1114,12 +1132,14 @@ Modify a schedule in place. Only supplied flags are changed.
 relay schedules update <schedule-id> --cron "0 4 * * *"
 relay schedules update <schedule-id> --disable
 relay schedules update <schedule-id> --enable --tz UTC
+relay schedules update <schedule-id> --spec repaired-job.json
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--cron EXPR` | New cron expression |
 | `--tz ZONE` | New IANA timezone |
+| `--spec FILE` | Replace the stored job spec with the contents of FILE (same format as `relay schedules create --spec`). The server validates it and reports any problem verbatim. This is the repair for a schedule whose `STATE` reads `FAILING`. |
 | `--overlap skip\|allow` | New overlap policy |
 | `--enable` | Re-enable a disabled schedule |
 | `--disable` | Pause the schedule without deleting it |

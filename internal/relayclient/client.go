@@ -124,7 +124,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 			Error string `json:"error"`
 		}
 		if decodeErr := json.NewDecoder(resp.Body).Decode(&errBody); decodeErr == nil && errBody.Error != "" {
-			return &ResponseError{StatusCode: resp.StatusCode, Message: errBody.Error}
+			// THE ONLY UNTRUSTED STRING IN THIS FUNCTION, and the point at which it
+			// stops being inert: Decode has just turned the wire's JSON escapes back
+			// into real bytes. handleRunScheduledJobNow answers a stored-spec
+			// validation failure with the raw jobspec.Validate message, which
+			// interpolates an operator-chosen task name verbatim, so an admin
+			// running run-now against someone else's schedule prints prose that
+			// party wrote. sanitizeServerText strips control and bidi runes without
+			// truncating; see its comment for why the transport owns this and the
+			// renderer does not.
+			return &ResponseError{StatusCode: resp.StatusCode, Message: sanitizeServerText(errBody.Error)}
 		}
 		if resp.StatusCode >= 500 {
 			return &ResponseError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("server error (%d) — try again", resp.StatusCode)}

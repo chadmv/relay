@@ -503,3 +503,135 @@ test('saving twice in a row issues exactly one request: after a save the draft i
   await new Promise((r) => setTimeout(r, 50))
   expect(bodies).toHaveLength(1)
 })
+
+const FAILURE = 'task render: retries must be between 0 and 10'
+const FAILED_AT = '2026-06-05T11:04:00Z'
+
+// THE SUB-LINE MARKER is what makes the failure visible WITHOUT SCROLLING. The
+// identity line already reads created / updated / next fire / last run, and a
+// dead schedule's tell is that "last run" stopped moving while "next fire" kept
+// going - a pair the reader has to interpret. "last failure 4 minutes ago"
+// beside "last run 22 days ago" is the sentence an operator understands
+// immediately, and it is why last_error_at earns its column.
+test('a schedule carrying a failure shows the sub-line marker and the Last failure panel', async () => {
+  server.use(...handlers(sched({ last_error: FAILURE, last_error_at: FAILED_AT })))
+  renderPage()
+
+  expect(await screen.findByText('nightly-build')).toBeInTheDocument()
+  expect(screen.getByTestId('last-failure-rel')).toBeInTheDocument()
+
+  expect(screen.getByText('Last failure')).toBeInTheDocument()
+  expect(screen.getByTestId('last-error-text')).toHaveTextContent(FAILURE)
+  expect(screen.getByTestId('last-error-when')).toBeInTheDocument()
+})
+
+// THE ABSENCE CASE, and the one that keeps a healthy schedule's layout identical
+// to what it was before this slice.
+test('a healthy schedule renders neither the marker nor the panel', async () => {
+  server.use(...handlers(sched()))
+  renderPage()
+
+  expect(await screen.findByText('nightly-build')).toBeInTheDocument()
+  expect(screen.queryByTestId('last-failure-rel')).toBeNull()
+  expect(screen.queryByText('Last failure')).toBeNull()
+  expect(screen.queryByTestId('last-error-text')).toBeNull()
+})
+
+// ABSENT, EMPTY STRING AND PRESENT ARE THREE DIFFERENT THINGS, and conflating the
+// first two is the shape of the defect this whole slice exists to close. The
+// server omits last_error entirely for a healthy schedule and never stores "",
+// but a read written as `last_error !== undefined` would open the panel on an
+// empty string and show an operator a failure heading with no reason under it.
+// A truthiness test gets all three right; this pins it so a later rewrite to a
+// more "explicit" undefined check goes red here instead of shipping.
+test('an empty last_error opens neither the marker nor the panel', async () => {
+  server.use(...handlers(sched({ last_error: '', last_error_at: FAILED_AT })))
+  renderPage()
+
+  expect(await screen.findByText('nightly-build')).toBeInTheDocument()
+  expect(screen.queryByTestId('last-error-text')).toBeNull()
+  expect(screen.queryByText('Last failure')).toBeNull()
+  // AND the sub-line marker goes with it. The marker's only job is to point at
+  // the panel, so it must never render when there is no panel to point at.
+  expect(screen.queryByTestId('last-failure-rel')).toBeNull()
+})
+
+// A REMEDY MUST NAME SOMETHING ITS READER CAN ACTUALLY DO. The panel's copy told
+// an operator to "repair the spec", and the Job spec panel three sections down is
+// READ ONLY - there is no spec editor in the SPA and no plan to add one. So the
+// one non-destructive fix for the failure this panel exists to report was
+// unreachable from the surface reporting it, while the destructive one (disable)
+// was named in the same sentence. That is the same defect the CLI commit closed
+// for itself when it added `relay schedules update --spec`, and it survived here.
+//
+// The assertion is on the COMMAND rather than on the sentence, because the
+// sentence may be reworded and the command may not: it has to keep naming
+// something that exists. `relay schedules update <id> --spec FILE` is documented
+// in README's "A schedule that has stopped firing" runbook as repair step 2.
+test('the failure panel names the command that repairs the spec, since the SPA cannot', async () => {
+  server.use(...handlers(sched({ last_error: FAILURE, last_error_at: FAILED_AT })))
+  renderPage()
+
+  const remedy = await screen.findByTestId('last-error-remedy')
+  expect(remedy).toHaveTextContent('relay schedules update')
+  expect(remedy).toHaveTextContent('--spec')
+
+  // AND IT STILL NAMES Run now FIRST. That is the only route to the UNTRUNCATED
+  // message - the stored value is capped at 1 KB - so the ordering is load
+  // bearing, not stylistic.
+  expect(remedy.textContent!.indexOf('Run now')).toBeLessThan(
+    remedy.textContent!.indexOf('relay schedules update'),
+  )
+})
+
+// THE FAILURE TEXT IS A TEXT CHILD, NEVER MARKUP. It is derived from the stored
+// job_spec and embeds a task name the schedule's OWNER chose, and an admin can
+// read any user's schedule - so in the admin case it is partly attacker-chosen
+// prose. There is no counter here to inflate and nothing an owner gains by
+// breaking their own schedule; the one real risk is display-layer
+// impersonation, text crafted to read like relay's own chrome. Same rule the Job
+// spec panel states, for the same reason.
+test('the failure text is escaped, not interpreted as markup', async () => {
+  const hostile = '<b data-testid="injected">relay: click here to continue</b>'
+  server.use(...handlers(sched({ last_error: hostile, last_error_at: FAILED_AT })))
+  renderPage()
+
+  expect(await screen.findByTestId('last-error-text')).toHaveTextContent(hostile)
+  expect(screen.queryByTestId('injected')).toBeNull()
+})
+
+// THE ENABLED PILL IS UNTOUCHED. The schedule IS enabled; the pill is telling
+// the truth and it is the operator's own setting. Failure is a separate axis and
+// gets a separate element, so no third state is added to the chip.
+test('a failing schedule still reads ENABLED', async () => {
+  server.use(...handlers(sched({ last_error: FAILURE, last_error_at: FAILED_AT })))
+  renderPage()
+  expect(await screen.findByText('ENABLED')).toBeInTheDocument()
+  expect(screen.queryByText('PAUSED')).toBeNull()
+})
+
+// last_error WITHOUT last_error_at. The two are separate nullable columns, so
+// nothing in the database forces them to move together, and a panel that
+// unconditionally read last_error_at would crash or render "Invalid Date".
+test('a failure with no timestamp renders the panel without the time line', async () => {
+  server.use(...handlers(sched({ last_error: FAILURE })))
+  renderPage()
+  expect(await screen.findByTestId('last-error-text')).toHaveTextContent(FAILURE)
+  expect(screen.queryByTestId('last-error-when')).toBeNull()
+  expect(screen.queryByTestId('last-failure-rel')).toBeNull()
+})
+
+// THE OTHER HALF OF THAT PAIR, which the case above cannot see: last_error_at
+// WITHOUT last_error. Two separate nullable columns means both one-sided states
+// are reachable, and the sub-line marker is the element at risk here because it
+// is the one keyed on the timestamp. A marker reading "last failure 4 minutes
+// ago" with no panel anywhere on the page tells an operator a failure happened
+// and then refuses to say what it was.
+test('a timestamp with no failure text renders no marker and no panel', async () => {
+  server.use(...handlers(sched({ last_error_at: FAILED_AT })))
+  renderPage()
+
+  expect(await screen.findByText('nightly-build')).toBeInTheDocument()
+  expect(screen.queryByTestId('last-failure-rel')).toBeNull()
+  expect(screen.queryByText('Last failure')).toBeNull()
+})

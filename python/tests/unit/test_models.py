@@ -646,3 +646,59 @@ def test_task_env_and_requires_are_normalised_server_side() -> None:
     assert task.requires == {}
     with pytest.raises(PydanticValidationError):
         Task.model_validate({"name": "cook", "env": None})
+
+
+def test_scheduled_job_failure_fields_are_none_when_the_server_omits_them() -> None:
+    """ABSENT MEANS HEALTHY. scheduledJobResponse carries `omitempty` on both
+    last_error and last_error_at, and the server's write site never stores an
+    empty string, so a schedule that has never failed sends NEITHER KEY - not
+    "", not null. `is None` is therefore the whole test for "healthy", and a
+    default of None is what makes that reading correct.
+    """
+    sj = ScheduledJob.model_validate(_scheduled_job_wire())
+    assert sj.last_error is None
+    assert sj.last_error_at is None
+
+
+def test_scheduled_job_failure_fields_parse_when_present() -> None:
+    """Why the scheduler last failed to produce a job from this schedule.
+
+    RED AT HEAD FOR A SPECIFIC REASON WORTH KNOWING: the model is
+    extra="ignore", so before the fields exist these keys are silently DROPPED
+    rather than raising, and the failure is an AttributeError on the read, not a
+    ValidationError. That is the same silence this test exists to close - a
+    server field the SDK cannot see.
+
+    The text is derived from the stored job_spec and is OPERATOR-SUPPLIED: the
+    message embeds a task name the schedule's owner chose. A consumer rendering
+    it into a terminal or a web page must treat it as untrusted text. The server
+    strips control characters and truncates to 1 KB at the write site;
+    run_scheduled_job_now() returns the untruncated message.
+    """
+    sj = ScheduledJob.model_validate(
+        _scheduled_job_wire(
+            last_error="task t: retries must be between 0 and 10",
+            last_error_at="2026-08-28T12:00:00Z",
+        )
+    )
+    assert sj.last_error == "task t: retries must be between 0 and 10"
+    assert sj.last_error_at is not None
+    assert sj.last_error_at.year == 2026
+    assert sj.last_error_at.month == 8
+
+
+def test_scheduled_job_empty_last_error_is_not_coerced_to_none() -> None:
+    """ABSENT, EMPTY AND PRESENT ARE THREE STATES, and the SDK must not collapse
+    two of them - collapsing two is the exact shape of the defect these fields
+    exist to report.
+
+    The server never sends "", so a body carrying one is a different server or a
+    bug. Either way pydantic must hand the caller the value it received rather
+    than a default, so that `sj.last_error is None` keeps meaning "the server
+    said nothing" and never "the server said something empty". A consumer's
+    healthy test is `not sj.last_error`, which reads both correctly; this test
+    pins that the SDK does not make that choice on the consumer's behalf.
+    """
+    sj = ScheduledJob.model_validate(_scheduled_job_wire(last_error=""))
+    assert sj.last_error == ""
+    assert sj.last_error is not None

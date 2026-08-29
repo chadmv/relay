@@ -55,6 +55,10 @@ func (s *Server) callListSchedules(ctx context.Context, args listSchedulesArgs) 
 
 	items := make([]any, len(resp.Items))
 	for i, item := range resp.Items {
+		// THE LIST ARM IS THE ONE THE ATTACK RUNS ON. "Which of my schedules are
+		// failing?" is a list question, so labelling only relay_get_schedule
+		// would leave the reachable path unlabelled.
+		labelUntrustedFailureText(item)
 		items[i] = item
 	}
 	return map[string]any{
@@ -73,5 +77,6 @@ func (s *Server) callGetSchedule(ctx context.Context, args getScheduleArgs) (map
 	if err := s.do(ctx, "GET", fmt.Sprintf("/v1/scheduled-jobs/%s", args.ScheduleID), nil, &resp); err != nil {
 		return nil, MapError(err)
 	}
+	labelUntrustedFailureText(resp)
 	return resp, nil
 }

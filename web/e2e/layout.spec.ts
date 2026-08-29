@@ -47,6 +47,9 @@ for (const width of WIDTHS) {
           // AuthProvider hydration, not after.
           await page.addInitScript(() => window.localStorage.removeItem('relay.token'))
         }
+        if (s.prepare) {
+          await s.prepare(page, seed)
+        }
         const path = s.path(seed)
         await page.goto(path)
         await s.ready(page, seed)
