@@ -1211,3 +1211,81 @@ def test_quote_cursor_bounds_a_long_cursor() -> None:
     assert "truncated from 5000 characters" in quoted
     assert "a" * 5000 not in quoted
     assert "a" * 200 in quoted
+
+
+# ─── _fetch_all termination stops ────────────────────────────────────────────
+#
+# Every fixture body below is a hand-written dict literal, built by
+# _page_response and _job_response. NEVER build one by dumping Page[Job] or Job:
+# a fixture encoded through the type under test agrees with the decoder by
+# construction, on the envelope keys AND on the item fields, and can detect
+# drift in neither direction. Same rule, same reason, as the task-log fixtures
+# above.
+#
+# Every fixture also has a TERMINATOR - an HTTP 500 past the request count the
+# correct implementation makes. This project has no pytest-timeout. Without the
+# terminator, deleting the stop under test leaves the handler answering forever
+# and the test HANGS instead of failing. With it, the mutant raises ServerError,
+# which is not ProtocolError, so the test is RED.
+
+
+def test_fetch_all_raises_on_an_empty_page_that_still_advertises_more() -> None:
+    """Stop 1. On a correct server this is unreachable - buildPage
+    (internal/api/pagination.go) returns ([], "") for zero rows and emits a
+    cursor only when it kept at least one row - which is the point: the loop is
+    driven by a value the client does not control, and "no correct server does
+    this" is a statement about correct servers.
+
+    Page 1 must be NON-EMPTY. With an empty page 1, `.records` is [] under both
+    the correct code and a mutant that drops records=, and the payload assertion
+    is vacuous.
+
+    Page 2's cursor must DIFFER from page 1's, or the repeated-cursor stop
+    becomes a second possible explanation for the raise and the diagnosis is
+    unpinned. The match= is the other half of that.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1"), _job_response(id="j2")],
+                    next_cursor="CUR-ONE",
+                    total=99,
+                ),
+            )
+        if len(calls) == 2:
+            return httpx.Response(
+                200, json=_page_response([], next_cursor="CUR-TWO", total=99)
+            )
+        return httpx.Response(500, json={"error": "past the stop"})
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert "CUR-TWO" in str(excinfo.value)
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2"]
+
+
+def test_fetch_all_zero_matching_rows_is_not_an_error() -> None:
+    """The drained return MUST stay above the empty-page stop.
+
+    A list with no matching rows answers `items: []` with `next_cursor: ""` -
+    that IS the legitimate empty page here, and it reports itself drained.
+    Testing emptiness first turns list_jobs() against an empty jobs table into a
+    ProtocolError. That inversion is a one-line mutation (M4).
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=_page_response([], total=0))
+
+    client = _make_client(handler)
+    assert client.list_jobs() == []
+    assert len(calls) == 1

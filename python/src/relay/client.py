@@ -255,18 +255,39 @@ class Client:
         p["limit"] = str(self._PAGE_REQUEST_LIMIT)
         out: list[M] = []
         cursor: Optional[str] = None
+        pages = 0
         while True:
+            pages += 1
             if cursor:
                 p["cursor"] = cursor
             response = self._http.get(path, params=p)
             raise_for_response(response)
             body = response.json()
-            out.extend(model.model_validate(item) for item in body["items"])
+            # Bound to a local rather than re-read below: the emptiness test
+            # must ask about THIS page, and `out` is cumulative. (These six
+            # routes never send JSON null here - buildPage returns a non-nil
+            # empty slice - so no null-coercion is needed.)
+            items = body["items"]
+            out.extend(model.model_validate(item) for item in items)
             if limit is not None and len(out) >= limit:
                 return out[:limit]
+            # NOT changed by this slice: a MISSING next_cursor key still reads
+            # as drained here, and that is the subject of the open item
+            # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained, which
+            # also covers _get_page and is therefore wider than this loop.
             cursor = body.get("next_cursor", "")
             if not cursor:
                 return out
+            # This arm MUST stay above the empty-page stop below. A list with no
+            # matching rows legitimately answers items: [] - and it reports
+            # itself drained, so it never reaches the stop. Inverted, list_jobs()
+            # against an empty jobs table raises.
+            if not items:
+                raise ProtocolError(
+                    "server returned an empty page while still advertising more "
+                    f"rows (next_cursor {_quote_cursor(cursor)})",
+                    records=out,
+                )
 
     # ─── Jobs ─────────────────────────────────────────────────────────────
 
