@@ -40,8 +40,12 @@ const failureTextUnavailable = "fire failed; message unavailable"
 // which can carry constraint names, column names, connection strings and host
 // names. internal/api has a settled convention of not disclosing internals
 // (writeError(w, 500, "db error"), never the pgx message), and storing a pgx
-// error in a column four clients render would sidestep that convention through
-// the back door.
+// error in a column rendered by the SPA, the CLI, the Python SDK and the MCP
+// server would sidestep that convention through the back door. (A COUNT IS NOT
+// CARRIED HERE ON PURPOSE. "four clients" was written when there were four, and
+// was already an undercount by the time MCP started labelling last_error in the
+// same PR. An enumeration goes stale loudly - a reader can check it - where a
+// number goes stale silently and has no maintainer.)
 //
 // Error() delegates to the wrapped error and adds NO PREFIX OF ITS OWN, so the
 // stored string is exactly what fireOne composed and nothing about this type
@@ -73,7 +77,9 @@ func recordableFailure(err error) (string, bool) {
 }
 
 // sanitizeFailureText makes an error message safe to store and to render, at the
-// SINGLE write site. One place, four readers (REST, SPA, CLI, Python SDK).
+// SINGLE write site. One place; the value is served by internal/api and rendered
+// by the SPA, the CLI, the Python SDK and the MCP server. Enumerated rather than
+// counted, for the reason given on permanentFireError above.
 //
 // THREE CLASSES BECOME A SPACE, and the second and third are here because the
 // first alone did not close the class this comment claims it closes. The text is
@@ -95,11 +101,19 @@ func recordableFailure(err error) (string, bool) {
 //     terminal alike. That is a display attack, not an escape sequence, which is
 //     why stripping C0 does nothing about it.
 //
-// internal/cli/schedules.go's terminalSafeLine makes the BYTE-IDENTICAL mapping
-// on the read side, for the same reason, and the two are deliberately NOT
-// shared: internal/cli is a client package and importing internal/schedrunner
-// from it to reach one predicate would be a worse coupling than the duplication.
-// IF THIS SET MOVES, MOVE THAT ONE WITH IT.
+// TWO OTHER SITES CARRY THE BYTE-IDENTICAL RUNE SET, and both are on the READ
+// side rather than this write side:
+//
+//   - internal/cli/schedules.go, terminalSafeLine - what `relay schedules show`
+//     puts on a terminal.
+//   - internal/relayclient/sanitize.go, sanitizeServerText - applied in Do to
+//     the message of a server error body, which is the un-escaping site for
+//     every relayclient consumer and so covers the MCP server for free.
+//
+// THEY ARE DELIBERATELY NOT SHARED. internal/cli and internal/relayclient are
+// client packages; importing internal/schedrunner from either to reach one
+// predicate would be a worse coupling than the duplication. IF THIS SET MOVES,
+// MOVE BOTH OF THOSE WITH IT.
 //
 // Invalid UTF-8 in the input is replaced with U+FFFD by the range-over-string
 // plus WriteRune round trip, so the output is always valid UTF-8. That matters:

@@ -150,7 +150,8 @@ func (r *Runner) fireOne(ctx context.Context, q *store.Queries, row store.Schedu
 	// insert failure are indistinguishable at the call site - and this slice has
 	// to tell them apart, because one is a permanent fact about the schedule's
 	// own data and the other is a transient infrastructure fault whose pgx text
-	// must not be stored in a column four clients render.
+	// must not be stored in a column the SPA, the CLI, the Python SDK and the MCP
+	// server all render.
 	//
 	// IT IS THE PRECEDENT, NOT A NEW IDEA. handleRunScheduledJobNow already does
 	// exactly this, for exactly this reason, and its comment says so at length.

@@ -133,11 +133,13 @@ func TestSanitizeFailureText(t *testing.T) {
 		}
 	})
 
-	// internal/cli/schedules.go's terminalSafeLine makes the byte-identical
-	// mapping for the same reason on the read side. The two are NOT shared and
-	// must not become shared: internal/cli is a client package and importing
-	// internal/schedrunner from it to reach one predicate would be a worse
-	// coupling than the duplication. If this set moves, move that one with it.
+	// TWO READ-SIDE SITES CARRY THE SAME RUNE SET and are verified identical to
+	// this one: internal/cli/schedules.go's terminalSafeLine, and
+	// internal/relayclient/sanitize.go's sanitizeServerText (applied in Do to a
+	// server error body, which covers the MCP server for free). Neither is shared
+	// with this one and neither should become shared - both are client packages,
+	// and importing internal/schedrunner to reach one predicate would be a worse
+	// coupling than the duplication. If this set moves, move both with it.
 
 	t.Run("a message that sanitizes to nothing becomes the fixed fallback", func(t *testing.T) {
 		got := sanitizeFailureText("\x00\x01 \t\r\n")

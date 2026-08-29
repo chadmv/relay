@@ -221,7 +221,8 @@ func patchSchedule(t *testing.T, srv *api.Server, token, id, body string) {
 }
 
 // assertNoFailureKeys checks ABSENCE, not emptiness. `""` and `null` are both
-// failures here: absent is the only spelling of "healthy" the four clients read.
+// failures here: absent is the only spelling of "healthy" that the SPA, the CLI,
+// the Python SDK and the MCP server read.
 func assertNoFailureKeys(t *testing.T, m map[string]any, subject string) {
 	t.Helper()
 	for _, k := range []string{"last_error", "last_error_at"} {
