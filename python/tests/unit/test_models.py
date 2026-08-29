@@ -669,9 +669,12 @@ def test_scheduled_job_failure_fields_parse_when_present() -> None:
     ValidationError. That is the same silence this test exists to close - a
     server field the SDK cannot see.
 
-    The text is derived from the stored job_spec and is OPERATOR-SUPPLIED: the
-    message embeds a task name the schedule's owner chose. A consumer rendering
-    it into a terminal or a web page must treat it as untrusted text. The server
+    The text is derived from the schedule's stored configuration - its job_spec,
+    or its cron_expr and timezone for a "parse cron: ..." failure - and is
+    OPERATOR-SUPPLIED: it MAY quote prose the schedule's owner chose, as the
+    fixture below does with a task name. Others are fixed server text. A consumer
+    rendering it into a terminal or a web page must treat the whole class as
+    untrusted text. The server
     strips control characters and truncates to 1 KB at the write site;
     run_scheduled_job_now() returns the untruncated message.
     """
