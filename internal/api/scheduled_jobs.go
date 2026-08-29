@@ -761,9 +761,13 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 	// forever. The bounds in jobspec.Validate are retroactive over specs stored
 	// by earlier releases, so this is reachable without anything being corrupt.
 	//
-	// run-now is the ONLY interactive path that can explain why a schedule
-	// stopped producing jobs: schedrunner's fireOne logs one server-side line
-	// and advances next_run_at, leaving nothing user-visible behind.
+	// run-now is the interactive path for this question, and since last_error
+	// landed (migration 000022) it is no longer the only surface that carries the
+	// answer: fireOne's failure branch records the same message on the row, and
+	// GET /v1/scheduled-jobs and its list sibling both serve it. What run-now still
+	// has that the recorded value does not is the UNTRUNCATED message and an
+	// answer on demand rather than at the next scheduled fire - which is why it
+	// stays the documented first step when a schedule reports a failure.
 	if err := ValidateJobSpec(spec); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

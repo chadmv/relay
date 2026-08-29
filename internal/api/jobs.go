@@ -862,10 +862,12 @@ const logIDHead = 8
 // log lines, annotating how many it dropped.
 //
 // Bounded on purpose, as INSURANCE rather than as a fix for a live flood. Task
-// count is bounded only against zero (jobspec.Validate) and log.Printf holds a
-// global mutex, so an unbounded rendering would let one line hold that mutex for
-// hundreds of kilobytes - and both call sites report a condition the code itself
-// argues should not happen, which is exactly the kind of line nobody watches.
+// count is now bounded at BOTH ends by jobspec.Validate - at least one, at most
+// maxTasksPerJob - and the upper bound does not retire this cap: 5000 ids is
+// still on the order of 185 KB, log.Printf holds a global mutex, and an unbounded
+// rendering would let one line hold that mutex for all of it. Both call sites
+// report a condition the code itself argues should not happen, which is exactly
+// the kind of line nobody watches.
 // The dependents guard in particular is believed unreachable in any well-formed
 // history; the cost of that belief being wrong is what this cap removes.
 //

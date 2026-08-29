@@ -77,20 +77,48 @@ var (
 // seconds; a larger N buys no waiting, only a faster burn. The instrument for
 // contention is a reservation, not a retry count.
 //
-// DO NOT MAKE THIS ENV-CONFIGURABLE. Validate runs on STORED scheduled-job specs
-// on BOTH paths that materialize one: schedrunner.fireOne at fire time, which
-// reaches Validate only through jobcreate.CreateJobFromSpec, and
-// handleRunScheduledJobNow on demand, which calls it DIRECTLY through
-// api.ValidateJobSpec ahead of the transaction and then again inside
-// CreateJobFromSpec. That direct call is the site that decides the status code:
-// it answers a stored spec's failure with 400 and the per-task message, where
-// CreateJobFromSpec's error collapses into a 500. An env-tunable bound would
-// therefore make
-// retroactive schedule invalidation environment-dependent: the same stored spec
-// fires on one replica's configuration and silently stops on another's, and
-// lowering the knob would disable schedules with no signal anywhere. A
-// validation vocabulary shared by four ingest paths is a property of the binary,
-// exactly as the priority set is.
+// DO NOT MAKE THIS ENV-CONFIGURABLE, AND THE SAME GOES FOR EVERY BOUND BELOW.
+// Validate runs on STORED scheduled_jobs.spec rows on five paths, and the older
+// version of this paragraph named two of them and got one of those wrong:
+//   - schedrunner.fireOne calls Validate DIRECTLY, hoisted above the overlap
+//     check, and then reaches it again inside jobcreate.CreateJobFromSpec. (It
+//     used to reach it only through CreateJobFromSpec; that changed and this
+//     comment did not.) Its failure branch records the message in last_error.
+//   - api.handleRunScheduledJobNow calls it DIRECTLY, ahead of the transaction,
+//     and then again inside CreateJobFromSpec. That direct call is the site that
+//     decides the status code: it answers a stored spec's failure with 400 and
+//     the validator's own message, where CreateJobFromSpec's error collapses into
+//     a 500 that relayclient.ErrorIsTransient reads as retryable.
+//   - schedrunner.ValidateStoredSpecsOnStartup, at boot, over every ENABLED
+//     schedule, through schedrunner.ValidateStoredSchedule.
+//   - api.handlePatchScheduledJob's clear-decision, through the same
+//     ValidateStoredSchedule, on the EFFECTIVE row.
+//   - jobcreate.CreateJobFromSpec itself, reached from the first two with stored
+//     data.
+//
+// An env-tunable bound would therefore make retroactive schedule invalidation
+// environment-dependent: the same stored spec fires on one replica's
+// configuration and silently stops on another's, and lowering the knob would
+// disable schedules with no signal anywhere. Two of the five sites make that
+// worse in ways that postdate the original argument. The startup sweep WRITES the
+// returned message into last_error, so the recorded failure text would become a
+// function of which replica happened to boot, and the number in a stored,
+// operator-facing string would stop matching the binary that reads it. And the
+// PATCH clear-decision clears the record if and only if the effective row
+// validates, so a PATCH served by a lenient replica would clear a record a strict
+// replica immediately re-writes, and the operator would watch the failure
+// flicker.
+//
+// A validation vocabulary shared by every ingest path is a property of the
+// binary, exactly as the priority set is. THE PATHS ARE ENUMERATED, NOT COUNTED,
+// and deliberately so - see internal/schedrunner/failure.go, which settled this
+// question: a number goes stale silently and has no maintainer, where an
+// enumeration goes stale loudly because a reader can check it. (The older version
+// of this sentence said "four ingest paths"; there are api.handleCreateJob,
+// api.handleCreateScheduledJob, api.handlePatchScheduledJob when the request body
+// carries a job_spec, mcp.submit, and mcp.schedules_write on both create and
+// update. The CLI, the SPA and the Python SDK post JSON and hold no parallel
+// validation, so they inherit through the API.)
 const maxRetries = 10
 
 // maxTimeoutSeconds bounds TaskSpec.TimeoutSeconds. Seven days: comfortably

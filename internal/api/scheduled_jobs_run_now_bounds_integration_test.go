@@ -19,18 +19,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRunScheduledJobNow_AStoredOverBoundSpecIsRefusedAsPermanent covers the one
-// interactive path that can tell an operator WHY a schedule stopped producing
-// jobs.
+// TestRunScheduledJobNow_AStoredOverBoundSpecIsRefusedAsPermanent covers the
+// interactive path that tells an operator WHY a schedule stopped producing jobs.
 //
-// The bounds are retroactive: jobspec.Validate runs on the STORED spec every
-// time a schedule fires, so a row written by an older release can now fail
-// validation. schedrunner's own path logs one server-side line and advances
-// next_run_at, which is the invisibility
-// TestTickOnce_AStoredSpecOverTheBoundStopsFiringInvisibly_DocumentedHazard
-// pins. run-now is the operator's way to ask the same question and get the
-// answer back, and it is reachable from `relay schedules run-now`, the SPA and
-// MCP.
+// The bounds are retroactive: jobspec.Validate runs on the STORED spec every time
+// a schedule fires, so a row written by an older release can now fail validation.
+// schedrunner's own path records the same message on the row (last_error /
+// last_error_at, pinned by
+// TestTickOnce_AStoredSpecOverTheBoundRecordsItsFailureAndStaysEnabled), so the
+// failure is discoverable without suspecting a schedule first. run-now is the way
+// to ask the same question ON DEMAND and get the UNTRUNCATED answer back, rather
+// than waiting for the next scheduled fire, and it is reachable from
+// `relay schedules run-now`, the SPA and MCP.
 //
 // TWO PROPERTIES, AND THE STATUS CODE CARRIES BOTH. A validation failure on a
 // stored spec is a fact about the request, not about the server's moment: a
@@ -65,7 +65,7 @@ func TestRunScheduledJobNow_AStoredOverBoundSpecIsRefusedAsPermanent(t *testing.
 		"a stored spec that cannot validate is a permanent refusal, not a retryable server fault: "+
 			"relayclient.ErrorIsTransient reads 5xx as transient and a polling caller would never stop")
 	assert.Equal(t, "task bad-task: retries must be between 0 and 10", body["error"],
-		"the per-task message must reach the operator verbatim - run-now is the ONLY interactive path "+
+		"the per-task message must reach the operator verbatim - run-now is the interactive path "+
 			"that can explain why this schedule stopped firing, and a generic 'create job failed' "+
 			"throws that explanation away")
 
