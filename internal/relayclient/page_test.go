@@ -331,7 +331,14 @@ func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
 			http.Error(w, `{"error":"past the cap"}`, http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(w, `{"items":[{"id":"a%d"}],"next_cursor":"CUR-%d","total":9999}`, calls, calls)
+		// TWO rows per page, not one. With one row per page the fixture had
+		// maxListPages == pages == len(out) == 3, so `3 rows collected` could not
+		// tell the three apart and the assertion pinned the message's row count
+		// only by numeric coincidence: measured, passing maxListPages where the
+		// message passes len(out) survived the whole package (mutation GM_F).
+		// That mutant tells an operator "10000 rows collected" when 2,000,000
+		// were. 2 x 3 = 6 collides with neither of the other two numbers.
+		fmt.Fprintf(w, `{"items":[{"id":"a%d"},{"id":"b%d"}],"next_cursor":"CUR-%d","total":9999}`, calls, calls, calls)
 	}))
 	defer srv.Close()
 
@@ -346,7 +353,7 @@ func TestFetchAllPages_PageCapBoundsTheRequestCount(t *testing.T) {
 	// incompleteness. T is a bare type parameter with no id, so this package
 	// cannot compute the distinct-row count the Python SDK's equivalent message
 	// uses, and must not claim one.
-	assert.Contains(t, err.Error(), "3 rows collected")
+	assert.Contains(t, err.Error(), "6 rows collected")
 	assert.Contains(t, err.Error(), "9999")
 	// The three negatives are the acceptance criterion, one per thing the
 	// message must not say. Each quotes wording that IS in the Python SDK's
