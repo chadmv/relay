@@ -120,13 +120,14 @@ func FetchAllPages[T any](
 		if userLimit > 0 && len(out) >= userLimit {
 			return out[:userLimit], total, nil
 		}
+		// THE DRAINED RETURN BELOW MUST STAY ABOVE THE EMPTY-PAGE STOP. buildPage
+		// (internal/api/pagination.go) returns ([]Out{}, "") for zero rows, so a
+		// list with no matching rows is an empty page that reports itself
+		// drained, and so never reaches the stop. Inverted, `relay list` fails
+		// against an empty jobs table.
 		if resp.NextCursor == "" {
 			return out, total, nil
 		}
-		// This arm MUST stay above the empty-page stop below. buildPage
-		// (internal/api/pagination.go) returns ([]Out{}, "") for zero rows, so a
-		// list with no matching rows is an empty page that reports itself
-		// drained. Inverted, `relay list` fails against an empty jobs table.
 		if len(resp.Items) == 0 {
 			return nil, 0, fmt.Errorf(
 				"paginate %s: server returned an empty page while still advertising more rows (next_cursor %s)",
