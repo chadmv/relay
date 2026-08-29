@@ -1474,6 +1474,53 @@ def test_fetch_all_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(calls) == 3
 
 
+def test_fetch_all_page_cap_quotes_the_last_pages_total_not_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap message says "the server's last page reported N", and N really
+    has to come off the LAST page.
+
+    Every other cap fixture in this file sends a CONSTANT total on every page,
+    so not one of them can tell which page the number was read from. Measured:
+    an SDK that captures page 1's total and interpolates that instead leaves all
+    159 of them green. The three totals here differ per page for exactly that
+    reason - do NOT flatten them back to a constant.
+
+    Python's claim is the STRONGER of the two SDKs' and so the one that needed
+    pinning. internal/relayclient/page.go says "the server's first page
+    reported", because FetchAllPages returns the first page's total as its own
+    second return value and the message is describing that number; this walk
+    returns no total at all, reads it fresh on every page, and says so.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=6 + len(calls),
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(calls) == 3
+    assert "3 rows were collected (3 distinct row ids)" in message
+    assert "the server's last page reported 9" in message
+    assert "reported 7" not in message
+    assert "reported 8" not in message
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j3"]
+
+
 def test_fetch_all_page_cap_makes_no_completeness_claim_when_total_is_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
