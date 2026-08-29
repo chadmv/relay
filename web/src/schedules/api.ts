@@ -88,17 +88,30 @@ export function getSchedule(id: string): Promise<Schedule> {
 // Every field optional. An OMITTED key means "leave alone" server-side, because
 // patchScheduledJobRequest is all pointers.
 //
-// SENDING A KEY YOU DID NOT CHANGE IS NOT A NO-OP, AND THERE ARE NOW TWO
-// CONSEQUENCES. next_run_at is recomputed from time.Now() whenever the body
-// merely CARRIES cron_expr or timezone, changed or not - see
-// handlePatchScheduledJob - so re-sending an unchanged cron on an `@every 1h`
-// schedule whose next fire is five minutes away pushes that fire out by 55
-// minutes. AND a body carrying job_spec, cron_expr or timezone CLEARS
-// last_error/last_error_at, on the reasoning that the handler validated the new
-// values before storing them so any record about the OLD ones is stale by
-// construction. Re-sending an unchanged cron therefore also erases the only
-// signal that the schedule is broken. Always build this from a diff against the
-// loaded row, never from the whole form.
+// SENDING A KEY YOU DID NOT CHANGE IS NOT A NO-OP. next_run_at is recomputed
+// from time.Now() whenever the body merely CARRIES cron_expr or timezone,
+// changed or not - see handlePatchScheduledJob - so re-sending an unchanged cron
+// on an `@every 1h` schedule whose next fire is five minutes away pushes that
+// fire out by 55 minutes. Always build this from a diff against the loaded row,
+// never from the whole form.
+//
+// IT NO LONGER ERASES THE FAILURE RECORD, AND THE REASON THIS COMMENT USED TO
+// GIVE FOR WHY IT DID WAS FALSE. A body carrying job_spec, cron_expr or timezone
+// may still clear last_error/last_error_at, but only when the row the patch
+// leaves behind ACTUALLY VALIDATES - the handler asks
+// schedrunner.ValidateStoredSchedule, the same unmarshal, parse and validate
+// that WROTE the record. The old reasoning was that the handler validated the
+// new values before storing them, so any record about the old ones was stale by
+// construction; that does not hold, because the handler validates per key. A
+// cron-only patch never looks at the stored spec, so it was erasing a still-true
+// "task t: retries must be between 0 and 10", and a spec-only patch was erasing
+// a still-true "parse cron: ..." without calling the cron parser at all. Both
+// directions were reachable from `relay schedules update`.
+//
+// Clearing is now a statement that the schedule is good, not that a key was
+// present. The diff guidance above therefore stands on next_run_at alone: it is
+// still correct client hygiene, and it is no longer the thing standing between a
+// redundant key and a lost signal.
 export interface SchedulePatch {
   name?: string
   cron_expr?: string

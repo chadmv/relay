@@ -286,9 +286,23 @@ export function ScheduleDetailPage() {
                     {formatRelativeTime(schedule.last_error_at)} · {formatStarted(schedule.last_error_at)}
                   </span>
                 ) : null}
-                <span className="text-[11px] text-fg-mute">
+                {/* THE REMEDY NAMES A COMMAND BECAUSE THIS SURFACE CANNOT PERFORM
+                    IT. "Repair the spec" pointed at nothing a reader of this panel
+                    could do: the Job spec panel below is read only and the SPA has
+                    no spec editor, so the only reachable half of that sentence was
+                    the destructive one. The CLI closed exactly this gap for itself
+                    by adding `relay schedules update --spec`; naming that command
+                    here is what makes the sentence actionable from a browser.
+
+                    RUN NOW STAYS FIRST. It is the only route to the UNTRUNCATED
+                    message - the stored value is capped at 1 KB - so the ordering
+                    is load bearing. README's "A schedule that has stopped firing"
+                    runbook carries the same three steps in the same order. */}
+                <span data-testid="last-error-remedy" className="text-[11px] text-fg-mute">
                   The scheduler re-validates the stored job spec on every fire. Use Run now to re-check and
-                  see the message in full, then repair the spec, or disable the schedule if it should not run.
+                  see the message in full. The Job spec panel here is read only, so repair the spec with{' '}
+                  <code className="font-mono">relay schedules update &lt;id&gt; --spec FILE</code>, or disable
+                  the schedule if it should not run.
                 </span>
               </div>
             </Panel>

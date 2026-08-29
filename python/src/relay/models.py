@@ -505,7 +505,22 @@ class ScheduledJob(BaseModel):
     # Why the scheduler last failed to produce a job from this schedule, and
     # when. ABSENT MEANS HEALTHY: the server omits both keys entirely
     # (scheduledJobResponse carries `omitempty` on each) and never sends "" or
-    # null, so `is None` is the correct and only test.
+    # null.
+    #
+    # A CONSUMER'S HEALTHY TEST IS `not sj.last_error`, matching every other
+    # relay client - the CLI's scheduleResp.hasFailure is `!= nil && *p != ""`
+    # and the SPA renders its panel on a plain truthiness check. `is None`
+    # answers the narrower question of whether the SERVER said anything at all,
+    # which is what test_scheduled_job_failure_fields_are_none_when_the_server_
+    # omits_them pins; it is not the question an application is asking.
+    #
+    # The two only differ on "", which this SDK deliberately does not coerce to
+    # None (see test_scheduled_job_empty_last_error_is_not_coerced_to_none):
+    # absent, empty and present are three states and collapsing two of them is
+    # the exact defect these fields exist to report, so the SDK reports what it
+    # received and leaves the partition to the caller. A caller who picks
+    # `is None` renders a labelled blank on a "" that every other relay surface
+    # calls healthy.
     #
     # last_error is derived from the stored job_spec and is OPERATOR-SUPPLIED -
     # it embeds a task name the schedule's owner chose - so treat it as untrusted

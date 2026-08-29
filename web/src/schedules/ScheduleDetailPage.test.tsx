@@ -556,6 +556,34 @@ test('an empty last_error opens neither the marker nor the panel', async () => {
   expect(screen.queryByTestId('last-failure-rel')).toBeNull()
 })
 
+// A REMEDY MUST NAME SOMETHING ITS READER CAN ACTUALLY DO. The panel's copy told
+// an operator to "repair the spec", and the Job spec panel three sections down is
+// READ ONLY - there is no spec editor in the SPA and no plan to add one. So the
+// one non-destructive fix for the failure this panel exists to report was
+// unreachable from the surface reporting it, while the destructive one (disable)
+// was named in the same sentence. That is the same defect the CLI commit closed
+// for itself when it added `relay schedules update --spec`, and it survived here.
+//
+// The assertion is on the COMMAND rather than on the sentence, because the
+// sentence may be reworded and the command may not: it has to keep naming
+// something that exists. `relay schedules update <id> --spec FILE` is documented
+// in README's "A schedule that has stopped firing" runbook as repair step 2.
+test('the failure panel names the command that repairs the spec, since the SPA cannot', async () => {
+  server.use(...handlers(sched({ last_error: FAILURE, last_error_at: FAILED_AT })))
+  renderPage()
+
+  const remedy = await screen.findByTestId('last-error-remedy')
+  expect(remedy).toHaveTextContent('relay schedules update')
+  expect(remedy).toHaveTextContent('--spec')
+
+  // AND IT STILL NAMES Run now FIRST. That is the only route to the UNTRUNCATED
+  // message - the stored value is capped at 1 KB - so the ordering is load
+  // bearing, not stylistic.
+  expect(remedy.textContent!.indexOf('Run now')).toBeLessThan(
+    remedy.textContent!.indexOf('relay schedules update'),
+  )
+})
+
 // THE FAILURE TEXT IS A TEXT CHILD, NEVER MARKUP. It is derived from the stored
 // job_spec and embeds a task name the schedule's OWNER chose, and an admin can
 // read any user's schedule - so in the admin case it is partly attacker-chosen
