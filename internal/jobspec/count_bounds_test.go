@@ -133,3 +133,71 @@ func TestValidate_ThePerTaskCommandCountIsBounded(t *testing.T) {
 			"task bad-task: at most 500 commands are allowed, got 25001")
 	})
 }
+
+// totalSpec builds a spec of nTasks tasks, each carrying perTask commands and a
+// unique name.
+func totalSpec(nTasks, perTask int) *JobSpec {
+	tasks := make([]TaskSpec, nTasks)
+	for i := range tasks {
+		tasks[i] = TaskSpec{Name: "c" + strconv.Itoa(i), Commands: argvN(perTask)}
+	}
+	return &JobSpec{Name: "counts", Tasks: tasks}
+}
+
+// TestValidate_TheJobWideCommandTotalIsBounded is the case NEITHER per-axis cap
+// can catch, and it is the entire argument for the third constant. Every task in
+// every case below is inside maxCommandsPerTask and every task count is inside
+// maxTasksPerJob, so with only the two per-axis bounds in place all four cases
+// are accepted and the third constant could be deleted with every other test in
+// the tree still green.
+//
+// RED at HEAD on three of the four.
+func TestValidate_TheJobWideCommandTotalIsBounded(t *testing.T) {
+	const overMsg = "at most 25000 commands in total across all tasks are allowed"
+
+	t.Run("one over the total, with every task inside its own bound", func(t *testing.T) {
+		// 50 x 500 is exactly 25,000; the 51st task's single command crosses it.
+		// 50 <= 5000 and 500 <= 500, so neither per-axis cap fires.
+		spec := totalSpec(50, 500)
+		spec.Tasks = append(spec.Tasks, TaskSpec{Name: "one-more", Commands: argvN(1)})
+		require.EqualError(t, Validate(spec), overMsg,
+			"NO 'got' CLAUSE, AND THAT IS A DECISION: the check fires the moment the budget is "+
+				"exceeded and does not know the final total, so a running figure would be false and "+
+				"would vary with task ordering for the same spec")
+	})
+
+	t.Run("exactly at the total is accepted", func(t *testing.T) {
+		require.NoError(t, Validate(totalSpec(50, 500)),
+			"25,000 exactly must still be accepted - the leg a >= breaks")
+	})
+
+	t.Run("a legacy command task counts toward the total", func(t *testing.T) {
+		// THE DISCRIMINATING INPUT FOR THE ACCUMULATOR'S POSITION, and the only one
+		// in the tree. The 51st task uses the legacy `command` spelling, so it
+		// carries len(Commands) == 0 until normalizeTaskCommands rewrites it. An
+		// accumulator placed ABOVE the normalization adds 0 for it, the total stops
+		// at exactly 25,000, and the spec is accepted.
+		//
+		// The per-task check's position is NOT distinguishable by any input (a
+		// legacy Command can only ever produce one command, and 0 > 500 and 1 > 500
+		// are both false). This case covers the half that is.
+		spec := totalSpec(50, 500)
+		spec.Tasks = append(spec.Tasks, TaskSpec{Name: "legacy", Command: []string{"true"}})
+		require.EqualError(t, Validate(spec), overMsg)
+	})
+
+	t.Run("the total is refused before traversal completes", func(t *testing.T) {
+		// 70 tasks x 400 commands is 28,000, and the running total crosses 25,000 at
+		// index 62. A DUPLICATE TASK NAME sits at index 65, three tasks past the
+		// crossing.
+		//
+		// Checking inside the loop reports the total. Completing the pass and
+		// checking afterwards reports the duplicate. This pins the "fail as soon as
+		// it is exceeded" decision, which is what stops a 116,000-command spec being
+		// walked in full before it is refused - and the message is the only
+		// observable trace of "as soon as".
+		spec := totalSpec(70, 400)
+		spec.Tasks[65].Name = spec.Tasks[0].Name
+		require.EqualError(t, Validate(spec), overMsg)
+	})
+}

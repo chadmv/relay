@@ -168,6 +168,60 @@ const maxTasksPerJob = 5000
 // to every bound in this file.
 const maxCommandsPerTask = 500
 
+// maxCommandsPerJob bounds the TOTAL number of commands across all of a job's
+// tasks, accumulated during validation. IT IS THE ONE OF THE THREE THAT MOVES THE
+// AGGREGATE NUMBER, and the other two do not produce it.
+//
+// TWO PER-AXIS CAPS WHOSE PRODUCT EXCEEDS WHAT THE BODY LIMIT ALREADY PERMITS
+// REDUCE NOTHING IN AGGREGATE; they only change the shape of the worst case. The
+// cost that matters - subprocess spawns, and one task_logs row per command from
+// the agent's step marker alone, which nothing in this repo prunes - is
+// total_commands x (1 + retries), and it does not care how the commands are
+// distributed across tasks, because the retry budget is per task and every task's
+// commands re-run on every attempt. maxTasksPerJob x maxCommandsPerTask is
+// 2,500,000, roughly 21x more than a 1 MiB body can express with the cheapest
+// RUNNABLE entry, so with only those two in place the binding constraint on the
+// total would remain maxBodyBytes - exactly as it was before any of these three
+// existed.
+//
+// WHY THE ENTRY MUST BE RUNNABLE, since the arithmetic above turns on it:
+// internal/agent/runner.go emits its step marker once per command EXECUTED, at
+// the top of the loop body and AFTER the empty-argv guard, and a command whose
+// Start or Wait fails breaks the loop. So a body full of entries that cannot
+// execute costs one failed exec and one marker, not one per entry. The cheapest
+// entry that costs anything is `["true"],` at 9 bytes, which puts about 116,000
+// of them in 1 MiB. This bound takes that to 25,000 and takes 1.28 million spawns
+// to 275,000.
+//
+// THE PER-AXIS CAPS ARE NOT REDUNDANT ONCE THIS EXISTS. This one implies
+// tasks <= 25000, since normalizeTaskCommands refuses a task with zero commands -
+// which is weaker than maxTasksPerJob - and it says nothing about concentration,
+// since 25,000 commands in one task satisfies it. Each of the three answers a
+// different question: how long is the transaction and how big is the dispatcher's
+// backlog; how much can one request pin to one worker slot; how much total work
+// can one request buy.
+//
+// 25,000 IS PLACED TO KEEP THE LEGITIMATE SIDE CLEAR, not to make the adversarial
+// number small. The legitimate high end is set by the many-tasks shape - thousands
+// of tasks at a handful of commands each - rather than by the few-tasks shape,
+// which tops out lower. The window between "what a real job needs" and "what 1
+// MiB expresses" is only about 8x wide, because a legitimate command is a long
+// string and an adversarial one is nine bytes, and a count bound cannot tell them
+// apart.
+//
+// IT IS NOT A DoS CONTROL AND MUST NOT BE TIGHTENED AS IF IT WERE. POST /v1/jobs
+// carries no rate limit - internal/api/server.go wraps only register and login in
+// RateLimit - so every figure above is per-request and an authenticated caller may
+// repeat it at whatever rate the network allows. The control for repetition is a
+// rate limit. Tightening this to buy a constant factor against an attack that
+// repetition makes unbounded anyway costs a refused real render, which has no
+// workaround inside the product.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.spec rows, and it applies identically
+// to every bound in this file.
+const maxCommandsPerJob = 25000
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -209,6 +263,7 @@ func Validate(spec *JobSpec) error {
 		return fmt.Errorf("invalid priority %q: must be low, normal, or high", spec.Priority)
 	}
 	nameSet := make(map[string]struct{}, len(spec.Tasks))
+	totalCommands := 0
 	for i := range spec.Tasks {
 		ts := &spec.Tasks[i]
 		if ts.Name == "" {
@@ -246,6 +301,27 @@ func Validate(spec *JobSpec) error {
 		if len(ts.Commands) > maxCommandsPerTask {
 			return fmt.Errorf("task %s: at most %d commands are allowed, got %d",
 				ts.Name, maxCommandsPerTask, len(ts.Commands))
+		}
+		totalCommands += len(ts.Commands)
+		// CHECKED INSIDE THE LOOP, not after it, so a spec far over the budget is
+		// refused partway through traversal rather than after a full pass over
+		// 116,000 entries.
+		//
+		// JOB-LEVEL MESSAGE, NO TASK PREFIX. The budget is a property of the job,
+		// and naming whichever task the accumulator happened to cross on would read
+		// as an accusation against a task that may be entirely ordinary - the same
+		// spec with its tasks in a different order would name a different one.
+		//
+		// NO "got" CLAUSE, AND THAT IS A DECISION RATHER THAN AN OMISSION. The other
+		// two count messages report the offending number because they know it. This
+		// one fires the moment the budget is exceeded and therefore does not know
+		// the final total; printing the running count as if it were the total would
+		// be false, and "got at least N" is honest but varies with task ordering for
+		// the same spec while telling the operator nothing they can act on, since
+		// the actionable number is the limit. Completing the pass to report an exact
+		// total would trade the early refusal for a nicer message; not taken.
+		if totalCommands > maxCommandsPerJob {
+			return fmt.Errorf("at most %d commands in total across all tasks are allowed", maxCommandsPerJob)
 		}
 		// A nil TimeoutSeconds is SKIPPED, not defaulted: nil is the documented
 		// "no deadline" and 0 is its second, equally valid spelling. Negatives
