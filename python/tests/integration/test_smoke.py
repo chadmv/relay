@@ -54,3 +54,23 @@ def test_list_jobs_includes_recent_submission(client: relay.Client) -> None:
     jobs = client.list_jobs()
     ids = {j.id for j in jobs}
     assert submitted.id in ids
+
+
+def test_a_list_with_no_matching_rows_returns_empty_and_does_not_raise(
+    client: relay.Client,
+) -> None:
+    """The ONE assertion in this slice whose truth depends on what the SERVER
+    puts on the wire, rather than on a fixture.
+
+    Inverting the drained return and the empty-page stop is a one-line mutation
+    that turns every list call against an empty result set into a ProtocolError.
+    A fixture proves the client handles `{"items": [], "next_cursor": ""}`; only
+    a live handler proves that is what buildPage actually sends for zero rows.
+
+    The filter is a random scheduled_job_id, so the result set is empty on any
+    server regardless of what else is in the database.
+    """
+    import uuid
+
+    jobs = client.list_jobs(scheduled_job_id=str(uuid.uuid4()))
+    assert jobs == []
