@@ -8,9 +8,10 @@ import (
 
 // ToolError is the structured payload returned to MCP clients on tool failure.
 type ToolError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Hint    string `json:"hint,omitempty"`
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Hint      string         `json:"hint,omitempty"`
+	Untrusted map[string]any `json:"untrusted,omitempty"`
 }
 
 func (e *ToolError) Error() string { return e.Code + ": " + e.Message }
