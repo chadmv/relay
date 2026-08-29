@@ -17,6 +17,7 @@ from relay import (
     OverlapPolicy,
     Priority,
     ProtocolError,
+    ServerError,
     ValidationError,
 )
 
@@ -1687,6 +1688,76 @@ def test_fetch_all_limit_satisfied_on_page_two_by_a_page_that_repeats_a_cursor()
 # defect (bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy);
 # what these pin is that a wrong-typed envelope reaches ONE documented decoding
 # failure instead of a raw TypeError from deep inside the loop.
+
+
+def test_fetch_all_discards_collected_rows_when_a_mid_walk_page_is_an_http_error() -> None:
+    """The counterexample the six list_* docstrings used to promise away.
+
+    They said "a walk that cannot be completed raises ProtocolError with the
+    rows collected so far on .records" without qualification. This walk cannot
+    be completed and raises ServerError, which carries no .records at all - and
+    page 1's two rows are gone. The claim is now scoped to the client's own
+    termination stops, and this pins the other side of that scope.
+
+    It also locks the shape against a plausible future "improvement": wrapping a
+    mid-walk transport or HTTP failure in ProtocolError so the partial rows
+    survive would be a real design change, not a bug fix, and it would silently
+    change what an existing caller's `except` clause catches.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1"), _job_response(id="j2")],
+                    next_cursor="CUR-ONE",
+                    total=99,
+                ),
+            )
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = _make_client(handler)
+    with pytest.raises(ServerError) as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert not hasattr(excinfo.value, "records")
+
+
+def test_fetch_all_discards_collected_rows_when_a_mid_walk_page_cannot_decode() -> None:
+    """The other half, and the likelier one in practice: ordinary server/SDK
+    version skew, where a row stops matching the model mid-walk.
+
+    pydantic.ValidationError does not descend from RelayError - that is the
+    tracked bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy
+    - and it carries no records either. Page 1's rows are discarded, which is
+    exactly the case the old docstring promised .records for.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1")], next_cursor="CUR-ONE", total=99
+                ),
+            )
+        # `name` is Job's one required field, so a row without it cannot decode.
+        return httpx.Response(
+            200, json=_page_response([{"id": "j2"}], next_cursor="", total=99)
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError) as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert not hasattr(excinfo.value, "records")
 
 
 def test_fetch_all_rejects_a_non_string_next_cursor() -> None:

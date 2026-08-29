@@ -49,10 +49,26 @@ M = TypeVar("M", bound=BaseModel)
 # nothing about content" argument that makes the stops below necessary, applied
 # to the diagnostic rather than the loop.
 #
-# 200 characters. A real relay cursor is base64url of a ~96-byte {t,i,s} JSON
-# (encodeCursorV2, internal/api/pagination.go), so ~128 characters: every
-# legitimate cursor is quoted in full, including a text-sort cursor that carries
-# a row's name, and only a cursor no correct server emits is ever cut.
+# 200 characters - and that does NOT cover every legitimate cursor. The claim
+# that it did, and specifically that it covered "a text-sort cursor that carries
+# a row's name", was measured false. encodeCursorV2 (internal/api/pagination.go)
+# emits base64url of a {t,i,s,v} JSON:
+#
+#   - a TIME-sort cursor is 127 characters, so every one of those is quoted
+#     whole;
+#   - a TEXT-sort cursor carries the row's sort value as well, so
+#     `--sort name` crosses 200 at a job name of about 89 characters:
+#     measured, an 85-character name gives 196, 90 gives 203, 100 gives 216.
+#     `jobs.name` is TEXT NOT NULL with no length limit and jobspec.Validate
+#     rejects only the empty string, so those are cursors a CORRECT server
+#     emits and this code truncates.
+#
+# The number stays at 200 anyway. "Every legitimate cursor fits" is not
+# achievable at ANY number against an unbounded sort value, and the consequence
+# of cutting one is cosmetic: _quote_cursor reports the TRUE length beside the
+# prefix, so the message stays diagnosable and a 216-character cursor is still
+# distinguishable from a 5 MB one. What the bound buys is that the message
+# length is the CLIENT's to choose, which was always the point.
 _CURSOR_MESSAGE_CHARS = 200
 
 
@@ -509,8 +525,11 @@ class Client:
         ``sort`` is forwarded to ?sort= and validated server-side; an
         unknown key raises :class:`ValidationError`.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all(
             "/v1/jobs", Job,
@@ -628,10 +647,14 @@ class Client:
         list. On a very large log use :meth:`task_logs_page` (O(one page)) or
         pass ``limit=``.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        records collected so far on ``.records``. printTaskLogs, which this
-        ports, has printed every row by the time it returns the equivalent
-        error, so the error is a caveat on output the operator already has;
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the records collected so far on
+        ``.records``. Records do NOT survive any other failure: an HTTP error
+        mid-walk raises the matching :class:`RelayError` and a page the SDK
+        cannot decode raises ``pydantic.ValidationError``, and both discard what
+        was collected. printTaskLogs, which this ports, has printed every row
+        by the time it returns the equivalent error, so the error is a caveat
+        on output the operator already has;
         returning a list is what makes the caveat and the rows arrive
         separately here.
         """
@@ -854,8 +877,11 @@ class Client:
         ``limit`` caps the TOTAL rows returned (None = all). ``sort`` is
         validated server-side; an unknown key raises :class:`ValidationError`.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit)
 
@@ -935,8 +961,11 @@ class Client:
     ) -> list[Worker]:
         """List workers, auto-paginating across all pages. ``limit`` caps total rows.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/workers", Worker, sort=sort, limit=limit)
 
@@ -954,8 +983,11 @@ class Client:
     ) -> list[User]:
         """List users, auto-paginating. Admin-only: a non-admin token raises AuthError.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/users", User, sort=sort, limit=limit)
 
@@ -973,8 +1005,11 @@ class Client:
     ) -> list[Reservation]:
         """List reservations, auto-paginating. Admin-only: non-admin raises AuthError.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/reservations", Reservation, sort=sort, limit=limit)
 
@@ -994,8 +1029,11 @@ class Client:
     ) -> list[AgentEnrollment]:
         """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        rows collected so far on ``.records``.
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit)
 

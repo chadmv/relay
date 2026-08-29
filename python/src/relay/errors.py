@@ -88,8 +88,13 @@ class ProtocolError(RelayError):
     ports, has already written every row to its output by the time it returns
     the equivalent error: there, the error is a completeness caveat on rows the
     operator can already see. The list walks have no output at all, so ``records``
-    is the ONLY route by which up to 2,000,000 collected rows reach the caller -
-    ``Client._MAX_LIST_PAGES`` is private, so nobody can raise the bound and retry.
+    is the ONLY route by which up to 2,000,000 collected rows reach the caller.
+    Not because the page cap cannot be moved: ``Client._MAX_LIST_PAGES`` is a
+    single-underscore CLASS attribute, which is a convention and not a barrier,
+    and the SDK's own tests raise and lower it with ``monkeypatch.setattr`` five
+    times over. It is because raising it and calling again starts a NEW walk at
+    page 1 and re-fetches every row; nothing carries the abandoned walk's rows
+    forward.
 
     It is ``[]`` when nothing was collected, never ``None``, so a caller need
     not test it before iterating.

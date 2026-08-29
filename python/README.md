@@ -105,11 +105,23 @@ Every one of those seven walks is driven by a cursor the **server** chooses, and
 the provenance of a value says nothing about who controls its content. So each
 has three stops beyond the server's own drained signal, and a server that trips
 one raises `ProtocolError`: a page that carries no rows while still advertising
-more, a cursor the walk has already requested (a repeat, or a two-cycle such as
-`A,B,A,B`), and a client-side cap of 10000 requests. The cap bounds **requests**
-and nothing else - not wall clock, not response bytes, not the memory of one
-response, for the reasons measured under "Reading a task's log" below. The rows
-collected before a walk was abandoned are on the exception:
+more, a cursor that does not advance, and a client-side cap of 10000 requests.
+
+The middle stop is **two different mechanisms**, and which one you get depends on
+the walk. The six `list_*` methods page on an opaque base64 cursor that carries
+no order, so they keep a **set** of every cursor already requested: both a repeat
+and a two-cycle (`A,B,A,B`, which two replicas behind a load balancer produce)
+stop, and the message says the server "repeated a cursor this walk had already
+requested". `task_logs` pages on an integer `next_seq` and so requires **strict
+advance** - `next_seq <= since_seq` stops - with the message "server cursor did
+not advance (next_seq N after since_seq M)". For integers, monotonicity already
+subsumes repetition, so the outcomes coincide and the mechanisms do not. Do not
+"unify" `task_logs` onto a set on the strength of this paragraph.
+
+The cap bounds **requests** and nothing else - not wall clock, not response
+bytes, not the memory of one response, for the reasons measured under "Reading a
+task's log" below. The rows collected before a walk was abandoned are on the
+exception:
 
 ```python
 try:
@@ -200,7 +212,11 @@ Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
 
 Errors raised by the SDK's own request handling descend from `relay.RelayError`.
 Response DECODING is the exception, and it escapes in two ways, neither of
-which descends from `RelayError`:
+which descends from `RelayError`. Two is the whole list only because every
+response body now goes through a model in one piece - a decode that hand-picks
+fields out of the raw dict and uses them untyped adds `TypeError` and `KeyError`
+to this list, which is what `_fetch_all` did until it was routed through
+`Page[model]`:
 
 - a body that is well-formed JSON but does not match the model raises
   `pydantic.ValidationError`;
