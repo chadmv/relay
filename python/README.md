@@ -244,6 +244,89 @@ The two escapes are:
 
 That gap is known and tracked separately.
 
+The first of those two escapes now has one more occasion, and it is a
+**fail-closed change** worth naming. Every `Page[T]` envelope - the six `list_*`
+walks and their six `*_page` siblings - requires `items`, `next_cursor` and
+`total`. A 200 whose envelope OMITS `next_cursor` or `total` raises
+`pydantic.ValidationError` rather than decoding into a page that reports the
+list drained. Before, a dropped key returned page 1 and reported success, and
+nothing in the return value distinguished a 200-row prefix from a complete
+200-row list. A correct server never produces this: the envelope is written by
+one `page[T]` struct whose three json tags carry no `omitempty`, which
+`TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage`
+(`internal/api/pagination_test.go`) now pins on the Go side.
+
+`Page[T]` is the scope of that sentence, not every envelope in the SDK. Two
+paged methods sit outside it, `task_logs_page` and the `task_logs` walk built
+on it, and both go through the one `LogPage` decode in `task_logs_page` - so
+there is one method pair but only one decode site. `LogPage`'s
+cursor is `next_seq`, and it has no `next_cursor` at all - a resumable log
+reader reads `page.next_seq`, and `page.next_cursor` on a `LogPage` is an
+`AttributeError`. `LogPage` has required `items`, `next_seq` and `total` since
+0.2.0, so with `Page[T]` joining it here, every paged envelope in the SDK is
+now strict.
+
+It is still not a `RelayError`, so `except relay.ValidationError` does **not**
+catch it - the two classes share a name, and that trap is why
+`bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy` is
+tracked. Catch `pydantic.ValidationError` explicitly until that lands. Nothing
+counted above changes: this widens when the first escape fires, not what the
+escapes are.
+
+Two things to know before you write that `except` clause, both of them on the
+tracking item's acceptance criteria.
+
+**The error object carries the whole page.** A `type=missing` error is raised at
+the MODEL level, so its `["input"]` in `e.errors()` is the ENTIRE decoded page
+rather than the offending field - and `e.errors()` and `e.json()` do not
+truncate it.
+Only `str(e)` does, to a ~50-character head-and-tail window, which is why this
+is easy to miss. It matters because a `/v1/schedules` page carries each
+schedule's full `job_spec`, per-task `env` maps included, and
+`list_schedules()` walks pages of them: a `logger.error("decode failed: %s",
+e.errors())`, an `e.json()`, or any structured error reporter that serialises
+`exc.errors()` ships those values wherever your logs go. Redact or drop `input`
+before forwarding the error.
+
+`logger.exception(...)` is the vector **not** on that list, and the reason is
+narrower than it looks. It renders the exception through `traceback`, which
+calls `str(exc)`, so it inherits the truncation - but that truncation is
+**head-and-tail**, roughly 25 characters of each, not a head. The last ~25
+characters of the input repr are emitted at **every** body size. Measured on
+pydantic 2.13.5: a 190-character body whose secret sits LAST leaks it in full
+through `logger.exception`; the same body with two timestamps after the secret
+does not.
+
+So the rule is about POSITION, not size - and through `Page[T]` specifically,
+position is bounded by something the server cannot move. The 24-character tail
+of a paged body is spent mostly on the envelope trailer `}], 'total': N}`,
+leaving roughly the last 9 characters to reach into the final item's final
+field, which today is `updated_at` (`scheduledJobResponse` in
+`internal/api/scheduled_jobs.go` declares `job_spec` seventh and
+`created_at`/`updated_at` last, and `json.loads` preserves that order).
+
+Do not overstate what a Go reordering would cost. Measured: moving `job_spec`
+last exposes **4** characters of a nested credential, not the value, because
+the trailer is still there; even a server that dropped both `next_cursor` and
+`total`, so the repr ends inside the item, reached 16 of 23 characters. A full
+credential cannot reach the window through `Page[T]`. The 190-character
+measurement above is a BARE dict, which has no trailer - that is why it leaks
+in full and a page does not.
+
+None of which makes `logger.exception` the thing to reason about. What decides
+how much leaks is a Go struct's field order and an envelope trailer's length,
+neither visible from Python and neither pinned by anything. Guard `errors()`
+and the question does not arise. The
+class is not new - `items` was already required, so a model-level error already
+carried the whole body - but this change widens the set of bodies that trigger
+it, and it is this section that tells you to catch it.
+
+**Rows already collected are lost.** When the raise happens mid-walk inside a
+`list_*` method, every row from the earlier pages is discarded: the walk raises
+rather than returning a short list, and unlike `ProtocolError` a
+`pydantic.ValidationError` carries no partial `.records`. A 250-page walk that
+fails on the last page delivers nothing and leaves no cursor to resume from.
+
 | Class | When |
 |---|---|
 | `ValidationError` | Local Pydantic failure or server 400 |

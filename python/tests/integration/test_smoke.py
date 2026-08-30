@@ -77,6 +77,31 @@ def test_a_list_with_no_matching_rows_returns_empty_and_does_not_raise(
     the random-uuid version failed with relay.errors.NotFound, never touching
     buildPage. The schedule has to exist and be owned by this token for the walk
     to get as far as the zero-row page this test is about.
+
+    Since the strict-envelope slice this test carries a SECOND job: Page
+    requires next_cursor and total as KEYS, so an `omitempty` creeping onto
+    internal/api's page[T] would make this call raise pydantic.ValidationError
+    instead of returning []. No fixture can see that - the server's serializer
+    is what is under test, and the zero-row page is the shape where an
+    omitempty would most plausibly bite. Under the old model this proved only
+    that the cursor was empty-or-absent; it now proves present-and-empty.
+
+    A NOTE, NOT A GATE. This lane is manual: conftest skips every test here
+    unless RELAY_INTEGRATION=1 and a live server is configured, and
+    .github/workflows/python.yml runs `pytest tests/unit -v` only. The
+    executable guard on the tag is on the Go side, where the tags live -
+    TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage in
+    internal/api/pagination_test.go, which runs in the lane CI does run.
+
+    test_list_jobs_includes_recent_submission is NOT the same proof. It is an
+    ASYMMETRIC one that pins next_cursor alone. Measured 2026-08-29 against a
+    real server with `,omitempty` on next_cursor and total but NOT on items:
+    this test failed on both of those fields (the wire body was literally
+    `{'items': []}`), while the list-jobs test failed on next_cursor only - its
+    `total` was 3, and omitempty does not drop a non-zero int. The mutation
+    scope is stated because it is load-bearing for the body: under an all-three
+    variant the zero-row body is `{}` and this test raises on three fields. That asymmetry is why the
+    zero-row page is the one that has to exist.
     """
     schedule = client.create_schedule(
         name=f"sdk-empty-list-{int(time.time())}",

@@ -260,11 +260,27 @@ class Client:
         # value is first used - which for the _fetch_all walk below was four
         # different lines in three different shapes.
         #
-        # `next_cursor: str = ""` and `total: int = 0` keep their DEFAULTS, so a
-        # MISSING key still reads as drained / zero exactly as `body.get(...)`
-        # did. That default is the subject of the separate open item
-        # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained and is not
-        # closed here; only a WRONG-TYPED value changes behaviour.
+        # `next_cursor` and `total` are REQUIRED and undefaulted, so a MISSING
+        # key is a decoding error here rather than a value. They carried
+        # defaults until the strict-envelope slice, and `next_cursor: str = ""`
+        # meant an absent key decoded to the drained signal: _fetch_all below
+        # stopped, and list_jobs() returned page 1 and reported success.
+        # Requiring them costs nothing - internal/api's `page[T]` tags all three
+        # fields without `omitempty`, so a correct server always sends all three.
+        #
+        # The failure is `pydantic.ValidationError`, which does NOT descend from
+        # RelayError. Deliberate, and not a new class of escape: python/README.md
+        # already documents it for every response body. Routing it belongs to the
+        # single `_read_json` chokepoint over all twelve `response.json()` sites
+        # in relay/ - ELEVEN in this file plus _extract_message in errors.py,
+        # which is the count README's Errors section arrives at independently.
+        # The scope is the PACKAGE, not this file: a grep of client.py alone
+        # also answers twelve, because this comment line matches its own
+        # subject, and the two twelves are not the same twelve.
+        # See bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy.
+        # A local try/except here would make _get_page and task_logs_page raise
+        # DIFFERENT types for the identical defect shape, which the chokepoint
+        # would then have to unwind.
         #
         # `Page.__class_getitem__(model)` rather than `Page[model]`: the two are
         # the same call, but mypy reads the subscript form as a type application
@@ -328,10 +344,12 @@ class Client:
             out.extend(page.items)
             if limit is not None and len(out) >= limit:
                 return out[:limit]
-            # NOT changed by this slice: a MISSING next_cursor key still reads
-            # as drained here, and that is the subject of the open item
-            # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained, which
-            # also covers _get_page and is therefore wider than this loop.
+            # `page.next_cursor` is PRESENT by construction: the field is
+            # required on the model, so a body that omitted the key raised in
+            # _get_page above and never reached this line. An empty string here
+            # is therefore the server SAYING drained, not the SDK inferring it
+            # from an absent key - which is what it used to be, and what made a
+            # dropped key silently truncate every walk to its first page.
             cursor = page.next_cursor
             # THE DRAINED RETURN BELOW MUST STAY ABOVE THE EMPTY-PAGE STOP. A
             # list with no matching rows legitimately answers items: [] - and it
@@ -437,11 +455,13 @@ class Client:
                         ids.add(row_id)
                 distinct = len(ids)
                 # From the CURRENT page, and the message says so rather than
-                # implying the number is authoritative. A MISSING total still
-                # defaults to 0, via Page's own default - deliberately NOT the
-                # same class of default as the next_cursor one above, where a
-                # missing key reads as "drained" and silently truncates. Here it
-                # only makes a reported number smaller.
+                # implying the number is authoritative. It is PRESENT because
+                # the model requires it: a page that omitted `total` raised in
+                # _get_page and never reached the cap. That is a claim about
+                # PROVENANCE, not about truth - `total` is still server-supplied
+                # and still unverifiable, which is why the message reports it
+                # beside a distinct-id count instead of settling completeness
+                # with it.
                 total = page.total
                 # The message REPORTS what it has and asserts NEITHER
                 # possibility: it does not blame the server, and it does not

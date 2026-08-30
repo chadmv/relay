@@ -338,8 +338,17 @@ class Job(BaseModel):
     # List-only enrichment (GET /v1/jobs rows). The server computes these from
     # the job's tasks and its scheduled-job source, and does not populate them
     # on single-job routes. They are DEFAULTED because Job is the authoring
-    # model too - Job(name="nightly") must keep working - which is why the
-    # strict no-default rule LogPage follows does not apply here.
+    # model too - Job(name="nightly") must keep working.
+    #
+    # That is an exemption on the AUTHORING axis and it is the only axis it is
+    # on. Page and LogPage require every envelope field they declare, and Page
+    # is now the closer analogue of the two: like Job it is a response model
+    # over a generic item list, and unlike Job nothing constructs one BY
+    # KEYWORD, so requiring its fields costs nothing. Page IS instantiated -
+    # model_validate on a decoded body, in _get_page and in tests/unit - and
+    # that is the point: every such call supplies the whole wire envelope or
+    # raises. Do not "make these consistent" - what
+    # makes these six defaulted is who BUILDS a Job, not what the values mean.
     total_tasks: int = 0
     done_tasks: int = 0
     started_at: Optional[datetime] = None
@@ -463,11 +472,34 @@ class LogPage(BaseModel):
     a global BIGSERIAL, so when one task logs alone its ids are contiguous and
     +1 skips the very next row.
 
-    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`, which
-    declares ``next_cursor: str = ""`` and so reads a missing key as the empty
-    string. A defaulted ``next_seq: int = 0`` would read a missing key as
-    "drained" and silently return page 1 - the same shape as the defect this
-    model exists to fix.
+    ``next_seq`` and ``total`` are REQUIRED and undefaulted, and so are
+    :class:`Page`'s ``next_cursor`` and ``total``. The two envelopes agree; what
+    matters is the reason, which is the same for both. A defaulted
+    ``next_seq: int = 0`` would read a MISSING key as "drained" and silently
+    return page 1, because 0 is this walk's end-of-log signal - and ``Page``
+    had exactly that hole with ``next_cursor: str = ""`` until it was closed.
+    An absent key with a benign default is not a missing value. It is a
+    FABRICATED one, and for a cursor the fabricated value is "there is nothing
+    more".
+
+    Read that as a rule about PAGE-ENVELOPE fields, not about this file. It does
+    not generalize to every default here, and the exemptions sit on two axes
+    that are not the same as each other:
+
+    - :class:`Job`'s list-only enrichment fields are exempt on the AUTHORING
+      axis. ``Job`` is the model a caller CONSTRUCTS - ``Job(name="nightly")``
+      is the README's first example - so a required ``total_tasks`` would break
+      every authoring call site. The question there is who BUILDS the object,
+      not what the value means. ``Page`` and ``LogPage`` are response-only and
+      nothing in ``relay/`` or its tests constructs one BY KEYWORD - every
+      instantiation is a ``model_validate`` over a decoded body, which supplies
+      the whole envelope or raises - which is why the strict rule costs nothing
+      here.
+    - Container fields such as ``Worker.labels`` and ``Reservation.selector``
+      are exempt on the PAYLOAD axis: an empty dict is the honest reading of an
+      absent map, and no control flow and no reported count is derived from it.
+      A cursor is neither a container nor a payload - it is the loop's stop
+      condition, which is why it gets no default at all.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -548,13 +580,57 @@ class Page(BaseModel, Generic[T]):
     ``next_cursor`` is the empty string on the last page; pass it back as
     ``cursor=`` to fetch the next page. ``total`` is the server's count of
     all matching rows, not just this page.
+
+    All three fields are REQUIRED and undefaulted, and ``next_cursor`` is the
+    one that matters. The empty string is this SDK's drained signal, so a
+    defaulted ``next_cursor: str = ""`` read an ABSENT key as "the list ended":
+    :meth:`relay.Client.list_jobs` returned page 1, raised nothing, and no
+    caller could tell a 200-row prefix from a complete 200-row list. ``total``
+    is the milder half - not a control-flow signal, but a number the six
+    ``*_page`` methods hand back for a caller to render, where a silent 0 is a
+    wrong number rather than a missing one.
+
+    Requiring them costs nothing against a correct server: internal/api's
+    ``page[T]`` envelope tags ``items``, ``next_cursor`` and ``total`` with no
+    ``omitempty``, so all three keys are emitted on every response including
+    the zero-row one.
+
+    The load-bearing property is the single TYPE, not a single constructor.
+    Every handler that RETURNS a ``page[...]`` builds the composite literal
+    itself. ``buildPage`` returns the trimmed items and the cursor string and
+    never touches the struct, and the count is not its output at all - it comes
+    from a separate ``Count*`` query per handler. handleListUsers' two early
+    returns go further and hand-build a zero-row page with ``NextCursor: ""``
+    and ``Total: 0``. Because the omission is impossible at the TAG level, all
+    of them emit all three keys regardless of who wrote them. A
+    single-constructor claim would be both false and weaker than the one that
+    actually holds.
+
+    Read that quantifier's domain narrowly: it ranges over the handlers that
+    emit this envelope, NOT over every list handler. handleListTasks and
+    handleListWorkerWorkspaces return a bare JSON array with no envelope at
+    all, which is why :meth:`relay.Client.get_tasks` is outside everything
+    argued here - see the note in python/README.md about the two
+    ``response.json()`` sites that do not hand the whole body to a model.
+
+    No site count is repeated here, deliberately. A cross-language tally in a
+    Python docstring cannot be pinned by anything on either side and drifts on
+    the next list endpoint, while the tag-level argument above holds for any
+    number of sites. The property itself IS pinned, on the Go side where the
+    tags live: TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage in
+    internal/api/pagination_test.go marshals a zero-value ``page[T]`` and
+    asserts all three keys are present.
+
+    ``extra="ignore"`` stays. Strictness here is about the ABSENCE of a
+    contract field, not the presence of an unknown one - opposite directions.
+    A model that rejected new envelope fields could not talk to a newer server.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     items: list[T]
-    next_cursor: str = ""
-    total: int = 0
+    next_cursor: str
+    total: int
 
 
 class Worker(BaseModel):

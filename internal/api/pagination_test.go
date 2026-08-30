@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -425,4 +428,130 @@ func TestParsePage_LegacyCursorRejectsExplicitNonDefaultSort(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, 400, w.Code)
 	assert.Contains(t, w.Body.String(), "cursor sort key does not match")
+}
+
+// TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage.
+//
+// The tags on page[T] carry a job beyond this package: the Python SDK's
+// relay.Page requires items, next_cursor and total as KEYS and raises
+// pydantic.ValidationError on a body that omits one, and its entire safety
+// argument is "internal/api's page[T] carries no omitempty, so all three keys
+// are emitted on every response including the zero-row one". Nothing in this
+// repo enforced that. Adding `,omitempty` to all three tags leaves every Go
+// package green - the buildPage tests above assert only that the returned
+// CURSOR STRING is empty, and testhelper_test.go decodes into its own struct
+// where a missing key is indistinguishable from a present zero. The only thing
+// that caught it was python/tests/integration, a lane gated on
+// RELAY_INTEGRATION=1 that CI does not run.
+//
+// The ZERO-VALUE page is the whole test: all three fields sit at their Go zero
+// (nil slice, "", 0), which is exactly the input `omitempty` drops and exactly
+// the shape a list with no matching rows produces. A non-empty page would be a
+// fail-open guard - a page carrying three rows keeps `total` under omitempty
+// because 3 is not zero, so it would pin next_cursor alone.
+//
+// State the mutation SCOPE when citing the live-server measurement, because the
+// two variants produce different bodies and the record is the point. Measured
+// 2026-08-29 against a live server with `,omitempty` on next_cursor and total
+// but NOT on items: the SDK's zero-row test failed on both of those fields
+// (wire body `{"items": []}`), and its non-empty sibling on next_cursor only.
+// Under the all-three variant the zero-row body is `{}` instead and the SDK
+// raises on three fields. The asymmetry conclusion holds under both, since the
+// three-row body drops next_cursor either way - but `{"items": []}` cannot be
+// produced by the all-three mutation, so do not attribute it to one.
+//
+// The assertion is on the RAW JSON key set, not on a decoded struct: a decoded
+// page cannot tell a present-and-zero key from a missing one, which is the
+// whole distinction.
+func TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage(t *testing.T) {
+	body, err := json.Marshal(page[string]{})
+	require.NoError(t, err)
+
+	var keys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &keys))
+
+	// counterKeys, from server_counters_test.go in this package - same signature,
+	// same job. Do not re-inline it.
+	require.ElementsMatch(t, []string{"items", "next_cursor", "total"}, counterKeys(keys),
+		"page[T] must emit all three envelope keys on a ZERO-VALUE page, never elided by omitempty. "+
+			"relay.Page in the Python SDK requires all three and raises on an absent one, and a dropped "+
+			"next_cursor is worse than an error there: the empty string is that SDK's drained signal, so "+
+			"an absent key used to read as 'the list ended' and truncated every walk to its first page. "+
+			"If a key must go, the SDK's model has to change first. ADDING a key is safe and this "+
+			"assertion is merely stricter than the property: relay.Page sets extra='ignore' precisely "+
+			"so a newer server can add envelope fields, so if you added one, add it to this list.")
+
+	assert.Equal(t, "null", string(keys["items"]),
+		"a nil Items slice still serialises under its key; handlers pass a make()d slice so a real "+
+			"zero-row response is [], but the KEY is what this test is about")
+	assert.Equal(t, `""`, string(keys["next_cursor"]), "next_cursor must serialise as an explicit empty string")
+	assert.Equal(t, "0", string(keys["total"]), "total must serialise as an explicit zero")
+}
+
+// TestPythonProseCitesThisPackagesEnvelopeGuard fails when the Go symbol three
+// Python artifacts name by hand stops existing under that name.
+//
+// python/src/relay/models.py, python/README.md and
+// python/tests/integration/test_smoke.py each cite
+// TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage as THE executable pin
+// for page[T]'s three json tags. That citation replaced an unpinnable
+// cross-language site COUNT, which was a trade up - a symbol is stabler and far
+// more greppable than a tally - but a bare reference across a language boundary
+// is still unpinned, and the SDK's strictness now depends on it.
+//
+// THIS GUARD LIVES IN GO ON PURPOSE, and the first version of it did not. It was
+// written in python/tests/unit/test_packaging.py, which sits inside the path
+// filter .github/workflows/python.yml declares (paths: python/**). A PR that
+// renames this symbol and touches nothing under python/ never triggers that
+// lane, so the guard would not have run on the one commit it exists to catch.
+// go-ci.yml declares no paths filter, so this file runs on every PR. Do not move
+// it back for symmetry with the prose it defends.
+//
+// It asserts BOTH directions. Dropping a citation on purpose is fine - delete it
+// from citingProse in the same commit, so the set stays known rather than
+// quietly shrinking.
+func TestPythonProseCitesThisPackagesEnvelopeGuard(t *testing.T) {
+	const guard = "TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage"
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+
+	// Glob the package rather than naming one file: moving the guard into
+	// page_envelope_test.go is a legitimate refactor that leaves the property
+	// intact, and a path-coupled assertion would go red on it.
+	matches, err := filepath.Glob(filepath.Join(root, "internal", "api", "*_test.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "no _test.go files under internal/api - wrong root?")
+
+	// `func <name>(`, not a bare substring. A considerate engineer renaming the
+	// test leaves a "renamed from ..." breadcrumb, and a bare-substring check is
+	// defeated by exactly that breadcrumb - measured, it was the one mutation of
+	// seven that survived the first version of this guard.
+	decl := "func " + guard + "("
+	found := false
+	for _, m := range matches {
+		b, readErr := os.ReadFile(m)
+		require.NoError(t, readErr)
+		if strings.Contains(string(b), decl) {
+			found = true
+			break
+		}
+	}
+	require.True(t, found,
+		"no file under internal/api declares %s. Three Python artifacts name it as the "+
+			"executable pin for page[T]'s json tags; if it was renamed, update them in the "+
+			"same commit (and this constant).", decl)
+
+	citingProse := []string{
+		filepath.Join("python", "src", "relay", "models.py"),
+		filepath.Join("python", "README.md"),
+		filepath.Join("python", "tests", "integration", "test_smoke.py"),
+	}
+	for _, rel := range citingProse {
+		b, readErr := os.ReadFile(filepath.Join(root, rel))
+		require.NoError(t, readErr, "%s is missing", rel)
+		assert.Contains(t, string(b), guard,
+			"%s cited %s and no longer does. If that was deliberate, drop it from "+
+				"citingProse here too - the point is that the set stays known.", rel, guard)
+	}
 }

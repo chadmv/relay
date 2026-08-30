@@ -1906,10 +1906,14 @@ def test_fetch_all_rejects_a_null_items() -> None:
 
 
 def test_fetch_all_rejects_a_missing_items_key() -> None:
-    """The absent-key sibling of the null case. `items` has NO default, unlike
-    `next_cursor` and `total`, whose defaults are deliberate and preserved - so
-    an absent `items` is an error while an absent `next_cursor` still reads as
-    drained.
+    """The absent-key sibling of the null case, and it still isolates `items`:
+    the fixture carries `next_cursor` and `total`, so `items` is the only key
+    missing and the only thing that can produce the raise.
+
+    All THREE of Page's fields are required and undefaulted. `next_cursor` and
+    `total` carried defaults until the strict-envelope slice; their absent-key
+    cases are test_fetch_all_rejects_a_missing_next_cursor and
+    test_fetch_all_rejects_a_missing_total.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1918,3 +1922,104 @@ def test_fetch_all_rejects_a_missing_items_key() -> None:
     client = _make_client(handler)
     with pytest.raises(PydanticValidationError):
         client.list_jobs()
+
+
+# ─── envelope ABSENCE ────────────────────────────────────────────────────────
+#
+# The section above varies the TYPE of an envelope field. These vary its
+# PRESENCE, which is the sharper case: a wrong type crashes somewhere loud,
+# while an absent key used to decode into a value that looked legitimate.
+# `next_cursor`'s default was the empty string and the empty string is
+# _fetch_all's drained signal, so a dropped key reported the list finished -
+# `list_jobs()` returned page 1 and raised nothing, and no caller could tell a
+# 200-row prefix from a complete 200-row list.
+#
+# _page_response cannot express these bodies: it is typed `next_cursor: str`
+# with `total` defaulting to len(items), so it always emits all three keys.
+# That is why it survived this change untouched, and why these are hand-written.
+#
+# Each fixture omits EXACTLY ONE of the two keys and carries the other. A single
+# fixture omitting both would make the two field declarations indistinguishable
+# - restoring either default alone would leave it green - and the pair would
+# look covered while pinning nothing.
+
+
+def test_fetch_all_rejects_a_missing_next_cursor() -> None:
+    """A body with no `next_cursor` key must RAISE, not read as drained.
+
+    `total` is PRESENT and non-zero here on purpose. It is what separates this
+    test from test_fetch_all_rejects_a_missing_total: restoring
+    `total: int = 0` alone must leave this one GREEN.
+
+    A request-count assertion would not be evidence here and is deliberately
+    absent: the correct code raises on request 1 and the old code stopped after
+    request 1, so `len(calls) == 1` holds under both. The 500 terminator stays
+    per this file's convention - it costs nothing, and it turns a mutant that
+    keeps walking into a failure instead of a hang, since the project has no
+    pytest-timeout.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 1:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200, json={"items": [_job_response(id="j1")], "total": 99}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_missing_total() -> None:
+    """The other half. `next_cursor` is PRESENT and DRAINED here, so a walk that
+    ignored the missing `total` would terminate normally with one row and
+    report success - which is exactly what it did before this slice.
+
+    Restoring `next_cursor: str = ""` alone must leave this one GREEN. That is
+    what makes the two field declarations separately pinned.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 1:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200, json={"items": [_job_response(id="j1")], "next_cursor": ""}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_get_page_rejects_a_missing_next_cursor() -> None:
+    """The same body through `list_jobs_page` - one request, no walk at all.
+
+    `_get_page` and `_fetch_all` share the model today, so this looks
+    redundant, and it is the six one-page methods' only pin. Nothing structural
+    forbids a lenient path being added back to `_get_page` - a `.get()` at the
+    call site is exactly how this defect was originally written - and a
+    `list_jobs_page` caller reads `page.next_cursor` to decide whether to ask
+    for more. Wired, not just the helper.
+
+    `len(calls) == 1` documents that the refusal happens after the request, not
+    instead of it. It does not discriminate the fix: the un-fixed code also made
+    exactly one request and returned a Page.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(
+            200, json={"items": [_job_response(id="j1")], "total": 99}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs_page()
+
+    assert len(calls) == 1

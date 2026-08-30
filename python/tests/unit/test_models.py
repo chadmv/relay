@@ -275,11 +275,31 @@ def test_page_validates_items_as_job_model() -> None:
     assert page.total == 5
 
 
-def test_page_defaults_empty_cursor_and_zero_total() -> None:
-    page = Page[Job].model_validate({"items": []})
-    assert page.items == []
-    assert page.next_cursor == ""
-    assert page.total == 0
+@pytest.mark.parametrize("missing", ["next_cursor", "total"])
+def test_page_requires_next_cursor_and_total(missing: str) -> None:
+    """Both REQUIRED and undefaulted, matching LogPage's next_seq and total.
+
+    Replaces test_page_defaults_empty_cursor_and_zero_total, which asserted the
+    opposite. `next_cursor: str = ""` made an ABSENT key decode to the empty
+    string, and the empty string is _fetch_all's drained signal - so a dropped
+    key reported the list finished, and twelve methods over six routes returned
+    a 200-row prefix indistinguishable from a complete list. `total: int = 0`
+    is the milder half: not a control-flow signal, but a public number the six
+    *_page methods hand back for a caller to render.
+
+    Requiring them costs nothing against a correct server. internal/api's
+    page[T] envelope carries no omitempty on any of its three json tags, so
+    encoding/json emits all three keys on every response including the zero-row
+    one - the same argument test_log_page_requires_next_seq_and_total makes for
+    LogPage.
+
+    One key is deleted per case, never both: a body missing both would go red
+    under either default alone and could not tell the two apart.
+    """
+    body = {"items": [], "next_cursor": "c", "total": 5}
+    del body[missing]
+    with pytest.raises(PydanticValidationError):
+        Page[Job].model_validate(body)
 
 
 def test_worker_parses_and_ignores_unknown_field() -> None:
@@ -400,12 +420,16 @@ def test_log_page_parses_the_envelope() -> None:
 
 @pytest.mark.parametrize("missing", ["next_seq", "total"])
 def test_log_page_requires_next_seq_and_total(missing: str) -> None:
-    """A deliberate departure from _get_page's body.get("next_cursor", "").
+    """A defaulted `next_seq: int = 0` would read a MISSING key as "drained" and
+    silently return page 1 - the defect shape this family of models exists to
+    refuse. The handler writes both keys unconditionally from a map literal, so
+    requiring them costs nothing.
 
-    A defaulted next_seq: int = 0 would read a missing key as "drained" and
-    silently return page 1 - which is the same shape as the defect this whole
-    slice exists to fix, rebuilt inside the fix. The handler writes both keys
-    unconditionally from a map literal, so requiring them costs nothing.
+    This used to call itself "a deliberate departure from _get_page's
+    body.get('next_cursor', '')". Both halves of that are gone: the body.get()
+    was deleted when the envelope was routed through Page[model], and Page's own
+    next_cursor/total defaults were removed after it. The sibling assertion is
+    test_page_requires_next_cursor_and_total above.
     """
     body = {"items": [], "next_seq": 5, "total": 9}
     del body[missing]
@@ -474,13 +498,14 @@ def test_job_parses_list_enrichment_fields() -> None:
 
 def test_job_authoring_does_not_require_enrichment_fields() -> None:
     """The six D3 fields are DEFAULTED, and that is deliberate rather than a
-    lapse from the strict no-default rule LogPage follows.
+    lapse from the strict rule Page and LogPage both follow.
 
-    Job is the AUTHORING model as well as the response model - Job(name=...) is
-    the README's first example - so a required total_tasks would break every
-    authoring call site. LogPage is response-only and has no authoring caller,
-    which is why the strict rule costs nothing there and everything here. Do
-    not "make these consistent".
+    The exemption is on the AUTHORING axis and nothing else. Job is the
+    authoring model as well as the response model - Job(name=...) is the
+    README's first example - so a required total_tasks would break every
+    authoring call site. Page and LogPage are response-only and nothing
+    constructs one, which is why the strict rule costs nothing there and
+    everything here. Do not "make these consistent".
     """
     job = Job(name="nightly")
     assert job.total_tasks == 0

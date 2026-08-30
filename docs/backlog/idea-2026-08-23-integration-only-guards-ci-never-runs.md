@@ -215,3 +215,33 @@ full integration lane runs in roughly 20 seconds locally, the cheapest of the th
 Add to Related: `internal/schedrunner/stored_spec_bounds_test.go`,
 `internal/schedrunner/startup_validation_integration_test.go`,
 `internal/api/scheduled_jobs_failure_visibility_integration_test.go`.
+
+## Notes
+
+**2026-08-29, a TENTH instance - and the first one that got partly retired rather than recorded.**
+The strict-Page-envelope slice rested on a premise nothing in the repo pinned: `internal/api`'s
+`page[T]` carrying no `omitempty`. Measured, not predicted - adding the tag left **21 of 22 Go
+packages green**. `internal/api/pagination_test.go` asserted only that a returned cursor STRING was
+empty, and `testhelper_test.go` decodes into its own struct, where Go leaves a missing key at the
+zero value and so cannot distinguish it from a present zero. The only thing that caught it was
+`python/tests/integration/`, the manual lane.
+
+What is different from the previous nine: instead of filing the gap and moving on, the slice moved
+the guard to the side that OWNS the tag.
+`TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage` now runs in `go-ci.yml`, which has no
+`paths:` filter, and it kills all three single-tag mutations.
+
+**That makes the open question sharper rather than closing it.** The remaining
+`python/tests/integration/` assertions are the ones whose truth genuinely depends on a live server
+(that `buildPage` answers a drained empty page as present-and-empty). Those cannot move to Go. So
+the decision this item should force is not "add a CI job or don't" in general, but specifically:
+**is `python/tests/integration/` ever meant to run automatically?** The answer changes what future
+slices are permitted to prove there. If it is formally accepted as manual, then an assertion whose
+only home is that lane is not evidence, and slices should be told to find a home in a running lane
+or do without - which is exactly the move that worked here.
+
+A related trap this instance also demonstrated: a guard written for a cross-language property was
+first placed in `python/tests/unit/`, inside `python.yml`'s `paths: python/**` filter. A PR renaming
+the Go symbol and touching nothing under `python/` would never have triggered it. Placement in a lane
+that runs is not sufficient; the lane must run on the commits that can break the property.
+
