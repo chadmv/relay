@@ -50,7 +50,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// ?job_id= is deliberately NOT VALIDATED: an unknown or unparseable job id
 	// yields an open, permanently empty stream rather than a 4xx - an existing
 	// contract (README.md "Events"; TestEvents_TaskIDValidation pins that
-	// `not-a-uuid` is not a 400). Both parameters are canonicalised; see
+	// `?job_id=not-a-uuid` is not a 400). Both parameters are canonicalised; see
 	// canonicalJobIDFilter for why the unparseable case must pass through
 	// UNCHANGED rather than be rendered.
 	jobID := canonicalJobIDFilter(r.URL.Query().Get("job_id"))
