@@ -258,8 +258,7 @@ class Client:
         BELOW ``_require_token()``, not above it. A client with no token cannot
         make the request whatever the limit says, and every other method on it
         reports :class:`AuthError` with a ``relay login`` hint; a limit guard in
-        front would make these six the only ones that answer a different
-        question first.
+        front would make the list_* methods answer a different question first.
         """
         self._require_token()
         if limit is not None and limit < 1:
@@ -535,7 +534,7 @@ class Client:
         applies, which is visible here because ``next_seq`` tells the caller
         there is more. Pass the returned ``next_seq`` back as ``since_seq=`` to
         page forward - VERBATIM, never ``+ 1``: the cursor is exclusive
-        already, and ``+ 1`` skips a row.
+        already, and ``+ 1`` can skip a row.
         """
         self._require_token()
         params: dict[str, str] = {}
@@ -691,9 +690,10 @@ class Client:
         three spellings ``uuid.UUID`` accepts (``+<31 hex>``, ``0x<30 hex>``,
         and a PEP 515 ``_`` inside 32 hex digits) it yields a DIFFERENT id
         than the string names - so canonicalising here could subscribe you to
-        the wrong job. Against a relay-server older than 2026-08-30 a
-        non-canonical spelling still yields a permanently empty stream; if you
-        may be talking to one, pass the id exactly as ``get_job()`` returned it.
+        the wrong job. Against a relay-server that predates ``?job_id=``
+        canonicalisation, a non-canonical spelling still yields a permanently
+        empty stream; if you may be talking to one, pass the id exactly as
+        ``get_job()`` returned it.
 
         The underlying HTTP connection is closed on generator exit.
         """
