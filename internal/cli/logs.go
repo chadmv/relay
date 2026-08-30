@@ -16,9 +16,7 @@ import (
 )
 
 // taskLogPage mirrors the envelope GET /v1/tasks/{id}/logs returns
-// (handleGetTaskLogs, internal/api/tasks.go). The handler has written this
-// object since 2026-05-08; the CLI decoded a bare array into a slice until
-// 2026-08-26, which fails and printed nothing for three and a half months.
+// (handleGetTaskLogs, internal/api/tasks.go).
 type taskLogPage struct {
 	Items   []taskLogEntry `json:"items"`
 	NextSeq int64          `json:"next_seq"`
@@ -67,14 +65,10 @@ func doLogs(ctx context.Context, cfg *Config, args []string, out, errOut io.Writ
 //
 // The two are COMPOSED, not ranked. They are not more and less informative
 // versions of the same thing; they are different things, and a message about logs
-// alone invites the reader to conclude the job itself was fine. Against a server
-// reporting a failed job whose logs route is down, "logs incomplete for 1 of the
-// job's tasks" was the entire output, and nothing on any stream said the job had
-// failed.
+// alone invites the reader to conclude the job itself was fine.
 //
-// silentError{} survives for the one case it was written for: a job that finished
-// non-done with complete output, where the exit code is the whole message and
-// Dispatch prints nothing.
+// silentError{} covers one case: a job that finished non-done with complete
+// output, where the exit code is the whole message and Dispatch prints nothing.
 //
 // Note what does NOT reach here. Both callers return a non-nil watch error
 // directly, so a stream that aborts discards the completeness alongside it. The
@@ -98,11 +92,9 @@ func watchOutcomeError(status string, completeness logCompleteness) error {
 // ZERO VALUE is the claim the exit code makes: every task that reached a terminal
 // state had its log printed in full.
 //
-// It is a struct rather than the plain count it replaced because the count could
-// only describe logs that were ATTEMPTED AND FAILED, and was silent about logs
-// that were never attempted at all - which is the larger of the two holes and the
-// one this command shipped with. Both fields have to be able to say "incomplete",
-// or the exit code overstates what was printed.
+// Both fields have to be able to say "incomplete" - a log can fail after being
+// attempted or never be attempted at all - or the exit code overstates what was
+// printed.
 type logCompleteness struct {
 	// incompleteTasks counts tasks whose log is not fully on stdout. Two
 	// distinct things put a task here and they share a count because they make
@@ -139,12 +131,8 @@ func (lc logCompleteness) reason() string {
 // depends on, and this file is registered as a slicing site in BOTH lockstep
 // guards - internal/store/tasks_status_vocabulary_lockstep_test.go for
 // taskIsTerminal and internal/store/jobs_status_vocabulary_lockstep_test.go for
-// jobIsTerminal. Read the matching one before adding a status to either.
-//
-// The second guard exists because the first one is not one: it reads
-// tasks_status_check and nothing else, so from the day jobIsTerminal was
-// registered until the day the jobs guard was written, the registration was
-// prose that could never fire.
+// jobIsTerminal. The tasks guard reads `tasks_status_check` only, so the jobs
+// guard is not redundant. Read the matching one before adding a status to either.
 //
 // A new TERMINAL task status omitted from taskIsTerminal means that task's log is
 // never fetched, while the exit code still claims every task's log printed in
@@ -165,12 +153,8 @@ func jobIsTerminal(status string) bool {
 //
 // A 200 that decodes is not the same fact as an answer. jobResp's `tasks` field
 // is `json:"tasks,omitempty"`, so a body that carries no task list decodes into
-// a silently-empty slice - and handleGetJob discarded ListTasksByJob's error
-// until 2026-08-26, so a pool exhaustion, statement timeout or cancelled context
-// produced exactly that body behind a 200. Iterating it prints nothing, sets
-// nothing, and returns having "reconciled": the same silently-zero decode
-// against a body that does not carry what the code assumed that this command was
-// fixed for, arriving through the function written to close it.
+// a silently-empty slice; iterating it prints nothing, sets nothing, and returns
+// having "reconciled".
 //
 // Two things make a body unusable.
 //
@@ -197,55 +181,22 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 }
 
 // canonicalJobID renders jobID in the one spelling the server uses for it, and
-// returns jobID unchanged when it is not a UUID at all (a typo, or a fixture id -
-// the server answers 400/404 for those and nothing downstream depends on the
-// value).
+// returns jobID unchanged when it is not a UUID at all (the server answers
+// 400/404 for those and nothing downstream depends on the value).
 //
-// The server accepts MORE spellings than it emits. parseUUID is
-// pgtype.UUID.Scan, which takes hex case-insensitively and takes the dashless
-// 32-char form too; uuidStr renders `%08x-%04x-%04x-%04x-%012x`, always
-// lowercase and always dashed. So `relay get 7E660488-...` and `relay get
-// 7e660488123443218888abcdefabcdef` are both working commands against the same
-// job.
+// The server accepts more spellings than it emits (pgtype.UUID.Scan is
+// case-insensitive and takes the dashless form), and two readers need one
+// spelling: jobSnapshotUnusable compares the body's id against ours - entirely
+// client-side, so no server change can replace this function - and the
+// ?job_id= subscription against an OLDER relay-server that does not
+// canonicalise. Canonicalising ARGV, before either request line is built,
+// covers both; adopting the id from the first snapshot instead could not fix
+// the subscription, which is established before any snapshot is read.
 //
-// ONE thing here still reads the id and does not tolerate a second spelling:
-// jobSnapshotUnusable compares the body's id against ours, so a canonical answer
-// to a non-canonical request reads as a response about a different job. That
-// comparison is entirely client-side and no server change can reach it, which is
-// why this function is not redundant and must not be deleted.
-//
-// The SECOND reader was handleEvents, and it stopped being one on 2026-08-30:
-// canonicalJobIDFilter (internal/api/events.go) now renders an accepted
-// `?job_id=` into the one spelling every publisher emits, so a non-canonical
-// subscription matches. `?job_id=` is still not VALIDATED - an unparseable id
-// passes through and still buys an open, permanently empty stream on a
-// connection with no heartbeat and no server-side timeout - and this function
-// still keeps a non-canonical spelling out of the request line against an OLDER
-// relay-server, which a CLI built from this tree may be pointed at.
-//
-// Canonicalising ARGV, before either request line is built, is what covers both.
-// Adopting the id from the first usable snapshot instead would fix the
-// comparison and could not fix the subscription, since the subscription is
-// established before any snapshot is read - and reading one first to learn the id
-// reopens the terminal-before-subscribe race the snapshot exists to close.
-//
-// Only the PARSE half is shared. This calls the same pgtype.UUID.Scan the
-// server's parseUUID calls, so what counts as a uuid cannot drift. The RENDER
-// below is a hand-written duplicate: the format string is the sixth production
-// copy of it (internal/api/server.go, cmd/relay-server/main.go,
-// internal/metrics/sweep.go, internal/scheduler/dispatch.go,
-// internal/worker/handler.go, plus this one), byte-identical today and unified
-// by nothing.
-//
-// Both directions are now pinned, but by two independent literals rather than by
-// any relationship between the functions. TestWatchJobLogs_NonCanonicalJobID_-
-// IsResolvedNotRejected hard-codes the expected spelling rather than deriving it
-// from this function, so a change HERE goes red; and since 2026-08-30
-// TestCanonicalJobIDFilter (internal/api/events_test.go) hard-codes the same
-// canonical spelling on the server side, so a change to internal/api's uuidStr
-// goes red too - measured, by rendering it uppercase and watching that test
-// fail. Still no test relates the two functions, and the four other unexported
-// copies of the format string remain related to nothing at all.
+// Only the PARSE half is shared with the server (same pgtype.UUID.Scan). The
+// RENDER below is a duplicate of the server's format string, related to it by
+// nothing; TestWatchJobLogs_NonCanonicalJobID_IsResolvedNotRejected pins this
+// side's spelling.
 func canonicalJobID(jobID string) string {
 	var u pgtype.UUID
 	if err := u.Scan(jobID); err != nil || !u.Valid {
@@ -261,9 +212,7 @@ func canonicalJobID(jobID string) string {
 // which context the id lands in.
 //
 // jobID is args[0]: typed by whoever ran the command, or pasted from wherever
-// they got it. It is the only untrusted input this file has, and it reached all
-// three of these request lines raw while printTaskLogs escaped the ONE id that
-// was a gen_random_uuid() primary key the server had just handed back.
+// they got it.
 //
 // The two contexts need different escapers and the difference is not cosmetic.
 // In a path a `/` reroutes the request to another endpoint on the same host with
@@ -297,14 +246,12 @@ func jobEventsPath(jobID string) string {
 // writes through them, not by a call at the bottom of the function.
 func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (finalStatus string, completeness logCompleteness, err error) {
 	// Once, before either request line is built and before anything compares an
-	// id. See canonicalJobID for the ONE reader here that still needs it, and for
-	// why the second one stopped being a reader on 2026-08-30.
+	// id. See canonicalJobID for the readers that need it.
 	jobID = canonicalJobID(jobID)
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)
 	// What the SUBSCRIBE-time snapshot settled, which is what the defer at the
-	// bottom needs to decide whether a reconcile is owed. There are three answers
-	// and the third one used to be indistinguishable from the second.
+	// bottom needs to decide whether a reconcile is owed. There are three answers.
 	//
 	//   - It established the terminal job status. It IS the reconcile; a second
 	//     read can only add a way to fail. snapshotWasFinal.
@@ -351,16 +298,14 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//
 	// Once the job is TERMINAL the same task is a contradiction - the job says
 	// everything is over and the task says it is not - and skipping it silently
-	// printed nothing for it while the zero-value logCompleteness still claimed
-	// the whole log was on stdout. That is unreachable today only by accident:
-	// CancelJobTasks' allow-list is ('pending','queued','running','dispatched')
-	// and omits `preparing`, which is already in the proto as
-	// TASK_STATUS_PREPARING with the agent already streaming LOG_STREAM_PREPARE
-	// chunks for it, so a cancelled job with a preparing task reaches this line
-	// the day that status lands. Print the rows the server will give us - they
-	// are what the operator came for - and say on errOut and in the exit code
-	// that the log is not final. The failure direction has to be loud, not
-	// optimistic.
+	// prints nothing for it while the zero-value logCompleteness still claims
+	// the whole log is on stdout. CancelJobTasks' allow-list omits `preparing`
+	// (already in the proto as TASK_STATUS_PREPARING, with the agent already
+	// streaming LOG_STREAM_PREPARE chunks), so a cancelled job with a preparing
+	// task reaches this line the day that status lands. Print the rows the
+	// server will give us - they are what the operator came for - and say on
+	// errOut and in the exit code that the log is not final. The failure
+	// direction has to be loud, not optimistic.
 	emitSnapshot := func(job jobResp) {
 		jobDone := jobIsTerminal(job.Status)
 		for _, t := range job.Tasks {
@@ -399,8 +344,6 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//
 	// A transport failure and a 200 whose body cannot be an answer are ONE return
 	// value because they are one fact to every caller: nothing was established.
-	// Keeping them apart is what let the unusable body be handled as a lesser
-	// problem than the failed read in one reader and an equal one in the other.
 	//
 	// The third return is the separate question of whether asking again could ever
 	// change the answer, and it is non-nil only when it CANNOT: the job does not
@@ -437,17 +380,16 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// something that cannot arrive - handleEvents holds the connection
 			// open with no heartbeat and no server-side timeout, and this
 			// command's context has no deadline - so the operator gets no output
-			// and no error, forever. That is the symptom this whole slice exists
-			// to fix, arriving through the guard written to make failures visible.
+			// and no error, forever.
 			//
-			// One retry, not a loop: a transient ListTasksByJob failure is exactly
-			// what the server-side half of this slice turned from a silent 200
-			// into a 500, and it is what this covers. A TRANSIENT read that fails
-			// twice leaves the client genuinely unable to tell a finished job from
-			// a running one, so it falls through to the stream and waits - which is
-			// the correct behaviour for the running case and is the residual hole
-			// for the finished one. Closing that needs the snapshot re-read while
-			// the stream is live, which this shape cannot express.
+			// One retry, not a loop: a transient server-side failure (a 500
+			// from a failed task-list read) is what this covers. A TRANSIENT
+			// read that fails twice leaves the client genuinely unable to tell
+			// a finished job from a running one, so it falls through to the
+			// stream and waits - which is the correct behaviour for the running
+			// case and is the residual hole for the finished one. Closing that
+			// needs the snapshot re-read while the stream is live, which this
+			// shape cannot express.
 			//
 			// That inability is what justifies the fall-through, and it is a claim
 			// about transient failures ONLY. Against a 404, a 400, a 401 or a 403
@@ -456,15 +398,15 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			job, why, fatal = readJobSnapshot()
 		}
 		if fatal != nil {
-			// A definite answer ends the watch here, and this is the arm the whole
-			// slice exists for. The stream cannot improve on it: handleEvents
-			// canonicalises `?job_id=` but still does not VALIDATE it (its own
-			// comment, internal/api/events.go), so an id naming no job - whether
-			// it parses or not - gets an open, permanently empty stream with no
-			// heartbeat and no server-side timeout, against a context cmd/relay
-			// gives no deadline. Falling through would print nothing on either
-			// stream until Ctrl-C - and a well-formed uuid that names no job is
-			// the likeliest thing an operator mistypes into this command.
+			// A definite answer ends the watch here. The stream cannot improve
+			// on it: handleEvents canonicalises `?job_id=` but still does not
+			// VALIDATE it (its own comment, internal/api/events.go), so an id
+			// naming no job - whether it parses or not - gets an open,
+			// permanently empty stream with no heartbeat and no server-side
+			// timeout, against a context cmd/relay gives no deadline. Falling
+			// through would print nothing on either stream until Ctrl-C - and a
+			// well-formed uuid that names no job is the likeliest thing an
+			// operator mistypes into this command.
 			//
 			// The error is carried out through the defer rather than returned from
 			// here, because this is a StreamEvents callback and its only return is
@@ -509,11 +451,9 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	//
 	//   - Cancel. handleCancelJob calls CancelJobTasks, which flips every
 	//     non-terminal task to `failed` in a single statement, then publishes ONE
-	//     event, for the job. No task frame is published for those tasks anywhere:
-	//     the three production `Type: "task"` publish sites are two in
-	//     internal/scheduler/dispatch.go and one in internal/worker/handler.go, and
-	//     none of them is on the cancel path. Without this reconcile the command
-	//     prints nothing at all for a cancelled job whose tasks ran and logged.
+	//     event, for the job - no task frames for those tasks. Without this
+	//     reconcile the command prints nothing at all for a cancelled job whose
+	//     tasks ran and logged.
 	//   - Ordering. handleTaskStatus publishes its task frame AFTER recomputing the
 	//     job status, so with two tasks finishing concurrently the job's `done`
 	//     frame can reach the subscriber ahead of the last task's own frame.
@@ -598,37 +538,36 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// Take the reconcile's obligation in the same breath as the call that can
 	// create it. A terminal status can only be established from inside
 	// onSubscribed or handler, both of which StreamEvents owns, and discharging
-	// it a hundred lines later at a single call site left the window between the
-	// two open to any early return added since: deleting the call is caught by a
-	// test, but a `return` added above it would not be. Armed here, every exit
-	// from this function passes through it.
+	// it at a distant single call site would leave the window between the two
+	// open to any early return: deleting the call is caught by a test, but a
+	// `return` added above it would not be. Armed here, every exit from this
+	// function passes through it.
 	//
 	// It is skipped for exactly ONE of the three things the subscribe-time
 	// snapshot can settle: that the job was already terminal. Then it is a pure
 	// duplicate request. That snapshot is authoritative, and emitSnapshot has
 	// already printed every task it listed - note the argument is that, and NOT
-	// that every task in a terminal job is terminal. The stronger claim is what
-	// this file used to make, and emitSnapshot exists partly to handle the case
-	// that disproves it: once the job is terminal a non-terminal task is printed
-	// too, and flagged. Making the request anyway can only add a way to fail, and
-	// it did: a 500 on the duplicate read turned a run that printed every line
-	// into exit 1 telling the operator their logs may be missing. `relay logs
-	// <finished-job>` is this command's dominant invocation.
+	// that every task in a terminal job is terminal: once the job is terminal a
+	// non-terminal task is printed too, and flagged (see emitSnapshot). Making
+	// the request anyway can only add a way to fail: a 500 on the duplicate read
+	// turns a run that printed every line into exit 1 telling the operator their
+	// logs may be missing. `relay logs <finished-job>` is this command's
+	// dominant invocation.
 	//
 	// The other two both owe a reconcile, and the gate has to name them
 	// SEPARATELY. Writing it as "a terminal status was observed" covers only the
 	// first of them, because a snapshot that established nothing observes no
-	// status at all - and gating on the absence of a status is what turned that
-	// path into "connection lost" with no output for a job that had finished long
-	// before the command started.
+	// status at all - gating on the absence of a status turns that path into
+	// "connection lost" with no output for a job that finished before the
+	// command started.
 	//
 	// The connection-lost error is decided here too, after the reconcile rather
 	// than before it, so what the reconcile establishes replaces it. Deciding it
-	// at the return statement instead made the skip above depend on the error
-	// paths happening to write "" into finalStatus on their way past: true today,
-	// and one edit to a return statement away from arming a reconcile on the
+	// at the return statement instead would make the skip above depend on the
+	// error paths happening to write "" into finalStatus on their way past - one
+	// edit to a return statement away from arming a reconcile on the
 	// transport-error path. Nothing below the stream call reads or writes the
-	// outcome now, so there is no ordering left to get wrong.
+	// outcome, so there is no ordering to get wrong.
 	defer func() {
 		// A definite snapshot failure stopped the stream cleanly, so StreamEvents
 		// returned nil and there is no transport error to prefer. It is the
@@ -728,9 +667,9 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 		// crafted value does not reach here today; escaping means the argument does
 		// not rest on that provenance.
 		//
-		// It does NOT remove the class from this command, and the comment used to
-		// say it did. The class lives on jobID, which is args[0] - see jobPath and
-		// jobEventsPath, which are where it is actually covered.
+		// It does NOT remove the class from this command: the class lives on
+		// jobID, which is args[0] - see jobPath and jobEventsPath, which are
+		// where it is covered.
 		path := fmt.Sprintf("/v1/tasks/%s/logs?since_seq=%d&limit=%d",
 			url.PathEscape(taskID), since, relayclient.PageRequestLimit)
 		var page taskLogPage
@@ -741,9 +680,9 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 		for _, l := range page.Items {
 			// The write is checked, and a failure stops the loop. Unchecked, a
 			// stdout that rejects every write (a full disk, a closed pipe, a `>`
-			// redirect onto something that refuses) reaches this slice's own
-			// symptom by the other door: the log pages to the end, nothing is
-			// printed, and the command exits 0 claiming it printed everything.
+			// redirect onto something that refuses) means the log pages to the
+			// end, nothing is printed, and the command exits 0 claiming it
+			// printed everything.
 			if _, werr := fmt.Fprintf(out, "[%s %s] %s\n", taskName, l.Stream, l.Content); werr != nil {
 				return progress, fmt.Errorf("writing page %d: %w", pages, werr)
 			}
@@ -763,10 +702,9 @@ func printTaskLogs(ctx context.Context, c *relayclient.Client, taskID, taskName 
 		// common case of a log whose length is an exact multiple of the page size,
 		// where the final request legitimately comes back empty.
 		//
-		// Which is precisely why this must be an ERROR and not the silent nil it
-		// used to be: the only server that reaches this line is one that is
-		// misbehaving, and returning nil would launder that into a completeness
-		// claim the client cannot support.
+		// Which is precisely why this must be an ERROR: a server that reaches
+		// this line is misbehaving, and returning nil would launder that into a
+		// completeness claim the client cannot support.
 		if len(page.Items) == 0 {
 			return progress, fmt.Errorf(
 				"server returned an empty page without reporting the log as drained (next_seq %d after since_seq %d)",

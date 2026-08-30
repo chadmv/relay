@@ -101,3 +101,14 @@ The mechanical detail, confirmed while writing the CLI comment: `jobcreate.Creat
 
 Add to Related: `internal/cli/jobs.go` (`jobResp.Labels`),
 `internal/cli/jobs_integration_test.go` (`TestIntegration_GetJobJSON_LabelsWhenTheJobHasNone`).
+
+## Notes (2026-08-30, comment-policy retrofit)
+
+The Python SDK's `_empty_on_null` docstring no longer records which of its five annotated fields
+have a live null path (the provenance was struck per the new CLAUDE.md comment policy); the record
+now lives here. Observed arriving as `null`: `Job.labels` (`jobcreate.go` marshals a nil map
+unconditionally) and `Reservation.selector` (`reservations.go` likewise). The other three
+(`Worker.labels`, `Task.commands`, `ScheduledJob.job_spec`) have no live null path today and are
+defence in depth. No test pins the two observed null paths; fixing this item at `rawJSON` (or a
+pin of the null-producing writes) is what would let the client-side defences be classified as
+purely defensive.

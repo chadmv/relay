@@ -22,41 +22,16 @@ def _empty_on_null(empty: Callable[[], Any]) -> BeforeValidator:
     """Coerce a wire ``null`` to the field's empty value, leaving absence alone.
 
     ``Field(default_factory=dict)`` covers a MISSING key. It does nothing for a
-    key that is present and ``null``, which is a different wire shape and the
-    one five of the API's jsonb fields actually send.
-
-    internal/api/server.go has two helpers for those columns. ``rawObject``
-    normalises ``null`` to ``{}`` and its comment says why - "so a client never
-    receives a null where an object is expected" - but it is used at only 2
-    sites (Task.env, Task.requires). ``rawJSON`` passes ``null`` through, and
-    its 5 sites are the fields annotated with this below. Server-side that
-    asymmetry is a separate question; client-side the SDK must not raise on a
-    document the server legitimately produces today.
+    key that is present and ``null``, which is a different wire shape and one
+    the server legitimately sends for some jsonb fields (``Job.labels`` and
+    ``Reservation.selector`` arrive as ``null`` today); the SDK must not raise
+    on a document the server legitimately produces. The remaining annotated
+    fields have no live null path today and are insurance against a server
+    change.
 
     A BEFORE validator, so the declared type stays ``dict``/``list`` rather
     than becoming Optional: a caller never has to test these for None, which
     is the whole point of the empty default they already carried.
-
-    TWO of the five are OBSERVED, three are DEFENCE IN DEPTH, and the split
-    was established against a running relay-server rather than by reading:
-
-      - ``Job.labels`` and ``Reservation.selector`` really do arrive as
-        ``null``. Confirmed by raw HTTP against a live server - submit a job
-        or create a reservation without the field and the handler marshals a
-        Go nil map. ``Job.labels`` is how this whole class was found: the
-        integration suite's list-jobs test failed on it and every
-        reading-based review had passed the same code.
-      - ``Worker.labels``, ``Task.commands`` and ``ScheduledJob.job_spec``
-        have no live path that produces ``null`` today. Worker registration
-        never assembles a nil map before marshalling, and jobspec.Validate
-        rejects a task with zero commands before storage. Their coercion was
-        verified by forcing ``'null'::jsonb`` in SQL, which is a synthetic
-        input, so it is insurance against a server change and NOT a fix for
-        an observed bug.
-
-    The distinction is recorded because it is the thing a future reader
-    cannot recover: all five look identical in the annotation, and only two
-    of them are evidence that the server does this.
     """
 
     def _coerce(value: Any) -> Any:
@@ -115,11 +90,10 @@ class EventType(str, Enum):
     this enum is the vocabulary the server emits TODAY, for comparison and
     autocomplete.
 
-    ``DROPPED`` is not a resource event. The server writes it directly
-    (handleEvents, internal/api/events.go) when the broker drops a subscriber
-    for falling behind, and its meaning is "you missed frames": anything
-    published in the gap is gone, so re-read the job with
-    :meth:`relay.Client.get_job` and resume each task's log with
+    ``DROPPED`` is not a resource event. The server writes it directly when
+    the broker drops a subscriber for falling behind, and its meaning is "you
+    missed frames": anything published in the gap is gone, so re-read the job
+    with :meth:`relay.Client.get_job` and resume each task's log with
     ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not ``task_logs``,
     which takes no ``since_seq``.
     """
@@ -338,17 +312,9 @@ class Job(BaseModel):
     # List-only enrichment (GET /v1/jobs rows). The server computes these from
     # the job's tasks and its scheduled-job source, and does not populate them
     # on single-job routes. They are DEFAULTED because Job is the authoring
-    # model too - Job(name="nightly") must keep working.
-    #
-    # That is an exemption on the AUTHORING axis and it is the only axis it is
-    # on. Page and LogPage require every envelope field they declare, and Page
-    # is now the closer analogue of the two: like Job it is a response model
-    # over a generic item list, and unlike Job nothing constructs one BY
-    # KEYWORD, so requiring its fields costs nothing. Page IS instantiated -
-    # model_validate on a decoded body, in _get_page and in tests/unit - and
-    # that is the point: every such call supplies the whole wire envelope or
-    # raises. Do not "make these consistent" - what
-    # makes these six defaulted is who BUILDS a Job, not what the values mean.
+    # model too - Job(name="nightly") must keep working. Do not "make these
+    # consistent" with Page/LogPage's required envelope fields: what makes
+    # these defaulted is who BUILDS a Job, not what the values mean.
     total_tasks: int = 0
     done_tasks: int = 0
     started_at: Optional[datetime] = None
@@ -466,40 +432,25 @@ class LogPage(BaseModel):
     """One page of a task's log, forward-only from ``since_seq``.
 
     ``next_seq`` is 0 when the server reports the log drained; otherwise it is
-    the cursor for the next request, passed VERBATIM as ``?since_seq=`` because
-    the server's predicate is ``id > $2`` (exclusive - see GetTaskLogsPage in
-    internal/store/query/tasks.sql). Never ``next_seq + 1``: ``task_logs.id`` is
-    a global BIGSERIAL, so when one task logs alone its ids are contiguous and
-    +1 skips the very next row.
+    the cursor for the next request, passed VERBATIM as ``?since_seq=`` - the
+    cursor is exclusive already. Never ``next_seq + 1``, which skips the very
+    next row when one task logs alone.
 
     ``next_seq`` and ``total`` are REQUIRED and undefaulted, and so are
-    :class:`Page`'s ``next_cursor`` and ``total``. The two envelopes agree; what
-    matters is the reason, which is the same for both. A defaulted
-    ``next_seq: int = 0`` would read a MISSING key as "drained" and silently
-    return page 1, because 0 is this walk's end-of-log signal - and ``Page``
-    had exactly that hole with ``next_cursor: str = ""`` until it was closed.
-    An absent key with a benign default is not a missing value. It is a
+    :class:`Page`'s ``next_cursor`` and ``total``, for the same reason. A
+    defaulted ``next_seq: int = 0`` would read a MISSING key as "drained" and
+    silently return page 1, because 0 is this walk's end-of-log signal. An
+    absent key with a benign default is not a missing value. It is a
     FABRICATED one, and for a cursor the fabricated value is "there is nothing
     more".
 
-    Read that as a rule about PAGE-ENVELOPE fields, not about this file. It does
-    not generalize to every default here, and the exemptions sit on two axes
-    that are not the same as each other:
-
-    - :class:`Job`'s list-only enrichment fields are exempt on the AUTHORING
-      axis. ``Job`` is the model a caller CONSTRUCTS - ``Job(name="nightly")``
-      is the README's first example - so a required ``total_tasks`` would break
-      every authoring call site. The question there is who BUILDS the object,
-      not what the value means. ``Page`` and ``LogPage`` are response-only and
-      nothing in ``relay/`` or its tests constructs one BY KEYWORD - every
-      instantiation is a ``model_validate`` over a decoded body, which supplies
-      the whole envelope or raises - which is why the strict rule costs nothing
-      here.
-    - Container fields such as ``Worker.labels`` and ``Reservation.selector``
-      are exempt on the PAYLOAD axis: an empty dict is the honest reading of an
-      absent map, and no control flow and no reported count is derived from it.
-      A cursor is neither a container nor a payload - it is the loop's stop
-      condition, which is why it gets no default at all.
+    Read that as a rule about PAGE-ENVELOPE fields, not about every default in
+    this file: :class:`Job`'s list-only enrichment fields stay defaulted
+    because ``Job`` is the model a caller CONSTRUCTS, and container fields
+    such as ``Worker.labels`` stay defaulted because an empty dict is the
+    honest reading of an absent map, with no control flow derived from it. A
+    cursor is neither - it is the loop's stop condition, which is why it gets
+    no default at all.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -536,24 +487,19 @@ class ScheduledJob(BaseModel):
     last_run_at: Optional[datetime] = None
     last_job_id: Optional[str] = None
     # Why the scheduler last failed to produce a job from this schedule, and
-    # when. ABSENT MEANS HEALTHY: the server omits both keys entirely
-    # (scheduledJobResponse carries `omitempty` on each) and never sends "" or
-    # null.
+    # when. ABSENT MEANS HEALTHY: the server omits both keys entirely and
+    # never sends "" or null.
     #
-    # A CONSUMER'S HEALTHY TEST IS `not sj.last_error`, matching every other
-    # relay client - the CLI's scheduleResp.hasFailure is `!= nil && *p != ""`
-    # and the SPA renders its panel on a plain truthiness check. `is None`
-    # answers the narrower question of whether the SERVER said anything at all,
-    # which is what test_scheduled_job_failure_fields_are_none_when_the_server_
+    # A CONSUMER'S HEALTHY TEST IS `not sj.last_error`. `is None` answers the
+    # narrower question of whether the SERVER said anything at all, which is
+    # what test_scheduled_job_failure_fields_are_none_when_the_server_
     # omits_them pins; it is not the question an application is asking.
     #
     # The two only differ on "", which this SDK deliberately does not coerce to
     # None (see test_scheduled_job_empty_last_error_is_not_coerced_to_none):
     # absent, empty and present are three states and collapsing two of them is
     # the exact defect these fields exist to report, so the SDK reports what it
-    # received and leaves the partition to the caller. A caller who picks
-    # `is None` renders a labelled blank on a "" that every other relay surface
-    # calls healthy.
+    # received and leaves the partition to the caller.
     #
     # last_error is derived from the schedule's stored configuration - its
     # job_spec, or its cron_expr and timezone for a "parse cron: ..." failure -
@@ -583,43 +529,21 @@ class Page(BaseModel, Generic[T]):
 
     All three fields are REQUIRED and undefaulted, and ``next_cursor`` is the
     one that matters. The empty string is this SDK's drained signal, so a
-    defaulted ``next_cursor: str = ""`` read an ABSENT key as "the list ended":
-    :meth:`relay.Client.list_jobs` returned page 1, raised nothing, and no
-    caller could tell a 200-row prefix from a complete 200-row list. ``total``
-    is the milder half - not a control-flow signal, but a number the six
+    defaulted ``next_cursor: str = ""`` would read an ABSENT key as "the list
+    ended": :meth:`relay.Client.list_jobs` would return page 1, raise nothing,
+    and no caller could tell a 200-row prefix from a complete 200-row list.
+    ``total`` is the milder half - not a control-flow signal, but a number the
     ``*_page`` methods hand back for a caller to render, where a silent 0 is a
     wrong number rather than a missing one.
 
-    Requiring them costs nothing against a correct server: internal/api's
-    ``page[T]`` envelope tags ``items``, ``next_cursor`` and ``total`` with no
-    ``omitempty``, so all three keys are emitted on every response including
-    the zero-row one.
-
-    The load-bearing property is the single TYPE, not a single constructor.
-    Every handler that RETURNS a ``page[...]`` builds the composite literal
-    itself. ``buildPage`` returns the trimmed items and the cursor string and
-    never touches the struct, and the count is not its output at all - it comes
-    from a separate ``Count*`` query per handler. handleListUsers' two early
-    returns go further and hand-build a zero-row page with ``NextCursor: ""``
-    and ``Total: 0``. Because the omission is impossible at the TAG level, all
-    of them emit all three keys regardless of who wrote them. A
-    single-constructor claim would be both false and weaker than the one that
-    actually holds.
-
-    Read that quantifier's domain narrowly: it ranges over the handlers that
-    emit this envelope, NOT over every list handler. handleListTasks and
-    handleListWorkerWorkspaces return a bare JSON array with no envelope at
-    all, which is why :meth:`relay.Client.get_tasks` is outside everything
-    argued here - see the note in python/README.md about the two
-    ``response.json()`` sites that do not hand the whole body to a model.
-
-    No site count is repeated here, deliberately. A cross-language tally in a
-    Python docstring cannot be pinned by anything on either side and drifts on
-    the next list endpoint, while the tag-level argument above holds for any
-    number of sites. The property itself IS pinned, on the Go side where the
-    tags live: TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage in
-    internal/api/pagination_test.go marshals a zero-value ``page[T]`` and
+    Requiring them costs nothing against a correct server. That property is
+    pinned on the Go side: TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage
+    in internal/api/pagination_test.go marshals a zero-value ``page[T]`` and
     asserts all three keys are present.
+
+    Not every endpoint uses this envelope: ``GET /v1/jobs/{id}/tasks`` returns
+    a bare JSON array, which is why :meth:`relay.Client.get_tasks` is outside
+    everything argued here - see the note in python/README.md.
 
     ``extra="ignore"`` stays. Strictness here is about the ABSENCE of a
     contract field, not the presence of an unknown one - opposite directions.

@@ -16,8 +16,7 @@ import (
 // FEWER log lines than normal, which is indistinguishable from a healthy fleet.
 // See docs/superpowers/specs/2026-08-21-silent-drop-observability.md.
 //
-// THE CONTRACT, fixed for all four sections before the first one shipped so that
-// no later slice reshapes a payload that is already in the wild:
+// THE CONTRACT (the payload is published; reshaping it is a breaking change):
 //
 //   - "counts" are MONOTONIC since started_at. "levels" are CURRENT. A reporter
 //     may consult counts to decide whether to speak and may NEVER consult
@@ -35,18 +34,14 @@ import (
 //     two replicas may be added; levels may NOT (max_per_source in particular
 //     does not sum into anything meaningful). No persistence, no history, no
 //     rates, no alerting - a poller derives rates itself.
-//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. Two paths are exempt
-//     today and each was argued in the commit that added it: started_at, as an
-//     RFC 3339 instant; and watchdog.counts.swept_by_worker, as a map from
-//     server-assigned worker uuids to counts, bounded by
-//     WatchdogSweptWorkerMax. The second was written into slice 1's allow-list
-//     against code nobody had written, DE-AUTHORIZED during slice 1's review
-//     because pre-blessing it reduced its only forcing function to a one-line
-//     edit, and re-added in slice 4 with predicates that DESCEND into the map
-//     and enforce the cap - see counterPayloadExemption. Anything else
+//   - NO FIELD ANYWHERE CARRIES A CALLER-SUPPLIED BYTE. Two exemptions:
+//     started_at, an RFC 3339 instant; and watchdog.counts.swept_by_worker, a
+//     map from server-assigned worker uuids to counts, bounded by
+//     WatchdogSweptWorkerMax and admitted by counterPayloadExemption
+//     predicates that DESCEND into the map and enforce the cap. Anything else
 //     non-integer goes RED and forces the same argument.
 //
-// WHAT THIS ENDPOINT DOES NOT BUY, stated next to what it does:
+// WHAT THIS ENDPOINT DOES NOT BUY:
 //
 //   - A zero level is not necessarily an empty control. When BOTH gRPC
 //     connection caps are disabled (RELAY_GRPC_MAX_CONNS=0 and
@@ -54,21 +49,16 @@ import (
 //     connection unwrapped and does no accounting at all, so every field of
 //     grpc_admission.levels reads 0 with thousands of live connections. "Not
 //     measured" and "nothing there" are the same payload there, which is this
-//     endpoint's own subject one layer down. Not fixed in this slice: closing it
-//     needs either a boolean (banned by the counts-only rule) or the configured
-//     caps as extra fields, and "max_per_source" as an observed maximum next to
-//     "max_per_source" as a configured cap is a naming trap. Documented in
-//     netlimit.Stats, in README and here.
+//     endpoint's own subject one layer down. Closing it needs either a boolean
+//     (banned by the counts-only rule) or the configured caps as extra fields,
+//     and "max_per_source" as an observed maximum next to "max_per_source" as
+//     a configured cap is a naming trap. See netlimit.Stats.
 //   - Serving grpc_admission is not free at every configuration. max_per_source
 //     is an O(len(perIP)) walk under the listener's mutex, and len(perIP) is
 //     bounded by RELAY_GRPC_MAX_CONNS only while that cap is enabled; with the
 //     total cap disabled and the per-source cap live, it is bounded by the
 //     process file-descriptor limit instead. What the walk delays is the gRPC
-//     ACCEPT PATH, not this request: this route's BearerAuth is paid in a
-//     different goroutine and completes before the handler runs, so it never
-//     overlaps holding that mutex, and cmd/relay-server's runRefusalReporter
-//     takes the same walk once a minute whether or not anybody polls here.
-//     Nothing rate-limits this route. Measured and priced in
+//     ACCEPT PATH, not this request, and nothing rate-limits this route. See
 //     netlimit.Listener.Stats.
 //
 // HOW A FUTURE SECTION ATTACHES ITSELF, because the answer is NOT the same for
@@ -89,15 +79,10 @@ import (
 // AND THE RULE THAT HOLDS FOR EVERY SECTION, WHICHEVER OF THOSE THREE SHAPES IT
 // TAKES: a section that copies a subsystem's snapshot into a response struct
 // FIELD BY FIELD needs a CARDINALITY CHECK between the two types, written in
-// this package, because this is the only place both are visible. A
-// field-by-field mapper is the one link in the chain the compiler says nothing
-// about - a field added on the subsystem side and not here compiles, vets and
-// tests clean while its number is counted on the hot path and published under no
-// JSON key. Every other link in ingest_log_budget's chain already had such a
-// check (kinds against the counters array, the array against
-// worker.IngestLogDropsByKind, CounterSources' fields against
-// cmd/relay-server's wiring table, the response against this handler's
-// branches); the mapper's was missed and is now
+// this package - the one that imports both. A field-by-field mapper is the one
+// link in the chain the compiler says nothing about - a field added on the
+// subsystem side and not here compiles, vets and tests clean while its number
+// is counted on the hot path and published under no JSON key. Pinned by
 // TestIngestLogKindCountsPublishesEveryWorkerSideField. Note what does NOT
 // substitute for it: counterPayloadLeaves is an ElementsMatch over this
 // package's OWN payload, so it reddens on an extra leaf here and is silent on a
@@ -112,11 +97,9 @@ type GRPCAdmissionSource interface {
 // IngestLogBudgetSource is whatever can report what the per-connection agent log
 // budgets have dropped - in production, *worker.Handler.
 //
-// ONE METHOD, AND A SEPARATE FIELD PER WORKER COUNTER. THREE CONTROLS NOW LIVE
-// ON ONE *worker.Handler - this budget, the task-log fence and the task-status
-// fence - and each has its OWN source field and its own section, so that "wired"
-// stays a per-SECTION fact. Widening this interface to carry another would make
-// independent controls appear and disappear together.
+// ONE METHOD, AND A SEPARATE SOURCE FIELD PER WORKER COUNTER, so that "wired"
+// stays a per-SECTION fact. Widening this interface to carry another counter
+// would make independent controls appear and disappear together.
 type IngestLogBudgetSource interface {
 	IngestLogDropCounts() worker.IngestLogDrops
 }
@@ -124,11 +107,10 @@ type IngestLogBudgetSource interface {
 // TaskLogFenceSource is whatever can report how many task-log chunks the
 // AppendTaskLog fence has rejected - in production, *worker.Handler.
 //
-// ITS OWN SOURCE FIELD, NOT A WIDENED IngestLogBudgetSource, exactly as that
-// interface's comment demands. THREE counters live on the same *worker.Handler
-// and are wired together today, but they are independent CONTROLS counting
-// different nouns, and an interface carrying more than one would make them appear
-// and disappear together as a matter of TYPE rather than as a matter of wiring.
+// ITS OWN SOURCE FIELD, NOT A WIDENED IngestLogBudgetSource: the counters are
+// wired together today, but they are independent CONTROLS counting different
+// nouns, and an interface carrying more than one would make them appear and
+// disappear together as a matter of TYPE rather than as a matter of wiring.
 //
 // A SCALAR, NOT A STRUCT, and that is load-bearing rather than minimal: a
 // section whose payload struct restates fields owned by another package needs a
@@ -144,11 +126,9 @@ type TaskLogFenceSource interface {
 // TaskStatusFenceSource is whatever can report what handleTaskStatus's two
 // epoch-fenced writes have refused - in production, *worker.Handler.
 //
-// ITS OWN SOURCE FIELD, not a widened TaskLogFenceSource and not a widened
-// IngestLogBudgetSource. All three counters live on the same *worker.Handler and
-// are wired together today, but they are independent CONTROLS counting different
-// nouns, and an interface carrying two would make them appear and disappear
-// together as a matter of TYPE rather than as a matter of wiring.
+// ITS OWN SOURCE FIELD, not a widened sibling interface, for the reason on
+// TaskLogFenceSource: independent controls must not appear and disappear
+// together as a matter of TYPE.
 //
 // A PRODUCER-OWNED STRUCT, AND THE DIRECTION IS FORCED. internal/api imports
 // internal/worker (server.go), so the watchdog's shape - declare the snapshot
@@ -178,35 +158,31 @@ type TaskStatusFenceSource interface {
 // against SweptOverflow instead. Nothing in this package enforces anything at
 // runtime - counterPayloadAllowList is a test predicate, and it runs against a
 // fake source whose keys are literals in server_counters_test.go, so it can only
-// ever say that THAT fixture is well-formed. The one place the real producer's
-// keys are read back through the real route is cmd/relay-server's
+// ever say that THAT fixture is well-formed. The real producer's keys are read
+// back through the real route in cmd/relay-server's
 // TestBuildHTTPServer_TheServedWatchdogKeysAreCanonicalUUIDsUnderTheCap, which
-// exists because that package can import both sides and this one structurally
-// cannot.
+// lives there because that package can import both sides and this one
+// structurally cannot.
 //
-// 256 is a policy number, not a measurement: it comfortably exceeds any fleet
-// this project has seen, and the design is FIRST-COME rather than top-K because
-// top-K needs a comparison on every increment to buy an ordering that
+// 256 is a policy number, not a measurement. The map is FIRST-COME rather than
+// top-K: top-K needs a comparison on every increment to buy an ordering that
 // swept_overflow already discloses the absence of.
 const WatchdogSweptWorkerMax = 256
 
 // WatchdogCounts is what the coordinator stale-task watchdog has ended since
 // started_at. It is declared HERE rather than in internal/scheduler because
 // internal/scheduler imports this package (scheduler/dispatch.go), so the
-// reverse import is impossible - which INVERTS the shape ingest_log_budget uses,
-// where the producing package owned the type.
+// reverse import is impossible.
 //
-// THAT INVERSION IS WHY THERE IS NO MAPPER ANYWHERE. This type is the response
-// type: serverCountersResponse carries *WatchdogCounters directly and
+// THERE IS NO MAPPER ANYWHERE. This type is the response type:
+// serverCountersResponse carries *WatchdogCounters directly and
 // handleServerCounters assigns it whole, and scheduler.Watchdog stores a
 // WatchdogCounts as its OWN counter state and returns a struct copy. A field
-// added here is published by both sides for free. That matters because slice 2
-// shipped a fully correct sixth log kind that was counted on one side and
-// published under no JSON key on the other, with all three packages green; the
-// remedy there was an arity assertion between two restated types, and the better
-// remedy is not to restate. TestWatchdogSectionRestatesNothing guards the
-// antecedent, and TestWatchdogCountersLiveOnlyInThePublishedStruct guards the
-// only remaining way a counter can go unpublished.
+// added here is published by both sides for free, where a restating mapper
+// would need an arity assertion instead.
+// TestWatchdogSectionRestatesNothing guards the antecedent, and
+// TestWatchdogCountersLiveOnlyInThePublishedStruct guards the only remaining
+// way a counter can go unpublished.
 //
 // WHAT THESE NUMBERS DO NOT COVER, said here because it is the question an
 // operator will get wrong: they count assignments THE COORDINATOR ended. An
@@ -219,13 +195,11 @@ const WatchdogSweptWorkerMax = 256
 // WHY NOT A DATABASE QUERY, which would be better on every other axis - no
 // process state, survives restarts, correct across replicas: DECLINED, WITH THE
 // PRICE, NOT IMPOSSIBLE. Telling a watchdog-written 'timed_out' from an
-// agent-written one needs either a new terminal status (threaded through every
-// status allow-list, including the two that must be read BACKWARDS -
-// AppendTaskLog's first arm and ListOverdueAssignedTasks - plus
-// TestTasksStatusVocabularyIsExactly) or a nullable writer column plus a
-// migration on a write path that sits under the epoch fence. That is a larger
-// and riskier slice than the observability it buys. IF SUCH A COLUMN IS EVER
-// ADDED FOR ANOTHER REASON, REVISIT THIS: the query route is genuinely better.
+// agent-written one needs either a new terminal status threaded through every
+// status allow-list, or a nullable writer column plus a migration on a write
+// path that sits under the epoch fence - a larger and riskier change than the
+// observability it buys. IF SUCH A COLUMN IS EVER ADDED FOR ANOTHER REASON,
+// REVISIT THIS: the query route is genuinely better.
 //
 // PER REPLICA. The watchdog is multi-replica-safe by first-write-wins, so a
 // sweep of worker X may be counted on either replica; add the counts across
@@ -257,13 +231,12 @@ type WatchdogCounts struct {
 }
 
 // WatchdogCounters is the watchdog section. COUNTS ONLY, and the absence of a
-// levels half is a decision: the only candidates were len(SweptByWorker), which
-// is the map itself restated and can only ever agree or be a bug, and the 256
-// cap, which is a CONFIGURED CONSTANT rather than a level. A constant in a
-// levels half would have to MOVE when a limits classification is added
-// (idea-2026-08-21-counters-payload-cannot-say-not-measured), and that is a
-// breaking change to a published payload. It is documented in README instead,
-// and swept_overflow is the runtime signal that it bound.
+// levels half is a decision: the cap is a CONFIGURED CONSTANT rather than a
+// level, and a constant in a levels half would have to MOVE when a limits
+// classification is added
+// (idea-2026-08-21-counters-payload-cannot-say-not-measured), which is a
+// breaking change to a published payload. The cap is documented in README
+// instead, and swept_overflow is the runtime signal that it bound.
 type WatchdogCounters struct {
 	Counts WatchdogCounts `json:"counts"`
 }
@@ -275,11 +248,9 @@ type WatchdogCounters struct {
 // interface is declared here and SATISFIED over there, because internal/api can
 // never name internal/scheduler.
 //
-// AN IMPLEMENTATION MUST RETURN A VALUE NOBODY ELSE STILL WRITES TO. This is the
-// first section source whose snapshot type carries a MUTABLE container
-// (SweptByWorker), and that changes what "return a snapshot" costs. Every other
-// source returns a struct of integers, where a copy is what the return statement
-// already does; here a plausible one-line implementation - `func (x X)
+// AN IMPLEMENTATION MUST RETURN A VALUE NOBODY ELSE STILL WRITES TO. This
+// snapshot type carries a MUTABLE container (SweptByWorker), so a struct copy
+// is not enough: a plausible one-line implementation - `func (x X)
 // CounterSnapshot() WatchdogCounters { return x.c }` - hands this handler a map
 // the producer's own goroutine keeps writing, and a single admin GET then ends
 // the process with `fatal error: concurrent map read and map write` (that one is
@@ -307,19 +278,17 @@ type WatchdogSource interface {
 // Per admin request, that is a goroutine stack trace to the log, inside the
 // feature whose subject is bounding log volume.
 //
-// This is not hypothetical for the next section to land. The watchdog is
-// legitimately disable-able (RELAY_TASK_WATCHDOG_MARGIN=0 and
+// The watchdog is legitimately disable-able (RELAY_TASK_WATCHDOG_MARGIN=0 and
 // RELAY_TASK_MAX_ASSIGNMENT=0), so `var wd *scheduler.Watchdog; if enabled
 // { wd = ... }; CounterSources{Watchdog: wd}` is the natural shape and it
 // panics. Filter the typed nil where the CONCRETE type is still visible, at the
 // wiring boundary: cmd/relay-server's buildHTTPServer is the live example, and
 // TestBuildHTTPServer_TypedNilListenerLeavesTheSectionAbsent plus
 // TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent are its
-// guards - one per wired source, because the filter is per httpServerDeps
-// FIELD. Not per CounterSources field: one deps field may feed several sections
-// (agentHandler feeds two), and they are covered by that field's single `if` -
-// see the comment on buildHTTPServer's nil filter. Do
-// not instead make the source's snapshot method nil-tolerant - returning a zero
+// guards. The filter is per httpServerDeps FIELD, not per CounterSources
+// field: one deps field may feed several sections, covered by that field's
+// single `if` - see the comment on buildHTTPServer's nil filter. Do not
+// instead make the source's snapshot method nil-tolerant - returning a zero
 // snapshot turns an unwired control into a section of zeros, which is the one
 // distinction this payload exists to preserve.
 type CounterSources struct {
@@ -404,8 +373,7 @@ type ingestLogBudgetCounts struct {
 // so named fields make an unbounded key set impossible AND keep both payload
 // walks at full reach. A map would need a counterPayloadExemption whose
 // predicates descend into it themselves, because an exemption is shape-checked
-// but NON-DESCENDING - slice 1 demonstrated a map[string]string with a
-// newline-injected key passing both guards.
+// but NON-DESCENDING.
 //
 // THESE KEYS ARE A RESPONSE CONTRACT tied to worker's logKind names; see that
 // type's comment before renaming anything here.
@@ -440,9 +408,8 @@ func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts 
 // stale, or the task finished longer ago than RELAY_TASKLOG_TRAILING_WINDOW, or
 // the task id matches no row at all. THE THIRD IS LEGITIMATE and is the one an
 // operator who set that knob too small hits constantly, which is why this number
-// exists at all - before it there was no runtime signal of any kind that task
-// output was being dropped. THE FOURTH is `t.id = task_id`, and it is easy to
-// forget because it looks like a lookup rather than a fence: a well-formed uuid
+// exists at all. THE FOURTH is `t.id = task_id`, and it is easy to forget
+// because it looks like a lookup rather than a fence: a well-formed uuid
 // naming no task yields pgx.ErrNoRows while being none of the other three, which
 // TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers
 // drives directly. An operator reading this number still concludes correctly,
@@ -482,8 +449,7 @@ type taskLogFenceCounts struct {
 //     THE ACTIONABLE ONE, and the reason this section exists: a task the
 //     coordinator's stale-task watchdog stamped 'timed_out' whose agent then
 //     reports 'done' lands here. That is a successful task recorded as a
-//     timeout, which is what RELAY_TASK_WATCHDOG_MARGIN set too small produces
-//     and which had no runtime signal of any kind before this number.
+//     timeout, which is what RELAY_TASK_WATCHDOG_MARGIN set too small produces.
 //
 // UNLIKE raced_total, THE OTHER TWO ARE EXACT rather than floors, and the
 // asymmetry is worth knowing: nothing between GetTask and the write reads the
@@ -494,14 +460,13 @@ type taskLogFenceCounts struct {
 // published sum would sit beside its own summands where it can only agree or be
 // a bug.
 //
-// WHY THE ARMS ARE NOT SPLIT BY STATEMENT, which is the split the filing item
-// proposed: IncrementTaskRetryCount and UpdateTaskStatus carry the IDENTICAL
-// THREE FENCE predicates - epoch, worker id, terminality - which of the two runs
-// is decided by the reported status and the row's retry budget rather than by
-// anything about the rejection, and both mean the same thing to an operator - the
-// agent's report of this task's outcome was discarded. Splitting by reason
-// answers the question the item actually asked (which of these is alarming);
-// splitting by statement does not.
+// WHY THE ARMS ARE NOT SPLIT BY STATEMENT: IncrementTaskRetryCount and
+// UpdateTaskStatus carry the IDENTICAL THREE FENCE predicates - epoch, worker
+// id, terminality - which of the two runs is decided by the reported status and
+// the row's retry budget rather than by anything about the rejection, and both
+// mean the same thing to an operator - the agent's report of this task's
+// outcome was discarded. Splitting by reason answers which rejection is
+// alarming; splitting by statement does not.
 //
 // IncrementTaskRetryCount carries a FOURTH predicate, `retry_count < retries`,
 // and it can never reach these counters. The Go gate in handleTaskStatus refuses
@@ -515,8 +480,8 @@ type taskLogFenceCounts struct {
 // A FINER SPLIT - WHICH SQL PREDICATE FIRED - IS DECLINED WITH THE PRICE, NOT
 // IMPOSSIBLE. Both statements yield no row on any predicate failure, so nothing
 // can carry a reason; recovering one needs a second round trip (forbidden on the
-// recv goroutine) or a rewrite of both result contracts. See task_log_fence
-// above, where the same call was made and the same wording is required.
+// recv goroutine) or a rewrite of both result contracts, as in task_log_fence
+// above.
 //
 // AND WHAT IT DOES NOT COVER:
 //
@@ -574,9 +539,7 @@ func (s *Server) handleServerCounters(w http.ResponseWriter, r *http.Request) {
 	if src := s.Counters.Watchdog; src != nil {
 		// ONE ASSIGNMENT, NOT A FIELD-BY-FIELD COPY, and that is the whole
 		// point: the source's type is the response type, so a counter added on
-		// the scheduler side reaches a JSON key with no edit here. Slice 2's
-		// mapper needed TestIngestLogKindCountsPublishesEveryWorkerSideField
-		// precisely because it was five hand-written assignments.
+		// the scheduler side reaches a JSON key with no edit here.
 		snap := src.CounterSnapshot()
 		resp.Watchdog = &snap
 	}

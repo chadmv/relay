@@ -22,26 +22,12 @@ const PageRequestLimit = 200
 // message may quote. The cursor is chosen by the SERVER and its length is
 // unbounded, so a message that interpolates it whole is unbounded too.
 //
-// 200 bytes - and that does NOT cover every legitimate cursor. The claim that
-// it did was measured false against the real encoder. encodeCursorV2
-// (internal/api/pagination.go) emits base64url of a {t,i,s,v} JSON, so:
-//
-//   - a TIME-sort cursor is ~128 bytes at microsecond precision, and every
-//     one of those is quoted whole;
-//   - a TEXT-sort cursor carries the row's sort value as well, so
-//     `relay jobs list --sort name` crosses 200 at a job name of 89
-//     characters: measured, 85 gives 196, 88 gives 200 (the last that fits),
-//     89 gives 202, 100 gives 216. jobs.name is TEXT NOT NULL with no length
-//     constraint (internal/store/migrations/000001_initial.up.sql) and
-//     jobspec.Validate rejects only the empty name, so those are cursors a
-//     CORRECT server emits and this code truncates.
-//
-// The number stays at 200 anyway. "Every legitimate cursor fits" is not
-// achievable at ANY number against an unbounded sort value, and the cost of
-// cutting one is cosmetic: quoteCursor reports the TRUE length beside the
-// prefix, so a 216-byte cursor stays distinguishable from a 5 MB one. What the
-// bound buys is that the message length is the CLIENT's to choose, which was
-// always the point.
+// 200 bytes does NOT cover every legitimate cursor, and no fixed number can:
+// a TEXT-sort cursor carries the row's sort value, which is unbounded, so a
+// CORRECT server emits cursors this code truncates. The cost of cutting one
+// is cosmetic: quoteCursor reports the TRUE length beside the prefix, so a
+// long-but-legitimate cursor stays distinguishable from a pathological one.
+// What the bound buys is that the message length is the CLIENT's to choose.
 const maxCursorInMessage = 200
 
 // quoteCursor renders a server-supplied cursor for an error message, bounded.
@@ -71,18 +57,15 @@ func quoteCursor(cursor string) string {
 //
 // Client EGRESS is open too, and it is the axis the CURSOR uniquely creates:
 // the server picks the cursor and this loop echoes it straight back in the
-// request URI, uncompressed, once per page, up to maxListPages times.
-// Measured, a 1 MiB cursor outside the base64url alphabet produces a
-// 3,145,754-byte URI - percent-encoding triples it - while the server can gzip
-// the same bytes to about 1 KB inbound. A cursor that IS base64url does not
-// expand at all, and a real relay-server answers 431, so the practical reach
-// is a hostile endpoint the operator chose to point at. Named here because
-// enumerating the open axes is what this comment is for, and because the
-// tracked item above names response bytes and timeouts, not this.
+// request URI, uncompressed, once per page, up to maxListPages times, and
+// percent-encoding expands a cursor outside the base64url alphabet while the
+// server can compress the same bytes inbound. A cursor that IS base64url does
+// not expand at all, and a real relay-server answers 431, so the practical
+// reach is a hostile endpoint the operator chose to point at. Named here
+// because the tracked item above names response bytes and timeouts, not this.
 //
-// A var rather than a const so a test can shrink it, matching internal/cli's
-// maxLogPages, which is a var for exactly this reason and says so. It is
-// package-global state: a test that shrinks it must NOT call t.Parallel().
+// A var rather than a const so a test can shrink it. It is package-global
+// state: a test that shrinks it must NOT call t.Parallel().
 var maxListPages = 10000
 
 // FetchAllPages walks ?cursor= until next_cursor is empty, or until userLimit
@@ -98,13 +81,9 @@ var maxListPages = 10000
 // on request 3; maxListPages catches an ever-advancing cursor that never drains,
 // which neither of the other two can see.
 //
-// On any of those the return is `nil, 0, err` - NOT the partial slice. That is
-// a deliberate asymmetry with the Python SDK, whose ProtocolError carries the
-// collected rows on .records: its caller is a program that can use partial rows
-// and has no other route to them, while this function's callers are five
-// renderers that have printed nothing yet plus one id-resolver, none of which
-// has anywhere to put a partial list - and the existing transport-error path
-// already returns nil, 0.
+// On any of those the return is `nil, 0, err` - NOT the partial slice: no
+// caller has anywhere to put a partial list, and the existing transport-error
+// path already returns nil, 0.
 func FetchAllPages[T any](
 	ctx context.Context,
 	c *Client,
@@ -192,42 +171,33 @@ func FetchAllPages[T any](
 			// it does not blame the server, and it does not claim every row was
 			// collected.
 			//
-			// The Python SDK's LIST walk says the same, and no longer splits
-			// on completeness either: its `distinct >= total` arm was removed
-			// once the premise behind it was measured against the wire. Every
-			// list query is `LIMIT sqlc.arg(page_limit)::int + 1` and every
-			// list handler goes through buildPage (internal/api/pagination.go),
-			// which emits a cursor only when that extra row came back - so a
-			// list whose length is an exact multiple of the page size drains at
-			// its last full page and never reaches a cap at all. Reaching this
-			// cap on a LIST means the server is misbehaving, and settling
-			// completeness would settle it with `total`, a number that same
-			// actor supplies.
+			// Reaching this cap on a LIST means the server is misbehaving:
+			// list queries fetch limit+1 rows and buildPage
+			// (internal/api/pagination.go) emits a cursor only when that
+			// extra row came back, so a list whose length is an exact
+			// multiple of the page size drains at its last full page and
+			// never reaches a cap at all. Settling completeness here would
+			// settle it with `total`, a number that same misbehaving actor
+			// supplies.
 			//
-			// The completeness split survives in exactly one message, Python's
-			// task_logs, and it is CORRECT there: GetTaskLogsPage
-			// (internal/store/query/tasks.sql) is `LIMIT $3` with no over-fetch
-			// and handleGetTaskLogs (internal/api/tasks.go) zeroes next_seq
-			// only when `len(items) < limit`, so a FULL last log page really
-			// does carry a cursor and that walk really can stop one request
-			// short of learning it was done.
-			//
-			// Do NOT copy task_logs' wording onto this count. That warning is
-			// unchanged; only its referent moved. Beyond the wire asymmetry
-			// above, this package could not count it honestly anyway: T is a
-			// bare type parameter with no constraint and no id, so reading one
-			// out would take reflection or a decode change, either of which
-			// couples this leaf package to its callers' row shapes. That is why
-			// Python's list message reports a DISTINCT-id count beside its row
-			// count and this one reports only len(out) - and a count of rows
-			// APPENDED is not a count of distinct rows received, since a server
-			// re-serving a page behind an advancing cursor drives them apart.
+			// Do NOT copy a task-log-style "may be incomplete" completeness
+			// warning onto this count. Task-log paging is genuinely different:
+			// GetTaskLogsPage (internal/store/query/tasks.sql) is `LIMIT $3`
+			// with no over-fetch and handleGetTaskLogs (internal/api/tasks.go)
+			// zeroes next_seq only when `len(items) < limit`, so a FULL last
+			// log page really does carry a cursor and that walk really can stop
+			// one request short of learning it was done. And this package could
+			// not count completeness honestly anyway: T is a bare type
+			// parameter with no constraint and no id, so counting distinct rows
+			// would take reflection or a decode change, either of which couples
+			// this leaf package to its callers' row shapes - and a count of
+			// rows APPENDED is not a count of distinct rows received, since a
+			// server re-serving a page behind an advancing cursor drives them
+			// apart.
 			//
 			// `total` is the FIRST page's total (see `if first` above) - the
 			// existing contract of this function's return value - so the message
 			// says which page it came from rather than implying it is current.
-			// Python's equivalent says "last page" and means it: that walk returns
-			// no total at all, so it reads one off whichever page it stopped on.
 			return nil, 0, fmt.Errorf(
 				"paginate %s: truncated after %d pages - hit the client's page cap; %d rows collected, the server's first page reported %d, and it had not yet reported the list as drained",
 				basePath, maxListPages, len(out), total)

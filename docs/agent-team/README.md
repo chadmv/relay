@@ -76,7 +76,7 @@ plan").
      | agentType | lens | brief |
      |---|---|---|
      | `relay-code-reviewer` | invariants | Only the seven Invariants in CLAUDE.md. Report any path that sidesteps one. Read them for their shape, not their nouns, on a `web/` diff. |
-     | `relay-code-reviewer` | correctness | Correctness bugs and needless complexity. Attack the tests as their own artifact. |
+     | `relay-code-reviewer` | correctness | Correctness bugs and needless complexity. Attack the tests as their own artifact. A checkable-but-unpinned prose claim is a finding; the default remedy is deletion or relocation to the commit message. |
      | `relay-code-reviewer` | security | Auth and authorization paths, input validation, secret handling, token hashing via `internal/tokenhash.Hash`. |
      | `relay-integration-tester` | integration | Run the integration tests relevant to the diff (`go test -tags integration -p 1`). Failures are high, flakes medium. Skip this lane entirely on a zero-Go diff and say so. |
 
@@ -109,7 +109,8 @@ plan").
   snapshot authoritative, and a 404 retried by the retry added for transient failures.
   The fourth round is the only evidence the sequence terminates. Scope the re-verify
   to the new delta and say so, rather than re-reviewing ground two lenses already
-  covered.
+  covered. For prose findings the fix is deletion-first; a correction is the remedy
+  that regenerated the defect four times running on one docstring.
 - **Phase 5** uses the finishing-a-development-branch skill.
 - **Phase 6 runs in the CONDUCTOR's own session. Do NOT dispatch it to `relay-tpm`
   or any other agent.** The `/retro` skill stops partway to present the human with
