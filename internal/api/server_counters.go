@@ -287,8 +287,8 @@ type WatchdogSource interface {
 // TestBuildHTTPServer_TypedNilAgentHandlerLeavesTheSectionAbsent are its
 // guards. The filter is per httpServerDeps FIELD, not per CounterSources
 // field: one deps field may feed several sections, covered by that field's
-// single `if` - see the comment on buildHTTPServer's nil filter. Do
-// not instead make the source's snapshot method nil-tolerant - returning a zero
+// single `if` - see the comment on buildHTTPServer's nil filter. Do not
+// instead make the source's snapshot method nil-tolerant - returning a zero
 // snapshot turns an unwired control into a section of zeros, which is the one
 // distinction this payload exists to preserve.
 type CounterSources struct {
@@ -408,8 +408,8 @@ func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts 
 // stale, or the task finished longer ago than RELAY_TASKLOG_TRAILING_WINDOW, or
 // the task id matches no row at all. THE THIRD IS LEGITIMATE and is the one an
 // operator who set that knob too small hits constantly, which is why this number
-// exists at all. THE FOURTH is `t.id = task_id`, and it is easy to
-// forget because it looks like a lookup rather than a fence: a well-formed uuid
+// exists at all. THE FOURTH is `t.id = task_id`, and it is easy to forget
+// because it looks like a lookup rather than a fence: a well-formed uuid
 // naming no task yields pgx.ErrNoRows while being none of the other three, which
 // TestGRPCAdmissionEndToEnd_TheServedTaskLogFenceCountsAreTheServingHandlers
 // drives directly. An operator reading this number still concludes correctly,
