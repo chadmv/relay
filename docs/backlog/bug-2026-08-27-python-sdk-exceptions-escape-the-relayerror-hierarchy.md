@@ -74,8 +74,11 @@ related item, which measured a 343x gzip amplification against this same unbound
   `_get_page` on the SAME call path, so an HTTP error mid-walk discards `out` too, exactly as the
   validation failure does - the six `list_*` docstrings say so already.
   `pydantic.ValidationError` is therefore NOT the anomaly: it behaves like the `RelayError`s and
-  unlike only the three `ProtocolError` stops. The decision aligns THREE raise sites, not two, and
-  "make it match everything else" is the wrong target. A 249-page walk that fails on page 250 loses ~49,800 rows with no
+  unlike only the loop's own `ProtocolError` stops. Count carefully if you restate this - the loop
+  has three logical STOPS but four `raise ProtocolError(..., records=out)` STATEMENTS, since the
+  page-cap stop raises from two branches. The decision is over three PARTIES whose partial-walk
+  behaviour must agree (the ProtocolError stops, the HTTP error, the validation failure), so "make
+  it match everything else" is the wrong target. A 249-page walk that fails on page 250 loses ~49,800 rows with no
   cursor to resume from. A local `try/except` at the `_get_page` call site is the WRONG fix and
   `client.py`'s comment there says why - it would make `_get_page` and `task_logs_page` raise
   different types for one defect shape. The chokepoint is where the two can be made to agree, so

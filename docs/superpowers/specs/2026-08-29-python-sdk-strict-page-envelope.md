@@ -97,8 +97,10 @@ both entry points. The item's "six routes / twelve methods" is exact.
 **Requiring the fields is safe against a correct server, and this is measurable rather than assumed.**
 `internal/api/pagination.go` declares the wire envelope as a generic `page[T]` struct whose three
 fields carry the json tags `items`, `next_cursor` and `total` with **no `omitempty` on any of them**,
-so `encoding/json` emits all three keys on every response including the zero-row one. Every list
-handler in `internal/api` writes that same struct: **sixteen** non-test
+so `encoding/json` emits all three keys on every response including the zero-row one. Every handler that
+RETURNS this envelope writes that same struct - not every list handler, since `handleListTasks` and
+`handleListWorkerWorkspaces` answer with a bare JSON array and no envelope at all: **sixteen**
+non-test
 `writeJSON(w, ..., page[...]{...})` sites - `users.go` 5, `jobs.go` 3, `workers.go` 2,
 `scheduled_jobs.go` 2, and one each in `reservations.go`, `agent_enrollments.go`, `invites.go`,
 `tokens.go`. There is no second envelope type. This is the same argument
@@ -496,7 +498,7 @@ Added by this spec:
   is precedent, not semver theory: `e536f3e` made a sibling response model's fields required and took
   a MINOR bump. (`test_version_files_are_in_lockstep` still makes moving one of them RED.)
 - ~~Gates: ... No Go gate is needed - this slice touches no Go file.~~ **SUPERSEDED 2026-08-29: the
-  slice adds one Go file and `go test ./...` is a gate.** Phase 4 found that the premise this whole
+  slice touches Go files and `go test ./...` is a gate.** Phase 4 found that the premise this whole
   spec rests on - `page[T]` carrying no `omitempty` - was pinned by nothing in the repo: adding the
   tag left all 21 other Go packages green, and only the opt-in Python integration lane caught it.
   `internal/api/pagination_test.go` now carries the guard, on the side that owns the tag. Gates:
