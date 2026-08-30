@@ -862,10 +862,17 @@ const logIDHead = 8
 // log lines, annotating how many it dropped.
 //
 // Bounded on purpose, as INSURANCE rather than as a fix for a live flood. Task
-// count is bounded only against zero (jobspec.Validate) and log.Printf holds a
-// global mutex, so an unbounded rendering would let one line hold that mutex for
-// hundreds of kilobytes - and both call sites report a condition the code itself
-// argues should not happen, which is exactly the kind of line nobody watches.
+// count is now bounded at BOTH ends by jobspec.Validate - at least one, at most
+// maxTasksPerJob - and the upper bound does not retire this cap, because THIS
+// FUNCTION'S INPUT IS DATABASE ROWS AND NOT A VALIDATED SPEC. Both slices come
+// from queries (SelectRetryableTaskIDs, RetryJobTasks), and maxTasksPerJob binds
+// job CREATION from here on: no migration clamps or deletes tasks from a job that
+// already exceeds it, so a job written before the bound existed still has however
+// many tasks it was created with and nothing but this cap bounds the line.
+// log.Printf holds a global mutex, and an unbounded rendering would let one line
+// hold that mutex for all of it. Both call sites
+// report a condition the code itself argues should not happen, which is exactly
+// the kind of line nobody watches.
 // The dependents guard in particular is believed unreachable in any well-formed
 // history; the cost of that belief being wrong is what this cap removes.
 //

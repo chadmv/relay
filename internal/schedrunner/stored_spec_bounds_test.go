@@ -20,13 +20,16 @@ import (
 // any more. retries: 50 was accepted by every relay release before the
 // retry-bounds change; jobspec.Validate now refuses it, and schedrunner
 // re-validates the stored spec on EVERY fire because fireOne calls
-// jobcreate.CreateJobFromSpec, which calls jobspec.Validate.
+// jobspec.Validate DIRECTLY, hoisted above the overlap check, and then reaches it
+// a second time inside jobcreate.CreateJobFromSpec. (This comment used to name
+// only the second of those, from before the hoist.)
 //
 // fireOne is not the only path that re-validates a stored spec. run-now
-// (handleRunScheduledJobNow) reaches the same Validate, and unlike this one it
-// ANSWERS: it refuses with 400 and the per-task message, which is what makes it
-// the operator's remedy for the hazard below. See
-// internal/api/scheduled_jobs_run_now_bounds_integration_test.go.
+// (handleRunScheduledJobNow) reaches the same Validate and answers ON DEMAND with
+// a 400 and the untruncated per-task message, rather than at the next scheduled
+// fire. See internal/api/scheduled_jobs_run_now_bounds_integration_test.go. (This
+// paragraph used to say fireOne did not answer at all; since last_error landed it
+// records the same message on the row, which is what the test below asserts.)
 func makeOverBudgetSpecJSON(t *testing.T) []byte {
 	t.Helper()
 	spec, err := json.Marshal(map[string]any{

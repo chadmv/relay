@@ -21,9 +21,14 @@ export interface Schedule {
   // correct and only test. A schedule that has never failed renders exactly as
   // it did before these fields existed.
   //
-  // THE TEXT IS OPERATOR-SUPPLIED, and partly attacker-chosen in the admin case:
-  // it is derived from the stored job_spec and embeds a task name the schedule's
-  // owner picked, and an admin can read any user's schedule. The server strips
+  // THE TEXT IS OPERATOR-SUPPLIED, and potentially attacker-chosen in the admin
+  // case: it is derived from the schedule's stored configuration - its job_spec,
+  // or its cron_expr and timezone when the failure is a `parse cron:` one - and it
+  // MAY quote prose the schedule's owner picked, such as a task name interpolated
+  // verbatim. Other messages are fixed server text with nothing operator-chosen in
+  // them; the panel labels the whole class the same way rather than string-matching
+  // the server's internal branches, and an admin can read any user's schedule. The
+  // server strips
   // control characters and truncates it, and the SPA must render it as a React
   // TEXT CHILD inside a panel whose heading names its provenance - never as
   // chrome, never through dangerouslySetInnerHTML, and never into a URL, a title

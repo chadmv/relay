@@ -282,10 +282,17 @@ func doSchedulesShow(ctx context.Context, c *relayclient.Client, args []string, 
 	}
 	if out.hasFailure() {
 		// THE PROVENANCE PREFIX IS DELIBERATE. The message is derived from the
-		// stored job_spec and embeds a task name the schedule's owner chose, so
-		// an admin inspecting another user's schedule is reading partly
+		// schedule's stored configuration - usually its job_spec, and its cron_expr
+		// or timezone for a "parse cron: ..." failure - and it may quote prose the
+		// schedule's owner chose, such as a task name interpolated verbatim. Others
+		// are fixed relay text; the label goes on the whole class because a client
+		// cannot tell them apart without string-matching the server's own messages.
+		// So an admin inspecting another user's schedule is reading potentially
 		// attacker-chosen prose, and the one real risk is text crafted to read
 		// like relay's own output. Naming where it came from is what closes that.
+		// The printed label names job_spec because that is the common case and it
+		// has to fit on one terminal line; the point it makes - not relay's words -
+		// holds for the cron case too.
 		fmt.Fprintf(w, "Last error (from the stored job_spec, operator-supplied): %s\n",
 			terminalSafeLine(*out.LastError))
 		if out.LastErrorAt != nil {

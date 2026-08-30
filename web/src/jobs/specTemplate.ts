@@ -19,8 +19,16 @@ export type SpecCheck =
 
 // Minimal client-side pre-check. Deliberately shallow: valid JSON, a non-empty
 // string `name`, and a non-empty `tasks` array. Deeper rules (unique task names,
-// command xor commands, dependency cycles, priority enum, source) are left to
-// the server (jobspec.Validate) so the two paths cannot drift.
+// command xor commands, dependency cycles, priority enum, source, and the upper
+// bounds on the task and command counts) are left to the server
+// (jobspec.Validate) so the two paths cannot drift.
+//
+// THE COUNT BOUNDS IN PARTICULAR MUST NOT BE MIRRORED HERE. This function already
+// duplicates the LOWER end of the task-count range, and that one is kept because
+// it is a typo check on an empty editor rather than a policy. The upper ends are
+// policy: a number written here makes the SPA refuse a spec the server would
+// accept, or accept one it would refuse, on the first release that moves either -
+// and the server is the validator of record.
 export function validateSpecText(text: string): SpecCheck {
   let value: unknown
   try {

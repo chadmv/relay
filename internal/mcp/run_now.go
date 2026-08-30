@@ -39,7 +39,7 @@ func (s *Server) callRunScheduleNow(ctx context.Context, args runScheduleNowArgs
 // untrustedOperatorText defines.
 //
 // WHY ONLY THE VALIDATION ARM. handleRunScheduledJobNow re-runs ValidateJobSpec
-// against the STORED spec, so its 400 carries a task name the schedule's owner
+// against the STORED spec, so its 400 CAN carry a task name the schedule's owner
 // chose - which, on someone else's schedule, an admin's model then reads while
 // holding relay_delete_schedule. Every other status this endpoint returns is a
 // fixed relay string, and labelling those would spend the signal: a label that
@@ -51,7 +51,10 @@ func (s *Server) callRunScheduleNow(ctx context.Context, args runScheduleNowArgs
 //
 // THE ACCEPTED FALSE POSITIVE. That endpoint emits three 400s - "invalid id",
 // "stored job_spec is invalid", and ValidateJobSpec's message - and only the
-// third carries operator prose. A CLIENT CANNOT TELL THEM APART; they arrive as
+// third can carry operator prose. It does not always: the job-level messages
+// ("at least one task is required", "at most N tasks are allowed") interpolate
+// nothing an operator wrote, which is a second and smaller instance of the same
+// accepted false positive. A CLIENT CANNOT TELL THEM APART; they arrive as
 // one status with a different string. The alternative is string-matching relay's
 // own fixed messages from a client, which encodes a peer's internal branch
 // structure and goes silently wrong the first time the server rewords one.

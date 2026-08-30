@@ -77,20 +77,75 @@ var (
 // seconds; a larger N buys no waiting, only a faster burn. The instrument for
 // contention is a reservation, not a retry count.
 //
-// DO NOT MAKE THIS ENV-CONFIGURABLE. Validate runs on STORED scheduled-job specs
-// on BOTH paths that materialize one: schedrunner.fireOne at fire time, which
-// reaches Validate only through jobcreate.CreateJobFromSpec, and
-// handleRunScheduledJobNow on demand, which calls it DIRECTLY through
-// api.ValidateJobSpec ahead of the transaction and then again inside
-// CreateJobFromSpec. That direct call is the site that decides the status code:
-// it answers a stored spec's failure with 400 and the per-task message, where
-// CreateJobFromSpec's error collapses into a 500. An env-tunable bound would
-// therefore make
-// retroactive schedule invalidation environment-dependent: the same stored spec
-// fires on one replica's configuration and silently stops on another's, and
-// lowering the knob would disable schedules with no signal anywhere. A
-// validation vocabulary shared by four ingest paths is a property of the binary,
-// exactly as the priority set is.
+// DO NOT MAKE THIS ENV-CONFIGURABLE, AND THE SAME GOES FOR EVERY BOUND BELOW.
+// Validate runs on STORED scheduled_jobs.job_spec rows on the paths enumerated
+// here, and the older version of this paragraph named two of them and got one of
+// those wrong:
+//   - schedrunner.fireOne calls Validate DIRECTLY, hoisted above the overlap
+//     check, and then reaches it again inside jobcreate.CreateJobFromSpec. (It
+//     used to reach it only through CreateJobFromSpec; that changed and this
+//     comment did not.) Its failure branch records the message in last_error.
+//   - api.handleRunScheduledJobNow calls it DIRECTLY, ahead of the transaction,
+//     and then again inside CreateJobFromSpec. That direct call is the site that
+//     decides the status code: it answers a stored spec's failure with 400 and
+//     the validator's own message, where CreateJobFromSpec's error collapses into
+//     a 500 that relayclient.ErrorIsTransient reads as retryable.
+//   - schedrunner.ValidateStoredSpecsOnStartup, at boot, over every ENABLED
+//     schedule, through schedrunner.ValidateStoredSchedule.
+//   - api.handlePatchScheduledJob's clear-decision, through the same
+//     ValidateStoredSchedule, on the EFFECTIVE row.
+//   - jobcreate.CreateJobFromSpec itself, reached from the first two with stored
+//     data.
+//
+// An env-tunable bound would therefore make retroactive schedule invalidation
+// environment-dependent: the same stored spec fires on one replica's
+// configuration and silently stops on another's, and lowering the knob would
+// disable schedules with no signal anywhere. Two of the sites above make that
+// worse in ways that postdate the original argument. The startup sweep WRITES the
+// returned message into last_error, so the recorded failure text would become a
+// function of which replica happened to boot, and the number in a stored,
+// operator-facing string would stop matching the binary that reads it. And the
+// PATCH clear-decision clears the record if and only if the effective row
+// validates, so a PATCH served by a lenient replica would clear a record a strict
+// replica immediately re-writes, and the operator would watch the failure
+// flicker.
+//
+// A validation vocabulary shared by every ingest path is a property of the
+// binary, exactly as the priority set is. THE PATHS ARE ENUMERATED, NOT COUNTED,
+// and deliberately so - see internal/schedrunner/failure.go, which settled this
+// question: a number goes stale silently and has no maintainer, where an
+// enumeration goes stale loudly because a reader can check it. (The older version
+// of this sentence said "four ingest paths"; there are api.handleCreateJob,
+// api.handleCreateScheduledJob, api.handlePatchScheduledJob when the request body
+// carries a job_spec, mcp.submit, and mcp.schedules_write on both create and
+// update. The CLI is not one of them: doSubmit unmarshals the file into an opaque
+// map[string]any and POSTs it, so it inherits every rule through the API.)
+//
+// TWO CLIENTS DO HOLD A PARALLEL VALIDATOR, and an earlier version of the sentence
+// above claimed neither did. Neither is an ingest path - both still POST to the
+// API, which stays the validator of record - but a rule ADDED here, and a message
+// REWORDED here, has to be checked against them:
+//
+//   - python/src/relay/models.py. JobSpec.validate_spec, whose own docstring says
+//     "Mirrors server-side ValidateJobSpec", plus the Task field validators
+//     _name_required and _commands_argv_nonempty, reproduce five of this file's
+//     message texts verbatim: "at least one task is required", "duplicate task
+//     name: {name}", "task {name}: commands is required", "task name is required",
+//     "commands[{i}]: argv must not be empty". Reword one of those here and a
+//     Python caller gets two different texts for one condition depending on
+//     whether the SDK or the server refused. That drift is already live on the
+//     dependency rules, which is what the hazard looks like in practice: the SDK
+//     emits "task {name}: unknown depends_on: {dep}" where this file emits
+//     "unknown depends_on: %s" with no task prefix, and the SDK has a "cannot
+//     depend on itself" message that has no counterpart here at all (a self-edge
+//     reaches detectCycle instead). The count bounds are deliberately NOT mirrored
+//     there; adding them would put a number from this file into a separately
+//     released package.
+//   - web/src/jobs/specTemplate.ts, validateSpecText - the /jobs/new editor's
+//     pre-check. It is deliberately shallow and worded independently, so it cannot
+//     drift on a message: it duplicates only the LOWER end of the task-count range
+//     ("Spec must have a non-empty \"tasks\" array."). Its own comment records why
+//     the upper bounds must not be copied into it.
 const maxRetries = 10
 
 // maxTimeoutSeconds bounds TaskSpec.TimeoutSeconds. Seven days: comfortably
@@ -110,6 +165,125 @@ const maxRetries = 10
 // one. Do not derive this from that env var at runtime.
 const maxTimeoutSeconds = 604800
 
+// maxTasksPerJob bounds len(JobSpec.Tasks). A task in relay is a frame, a frame
+// chunk, a build step, or one unit of a fan-out, so the realistic high end for a
+// single submission is a full animation submitted one task per frame: a 1000 to
+// 2000 frame sequence. Chunking frames - the usual practice, because per-task
+// dispatch and workspace-prep overhead dominates for fast frames - puts the same
+// sequence at a couple of hundred tasks. A build with a few hundred steps and a
+// parameter sweep of a few hundred units both land far below. 5000 is 2.5x to 5x
+// above that high end, so no submission a user plausibly wants is refused.
+//
+// IT STILL BINDS. A realistic task with a real command line is around 100 bytes
+// of JSON, so maxBodyBytes (1 MiB, internal/api/server.go) already caps a
+// realistic request near 10,000 tasks and this cap binds at half of that. Against
+// minimal JSON - a short unique name and a one-element argv, on the order of 30
+// to 35 bytes - the body permits on the order of 30,000, so this is roughly a 6x
+// reduction on the worst case.
+//
+// DO NOT RAISE THIS WITHOUT A REFUSED REAL SUBMISSION. "The number looks small"
+// is not the reason; a job somebody actually wanted to run being rejected is. And
+// before raising it, look at the two costs this number stands in for, because
+// fixing either is a better answer than a larger cap:
+//   - jobcreate.CreateJobFromSpec inserts tasks ONE AT A TIME, one round trip
+//     each, inside the caller's transaction. 5000 tasks is 5000 sequential round
+//     trips - a slow request. 30,000 is a different thing entirely.
+//   - store.GetEligibleTasks has NO LIMIT, and scheduler.Dispatcher.dispatch runs
+//     it on every Trigger() and every 30 seconds, so a large pending backlog is
+//     re-read in full on every tick until it drains. That is a fleet-wide
+//     property, so a per-request cap bounds one request's contribution to it and
+//     nothing about repetition.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
+// to every bound in this file.
+const maxTasksPerJob = 5000
+
+// maxCommandsPerTask bounds len(TaskSpec.Commands) after normalization.
+//
+// `commands` exists so several steps share ONE prepared workspace and
+// environment: sync, build, render, publish, clean up. The realistic shape is
+// single digits. The plausible high end is a task that iterates a fixed list
+// inside one prepared workspace - export N assets from a scene, bake N maps -
+// which is tens. 500 is roughly 20x that.
+//
+// THIS IS THE CONCENTRATION CONTROL. It bounds how much sequential work a single
+// request can pin to a single worker slot: at the bound, one task is 500
+// subprocess spawns per attempt and 5500 across a full maxRetries budget.
+//
+// A USER AT THIS BOUND IS BEING TOLD TO USE THE BETTER MODEL, NOT TOLD NO. Past a
+// few hundred, one task per unit is better anyway: separate tasks parallelize
+// across the fleet, retry independently and report per-unit status, which is the
+// entire point of a task graph. Tasks sharing a `source` reuse the same workspace
+// (workspace_exclusive defaults to false), so splitting does not cost the
+// workspace sharing that motivates `commands` in the first place.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
+// to every bound in this file.
+const maxCommandsPerTask = 500
+
+// maxCommandsPerJob bounds the TOTAL number of commands across all of a job's
+// tasks, accumulated during validation. IT IS THE ONE OF THE THREE THAT MOVES THE
+// AGGREGATE NUMBER, and the other two do not produce it.
+//
+// TWO PER-AXIS CAPS WHOSE PRODUCT EXCEEDS WHAT THE BODY LIMIT ALREADY PERMITS
+// REDUCE NOTHING IN AGGREGATE; they only change the shape of the worst case. The
+// cost that matters - subprocess spawns, and one task_logs row per command from
+// the agent's step marker alone, which nothing in this repo prunes - is
+// total_commands x (1 + retries), and it does not care how the commands are
+// distributed across tasks, because the retry budget is per task and every task's
+// commands re-run on every attempt. maxTasksPerJob x maxCommandsPerTask is
+// 2,500,000, roughly 15x more than a 1 MiB body can express with the cheapest
+// RUNNABLE entry (see the range below), so with only those two in place the
+// binding constraint on the total would remain maxBodyBytes - exactly as it was
+// before any of these three existed.
+//
+// WHY THE ENTRY MUST BE RUNNABLE, since the arithmetic above turns on it:
+// internal/agent/runner.go emits its step marker once per command EXECUTED, at
+// the top of the loop body and AFTER the empty-argv guard, and a command whose
+// Start or Wait fails breaks the loop. So a body full of entries that cannot
+// execute costs one failed exec and one marker, not one per entry.
+//
+// THE CHEAPEST RUNNABLE ENTRY IS A RANGE, NOT A NUMBER, AND THE RANGE IS NOT A
+// PROPERTY OF RELAY: it depends on what is on the agent's PATH and exits 0.
+// `["ls"],` is 7 bytes and puts about 149,800 entries in a 1 MiB body; a
+// one-character command that exits 0 is 6 bytes and puts about 174,800. An
+// earlier version of this paragraph offered `["true"],` at 9 bytes and 116,000 as
+// though it were the floor. It is not, and the error ran in the direction that
+// UNDERSTATES the case for the bound. So: roughly 150,000 to 175,000 commands per
+// body before this bound and 25,000 after, a 6x to 7x reduction, and 1.6 to 1.9
+// million spawns across a full maxRetries budget taken to 275,000.
+//
+// THE PER-AXIS CAPS ARE NOT REDUNDANT ONCE THIS EXISTS. This one implies
+// tasks <= 25000, since normalizeTaskCommands refuses a task with zero commands -
+// which is weaker than maxTasksPerJob - and it says nothing about concentration,
+// since 25,000 commands in one task satisfies it. Each of the three answers a
+// different question: how long is the transaction and how big is the dispatcher's
+// backlog; how much can one request pin to one worker slot; how much total work
+// can one request buy.
+//
+// 25,000 IS PLACED TO KEEP THE LEGITIMATE SIDE CLEAR, not to make the adversarial
+// number small. The legitimate high end is set by the many-tasks shape - thousands
+// of tasks at a handful of commands each - rather than by the few-tasks shape,
+// which tops out lower. The window between "what a real job needs" and "what 1
+// MiB expresses" is only about 8x wide, because a legitimate command is a long
+// string and an adversarial one is nine bytes, and a count bound cannot tell them
+// apart.
+//
+// IT IS NOT A DoS CONTROL AND MUST NOT BE TIGHTENED AS IF IT WERE. POST /v1/jobs
+// carries no rate limit - internal/api/server.go wraps only register and login in
+// RateLimit - so every figure above is per-request and an authenticated caller may
+// repeat it at whatever rate the network allows. The control for repetition is a
+// rate limit. Tightening this to buy a constant factor against an attack that
+// repetition makes unbounded anyway costs a refused real render, which has no
+// workaround inside the product.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies identically
+// to every bound in this file.
+const maxCommandsPerJob = 25000
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -121,6 +295,23 @@ func Validate(spec *JobSpec) error {
 	}
 	if len(spec.Tasks) == 0 {
 		return errors.New("at least one task is required")
+	}
+	// The other end of the SAME range, deliberately adjacent to it, so a reader
+	// changing either bound sees the other - the same adjacency argument that keeps
+	// the retries and timeout_seconds bounds together. It is a JOB-level property,
+	// so it has no task name to interpolate and does not belong in the per-task
+	// loop. And it refuses the spec BEFORE the work it bounds: before nameSet is
+	// allocated at len(spec.Tasks) capacity and before one normalizeTaskCommands
+	// call per task.
+	//
+	// PRECEDENCE CONSEQUENCE, TAKEN DELIBERATELY. A spec that is over this bound
+	// AND carries an invalid priority, a nameless task, a duplicate task name or a
+	// bad command form now reports the task count, where the older code reported
+	// whichever of those came first. No test can depend on the old order, since the
+	// bound is new, and nothing reads these messages positionally. The wording
+	// mirrors "at least one task is required" so the pair reads as one range.
+	if len(spec.Tasks) > maxTasksPerJob {
+		return fmt.Errorf("at most %d tasks are allowed, got %d", maxTasksPerJob, len(spec.Tasks))
 	}
 	// Priority is optional. Empty is allowed (jobcreate defaults it to "normal").
 	// A non-empty value must be one of the known levels; this rejects typos that
@@ -134,6 +325,7 @@ func Validate(spec *JobSpec) error {
 		return fmt.Errorf("invalid priority %q: must be low, normal, or high", spec.Priority)
 	}
 	nameSet := make(map[string]struct{}, len(spec.Tasks))
+	totalCommands := 0
 	for i := range spec.Tasks {
 		ts := &spec.Tasks[i]
 		if ts.Name == "" {
@@ -147,8 +339,52 @@ func Validate(spec *JobSpec) error {
 		}
 		nameSet[ts.Name] = struct{}{}
 		// Bounds last in this loop body, so command-form and duplicate-name
-		// errors keep the precedence they have today.
+		// errors keep the precedence they have today. That promise is about
+		// precedence WITHIN one iteration. A bound has always been able to preempt
+		// a form error on a LATER task - a bad `retries` at index 3 has always
+		// outrun a duplicate name at index 90 - and the running total below is one
+		// more instance of that rather than a change to it.
 		//
+		// THE COMMAND CHECK READS THE NORMALIZED VALUE, i.e. it sits AFTER
+		// normalizeTaskCommands, which rewrites a legacy single Command into a
+		// one-element Commands and clears Command. That covers both spellings by
+		// construction. BE HONEST ABOUT WHAT THAT BUYS TODAY: a legacy Command can
+		// only ever produce one command, so hoisting THIS check above the
+		// normalization would behave identically and NO INPUT DISTINGUISHES THE TWO
+		// POSITIONS. The position is correct rather than merely lucky the moment the
+		// legacy form gains a second element. The ACCUMULATOR below is the half that
+		// IS testable, because above the normalization a legacy task contributes 0.
+		//
+		// IT COMES BEFORE THE TOTAL so a task that is itself over the per-task cap
+		// gets the specific, task-naming message rather than the job-level one. That
+		// is the whole ordering argument; it says nothing about the retries and
+		// timeout_seconds checks below, whose relative order is unchanged and
+		// unimportant.
+		if len(ts.Commands) > maxCommandsPerTask {
+			return fmt.Errorf("task %s: at most %d commands are allowed, got %d",
+				ts.Name, maxCommandsPerTask, len(ts.Commands))
+		}
+		totalCommands += len(ts.Commands)
+		// CHECKED INSIDE THE LOOP, not after it, so a spec far over the budget is
+		// refused partway through traversal rather than after a full pass over the
+		// 150,000-plus entries a 1 MiB body can hold.
+		//
+		// JOB-LEVEL MESSAGE, NO TASK PREFIX. The budget is a property of the job,
+		// and naming whichever task the accumulator happened to cross on would read
+		// as an accusation against a task that may be entirely ordinary - the same
+		// spec with its tasks in a different order would name a different one.
+		//
+		// NO "got" CLAUSE, AND THAT IS A DECISION RATHER THAN AN OMISSION. The other
+		// two count messages report the offending number because they know it. This
+		// one fires the moment the budget is exceeded and therefore does not know
+		// the final total; printing the running count as if it were the total would
+		// be false, and "got at least N" is honest but varies with task ordering for
+		// the same spec while telling the operator nothing they can act on, since
+		// the actionable number is the limit. Completing the pass to report an exact
+		// total would trade the early refusal for a nicer message; not taken.
+		if totalCommands > maxCommandsPerJob {
+			return fmt.Errorf("at most %d commands in total across all tasks are allowed", maxCommandsPerJob)
+		}
 		// A nil TimeoutSeconds is SKIPPED, not defaulted: nil is the documented
 		// "no deadline" and 0 is its second, equally valid spelling. Negatives
 		// are rejected rather than documented as a third synonym, because
