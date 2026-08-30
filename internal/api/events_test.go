@@ -36,6 +36,12 @@ func TestCanonicalJobIDFilter(t *testing.T) {
 		{"colon separators", "7e660488:1234:4321:8888:abcdefabcdef"},
 		{"space separators", "7e660488 1234 4321 8888 abcdefabcdef"},
 		{"mixed separators", "7e660488-1234*4321-8888-abcdefabcdef"},
+		// A separator byte that is not valid UTF-8 at all. README.md asserts this
+		// direction (?job_id=7e660488%FF... decodes to 36 bytes and IS
+		// canonicalised) and nothing pinned it until this row: every other
+		// accepted case above is ASCII, so a Scan that started decoding runes
+		// instead of counting bytes would leave them all green.
+		{"non-utf8 separator byte", "7e660488\xff1234-4321-8888-abcdefabcdef"},
 	}
 	for _, tc := range accepted {
 		tc := tc

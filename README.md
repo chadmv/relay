@@ -1772,11 +1772,17 @@ does accept.
 Two consequences of that grammar, both measured, because "36 characters" and
 "the job it names" are each wrong for a case the grammar admits:
 
-- **The length test is over BYTES.** `7e660488é1234-4321-8888-abcdefabcdef` is 36
-  *characters* but 37 bytes, so it is rejected and passed through untouched;
-  `?job_id=7e660488%FF1234-4321-8888-abcdefabcdef` is 36 bytes and *is*
-  canonicalised. The dashless form above is unambiguous because all 32 of its
-  positions must be ASCII hex, so there bytes and characters coincide.
+- **The length test is over BYTES, not characters.** Replace two hex positions
+  with a single two-byte rune and the string is 36 *characters* but 37 *bytes*,
+  so it misses the 36-byte branch entirely and is passed through untouched.
+  Conversely `?job_id=7e660488%FF1234-4321-8888-abcdefabcdef` decodes to 36
+  bytes and *is* canonicalised, though those 36 bytes are not valid UTF-8 and
+  so are not a 36-character string in any useful sense. The dashless form above
+  is unambiguous because all 32 of its positions must be ASCII hex, so there
+  bytes and characters coincide. This paragraph deliberately contains no
+  non-ASCII literal: an earlier revision wrote one as a raw Latin-1 byte, which
+  made this file invalid UTF-8 AND made the example 36 bytes - accepted, the
+  opposite of what the sentence around it claimed.
 - **The four separator bytes are discarded UNEXAMINED**, so a 36-byte spelling
   can name a job only up to those four bytes:
   `7e660488a1234b4321c8888dabcdefabcdef` canonicalises to

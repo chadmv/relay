@@ -115,9 +115,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // the same format string. This SUBSCRIBE side calls internal/api's; job and task
 // status events are published through the other two, and nothing relates the
 // three to each other. TestCanonicalJobIDFilter pins internal/api's rendering to
-// a hard-coded literal, so drift HERE goes red on `make test`; drift in either
-// PUBLISHER package leaves every package green and silently evaporates this fix
-// back into the exact bug it closed. That gap is the subject of
+// a hard-coded literal, so drift HERE goes red on `make test`.
+//
+// Drift in a PUBLISHER package does redden something - measured, uppercasing
+// internal/worker's fails internal/worker, and internal/scheduler's fails
+// cmd/relay-server and internal/scheduler. Do NOT read that as coverage of this
+// fix. Those tests fail for TaskID-keyed and watchdog-key reasons; NOTHING
+// relates internal/api's rendering to a publisher's on the job-status JobID path
+// canonicalJobIDFilter depends on, and a drift that moved both sides together
+// would leave every one of them green. That gap is the subject of
 // docs/backlog/idea-2026-08-26-six-copies-of-the-uuid-render-format.md.
 //
 // internal/events' filter is an exact string compare, so without this an
