@@ -42,6 +42,49 @@ _TERMINAL_JOB_STATUSES = frozenset(
 
 M = TypeVar("M", bound=BaseModel)
 
+# How much of a server-supplied cursor a ProtocolError message may quote.
+#
+# The cursor is chosen by the SERVER and its length is unbounded, so a message
+# that interpolates it whole is unbounded too - the same "provenance says
+# nothing about content" argument that makes the stops below necessary, applied
+# to the diagnostic rather than the loop.
+#
+# 200 characters - and that does NOT cover every legitimate cursor. The claim
+# that it did, and specifically that it covered "a text-sort cursor that carries
+# a row's name", was measured false. encodeCursorV2 (internal/api/pagination.go)
+# emits base64url of a {t,i,s,v} JSON:
+#
+#   - a TIME-sort cursor is 127 characters, so every one of those is quoted
+#     whole;
+#   - a TEXT-sort cursor carries the row's sort value as well, so
+#     `--sort name` crosses 200 at a job name of about 89 characters:
+#     measured, an 85-character name gives 196, 90 gives 203, 100 gives 216.
+#     `jobs.name` is TEXT NOT NULL with no length limit and jobspec.Validate
+#     rejects only the empty string, so those are cursors a CORRECT server
+#     emits and this code truncates.
+#
+# The number stays at 200 anyway. "Every legitimate cursor fits" is not
+# achievable at ANY number against an unbounded sort value, and the consequence
+# of cutting one is cosmetic: _quote_cursor reports the TRUE length beside the
+# prefix, so the message stays diagnosable and a 216-character cursor is still
+# distinguishable from a 5 MB one. What the bound buys is that the message
+# length is the CLIENT's to choose, which was always the point.
+_CURSOR_MESSAGE_CHARS = 200
+
+
+def _quote_cursor(cursor: str) -> str:
+    """Render a server-supplied cursor for an error message, bounded.
+
+    Longer than the bound, the prefix is quoted and the TRUE length reported -
+    a truncated string with no length would let a 5 MB cursor and a 201-byte one
+    produce the same message.
+    """
+    if len(cursor) <= _CURSOR_MESSAGE_CHARS:
+        return repr(cursor)
+    head = cursor[:_CURSOR_MESSAGE_CHARS]
+    return f"{head!r} (truncated from {len(cursor)} characters)"
+
+
 
 class Client:
     """Synchronous client for the relay REST API.
@@ -109,6 +152,29 @@ class Client:
     # A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
     # it - which means the loop must read it off `self`, not off a module global.
     _MAX_LOG_PAGES = 10000
+    # Bounds the NUMBER OF REQUESTS the LIST paging loop (_fetch_all) makes
+    # against a server whose next_cursor keeps advancing but which never reports
+    # the list as drained. 10000 pages at _PAGE_REQUEST_LIMIT rows is 2,000,000
+    # rows - a jobs table on a long-lived farm can plausibly reach that, and a
+    # cap that truncates a legitimate list is worse than the hang it prevents is
+    # frequent, so this is the wrong place to be clever with a smaller number.
+    # The public, caller-chosen bound on ROWS is `limit=`.
+    #
+    # Requests is all it bounds. Wall clock, response bytes and the memory of a
+    # single response are all open; those three axes are MEASURED in the
+    # _MAX_LOG_PAGES comment above - read them there. They are not restated
+    # here, because a second copy is a second thing that can go stale. Closing
+    # them belongs to
+    # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
+    #
+    # SEPARATE from _MAX_LOG_PAGES rather than a shared _MAX_PAGES: the two
+    # loops bound different populations, and that comment's measurements are
+    # log-specific and would become wrong if the constant were shared.
+    #
+    # A CLASS attribute, like _MAX_LOG_PAGES, so a test can shrink it - which
+    # means the loop must read it off `self`, not off a module global.
+    _MAX_LIST_PAGES = 10000
+
 
     def __init__(
         self,
@@ -173,7 +239,7 @@ class Client:
         limit: Optional[int] = None,
         cursor: Optional[str] = None,
     ) -> Page[M]:
-        """Fetch a single page envelope and validate each item into ``model``."""
+        """Fetch a single page envelope and validate it into ``Page[model]``."""
         self._require_token()
         p: dict[str, str] = dict(params or {})
         if sort is not None:
@@ -184,12 +250,28 @@ class Client:
             p["cursor"] = cursor
         response = self._http.get(path, params=p)
         raise_for_response(response)
-        body = response.json()
-        items = [model.model_validate(item) for item in body["items"]]
-        return cast(
-            "Page[M]",
-            Page(items=items, next_cursor=body.get("next_cursor", ""), total=body.get("total", 0)),
-        )
+        # The WHOLE body goes through the model, never a hand-picked
+        # body["items"] with next_cursor and total read off the raw dict beside
+        # it. The model is the pin, the same way it is in task_logs_page:
+        # `items` is required so a missing or null one raises instead of
+        # reading as an empty page, and `next_cursor` and `total` are TYPED, so
+        # a server answering next_cursor: 12345 or total: "many" fails here as
+        # one decoding error rather than as a raw TypeError from wherever the
+        # value is first used - which for the _fetch_all walk below was four
+        # different lines in three different shapes.
+        #
+        # `next_cursor: str = ""` and `total: int = 0` keep their DEFAULTS, so a
+        # MISSING key still reads as drained / zero exactly as `body.get(...)`
+        # did. That default is the subject of the separate open item
+        # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained and is not
+        # closed here; only a WRONG-TYPED value changes behaviour.
+        #
+        # `Page.__class_getitem__(model)` rather than `Page[model]`: the two are
+        # the same call, but mypy reads the subscript form as a type application
+        # and rejects a variable in that position. The cast restores M, which
+        # the runtime call erases.
+        page_model = cast("type[Page[M]]", Page.__class_getitem__(model))
+        return page_model.model_validate(response.json())
 
     def _fetch_all(
         self,
@@ -222,24 +304,209 @@ class Client:
         self._require_token()
         if limit is not None and limit < 1:
             raise ValidationError(f"limit must be >= 1, got {limit}")
-        p: dict[str, str] = dict(params or {})
-        if sort is not None:
-            p["sort"] = sort
-        p["limit"] = str(self._PAGE_REQUEST_LIMIT)
         out: list[M] = []
         cursor: Optional[str] = None
+        pages = 0
+        seen: set[str] = set()
         while True:
-            if cursor:
-                p["cursor"] = cursor
-            response = self._http.get(path, params=p)
-            raise_for_response(response)
-            body = response.json()
-            out.extend(model.model_validate(item) for item in body["items"])
+            pages += 1
+            # Through _get_page, which decodes the whole envelope into
+            # Page[model]. This loop used to build the request itself and read
+            # next_cursor and total off the raw dict, and that hand-picking was
+            # the defect: it made every stop below operate on a value of a type
+            # the server chose. `page.next_cursor` is a str and `page.total` an
+            # int by construction here, so `len()`, `in seen` and `>` are all
+            # asking a question their operand can answer.
+            page = self._get_page(
+                path,
+                model,
+                params=params,
+                sort=sort,
+                limit=self._PAGE_REQUEST_LIMIT,
+                cursor=cursor,
+            )
+            out.extend(page.items)
             if limit is not None and len(out) >= limit:
                 return out[:limit]
-            cursor = body.get("next_cursor", "")
+            # NOT changed by this slice: a MISSING next_cursor key still reads
+            # as drained here, and that is the subject of the open item
+            # bug-2026-08-27-python-sdk-page-cursor-defaults-to-drained, which
+            # also covers _get_page and is therefore wider than this loop.
+            cursor = page.next_cursor
+            # THE DRAINED RETURN BELOW MUST STAY ABOVE THE EMPTY-PAGE STOP. A
+            # list with no matching rows legitimately answers items: [] - and it
+            # reports itself drained, so it never reaches the stop. Inverted,
+            # list_jobs() against an empty jobs table raises.
             if not cursor:
                 return out
+            if not page.items:
+                raise ProtocolError(
+                    "server returned an empty page while still advertising more "
+                    f"rows (next_cursor {_quote_cursor(cursor)})",
+                    records=out,
+                )
+            # The stop is: this walk already requested this cursor. A SET, not a
+            # comparison against the previous cursor - the two catch different
+            # things and a two-cycle (A,B,A,B, which two replicas behind a load
+            # balancer produce) is invisible to the comparison and runs to the
+            # page cap. This is not a second stop; it is the one stop, with the
+            # container that implements it. Previous-cursor-only is this set
+            # restricted to its last element.
+            #
+            # A repeated cursor is UNREACHABLE on a correct server: the server's
+            # cursor (encodeCursorV2, internal/api/pagination.go) encodes the
+            # LAST KEPT row's key and the next page's predicate is strictly past
+            # it with id as tiebreaker, so cursor keys strictly decrease along a
+            # walk. Comparison is byte-exact on the base64 string; the SDK never
+            # decodes it, and deliberately so - decoding would make a
+            # server-internal encoding a cross-language contract to keep in step.
+            #
+            # Memory, stated rather than hidden: at most one entry per page, so
+            # the entry COUNT is bounded by _MAX_LIST_PAGES. The BYTE cost is
+            # entries x cursor length, and cursor length is server-supplied and
+            # unbounded - roughly 0.1% of a real walk (~128 bytes against ~100 KB
+            # of models per page), and dominant only against a server sending
+            # one-item pages with multi-megabyte cursors. A digest per entry
+            # would close that term and is DECLINED: the same attacker already
+            # has an equal retention channel through `items`, and the
+            # unbounded-response-bytes axis belongs to
+            # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout
+            # at the right layer.
+            if cursor in seen:
+                raise ProtocolError(
+                    "server cursor did not advance - it repeated a cursor this "
+                    f"walk had already requested ({_quote_cursor(cursor)}) after "
+                    f"{pages} pages",
+                    records=out,
+                )
+            # Recorded HERE, adjacent to the membership test it feeds, and not
+            # as the last statement of the loop body 60 lines below - the
+            # acquire direction of CLAUDE.md's "take the state and arm its
+            # release in the same breath, so no early return added later can
+            # forget to".
+            #
+            # The move is behaviour-identical, and that was PROVEN rather than
+            # argued: a sentinel raise placed as the final statement inside the
+            # page-cap block below leaves the suite green, while the same
+            # sentinel as that block's FIRST statement kills four tests. The
+            # block is entered and every arm of it raises, so the old position
+            # was never reached on any path the new one is not.
+            #
+            # It matters because a `continue` added later - a transient-retry
+            # arm is the obvious candidate - would silently stop populating
+            # `seen` from the old position, and the only symptom is 10000
+            # requests where there should have been 2.
+            #
+            # The rule is general; its APPLICATION here is not. task_logs' walk
+            # ends its loop body with `since = page.next_seq`, which looks like
+            # the same statement and must NOT be moved up to match: two of that
+            # walk's stops interpolate the PRE-update `since` into their
+            # messages ("next_seq N after since_seq M"), so advancing it early
+            # would make both messages report the cursor the server just sent as
+            # the one we had asked from. Different statement, different
+            # constraint - `seen` is only ever read by the membership test above
+            # it, while `since` is read by the messages below it.
+            seen.add(cursor)
+            if pages >= self._MAX_LIST_PAGES:
+                # Count DISTINCT ids, never len(out). `total` is server-supplied
+                # and so is the cursor, so a server that re-serves a page behind
+                # an ADVANCING cursor drives len(out) up to total while half the
+                # list was never sent - and the repeated-cursor stop above cannot
+                # see that, because the cursor genuinely advances.
+                #
+                # M is bound only to BaseModel, so nothing structural guarantees
+                # an id: the accessor is getattr with a default. Five of the six
+                # walked models declare `id: str` (required, undefaulted), so
+                # against them a row without an id fails in model_validate long
+                # before this line. `Job` declares `id: Optional[str] = None`
+                # because it is the authoring model too, so list_jobs is the one
+                # method that can reach the "no id" arm below.
+                #
+                # The failure direction is UNDER-count, which is safe: it can
+                # only push the code into the blaming arm. It can never
+                # over-count - the set holds at most one entry per row received.
+                #
+                # Built ONCE, inside a block every path of which raises. The
+                # common path - a walk that finishes - pays nothing. Do not
+                # accumulate this per page: that would put a string per row on
+                # 100% of walks to serve a message that fires at 2,000,000 rows.
+                ids: set[str] = set()
+                for row in out:
+                    row_id = getattr(row, "id", None)
+                    if isinstance(row_id, str) and row_id:
+                        ids.add(row_id)
+                distinct = len(ids)
+                # From the CURRENT page, and the message says so rather than
+                # implying the number is authoritative. A MISSING total still
+                # defaults to 0, via Page's own default - deliberately NOT the
+                # same class of default as the next_cursor one above, where a
+                # missing key reads as "drained" and silently truncates. Here it
+                # only makes a reported number smaller.
+                total = page.total
+                # The message REPORTS what it has and asserts NEITHER
+                # possibility: it does not blame the server, and it does not
+                # claim every row was collected.
+                #
+                # There used to be a `distinct >= total` arm that did claim
+                # completeness, justified by "a list of exactly _MAX_LIST_PAGES *
+                # _PAGE_REQUEST_LIMIT rows drains correctly, but its last page is
+                # full and so carries a cursor". That premise is TRUE for
+                # task_logs and FALSE here, and the asymmetry is an over-fetch:
+                #
+                #   - GetTaskLogsPage (internal/store/query/tasks.sql) is
+                #     `LIMIT $3`, and handleGetTaskLogs (internal/api/tasks.go)
+                #     zeroes next_seq only when `len(items) < limit`. A FULL last
+                #     log page carries a non-zero cursor, so that walk really does
+                #     stop one request short of learning it was done. Do NOT
+                #     "unify" task_logs' equivalent arm onto this one.
+                #   - Every LIST query is `LIMIT sqlc.arg(page_limit)::int + 1`,
+                #     and every list handler goes through buildPage
+                #     (internal/api/pagination.go), which emits a cursor only when
+                #     that extra row came back. A list page carries a cursor only
+                #     when a row genuinely exists BEYOND it, so a list whose
+                #     length is an exact multiple of the page size drains at its
+                #     last full page and never reaches this cap.
+                #
+                # So reaching the cap on a list means the server IS misbehaving,
+                # and the removed arm settled completeness with `total` - a number
+                # that same actor supplies. A server that keeps advancing cursors
+                # and reports total: 1000 on a five-million-row list got this to
+                # tell the operator every row was collected on a walk 0.02%
+                # complete. internal/relayclient/page.go reached the same
+                # conclusion first - it never had the arm, because T is a bare
+                # type parameter with no id and it could not have counted
+                # honestly anyway - and its comment warns against copying the
+                # completeness wording onto a list count. This is the side that
+                # had copied it. After this removal the only message in either
+                # SDK still carrying that wording is task_logs' below, where the
+                # premise above holds.
+                #
+                # Both numbers are still reported, and separately: `len(out)`
+                # counts rows APPENDED while `distinct` counts rows RECEIVED, and
+                # their disagreement is the diagnostic. Reporting is not
+                # asserting.
+                if distinct == 0:
+                    # Reaching here means every collected row lacked a usable id;
+                    # `out` itself is non-empty, because the empty-page stop above
+                    # rejects any page that contributed no rows. Do NOT print
+                    # "0 distinct row ids" - that is a computed-looking number
+                    # standing in for a measurement that did not happen.
+                    raise ProtocolError(
+                        f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
+                        f"client's page cap; {len(out)} rows were collected and "
+                        f"the server's last page reported {total}, and it had not "
+                        "yet reported the list as drained - the rows carry no id, "
+                        "so no distinct-row count can be given",
+                        records=out,
+                    )
+                raise ProtocolError(
+                    f"truncated after {self._MAX_LIST_PAGES} pages - hit the "
+                    f"client's page cap; {len(out)} rows were collected "
+                    f"({distinct} distinct row ids) and the server's last page "
+                    f"reported {total}, and it had not yet reported the list as "
+                    "drained",
+                    records=out,
+                )
 
     # ─── Jobs ─────────────────────────────────────────────────────────────
 
@@ -272,6 +539,12 @@ class Client:
         ``limit`` caps the TOTAL number of jobs returned (None = all).
         ``sort`` is forwarded to ?sort= and validated server-side; an
         unknown key raises :class:`ValidationError`.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all(
             "/v1/jobs", Job,
@@ -389,10 +662,14 @@ class Client:
         list. On a very large log use :meth:`task_logs_page` (O(one page)) or
         pass ``limit=``.
 
-        A walk that cannot be completed raises :class:`ProtocolError` with the
-        records collected so far on ``.records``. printTaskLogs, which this
-        ports, has printed every row by the time it returns the equivalent
-        error, so the error is a caveat on output the operator already has;
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the records collected so far on
+        ``.records``. Records do NOT survive any other failure: an HTTP error
+        mid-walk raises the matching :class:`RelayError` and a page the SDK
+        cannot decode raises ``pydantic.ValidationError``, and both discard what
+        was collected. printTaskLogs, which this ports, has printed every row
+        by the time it returns the equivalent error, so the error is a caveat
+        on output the operator already has;
         returning a list is what makes the caveat and the rows arrive
         separately here.
         """
@@ -614,6 +891,12 @@ class Client:
 
         ``limit`` caps the TOTAL rows returned (None = all). ``sort`` is
         validated server-side; an unknown key raises :class:`ValidationError`.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
         """
         return self._fetch_all("/v1/scheduled-jobs", ScheduledJob, sort=sort, limit=limit)
 
@@ -691,7 +974,14 @@ class Client:
     def list_workers(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[Worker]:
-        """List workers, auto-paginating across all pages. ``limit`` caps total rows."""
+        """List workers, auto-paginating across all pages. ``limit`` caps total rows.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
+        """
         return self._fetch_all("/v1/workers", Worker, sort=sort, limit=limit)
 
     def list_workers_page(
@@ -706,7 +996,14 @@ class Client:
     def list_users(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[User]:
-        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError."""
+        """List users, auto-paginating. Admin-only: a non-admin token raises AuthError.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
+        """
         return self._fetch_all("/v1/users", User, sort=sort, limit=limit)
 
     def list_users_page(
@@ -721,7 +1018,14 @@ class Client:
     def list_reservations(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[Reservation]:
-        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError."""
+        """List reservations, auto-paginating. Admin-only: non-admin raises AuthError.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
+        """
         return self._fetch_all("/v1/reservations", Reservation, sort=sort, limit=limit)
 
     def list_reservations_page(
@@ -738,7 +1042,14 @@ class Client:
     def list_agent_enrollments(
         self, *, sort: Optional[str] = None, limit: Optional[int] = None
     ) -> list[AgentEnrollment]:
-        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError."""
+        """List active agent enrollments, auto-paginating. Admin-only: non-admin raises AuthError.
+
+        A walk stopped by one of the client's own termination stops raises
+        :class:`ProtocolError` with the rows collected so far on ``.records``.
+        Rows do NOT survive any other failure: an HTTP error mid-walk raises the
+        matching :class:`RelayError` and a page the SDK cannot decode raises
+        ``pydantic.ValidationError``, and both discard what was collected.
+        """
         return self._fetch_all("/v1/agent-enrollments", AgentEnrollment, sort=sort, limit=limit)
 
     def list_agent_enrollments_page(

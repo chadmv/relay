@@ -17,6 +17,7 @@ from relay import (
     OverlapPolicy,
     Priority,
     ProtocolError,
+    ServerError,
     ValidationError,
 )
 
@@ -1183,3 +1184,737 @@ def test_a_bad_limit_does_not_pre_empt_the_missing_token_error(tmp_path: Any) ->
         with pytest.raises(AuthError, match="relay login"):
             client.task_logs("abc", limit=bad)
     assert called is False
+
+
+# ─── cursor quoting ──────────────────────────────────────────────────────────
+
+
+def test_quote_cursor_returns_a_short_cursor_verbatim() -> None:
+    """A real relay cursor is base64url of a ~96-byte {t,i,s} JSON, so about 128
+    characters. The threshold is 200, so every legitimate cursor is quoted in
+    full and an operator can paste it back.
+    """
+    from relay.client import _quote_cursor
+
+    assert _quote_cursor("eyJ0IjoiMjAyNi0wOC0yOCJ9") == "'eyJ0IjoiMjAyNi0wOC0yOCJ9'"
+
+
+def test_quote_cursor_bounds_a_long_cursor() -> None:
+    """The cursor is SERVER-SUPPLIED and its length is unbounded, so a message
+    built from it is unbounded too. The bound must still leave the message
+    diagnosable, so the true length is reported alongside the prefix.
+    """
+    from relay.client import _quote_cursor
+
+    quoted = _quote_cursor("a" * 5000)
+
+    assert len(quoted) < 300
+    assert "truncated from 5000 characters" in quoted
+    assert "a" * 5000 not in quoted
+    assert "a" * 200 in quoted
+
+
+# ─── _fetch_all termination stops ────────────────────────────────────────────
+#
+# Every fixture body below is a hand-written dict literal, built by
+# _page_response and _job_response. NEVER build one by dumping Page[Job] or Job:
+# a fixture encoded through the type under test agrees with the decoder by
+# construction, on the envelope keys AND on the item fields, and can detect
+# drift in neither direction. Same rule, same reason, as the task-log fixtures
+# above.
+#
+# Every fixture also has a TERMINATOR - an HTTP 500 past the request count the
+# correct implementation makes. This project has no pytest-timeout. Without the
+# terminator, deleting the stop under test leaves the handler answering forever
+# and the test HANGS instead of failing. With it, the mutant raises ServerError,
+# which is not ProtocolError, so the test is RED.
+
+
+def test_fetch_all_raises_on_an_empty_page_that_still_advertises_more() -> None:
+    """Stop 1. On a correct server this is unreachable - buildPage
+    (internal/api/pagination.go) returns ([], "") for zero rows and emits a
+    cursor only when it kept at least one row - which is the point: the loop is
+    driven by a value the client does not control, and "no correct server does
+    this" is a statement about correct servers.
+
+    Page 1 must be NON-EMPTY. With an empty page 1, `.records` is [] under both
+    the correct code and a mutant that drops records=, and the payload assertion
+    is vacuous.
+
+    Page 2's cursor must DIFFER from page 1's, or the repeated-cursor stop
+    becomes a second possible explanation for the raise and the diagnosis is
+    unpinned. The match= is the other half of that.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1"), _job_response(id="j2")],
+                    next_cursor="CUR-ONE",
+                    total=99,
+                ),
+            )
+        if len(calls) == 2:
+            return httpx.Response(
+                200, json=_page_response([], next_cursor="CUR-TWO", total=99)
+            )
+        return httpx.Response(500, json={"error": "past the stop"})
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert "CUR-TWO" in str(excinfo.value)
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2"]
+
+
+def test_fetch_all_zero_matching_rows_is_not_an_error() -> None:
+    """The drained return MUST stay above the empty-page stop.
+
+    A list with no matching rows answers `items: []` with `next_cursor: ""` -
+    that IS the legitimate empty page here, and it reports itself drained.
+    Testing emptiness first turns list_jobs() against an empty jobs table into a
+    ProtocolError. That inversion is a one-line mutation (M4).
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=_page_response([], total=0))
+
+    client = _make_client(handler)
+    assert client.list_jobs() == []
+    assert len(calls) == 1
+
+
+def test_fetch_all_raises_when_the_server_repeats_a_cursor() -> None:
+    """Stop 2, self-loop. The repro from the backlog item: a server answering
+    the same cursor forever drove 2000 requests and counting.
+
+    The cursor here is an opaque base64 string with no order, so "did not
+    advance" cannot be a comparison the way task_logs' `next_seq <= since` is.
+    The stop is membership: this walk already requested this cursor.
+
+    Membership is tested BEFORE the cursor is recorded, so a self-loop fires on
+    request 2 - hence `len(calls) == 2`, not 3.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")], next_cursor="CUR-SAME", total=99
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="already requested") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert "CUR-SAME" in str(excinfo.value)
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2"]
+
+
+def test_fetch_all_raises_on_a_two_cycle_of_cursors() -> None:
+    """THIS is the test that discriminates a seen-SET from a comparison against
+    the immediately previous cursor.
+
+    Under previous-cursor-only, A,B,A,B never fires: it runs to the page cap,
+    10000 requests and up to 2,000,000 retained rows later. That is not an
+    exotic adversarial construction - two replicas behind a load balancer with
+    different data, or a caching proxy alternating two cached bodies, produce
+    exactly this.
+
+    The set fires on request 3, when A comes round again.
+    """
+    calls: list[dict[str, str]] = []
+    cursors = ["CUR-A", "CUR-B", "CUR-A"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > len(cursors):
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=cursors[len(calls) - 1],
+                total=99,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="already requested") as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 3
+    assert "CUR-A" in str(excinfo.value)
+
+
+def test_fetch_all_truncates_an_over_long_cursor_in_its_message() -> None:
+    """The message quotes a value the SERVER chose, so the message's length is
+    the server's to choose unless the client bounds it.
+
+    This is the WIRING half of the _quote_cursor tests: asserting the helper
+    truncates proves nothing about the code that builds the message.
+
+    Note this fixture is also a self-loop, so deleting the repeated-cursor stop
+    (M1) reddens this test too. That is expected and recorded in the mutation
+    table; it is not a sign the truncation is unpinned - M8 kills this test
+    while leaving the stop intact.
+    """
+    huge = "z" * 5000
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the stop"})
+        return httpx.Response(
+            200,
+            json=_page_response([_job_response(id="j1")], next_cursor=huge, total=99),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(message) < 1000
+    assert "truncated from 5000 characters" in message
+    assert huge not in message
+
+
+def test_fetch_all_truncates_an_over_long_cursor_in_the_empty_page_message() -> None:
+    """The SECOND raise site that interpolates a cursor, and it was unpinned.
+
+    _fetch_all quotes a server-chosen cursor in two messages, and the test above
+    reaches only one of them: its fixture is a self-loop, so it always arrives at
+    the repeated-cursor message. Measured, replacing _quote_cursor(cursor) with
+    cursor!r at the EMPTY-PAGE site alone survived the entire suite.
+
+    The bound belongs to the raise site, not to the helper - a helper that
+    truncates proves nothing about a caller that does not use it - so each site
+    needs its own fixture. This one reaches the empty-page stop: page 1 is
+    non-empty with a short cursor, page 2 is empty with a 5000-character one.
+
+    The two cursors differ, so the repeated-cursor stop is not a second possible
+    explanation for the raise; the match= is the other half of that.
+    """
+    huge = "q" * 5000
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1")], next_cursor="CUR-SHORT", total=99
+                ),
+            )
+        if len(calls) == 2:
+            return httpx.Response(
+                200, json=_page_response([], next_cursor=huge, total=99)
+            )
+        return httpx.Response(500, json={"error": "past the stop"})
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="empty page") as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(calls) == 2
+    assert len(message) < 1000
+    assert "truncated from 5000 characters" in message
+    assert huge not in message
+    assert [j.id for j in excinfo.value.records] == ["j1"]
+
+
+def test_fetch_all_raises_at_the_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop 3, which catches an ever-advancing, never-repeating cursor that
+    never drains - something neither of the other two stops can see.
+
+    _MAX_LIST_PAGES is a CLASS attribute so this monkeypatch works, which means
+    the loop must read it off `self` and never off a module global.
+
+    The request-count assertion is not decoration: a test that only checks the
+    exception class cannot tell the cap from a different stop firing, and it
+    cannot see an off-by-one in the cap's own predicate.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=9999,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError, match="page cap"):
+        client.list_jobs()
+    assert len(calls) == 3
+
+
+def test_fetch_all_page_cap_quotes_the_last_pages_total_not_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap message says "the server's last page reported N", and N really
+    has to come off the LAST page.
+
+    Every other cap fixture in this file sends a CONSTANT total on every page,
+    so not one of them can tell which page the number was read from. Measured:
+    an SDK that captures page 1's total and interpolates that instead leaves all
+    159 of them green. The three totals here differ per page for exactly that
+    reason - do NOT flatten them back to a constant.
+
+    Python's claim is the STRONGER of the two SDKs' and so the one that needed
+    pinning. internal/relayclient/page.go says "the server's first page
+    reported", because FetchAllPages returns the first page's total as its own
+    second return value and the message is describing that number; this walk
+    returns no total at all, reads it fresh on every page, and says so.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 3)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 3:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{len(calls)}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=6 + len(calls),
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert len(calls) == 3
+    assert "3 rows were collected (3 distinct row ids)" in message
+    assert "the server's last page reported 9" in message
+    assert "reported 7" not in message
+    assert "reported 8" not in message
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j3"]
+
+
+def test_fetch_all_page_cap_makes_no_completeness_claim_when_total_is_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop 3's message asserts NEITHER possibility: it does not blame the
+    server, and it does not claim every row was collected. It REPORTS the two
+    numbers it has, which is not the same thing.
+
+    It used to split on completeness whenever `distinct >= total`, justified by
+    "a list of exactly _MAX_LIST_PAGES * _PAGE_REQUEST_LIMIT rows drains
+    correctly, but its last page is full and so carries a cursor". That premise
+    is true for task_logs and FALSE for a list walk, and the asymmetry is on the
+    wire:
+
+      - GetTaskLogsPage (internal/store/query/tasks.sql) is `LIMIT $3` - no
+        over-fetch - and handleGetTaskLogs (internal/api/tasks.go) sets
+        next_seq = 0 only when `len(items) < limit`. A FULL last log page does
+        carry a non-zero cursor, so the log walk really does stop one request
+        short. The premise holds there.
+      - Every list query is `LIMIT sqlc.arg(page_limit)::int + 1`, and every
+        list handler goes through buildPage (internal/api/pagination.go), which
+        does `hasMore := int32(len(rows)) > limit` and returns an empty cursor
+        when that is false. A list page carries a cursor only when a row
+        genuinely exists BEYOND it, so a list that is an exact multiple of the
+        page size drains at its last full page and never reaches the cap.
+
+    So on a list, reaching the cap means the server IS misbehaving - and the
+    removed arm then settled completeness using `total`, a number that same
+    misbehaving actor supplies. A server that keeps advancing cursors and
+    reports total: 1000 on a five-million-row list got the SDK to tell the
+    operator every row was collected on a walk 0.02% complete.
+
+    This fixture is the exact input that used to trigger the claim: distinct ==
+    total == 4. The Go side reached the same conclusion first and says so at
+    internal/relayclient/page.go.
+
+    The outcome assertion is not optional. The sibling's version of this test
+    was green BECAUSE OF a different bug until `.records` was asserted.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        n = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{n - 1}"), _job_response(id=f"j{n}")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "every one was collected" not in message
+    assert "completeness" not in message
+    assert "4 rows were collected (4 distinct row ids)" in message
+    assert "the server's last page reported 4" in message
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j3", "j4"]
+
+
+def test_fetch_all_page_cap_reports_distinct_ids_alongside_the_row_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The message reports rows APPENDED and DISTINCT ids as two separate
+    numbers, because they are two different measurements and their disagreement
+    is the whole diagnostic value of the second one.
+
+    A server that re-serves a page behind an ADVANCING cursor drives len(out) up
+    while sending nothing new - and the repeated-cursor stop cannot see it,
+    because the cursor genuinely advances. This handler does exactly that: ids
+    j1 and j2 twice, cursors CUR-1 then CUR-2, total 4. Rows 3 and 4 do not
+    exist on the wire at any point, and an operator reading "4 rows collected"
+    alone would never know.
+
+    Pinning both numbers in ONE substring is what makes this discriminating: a
+    mutant that reports len(out) as the distinct count says "(4 distinct row
+    ids)" and dies here.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id="j1"), _job_response(id="j2")],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "every one was collected" not in message
+    assert "completeness" not in message
+    assert "4 rows were collected (2 distinct row ids)" in message
+    # Duplicates and all: the client does not know which of them the server
+    # meant, so it hands back exactly what it received.
+    assert [j.id for j in excinfo.value.records] == ["j1", "j2", "j1", "j2"]
+
+
+def test_fetch_all_page_cap_says_so_when_no_row_carried_an_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third message arm, and it exists for list_jobs SPECIFICALLY.
+
+    Of the six models _fetch_all walks, five declare `id: str` - required and
+    undefaulted - so a row missing `id` fails inside model_validate long before
+    the cap arm runs, and this arm is unreachable for them BY CONSTRUCTION.
+    `Job` declares `id: Optional[str] = None`, because Job is the authoring
+    model too and Job(name="nightly") must keep working. So list_jobs is the one
+    method that can reach here, which is why this fixture is a jobs walk.
+
+    The message must NOT print "0 distinct row ids": that is a computed-looking
+    number standing in for a measurement that did not happen. It says no
+    distinct-row count can be given, and why.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        n = len(calls) * 2
+        # Hand-written rows that deliberately carry NO "id" key. Job's only
+        # required field is `name`.
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [{"name": f"n{n - 1}"}, {"name": f"n{n}"}],
+                next_cursor=f"CUR-{len(calls)}",
+                total=4,
+            ),
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(ProtocolError) as excinfo:
+        client.list_jobs()
+
+    message = str(excinfo.value)
+    assert "carry no id" in message
+    assert "0 distinct" not in message
+    assert "every one was collected" not in message
+    assert "completeness" not in message
+    assert "4 rows were collected" in message
+    assert [j.name for j in excinfo.value.records] == ["n1", "n2", "n3", "n4"]
+
+
+def test_fetch_all_limit_satisfied_on_page_two_by_a_page_that_repeats_a_cursor() -> None:
+    """The `limit` short-circuit stays ABOVE every stop.
+
+    A caller who asked for 3 rows and has 3 rows has been served. Turning that
+    into an error because the page that completed the order also repeated a
+    cursor would make a correct result depend on a defect the caller never
+    observes.
+
+    The discriminating case is narrower than it looks and no existing test
+    covers it. Neither the cursor-repeat stop nor the page cap can fire on
+    request 1 - there is no previous cursor, and pages == 1 < cap - so a walk
+    satisfied on page 1 proves nothing about the ordering. `limit` must be
+    satisfied on page 2 OR LATER, by a page that also trips a stop. That is why
+    both pages return cursor CUR-A.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the stop"})
+        n = len(calls) * 2
+        return httpx.Response(
+            200,
+            json=_page_response(
+                [_job_response(id=f"j{n - 1}"), _job_response(id=f"j{n}")],
+                next_cursor="CUR-A",
+                total=99,
+            ),
+        )
+
+    client = _make_client(handler)
+    jobs = client.list_jobs(limit=3)
+
+    assert [j.id for j in jobs] == ["j1", "j2", "j3"]
+    assert len(calls) == 2
+
+
+# ─── _fetch_all envelope typing ──────────────────────────────────────────────
+#
+# _page_response cannot express any of these bodies: it is typed
+# `next_cursor: str, total: Optional[int]`, which is exactly why nothing in this
+# file had ever varied the TYPE of an envelope field. The envelope is chosen by
+# the SERVER, so its field TYPES are the server's to choose in the same sense
+# its values are - the argument the termination stops already rest on, applied
+# one level up. These bodies are therefore hand-written inline.
+#
+# The contract asserted is pydantic's ValidationError, NOT a relay error.
+# ValidationError escaping the RelayError hierarchy is a separate, tracked
+# defect (bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy);
+# what these pin is that a wrong-typed envelope reaches ONE documented decoding
+# failure instead of a raw TypeError from deep inside the loop.
+
+
+def test_fetch_all_discards_collected_rows_when_a_mid_walk_page_is_an_http_error() -> None:
+    """The counterexample the six list_* docstrings used to promise away.
+
+    They said "a walk that cannot be completed raises ProtocolError with the
+    rows collected so far on .records" without qualification. This walk cannot
+    be completed and raises ServerError, which carries no .records at all - and
+    page 1's two rows are gone. The claim is now scoped to the client's own
+    termination stops, and this pins the other side of that scope.
+
+    It also locks the shape against a plausible future "improvement": wrapping a
+    mid-walk transport or HTTP failure in ProtocolError so the partial rows
+    survive would be a real design change, not a bug fix, and it would silently
+    change what an existing caller's `except` clause catches.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1"), _job_response(id="j2")],
+                    next_cursor="CUR-ONE",
+                    total=99,
+                ),
+            )
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = _make_client(handler)
+    with pytest.raises(ServerError) as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert not hasattr(excinfo.value, "records")
+
+
+def test_fetch_all_discards_collected_rows_when_a_mid_walk_page_cannot_decode() -> None:
+    """The other half, and the likelier one in practice: ordinary server/SDK
+    version skew, where a row stops matching the model mid-walk.
+
+    pydantic.ValidationError does not descend from RelayError - that is the
+    tracked bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy
+    - and it carries no records either. Page 1's rows are discarded, which is
+    exactly the case the old docstring promised .records for.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json=_page_response(
+                    [_job_response(id="j1")], next_cursor="CUR-ONE", total=99
+                ),
+            )
+        # `name` is Job's one required field, so a row without it cannot decode.
+        return httpx.Response(
+            200, json=_page_response([{"id": "j2"}], next_cursor="", total=99)
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError) as excinfo:
+        client.list_jobs()
+
+    assert len(calls) == 2
+    assert not hasattr(excinfo.value, "records")
+
+
+def test_fetch_all_rejects_a_non_string_next_cursor() -> None:
+    """Fires on request 2, with no page cap involved: an int cursor is hashable,
+    so it survives the `in seen` membership test on request 2 and reaches
+    _quote_cursor, which asks it for a len().
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200,
+            json={"items": [_job_response(id="j1")], "next_cursor": 12345, "total": 5},
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_list_next_cursor() -> None:
+    """The other half of the cursor-type pair, and it fails EARLIER than the int
+    one on the un-fixed code: a list is unhashable, so `cursor in seen` raises
+    before _quote_cursor is ever reached. Two crash sites, one shape.
+    """
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the decode"})
+        return httpx.Response(
+            200,
+            json={"items": [_job_response(id="j1")], "next_cursor": ["x"], "total": 5},
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+@pytest.mark.parametrize("bad_total", ["many", None, {"n": 1}])
+def test_fetch_all_rejects_a_non_integer_total(
+    bad_total: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`total` is only READ at the page cap on the un-fixed code, so the cap is
+    what this fixture drives - that is where the TypeError was measured.
+
+    Routed through the model, `total` is validated on EVERY page, so the fix
+    moves the failure forward to request 1. The assertion is deliberately about
+    the exception, not the request count: both are correct outcomes and pinning
+    the count here would pin the un-fixed code's laziness as a contract.
+
+    "many" is not simply "a string": pydantic coerces a NUMERIC string, so
+    `total: "5"` stays acceptable. It is the non-numeric string that must fail.
+    """
+    monkeypatch.setattr(Client, "_MAX_LIST_PAGES", 2)
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        if len(calls) > 2:
+            return httpx.Response(500, json={"error": "past the cap"})
+        return httpx.Response(
+            200,
+            json={
+                "items": [_job_response(id=f"j{len(calls)}")],
+                "next_cursor": f"CUR-{len(calls)}",
+                "total": bad_total,
+            },
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_null_items() -> None:
+    """`items: null` is a live defect that PRE-DATES this slice - the line it
+    crashed on is the same subscript that was there before - so it is fixed here
+    incidentally, by the same routing, rather than as a regression.
+
+    `Page.items` is required and undefaulted, so null is a ValidationError and
+    not an empty page: coercing null to [] would invent a drained-looking page
+    out of a body the server never sent.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"items": None, "next_cursor": "", "total": 0}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()
+
+
+def test_fetch_all_rejects_a_missing_items_key() -> None:
+    """The absent-key sibling of the null case. `items` has NO default, unlike
+    `next_cursor` and `total`, whose defaults are deliberate and preserved - so
+    an absent `items` is an error while an absent `next_cursor` still reads as
+    drained.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"next_cursor": "", "total": 0})
+
+    client = _make_client(handler)
+    with pytest.raises(PydanticValidationError):
+        client.list_jobs()

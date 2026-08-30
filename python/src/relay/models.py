@@ -463,10 +463,11 @@ class LogPage(BaseModel):
     a global BIGSERIAL, so when one task logs alone its ids are contiguous and
     +1 skips the very next row.
 
-    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`'s cursor,
-    which is read with ``body.get("next_cursor", "")``. A defaulted
-    ``next_seq: int = 0`` would read a missing key as "drained" and silently
-    return page 1 - the same shape as the defect this model exists to fix.
+    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`, which
+    declares ``next_cursor: str = ""`` and so reads a missing key as the empty
+    string. A defaulted ``next_seq: int = 0`` would read a missing key as
+    "drained" and silently return page 1 - the same shape as the defect this
+    model exists to fix.
     """
 
     model_config = ConfigDict(extra="ignore")

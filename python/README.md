@@ -101,6 +101,39 @@ the last N rows": a plausible-looking short list rather than an error. This
 does not apply to the `*_page` siblings, where `limit` is the page size and
 travels to the server, which answers 400 for anything outside 1-200.
 
+Every one of those seven walks is driven by a cursor the **server** chooses, and
+the provenance of a value says nothing about who controls its content. So each
+has three stops beyond the server's own drained signal, and a server that trips
+one raises `ProtocolError`: a page that carries no rows while still advertising
+more, a cursor that does not advance, and a client-side cap of 10000 requests.
+
+The middle stop is **two different mechanisms**, and which one you get depends on
+the walk. The six `list_*` methods page on an opaque base64 cursor that carries
+no order, so they keep a **set** of every cursor already requested: both a repeat
+and a two-cycle (`A,B,A,B`, which two replicas behind a load balancer produce)
+stop, and the message says the server "repeated a cursor this walk had already
+requested". `task_logs` pages on an integer `next_seq` and so requires **strict
+advance** - `next_seq <= since_seq` stops - with the message "server cursor did
+not advance (next_seq N after since_seq M)". For integers, monotonicity already
+subsumes repetition, so the outcomes coincide and the mechanisms do not. Do not
+"unify" `task_logs` onto a set on the strength of this paragraph.
+
+The cap bounds **requests** and nothing else - not wall clock, not response
+bytes, not the memory of one response, for the reasons measured under "Reading a
+task's log" below. The rows collected before a walk was abandoned are on the
+exception:
+
+```python
+try:
+    jobs = client.list_jobs()
+except relay.ProtocolError as e:
+    jobs = e.records          # never None; [] if nothing was collected
+    print(f"partial list ({len(jobs)} jobs): {e}")
+```
+
+A list with **no matching rows is not an error** - it answers `items: []` with an
+empty cursor, which is the drained signal, and `list_jobs()` returns `[]`.
+
 ### Reading a task's log
 
 `task_logs(id)` walks every page and returns the whole log as a list. It always
@@ -179,7 +212,28 @@ Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
 
 Errors raised by the SDK's own request handling descend from `relay.RelayError`.
 Response DECODING is the exception, and it escapes in two ways, neither of
-which descends from `RelayError`:
+which descends from `RelayError`. Two is the whole list only for the bodies that
+go through a model in ONE PIECE - every paged envelope now does, which is what
+`_fetch_all` did not do until it was routed through `Page[model]`. A decode that
+hand-picks fields out of the raw result and uses them untyped adds `TypeError`
+and `KeyError`, and the claim has to be scoped because one such decode remains.
+
+Counted across `relay/`, twelve call sites read `response.json()`. Ten hand the
+whole body to a model. Two do not, and only one of them widens this list:
+
+- `get_tasks(job_id)` iterates the raw result
+  (`[Task.model_validate(item) for item in response.json()]`), so a 200 whose
+  body is not a JSON array raises `TypeError` - exactly the escape class the
+  paragraph above says the paged envelopes no longer have. `handleListTasks`
+  builds `make([]taskResponse, len(tasks))`, so a correct server never sends
+  one; that is a statement about the server, not about the decode, and it is
+  tracked separately.
+- `_extract_message` in `errors.py` reads `payload.get("error")`, but every step
+  is guarded - `try/except ValueError` around the parse, `isinstance` on both
+  the payload and the field - and it falls back to `response.text`. It cannot
+  raise, so it adds nothing here.
+
+The two escapes are:
 
 - a body that is well-formed JSON but does not match the model raises
   `pydantic.ValidationError`;
@@ -198,7 +252,7 @@ That gap is known and tracked separately.
 | `Conflict` | 409 (e.g. cancelling a terminal job) |
 | `ServerError` | 5xx |
 | `HTTPError` | Any other unexpected status |
-| `ProtocolError` | A 200 that is not a usable relay response: an empty page advertising more rows, a cursor that does not advance, or a log that never reports itself drained. Carries `.records` (what the abandoned walk collected) instead of `.response` |
+| `ProtocolError` | A 200 that is not a usable relay response, raised by **any** cursor walk - `task_logs` and all six `list_*` methods: an empty page advertising more rows, a cursor the walk already requested, or a walk that never reports itself drained within the client's page cap. Carries `.records` (whatever that walk collected - log records from `task_logs`, resource models from `list_*`) instead of `.response` |
 | `TimeoutError` | `wait()` exceeded its wall-clock limit |
 
 `.response` carries the originating `httpx.Response`, but only where there was
