@@ -115,11 +115,22 @@ The distinction the comment draws is between two *classes of default*, and after
 
 What is newly true at that line and worth recording instead: **`page.total` is present because the model requires it - a page that omitted it raised in `_get_page` and never reached the cap.** That is a claim about provenance and it is exactly the right claim there, because the paragraph immediately below it is about not settling completeness with a server-supplied number. Presence and truth are different properties and the comment now says both. Section 5.2's argument (the safe-direction claim was scoped to one reader and there are seven) belongs in the spec and in `Page`'s docstring, where the requirement is declared, not at a page-cap message that no missing `total` can reach.
 
-### Q3 - `0.2.2` or `0.3.0`? DECIDED: `0.2.2`
+### Q3 - `0.2.2` or `0.3.0`? ~~DECIDED: `0.2.2`~~ **AMENDED IN PHASE 4: `0.3.0`**
 
-Four reasons, in order of weight. No public signature changes - the twelve method names, parameters and return types are byte-identical. The behaviour change is only observable against a response **no correct server produces**, and section 2 measured that (`page[T]` carries no `omitempty`). The project has no CHANGELOG and no release notes, so a minor bump advertises to nobody; the advertisement this slice actually owes is the README Errors paragraph, and Task 2 writes it. And there is a larger, genuinely breaking change queued behind this one - the `_read_json` chokepoint that moves decode failures into `RelayError` and *will* change what an existing `except` clause catches - which is a better place to spend a minor bump.
+~~Four reasons, in order of weight. No public signature changes - the twelve method names, parameters and return types are byte-identical. The behaviour change is only observable against a response **no correct server produces**, and section 2 measured that (`page[T]` carries no `omitempty`). The project has no CHANGELOG and no release notes, so a minor bump advertises to nobody; the advertisement this slice actually owes is the README Errors paragraph, and Task 2 writes it. And there is a larger, genuinely breaking change queued behind this one - the `_read_json` chokepoint that moves decode failures into `RelayError` and *will* change what an existing `except` clause catches - which is a better place to spend a minor bump.~~
 
-Reversible: if the human prefers `0.3.0`, it is a two-file edit in Task 4 and nothing else in this plan moves.
+**Corrected reasoning.** The decision above is superseded; the version shipped is `0.3.0`.
+
+The load-bearing evidence is PRECEDENT, not semver theory. Commit `e536f3e` (#156) made `LogPage.next_seq` and `LogPage.total` required for materially identical reasons - "a patch bump advertises no breakage" is its own commit message - and went `0.1.2 -> 0.2.0`, a MINOR bump. This slice is that exact shape on the sibling envelope and took a patch. (`69cef30`/#161 took a patch, but it only ADDED raise sites; it did not change a public model's construction signature, so it is not the counter-example it looks like.)
+
+Two of the four reasons above are refuted rather than merely outweighed:
+
+- **"No public signature changes" is false.** `Page` is in `__all__`, so `Page[Job](items=[...])` is public API, and it now raises where it did not. The construction signature changed even though no method's did.
+- **"A minor bump advertises to nobody" is false, and backwards.** With no CHANGELOG, the version number IS the advertisement channel - and it is the one that fires with no human reading anything. A downstream pinned `~=0.2.1` auto-resolves `0.2.2` and breaks on upgrade; the same downstream pinned `>=0.2,<0.3` is PROTECTED from `0.3.0`. A patch bump does not fail to advertise, it advertises the wrong thing to a resolver.
+
+The surviving reason - "no correct server produces this response" - considered only the SERVER direction. The break lands on downstream test doubles and recorded fixtures, which routinely omit keys precisely because the old model defaulted them, and those are not servers.
+
+`test_version_files_are_in_lockstep` catches moving only one of the two files.
 
 ---
 
@@ -133,7 +144,7 @@ Reversible: if the human prefers `0.3.0`, it is a two-file edit in Task 4 and no
 | `python/tests/unit/test_models.py` | One test replaced (Task 1); two docstring corrections (Task 2). |
 | `python/README.md` | Errors section gains the fail-closed advertisement (Task 2). |
 | `python/tests/integration/test_smoke.py` | One docstring note - the test acquires a new job (Task 3). |
-| `python/pyproject.toml`, `python/src/relay/_version.py` | `0.2.1` -> `0.2.2` (Task 4). |
+| `python/pyproject.toml`, `python/src/relay/_version.py` | `0.2.1` -> `0.3.0` (Task 4; the plan said `0.2.2` and Phase 4 amended Q3 - see above). |
 
 ---
 
@@ -703,6 +714,8 @@ git commit -m "test(python): record the live-server property the strict envelope
 ---
 
 ## Task 4: Version bump to 0.2.2
+
+> **SUPERSEDED - the version shipped is `0.3.0`, not `0.2.2`.** Phase 4 amended Q3 (see above) after `e536f3e`/#156 was measured as the governing precedent. The steps below are kept verbatim as the plan-as-written; substitute `0.3.0` for `0.2.2` throughout. Nothing else in the task changes - the two files, the lockstep guard and the one-at-a-time RED are the same.
 
 **Files:**
 - Modify: `python/pyproject.toml:7`
