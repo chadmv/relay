@@ -25,7 +25,9 @@ def _empty_on_null(empty: Callable[[], Any]) -> BeforeValidator:
     key that is present and ``null``, which is a different wire shape and one
     the server legitimately sends for some jsonb fields (``Job.labels`` and
     ``Reservation.selector`` arrive as ``null`` today); the SDK must not raise
-    on a document the server legitimately produces.
+    on a document the server legitimately produces. The remaining annotated
+    fields have no live null path today and are insurance against a server
+    change.
 
     A BEFORE validator, so the declared type stays ``dict``/``list`` rather
     than becoming Optional: a caller never has to test these for None, which
@@ -88,11 +90,10 @@ class EventType(str, Enum):
     this enum is the vocabulary the server emits TODAY, for comparison and
     autocomplete.
 
-    ``DROPPED`` is not a resource event. The server writes it directly
-    when the broker drops a subscriber for falling behind, and its meaning
-    is "you missed frames": anything
-    published in the gap is gone, so re-read the job with
-    :meth:`relay.Client.get_job` and resume each task's log with
+    ``DROPPED`` is not a resource event. The server writes it directly when
+    the broker drops a subscriber for falling behind, and its meaning is "you
+    missed frames": anything published in the gap is gone, so re-read the job
+    with :meth:`relay.Client.get_job` and resume each task's log with
     ``task_logs_page(task_id, since_seq=<last seq seen>)``. Not ``task_logs``,
     which takes no ``since_seq``.
     """
