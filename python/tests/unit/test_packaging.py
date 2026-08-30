@@ -6,7 +6,6 @@ from pathlib import Path
 from relay import Client, __version__
 
 _PYTHON_DIR = Path(__file__).resolve().parents[2]
-_REPO_ROOT = _PYTHON_DIR.parent
 
 
 def test_readme_client_api_table_documents_every_public_method() -> None:
@@ -54,37 +53,3 @@ def test_version_files_are_in_lockstep() -> None:
     match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
     assert match is not None, "pyproject.toml has no [project] version"
     assert match.group(1) == __version__
-
-
-def test_the_go_side_guard_named_in_our_prose_still_exists() -> None:
-    """Three Python artifacts name a GO test by symbol, and nothing else can see it.
-
-    The strict-envelope slice dropped an unpinnable cross-language site COUNT and
-    substituted a reference to the Go test that pins the property instead. That is
-    a real improvement - a symbol is more stable and far more greppable than a
-    tally - but it is still a cross-language reference, and
-    .github/workflows/python.yml is path-filtered to `python/**`, so the Python
-    lane can never see a Go rename. This closes that.
-
-    Failing here does NOT mean the Go test is gone; it may only have been renamed.
-    Check internal/api/pagination_test.go first, then update the three prose sites.
-    """
-    guard = "TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage"
-    go_test = _REPO_ROOT / "internal" / "api" / "pagination_test.go"
-    assert go_test.is_file(), f"{go_test} is missing; the tag guard moved or was deleted"
-    assert guard in go_test.read_text(encoding="utf-8"), (
-        f"{guard} is not in {go_test.name}, but relay/models.py, python/README.md and "
-        "tests/integration/test_smoke.py all name it as the executable pin for "
-        "page[T]'s three json tags"
-    )
-
-    citing = [
-        _PYTHON_DIR / "src" / "relay" / "models.py",
-        _PYTHON_DIR / "README.md",
-        _PYTHON_DIR / "tests" / "integration" / "test_smoke.py",
-    ]
-    missing = [p.name for p in citing if guard not in p.read_text(encoding="utf-8")]
-    assert missing == [], (
-        f"these cite the Go guard by name and no longer do: {missing}. If a citation was "
-        "dropped on purpose, drop it from this list too - the point is that the set is known."
-    )

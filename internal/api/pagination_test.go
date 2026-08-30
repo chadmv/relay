@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -483,4 +486,72 @@ func TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage(t *testing.T) {
 			"zero-row response is [], but the KEY is what this test is about")
 	assert.Equal(t, `""`, string(keys["next_cursor"]), "next_cursor must serialise as an explicit empty string")
 	assert.Equal(t, "0", string(keys["total"]), "total must serialise as an explicit zero")
+}
+
+// TestPythonProseCitesThisPackagesEnvelopeGuard fails when the Go symbol three
+// Python artifacts name by hand stops existing under that name.
+//
+// python/src/relay/models.py, python/README.md and
+// python/tests/integration/test_smoke.py each cite
+// TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage as THE executable pin
+// for page[T]'s three json tags. That citation replaced an unpinnable
+// cross-language site COUNT, which was a trade up - a symbol is stabler and far
+// more greppable than a tally - but a bare reference across a language boundary
+// is still unpinned, and the SDK's strictness now depends on it.
+//
+// THIS GUARD LIVES IN GO ON PURPOSE, and the first version of it did not. It was
+// written in python/tests/unit/test_packaging.py, which sits inside the path
+// filter .github/workflows/python.yml declares (paths: python/**). A PR that
+// renames this symbol and touches nothing under python/ never triggers that
+// lane, so the guard would not have run on the one commit it exists to catch.
+// go-ci.yml declares no paths filter, so this file runs on every PR. Do not move
+// it back for symmetry with the prose it defends.
+//
+// It asserts BOTH directions. Dropping a citation on purpose is fine - delete it
+// from citingProse in the same commit, so the set stays known rather than
+// quietly shrinking.
+func TestPythonProseCitesThisPackagesEnvelopeGuard(t *testing.T) {
+	const guard = "TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage"
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+
+	// Glob the package rather than naming one file: moving the guard into
+	// page_envelope_test.go is a legitimate refactor that leaves the property
+	// intact, and a path-coupled assertion would go red on it.
+	matches, err := filepath.Glob(filepath.Join(root, "internal", "api", "*_test.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "no _test.go files under internal/api - wrong root?")
+
+	// `func <name>(`, not a bare substring. A considerate engineer renaming the
+	// test leaves a "renamed from ..." breadcrumb, and a bare-substring check is
+	// defeated by exactly that breadcrumb - measured, it was the one mutation of
+	// seven that survived the first version of this guard.
+	decl := "func " + guard + "("
+	found := false
+	for _, m := range matches {
+		b, readErr := os.ReadFile(m)
+		require.NoError(t, readErr)
+		if strings.Contains(string(b), decl) {
+			found = true
+			break
+		}
+	}
+	require.True(t, found,
+		"no file under internal/api declares %s. Three Python artifacts name it as the "+
+			"executable pin for page[T]'s json tags; if it was renamed, update them in the "+
+			"same commit (and this constant).", decl)
+
+	citingProse := []string{
+		filepath.Join("python", "src", "relay", "models.py"),
+		filepath.Join("python", "README.md"),
+		filepath.Join("python", "tests", "integration", "test_smoke.py"),
+	}
+	for _, rel := range citingProse {
+		b, readErr := os.ReadFile(filepath.Join(root, rel))
+		require.NoError(t, readErr, "%s is missing", rel)
+		assert.Contains(t, string(b), guard,
+			"%s cited %s and no longer does. If that was deliberate, drop it from "+
+				"citingProse here too - the point is that the set stays known.", rel, guard)
+	}
 }
