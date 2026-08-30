@@ -151,6 +151,31 @@ Code map:
 
 **Source providers.** Relay assumes `p4` is installed and a valid P4 ticket is active on the agent. Provision tickets out-of-band (`p4 login`); relay does not manage P4 credentials. The Perforce integration test spins up a `p4d` container via testcontainers-go.
 
+## Comments
+
+A comment exists to state a hazard or constraint the code cannot show, in a few lines. It may
+cite the one test that pins the claim ("deleting this guard turns every typo into a broadcast
+subscription; TestCanonicalJobIDFilter's passthrough rows go red"). Everything else - the
+argument that the change is correct, its history, its measurements - goes in the commit
+message, spec, or retro: records of a moment, which cannot drift. If content feels worth
+keeping, it is - in the commit message.
+
+Never put in a comment or docstring:
+
+- Dates or change history ("since 2026-08-30", "was previously two readers"). Git owns history.
+  (A date inside a backlog-item filename cited as a pointer is an identifier, not history, and
+  is fine.)
+- Session or review narrative, and measurement provenance ("measured by rendering it uppercase
+  and watching that test fail").
+- Counts of anything elsewhere ("16 sites", "four other copies").
+- Uniqueness or completeness claims ("the only", "every", "all N") about OTHER code. These are
+  claims about the complement, pinned by nothing; replace with a named guard or delete. Stating
+  this function's own contract ("prints every not-yet-printed task") is fine.
+- Censuses of other files or packages, and claims about another language's source.
+
+Test comments state the property pinned and why the input discriminates. RED/GREEN history and
+mutation provenance go in the commit that adds the test.
+
 ## Invariants
 
 Cross-cutting rules that new code must not bypass. Every high-severity finding in the 2026-06-10 codebase review was a path that sidestepped an invariant already enforced elsewhere - check changes against these.
