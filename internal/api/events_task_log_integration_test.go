@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -338,4 +339,77 @@ func TestEvents_DeliveryMatrix(t *testing.T) {
 	assert.NotContains(t, jobOnly.body(), "task_log", "a job-scoped subscriber must receive NO task_log frames")
 	assert.NotContains(t, taskOnly.body(), "event: task\n",
 		"?task_id= alone must not become a global status subscription")
+}
+
+// TestEvents_JobIDSpellingIsCanonicalisedNotRejected is the headline test for
+// bug-2026-08-27-python-sdk-follow-job-hangs-on-noncanonical-job-id.
+//
+// GET /v1/jobs/{id} accepts every spelling pgtype.UUID.Scan takes; the broker's
+// status filter is an exact string compare against a JobID that every publisher
+// builds with uuidStr. So before this slice, an id that answered 200 on the REST
+// route subscribed to a filter nothing could ever match - an open, silently
+// empty SSE stream, forever, on a client with no read timeout.
+//
+// THE UNDERSCORE CASE IS FIRST AND IS NOT DECORATION. pgtype.UUID.Scan slices
+// indexes 8, 13, 18 and 23 out of the 36-byte form WITHOUT EXAMINING THEM, so
+// any byte may sit there. That row is the one no client-side canonicaliser built
+// on Python's uuid.UUID can normalise, and it is therefore the single assertion
+// that discriminates a server-side fix from every SDK-side one. A discriminating
+// input placed last cannot detect an early-exit defect, so it leads.
+//
+// Every probe is built through url.Values. Concatenating the spelling into the
+// query string directly is wrong for at least one spelling in the sibling test
+// below - a raw `+` decodes to a SPACE - and a negative assertion on the wrong
+// string passes for the wrong reason.
+//
+// Bounding: a httptest request's context is never cancelled, so a handler that
+// streams forever would hang the package rather than fail the test. Each subtest
+// owns a cancel and every wait is a bounded require.Eventually.
+func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
+	srv, q, broker, _ := newTestServerWithBroker(t)
+	user := createTestUser(t, q, "Alice", "sse-spelling@example.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID, _ := seedTaskViaAPI(t, srv, token)
+
+	for _, sp := range []struct{ name, id string }{
+		{"underscore separators", strings.ReplaceAll(jobID, "-", "_")},
+		{"uppercase", strings.ToUpper(jobID)},
+		{"dashless", strings.ReplaceAll(jobID, "-", "")},
+	} {
+		sp := sp
+		t.Run(sp.name, func(t *testing.T) {
+			require.NotEqual(t, jobID, sp.id,
+				"the probe must differ from the canonical spelling, or this subtest proves nothing; "+
+					"for the uppercase row this can only happen if gen_random_uuid() produced 32 "+
+					"decimal digits, about 1 in 6.7 million - re-run")
+
+			vals := url.Values{"job_id": {sp.id}}
+			req := httptest.NewRequest("GET", "/v1/events?"+vals.Encode(), nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			ctx, cancel := context.WithCancel(req.Context())
+			gw := newGateWriter()
+			close(gw.release) // never block; the handler should write normally
+			done := make(chan struct{})
+			go func() { defer close(done); srv.Handler().ServeHTTP(gw, req.WithContext(ctx)) }()
+			defer func() { cancel(); <-done }()
+
+			// A recorded Flush is the file's deterministic barrier for "this
+			// subscription is live": handleEvents subscribes and then flushes,
+			// before its first receive. No sleeps.
+			require.Eventually(t, func() bool { return gw.flushed() >= 1 },
+				5*time.Second, 5*time.Millisecond, "the subscription never became live")
+
+			// The canonical spelling is what every production publisher emits.
+			broker.Publish(events.Event{
+				Type:  "job",
+				JobID: jobID,
+				Data:  []byte(`{"status":"done","probe":"canonicalised"}`),
+			})
+
+			require.Eventually(t, func() bool {
+				return strings.Contains(gw.body(), `"probe":"canonicalised"`)
+			}, 5*time.Second, 5*time.Millisecond,
+				"a spelling GET /v1/jobs/{id} ACCEPTS must subscribe to the job it names")
+		})
+	}
 }
