@@ -426,3 +426,54 @@ func TestParsePage_LegacyCursorRejectsExplicitNonDefaultSort(t *testing.T) {
 	assert.Equal(t, 400, w.Code)
 	assert.Contains(t, w.Body.String(), "cursor sort key does not match")
 }
+
+// TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage.
+//
+// The tags on page[T] carry a job beyond this package: the Python SDK's
+// relay.Page requires items, next_cursor and total as KEYS and raises
+// pydantic.ValidationError on a body that omits one, and its entire safety
+// argument is "internal/api's page[T] carries no omitempty, so all three keys
+// are emitted on every response including the zero-row one". Nothing in this
+// repo enforced that. Adding `,omitempty` to all three tags leaves every Go
+// package green - the buildPage tests above assert only that the returned
+// CURSOR STRING is empty, and testhelper_test.go decodes into its own struct
+// where a missing key is indistinguishable from a present zero. The only thing
+// that caught it was python/tests/integration, a lane gated on
+// RELAY_INTEGRATION=1 that CI does not run.
+//
+// The ZERO-VALUE page is the whole test: all three fields sit at their Go zero
+// (nil slice, "", 0), which is exactly the input `omitempty` drops and exactly
+// the shape a list with no matching rows produces. A non-empty page would be a
+// fail-open guard - a page carrying three rows keeps `total` under omitempty
+// because 3 is not zero, so it would pin next_cursor alone. Measured on
+// 2026-08-29 against a live server: the mutation failed the SDK's zero-row
+// test on both next_cursor and total, and its non-empty sibling on next_cursor
+// only.
+//
+// The assertion is on the RAW JSON key set, not on a decoded struct: a decoded
+// page cannot tell a present-and-zero key from a missing one, which is the
+// whole distinction.
+func TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage(t *testing.T) {
+	body, err := json.Marshal(page[string]{})
+	require.NoError(t, err)
+
+	var keys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &keys))
+
+	got := make([]string, 0, len(keys))
+	for k := range keys {
+		got = append(got, k)
+	}
+	require.ElementsMatch(t, []string{"items", "next_cursor", "total"}, got,
+		"page[T] must emit all three envelope keys on a ZERO-VALUE page, never elided by omitempty. "+
+			"relay.Page in the Python SDK requires all three and raises on an absent one, and a dropped "+
+			"next_cursor is worse than an error there: the empty string is that SDK's drained signal, so "+
+			"an absent key used to read as 'the list ended' and truncated every walk to its first page. "+
+			"If a key must go, the SDK's model has to change first.")
+
+	assert.Equal(t, "null", string(keys["items"]),
+		"a nil Items slice still serialises under its key; handlers pass a make()d slice so a real "+
+			"zero-row response is [], but the KEY is what this test is about")
+	assert.Equal(t, `""`, string(keys["next_cursor"]), "next_cursor must serialise as an explicit empty string")
+	assert.Equal(t, "0", string(keys["total"]), "total must serialise as an explicit zero")
+}
