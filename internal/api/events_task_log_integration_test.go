@@ -108,6 +108,15 @@ func TestEvents_TaskIDValidation(t *testing.T) {
 		"an unparseable job id must still OPEN a stream - the 200 is what makes "+
 			"the NotEqual below non-vacuous; a 401 here means the request died in auth")
 	assert.NotEqual(t, http.StatusBadRequest, rec.Code)
+	// rec.Code alone does NOT establish "opened a stream": httptest.NewRecorder
+	// initialises Code to 200, and Flush() only calls WriteHeader(200) when
+	// nothing wrote a header, so 200 also holds for a handler that returned
+	// having written nothing at all. It does distinguish 400 and 401, which is
+	// what the 2026-08-30 repair needed. These two say the rest, and cost
+	// nothing because `do` hands back the recorder.
+	assert.True(t, rec.Flushed,
+		"the handler must have reached the streaming path, not merely declined to write")
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
 
 	// Valid task -> a live SSE stream. Positive control for the two rejections
 	// above: it proves the handler can reach 200 on this same path at all.
@@ -185,7 +194,15 @@ func (g *gateWriter) body() string {
 }
 
 // header returns a snapshot of the headers. handleEvents sets them from its own
-// goroutine, so reading g.hdr directly would be a data race under -race.
+// goroutine, and the mutex taken here is NOT what makes that safe: Header()
+// hands out g.hdr without g.mu, so handleEvents' w.Header().Set(...) writes the
+// map unsynchronised and a lock held only on the reading side orders nothing.
+// What actually orders it is the FLUSH BARRIER. Those Set calls all
+// happen-before handleEvents' flusher.Flush(), which takes g.mu, and every
+// caller of this method first waits on flushed() >= 1, which takes g.mu again -
+// so the Sets are ordered before the read. Verified clean under `go test -race`.
+// A call site added BEFORE that barrier would be a real race; keep the barrier
+// in front of every header() call.
 func (g *gateWriter) header() http.Header {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -395,7 +412,7 @@ func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
 			require.NotEqual(t, jobID, sp.id,
 				"the probe must differ from the canonical spelling, or this subtest proves nothing; "+
 					"for the uppercase row this can only happen if gen_random_uuid() produced 32 "+
-					"decimal digits, about 1 in 6.7 million - re-run")
+					"decimal digits, about 1 in 2.7 million - re-run")
 
 			vals := url.Values{"job_id": {sp.id}}
 			req := httptest.NewRequest("GET", "/v1/events?"+vals.Encode(), nil)
@@ -436,8 +453,11 @@ func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
 // the broker's BROADCAST scope (internal/events/broker.go: "empty = broadcast to
 // all"). So `u, _ := parseUUID(raw); return uuidStr(u)` - one deleted guard -
 // turns every unparseable ?job_id= into a whole-cluster status feed. This test
-// asserts SCOPE, not the absence of an error: a fail-open here is an escalation
-// and nothing about it looks like a failure.
+// asserts SCOPE, not the absence of an error: nothing about a fail-open here
+// looks like a failure. It is a scope surprise rather than a privilege
+// escalation - GET /v1/events has no per-owner gate and omitting ?job_id=
+// entirely is already that same server-wide feed - which is exactly why only a
+// scope assertion can catch it.
 //
 // Each probe is ?job_id= ONLY. Publish's status branch skips a filter whose
 // JobID is "" and whose TaskID is not, so a probe carrying a task_id would be
@@ -445,9 +465,9 @@ func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
 // add a task_id to these.
 //
 // Each probe is built through url.Values because a raw `+` in a query string
-// decodes to a SPACE - the sign-prefixed row would otherwise arrive as a
-// 33-byte string with a leading space, still rejected, but not the string this
-// test claims to be about.
+// decodes to a SPACE - the sign-prefixed row ("+" plus 31 hex) would otherwise
+// arrive as a 32-byte string with a leading space, still rejected, but not the
+// string this test claims to be about.
 //
 // The four spellings are the ones Python's uuid.UUID ACCEPTS and this server
 // does not (spec section 4.4). For the sign-prefixed row uuid.UUID does not
