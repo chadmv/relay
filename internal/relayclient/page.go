@@ -81,10 +81,9 @@ var maxListPages = 10000
 // on request 3; maxListPages catches an ever-advancing cursor that never drains,
 // which neither of the other two can see.
 //
-// On any of those the return is `nil, 0, err` - NOT the partial slice: this
-// function's callers are renderers that have printed nothing yet and have
-// nowhere to put a partial list, and the existing transport-error path
-// already returns nil, 0.
+// On any of those the return is `nil, 0, err` - NOT the partial slice: no
+// caller has anywhere to put a partial list, and the existing transport-error
+// path already returns nil, 0.
 func FetchAllPages[T any](
 	ctx context.Context,
 	c *Client,
@@ -173,11 +172,11 @@ func FetchAllPages[T any](
 			// collected.
 			//
 			// Reaching this cap on a LIST means the server is misbehaving:
-			// list handlers page through buildPage
-			// (internal/api/pagination.go), which over-fetches one row and
-			// emits a cursor only when that extra row came back, so a list
-			// whose length is an exact multiple of the page size drains at its
-			// last full page and never reaches a cap at all. Settling
+			// list queries fetch limit+1 rows and buildPage
+			// (internal/api/pagination.go) emits a cursor only when that
+			// extra row came back, so a list whose length is an exact
+			// multiple of the page size drains at its last full page and
+			// never reaches a cap at all. Settling
 			// completeness here would settle it with `total`, a number that
 			// same misbehaving actor supplies.
 			//
