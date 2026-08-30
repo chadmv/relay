@@ -297,16 +297,26 @@ pydantic 2.13.5: a 190-character body whose secret sits LAST leaks it in full
 through `logger.exception`; the same body with two timestamps after the secret
 does not.
 
-So the rule is about POSITION, not size, and `logger.exception` is safe for a
-`/v1/schedules` page today for a reason that has nothing to do with Python:
-`scheduledJobResponse` (`internal/api/scheduled_jobs.go`) declares `job_spec`
-seventh and `created_at`/`updated_at` LAST, `json.loads` preserves that order,
-so the tail window lands on timestamps. Nothing pins that field order. A
-reordering refactor in Go would silently move a credential into the window.
+So the rule is about POSITION, not size - and through `Page[T]` specifically,
+position is bounded by something the server cannot move. The 24-character tail
+of a paged body is spent mostly on the envelope trailer `}], 'total': N}`,
+leaving roughly the last 9 characters to reach into the final item's final
+field, which today is `updated_at` (`scheduledJobResponse` in
+`internal/api/scheduled_jobs.go` declares `job_spec` seventh and
+`created_at`/`updated_at` last, and `json.loads` preserves that order).
 
-Which is the argument for guarding `errors()` rather than any one call site:
-the thing that decides whether `logger.exception` leaks is a Go struct's field
-order, not anything visible from Python. The
+Do not overstate what a Go reordering would cost. Measured: moving `job_spec`
+last exposes **4** characters of a nested credential, not the value, because
+the trailer is still there; even a server that dropped both `next_cursor` and
+`total`, so the repr ends inside the item, reached 16 of 23 characters. A full
+credential cannot reach the window through `Page[T]`. The 190-character
+measurement above is a BARE dict, which has no trailer - that is why it leaks
+in full and a page does not.
+
+None of which makes `logger.exception` the thing to reason about. What decides
+how much leaks is a Go struct's field order and an envelope trailer's length,
+neither visible from Python and neither pinned by anything. Guard `errors()`
+and the question does not arise. The
 class is not new - `items` was already required, so a model-level error already
 carried the whole body - but this change widens the set of bodies that trigger
 it, and it is this section that tells you to catch it.

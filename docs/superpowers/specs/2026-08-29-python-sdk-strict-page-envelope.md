@@ -498,7 +498,7 @@ Added by this spec:
   is precedent, not semver theory: `e536f3e` made a sibling response model's fields required and took
   a MINOR bump. (`test_version_files_are_in_lockstep` still makes moving one of them RED.)
 - ~~Gates: ... No Go gate is needed - this slice touches no Go file.~~ **SUPERSEDED 2026-08-29: the
-  slice touches Go files and `go test ./...` is a gate.** Phase 4 found that the premise this whole
+  slice touches a Go file and `go test ./...` is a gate.** Phase 4 found that the premise this whole
   spec rests on - `page[T]` carrying no `omitempty` - was pinned by nothing in the repo: adding the
   tag left all 21 other Go packages green, and only the opt-in Python integration lane caught it.
   `internal/api/pagination_test.go` now carries the guard, on the side that owns the tag. Gates:
