@@ -154,7 +154,7 @@ Code map:
 ## Comments
 
 A comment exists to state a hazard or constraint the code cannot show, in a few lines. It may
-cite the one test that pins the claim ("deleting this guard turns every typo into a broadcast
+cite the test or tests that pin the claim ("deleting this guard turns every typo into a broadcast
 subscription; TestCanonicalJobIDFilter's passthrough rows go red"). Everything else - the
 argument that the change is correct, its history, its measurements - goes in the commit
 message, spec, or retro: records of a moment, which cannot drift. If content feels worth

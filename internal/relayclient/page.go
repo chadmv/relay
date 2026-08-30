@@ -176,9 +176,9 @@ func FetchAllPages[T any](
 			// (internal/api/pagination.go) emits a cursor only when that
 			// extra row came back, so a list whose length is an exact
 			// multiple of the page size drains at its last full page and
-			// never reaches a cap at all. Settling
-			// completeness here would settle it with `total`, a number that
-			// same misbehaving actor supplies.
+			// never reaches a cap at all. Settling completeness here would
+			// settle it with `total`, a number that same misbehaving actor
+			// supplies.
 			//
 			// Do NOT copy a task-log-style "may be incomplete" completeness
 			// warning onto this count. Task-log paging is genuinely different:
