@@ -47,10 +47,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		logTaskID = uuidStr(taskID)
 	}
 
-	// ?job_id= is deliberately NOT validated: an unknown job has always yielded
-	// an open, permanently empty stream, and that is an existing contract with
-	// existing clients. The asymmetry with task_id is intentional.
-	jobID := r.URL.Query().Get("job_id")
+	// ?job_id= is still deliberately NOT VALIDATED: an unknown or unparseable
+	// job id yields an open, permanently empty stream rather than a 4xx, and
+	// that is an existing contract with existing clients (README.md, "Events",
+	// and TestEvents_TaskIDValidation asserts the `not-a-uuid` case is not a
+	// 400). The asymmetry with task_id is intentional and is about REJECTION
+	// only - both parameters are canonicalised, task_id eleven lines above and
+	// job_id here since 2026-08-30. See canonicalJobIDFilter for why the
+	// unparseable case must pass through UNCHANGED rather than be rendered.
+	jobID := canonicalJobIDFilter(r.URL.Query().Get("job_id"))
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -92,4 +97,42 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// canonicalJobIDFilter renders raw in the one spelling every publisher emits,
+// and returns raw UNCHANGED when it is not a UUID this server accepts.
+//
+// The server accepts far more spellings than it emits. parseUUID is
+// pgtype.UUID.Scan, which takes hex case-insensitively, takes the dashless
+// 32-character form, and on the 36-byte form slices out indexes 8, 13, 18 and
+// 23 WITHOUT EXAMINING THEM - so `7e660488_1234_4321_8888_abcdefabcdef` names
+// the same job as the canonical spelling, and GET /v1/jobs/{id} answers 200 for
+// it. uuidStr renders exactly one of those spellings, and every JobID-carrying
+// broker.Publish in the tree builds its value with uuidStr over a pgtype.UUID
+// read from the database. internal/events' filter is an exact string compare,
+// so without this an accepted-but-non-canonical id subscribed to a filter
+// nothing could ever match: an open, silently empty stream forever.
+//
+// THE err != nil GUARD IS THE WHOLE CORRECTNESS ARGUMENT, NOT NOISE. parseUUID
+// returns pgtype.UUID{} on failure and uuidStr returns "" for an invalid UUID,
+// and Filter{JobID: ""} is the broker's BROADCAST subscription - Publish's
+// status branch delivers to every filter whose JobID is empty. Rendering
+// unconditionally would therefore promote every typo'd ?job_id= from "one job,
+// silently empty" into "every job on the cluster": a silent change of scope from
+// what the caller wrote, and the one way this change can be worse than doing
+// nothing. Gate the render on the parse having actually succeeded, the same
+// shape as gating a write on a fence having actually matched.
+// TestEvents_JobIDRejectedSpellingsAreNotCanonicalised is the test that dies
+// when this guard is deleted, and it asserts SCOPE rather than absence of error
+// because a fail-open here is an escalation, not a crash.
+//
+// The !u.Valid arm mirrors internal/cli/logs.go's canonicalJobID and is
+// belt-and-braces against a pgx whose Scan reports success without setting
+// Valid. It costs one comparison; being wrong costs the broadcast above.
+func canonicalJobIDFilter(raw string) string {
+	u, err := parseUUID(raw)
+	if err != nil || !u.Valid {
+		return raw
+	}
+	return uuidStr(u)
 }
