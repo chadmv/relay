@@ -107,24 +107,47 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // 32-character form, and on the 36-byte form slices out indexes 8, 13, 18 and
 // 23 WITHOUT EXAMINING THEM - so `7e660488_1234_4321_8888_abcdefabcdef` names
 // the same job as the canonical spelling, and GET /v1/jobs/{id} answers 200 for
-// it. uuidStr renders exactly one of those spellings, and every JobID-carrying
-// broker.Publish in the tree builds its value with uuidStr over a pgtype.UUID
-// read from the database. internal/events' filter is an exact string compare,
-// so without this an accepted-but-non-canonical id subscribed to a filter
-// nothing could ever match: an open, silently empty stream forever.
+// it. uuidStr renders exactly one of those spellings, and all 8 JobID-carrying
+// broker.Publish sites in the tree build their value with `uuidStr` over a
+// pgtype.UUID read from the database - but `uuidStr` is THREE different
+// unexported functions, not one: internal/api (2 of the 8 sites),
+// internal/scheduler (3) and internal/worker (3), each a byte-identical copy of
+// the same format string. This SUBSCRIBE side calls internal/api's; job and task
+// status events are published through the other two, and nothing relates the
+// three to each other. TestCanonicalJobIDFilter pins internal/api's rendering to
+// a hard-coded literal, so drift HERE goes red on `make test`; drift in either
+// PUBLISHER package leaves every package green and silently evaporates this fix
+// back into the exact bug it closed. That gap is the subject of
+// docs/backlog/idea-2026-08-26-six-copies-of-the-uuid-render-format.md.
+//
+// internal/events' filter is an exact string compare, so without this an
+// accepted-but-non-canonical id subscribed to a filter nothing could ever
+// match: an open, silently empty stream forever.
 //
 // THE err != nil GUARD IS THE WHOLE CORRECTNESS ARGUMENT, NOT NOISE. parseUUID
 // returns pgtype.UUID{} on failure and uuidStr returns "" for an invalid UUID,
 // and Filter{JobID: ""} is the broker's BROADCAST subscription - Publish's
-// status branch delivers to every filter whose JobID is empty. Rendering
-// unconditionally would therefore promote every typo'd ?job_id= from "one job,
-// silently empty" into "every job on the cluster": a silent change of scope from
-// what the caller wrote, and the one way this change can be worse than doing
-// nothing. Gate the render on the parse having actually succeeded, the same
-// shape as gating a write on a fence having actually matched.
-// TestEvents_JobIDRejectedSpellingsAreNotCanonicalised is the test that dies
-// when this guard is deleted, and it asserts SCOPE rather than absence of error
-// because a fail-open here is an escalation, not a crash.
+// status branch delivers to every filter whose JobID is empty AND which named no
+// task (a JobID-empty, TaskID-set filter is a log tail and is skipped; see
+// internal/events/broker.go). Rendering unconditionally would therefore promote
+// every typo'd ?job_id= from "one job, silently empty" into "every job's status
+// events on this server": a silent change of SCOPE from what the caller wrote,
+// and the one way this change can be worse than doing nothing.
+//
+// That is a scope surprise, not a privilege escalation, and stating it that way
+// is the honest severity. GET /v1/events is bearer-auth-only with no per-owner
+// gate, and omitting ?job_id= entirely is ALREADY exactly that server-wide
+// status feed - so the fail-open would hand a caller data the same token could
+// have asked for outright, without it having asked. Gate the render on the parse
+// having actually succeeded, the same shape as gating a write on a fence having
+// actually matched.
+//
+// TWO tests die when this guard is deleted, and the split is operational.
+// TestCanonicalJobIDFilter's passthrough rows (internal/api/events_test.go) go
+// red on `make test`, no container.
+// TestEvents_JobIDRejectedSpellingsAreNotCanonicalised goes red in the
+// //go:build integration lane, and it is the one that asserts SCOPE rather than
+// absence of error, because a fail-open here looks like nothing at all.
 //
 // The !u.Valid arm mirrors internal/cli/logs.go's canonicalJobID and is
 // belt-and-braces against a pgx whose Scan reports success without setting

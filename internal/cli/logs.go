@@ -237,10 +237,15 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // internal/worker/handler.go, plus this one), byte-identical today and unified
 // by nothing.
 //
-// Its only guard is one-directional. TestWatchJobLogs_NonCanonicalJobID_-
+// Both directions are now pinned, but by two independent literals rather than by
+// any relationship between the functions. TestWatchJobLogs_NonCanonicalJobID_-
 // IsResolvedNotRejected hard-codes the expected spelling rather than deriving it
-// from this function, so a change HERE goes red. A change in the SERVER's uuidStr
-// is caught by nothing: it is unexported, so no test relates the two.
+// from this function, so a change HERE goes red; and since 2026-08-30
+// TestCanonicalJobIDFilter (internal/api/events_test.go) hard-codes the same
+// canonical spelling on the server side, so a change to internal/api's uuidStr
+// goes red too - measured, by rendering it uppercase and watching that test
+// fail. Still no test relates the two functions, and the four other unexported
+// copies of the format string remain related to nothing at all.
 func canonicalJobID(jobID string) string {
 	var u pgtype.UUID
 	if err := u.Scan(jobID); err != nil || !u.Valid {
@@ -292,7 +297,8 @@ func jobEventsPath(jobID string) string {
 // writes through them, not by a call at the bottom of the function.
 func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (finalStatus string, completeness logCompleteness, err error) {
 	// Once, before either request line is built and before anything compares an
-	// id. See canonicalJobID for the two readers that need it.
+	// id. See canonicalJobID for the ONE reader here that still needs it, and for
+	// why the second one stopped being a reader on 2026-08-30.
 	jobID = canonicalJobID(jobID)
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)

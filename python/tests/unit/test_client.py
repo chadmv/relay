@@ -848,20 +848,32 @@ def test_follow_job_sends_the_callers_job_id_spelling_verbatim() -> None:
     `captured["query"] == {"job_id": "j1"}`, which READS like a verbatim
     guard and is not one: "j1" is not a UUID, and every plausible
     canonicaliser - internal/cli/logs.go's canonicalJobID is the model -
-    passes a non-UUID through unchanged. Inserting
-    `job_id = str(uuid.UUID(job_id))` into _stream_events leaves that
-    assertion green. This test uses an UPPERCASE UUID, which is exactly the
-    input such a canonicaliser rewrites.
+    passes a non-UUID through UNCHANGED. That "unchanged" is the whole
+    point, and it is why the mutation has to be written with its guard::
+
+        try:
+            job_id = str(uuid.UUID(job_id))
+        except ValueError:
+            pass
+
+    inserted into _stream_events. Measured: that leaves the "j1" assertion
+    green and kills only this test. The UNGUARDED one-liner
+    `job_id = str(uuid.UUID(job_id))` is NOT the mutation to reason about -
+    uuid.UUID("j1") raises ValueError, so it reddens the "j1" test too, for a
+    reason that has nothing to do with spelling. This test uses an UPPERCASE
+    UUID, which is the input a canonicaliser rewrites rather than rejects.
 
     Canonicalising here would be wrong in both directions, measured in
     docs/superpowers/specs/2026-08-30-python-sdk-follow-job-canonical-id.md
     section 4. uuid.UUID REJECTS four spellings pgtype.UUID.Scan accepts
-    (any byte may sit in the four separator positions of the 36-character
-    form), so a Python canonicaliser cannot fix the very ids it is needed
-    for; and it ACCEPTS seven the server rejects, three of which resolve to
-    a DIFFERENT uuid than the string names - so it would silently subscribe
-    the caller to the wrong job. The server canonicalises instead, since
-    2026-08-30 (internal/api/events.go, canonicalJobIDFilter).
+    (any byte may sit in the four separator positions of the 36-BYTE form -
+    bytes, because Scan switches on len(src), which is exactly the kind of
+    thing Python's str-based parser cannot express), so a Python
+    canonicaliser cannot fix the very ids it is needed for; and it ACCEPTS
+    seven the server rejects, three of which resolve to a DIFFERENT uuid than
+    the string names - so it would silently subscribe the caller to the wrong
+    job. The server canonicalises instead, since 2026-08-30
+    (internal/api/events.go, canonicalJobIDFilter).
     """
     uppercase = "7E660488-1234-4321-8888-ABCDEFABCDEF"
     captured: dict[str, Any] = {}

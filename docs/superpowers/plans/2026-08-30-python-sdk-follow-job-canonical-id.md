@@ -99,7 +99,7 @@ So a request carrying **both** a malformed `?job_id=` and a valid `?task_id=` be
 
 ### R8. The existing Python test that LOOKS like a verbatim-passthrough guard is vacuous, so the design decision has no guard at HEAD
 
-`python/tests/unit/test_client.py`'s `test_follow_job_yields_events_and_disables_only_the_read_timeout` asserts `captured["query"] == {"job_id": "j1"}`. That reads as a pin on "the SDK sends your string unchanged". It is not one: `"j1"` is not a UUID, and every plausible canonicaliser - `canonicalJobID` is the model, and it returns non-UUIDs unchanged - passes it through. Inserting `job_id = str(uuid.UUID(job_id))` into `_stream_events` leaves that assertion green.
+`python/tests/unit/test_client.py`'s `test_follow_job_yields_events_and_disables_only_the_read_timeout` asserts `captured["query"] == {"job_id": "j1"}`. That reads as a pin on "the SDK sends your string unchanged". It is not one: `"j1"` is not a UUID, and every plausible canonicaliser - `canonicalJobID` is the model, and it returns non-UUIDs unchanged - passes it through. Inserting a canonicaliser **in its guarded form** (`try: job_id = str(uuid.UUID(job_id))` / `except ValueError: pass`, as Step 3 of Task 6 below prescribes) into `_stream_events` leaves that assertion green. Corrected 2026-08-30 in the Phase 4 fix round: this paragraph originally named the UNGUARDED one-liner, which is not the mutation to reason about - `uuid.UUID("j1")` raises `ValueError`, so it reddens the `"j1"` test too, for a reason that has nothing to do with spelling. Measured both ways; Step 3 was right and this sentence was wrong.
 
 So this slice's most consequential decision (*no SDK-side canonicaliser, ever, because it is unsound in one direction and incomplete in the other*) is protected by nothing. Task 6 adds a guard with an **uppercase UUID** input and proves it with that exact mutation. This is the repo's "added a property, forgot its guard" shape, caught one slice early instead of one slice late.
 
@@ -766,12 +766,20 @@ produced no output".
 
 **Normalisation.** The asymmetry above is about REJECTION only. Both parameters
 are canonicalised. Any spelling the server accepts - uppercase hex, the dashless
-32-character form, and the 36-character form with any byte in the four separator
+32-character form, and the 36-byte form with any byte in the four separator
 positions - is normalised to the lowercase dashed form the server emits, so
-`?job_id=7E660488-1234-4321-8888-ABCDEFABCDEF` subscribes to the job it names
-rather than to a filter nothing matches. A spelling the server does not accept
-is passed through unchanged and is never widened into one it does accept.
+`?job_id=7E660488-1234-4321-8888-ABCDEFABCDEF` follows the same job as the
+canonical spelling rather than a filter nothing matches. A spelling the server
+does not accept is passed through unchanged and is never widened into one it
+does accept.
 ```
+
+> Amended 2026-08-30 in the Phase 4 fix round. The paragraph as first written
+> said "36-character" (the parser switches on `len(src)`, i.e. BYTES - a 36-char,
+> 37-byte spelling is rejected) and "subscribes to the job it names" (the four
+> separator bytes are sliced out unexamined, so `7e660488a1234b4321c8888dabcdef-
+> abcdef` canonicalises with the `a`/`b`/`c`/`d` silently discarded). The shipped
+> README carries two bullets covering both; see `README.md`, "Normalisation".
 
 - [ ] **Step 6: Confirm no known-false sentence survives**
 
@@ -829,20 +837,32 @@ def test_follow_job_sends_the_callers_job_id_spelling_verbatim() -> None:
     `captured["query"] == {"job_id": "j1"}`, which READS like a verbatim
     guard and is not one: "j1" is not a UUID, and every plausible
     canonicaliser - internal/cli/logs.go's canonicalJobID is the model -
-    passes a non-UUID through unchanged. Inserting
-    `job_id = str(uuid.UUID(job_id))` into _stream_events leaves that
-    assertion green. This test uses an UPPERCASE UUID, which is exactly the
-    input such a canonicaliser rewrites.
+    passes a non-UUID through UNCHANGED. That "unchanged" is the whole
+    point, and it is why the mutation has to be written with its guard::
+
+        try:
+            job_id = str(uuid.UUID(job_id))
+        except ValueError:
+            pass
+
+    inserted into _stream_events. Measured: that leaves the "j1" assertion
+    green and kills only this test. The UNGUARDED one-liner
+    `job_id = str(uuid.UUID(job_id))` is NOT the mutation to reason about -
+    uuid.UUID("j1") raises ValueError, so it reddens the "j1" test too, for a
+    reason that has nothing to do with spelling. This test uses an UPPERCASE
+    UUID, which is the input a canonicaliser rewrites rather than rejects.
 
     Canonicalising here would be wrong in both directions, measured in
     docs/superpowers/specs/2026-08-30-python-sdk-follow-job-canonical-id.md
     section 4. uuid.UUID REJECTS four spellings pgtype.UUID.Scan accepts
-    (any byte may sit in the four separator positions of the 36-character
-    form), so a Python canonicaliser cannot fix the very ids it is needed
-    for; and it ACCEPTS seven the server rejects, three of which resolve to
-    a DIFFERENT uuid than the string names - so it would silently subscribe
-    the caller to the wrong job. The server canonicalises instead, since
-    2026-08-30 (internal/api/events.go, canonicalJobIDFilter).
+    (any byte may sit in the four separator positions of the 36-BYTE form -
+    bytes, because Scan switches on len(src), which is exactly the kind of
+    thing Python's str-based parser cannot express), so a Python
+    canonicaliser cannot fix the very ids it is needed for; and it ACCEPTS
+    seven the server rejects, three of which resolve to a DIFFERENT uuid than
+    the string names - so it would silently subscribe the caller to the wrong
+    job. The server canonicalises instead, since 2026-08-30
+    (internal/api/events.go, canonicalJobIDFilter).
     """
     uppercase = "7E660488-1234-4321-8888-ABCDEFABCDEF"
     captured: dict[str, Any] = {}
