@@ -588,7 +588,17 @@ class Page(BaseModel, Generic[T]):
     Requiring them costs nothing against a correct server: internal/api's
     ``page[T]`` envelope tags ``items``, ``next_cursor`` and ``total`` with no
     ``omitempty``, so all three keys are emitted on every response including
-    the zero-row one, and ``buildPage`` is the only thing that builds it.
+    the zero-row one.
+
+    The load-bearing property is the single TYPE, not a single constructor.
+    Sixteen non-test handlers in ``internal/api`` build a ``page[...]``
+    composite literal themselves - ``buildPage`` computes the cursor and the
+    count, it does not wrap the struct - and two of them (handleListUsers'
+    early returns) build a zero-row page with ``NextCursor: ""`` and
+    ``Total: 0`` by hand. Because the omission is impossible at the TAG level,
+    every one of those sixteen emits all three keys regardless of who wrote it.
+    A single-constructor claim would be both false and weaker than the one that
+    actually holds.
 
     ``extra="ignore"`` stays. Strictness here is about the ABSENCE of a
     contract field, not the presence of an unknown one - opposite directions.
