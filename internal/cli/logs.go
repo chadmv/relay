@@ -131,7 +131,8 @@ func (lc logCompleteness) reason() string {
 // depends on, and this file is registered as a slicing site in BOTH lockstep
 // guards - internal/store/tasks_status_vocabulary_lockstep_test.go for
 // taskIsTerminal and internal/store/jobs_status_vocabulary_lockstep_test.go for
-// jobIsTerminal. Read the matching one before adding a status to either.
+// jobIsTerminal. The tasks guard reads `tasks_status_check` only, so the jobs
+// guard is not redundant. Read the matching one before adding a status to either.
 //
 // A new TERMINAL task status omitted from taskIsTerminal means that task's log is
 // never fetched, while the exit code still claims every task's log printed in
@@ -302,10 +303,9 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// (already in the proto as TASK_STATUS_PREPARING, with the agent already
 	// streaming LOG_STREAM_PREPARE chunks), so a cancelled job with a preparing
 	// task reaches this line the day that status lands. Print the rows the
-	// server will give us - they
-	// are what the operator came for - and say on errOut and in the exit code
-	// that the log is not final. The failure direction has to be loud, not
-	// optimistic.
+	// server will give us - they are what the operator came for - and say on
+	// errOut and in the exit code that the log is not final. The failure
+	// direction has to be loud, not optimistic.
 	emitSnapshot := func(job jobResp) {
 		jobDone := jobIsTerminal(job.Status)
 		for _, t := range job.Tasks {
@@ -382,13 +382,14 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 			// command's context has no deadline - so the operator gets no output
 			// and no error, forever.
 			//
-			// One retry, not a loop: a transient server-side failure (a 500 from
-			// a failed task-list read) is what this covers. A TRANSIENT read that fails
-			// twice leaves the client genuinely unable to tell a finished job from
-			// a running one, so it falls through to the stream and waits - which is
-			// the correct behaviour for the running case and is the residual hole
-			// for the finished one. Closing that needs the snapshot re-read while
-			// the stream is live, which this shape cannot express.
+			// One retry, not a loop: a transient server-side failure (a 500
+			// from a failed task-list read) is what this covers. A TRANSIENT
+			// read that fails twice leaves the client genuinely unable to tell
+			// a finished job from a running one, so it falls through to the
+			// stream and waits - which is the correct behaviour for the running
+			// case and is the residual hole for the finished one. Closing that
+			// needs the snapshot re-read while the stream is live, which this
+			// shape cannot express.
 			//
 			// That inability is what justifies the fall-through, and it is a claim
 			// about transient failures ONLY. Against a 404, a 400, a 401 or a 403
@@ -398,14 +399,14 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		}
 		if fatal != nil {
 			// A definite answer ends the watch here. The stream cannot improve
-			// on it: handleEvents
-			// canonicalises `?job_id=` but still does not VALIDATE it (its own
-			// comment, internal/api/events.go), so an id naming no job - whether
-			// it parses or not - gets an open, permanently empty stream with no
-			// heartbeat and no server-side timeout, against a context cmd/relay
-			// gives no deadline. Falling through would print nothing on either
-			// stream until Ctrl-C - and a well-formed uuid that names no job is
-			// the likeliest thing an operator mistypes into this command.
+			// on it: handleEvents canonicalises `?job_id=` but still does not
+			// VALIDATE it (its own comment, internal/api/events.go), so an id
+			// naming no job - whether it parses or not - gets an open,
+			// permanently empty stream with no heartbeat and no server-side
+			// timeout, against a context cmd/relay gives no deadline. Falling
+			// through would print nothing on either stream until Ctrl-C - and a
+			// well-formed uuid that names no job is the likeliest thing an
+			// operator mistypes into this command.
 			//
 			// The error is carried out through the defer rather than returned from
 			// here, because this is a StreamEvents callback and its only return is
