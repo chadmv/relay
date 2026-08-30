@@ -52,6 +52,24 @@ related item, which measured a 343x gzip amplification against this same unbound
 - The original exception is reachable via `__cause__`.
 - The README's error table matches, and a test pins that a non-JSON 200 is catchable as
   `RelayError`.
+- **The wrapper STRIPS `input` rather than passing it through**, and a test pins that. Measured
+  against pydantic 2.13.5 on 2026-08-29: a `type=missing` error is raised at the MODEL level, so
+  `e.errors()[0]["input"]` is the ENTIRE decoded page, and `errors()`/`json()` do not truncate it
+  (only `str(e)` does, to a ~50-char head and tail). A `/v1/schedules` page carries each schedule's
+  full `job_spec`, per-task `env` maps included, and `list_schedules()` walks pages of them - so the
+  natural `logger.exception(...)` written against the README's current "catch `pydantic
+  .ValidationError` explicitly" instruction ships those values to wherever the logs go. This
+  chokepoint is the one place that can fix it for every call site; `__cause__` must not silently
+  re-expose what the wrapper strips.
+- **DECIDE whether a validation failure mid-walk carries the rows already collected**, either way,
+  and say so in the README. Today it does not: when `_get_page` raises inside `_fetch_all`, `out`
+  (pages 1..N-1) is discarded, while every *other* mid-walk failure in that same loop preserves it
+  via `ProtocolError(..., records=out)` and the README's error table advertises `.records` as
+  "whatever that walk collected". A 249-page walk that fails on page 250 loses ~49,800 rows with no
+  cursor to resume from. A local `try/except` at the `_get_page` call site is the WRONG fix and
+  `client.py`'s comment there says why - it would make `_get_page` and `task_logs_page` raise
+  different types for one defect shape. The chokepoint is where the two can be made to agree, so
+  this item inherits the question and must answer it rather than pass it on.
 
 ## Related
 - `python/src/relay/client.py` - roughly 13 `response.json()` sites
