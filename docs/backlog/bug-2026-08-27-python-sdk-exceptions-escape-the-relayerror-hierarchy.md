@@ -11,7 +11,7 @@ source: Spec D8 plus the Phase 4 security lens, while fixing bug-2026-08-25-pyth
 
 ## Summary
 `python/README.md` states that all exceptions descend from `relay.RelayError`. Three classes of
-server-driven failure do not, at roughly thirteen `response.json()` call sites plus every
+server-driven failure do not, at twelve `response.json()` call sites plus every
 `model_validate`. A caller who writes `except RelayError` around SDK calls is not covered.
 
 ## Repro / Symptoms
@@ -54,25 +54,37 @@ related item, which measured a 343x gzip amplification against this same unbound
   `RelayError`.
 - **The wrapper STRIPS `input` rather than passing it through**, and a test pins that. Measured
   against pydantic 2.13.5 on 2026-08-29: a `type=missing` error is raised at the MODEL level, so
-  `e.errors()[0]["input"]` is the ENTIRE decoded page, and `errors()`/`json()` do not truncate it
+  its `["input"]` in `e.errors()` is the ENTIRE decoded page rather than the offending field, and
+  `errors()`/`json()` do not truncate it
   (only `str(e)` does, to a ~50-char head and tail). A `/v1/schedules` page carries each schedule's
   full `job_spec`, per-task `env` maps included, and `list_schedules()` walks pages of them - so the
-  natural `logger.exception(...)` written against the README's current "catch `pydantic
-  .ValidationError` explicitly" instruction ships those values to wherever the logs go. This
+  natural `logger.error("decode failed: %s", e.errors())` written against the README's "catch
+  `pydantic.ValidationError` explicitly" instruction ships those values to wherever the logs go.
+  Do NOT write the pin against `logger.exception(...)`: measured the same day, that vector does NOT
+  leak a schedules page, because `logging` renders through `traceback` and so inherits `str`'s
+  truncation. A test pinning `logger.exception` would have been green before any fix, and vacuous.
+  The thing to guard is `errors()`, not a call site. This
   chokepoint is the one place that can fix it for every call site; `__cause__` must not silently
   re-expose what the wrapper strips.
 - **DECIDE whether a validation failure mid-walk carries the rows already collected**, either way,
   and say so in the README. Today it does not: when `_get_page` raises inside `_fetch_all`, `out`
-  (pages 1..N-1) is discarded, while every *other* mid-walk failure in that same loop preserves it
-  via `ProtocolError(..., records=out)` and the README's error table advertises `.records` as
-  "whatever that walk collected". A 249-page walk that fails on page 250 loses ~49,800 rows with no
+  (pages 1..N-1) is discarded - and the target set is narrower than it looks. The loop's own three
+  termination stops preserve it via `ProtocolError(..., records=out)`, and the README's error table
+  advertises `.records` as "whatever that walk collected". But `raise_for_response` sits inside
+  `_get_page` on the SAME call path, so an HTTP error mid-walk discards `out` too, exactly as the
+  validation failure does - the six `list_*` docstrings say so already.
+  `pydantic.ValidationError` is therefore NOT the anomaly: it behaves like the `RelayError`s and
+  unlike only the three `ProtocolError` stops. The decision aligns THREE raise sites, not two, and
+  "make it match everything else" is the wrong target. A 249-page walk that fails on page 250 loses ~49,800 rows with no
   cursor to resume from. A local `try/except` at the `_get_page` call site is the WRONG fix and
   `client.py`'s comment there says why - it would make `_get_page` and `task_logs_page` raise
   different types for one defect shape. The chokepoint is where the two can be made to agree, so
   this item inherits the question and must answer it rather than pass it on.
 
 ## Related
-- `python/src/relay/client.py` - roughly 13 `response.json()` sites
+- `python/src/relay/` - twelve `response.json()` sites: eleven in `client.py`, one in
+  `errors.py` (`_extract_message`). A `grep -c` of `client.py` alone answers twelve because
+  `client.py`'s own comment names the literal `response.json()` and matches itself.
 - `python/README.md` - Errors section
 - [[bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout]] - the same chokepoint
   would carry the byte bound

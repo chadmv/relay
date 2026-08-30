@@ -121,7 +121,7 @@ What is newly true at that line and worth recording instead: **`page.total` is p
 
 **Corrected reasoning.** The decision above is superseded; the version shipped is `0.3.0`.
 
-The load-bearing evidence is PRECEDENT, not semver theory. Commit `e536f3e` (#156) made `LogPage.next_seq` and `LogPage.total` required for materially identical reasons - "a patch bump advertises no breakage" is its own commit message - and went `0.1.2 -> 0.2.0`, a MINOR bump. This slice is that exact shape on the sibling envelope and took a patch. (`69cef30`/#161 took a patch, but it only ADDED raise sites; it did not change a public model's construction signature, so it is not the counter-example it looks like.)
+The load-bearing evidence is PRECEDENT, not semver theory. Commit `e536f3e` (#156) made `LogPage.next_seq` and `LogPage.total` required for materially identical reasons and went `0.1.2 -> 0.2.0`, a MINOR bump. (Cite the quote precisely: "a patch bump advertises no breakage" sits in that commit message under `0.1.3 -> 0.2.0: LogRecord.seq became REQUIRED` - a sibling required field on a different response-only model, inside a PR that netted `0.1.2 -> 0.2.0`. The precedent holds; only a careless pointer would attach the quote to `LogPage` itself.) This slice is that exact shape on the sibling envelope and took a patch. (`69cef30`/#161 took a patch, but it only ADDED raise sites; it did not change a public model's construction signature, so it is not the counter-example it looks like.)
 
 Two of the four reasons above are refuted rather than merely outweighed:
 

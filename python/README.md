@@ -256,9 +256,11 @@ one `page[T]` struct whose three json tags carry no `omitempty`, which
 `TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage`
 (`internal/api/pagination_test.go`) now pins on the Go side.
 
-`Page[T]` is the scope of that sentence, not every envelope in the SDK. The one
-paged method outside that set is `task_logs_page`, which returns a `LogPage`:
-its cursor is `next_seq`, and it has no `next_cursor` at all - a resumable log
+`Page[T]` is the scope of that sentence, not every envelope in the SDK. Two
+paged methods sit outside it, `task_logs_page` and the `task_logs` walk built
+on it, and both go through the one `LogPage` decode in `task_logs_page` - so
+there is one method pair but only one decode site. `LogPage`'s
+cursor is `next_seq`, and it has no `next_cursor` at all - a resumable log
 reader reads `page.next_seq`, and `page.next_cursor` on a `LogPage` is an
 `AttributeError`. `LogPage` has required `items`, `next_seq` and `total` since
 0.2.0, so with `Page[T]` joining it here, every paged envelope in the SDK is
@@ -281,9 +283,21 @@ truncate it.
 Only `str(e)` does, to a ~50-character head-and-tail window, which is why this
 is easy to miss. It matters because a `/v1/schedules` page carries each
 schedule's full `job_spec`, per-task `env` maps included, and
-`list_schedules()` walks pages of them: a `logger.exception(...)` or a
-`report(e.errors())` in the handler you are about to write ships those values
-wherever your logs go. Redact or drop `input` before forwarding the error. The
+`list_schedules()` walks pages of them: a `logger.error("decode failed: %s",
+e.errors())`, an `e.json()`, or any structured error reporter that serialises
+`exc.errors()` ships those values wherever your logs go. Redact or drop `input`
+before forwarding the error.
+
+Note which vector is **not** on that list, because the distinction is the whole
+point of the paragraph above. `logger.exception(...)` renders the exception
+through `traceback`, which calls `str(exc)` - so it inherits the truncation and
+does not leak a `/v1/schedules` page. Measured on pydantic 2.13.5. It leaks
+only when the entire page repr fits inside the ~50-character window, which a
+one-row schedules page does not and an `{"items": [], "total": 0, ...}` page
+does. Do not read that as "`logger.exception` is safe": it is safe for the
+large bodies and unsafe for the small ones, which is the opposite of the
+intuition, and it is why `errors()` is the thing to guard rather than any one
+call site. The
 class is not new - `items` was already required, so a model-level error already
 carried the whole body - but this change widens the set of bodies that trigger
 it, and it is this section that tells you to catch it.

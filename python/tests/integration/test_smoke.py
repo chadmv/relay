@@ -94,11 +94,13 @@ def test_a_list_with_no_matching_rows_returns_empty_and_does_not_raise(
     internal/api/pagination_test.go, which runs in the lane CI does run.
 
     test_list_jobs_includes_recent_submission is NOT the same proof. It is an
-    ASYMMETRIC one that pins next_cursor alone. Measured 2026-08-29 with the
-    `,omitempty` mutation applied against a real server: this test failed on
-    both next_cursor and total (the wire body was literally `{'items': []}`),
-    while the list-jobs test failed on next_cursor only - its `total` was 3,
-    and omitempty does not drop a non-zero int. That asymmetry is why the
+    ASYMMETRIC one that pins next_cursor alone. Measured 2026-08-29 against a
+    real server with `,omitempty` on next_cursor and total but NOT on items:
+    this test failed on both of those fields (the wire body was literally
+    `{'items': []}`), while the list-jobs test failed on next_cursor only - its
+    `total` was 3, and omitempty does not drop a non-zero int. The mutation
+    scope is stated because it is load-bearing for the body: under an all-three
+    variant the zero-row body is `{}` and this test raises on three fields. That asymmetry is why the
     zero-row page is the one that has to exist.
     """
     schedule = client.create_schedule(

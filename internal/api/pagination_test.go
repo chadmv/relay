@@ -445,10 +445,17 @@ func TestParsePage_LegacyCursorRejectsExplicitNonDefaultSort(t *testing.T) {
 // (nil slice, "", 0), which is exactly the input `omitempty` drops and exactly
 // the shape a list with no matching rows produces. A non-empty page would be a
 // fail-open guard - a page carrying three rows keeps `total` under omitempty
-// because 3 is not zero, so it would pin next_cursor alone. Measured on
-// 2026-08-29 against a live server: the mutation failed the SDK's zero-row
-// test on both next_cursor and total, and its non-empty sibling on next_cursor
-// only.
+// because 3 is not zero, so it would pin next_cursor alone.
+//
+// State the mutation SCOPE when citing the live-server measurement, because the
+// two variants produce different bodies and the record is the point. Measured
+// 2026-08-29 against a live server with `,omitempty` on next_cursor and total
+// but NOT on items: the SDK's zero-row test failed on both of those fields
+// (wire body `{"items": []}`), and its non-empty sibling on next_cursor only.
+// Under the all-three variant the zero-row body is `{}` instead and the SDK
+// raises on three fields. The asymmetry conclusion holds under both, since the
+// three-row body drops next_cursor either way - but `{"items": []}` cannot be
+// produced by the all-three mutation, so do not attribute it to one.
 //
 // The assertion is on the RAW JSON key set, not on a decoded struct: a decoded
 // page cannot tell a present-and-zero key from a missing one, which is the
@@ -460,16 +467,16 @@ func TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage(t *testing.T) {
 	var keys map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body, &keys))
 
-	got := make([]string, 0, len(keys))
-	for k := range keys {
-		got = append(got, k)
-	}
-	require.ElementsMatch(t, []string{"items", "next_cursor", "total"}, got,
+	// counterKeys, from server_counters_test.go in this package - same signature,
+	// same job. Do not re-inline it.
+	require.ElementsMatch(t, []string{"items", "next_cursor", "total"}, counterKeys(keys),
 		"page[T] must emit all three envelope keys on a ZERO-VALUE page, never elided by omitempty. "+
 			"relay.Page in the Python SDK requires all three and raises on an absent one, and a dropped "+
 			"next_cursor is worse than an error there: the empty string is that SDK's drained signal, so "+
 			"an absent key used to read as 'the list ended' and truncated every walk to its first page. "+
-			"If a key must go, the SDK's model has to change first.")
+			"If a key must go, the SDK's model has to change first. ADDING a key is safe and this "+
+			"assertion is merely stricter than the property: relay.Page sets extra='ignore' precisely "+
+			"so a newer server can add envelope fields, so if you added one, add it to this list.")
 
 	assert.Equal(t, "null", string(keys["items"]),
 		"a nil Items slice still serialises under its key; handlers pass a make()d slice so a real "+

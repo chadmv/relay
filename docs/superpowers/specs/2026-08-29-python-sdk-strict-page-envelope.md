@@ -489,11 +489,19 @@ Added by this spec:
   required scope.
 - The Go decision is explicit: a backlog item for `relayclient.PageEnvelope` exists and is linked, or
   the Go paragraph in section 8 is downgraded to an intention.
-- `_version.py` and `pyproject.toml` move together to `0.2.2` (`test_version_files_are_in_lockstep`
-  makes moving one of them RED).
-- Gates: `pytest tests/unit` on **3.9 through 3.13** (the CI matrix in `.github/workflows/python.yml`),
-  `ruff check src tests`, `mypy src`, and `test_packaging.py`'s README guard. No Go gate is needed -
-  this slice touches no Go file.
+- ~~`_version.py` and `pyproject.toml` move together to `0.2.2`~~ **SUPERSEDED 2026-08-29: they move
+  together to `0.3.0`.** Phase 4 established that `Page` is in `__all__`, so removing the field
+  defaults breaks any downstream code that CONSTRUCTS one - test doubles and recorded fixtures, which
+  routinely omit keys. G4's rationale only considered the decode direction. The load-bearing evidence
+  is precedent, not semver theory: `e536f3e` made a sibling response model's fields required and took
+  a MINOR bump. (`test_version_files_are_in_lockstep` still makes moving one of them RED.)
+- ~~Gates: ... No Go gate is needed - this slice touches no Go file.~~ **SUPERSEDED 2026-08-29: the
+  slice adds one Go file and `go test ./...` is a gate.** Phase 4 found that the premise this whole
+  spec rests on - `page[T]` carrying no `omitempty` - was pinned by nothing in the repo: adding the
+  tag left all 21 other Go packages green, and only the opt-in Python integration lane caught it.
+  `internal/api/pagination_test.go` now carries the guard, on the side that owns the tag. Gates:
+  `pytest tests/unit` on **3.9 through 3.13** (the CI matrix in `.github/workflows/python.yml`),
+  `ruff check src tests`, `mypy src`, `test_packaging.py`'s guards, and `go test ./...`.
 
 ---
 

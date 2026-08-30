@@ -596,15 +596,22 @@ class Page(BaseModel, Generic[T]):
     the zero-row one.
 
     The load-bearing property is the single TYPE, not a single constructor.
-    Every list handler in ``internal/api`` builds its own ``page[...]``
-    composite literal. ``buildPage`` returns the trimmed items and the cursor
-    string and never touches the struct, and the count is not its output at
-    all - it comes from a separate ``Count*`` query per handler. handleListUsers'
-    two early returns go further and hand-build a zero-row page with
-    ``NextCursor: ""`` and ``Total: 0``. Because the omission is impossible at
-    the TAG level, all of them emit all three keys regardless of who wrote them.
-    A single-constructor claim would be both false and weaker than the one that
+    Every handler that RETURNS a ``page[...]`` builds the composite literal
+    itself. ``buildPage`` returns the trimmed items and the cursor string and
+    never touches the struct, and the count is not its output at all - it comes
+    from a separate ``Count*`` query per handler. handleListUsers' two early
+    returns go further and hand-build a zero-row page with ``NextCursor: ""``
+    and ``Total: 0``. Because the omission is impossible at the TAG level, all
+    of them emit all three keys regardless of who wrote them. A
+    single-constructor claim would be both false and weaker than the one that
     actually holds.
+
+    Read that quantifier's domain narrowly: it ranges over the handlers that
+    emit this envelope, NOT over every list handler. handleListTasks and
+    handleListWorkerWorkspaces return a bare JSON array with no envelope at
+    all, which is why :meth:`relay.Client.get_tasks` is outside everything
+    argued here - see the note in python/README.md about the two
+    ``response.json()`` sites that do not hand the whole body to a model.
 
     No site count is repeated here, deliberately. A cross-language tally in a
     Python docstring cannot be pinned by anything on either side and drifts on
