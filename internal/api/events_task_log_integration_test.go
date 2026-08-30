@@ -83,9 +83,14 @@ func TestEvents_TaskIDValidation(t *testing.T) {
 	rec = do("?task_id=11111111-1111-1111-1111-111111111111")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	// ?job_id= validation is deliberately UNCHANGED: an unknown job is still an
-	// open, silently empty stream. It is an existing contract with existing
-	// clients; the asymmetry is intentional and documented in README.md.
+	// ?job_id= VALIDATION is deliberately unchanged, and this assertion is the
+	// proof that the 2026-08-30 canonicalisation was additive: `not-a-uuid` is
+	// 10 bytes, so pgtype.UUID.Scan takes its default branch, canonicalJobIDFilter
+	// returns the string untouched, and this is still an open silently empty
+	// stream rather than a 400. It is an existing contract with existing clients.
+	// The asymmetry with task_id is intentional and is about REJECTION only -
+	// both parameters are canonicalised. See
+	// TestEvents_JobIDSpellingIsCanonicalisedNotRejected.
 	// (Served with a cancelled context so the handler returns immediately.)
 	req := httptest.NewRequest("GET", "/v1/events?job_id=not-a-uuid", nil)
 	req.Header.Set("Authorization", "Bearer "+token)

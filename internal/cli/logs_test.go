@@ -1601,16 +1601,20 @@ func TestWatchJobLogs_ReconcileDoesNotAdoptANonTerminalStatus(t *testing.T) {
 	require.Empty(t, errOut.String())
 }
 
-// fakeUUIDSpellingServer models the three things the real server does with a job
-// id, and the one thing it does not do.
+// fakeUUIDSpellingServer models a PRE-2026-08-30 relay-server: the three things
+// every version does with a job id, plus the one thing versions before that date
+// did not do. It is deliberately NOT updated to the current server - `relay logs`
+// may be pointed at any server, the older one still exists in the field, and this
+// fixture is the only thing proving the CLI works against it.
 //
 //   - GET /v1/jobs/{id} accepts every spelling pgtype.UUID.Scan takes - hex is
 //     case-insensitive and the dashless 32-char form parses - and always answers
 //     with the canonical lowercase-dashed form uuidStr renders.
-//   - GET /v1/events?job_id= is deliberately NOT validated or canonicalised
-//     (there is a comment saying so at internal/api/events.go), and the broker's
-//     filter is an exact string compare (internal/events/broker.go), so a
-//     non-canonical spelling matches nothing that is published.
+//   - GET /v1/events?job_id= is taken VERBATIM here, and the broker's filter is
+//     an exact string compare (internal/events/broker.go), so a non-canonical
+//     spelling matches nothing that is published. A server from 2026-08-30
+//     onward canonicalises it first (canonicalJobIDFilter, internal/api/events.go)
+//     and would deliver; that server is not what this fixture models.
 //   - That stream is then held open with no heartbeat and no timeout, which is
 //     what turns "matches nothing" into a hang rather than an error.
 //

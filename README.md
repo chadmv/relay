@@ -1754,10 +1754,19 @@ ids. A gap in `seq` is therefore **not** a drop signal - do not re-page on one.
 The `dropped` frame and an unexpectedly closed stream are the only drop signals.
 
 **Validation.** `?task_id=` returns `400` for a malformed UUID and `404` for an
-unknown task. `?job_id=` is not validated - an unknown job yields an open but
-permanently empty stream. This asymmetry is deliberate: `?job_id=` is an
-existing contract with existing clients, while an unvalidated `?task_id=` would
-look identical to "this task produced no output".
+unknown task. `?job_id=` is not validated - an unknown or unparseable job id
+yields an open but permanently empty stream rather than an error. This
+asymmetry is deliberate: `?job_id=` is an existing contract with existing
+clients, while an unvalidated `?task_id=` would look identical to "this task
+produced no output".
+
+**Normalisation.** The asymmetry above is about REJECTION only. Both parameters
+are canonicalised. Any spelling the server accepts - uppercase hex, the dashless
+32-character form, and the 36-character form with any byte in the four separator
+positions - is normalised to the lowercase dashed form the server emits, so
+`?job_id=7E660488-1234-4321-8888-ABCDEFABCDEF` subscribes to the job it names
+rather than to a filter nothing matches. A spelling the server does not accept
+is passed through unchanged and is never widened into one it does accept.
 
 **Single-process caveat.** The broker is in-memory, so events are visible only
 to clients connected to the `relay-server` process that owns the relevant
