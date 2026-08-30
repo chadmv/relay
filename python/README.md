@@ -244,6 +244,23 @@ The two escapes are:
 
 That gap is known and tracked separately.
 
+The first of those two escapes now has one more occasion, and it is a
+**fail-closed change** worth naming. Every paged envelope - the six `list_*`
+walks and their six `*_page` siblings - requires `items`, `next_cursor` and
+`total`. A 200 whose envelope OMITS `next_cursor` or `total` raises
+`pydantic.ValidationError` rather than decoding into a page that reports the
+list drained. Before, a dropped key returned page 1 and reported success, and
+nothing in the return value distinguished a 200-row prefix from a complete
+200-row list. A correct server never produces this: the envelope is written by
+one `page[T]` struct whose three json tags carry no `omitempty`.
+
+It is still not a `RelayError`, so `except relay.ValidationError` does **not**
+catch it - the two classes share a name, and that trap is why
+`bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy` is
+tracked. Catch `pydantic.ValidationError` explicitly until that lands. Nothing
+counted above changes: this widens when the first escape fires, not what the
+escapes are.
+
 | Class | When |
 |---|---|
 | `ValidationError` | Local Pydantic failure or server 400 |

@@ -338,8 +338,14 @@ class Job(BaseModel):
     # List-only enrichment (GET /v1/jobs rows). The server computes these from
     # the job's tasks and its scheduled-job source, and does not populate them
     # on single-job routes. They are DEFAULTED because Job is the authoring
-    # model too - Job(name="nightly") must keep working - which is why the
-    # strict no-default rule LogPage follows does not apply here.
+    # model too - Job(name="nightly") must keep working.
+    #
+    # That is an exemption on the AUTHORING axis and it is the only axis it is
+    # on. Page and LogPage require every envelope field they declare, and Page
+    # is now the closer analogue of the two: like Job it is a response model
+    # over a generic item list, and unlike Job nothing constructs one, so
+    # requiring its fields costs nothing. Do not "make these consistent" - what
+    # makes these six defaulted is who BUILDS a Job, not what the values mean.
     total_tasks: int = 0
     done_tasks: int = 0
     started_at: Optional[datetime] = None
@@ -463,11 +469,32 @@ class LogPage(BaseModel):
     a global BIGSERIAL, so when one task logs alone its ids are contiguous and
     +1 skips the very next row.
 
-    ``next_seq`` and ``total`` are REQUIRED, unlike :class:`Page`, which
-    declares ``next_cursor: str = ""`` and so reads a missing key as the empty
-    string. A defaulted ``next_seq: int = 0`` would read a missing key as
-    "drained" and silently return page 1 - the same shape as the defect this
-    model exists to fix.
+    ``next_seq`` and ``total`` are REQUIRED and undefaulted, and so are
+    :class:`Page`'s ``next_cursor`` and ``total``. The two envelopes agree; what
+    matters is the reason, which is the same for both. A defaulted
+    ``next_seq: int = 0`` would read a MISSING key as "drained" and silently
+    return page 1, because 0 is this walk's end-of-log signal - and ``Page``
+    had exactly that hole with ``next_cursor: str = ""`` until it was closed.
+    An absent key with a benign default is not a missing value. It is a
+    FABRICATED one, and for a cursor the fabricated value is "there is nothing
+    more".
+
+    Read that as a rule about PAGE-ENVELOPE fields, not about this file. It does
+    not generalize to every default here, and the exemptions sit on two axes
+    that are not the same as each other:
+
+    - :class:`Job`'s list-only enrichment fields are exempt on the AUTHORING
+      axis. ``Job`` is the model a caller CONSTRUCTS - ``Job(name="nightly")``
+      is the README's first example - so a required ``total_tasks`` would break
+      every authoring call site. The question there is who BUILDS the object,
+      not what the value means. ``Page`` and ``LogPage`` are response-only and
+      nothing in ``relay/`` or its tests constructs one, which is why the strict
+      rule costs nothing here.
+    - Container fields such as ``Worker.labels`` and ``Reservation.selector``
+      are exempt on the PAYLOAD axis: an empty dict is the honest reading of an
+      absent map, and no control flow and no reported count is derived from it.
+      A cursor is neither a container nor a payload - it is the loop's stop
+      condition, which is why it gets no default at all.
     """
 
     model_config = ConfigDict(extra="ignore")

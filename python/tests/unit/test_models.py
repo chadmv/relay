@@ -420,12 +420,16 @@ def test_log_page_parses_the_envelope() -> None:
 
 @pytest.mark.parametrize("missing", ["next_seq", "total"])
 def test_log_page_requires_next_seq_and_total(missing: str) -> None:
-    """A deliberate departure from _get_page's body.get("next_cursor", "").
+    """A defaulted `next_seq: int = 0` would read a MISSING key as "drained" and
+    silently return page 1 - the defect shape this family of models exists to
+    refuse. The handler writes both keys unconditionally from a map literal, so
+    requiring them costs nothing.
 
-    A defaulted next_seq: int = 0 would read a missing key as "drained" and
-    silently return page 1 - which is the same shape as the defect this whole
-    slice exists to fix, rebuilt inside the fix. The handler writes both keys
-    unconditionally from a map literal, so requiring them costs nothing.
+    This used to call itself "a deliberate departure from _get_page's
+    body.get('next_cursor', '')". Both halves of that are gone: the body.get()
+    was deleted when the envelope was routed through Page[model], and Page's own
+    next_cursor/total defaults were removed after it. The sibling assertion is
+    test_page_requires_next_cursor_and_total above.
     """
     body = {"items": [], "next_seq": 5, "total": 9}
     del body[missing]
@@ -494,13 +498,14 @@ def test_job_parses_list_enrichment_fields() -> None:
 
 def test_job_authoring_does_not_require_enrichment_fields() -> None:
     """The six D3 fields are DEFAULTED, and that is deliberate rather than a
-    lapse from the strict no-default rule LogPage follows.
+    lapse from the strict rule Page and LogPage both follow.
 
-    Job is the AUTHORING model as well as the response model - Job(name=...) is
-    the README's first example - so a required total_tasks would break every
-    authoring call site. LogPage is response-only and has no authoring caller,
-    which is why the strict rule costs nothing there and everything here. Do
-    not "make these consistent".
+    The exemption is on the AUTHORING axis and nothing else. Job is the
+    authoring model as well as the response model - Job(name=...) is the
+    README's first example - so a required total_tasks would break every
+    authoring call site. Page and LogPage are response-only and nothing
+    constructs one, which is why the strict rule costs nothing there and
+    everything here. Do not "make these consistent".
     """
     job = Job(name="nightly")
     assert job.total_tasks == 0
