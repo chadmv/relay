@@ -413,3 +413,91 @@ func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestEvents_JobIDRejectedSpellingsAreNotCanonicalised is the other direction of
+// the item's acceptance criterion, and the test that kills the one mutation that
+// makes this slice WORSE than doing nothing.
+//
+// uuidStr returns "" for an invalid pgtype.UUID, and events.Filter{JobID: ""} is
+// the broker's BROADCAST scope (internal/events/broker.go: "empty = broadcast to
+// all"). So `u, _ := parseUUID(raw); return uuidStr(u)` - one deleted guard -
+// turns every unparseable ?job_id= into a whole-cluster status feed. This test
+// asserts SCOPE, not the absence of an error: a fail-open here is an escalation
+// and nothing about it looks like a failure.
+//
+// Each probe is ?job_id= ONLY. Publish's status branch skips a filter whose
+// JobID is "" and whose TaskID is not, so a probe carrying a task_id would be
+// routed as a log tail under the mutation and the kill would be vacuous. Do not
+// add a task_id to these.
+//
+// Each probe is built through url.Values because a raw `+` in a query string
+// decodes to a SPACE - the sign-prefixed row would otherwise arrive as a
+// 33-byte string with a leading space, still rejected, but not the string this
+// test claims to be about.
+//
+// The four spellings are the ones Python's uuid.UUID ACCEPTS and this server
+// does not (spec section 4.4). For the sign-prefixed row uuid.UUID does not
+// merely over-accept: it resolves to a DIFFERENT uuid than the string names.
+// That is why no canonicaliser may live in a client.
+//
+// A rejected spelling is still not a 4xx: the flushed()>=1 barrier and the
+// Content-Type check below are the observable form of that, because gateWriter
+// discards the status code.
+func TestEvents_JobIDRejectedSpellingsAreNotCanonicalised(t *testing.T) {
+	srv, q, broker, _ := newTestServerWithBroker(t)
+	user := createTestUser(t, q, "Alice", "sse-rejected@example.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID, _ := seedTaskViaAPI(t, srv, token)
+
+	open := func(t *testing.T, spelling string) *gateWriter {
+		t.Helper()
+		vals := url.Values{"job_id": {spelling}}
+		req := httptest.NewRequest("GET", "/v1/events?"+vals.Encode(), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		ctx, cancel := context.WithCancel(req.Context())
+		gw := newGateWriter()
+		close(gw.release)
+		done := make(chan struct{})
+		go func() { defer close(done); srv.Handler().ServeHTTP(gw, req.WithContext(ctx)) }()
+		t.Cleanup(func() { cancel(); <-done })
+		require.Eventually(t, func() bool { return gw.flushed() >= 1 },
+			5*time.Second, 5*time.Millisecond,
+			"the subscription never became live for %q - a rejected spelling must still open a stream", spelling)
+		assert.Equal(t, "text/event-stream", gw.header().Get("Content-Type"),
+			"%q must be an open stream, never a 4xx", spelling)
+		return gw
+	}
+
+	// Positive control first, so the negatives below cannot pass vacuously.
+	control := open(t, jobID)
+
+	dashless := strings.ReplaceAll(jobID, "-", "")
+	rejected := map[string]*gateWriter{}
+	for name, spelling := range map[string]string{
+		"brace wrapped":   "{" + jobID + "}",
+		"urn prefixed":    "urn:uuid:" + jobID,
+		"trailing hyphen": jobID + "-",
+		"sign prefixed":   "+" + dashless[:31],
+	} {
+		rejected[name] = open(t, spelling)
+	}
+
+	broker.Publish(events.Event{
+		Type:  "job",
+		JobID: jobID,
+		Data:  []byte(`{"status":"done","probe":"scope"}`),
+	})
+
+	require.Eventually(t, func() bool { return strings.Contains(control.body(), `"probe":"scope"`) },
+		5*time.Second, 5*time.Millisecond,
+		"the canonical control never received the frame - every negative below would be vacuous")
+
+	for name, gw := range rejected {
+		name, gw := name, gw
+		assert.Never(t, func() bool { return strings.Contains(gw.body(), `"probe":"scope"`) },
+			500*time.Millisecond, 25*time.Millisecond,
+			"%s: a spelling the server REJECTS must not be silently widened into one it accepts. "+
+				"Receiving this frame means the filter became \"\", which is the broker's BROADCAST scope",
+			name)
+	}
+}
