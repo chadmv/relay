@@ -1,5 +1,5 @@
 ---
-title: Six production copies of the UUID render format string, and drift in the server direction is caught by nothing
+title: Six production copies of the UUID render format string, and drift in the two PUBLISHER copies is caught by nothing
 type: idea
 status: open
 created: 2026-08-26
@@ -7,7 +7,7 @@ priority: low
 source: Phase 6 of the 2026-08-26-relay-logs-envelope-drift slice, which added the sixth copy and said so in its own comment
 ---
 
-# Six production copies of the UUID render format string, and drift in the server direction is caught by nothing
+# Six production copies of the UUID render format string, and drift in the publisher copies is caught by nothing
 
 ## Summary
 
@@ -28,20 +28,48 @@ Plus five more in test files (`internal/worker/handler_test.go` x3, `internal/ap
 
 **The asymmetry is the point of the item, not the duplication.** The 2026-08-26 slice made this
 format load-bearing across a trust boundary for the first time: `canonicalJobID` renders argv into
-the one spelling the server emits, because `handleEvents` does not canonicalise `?job_id=` and the
-broker filter is an exact string compare, so a mismatched spelling subscribes to a stream that
-receives nothing, forever, with no heartbeat and no timeout.
+the one spelling the server emits, so a mismatched spelling subscribes to a stream that receives
+nothing, forever, with no heartbeat and no timeout.
 
 - **Drift in the CLI direction is caught.** `TestWatchJobLogs_NonCanonicalJobID_IsResolvedNotRejected`
   hard-codes the expected spelling rather than deriving it from `canonicalJobID`, so a change there
   goes red.
-- **Drift in the SERVER direction is caught by nothing.** `internal/api.uuidStr` is unexported, so
-  no test relates the two, and the four other copies are unexported local helpers with no
-  relationship to each other at all. Changing `uuidStr` - to uppercase, to the dashless form, to
-  `google/uuid`'s `String()` - leaves every package green and silently breaks the CLI's `relay logs`
-  subscription for non-canonical ids.
+- **Drift in `internal/api.uuidStr` is now caught too, as of 2026-08-30.** See the amendment below.
+- **The four other copies are still related to nothing.** They are unexported local helpers with no
+  relationship to each other, and no test pins any of them to a literal.
 
-`canonicalJobID`'s own doc comment already states all of this. This item is the follow-through.
+## Amendment 2026-08-30 - narrowed, and the argument got stronger
+
+The slice that shipped `canonicalJobIDFilter` (`internal/api/events.go`) changed two things this
+item asserted, and neither of them weakens it.
+
+**What is now false, and was left standing by that slice's own "correct the sites" commit:**
+
+- *"`canonicalJobID` renders argv ... because `handleEvents` does not canonicalise `?job_id=`."*
+  It does canonicalise it, since 2026-08-30. `canonicalJobID` is still not redundant - the reason
+  narrowed to the one reader no server change can reach, `jobSnapshotUnusable`'s client-side id
+  comparison, plus keeping a non-canonical spelling out of the request line against an OLDER
+  `relay-server` a CLI built from this tree may be pointed at.
+- *"Drift in the SERVER direction is caught by nothing - `internal/api.uuidStr` is unexported, so no
+  test relates the two."* Refuted. `TestCanonicalJobIDFilter` (`internal/api/events_test.go`,
+  default lane, no container) hard-codes the canonical literal and asserts 8 spellings render to it
+  through `uuidStr`. **Measured**: rendering `uuidStr` uppercase turns 5 of its subtests red. This
+  satisfies the first Acceptance bullet below on its own, by accident rather than by intent.
+
+**Why the item gets STRONGER, not weaker.** The format is now load-bearing on BOTH sides of the
+boundary, not just the CLI's. `?job_id=` canonicalisation only works because the subscribe side's
+`internal/api.uuidStr` renders what the publish side emits - and the publish side is
+`internal/scheduler.uuidStr` (3 of the 8 JobID-carrying `broker.Publish` sites) and
+`internal/worker.uuidStr` (3 more), which are DIFFERENT unexported functions that no test relates to
+`internal/api`'s. If either publisher copy drifts, the SSE fix silently evaporates back into the bug
+it closed with every package green. That is a strictly larger hole than the CLI one this item was
+filed for.
+
+**Remaining scope**, therefore: the two publisher copies plus `cmd/relay-server/main.go` and
+`internal/metrics/sweep.go`. `internal/api`'s and the CLI's are each pinned to a hard-coded literal
+now, by two independent tests and by no relationship between the functions.
+
+`canonicalJobID`'s doc comment records all of this as of 2026-08-30.
 
 ## Context
 
@@ -77,8 +105,12 @@ lives, since its comment currently ends by naming the gap.
 
 ## Acceptance / Done When
 
-- A change to `internal/api`'s rendering that would break `canonicalJobID`'s agreement with it
-  reddens at least one test. Proven once, by making that change and observing the RED.
+- ~~A change to `internal/api`'s rendering that would break `canonicalJobID`'s agreement with it
+  reddens at least one test. Proven once, by making that change and observing the RED.~~ **Done
+  incidentally 2026-08-30** by `TestCanonicalJobIDFilter`; proven by mutating `uuidStr` to uppercase
+  and observing 5 red subtests. Not the item's own doing, and it does not close the item.
+- A change to `internal/scheduler`'s or `internal/worker`'s rendering - the two PUBLISHER copies -
+  reddens at least one test. This is the larger hole and nothing covers it today.
 - Whichever option is taken, `canonicalJobID`'s comment stops saying the server direction is caught
   by nothing, because it no longer is.
 - If Option A: all six production sites call the shared renderer and the test copies are left alone
