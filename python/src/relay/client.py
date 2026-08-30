@@ -809,6 +809,18 @@ class Client:
         :meth:`task_logs`, which takes no ``since_seq`` and would restart at
         row 0 and re-walk the whole log.
 
+        The server normalises the id's SPELLING, so any form
+        ``GET /v1/jobs/{id}`` accepts - uppercase hex, the dashless
+        32-character form - subscribes to the job it names. The SDK
+        deliberately sends your string unchanged: Python's ``uuid.UUID`` and
+        the server's parser accept different sets in BOTH directions, and for
+        three spellings ``uuid.UUID`` accepts (``+<31 hex>``, ``0x<30 hex>``,
+        and a PEP 515 ``_`` inside 32 hex digits) it yields a DIFFERENT id
+        than the string names - so canonicalising here could subscribe you to
+        the wrong job. Against a relay-server older than 2026-08-30 a
+        non-canonical spelling still yields a permanently empty stream; if you
+        may be talking to one, pass the id exactly as ``get_job()`` returned it.
+
         The underlying HTTP connection is closed on generator exit.
         """
         self._require_token()
