@@ -59,6 +59,14 @@ shape, not the nouns.
 7. Single JSON entry point (bodies read only via readJSON).
 Also confirm token hashing uses internal/tokenhash.Hash, never inline sha256.
 
+## Prose findings
+
+A checkable-but-unpinned claim in an added comment or docstring is itself a finding - counts,
+uniqueness claims, dates, censuses of other files, cross-language claims, measurement
+narratives. The default remedy to suggest is delete, or relocate to the commit message. Suggest
+a corrected wording only with a stated reason the claim must live in code at all: corrections
+to such claims regenerated the defect four times running on one docstring.
+
 ## Output
 
 Report findings grouped by severity (high/medium/low), each with file:line, the
