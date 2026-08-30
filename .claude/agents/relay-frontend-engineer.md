@@ -31,3 +31,9 @@ SPA that is built and embedded into relay-server.
 - Surgical changes: touch only what the task requires; clean up only orphans your
   own changes create.
 - Never use em dashes or en dashes; use regular hyphens.
+- Match the surrounding code's style and naming, but NOT its comment density - much of the
+  existing density is history the comment policy now forbids. A comment states a hazard or
+  constraint the code cannot show, in a few lines, optionally citing the one test that pins it.
+  No dates, change history, measurement narratives, counts, uniqueness/completeness claims, or
+  censuses of other files - that content goes in the commit message or spec. Test comments
+  state the property pinned and why the input discriminates; provenance goes in the commit.
