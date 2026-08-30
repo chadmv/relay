@@ -45,30 +45,11 @@ M = TypeVar("M", bound=BaseModel)
 # How much of a server-supplied cursor a ProtocolError message may quote.
 #
 # The cursor is chosen by the SERVER and its length is unbounded, so a message
-# that interpolates it whole is unbounded too - the same "provenance says
-# nothing about content" argument that makes the stops below necessary, applied
-# to the diagnostic rather than the loop.
-#
-# 200 characters - and that does NOT cover every legitimate cursor. The claim
-# that it did, and specifically that it covered "a text-sort cursor that carries
-# a row's name", was measured false. encodeCursorV2 (internal/api/pagination.go)
-# emits base64url of a {t,i,s,v} JSON:
-#
-#   - a TIME-sort cursor is 127 characters, so every one of those is quoted
-#     whole;
-#   - a TEXT-sort cursor carries the row's sort value as well, so
-#     `--sort name` crosses 200 at a job name of about 89 characters:
-#     measured, an 85-character name gives 196, 90 gives 203, 100 gives 216.
-#     `jobs.name` is TEXT NOT NULL with no length limit and jobspec.Validate
-#     rejects only the empty string, so those are cursors a CORRECT server
-#     emits and this code truncates.
-#
-# The number stays at 200 anyway. "Every legitimate cursor fits" is not
-# achievable at ANY number against an unbounded sort value, and the consequence
-# of cutting one is cosmetic: _quote_cursor reports the TRUE length beside the
-# prefix, so the message stays diagnosable and a 216-character cursor is still
-# distinguishable from a 5 MB one. What the bound buys is that the message
-# length is the CLIENT's to choose, which was always the point.
+# that interpolates it whole is unbounded too. No fixed number covers every
+# legitimate cursor (a text-sort cursor carries the row's unbounded sort
+# value), and cutting one is cosmetic: _quote_cursor reports the true length
+# beside the prefix, so a long-but-legitimate cursor stays distinguishable
+# from a pathological one.
 _CURSOR_MESSAGE_CHARS = 200
 
 
@@ -117,37 +98,11 @@ class Client:
 
     # Bounds the NUMBER OF REQUESTS the log paging loop makes against a server
     # whose next_seq keeps advancing but which never reports the log as
-    # drained. 10000 pages at _PAGE_REQUEST_LIMIT rows is 2,000,000 rows.
-    #
-    # Requests is all it bounds. It was described here as a "hang bound" and
-    # it is not one, so read it as the count it is - the three axes it leaves
-    # open were measured:
-    #
-    #   - Wall clock. httpx's read timeout applies per SOCKET READ, not per
-    #     request, so a server that answers steadily enough need not trip it
-    #     at all: measured, one request dribbling a byte every 0.4 s completed
-    #     in 14.3 s under a 0.5 s read timeout, 29x. Multiply by 10000
-    #     sequential pages.
-    #   - Bytes. httpx sends `accept-encoding: gzip, deflate` by default and
-    #     decodes with no bound: measured, 89 KiB on the wire materialised as
-    #     31 MB, a 343x ratio. Again per page.
-    #   - Memory. A LogRecord retains roughly 0.5-1 KB depending on line
-    #     length, so a full 2,000,000-row walk is well over a gigabyte,
-    #     retained, before task_logs returns.
-    #
-    # Do NOT point a reader at Client(timeout=) for the first two. That
-    # remedy was written here and it does not exist: httpx has no total-time
-    # and no response-size setting, and Client(timeout=) sets exactly the four
-    # per-operation values (connect, read, write, pool) that the 14.3 s
-    # measurement above defeats. Closing either axis needs a caller-supplied
-    # httpx.BaseTransport wrapper passed as http_client=, or a deadline
-    # enforced outside the SDK. Only the third axis has an in-SDK bound.
-    #
-    # That bound is `task_logs(limit=N)`, and a private total-row budget is
-    # DECLINED deliberately rather than omitted: limit= already is that
-    # budget, it short-circuits the walk, and it is public and caller-chosen -
-    # a second private one would bound the same axis twice while still
-    # advertising nothing about the other two.
+    # drained. Requests is ALL it bounds - not wall clock (httpx's read
+    # timeout is per socket read), not bytes (httpx decompresses with no
+    # bound), not memory. Do NOT point a reader at Client(timeout=) for
+    # those: httpx has no total-time and no response-size setting. See
+    # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
     #
     # A CLASS attribute, like _PAGE_REQUEST_LIMIT, so a test can shrink
     # it - which means the loop must read it off `self`, not off a module global.
@@ -161,15 +116,11 @@ class Client:
     # The public, caller-chosen bound on ROWS is `limit=`.
     #
     # Requests is all it bounds. Wall clock, response bytes and the memory of a
-    # single response are all open; those three axes are MEASURED in the
-    # _MAX_LOG_PAGES comment above - read them there. They are not restated
-    # here, because a second copy is a second thing that can go stale. Closing
-    # them belongs to
+    # single response are all open - see the _MAX_LOG_PAGES comment above and
     # bug-2026-08-26-relayclient-has-no-response-bound-and-no-client-timeout.
     #
     # SEPARATE from _MAX_LOG_PAGES rather than a shared _MAX_PAGES: the two
-    # loops bound different populations, and that comment's measurements are
-    # log-specific and would become wrong if the constant were shared.
+    # loops bound different populations.
     #
     # A CLASS attribute, like _MAX_LOG_PAGES, so a test can shrink it - which
     # means the loop must read it off `self`, not off a module global.
@@ -257,27 +208,20 @@ class Client:
         # reading as an empty page, and `next_cursor` and `total` are TYPED, so
         # a server answering next_cursor: 12345 or total: "many" fails here as
         # one decoding error rather than as a raw TypeError from wherever the
-        # value is first used - which for the _fetch_all walk below was four
-        # different lines in three different shapes.
+        # value is first used.
         #
         # `next_cursor` and `total` are REQUIRED and undefaulted, so a MISSING
-        # key is a decoding error here rather than a value. They carried
-        # defaults until the strict-envelope slice, and `next_cursor: str = ""`
-        # meant an absent key decoded to the drained signal: _fetch_all below
-        # stopped, and list_jobs() returned page 1 and reported success.
-        # Requiring them costs nothing - internal/api's `page[T]` tags all three
-        # fields without `omitempty`, so a correct server always sends all three.
+        # key is a decoding error here rather than a value - a defaulted
+        # `next_cursor: str = ""` would decode an absent key to the drained
+        # signal and silently truncate every walk to page 1. Requiring them
+        # costs nothing against a correct server (pinned by
+        # TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage,
+        # internal/api/pagination_test.go).
         #
         # The failure is `pydantic.ValidationError`, which does NOT descend from
-        # RelayError. Deliberate, and not a new class of escape: python/README.md
-        # already documents it for every response body. Routing it belongs to the
-        # single `_read_json` chokepoint over all twelve `response.json()` sites
-        # in relay/ - ELEVEN in this file plus _extract_message in errors.py,
-        # which is the count README's Errors section arrives at independently.
-        # The scope is the PACKAGE, not this file: a grep of client.py alone
-        # also answers twelve, because this comment line matches its own
-        # subject, and the two twelves are not the same twelve.
-        # See bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy.
+        # RelayError. Deliberate: python/README.md already documents it for
+        # every response body. Routing it belongs to a single chokepoint - see
+        # bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy.
         # A local try/except here would make _get_page and task_logs_page raise
         # DIFFERENT types for the identical defect shape, which the chokepoint
         # would then have to unwind.
@@ -327,12 +271,10 @@ class Client:
         while True:
             pages += 1
             # Through _get_page, which decodes the whole envelope into
-            # Page[model]. This loop used to build the request itself and read
-            # next_cursor and total off the raw dict, and that hand-picking was
-            # the defect: it made every stop below operate on a value of a type
-            # the server chose. `page.next_cursor` is a str and `page.total` an
-            # int by construction here, so `len()`, `in seen` and `>` are all
-            # asking a question their operand can answer.
+            # Page[model], never a hand-picked raw dict: `page.next_cursor` is
+            # a str and `page.total` an int by construction here, so `len()`,
+            # `in seen` and `>` are all asking a question their operand can
+            # answer.
             page = self._get_page(
                 path,
                 model,
@@ -348,8 +290,7 @@ class Client:
             # required on the model, so a body that omitted the key raised in
             # _get_page above and never reached this line. An empty string here
             # is therefore the server SAYING drained, not the SDK inferring it
-            # from an absent key - which is what it used to be, and what made a
-            # dropped key silently truncate every walk to its first page.
+            # from an absent key.
             cursor = page.next_cursor
             # THE DRAINED RETURN BELOW MUST STAY ABOVE THE EMPTY-PAGE STOP. A
             # list with no matching rows legitimately answers items: [] - and it
@@ -367,24 +308,15 @@ class Client:
             # comparison against the previous cursor - the two catch different
             # things and a two-cycle (A,B,A,B, which two replicas behind a load
             # balancer produce) is invisible to the comparison and runs to the
-            # page cap. This is not a second stop; it is the one stop, with the
-            # container that implements it. Previous-cursor-only is this set
-            # restricted to its last element.
+            # page cap.
             #
-            # A repeated cursor is UNREACHABLE on a correct server: the server's
-            # cursor (encodeCursorV2, internal/api/pagination.go) encodes the
-            # LAST KEPT row's key and the next page's predicate is strictly past
-            # it with id as tiebreaker, so cursor keys strictly decrease along a
-            # walk. Comparison is byte-exact on the base64 string; the SDK never
+            # Comparison is byte-exact on the base64 string; the SDK never
             # decodes it, and deliberately so - decoding would make a
             # server-internal encoding a cross-language contract to keep in step.
             #
-            # Memory, stated rather than hidden: at most one entry per page, so
-            # the entry COUNT is bounded by _MAX_LIST_PAGES. The BYTE cost is
-            # entries x cursor length, and cursor length is server-supplied and
-            # unbounded - roughly 0.1% of a real walk (~128 bytes against ~100 KB
-            # of models per page), and dominant only against a server sending
-            # one-item pages with multi-megabyte cursors. A digest per entry
+            # Memory: at most one entry per page, so the entry COUNT is bounded
+            # by _MAX_LIST_PAGES; the BYTE cost is entries x cursor length, and
+            # cursor length is server-supplied and unbounded. A digest per entry
             # would close that term and is DECLINED: the same attacker already
             # has an equal retention channel through `items`, and the
             # unbounded-response-bytes axis belongs to
@@ -398,32 +330,19 @@ class Client:
                     records=out,
                 )
             # Recorded HERE, adjacent to the membership test it feeds, and not
-            # as the last statement of the loop body 60 lines below - the
-            # acquire direction of CLAUDE.md's "take the state and arm its
-            # release in the same breath, so no early return added later can
-            # forget to".
+            # at the end of the loop body: a `continue` added later (a
+            # transient-retry arm is the obvious candidate) would silently stop
+            # populating `seen` from a later position, and the only symptom is
+            # 10000 requests where there should have been 2.
             #
-            # The move is behaviour-identical, and that was PROVEN rather than
-            # argued: a sentinel raise placed as the final statement inside the
-            # page-cap block below leaves the suite green, while the same
-            # sentinel as that block's FIRST statement kills four tests. The
-            # block is entered and every arm of it raises, so the old position
-            # was never reached on any path the new one is not.
-            #
-            # It matters because a `continue` added later - a transient-retry
-            # arm is the obvious candidate - would silently stop populating
-            # `seen` from the old position, and the only symptom is 10000
-            # requests where there should have been 2.
-            #
-            # The rule is general; its APPLICATION here is not. task_logs' walk
-            # ends its loop body with `since = page.next_seq`, which looks like
-            # the same statement and must NOT be moved up to match: two of that
-            # walk's stops interpolate the PRE-update `since` into their
-            # messages ("next_seq N after since_seq M"), so advancing it early
-            # would make both messages report the cursor the server just sent as
-            # the one we had asked from. Different statement, different
-            # constraint - `seen` is only ever read by the membership test above
-            # it, while `since` is read by the messages below it.
+            # task_logs' walk ends its loop body with `since = page.next_seq`,
+            # which looks like the same statement and must NOT be moved up to
+            # match: two of that walk's stops interpolate the PRE-update
+            # `since` into their messages ("next_seq N after since_seq M"), so
+            # advancing it early would make both messages report the cursor the
+            # server just sent as the one we had asked from. `seen` is only
+            # ever read by the membership test above it, while `since` is read
+            # by the messages below it.
             seen.add(cursor)
             if pages >= self._MAX_LIST_PAGES:
                 # Count DISTINCT ids, never len(out). `total` is server-supplied
@@ -465,41 +384,16 @@ class Client:
                 total = page.total
                 # The message REPORTS what it has and asserts NEITHER
                 # possibility: it does not blame the server, and it does not
-                # claim every row was collected.
-                #
-                # There used to be a `distinct >= total` arm that did claim
-                # completeness, justified by "a list of exactly _MAX_LIST_PAGES *
-                # _PAGE_REQUEST_LIMIT rows drains correctly, but its last page is
-                # full and so carries a cursor". That premise is TRUE for
-                # task_logs and FALSE here, and the asymmetry is an over-fetch:
-                #
-                #   - GetTaskLogsPage (internal/store/query/tasks.sql) is
-                #     `LIMIT $3`, and handleGetTaskLogs (internal/api/tasks.go)
-                #     zeroes next_seq only when `len(items) < limit`. A FULL last
-                #     log page carries a non-zero cursor, so that walk really does
-                #     stop one request short of learning it was done. Do NOT
-                #     "unify" task_logs' equivalent arm onto this one.
-                #   - Every LIST query is `LIMIT sqlc.arg(page_limit)::int + 1`,
-                #     and every list handler goes through buildPage
-                #     (internal/api/pagination.go), which emits a cursor only when
-                #     that extra row came back. A list page carries a cursor only
-                #     when a row genuinely exists BEYOND it, so a list whose
-                #     length is an exact multiple of the page size drains at its
-                #     last full page and never reaches this cap.
-                #
-                # So reaching the cap on a list means the server IS misbehaving,
-                # and the removed arm settled completeness with `total` - a number
-                # that same actor supplies. A server that keeps advancing cursors
-                # and reports total: 1000 on a five-million-row list got this to
-                # tell the operator every row was collected on a walk 0.02%
-                # complete. internal/relayclient/page.go reached the same
-                # conclusion first - it never had the arm, because T is a bare
-                # type parameter with no id and it could not have counted
-                # honestly anyway - and its comment warns against copying the
-                # completeness wording onto a list count. This is the side that
-                # had copied it. After this removal the only message in either
-                # SDK still carrying that wording is task_logs' below, where the
-                # premise above holds.
+                # claim every row was collected. Do NOT add a `distinct >=
+                # total` completeness arm here: `total` is supplied by the same
+                # actor whose misbehavior this cap detects, so a server that
+                # keeps advancing cursors while under-reporting total would get
+                # this message to call a barely-started walk complete. And do
+                # NOT "unify" task_logs' completeness arm onto this one: a full
+                # last LOG page carries a non-zero cursor, so that walk can
+                # genuinely stop one request short of learning it was done,
+                # while a list page carries a cursor only when a row exists
+                # beyond it - reaching this cap on a list is not that case.
                 #
                 # Both numbers are still reported, and separately: `len(out)`
                 # counts rows APPENDED while `distinct` counts rows RECEIVED, and
@@ -607,11 +501,10 @@ class Client:
         """Cancel a job. Graceful by default; ``force=True`` asks the agent to
         kill the running task immediately.
 
-        The returned :class:`Job` carries NO task list. ``handleCancelJob``
-        serializes with ``tasks`` omitted (the field is ``omitempty``), so
-        ``job.tasks`` is ``[]`` here for EVERY job - including jobs that have
-        tasks, which is all of them, since the server rejects a spec with none.
-        Do not read ``.tasks`` off this value; call :meth:`get_tasks` instead.
+        The returned :class:`Job` carries NO task list: the server omits
+        ``tasks`` from this response, so ``job.tasks`` is ``[]`` here for
+        EVERY job - including jobs that have tasks. Do not read ``.tasks``
+        off this value; call :meth:`get_tasks` instead.
         """
         self._require_token()
         params = {"force": "true"} if force else {}
@@ -641,8 +534,8 @@ class Client:
         ``limit`` is the PAGE SIZE (1-200); omitted, the server's default of 50
         applies, which is visible here because ``next_seq`` tells the caller
         there is more. Pass the returned ``next_seq`` back as ``since_seq=`` to
-        page forward - VERBATIM, never ``+ 1``: the server's predicate is
-        ``id > $2``, so the cursor is exclusive already.
+        page forward - VERBATIM, never ``+ 1``: the cursor is exclusive
+        already, and ``+ 1`` skips a row.
         """
         self._require_token()
         params: dict[str, str] = {}
@@ -650,16 +543,10 @@ class Client:
             params["since_seq"] = str(since_seq)
         if limit is not None:
             params["limit"] = str(limit)
-        # quote(safe="") escapes AT LEAST as much as Go's url.PathEscape,
-        # which printTaskLogs (internal/cli/logs.go:714) applies to this same
-        # argument. Not an identity: Go leaves + : @ = & $ unescaped and
-        # Python percent-encodes them. The extra is harmless here (the two
-        # agree exactly on a UUID, and over-escaping a path segment is the
-        # safe direction), but they are not the same function. Raw, an id
-        # of "../../v1/users" resolves to /v1/users/logs - same host, bearer
-        # attached - and one containing "?" swallows the /logs suffix and the
-        # paging params into a query string. The escape means the request shape
-        # does not rest on where the id came from.
+        # quote(safe="") so the request shape does not rest on where the id
+        # came from. Raw, an id of "../../v1/users" resolves to /v1/users/logs
+        # - same host, bearer attached - and one containing "?" swallows the
+        # /logs suffix and the paging params into a query string.
         response = self._http.get(
             f"/v1/tasks/{quote(task_id, safe='')}/logs", params=params
         )
@@ -677,26 +564,21 @@ class Client:
         request fetches ``_PAGE_REQUEST_LIMIT`` rows; without that explicit
         limit the server's default is 50 and a long log is silently truncated.
 
-        This accumulates the whole log in memory. ``relay logs`` does not - it
-        prints each page as it arrives - and this cannot, while returning a
-        list. On a very large log use :meth:`task_logs_page` (O(one page)) or
-        pass ``limit=``.
+        This accumulates the whole log in memory - it cannot stream while
+        returning a list. On a very large log use :meth:`task_logs_page`
+        (O(one page)) or pass ``limit=``.
 
         A walk stopped by one of the client's own termination stops raises
         :class:`ProtocolError` with the records collected so far on
         ``.records``. Records do NOT survive any other failure: an HTTP error
         mid-walk raises the matching :class:`RelayError` and a page the SDK
         cannot decode raises ``pydantic.ValidationError``, and both discard what
-        was collected. printTaskLogs, which this ports, has printed every row
-        by the time it returns the equivalent error, so the error is a caveat
-        on output the operator already has;
-        returning a list is what makes the caveat and the rows arrive
-        separately here.
+        was collected.
         """
         # Locally, before the loop. The cap is applied as `out[:limit]`, and
         # Python slice semantics turn a negative limit into "all but the last
-        # N" - limit=-1 on a 5-row log returned 4 records, dropping the newest
-        # line rather than capping anything. limit=0 spent a request to
+        # N" - a plausible-looking short list that drops the newest lines
+        # rather than an error - while limit=0 would spend a request to
         # return [].
         #
         # The token check is first and is repeated here on purpose. Every other
@@ -749,19 +631,13 @@ class Client:
                 # and so is the cursor, so a server that re-serves a page behind
                 # an advancing cursor drives len(out) up to total while half the
                 # log was never sent - and the message below would then tell the
-                # operator every row was collected. This is the first place
-                # LogRecord.seq is load-bearing for CORRECTNESS rather than for
-                # correlating a record with a cursor, and it is what the field's
-                # required-and-undefaulted declaration buys: a defaulted
-                # `seq: int = 0` would collapse every row of a seq-less page into
-                # one set member and under-count instead.
+                # operator every row was collected. This relies on LogRecord.seq
+                # being required and undefaulted: a defaulted `seq: int = 0`
+                # would collapse every row of a seq-less page into one set
+                # member and under-count instead.
                 #
-                # This set is the one line in a memory-critical walk that adds
-                # memory: up to 2,000,000 ints, roughly 35-70 MB. It is built
-                # once, inside a block every path of which raises, so it is a
-                # transient peak at the end and not a per-page cost - which is
-                # why it is affordable against the gigabyte-plus of LogRecords
-                # already retained by then.
+                # Built once, inside a block every path of which raises - a
+                # transient peak at the end, not a per-page cost.
                 collected = len({r.seq for r in out})
                 if page.total > 0 and collected >= page.total:
                     # Do not blame the server here. A log of exactly
@@ -793,12 +669,10 @@ class Client:
     def follow_job(self, job_id: str) -> Iterator[Event]:
         """Stream events for a single job over SSE.
 
-        **The server does not end the stream when the job finishes.**
-        ``handleEvents`` closes on exactly two conditions - the request context
-        is done, or the broker drops this subscriber for falling behind - and
-        it has no notion of job terminality. This iterator sets no read
-        timeout, so a caller that iterates to exhaustion blocks forever after
-        the job is done. Break out on a terminal ``job`` frame yourself, or use
+        **The server does not end the stream when the job finishes** - it has
+        no notion of job terminality. This iterator sets no read timeout, so a
+        caller that iterates to exhaustion blocks forever after the job is
+        done. Break out on a terminal ``job`` frame yourself, or use
         :meth:`wait`, which polls and is immune.
 
         A ``dropped`` frame (:attr:`relay.EventType.DROPPED`) means the broker
@@ -829,9 +703,8 @@ class Client:
     def _stream_events(self, job_id: str) -> Iterator[Event]:
         # All FOUR parameters, explicitly. httpx.Timeout takes its
         # four-explicit branch only when connect, read, write and pool are all
-        # set; anything less and it raises ValueError, which is what
-        # `Timeout(connect=..., read=None)` did on every call. And it must be
-        # this form rather than `Timeout(self._http.timeout, read=None)`: the
+        # set; anything less raises ValueError. And it must be this form
+        # rather than `Timeout(self._http.timeout, read=None)`: the
         # single-Timeout branch `assert read is UNSET`s, so that spelling
         # raises AssertionError - and under `python -O`, where asserts are
         # stripped, silently reinstates the read timeout the stream must not
