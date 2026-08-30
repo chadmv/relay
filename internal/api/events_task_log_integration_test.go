@@ -91,18 +91,27 @@ func TestEvents_TaskIDValidation(t *testing.T) {
 	// The asymmetry with task_id is intentional and is about REJECTION only -
 	// both parameters are canonicalised. See
 	// TestEvents_JobIDSpellingIsCanonicalisedNotRejected.
-	// (Served with a cancelled context so the handler returns immediately.)
-	req := httptest.NewRequest("GET", "/v1/events?job_id=not-a-uuid", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	ctx, cancel := context.WithCancel(req.Context())
-	cancel()
-	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req.WithContext(ctx))
+	//
+	// It goes through `do`, i.e. a context with a TIMEOUT, and that is the whole
+	// difference between this assertion and the vacuous one it replaced on
+	// 2026-08-30. The original served an ALREADY-CANCELLED context "so the
+	// handler returns immediately" - but BearerAuth's token lookup runs on that
+	// same context and fails first, so the probe answered 401 "invalid token"
+	// and handleEvents was never entered. It could not have seen a job_id
+	// rejection, and `assert.NotEqual(StatusBadRequest, ...)` held for a reason
+	// that had nothing to do with job_id: measured under a mutation that DOES
+	// 400 on an unparseable job_id, the old form still passed. A timeout instead
+	// of a cancel costs this probe the 2 s the stream then stays open, and buys
+	// a 200 that means what it says.
+	rec = do("?job_id=not-a-uuid")
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"an unparseable job id must still OPEN a stream - the 200 is what makes "+
+			"the NotEqual below non-vacuous; a 401 here means the request died in auth")
 	assert.NotEqual(t, http.StatusBadRequest, rec.Code)
 
 	// Valid task -> a live SSE stream. Positive control for the two rejections
 	// above: it proves the handler can reach 200 on this same path at all.
-	req = httptest.NewRequest("GET", "/v1/events?task_id="+taskID, nil)
+	req := httptest.NewRequest("GET", "/v1/events?task_id="+taskID, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	streamCtx, streamCancel := context.WithCancel(req.Context())
 	defer streamCancel()
