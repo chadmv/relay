@@ -548,13 +548,31 @@ class Page(BaseModel, Generic[T]):
     ``next_cursor`` is the empty string on the last page; pass it back as
     ``cursor=`` to fetch the next page. ``total`` is the server's count of
     all matching rows, not just this page.
+
+    All three fields are REQUIRED and undefaulted, and ``next_cursor`` is the
+    one that matters. The empty string is this SDK's drained signal, so a
+    defaulted ``next_cursor: str = ""`` read an ABSENT key as "the list ended":
+    :meth:`relay.Client.list_jobs` returned page 1, raised nothing, and no
+    caller could tell a 200-row prefix from a complete 200-row list. ``total``
+    is the milder half - not a control-flow signal, but a number the six
+    ``*_page`` methods hand back for a caller to render, where a silent 0 is a
+    wrong number rather than a missing one.
+
+    Requiring them costs nothing against a correct server: internal/api's
+    ``page[T]`` envelope tags ``items``, ``next_cursor`` and ``total`` with no
+    ``omitempty``, so all three keys are emitted on every response including
+    the zero-row one, and ``buildPage`` is the only thing that builds it.
+
+    ``extra="ignore"`` stays. Strictness here is about the ABSENCE of a
+    contract field, not the presence of an unknown one - opposite directions.
+    A model that rejected new envelope fields could not talk to a newer server.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     items: list[T]
-    next_cursor: str = ""
-    total: int = 0
+    next_cursor: str
+    total: int
 
 
 class Worker(BaseModel):

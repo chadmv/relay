@@ -275,11 +275,31 @@ def test_page_validates_items_as_job_model() -> None:
     assert page.total == 5
 
 
-def test_page_defaults_empty_cursor_and_zero_total() -> None:
-    page = Page[Job].model_validate({"items": []})
-    assert page.items == []
-    assert page.next_cursor == ""
-    assert page.total == 0
+@pytest.mark.parametrize("missing", ["next_cursor", "total"])
+def test_page_requires_next_cursor_and_total(missing: str) -> None:
+    """Both REQUIRED and undefaulted, matching LogPage's next_seq and total.
+
+    Replaces test_page_defaults_empty_cursor_and_zero_total, which asserted the
+    opposite. `next_cursor: str = ""` made an ABSENT key decode to the empty
+    string, and the empty string is _fetch_all's drained signal - so a dropped
+    key reported the list finished, and twelve methods over six routes returned
+    a 200-row prefix indistinguishable from a complete list. `total: int = 0`
+    is the milder half: not a control-flow signal, but a public number the six
+    *_page methods hand back for a caller to render.
+
+    Requiring them costs nothing against a correct server. internal/api's
+    page[T] envelope carries no omitempty on any of its three json tags, so
+    encoding/json emits all three keys on every response including the zero-row
+    one - the same argument test_log_page_requires_next_seq_and_total makes for
+    LogPage.
+
+    One key is deleted per case, never both: a body missing both would go red
+    under either default alone and could not tell the two apart.
+    """
+    body = {"items": [], "next_cursor": "c", "total": 5}
+    del body[missing]
+    with pytest.raises(PydanticValidationError):
+        Page[Job].model_validate(body)
 
 
 def test_worker_parses_and_ignores_unknown_field() -> None:
