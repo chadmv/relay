@@ -272,7 +272,12 @@ class Client:
         # RelayError. Deliberate, and not a new class of escape: python/README.md
         # already documents it for every response body. Routing it belongs to the
         # single `_read_json` chokepoint over all twelve `response.json()` sites
-        # in bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy.
+        # in relay/ - ELEVEN in this file plus _extract_message in errors.py,
+        # which is the count README's Errors section arrives at independently.
+        # The scope is the PACKAGE, not this file: a grep of client.py alone
+        # also answers twelve, because this comment line matches its own
+        # subject, and the two twelves are not the same twelve.
+        # See bug-2026-08-27-python-sdk-exceptions-escape-the-relayerror-hierarchy.
         # A local try/except here would make _get_page and task_logs_page raise
         # DIFFERENT types for the identical defect shape, which the chokepoint
         # would then have to unwind.

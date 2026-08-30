@@ -245,14 +245,24 @@ The two escapes are:
 That gap is known and tracked separately.
 
 The first of those two escapes now has one more occasion, and it is a
-**fail-closed change** worth naming. Every paged envelope - the six `list_*`
+**fail-closed change** worth naming. Every `Page[T]` envelope - the six `list_*`
 walks and their six `*_page` siblings - requires `items`, `next_cursor` and
 `total`. A 200 whose envelope OMITS `next_cursor` or `total` raises
 `pydantic.ValidationError` rather than decoding into a page that reports the
 list drained. Before, a dropped key returned page 1 and reported success, and
 nothing in the return value distinguished a 200-row prefix from a complete
 200-row list. A correct server never produces this: the envelope is written by
-one `page[T]` struct whose three json tags carry no `omitempty`.
+one `page[T]` struct whose three json tags carry no `omitempty`, which
+`TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage`
+(`internal/api/pagination_test.go`) now pins on the Go side.
+
+`Page[T]` is the scope of that sentence, not every envelope in the SDK. The one
+paged method outside that set is `task_logs_page`, which returns a `LogPage`:
+its cursor is `next_seq`, and it has no `next_cursor` at all - a resumable log
+reader reads `page.next_seq`, and `page.next_cursor` on a `LogPage` is an
+`AttributeError`. `LogPage` has required `items`, `next_seq` and `total` since
+0.2.0, so with `Page[T]` joining it here, every paged envelope in the SDK is
+now strict.
 
 It is still not a `RelayError`, so `except relay.ValidationError` does **not**
 catch it - the two classes share a name, and that trap is why
@@ -260,6 +270,29 @@ catch it - the two classes share a name, and that trap is why
 tracked. Catch `pydantic.ValidationError` explicitly until that lands. Nothing
 counted above changes: this widens when the first escape fires, not what the
 escapes are.
+
+Two things to know before you write that `except` clause, both of them on the
+tracking item's acceptance criteria.
+
+**The error object carries the whole page.** A `type=missing` error is raised at
+the MODEL level, so its `["input"]` in `e.errors()` is the ENTIRE decoded page
+rather than the offending field - and `e.errors()` and `e.json()` do not
+truncate it.
+Only `str(e)` does, to a ~50-character head-and-tail window, which is why this
+is easy to miss. It matters because a `/v1/schedules` page carries each
+schedule's full `job_spec`, per-task `env` maps included, and
+`list_schedules()` walks pages of them: a `logger.exception(...)` or a
+`report(e.errors())` in the handler you are about to write ships those values
+wherever your logs go. Redact or drop `input` before forwarding the error. The
+class is not new - `items` was already required, so a model-level error already
+carried the whole body - but this change widens the set of bodies that trigger
+it, and it is this section that tells you to catch it.
+
+**Rows already collected are lost.** When the raise happens mid-walk inside a
+`list_*` method, every row from the earlier pages is discarded: the walk raises
+rather than returning a short list, and unlike `ProtocolError` a
+`pydantic.ValidationError` carries no partial `.records`. A 250-page walk that
+fails on the last page delivers nothing and leaves no cursor to resume from.
 
 | Class | When |
 |---|---|

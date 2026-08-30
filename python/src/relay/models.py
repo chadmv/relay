@@ -343,8 +343,11 @@ class Job(BaseModel):
     # That is an exemption on the AUTHORING axis and it is the only axis it is
     # on. Page and LogPage require every envelope field they declare, and Page
     # is now the closer analogue of the two: like Job it is a response model
-    # over a generic item list, and unlike Job nothing constructs one, so
-    # requiring its fields costs nothing. Do not "make these consistent" - what
+    # over a generic item list, and unlike Job nothing constructs one BY
+    # KEYWORD, so requiring its fields costs nothing. Page IS instantiated -
+    # model_validate on a decoded body, in _get_page and in tests/unit - and
+    # that is the point: every such call supplies the whole wire envelope or
+    # raises. Do not "make these consistent" - what
     # makes these six defaulted is who BUILDS a Job, not what the values mean.
     total_tasks: int = 0
     done_tasks: int = 0
@@ -488,8 +491,10 @@ class LogPage(BaseModel):
       is the README's first example - so a required ``total_tasks`` would break
       every authoring call site. The question there is who BUILDS the object,
       not what the value means. ``Page`` and ``LogPage`` are response-only and
-      nothing in ``relay/`` or its tests constructs one, which is why the strict
-      rule costs nothing here.
+      nothing in ``relay/`` or its tests constructs one BY KEYWORD - every
+      instantiation is a ``model_validate`` over a decoded body, which supplies
+      the whole envelope or raises - which is why the strict rule costs nothing
+      here.
     - Container fields such as ``Worker.labels`` and ``Reservation.selector``
       are exempt on the PAYLOAD axis: an empty dict is the honest reading of an
       absent map, and no control flow and no reported count is derived from it.
@@ -591,14 +596,23 @@ class Page(BaseModel, Generic[T]):
     the zero-row one.
 
     The load-bearing property is the single TYPE, not a single constructor.
-    Sixteen non-test handlers in ``internal/api`` build a ``page[...]``
-    composite literal themselves - ``buildPage`` computes the cursor and the
-    count, it does not wrap the struct - and two of them (handleListUsers'
-    early returns) build a zero-row page with ``NextCursor: ""`` and
-    ``Total: 0`` by hand. Because the omission is impossible at the TAG level,
-    every one of those sixteen emits all three keys regardless of who wrote it.
+    Every list handler in ``internal/api`` builds its own ``page[...]``
+    composite literal. ``buildPage`` returns the trimmed items and the cursor
+    string and never touches the struct, and the count is not its output at
+    all - it comes from a separate ``Count*`` query per handler. handleListUsers'
+    two early returns go further and hand-build a zero-row page with
+    ``NextCursor: ""`` and ``Total: 0``. Because the omission is impossible at
+    the TAG level, all of them emit all three keys regardless of who wrote them.
     A single-constructor claim would be both false and weaker than the one that
     actually holds.
+
+    No site count is repeated here, deliberately. A cross-language tally in a
+    Python docstring cannot be pinned by anything on either side and drifts on
+    the next list endpoint, while the tag-level argument above holds for any
+    number of sites. The property itself IS pinned, on the Go side where the
+    tags live: TestPageEnvelope_AllThreeKeysArePresentOnAZeroValuePage in
+    internal/api/pagination_test.go marshals a zero-value ``page[T]`` and
+    asserts all three keys are present.
 
     ``extra="ignore"`` stays. Strictness here is about the ABSENCE of a
     contract field, not the presence of an unknown one - opposite directions.
