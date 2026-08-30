@@ -249,9 +249,15 @@ export function ScheduleDetailPage() {
         <div className="flex flex-col gap-3">
           {/* TOP OF THE COLUMN, and conditional, so a healthy schedule's layout is
               unchanged. The heading names the text's PROVENANCE because the text
-              is operator-supplied: it is derived from the stored job_spec and
-              embeds a task name the schedule's owner chose, and an admin reading
-              someone else's schedule is reading partly attacker-chosen prose.
+              is operator-supplied: it is derived from the schedule's stored
+              configuration - its job_spec, or its cron_expr and timezone for a
+              `parse cron:` failure - and it may quote prose the schedule's owner
+              chose, such as a task name interpolated verbatim. Other messages are
+              fixed server text; the meta label names job_spec because that is the
+              common case and the strip is a few words wide, and the point it makes
+              - these are not relay's words - holds for the cron case too. So an
+              admin reading someone else's schedule is reading potentially
+              attacker-chosen prose.
               There is no counter here to inflate and nothing an owner gains by
               breaking their own schedule; the one real risk is display-layer
               impersonation, text crafted to read like relay's own chrome. So it

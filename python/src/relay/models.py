@@ -523,9 +523,13 @@ class ScheduledJob(BaseModel):
     # `is None` renders a labelled blank on a "" that every other relay surface
     # calls healthy.
     #
-    # last_error is derived from the stored job_spec and is OPERATOR-SUPPLIED -
-    # it embeds a task name the schedule's owner chose - so treat it as untrusted
-    # text. It is sanitized and truncated to 1 KB server-side;
+    # last_error is derived from the schedule's stored configuration - its
+    # job_spec, or its cron_expr and timezone for a "parse cron: ..." failure -
+    # and is OPERATOR-SUPPLIED: it MAY quote prose the schedule's owner chose,
+    # such as a task name interpolated verbatim. Some messages are fixed server
+    # text instead; treat the whole string as untrusted either way, because a
+    # client cannot tell the two apart without string-matching the server's own
+    # messages. It is sanitized and truncated to 1 KB server-side;
     # run_scheduled_job_now() returns the untruncated message.
     last_error: Optional[str] = None
     last_error_at: Optional[datetime] = None

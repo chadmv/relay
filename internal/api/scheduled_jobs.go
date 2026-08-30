@@ -35,10 +35,16 @@ type scheduledJobResponse struct {
 	// (internal/schedrunner/failure.go) never stores an empty string, precisely
 	// so that an empty one cannot be confused with an absent one.
 	//
-	// THE TEXT IS OPERATOR-SUPPLIED. It is derived from the stored job_spec: a
-	// task name the schedule's owner chose flows verbatim into jobspec.Validate's
-	// "task %s: ..." message. An admin reading someone else's schedule is
-	// therefore reading partly attacker-chosen prose. It is sanitized at the
+	// THE TEXT IS OPERATOR-SUPPLIED. It is derived from the schedule's stored
+	// configuration - its job_spec, or its cron_expr and timezone when
+	// schedrunner records a "parse cron: ..." failure - and it MAY quote prose the
+	// schedule's owner chose: a task name flows verbatim into jobspec.Validate's
+	// "task %s: ..." message, a cron expression into ParseSchedule's "invalid cron
+	// expression %q". Some messages are fixed relay text with nothing
+	// operator-chosen in them; every renderer treats the whole class the same way,
+	// because the alternative is string-matching the server's internal branches.
+	// An admin reading someone else's schedule is therefore reading potentially
+	// attacker-chosen prose. It is sanitized at the
 	// write site (control characters stripped, truncated to 1 KB on a rune
 	// boundary), and every renderer must treat it as untrusted text: a React text
 	// child, never chrome, never dangerouslySetInnerHTML, and prefixed with its
@@ -761,9 +767,13 @@ func (s *Server) handleRunScheduledJobNow(w http.ResponseWriter, r *http.Request
 	// forever. The bounds in jobspec.Validate are retroactive over specs stored
 	// by earlier releases, so this is reachable without anything being corrupt.
 	//
-	// run-now is the ONLY interactive path that can explain why a schedule
-	// stopped producing jobs: schedrunner's fireOne logs one server-side line
-	// and advances next_run_at, leaving nothing user-visible behind.
+	// run-now is the interactive path for this question, and since last_error
+	// landed (migration 000022) it is no longer the only surface that carries the
+	// answer: fireOne's failure branch records the same message on the row, and
+	// GET /v1/scheduled-jobs and its list sibling both serve it. What run-now still
+	// has that the recorded value does not is the UNTRUNCATED message and an
+	// answer on demand rather than at the next scheduled fire - which is why it
+	// stays the documented first step when a schedule reports a failure.
 	if err := ValidateJobSpec(spec); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
