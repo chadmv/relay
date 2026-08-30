@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -82,21 +83,44 @@ func TestEvents_TaskIDValidation(t *testing.T) {
 	rec = do("?task_id=11111111-1111-1111-1111-111111111111")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	// ?job_id= validation is deliberately UNCHANGED: an unknown job is still an
-	// open, silently empty stream. It is an existing contract with existing
-	// clients; the asymmetry is intentional and documented in README.md.
-	// (Served with a cancelled context so the handler returns immediately.)
-	req := httptest.NewRequest("GET", "/v1/events?job_id=not-a-uuid", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	ctx, cancel := context.WithCancel(req.Context())
-	cancel()
-	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req.WithContext(ctx))
+	// ?job_id= VALIDATION is deliberately unchanged, and this assertion is the
+	// proof that the 2026-08-30 canonicalisation was additive: `not-a-uuid` is
+	// 10 bytes, so pgtype.UUID.Scan takes its default branch, canonicalJobIDFilter
+	// returns the string untouched, and this is still an open silently empty
+	// stream rather than a 400. It is an existing contract with existing clients.
+	// The asymmetry with task_id is intentional and is about REJECTION only -
+	// both parameters are canonicalised. See
+	// TestEvents_JobIDSpellingIsCanonicalisedNotRejected.
+	//
+	// It goes through `do`, i.e. a context with a TIMEOUT, and that is the whole
+	// difference between this assertion and the vacuous one it replaced on
+	// 2026-08-30. The original served an ALREADY-CANCELLED context "so the
+	// handler returns immediately" - but BearerAuth's token lookup runs on that
+	// same context and fails first, so the probe answered 401 "invalid token"
+	// and handleEvents was never entered. It could not have seen a job_id
+	// rejection, and `assert.NotEqual(StatusBadRequest, ...)` held for a reason
+	// that had nothing to do with job_id: measured under a mutation that DOES
+	// 400 on an unparseable job_id, the old form still passed. A timeout instead
+	// of a cancel costs this probe the 2 s the stream then stays open, and buys
+	// a 200 that means what it says.
+	rec = do("?job_id=not-a-uuid")
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"an unparseable job id must still OPEN a stream - the 200 is what makes "+
+			"the NotEqual below non-vacuous; a 401 here means the request died in auth")
 	assert.NotEqual(t, http.StatusBadRequest, rec.Code)
+	// rec.Code alone does NOT establish "opened a stream": httptest.NewRecorder
+	// initialises Code to 200, and Flush() only calls WriteHeader(200) when
+	// nothing wrote a header, so 200 also holds for a handler that returned
+	// having written nothing at all. It does distinguish 400 and 401, which is
+	// what the 2026-08-30 repair needed. These two say the rest, and cost
+	// nothing because `do` hands back the recorder.
+	assert.True(t, rec.Flushed,
+		"the handler must have reached the streaming path, not merely declined to write")
+	assert.Equal(t, "text/event-stream", rec.Header().Get("Content-Type"))
 
 	// Valid task -> a live SSE stream. Positive control for the two rejections
 	// above: it proves the handler can reach 200 on this same path at all.
-	req = httptest.NewRequest("GET", "/v1/events?task_id="+taskID, nil)
+	req := httptest.NewRequest("GET", "/v1/events?task_id="+taskID, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	streamCtx, streamCancel := context.WithCancel(req.Context())
 	defer streamCancel()
@@ -170,7 +194,15 @@ func (g *gateWriter) body() string {
 }
 
 // header returns a snapshot of the headers. handleEvents sets them from its own
-// goroutine, so reading g.hdr directly would be a data race under -race.
+// goroutine, and the mutex taken here is NOT what makes that safe: Header()
+// hands out g.hdr without g.mu, so handleEvents' w.Header().Set(...) writes the
+// map unsynchronised and a lock held only on the reading side orders nothing.
+// What actually orders it is the FLUSH BARRIER. Those Set calls all
+// happen-before handleEvents' flusher.Flush(), which takes g.mu, and every
+// caller of this method first waits on flushed() >= 1, which takes g.mu again -
+// so the Sets are ordered before the read. Verified clean under `go test -race`.
+// A call site added BEFORE that barrier would be a real race; keep the barrier
+// in front of every header() call.
 func (g *gateWriter) header() http.Header {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -338,4 +370,168 @@ func TestEvents_DeliveryMatrix(t *testing.T) {
 	assert.NotContains(t, jobOnly.body(), "task_log", "a job-scoped subscriber must receive NO task_log frames")
 	assert.NotContains(t, taskOnly.body(), "event: task\n",
 		"?task_id= alone must not become a global status subscription")
+}
+
+// TestEvents_JobIDSpellingIsCanonicalisedNotRejected is the headline test for
+// bug-2026-08-27-python-sdk-follow-job-hangs-on-noncanonical-job-id.
+//
+// GET /v1/jobs/{id} accepts every spelling pgtype.UUID.Scan takes; the broker's
+// status filter is an exact string compare against a JobID that every publisher
+// builds with uuidStr. So before this slice, an id that answered 200 on the REST
+// route subscribed to a filter nothing could ever match - an open, silently
+// empty SSE stream, forever, on a client with no read timeout.
+//
+// THE UNDERSCORE CASE IS FIRST AND IS NOT DECORATION. pgtype.UUID.Scan slices
+// indexes 8, 13, 18 and 23 out of the 36-byte form WITHOUT EXAMINING THEM, so
+// any byte may sit there. That row is the one no client-side canonicaliser built
+// on Python's uuid.UUID can normalise, and it is therefore the single assertion
+// that discriminates a server-side fix from every SDK-side one. A discriminating
+// input placed last cannot detect an early-exit defect, so it leads.
+//
+// Every probe is built through url.Values. Concatenating the spelling into the
+// query string directly is wrong for at least one spelling in the sibling test
+// below - a raw `+` decodes to a SPACE - and a negative assertion on the wrong
+// string passes for the wrong reason.
+//
+// Bounding: a httptest request's context is never cancelled, so a handler that
+// streams forever would hang the package rather than fail the test. Each subtest
+// owns a cancel and every wait is a bounded require.Eventually.
+func TestEvents_JobIDSpellingIsCanonicalisedNotRejected(t *testing.T) {
+	srv, q, broker, _ := newTestServerWithBroker(t)
+	user := createTestUser(t, q, "Alice", "sse-spelling@example.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID, _ := seedTaskViaAPI(t, srv, token)
+
+	for _, sp := range []struct{ name, id string }{
+		{"underscore separators", strings.ReplaceAll(jobID, "-", "_")},
+		{"uppercase", strings.ToUpper(jobID)},
+		{"dashless", strings.ReplaceAll(jobID, "-", "")},
+	} {
+		sp := sp
+		t.Run(sp.name, func(t *testing.T) {
+			require.NotEqual(t, jobID, sp.id,
+				"the probe must differ from the canonical spelling, or this subtest proves nothing; "+
+					"for the uppercase row this can only happen if gen_random_uuid() produced 32 "+
+					"decimal digits, about 1 in 2.7 million - re-run")
+
+			vals := url.Values{"job_id": {sp.id}}
+			req := httptest.NewRequest("GET", "/v1/events?"+vals.Encode(), nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			ctx, cancel := context.WithCancel(req.Context())
+			gw := newGateWriter()
+			close(gw.release) // never block; the handler should write normally
+			done := make(chan struct{})
+			go func() { defer close(done); srv.Handler().ServeHTTP(gw, req.WithContext(ctx)) }()
+			defer func() { cancel(); <-done }()
+
+			// A recorded Flush is the file's deterministic barrier for "this
+			// subscription is live": handleEvents subscribes and then flushes,
+			// before its first receive. No sleeps.
+			require.Eventually(t, func() bool { return gw.flushed() >= 1 },
+				5*time.Second, 5*time.Millisecond, "the subscription never became live")
+
+			// The canonical spelling is what every production publisher emits.
+			broker.Publish(events.Event{
+				Type:  "job",
+				JobID: jobID,
+				Data:  []byte(`{"status":"done","probe":"canonicalised"}`),
+			})
+
+			require.Eventually(t, func() bool {
+				return strings.Contains(gw.body(), `"probe":"canonicalised"`)
+			}, 5*time.Second, 5*time.Millisecond,
+				"a spelling GET /v1/jobs/{id} ACCEPTS must subscribe to the job it names")
+		})
+	}
+}
+
+// TestEvents_JobIDRejectedSpellingsAreNotCanonicalised is the other direction of
+// the item's acceptance criterion, and the test that kills the one mutation that
+// makes this slice WORSE than doing nothing.
+//
+// uuidStr returns "" for an invalid pgtype.UUID, and events.Filter{JobID: ""} is
+// the broker's BROADCAST scope (internal/events/broker.go: "empty = broadcast to
+// all"). So `u, _ := parseUUID(raw); return uuidStr(u)` - one deleted guard -
+// turns every unparseable ?job_id= into a whole-cluster status feed. This test
+// asserts SCOPE, not the absence of an error: nothing about a fail-open here
+// looks like a failure. It is a scope surprise rather than a privilege
+// escalation - GET /v1/events has no per-owner gate and omitting ?job_id=
+// entirely is already that same server-wide feed - which is exactly why only a
+// scope assertion can catch it.
+//
+// Each probe is ?job_id= ONLY. Publish's status branch skips a filter whose
+// JobID is "" and whose TaskID is not, so a probe carrying a task_id would be
+// routed as a log tail under the mutation and the kill would be vacuous. Do not
+// add a task_id to these.
+//
+// Each probe is built through url.Values because a raw `+` in a query string
+// decodes to a SPACE - the sign-prefixed row ("+" plus 31 hex) would otherwise
+// arrive as a 32-byte string with a leading space, still rejected, but not the
+// string this test claims to be about.
+//
+// The four spellings are the ones Python's uuid.UUID ACCEPTS and this server
+// does not (spec section 4.4). For the sign-prefixed row uuid.UUID does not
+// merely over-accept: it resolves to a DIFFERENT uuid than the string names.
+// That is why no canonicaliser may live in a client.
+//
+// A rejected spelling is still not a 4xx: the flushed()>=1 barrier and the
+// Content-Type check below are the observable form of that, because gateWriter
+// discards the status code.
+func TestEvents_JobIDRejectedSpellingsAreNotCanonicalised(t *testing.T) {
+	srv, q, broker, _ := newTestServerWithBroker(t)
+	user := createTestUser(t, q, "Alice", "sse-rejected@example.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID, _ := seedTaskViaAPI(t, srv, token)
+
+	open := func(t *testing.T, spelling string) *gateWriter {
+		t.Helper()
+		vals := url.Values{"job_id": {spelling}}
+		req := httptest.NewRequest("GET", "/v1/events?"+vals.Encode(), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		ctx, cancel := context.WithCancel(req.Context())
+		gw := newGateWriter()
+		close(gw.release)
+		done := make(chan struct{})
+		go func() { defer close(done); srv.Handler().ServeHTTP(gw, req.WithContext(ctx)) }()
+		t.Cleanup(func() { cancel(); <-done })
+		require.Eventually(t, func() bool { return gw.flushed() >= 1 },
+			5*time.Second, 5*time.Millisecond,
+			"the subscription never became live for %q - a rejected spelling must still open a stream", spelling)
+		assert.Equal(t, "text/event-stream", gw.header().Get("Content-Type"),
+			"%q must be an open stream, never a 4xx", spelling)
+		return gw
+	}
+
+	// Positive control first, so the negatives below cannot pass vacuously.
+	control := open(t, jobID)
+
+	dashless := strings.ReplaceAll(jobID, "-", "")
+	rejected := map[string]*gateWriter{}
+	for name, spelling := range map[string]string{
+		"brace wrapped":   "{" + jobID + "}",
+		"urn prefixed":    "urn:uuid:" + jobID,
+		"trailing hyphen": jobID + "-",
+		"sign prefixed":   "+" + dashless[:31],
+	} {
+		rejected[name] = open(t, spelling)
+	}
+
+	broker.Publish(events.Event{
+		Type:  "job",
+		JobID: jobID,
+		Data:  []byte(`{"status":"done","probe":"scope"}`),
+	})
+
+	require.Eventually(t, func() bool { return strings.Contains(control.body(), `"probe":"scope"`) },
+		5*time.Second, 5*time.Millisecond,
+		"the canonical control never received the frame - every negative below would be vacuous")
+
+	for name, gw := range rejected {
+		name, gw := name, gw
+		assert.Never(t, func() bool { return strings.Contains(gw.body(), `"probe":"scope"`) },
+			500*time.Millisecond, 25*time.Millisecond,
+			"%s: a spelling the server REJECTS must not be silently widened into one it accepts. "+
+				"Receiving this frame means the filter became \"\", which is the broker's BROADCAST scope",
+			name)
+	}
 }

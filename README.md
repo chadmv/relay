@@ -1754,10 +1754,43 @@ ids. A gap in `seq` is therefore **not** a drop signal - do not re-page on one.
 The `dropped` frame and an unexpectedly closed stream are the only drop signals.
 
 **Validation.** `?task_id=` returns `400` for a malformed UUID and `404` for an
-unknown task. `?job_id=` is not validated - an unknown job yields an open but
-permanently empty stream. This asymmetry is deliberate: `?job_id=` is an
-existing contract with existing clients, while an unvalidated `?task_id=` would
-look identical to "this task produced no output".
+unknown task. `?job_id=` is not validated - an unknown or unparseable job id
+yields an open but permanently empty stream rather than an error. This
+asymmetry is deliberate: `?job_id=` is an existing contract with existing
+clients, while an unvalidated `?task_id=` would look identical to "this task
+produced no output".
+
+**Normalisation.** The asymmetry above is about REJECTION only. Both parameters
+are canonicalised. Any spelling the server accepts - uppercase hex, the dashless
+32-character form, and the **36-byte** form with any byte in the four separator
+positions - is normalised to the lowercase dashed form the server emits, so
+`?job_id=7E660488-1234-4321-8888-ABCDEFABCDEF` follows the same job as the
+canonical spelling rather than a filter nothing matches. A spelling the server
+does not accept is passed through unchanged and is never widened into one it
+does accept.
+
+Two consequences of that grammar, both measured, because "36 characters" and
+"the job it names" are each wrong for a case the grammar admits:
+
+- **The length test is over BYTES, not characters.** Replace two hex positions
+  with a single two-byte rune and the string is 36 *characters* but 37 *bytes*,
+  so it misses the 36-byte branch entirely and is passed through untouched.
+  Conversely `?job_id=7e660488%FF1234-4321-8888-abcdefabcdef` decodes to 36
+  bytes and *is* canonicalised, though those 36 bytes are not valid UTF-8 and
+  so are not a 36-character string in any useful sense. The dashless form above
+  is unambiguous because all 32 of its positions must be ASCII hex, so there
+  bytes and characters coincide. This paragraph deliberately contains no
+  non-ASCII literal: an earlier revision wrote one as a raw Latin-1 byte, which
+  made this file invalid UTF-8 AND made the example 36 bytes - accepted, the
+  opposite of what the sentence around it claimed.
+- **The four separator bytes are discarded UNEXAMINED**, so a 36-byte spelling
+  can name a job only up to those four bytes:
+  `7e660488a1234b4321c8888dabcdefabcdef` canonicalises to
+  `7e660488-1234-4321-8888-abcdefabcdef`, silently dropping the `a`, `b`, `c`
+  and `d`. This is not new and not a scoping hole - `GET /v1/jobs/{id}` has
+  always resolved that same string to that same job - but it means an accepted
+  spelling follows the job the *parser* reads out of it, which is not always the
+  one a reader would say it names.
 
 **Single-process caveat.** The broker is in-memory, so events are visible only
 to clients connected to the `relay-server` process that owns the relevant

@@ -100,6 +100,19 @@ commands you would use to check disagree by design.
   against the size of the change you intended, and run `git ls-files --eol` on the touched paths -
   every one should read `i/lf`. `gofmt -l` is useless as a signal here; it lists ~349 files under
   `internal/` on a clean tree purely because of working-copy CRLF.
+- **ENCODING is a second axis and none of the above can see it.** On 2026-08-30 an edit wrote `e`
+  with an acute accent as a raw Latin-1 `0xE9` instead of UTF-8 `C3 A9`. `git ls-files --eol` read
+  `i/lf`, the diffstat was proportionate, `gofmt` was clean and every test was green - and README.md
+  had stopped being valid UTF-8 from that commit on. It compounded: the example was meant to show a
+  37-byte string a parser REJECTS, and the mangled literal was 36 bytes and **accepted**, so the
+  sentence's own example proved the opposite of the sentence, under a heading saying "measured". The
+  identical defect was reproduced in a Go test file within the hour, by writing a byte as a character
+  where a four-character escape was needed. So: after a programmatic edit, assert the file still
+  decodes as UTF-8, and assert any non-ASCII byte is the sequence you intended. **Where an example
+  needs a non-ASCII byte, prefer describing it in words or writing it as an escape the compiler
+  expands** - a raw non-ASCII literal in a document is unverifiable by eye and survives every check
+  this repo runs. Watch the shell layer specifically: a heredoc, a `python -c` and an editor tool
+  each treat backslash escapes differently.
 
 ## Architecture
 

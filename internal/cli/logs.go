@@ -208,14 +208,20 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // 7e660488123443218888abcdefabcdef` are both working commands against the same
 // job.
 //
-// Two things here read the id and NEITHER tolerates a second spelling.
+// ONE thing here still reads the id and does not tolerate a second spelling:
 // jobSnapshotUnusable compares the body's id against ours, so a canonical answer
-// to a non-canonical request reads as a response about a different job. And
-// handleEvents deliberately does not validate or canonicalise `?job_id=` (its own
-// comment says so, internal/api/events.go) while the broker filter is an exact
-// string compare (internal/events/broker.go), so a non-canonical subscription
-// matches nothing that is ever published - on a stream held open with no
-// heartbeat and no timeout, against a context with no deadline.
+// to a non-canonical request reads as a response about a different job. That
+// comparison is entirely client-side and no server change can reach it, which is
+// why this function is not redundant and must not be deleted.
+//
+// The SECOND reader was handleEvents, and it stopped being one on 2026-08-30:
+// canonicalJobIDFilter (internal/api/events.go) now renders an accepted
+// `?job_id=` into the one spelling every publisher emits, so a non-canonical
+// subscription matches. `?job_id=` is still not VALIDATED - an unparseable id
+// passes through and still buys an open, permanently empty stream on a
+// connection with no heartbeat and no server-side timeout - and this function
+// still keeps a non-canonical spelling out of the request line against an OLDER
+// relay-server, which a CLI built from this tree may be pointed at.
 //
 // Canonicalising ARGV, before either request line is built, is what covers both.
 // Adopting the id from the first usable snapshot instead would fix the
@@ -231,10 +237,15 @@ func jobSnapshotUnusable(job jobResp, jobID string) string {
 // internal/worker/handler.go, plus this one), byte-identical today and unified
 // by nothing.
 //
-// Its only guard is one-directional. TestWatchJobLogs_NonCanonicalJobID_-
+// Both directions are now pinned, but by two independent literals rather than by
+// any relationship between the functions. TestWatchJobLogs_NonCanonicalJobID_-
 // IsResolvedNotRejected hard-codes the expected spelling rather than deriving it
-// from this function, so a change HERE goes red. A change in the SERVER's uuidStr
-// is caught by nothing: it is unexported, so no test relates the two.
+// from this function, so a change HERE goes red; and since 2026-08-30
+// TestCanonicalJobIDFilter (internal/api/events_test.go) hard-codes the same
+// canonical spelling on the server side, so a change to internal/api's uuidStr
+// goes red too - measured, by rendering it uppercase and watching that test
+// fail. Still no test relates the two functions, and the four other unexported
+// copies of the format string remain related to nothing at all.
 func canonicalJobID(jobID string) string {
 	var u pgtype.UUID
 	if err := u.Scan(jobID); err != nil || !u.Valid {
@@ -286,7 +297,8 @@ func jobEventsPath(jobID string) string {
 // writes through them, not by a call at the bottom of the function.
 func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out, errOut io.Writer) (finalStatus string, completeness logCompleteness, err error) {
 	// Once, before either request line is built and before anything compares an
-	// id. See canonicalJobID for the two readers that need it.
+	// id. See canonicalJobID for the ONE reader here that still needs it, and for
+	// why the second one stopped being a reader on 2026-08-30.
 	jobID = canonicalJobID(jobID)
 	taskNames := make(map[string]string)
 	printed := make(map[string]bool)
@@ -445,14 +457,14 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 		}
 		if fatal != nil {
 			// A definite answer ends the watch here, and this is the arm the whole
-			// slice exists for. The stream cannot improve on it: handleEvents does
-			// not validate or canonicalise `?job_id=` (its own comment,
-			// internal/api/events.go), so an id naming no job gets an open,
-			// permanently empty stream with no heartbeat and no server-side
-			// timeout, against a context cmd/relay gives no deadline. Falling
-			// through would print nothing on either stream until Ctrl-C - and a
-			// well-formed uuid that names no job is the likeliest thing an operator
-			// mistypes into this command.
+			// slice exists for. The stream cannot improve on it: handleEvents
+			// canonicalises `?job_id=` but still does not VALIDATE it (its own
+			// comment, internal/api/events.go), so an id naming no job - whether
+			// it parses or not - gets an open, permanently empty stream with no
+			// heartbeat and no server-side timeout, against a context cmd/relay
+			// gives no deadline. Falling through would print nothing on either
+			// stream until Ctrl-C - and a well-formed uuid that names no job is
+			// the likeliest thing an operator mistypes into this command.
 			//
 			// The error is carried out through the defer rather than returned from
 			// here, because this is a StreamEvents callback and its only return is

@@ -205,6 +205,16 @@ for event in client.follow_job(job_id):
         break
 ```
 
+**Job id spelling.** The server normalises `?job_id=`, so any spelling
+`get_job(id)` accepts - uppercase hex, the dashless 32-character form -
+follows the job it names. The SDK sends your string unchanged on purpose:
+Python's `uuid.UUID` and the server's parser accept different sets in both
+directions, and for three spellings `uuid.UUID` accepts it resolves to a
+*different* id than the string names, so canonicalising client-side could
+follow the wrong job. Against a `relay-server` older than 2026-08-30 a
+non-canonical spelling still yields a permanently empty stream - pass the id
+exactly as `get_job()` returned it if you may be talking to one.
+
 Or use `wait(id)`, which polls `GET /v1/jobs/{id}` and returns the terminal
 `Job`. Polling is immune to both of the above.
 

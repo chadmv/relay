@@ -841,6 +841,55 @@ def test_follow_job_without_a_token_raises_before_the_request(tmp_path: Any) -> 
     assert called is False
 
 
+def test_follow_job_sends_the_callers_job_id_spelling_verbatim() -> None:
+    """The SDK must NOT canonicalise the job id, and nothing pinned that.
+
+    test_follow_job_yields_events_and_disables_only_the_read_timeout asserts
+    `captured["query"] == {"job_id": "j1"}`, which READS like a verbatim
+    guard and is not one: "j1" is not a UUID, and every plausible
+    canonicaliser - internal/cli/logs.go's canonicalJobID is the model -
+    passes a non-UUID through UNCHANGED. That "unchanged" is the whole
+    point, and it is why the mutation has to be written with its guard::
+
+        try:
+            job_id = str(uuid.UUID(job_id))
+        except ValueError:
+            pass
+
+    inserted into _stream_events. Measured: that leaves the "j1" assertion
+    green and kills only this test. The UNGUARDED one-liner
+    `job_id = str(uuid.UUID(job_id))` is NOT the mutation to reason about -
+    uuid.UUID("j1") raises ValueError, so it reddens the "j1" test too, for a
+    reason that has nothing to do with spelling. This test uses an UPPERCASE
+    UUID, which is the input a canonicaliser rewrites rather than rejects.
+
+    Canonicalising here would be wrong in both directions, measured in
+    docs/superpowers/specs/2026-08-30-python-sdk-follow-job-canonical-id.md
+    section 4. uuid.UUID REJECTS four spellings pgtype.UUID.Scan accepts
+    (any byte may sit in the four separator positions of the 36-BYTE form -
+    bytes, because Scan switches on len(src), which is exactly the kind of
+    thing Python's str-based parser cannot express), so a Python
+    canonicaliser cannot fix the very ids it is needed for; and it ACCEPTS
+    seven the server rejects, three of which resolve to a DIFFERENT uuid than
+    the string names - so it would silently subscribe the caller to the wrong
+    job. The server canonicalises instead, since 2026-08-30
+    (internal/api/events.go, canonicalJobIDFilter).
+    """
+    uppercase = "7E660488-1234-4321-8888-ABCDEFABCDEF"
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["query"] = dict(request.url.params)
+        return httpx.Response(
+            200, text="", headers={"content-type": "text/event-stream"}
+        )
+
+    client = _make_client(handler)
+    list(client.follow_job(uppercase))
+
+    assert captured["query"] == {"job_id": uppercase}
+
+
 # ─── wait() ──────────────────────────────────────────────────────────────────
 
 
