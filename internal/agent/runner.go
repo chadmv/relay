@@ -22,16 +22,39 @@ import (
 // subprocess. Nothing else may supply them; see the merge in Run.
 var reservedIdentityNames = [...]string{"RELAY_TASK_ID", "RELAY_JOB_ID", "RELAY_JOB_URL", "RELAY_TASK_URL"}
 
-// isReservedIdentityName matches os/exec's own duplicate-key rule: Windows
-// resolves environment names case-insensitively, every other platform does not.
-// Folding everywhere would delete a spec key that is a genuinely distinct
-// variable on Unix; folding nowhere would let a Windows spec key differing only
-// in case supply the name relay owns.
+// isReservedIdentityName reports whether k is a name the coordinator owns for
+// the platform this agent is running on. Windows resolves environment names
+// case-insensitively, every other platform does not: folding everywhere would
+// delete a spec key that is a genuinely distinct variable on Unix, folding
+// nowhere would let a Windows spec key differing only in case supply the name
+// relay owns.
 // TestRunner_TheReservedNamesAreCaseFoldedExactlyWhereOsExecFoldsThem pins both
-// directions.
+// directions on the platform it runs on.
 func isReservedIdentityName(k string) bool {
+	return isReservedIdentityNameFor(runtime.GOOS, k)
+}
+
+// isReservedIdentityNameFor takes goos as a parameter so both halves of the case
+// rule are exercised wherever the tests run; CI is Linux-only, so a
+// runtime.GOOS-only predicate leaves the Windows half killed by no lane.
+//
+// The fold is strings.ToLower and NOT strings.EqualFold, because os/exec's
+// duplicate-key rule lower-cases the key. The two disagree on U+017F, which
+// EqualFold treats as an 's' - stripping a key os/exec would have carried
+// through as a distinct variable.
+// TestIsReservedIdentityNameFor_FoldsExactlyWhereOsExecFolds pins both.
+func isReservedIdentityNameFor(goos, k string) bool {
+	if goos == "windows" {
+		k = strings.ToLower(k)
+		for _, r := range reservedIdentityNames {
+			if k == strings.ToLower(r) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, r := range reservedIdentityNames {
-		if k == r || (runtime.GOOS == "windows" && strings.EqualFold(k, r)) {
+		if k == r {
 			return true
 		}
 	}
@@ -175,31 +198,31 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 
 	// Merge env: current process env first, task env, then workspace env. THE
 	// RESERVED NAMES ARE STRIPPED FROM BOTH MAPS, NOT MERELY OUTRANKED BY THE
-	// APPEND BELOW. Ordering alone protects nothing on a coordinator with no
-	// RELAY_PUBLIC_URL: there is no relay value to append, so a spec's
-	// RELAY_JOB_URL would be the only occurrence and os/exec would have nothing
-	// to dedup it against. Stripping also refuses a spec entry whose value is
-	// EMPTY, which the append cannot outrank either.
-	// TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL and its workspace
-	// twin are the legs that redden.
+	// APPEND BELOW; TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL and
+	// its workspace twin are the legs that redden.
 	//
-	// The append still has to come after os.Environ(), which is inherited
-	// unfiltered, or relay's own value loses to whatever the agent operator
-	// exported; TestRunner_ACoordinatorValueBeatsAnInheritedOne is that leg. Its
-	// position relative to the two loops no longer decides anything, because the
-	// names are gone from both by the time it runs.
-	// Each name is appended only when its value is non-empty, so relay
-	// never sets one of them to the empty string and a consumer needs one check
-	// rather than a second for "set but blank".
+	// A key CONTAINING "=" is refused outright rather than parsed: os/exec splits
+	// an entry at its first "=", so such a key is a different string to the
+	// reserved-name predicate and the same variable to the child.
+	// TestRunner_ASpecEnvKeyContainingAnEqualsCannotSupplyAReservedName and its
+	// workspace twin pin it. A key containing NUL needs no guard here - os/exec
+	// refuses to Start at all rather than splitting the entry.
+	//
+	// The append has to come after os.Environ(), which is inherited unfiltered,
+	// or relay's own value loses to whatever the agent operator exported;
+	// TestRunner_ACoordinatorValueBeatsAnInheritedOne is that leg. Each name is
+	// appended only when its value is non-empty, so relay never sets one of them
+	// to the empty string and a consumer needs one check rather than a second for
+	// "set but blank".
 	env := os.Environ()
 	for k, v := range task.Env {
-		if isReservedIdentityName(k) {
+		if strings.Contains(k, "=") || isReservedIdentityName(k) {
 			continue
 		}
 		env = append(env, k+"="+v)
 	}
 	for k, v := range extraEnv {
-		if isReservedIdentityName(k) {
+		if strings.Contains(k, "=") || isReservedIdentityName(k) {
 			continue
 		}
 		env = append(env, k+"="+v)

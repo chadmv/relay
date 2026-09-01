@@ -8,9 +8,8 @@ package scheduler
 // site, and a consumer of the resulting environment variable needs one check
 // rather than a second one for "set but blank".
 //
-// Plain concatenation with no separator logic, because parsePublicURL
-// guarantees base carries no trailing slash - that guarantee is why
-// normalization happens at parse time and not here.
+// Plain concatenation with no separator logic: NewDispatcher trims the trailing
+// slash off base.
 //
 // THE IDS ARE NOT ESCAPED, on a stated premise: both are uuidStr output over
 // pgtype.UUID values read off the claimed row, so they can contain only

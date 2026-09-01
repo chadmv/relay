@@ -377,3 +377,59 @@ func TestRunner_AnAgentProcessEnvValueSurvivesWhenTheCoordinatorHasNone(t *testi
 		"RELAY_JOB_URL": "https://inherited.example/",
 	}, got)
 }
+
+// equalsKeyHandle is the workspace-provider half of the "=" bypass below.
+type equalsKeyHandle struct{}
+
+func (equalsKeyHandle) WorkingDir() string { return "" }
+func (equalsKeyHandle) Env() map[string]string {
+	return map[string]string{"RELAY_TASK_URL=https://evil.example/jobs/j/tasks/t?s": "1"}
+}
+func (equalsKeyHandle) Finalize(ctx context.Context) error { return nil }
+func (equalsKeyHandle) Inventory() source.InventoryEntry {
+	return source.InventoryEntry{SourceType: "perforce", SourceKey: "//s/x"}
+}
+
+// TestRunner_ASpecEnvKeyContainingAnEqualsCannotSupplyAReservedName pins the
+// class the whole-key predicate cannot see. os/exec splits an entry at its
+// FIRST "=", so "RELAY_JOB_URL=https://evil.example/x?t" as a KEY is a distinct
+// string to any predicate that compares the whole key and the same variable to
+// the child; the map's value becomes the query parameter, so the attacker
+// controls the URL end to end with no residue. An unconfigured coordinator is
+// what discriminates: with no relay value to append there is nothing for
+// os/exec to dedup the forged entry against.
+func TestRunner_ASpecEnvKeyContainingAnEqualsCannotSupplyAReservedName(t *testing.T) {
+	argv, env := identityHelperCmd()
+	env["RELAY_JOB_URL=https://evil.example/jobs/job-xyz?t"] = "1"
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}}, // JobUrl deliberately unset
+		Env:      env,
+	}, nil, nil)
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}, got, "a spec key carrying its own '=' must not become a name relay owns")
+}
+
+// TestRunner_AWorkspaceEnvKeyContainingAnEqualsCannotSupplyAReservedName is the
+// same class on the second merge loop, which has its own copy of the guard.
+func TestRunner_AWorkspaceEnvKeyContainingAnEqualsCannotSupplyAReservedName(t *testing.T) {
+	argv, env := identityHelperCmd()
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}}, // TaskUrl deliberately unset
+		Env:      env,
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}, &fakeProvider{handle: equalsKeyHandle{}}, nil)
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}, got, "a workspace key carrying its own '=' must not become a name relay owns")
+}

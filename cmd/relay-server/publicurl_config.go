@@ -16,13 +16,14 @@ import (
 // the degraded mode would be indistinguishable from the unconfigured mode, and
 // there is no defensible default origin to fall back to.
 //
-// NOTHING HERE MAY ECHO THE RAW VALUE: it can carry a password, and log.Fatalf
-// writes to a stderr that is usually shipped somewhere with broader read access
-// than the environment variable had. Rejections holding a structured URL render
-// it through (*url.URL).Redacted(); the url.Parse branch has no structured URL
-// and must not use %w either, because *url.Error quotes the whole input.
-// TestParsePublicURL_RejectionDoesNotLeakAPassword's parse-failure rows pin
-// both halves.
+// NO BRANCH MAY RENDER A VALUE DERIVED FROM THE INPUT: it can carry a password,
+// and log.Fatalf writes to a stderr that is usually shipped somewhere with
+// broader read access than the environment variable had. The operator already
+// has the value, so a rejection only has to name the variable and the rule it
+// broke. Every attempt at rendering it safely instead has had a hole:
+// (*url.URL).Redacted() substitutes nothing for a userinfo with no password,
+// and net/url's own errors embed slices of the input.
+// TestParsePublicURL_RejectionDoesNotLeakAPassword pins it.
 func parsePublicURL(name, raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -41,22 +42,28 @@ func parsePublicURL(name, raw string) (string, error) {
 	}
 	u, err := url.Parse(s)
 	if err != nil {
-		// Neither the raw value nor the *url.Error wrapping it may be rendered:
-		// url.Error.Error() quotes the whole input, so a %w here leaks
-		// independently of a %q. Only the inner error is safe to show.
+		// The inner error is NOT input-free either: net/url builds "invalid port
+		// %q after host" from a slice of the input, and a secret containing '#',
+		// '?' or '/' terminates the authority before the '@' is ever found, so
+		// that slice is the secret. Classify the failure instead of printing it.
 		var uerr *url.Error
 		if errors.As(err, &uerr) {
-			return "", fmt.Errorf("%s is not a URL: %v", name, uerr.Err)
+			switch uerr.Err.(type) {
+			case url.EscapeError:
+				return "", fmt.Errorf("%s is not a URL: it contains an invalid percent-escape", name)
+			case url.InvalidHostError:
+				return "", fmt.Errorf("%s is not a URL: it contains a character that is not allowed in a host", name)
+			}
 		}
 		return "", fmt.Errorf("%s is not a URL", name)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("%s=%q must use the http or https scheme", name, u.Redacted())
+		return "", fmt.Errorf("%s must use the http or https scheme", name)
 	}
 	// Hostname(), not Host: Host keeps the port, so "https://:8080" has a
 	// non-empty Host and no host at all.
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("%s=%q is missing a host", name, u.Redacted())
+		return "", fmt.Errorf("%s is missing a host", name)
 	}
 	// A host byte >= 0x80 is refused rather than rendered. Browsers map U+3002,
 	// U+FF0E and U+FF61 to '.' before resolving a name, so
@@ -72,22 +79,26 @@ func parsePublicURL(name, raw string) (string, error) {
 			return "", fmt.Errorf("%s must use an ASCII host; supply the punycode (xn--) form of an IDN", name)
 		}
 	}
-	// url.Parse checks that a port is digits, not that it is a port.
+	// url.Parse checks that a port is digits, not that it is a port. A bare
+	// trailing colon is its own row: u.Port() is "" for it, so the range check
+	// cannot see it, and the dangling colon would flow into every link.
+	if strings.HasSuffix(u.Host, ":") {
+		return "", fmt.Errorf("%s must not end in a bare colon; give a port or leave it off", name)
+	}
 	if p := u.Port(); p != "" {
 		n, convErr := strconv.Atoi(p)
 		if convErr != nil || n < 1 || n > 65535 {
-			return "", fmt.Errorf("%s=%q has a port outside 1-65535", name, u.Redacted())
+			return "", fmt.Errorf("%s has a port outside 1-65535", name)
 		}
 	}
 	if u.User != nil {
 		// A base URL carrying userinfo is both a credential in an environment
 		// variable and a phishing shape (https://relay.example.com@evil.example/)
 		// that relay would render into every link it publishes.
-		return "", fmt.Errorf("%s=%q must not carry userinfo", name, u.Redacted())
+		return "", fmt.Errorf("%s must not carry userinfo", name)
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return "", fmt.Errorf("%s=%q must not carry a query or fragment; relay appends a path to it",
-			name, u.Redacted())
+		return "", fmt.Errorf("%s must not carry a query or fragment; relay appends a path to it", name)
 	}
 	// EscapedPath rather than Path so an operator's percent-encoding survives.
 	// Assembled explicitly rather than through u.String(): the two agree only

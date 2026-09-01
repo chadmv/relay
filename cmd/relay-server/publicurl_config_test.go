@@ -76,6 +76,10 @@ func TestParsePublicURL_Rejects(t *testing.T) {
 		{"a port-only authority has no host", "https://:8080"},
 		{"a port-only authority with a path has no host either", "https://:8080/relay"},
 		{"port out of range", "https://relay.example.com:99999"},
+		// u.Port() is "" for a bare trailing colon, so the range check above
+		// never sees it and the dangling colon reaches every published link.
+		{"a bare trailing colon is not a port", "https://relay.example.com:"},
+		{"a bare trailing colon before a path", "https://relay.example.com:/relay"},
 		// The three characters browsers map to '.' before resolving a name. The
 		// value reads as relay's host and resolves to a label under evil.com,
 		// and U+3002 is what a CJK IME emits for a typed period, so this is a
@@ -106,16 +110,21 @@ func TestParsePublicURL_Rejects(t *testing.T) {
 	}
 }
 
-// TestParsePublicURL_RejectionDoesNotLeakAPassword pins the redaction rule. The
-// message goes to a server log an operator reads and ships; the value it is
-// refusing may carry a credential.
+// TestParsePublicURL_RejectionDoesNotLeakAPassword pins the redaction rule: NO
+// branch may render anything derived from the input. The message goes to a
+// server log an operator reads and ships; the value it is refusing may carry a
+// credential, and the operator already has the value, so naming the variable and
+// the rule broken is the whole job.
 //
-// The rows below the first one are the ones that discriminate: they reach the
-// url.Parse failure branch, which never gets a structured URL to redact and
-// which url.Parse's own *url.Error would quote verbatim. Two realistic typos put
-// a credentialled value there - an unsubstituted :port placeholder and a bare %
-// inside a generated secret - and the userinfo check that redacts correctly is
-// several lines too late to see either.
+// The rows discriminate on three different mechanisms, and each one defeated a
+// different attempt at rendering the value safely. A secret containing '#', '?'
+// or '/' - all in the base64 alphabet - terminates the authority before
+// url.Parse ever finds the '@', so the parse error's own text carries a slice of
+// the secret and echoing only the inner error leaks it. (*url.URL).Redacted()
+// substitutes only when the userinfo HAS a password, so a username-only
+// userinfo - the shape of a pasted bearer token, and what url.Parse normalizes
+// user%3Apass into - prints verbatim. And a credentialled value can be refused
+// by the scheme or port branch before the userinfo branch ever runs.
 func TestParsePublicURL_RejectionDoesNotLeakAPassword(t *testing.T) {
 	cases := []struct {
 		name string
@@ -125,6 +134,13 @@ func TestParsePublicURL_RejectionDoesNotLeakAPassword(t *testing.T) {
 		{"an unsubstituted port placeholder fails url.Parse first", "https://ops:hunter2@relay.example.com:port"},
 		{"a percent in the secret fails url.Parse first", "https://ops:hunter2@relay.example.com/%zz"},
 		{"a non-numeric port fails url.Parse first", "https://ops:hunter2@relay.example.com:80a"},
+		{"a fragment character inside the secret", "https://ops:hunter2#x@relay.example.com"},
+		{"a question mark inside the secret", "https://ops:hunter2?tail@relay.example.com"},
+		{"a slash inside the secret", "https://ops:hunter2/tail@relay.example.com"},
+		{"a username-only userinfo is the shape of a pasted token", "https://hunter2@relay.example.com"},
+		{"a percent-encoded colon normalizes to a username-only userinfo", "https://user%3Ahunter2@relay.example.com"},
+		{"a credentialled value refused by the port branch first", "https://hunter2@relay.example.com:99999"},
+		{"a credentialled value refused by the scheme branch first", "ftp://hunter2@relay.example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
