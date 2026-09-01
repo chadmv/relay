@@ -152,13 +152,37 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		return
 	}
 
-	// Merge env: current process env first, task env overrides, then workspace env.
+	// Merge env: current process env first, task env overrides, then workspace
+	// env. THE COORDINATOR'S IDENTITY BLOCK IS APPENDED LAST AND MUST STAY LAST.
+	// os/exec keeps the LAST occurrence of a duplicate key - a documented Cmd.Env
+	// contract, case-insensitive on Windows and case-sensitive elsewhere - so
+	// appending after both loops is the whole reason a job spec, authored by any
+	// authenticated user, cannot choose the link a downstream notifier posts.
+	// Moving this block above either loop is what
+	// TestRunner_CoordinatorIdentityBeatsSpecEnv and
+	// TestRunner_CoordinatorIdentityBeatsWorkspaceEnv exist to redden.
+	//
+	// Each name is appended only when its value is non-empty, so relay never sets
+	// one of them to the empty string and a consumer needs one check rather than
+	// a second for "set but blank".
 	env := os.Environ()
 	for k, v := range task.Env {
 		env = append(env, k+"="+v)
 	}
 	for k, v := range extraEnv {
 		env = append(env, k+"="+v)
+	}
+	if r.taskID != "" {
+		env = append(env, "RELAY_TASK_ID="+r.taskID)
+	}
+	if task.JobId != "" {
+		env = append(env, "RELAY_JOB_ID="+task.JobId)
+	}
+	if task.JobUrl != "" {
+		env = append(env, "RELAY_JOB_URL="+task.JobUrl)
+	}
+	if task.TaskUrl != "" {
+		env = append(env, "RELAY_TASK_URL="+task.TaskUrl)
 	}
 
 	// Send a single RUNNING status before the first step. Subsequent steps
