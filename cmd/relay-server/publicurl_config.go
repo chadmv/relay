@@ -29,10 +29,14 @@ func parsePublicURL(name, raw string) (string, error) {
 	if s == "" {
 		return "", nil
 	}
-	// Ahead of url.Parse on purpose: url.Parse rejects some control bytes and
-	// accepts a space, so leaving this to it would make the refusal depend on
-	// which byte was typed. A shell step interpolating this value unquoted is
-	// the realistic footgun.
+	// Ahead of url.Parse on purpose, and the reachable case is narrower than it
+	// looks: url.Parse refuses every control byte anywhere and a space in the
+	// HOST, but a space in the PATH it accepts and percent-encodes. Without this
+	// loop, "https://ops.example.com/re lay" is accepted silently and the %20
+	// is rendered into every link relay publishes. A shell step interpolating
+	// this value unquoted is the realistic footgun.
+	// TestParsePublicURL_Rejects's path-space row is the only leg that reddens
+	// when this moves below url.Parse.
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x21 || s[i] == 0x7f {
 			return "", fmt.Errorf("%s must not contain whitespace or control characters", name)

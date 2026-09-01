@@ -56,7 +56,13 @@ func TestParsePublicURL_Rejects(t *testing.T) {
 		{"no scheme at all leaves the host empty", "relay.example.com"},
 		{"query string cannot have a path appended", "https://relay.example.com/?x=1"},
 		{"fragment cannot have a path appended", "https://relay.example.com/#frag"},
-		{"embedded space", "https://relay example.com"},
+		// A space in the HOST and a space in the PATH are two different rows,
+		// and only the second one discriminates: url.Parse rejects the first
+		// itself, so the host row stays green with the pre-parse check moved
+		// below url.Parse. url.Parse ACCEPTS the second and percent-encodes it
+		// to /re%20lay, so nothing but the pre-parse check refuses it.
+		{"space in the host", "https://relay example.com"},
+		{"space in the path, which url.Parse would silently percent-encode", "https://ops.example.com/re lay"},
 		{"embedded tab", "https://relay.example.com\tx"},
 		{"embedded newline", "https://relay.example.com\nX"},
 	}
