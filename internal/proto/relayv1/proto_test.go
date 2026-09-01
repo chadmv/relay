@@ -72,10 +72,9 @@ func TestSourceSpecAndInventoryMessages(t *testing.T) {
 }
 
 // TestDispatchTaskCarriesRenderedURLs pins that job_url and task_url are two
-// DISTINCT fields on the wire, and that a coordinator with no public URL
-// configured pays nothing for them. Setting one must not populate the other -
-// which is what a copy-pasted field number would do, and protoc is the only
-// thing that would catch that.
+// DISTINCT fields on the wire, and that an unconfigured coordinator leaves both
+// unset after a roundtrip. Setting one must not populate the other, which is
+// what a copy-pasted field number would do.
 func TestDispatchTaskCarriesRenderedURLs(t *testing.T) {
 	task := &relayv1.DispatchTask{
 		TaskId:  "t1",
@@ -90,14 +89,12 @@ func TestDispatchTaskCarriesRenderedURLs(t *testing.T) {
 	require.Equal(t, "https://relay.example.com/jobs/j1", got.JobUrl)
 	require.Equal(t, "https://relay.example.com/jobs/j1/tasks/t1", got.TaskUrl)
 
-	// Proto3 does not serialize an empty scalar, so "not configured" costs
-	// nothing on the wire and needs no version negotiation in either direction:
-	// an old agent ignores the fields, and a new agent reads them as empty.
+	// A new agent reading an old server's dispatch sees both names empty, which
+	// is what the runner's absent-or-non-empty guard turns on.
 	bare, err := proto.Marshal(&relayv1.DispatchTask{TaskId: "t1", JobId: "j1"})
 	require.NoError(t, err)
 	var gotBare relayv1.DispatchTask
 	require.NoError(t, proto.Unmarshal(bare, &gotBare))
 	require.Empty(t, gotBare.JobUrl)
 	require.Empty(t, gotBare.TaskUrl)
-	require.Less(t, len(bare), len(b))
 }

@@ -475,8 +475,8 @@ generated-store half of that hazard does not apply.
 
 | Principal | Can they forge a variable? |
 |---|---|
-| Job spec author (any authenticated user) | **No.** Their `env` is appended before relay's block and loses the `os/exec` dedup. This is the property the whole design exists to provide. |
-| Workspace provider (`perforce.Handle.Env`) | **No.** Same reason; relay's block is appended after `extraEnv` too. |
+| Job spec author (any authenticated user) | **No.** The four names are stripped from their `env` before it is merged. (Implemented as a strip rather than the append-last ordering this section originally described: with no `RELAY_PUBLIC_URL` set there is no relay value to append, so ordering alone left the spec's entry as the only occurrence.) This is the property the whole design exists to provide. |
+| Workspace provider (`perforce.Handle.Env`) | **No.** Same reason; `extraEnv` is stripped before it is merged too. |
 | A task subprocess | Only for its own children, which is inherent and uninteresting. |
 | Server operator | Yes, by definition - they set `RELAY_PUBLIC_URL`. Constrained to an `http`/`https` URL with no userinfo, no query, no fragment, and no whitespace. |
 | Agent operator | **Yes**, by exporting `RELAY_JOB_URL` into `relay-agent`'s own environment; relay will not override it when it has no value of its own. See section 12, limitation 1. This principal already chooses the agent binary and owns the machine that runs the subprocess, so there is nothing to defend. |

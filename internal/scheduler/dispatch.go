@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"relay/internal/api"
@@ -30,17 +31,19 @@ type Dispatcher struct {
 // NewDispatcher returns a ready-to-use Dispatcher. publicBaseURL is the
 // normalized RELAY_PUBLIC_URL, or "" when the operator has not set one.
 //
-// A CONSTRUCTOR PARAMETER, NOT A SETTABLE FIELD like agentHandler.TrailingLogWindow:
-// a field that main forgets to set produces silently absent URLs,
-// indistinguishable from an unconfigured server, with every test green. A
-// parameter makes that a compile error instead of something a structural
-// main.go-parsing test has to notice.
+// It is a parameter rather than a settable field because a caller that forgets
+// to set it produces silently absent URLs - indistinguishable from an
+// unconfigured server, with every test green.
+//
+// The trailing slash is trimmed HERE because jobURL and taskURL concatenate
+// with no separator logic and the guarantee they rely on is produced in
+// package main, which this package cannot reference.
 func NewDispatcher(q *store.Queries, r *worker.Registry, b *events.Broker, publicBaseURL string) *Dispatcher {
 	return &Dispatcher{
 		q:             q,
 		registry:      r,
 		broker:        b,
-		publicBaseURL: publicBaseURL,
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		trigger:       make(chan struct{}, 1),
 	}
 }

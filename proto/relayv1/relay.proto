@@ -116,9 +116,8 @@ message DispatchTask {
   SourceSpec          source          = 7;
   repeated CommandLine commands       = 8;
   // Rendered by the coordinator, never by the agent: the frontend's route shape
-  // is not an independently-deployed, long-lived agent's to know, and a fleet
-  // the server cannot force to upgrade would keep emitting dead links after a
-  // route change. Empty when the server has no RELAY_PUBLIC_URL.
+  // is not an independently-deployed agent's to know. Empty when the server has
+  // no RELAY_PUBLIC_URL.
   string              job_url         = 9;
   string              task_url        = 10;
 }

@@ -937,9 +937,8 @@ type DispatchTask struct {
 	Source         *SourceSpec            `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
 	Commands       []*CommandLine         `protobuf:"bytes,8,rep,name=commands,proto3" json:"commands,omitempty"`
 	// Rendered by the coordinator, never by the agent: the frontend's route shape
-	// is not an independently-deployed, long-lived agent's to know, and a fleet
-	// the server cannot force to upgrade would keep emitting dead links after a
-	// route change. Empty when the server has no RELAY_PUBLIC_URL.
+	// is not an independently-deployed agent's to know. Empty when the server has
+	// no RELAY_PUBLIC_URL.
 	JobUrl        string `protobuf:"bytes,9,opt,name=job_url,json=jobUrl,proto3" json:"job_url,omitempty"`
 	TaskUrl       string `protobuf:"bytes,10,opt,name=task_url,json=taskUrl,proto3" json:"task_url,omitempty"`
 	unknownFields protoimpl.UnknownFields

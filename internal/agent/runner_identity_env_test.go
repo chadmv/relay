@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,10 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// identityVars is the exact set the coordinator injects. The helper reports each
-// through os.LookupEnv, so ABSENT and PRESENT-BUT-EMPTY stay distinguishable -
-// the distinction the absent-or-non-empty rule turns on, and one that
-// `echo $VAR` cannot make on either platform.
+// identityVars is the exact set the coordinator injects. The helper reports the
+// child's own environment block, so ABSENT and PRESENT-BUT-EMPTY stay
+// distinguishable - the distinction the absent-or-non-empty rule turns on, and
+// one that `echo $VAR` cannot make on either platform. It reports a
+// case-INSENSITIVE match under whatever name the child actually carries, so a
+// spec key that differs only in case is visible to an assertion; os/exec's
+// dedup rule folds case on Windows only, and the two platforms must be told
+// apart here rather than assumed.
 var identityVars = []string{"RELAY_TASK_ID", "RELAY_JOB_ID", "RELAY_JOB_URL", "RELAY_TASK_URL"}
 
 const identityLinePrefix = "relayenv "
@@ -32,9 +37,13 @@ func TestRunnerEnvHelperProcess(t *testing.T) {
 	if os.Getenv("RELAY_ENV_HELPER") == "" {
 		return // an ordinary test run; this process is not the helper
 	}
-	for _, k := range identityVars {
-		if v, ok := os.LookupEnv(k); ok {
-			_, _ = os.Stdout.WriteString(identityLinePrefix + k + "=" + v + "\n")
+	for _, e := range os.Environ() {
+		k, v, _ := strings.Cut(e, "=")
+		for _, want := range identityVars {
+			if strings.EqualFold(k, want) {
+				_, _ = os.Stdout.WriteString(identityLinePrefix + k + "=" + v + "\n")
+				break
+			}
 		}
 	}
 	os.Exit(0)
@@ -231,12 +240,128 @@ func TestRunner_AnEmptyDispatchedIdProducesNoVariableAtAll(t *testing.T) {
 			"check, not a second one for 'set but blank'")
 }
 
+// TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL is the case
+// append-last cannot cover: with no RELAY_PUBLIC_URL there is no relay value to
+// append, so the spec's entry is the ONLY occurrence and os/exec has nothing to
+// dedup it against. The guarantee has to hold on a default-configured server or
+// it is not a guarantee.
+func TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL(t *testing.T) {
+	argv, env := identityHelperCmd()
+	env["RELAY_JOB_URL"] = "https://evil.example/jobs/job-xyz"
+	env["RELAY_TASK_URL"] = "https://evil.example/jobs/job-xyz/tasks/task-abc"
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}}, // JobUrl and TaskUrl deliberately unset
+		Env:      env,
+	}, nil, nil)
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}, got, "a job spec must not decide the link a notifier posts on a server with no public URL")
+}
+
+// TestRunner_ASpecEnvEmptyValueCannotCreateASetButBlankName is the same hole
+// aimed at the absent-or-non-empty rule rather than at the value: an empty spec
+// entry needs no configured coordinator to beat, because relay's own guard
+// already declines to append an empty value.
+func TestRunner_ASpecEnvEmptyValueCannotCreateASetButBlankName(t *testing.T) {
+	argv, env := identityHelperCmd()
+	for _, k := range identityVars {
+		env[k] = ""
+	}
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}},
+		Env:      env,
+	}, nil, nil)
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}, got, "a spec entry must not turn a name relay leaves absent into a set-but-blank one")
+}
+
+// TestRunner_UnconfiguredCoordinatorStillRefusesAWorkspaceEnvURL is the same
+// hole on the second merge loop. spoofingHandle sets RELAY_JOB_URL, for which
+// this dispatch carries no coordinator value at all.
+func TestRunner_UnconfiguredCoordinatorStillRefusesAWorkspaceEnvURL(t *testing.T) {
+	argv, env := identityHelperCmd()
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}}, // JobUrl and TaskUrl deliberately unset
+		Env:      env,
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	}, &fakeProvider{handle: spoofingHandle{}}, nil)
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}, got, "a workspace provider must not supply a name the coordinator owns")
+}
+
+// TestRunner_TheReservedNamesAreCaseFoldedExactlyWhereOsExecFoldsThem pins the
+// platform asymmetry rather than asserting it in prose. The strip has to match
+// os/exec's own duplicate-key rule in BOTH directions: fold on Windows, where
+// relay_job_url and RELAY_JOB_URL are one variable and the spec's spelling would
+// otherwise be the value the child resolves; do not fold elsewhere, where they
+// are two variables and stripping the lower-case one would delete a spec entry
+// relay has no claim on. An unconfigured coordinator is what discriminates - a
+// configured one hides the Windows leg behind exec's own dedup.
+func TestRunner_TheReservedNamesAreCaseFoldedExactlyWhereOsExecFoldsThem(t *testing.T) {
+	argv, env := identityHelperCmd()
+	env["relay_job_url"] = "https://evil.example/jobs/job-xyz"
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}}, // JobUrl deliberately unset
+		Env:      env,
+	}, nil, nil)
+
+	want := map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+	}
+	if runtime.GOOS != "windows" {
+		want["relay_job_url"] = "https://evil.example/jobs/job-xyz"
+	}
+	require.Equal(t, want, got)
+}
+
+// TestRunner_ACoordinatorValueBeatsAnInheritedOne is what still makes the
+// append's POSITION load-bearing now that the two merge loops are stripped:
+// os.Environ() is inherited unfiltered, so the block must be appended after it
+// or os/exec's last-duplicate-wins rule hands the child the agent operator's
+// stale value instead of this dispatch's.
+func TestRunner_ACoordinatorValueBeatsAnInheritedOne(t *testing.T) {
+	argv, env := identityHelperCmd()
+	got := runIdentityHelper(t, &relayv1.DispatchTask{
+		TaskId:   "task-abc",
+		JobId:    "job-xyz",
+		JobUrl:   "https://relay.example.com/jobs/job-xyz",
+		Commands: []*relayv1.CommandLine{{Argv: argv}},
+		Env:      env,
+	}, nil, map[string]string{"RELAY_JOB_URL": "https://stale.example/jobs/old"})
+
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID": "task-abc",
+		"RELAY_JOB_ID":  "job-xyz",
+		"RELAY_JOB_URL": "https://relay.example.com/jobs/job-xyz",
+	}, got)
+}
+
 // TestRunner_AnAgentProcessEnvValueSurvivesWhenTheCoordinatorHasNone documents a
-// known limitation AS A BEHAVIOUR. relay only appends; it does not strip. The
-// trust boundary this feature defends is the job spec author, not the agent
-// operator, who already chooses the binary and owns the machine. A later slice
-// that decides to start stripping must redden HERE rather than changing this
-// silently.
+// known limitation AS A BEHAVIOUR. The strip covers the dispatched spec env and
+// the workspace provider's env; os.Environ() is inherited unfiltered. The trust
+// boundary this feature defends is the job spec author, not the agent operator,
+// who already chooses the binary and owns the machine. A later slice that
+// decides to strip the inherited environment too must redden HERE rather than
+// changing this silently.
 func TestRunner_AnAgentProcessEnvValueSurvivesWhenTheCoordinatorHasNone(t *testing.T) {
 	argv, env := identityHelperCmd()
 	got := runIdentityHelper(t, &relayv1.DispatchTask{
