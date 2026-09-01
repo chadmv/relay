@@ -936,8 +936,14 @@ type DispatchTask struct {
 	Epoch          int64                  `protobuf:"varint,6,opt,name=epoch,proto3" json:"epoch,omitempty"`
 	Source         *SourceSpec            `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
 	Commands       []*CommandLine         `protobuf:"bytes,8,rep,name=commands,proto3" json:"commands,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Rendered by the coordinator, never by the agent: the frontend's route shape
+	// is not an independently-deployed, long-lived agent's to know, and a fleet
+	// the server cannot force to upgrade would keep emitting dead links after a
+	// route change. Empty when the server has no RELAY_PUBLIC_URL.
+	JobUrl        string `protobuf:"bytes,9,opt,name=job_url,json=jobUrl,proto3" json:"job_url,omitempty"`
+	TaskUrl       string `protobuf:"bytes,10,opt,name=task_url,json=taskUrl,proto3" json:"task_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DispatchTask) Reset() {
@@ -1017,6 +1023,20 @@ func (x *DispatchTask) GetCommands() []*CommandLine {
 		return x.Commands
 	}
 	return nil
+}
+
+func (x *DispatchTask) GetJobUrl() string {
+	if x != nil {
+		return x.JobUrl
+	}
+	return ""
+}
+
+func (x *DispatchTask) GetTaskUrl() string {
+	if x != nil {
+		return x.TaskUrl
+	}
+	return ""
 }
 
 // CommandLine carries a single argv (executable + args). A task runs each
@@ -1519,7 +1539,7 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12&\n" +
 	"\x0fcancel_task_ids\x18\x02 \x03(\tR\rcancelTaskIds\x12\x1f\n" +
 	"\vagent_token\x18\x03 \x01(\tR\n" +
-	"agentToken\"\xd8\x02\n" +
+	"agentToken\"\x8c\x03\n" +
 	"\fDispatchTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\tR\x05jobId\x121\n" +
@@ -1527,7 +1547,10 @@ const file_relayv1_relay_proto_rawDesc = "" +
 	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x03R\x05epoch\x12,\n" +
 	"\x06source\x18\a \x01(\v2\x14.relay.v1.SourceSpecR\x06source\x121\n" +
-	"\bcommands\x18\b \x03(\v2\x15.relay.v1.CommandLineR\bcommands\x1a6\n" +
+	"\bcommands\x18\b \x03(\v2\x15.relay.v1.CommandLineR\bcommands\x12\x17\n" +
+	"\ajob_url\x18\t \x01(\tR\x06jobUrl\x12\x19\n" +
+	"\btask_url\x18\n" +
+	" \x01(\tR\ataskUrl\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x03\x10\x04R\acommand\"!\n" +
