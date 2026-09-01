@@ -17,11 +17,13 @@ unless the agent operator exported it" rather than absolute. Filtering the four 
 of `os.Environ()` before the merge would make the rule unconditional.
 
 ## Context
-The per-task identity variables were designed to defend one trust boundary: the job spec author.
-The identity block is appended last, so a job spec's `env` and the workspace handle's env both lose
-the `os/exec` dedup. The agent operator is a different principal, and one relay does not defend
-against - they choose the agent binary and own the machine that runs the subprocess, so there is
-nothing to protect. This item is not a security fix; it is a consistency fix.
+The per-task identity variables defend one trust boundary: the job spec author. The agent already
+strips the four names from a job spec's `env` and from the workspace handle's env before merging
+either, so those two principals are closed. The agent operator is a different principal, and one
+relay does not defend against - they choose the agent binary and own the machine that runs the
+subprocess, so there is nothing to protect. This item is not a security fix; it is a consistency
+fix, and it is what is LEFT once the two closed principals are subtracted: `os.Environ()` is the
+only merge input still passed through unfiltered.
 
 The realistic failure it removes is mundane rather than adversarial: a stale `RELAY_JOB_URL` left
 exported in a debugging shell silently poisons every link the agent's tasks post, and nothing
@@ -33,26 +35,28 @@ child sees `INHERITED`. Implementing this item must therefore flip that test del
 than discover it.
 
 ## Proposal
-Filter `os.Environ()` for the four reserved names before the merge in `Runner.Run`, so an inherited
-value is dropped whether or not relay has a value of its own to replace it with.
+Extend the existing strip to `os.Environ()`. `Runner.Run` already filters `task.Env` and `extraEnv`
+through `isReservedIdentityName`; this is the same predicate applied to the third merge input, so an
+inherited value is dropped whether or not relay has a value of its own to replace it with.
 
 Two things to settle when it is picked up:
 
-- **Case.** `os/exec`'s dedup folds case on Windows only, so a filter that compares case-sensitively
-  would leave `relay_job_url` inherited on Linux (correct, it is a distinct variable) and would let
-  `Relay_Job_Url` through on Windows where it would then beat relay's own value. The comparison has
-  to be case-insensitive on Windows to be honest about the platform it runs on.
+- **Case.** `isReservedIdentityName` already folds case on Windows only, matching `os/exec`'s own
+  dedup rule, so the predicate needs no change - only its third call site. Reusing it is the point:
+  a second, differently-cased comparison here would be the defect.
 - **Whether the four names become documented as reserved.** Stripping makes that a contract rather
   than a convention, and README should say so in the same place it documents the precedence rule.
 
 ## Acceptance / Done When
 - With the agent process's environment carrying `RELAY_JOB_URL` and a dispatch carrying an empty
   `JobUrl`, the child subprocess has no `RELAY_JOB_URL` key at all.
-- The existing inheritance test is replaced rather than deleted, so the change of contract is
-  visible in the diff.
-- On Windows, a mixed-case spelling of a reserved name is stripped too; on other platforms it
-  survives as the distinct variable it is, and a test pins the asymmetry rather than papering over
-  it.
+- `TestRunner_AnAgentProcessEnvValueSurvivesWhenTheCoordinatorHasNone` is replaced rather than
+  deleted, so the change of contract is visible in the diff. It exists today to pin the current
+  behaviour as a behaviour, precisely so this change cannot be made silently.
+- `TestRunner_ACoordinatorValueBeatsAnInheritedOne` still passes: stripping the inherited value must
+  not be mistaken for the append no longer having to come after `os.Environ()`.
+- The Windows/Unix case asymmetry stays pinned by
+  `TestRunner_TheReservedNamesAreCaseFoldedExactlyWhereOsExecFoldsThem`, extended to the new input.
 - README's task subprocess environment section states that the four names are reserved.
 
 ## Related
