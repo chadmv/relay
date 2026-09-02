@@ -64,48 +64,116 @@ test('applies frames buffered during backfill, deduping any also present in a pa
   )
 })
 
-test('pumps since_seq from next_seq until next_seq is 0', async () => {
+test('opens at the tail with one request', async () => {
   const fake = fakeSseServer()
-  const seen: (string | null)[] = []
+  const searches: string[] = []
   server.use(
     http.get('/v1/tasks/t1/logs', ({ request }) => {
-      const since = new URL(request.url).searchParams.get('since_seq')
-      seen.push(since)
-      if (since === null) return HttpResponse.json({ items: [entry(10)], next_seq: 10, total: 3 })
-      if (since === '10') return HttpResponse.json({ items: [entry(20)], next_seq: 20, total: 3 })
-      return HttpResponse.json({ items: [entry(30)], next_seq: 0, total: 3 })
+      searches.push(new URL(request.url).search)
+      // A server with more history than one page: prev_seq is non-zero, and
+      // next_seq is 0 in every descending response.
+      return HttpResponse.json({ items: [entry(93_913), entry(94_312)], next_seq: 0, prev_seq: 93_913, total: 94_312 })
     }),
   )
   const { result } = renderHook(() =>
     useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
   )
   await waitFor(() => expect(result.current.status).toBe('live'))
-  expect(seen).toEqual([null, '10', '20'])
-  expect(result.current.rows.map((r) => r.text)).toEqual(['line-10', 'line-20', 'line-30'])
+
+  // The exact count and the exact query string: a leftover forward walk shows
+  // up as a second request, and a forward FIRST request shows up here as a
+  // missing order=desc.
+  expect(searches).toEqual(['?order=desc&limit=200'])
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-93913', 'line-94312'])
+  expect(result.current.total).toBe(94_312)
+  expect(result.current.historyTruncated).toBe(false)
+})
+
+test('a short tail page means the log is complete', async () => {
+  const fake = fakeSseServer()
+  server.use(
+    http.get('/v1/tasks/t1/logs', () =>
+      HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 1 }),
+    ),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(result.current.earlierComplete).toBe(true)
+})
+
+// The forward loop is now reached only by a RECOVERY: a fresh open takes the
+// tail. Entering through a dropped frame is the shortest honest route to it.
+test('a recovery pumps since_seq from next_seq until next_seq is 0', async () => {
+  const fake = fakeSseServer()
+  const searches: string[] = []
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const url = new URL(request.url)
+      searches.push(url.search)
+      const since = url.searchParams.get('since_seq')
+      if (since === null) return HttpResponse.json({ items: [entry(10)], next_seq: 0, prev_seq: 0, total: 3 })
+      if (since === '10') return HttpResponse.json({ items: [entry(20)], next_seq: 20, prev_seq: 0, total: 3 })
+      return HttpResponse.json({ items: [entry(30)], next_seq: 0, prev_seq: 0, total: 3 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(searches).toEqual(['?order=desc&limit=200'])
+
+  fake.latest().emit('dropped', { reason: 'slow_consumer' })
+  await waitFor(() => expect(result.current.status).toBe('live'))
+
+  // Direction is decided by what we hold: maxSeq is 10, so the recovery pages
+  // FORWARD and pumps until next_seq is 0. No order parameter on any of them.
+  expect(searches).toEqual([
+    '?order=desc&limit=200',
+    '?limit=200&since_seq=10',
+    '?limit=200&since_seq=20',
+  ])
+  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+    'line-10',
+    'line-20',
+    'line-30',
+  ])
   expect(result.current.historyTruncated).toBe(false)
   expect(result.current.total).toBe(3)
 })
 
-test('stops at MAX_BACKFILL_PAGES, flags truncation, and still applies live frames', async () => {
+test('a recovery stops at MAX_BACKFILL_PAGES, flags truncation, and still applies live frames', async () => {
   const fake = fakeSseServer()
-  let requests = 0
+  let forwardRequests = 0
   server.use(
-    http.get('/v1/tasks/t1/logs', () => {
-      requests++
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const since = new URL(request.url).searchParams.get('since_seq')
+      if (since === null) {
+        return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 94_312 })
+      }
+      forwardRequests++
       // A server that never drains: next_seq is always non-zero.
-      return HttpResponse.json({ items: [entry(requests)], next_seq: requests, total: 94312 })
+      return HttpResponse.json({
+        items: [entry(forwardRequests + 1)],
+        next_seq: forwardRequests + 1,
+        prev_seq: 0,
+        total: 94_312,
+      })
     }),
   )
   const { result } = renderHook(() =>
     useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
   )
   await waitFor(() => expect(result.current.status).toBe('live'))
-  // Exact count, not "several": an off-by-one or a missing cap is a request loop.
-  expect(requests).toBe(MAX_BACKFILL_PAGES)
-  expect(result.current.historyTruncated).toBe(true)
-  expect(result.current.total).toBe(94312)
+  expect(result.current.historyTruncated).toBe(false) // a tail open never truncates
 
-  // Truncated history must not stop live tailing.
+  fake.latest().emit('dropped', { reason: 'slow_consumer' })
+  await waitFor(() => expect(result.current.historyTruncated).toBe(true))
+  // Exact count, not "several": an off-by-one or a missing cap is a request loop.
+  expect(forwardRequests).toBe(MAX_BACKFILL_PAGES)
+  expect(result.current.total).toBe(94_312)
+
   fake.latest().emit('task_log', logEvent(5000, 'after-cap\n'))
   await waitFor(() => expect(result.current.rows.some((r) => r.text === 'after-cap')).toBe(true))
 })

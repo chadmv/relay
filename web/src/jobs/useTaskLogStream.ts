@@ -3,6 +3,7 @@ import { ApiError } from '../lib/api'
 import {
   BACKFILL_PAGE_SIZE,
   getTaskLogs,
+  getTaskLogsDesc,
   streamTaskLog,
   type TaskLogEvent,
   type TaskLogPage,
@@ -56,6 +57,8 @@ export interface TaskLogStreamResult {
   total: number
   errorMessage: string
   reconnect: () => void
+  /** prev_seq was 0: the window reaches the beginning of the log. */
+  earlierComplete: boolean
 }
 
 export interface UseTaskLogStreamOptions {
@@ -90,6 +93,7 @@ export function useTaskLogStream(
   const [historyTruncated, setHistoryTruncated] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
   const [manualRetry, setManualRetry] = useState(0)
+  const [earlierComplete, setEarlierComplete] = useState(false)
 
   const reconnect = useCallback(() => {
     setAttempt(0)
@@ -113,6 +117,7 @@ export function useTaskLogStream(
     if (!enabled || taskId === '') {
       carry.current = null
       setView(createLogState())
+      setEarlierComplete(false)
       setStatus('idle')
       return
     }
@@ -162,6 +167,11 @@ export function useTaskLogStream(
     setStatus('loading')
     setHistoryTruncated(false)
     setErrorMessage('')
+    // Only for a genuinely fresh window. A same-task re-run with a carry (a
+    // terminal transition, a manual reconnect) keeps whatever the user has
+    // already walked back to; blanket-resetting would re-offer "Load earlier"
+    // on a log that has none.
+    if (carried === null) setEarlierComplete(false)
 
     function setLogState(next: LogState) {
       logState = next
@@ -315,6 +325,21 @@ export function useTaskLogStream(
       })
     }
 
+    // Ends the generation BEFORE releasing the resource. The SSE stream this
+    // run opened is still open, and aborting makes its promise settle on the
+    // next microtask; without bumping gen (and setting fatal) first, that dying
+    // connection's own handler still passes the staleness guard and overwrites
+    // 'error' with 'reconnecting', inserting a bogus drop marker for lines that
+    // were never missed. Guard: 'a failing backfill page settles to error and
+    // the dying stream cannot resurrect it'.
+    function failHistory(err: unknown) {
+      fatal = true
+      gen++
+      setErrorMessage(err instanceof Error ? err.message : 'failed to load logs')
+      setStatus('error')
+      controller.abort()
+    }
+
     async function run(sinceSeq: number) {
       const myGen = ++gen
       buffering = true
@@ -354,39 +379,48 @@ export function useTaskLogStream(
         if (cancelled || myGen !== gen) return
       }
 
-      let since = sinceSeq
-      let pages = 0
-      for (;;) {
+      if (logState.maxSeq === 0) {
+        // We hold nothing, so open at the END. One request, and the rows the
+        // reader came for. Paging forward from 0 returns the OLDEST page, which
+        // on a long log is the wrong end and costs up to MAX_BACKFILL_PAGES
+        // requests to still not reach the tail.
         let page: TaskLogPage
         try {
-          page = await getTaskLogs(taskId, since, BACKFILL_PAGE_SIZE)
+          page = await getTaskLogsDesc(taskId, 0, BACKFILL_PAGE_SIZE)
         } catch (err) {
           if (cancelled || myGen !== gen) return
-          // End the assignment BEFORE aborting: the SSE stream opened by this
-          // same run is still open, and aborting it makes its promise
-          // reject/resolve on the very next microtask. Without bumping gen
-          // (and setting fatal) first, that dying connection's own
-          // .then()/.catch() would see myGen still === gen and call
-          // recover('closed'), silently overwriting this 'error' status with
-          // 'reconnecting' and inserting a bogus drop marker for lines that
-          // were never actually missed.
-          fatal = true
-          gen++
-          setErrorMessage(err instanceof Error ? err.message : 'failed to load logs')
-          setStatus('error')
-          controller.abort()
+          failHistory(err)
           return
         }
         if (cancelled || myGen !== gen) return
         ingest(page.items)
         setTotal(page.total)
-        pages++
-        if (page.next_seq === 0) break
-        if (pages >= MAX_BACKFILL_PAGES) {
-          setHistoryTruncated(true)
-          break
+        setEarlierComplete(page.prev_seq === 0)
+      } else {
+        // We hold something: continue FORWARD from it. This is the recovery,
+        // the reconciliation and the manual reconnect, all unchanged.
+        let since = sinceSeq
+        let pages = 0
+        for (;;) {
+          let page: TaskLogPage
+          try {
+            page = await getTaskLogs(taskId, since, BACKFILL_PAGE_SIZE)
+          } catch (err) {
+            if (cancelled || myGen !== gen) return
+            failHistory(err)
+            return
+          }
+          if (cancelled || myGen !== gen) return
+          ingest(page.items)
+          setTotal(page.total)
+          pages++
+          if (page.next_seq === 0) break
+          if (pages >= MAX_BACKFILL_PAGES) {
+            setHistoryTruncated(true)
+            break
+          }
+          since = page.next_seq
         }
-        since = page.next_seq
       }
 
       // Step 3 of the README join: apply what arrived while we were paging.
@@ -431,5 +465,6 @@ export function useTaskLogStream(
     total,
     errorMessage,
     reconnect,
+    earlierComplete,
   }
 }
