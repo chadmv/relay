@@ -134,6 +134,35 @@ export function surfaces(): Surface[] {
       },
     },
     {
+      // THE SAME PATH as `jobs` above, in the other view. `prepare` sets the same
+      // preference key the shipped view switch writes, so no state is fabricated
+      // that production cannot produce; addInitScript is required because the SPA
+      // reads the key during its first render, before any test code could run.
+      //
+      // WHAT THIS SURFACE ESTABLISHES: five lanes do not widen the document,
+      // <header> or <main>. WHAT IT CANNOT: whether the lanes are readable, or how
+      // much of the row sits clipped behind its own scroller - a
+      // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped", and this
+      // view is deliberately a scroller (see README, and the same limit spelled out
+      // on schedules-failing). The screenshots are the artifact for that.
+      name: 'jobs-lanes',
+      path: () => '/jobs',
+      population: 'populated',
+      prepare: async (p) => {
+        await p.addInitScript(() => window.localStorage.setItem('relay.jobs.view', 'lanes'))
+      },
+      ready: async (p, seed) => {
+        // Scoped to the Queued lane, not the bare link: a seeded job never leaves
+        // `pending`, so a pass here means the populated lane really rendered,
+        // rather than an empty lanes view being measured under a populated name.
+        //
+        // Case-insensitive name: the lane heading is uppercased by CSS, and
+        // Chromium reflects text-transform in the accessible name.
+        const lane = p.getByRole('region', { name: /^queued$/i })
+        await expect(lane.getByRole('link', { name: seed.jobName })).toBeVisible()
+      },
+    },
+    {
       name: 'job-detail',
       path: (seed) => `/jobs/${seed.jobId}`,
       population: 'populated',
@@ -178,9 +207,8 @@ export function surfaces(): Surface[] {
       // pixel. The healthy surface above is the CONTROL: if both overflow, the
       // chip is not the cause.
       //
-      // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH, measured 2026-08-28 rather
-      // than argued. Widening SchedulesTable's own MIN_W to 2400px changes
-      // NOTHING here: the suite stays green. That is not a hole in this
+      // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH. Widening SchedulesTable's own
+      // MIN_W to 2400px changes NOTHING here. That is not a hole in this
       // surface, it is the documented limit in e2e/README.md - a
       // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped behind
       // a scroller", and Table wraps the whole role="table" subtree in an

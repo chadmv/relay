@@ -1,6 +1,10 @@
 import { apiFetch, apiStream } from '../lib/api'
 
-export type JobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
+// The jobs.status vocabulary, in lifecycle order. JobStatus derives from the tuple
+// so the type and the runtime list cannot drift from each other.
+export const JOB_STATUSES = ['pending', 'running', 'done', 'failed', 'cancelled'] as const
+
+export type JobStatus = (typeof JOB_STATUSES)[number]
 
 export interface Job {
   id: string
@@ -75,6 +79,20 @@ export function getJobStats(): Promise<JobStats> {
 // be enumerated by paging.
 export function listJobsBySchedule(scheduledJobId: string, limit: number): Promise<JobsPage> {
   const q = new URLSearchParams({ scheduled_job_id: scheduledJobId, limit: String(limit) })
+  return apiFetch<JobsPage>(`/jobs?${q}`)
+}
+
+// One lane of the jobs board: the newest `limit` jobs in one status, plus that
+// status's all-time total from the same response, so a lane header and its overflow
+// control are computed from one number and cannot disagree.
+//
+// Sends NO sort and NO cursor. Deliberately not expressed through listJobs, for the
+// same reason listJobsBySchedule is not: listJobs sets sort by default on its
+// unfiltered branch, and sort combined with a filter is a hard 400. Do not unify
+// them. A limit outside [1, 200] is REJECTED with a 400, not clamped
+// (internal/api/pagination.go, parsePage), so a caller's cap is a hard ceiling.
+export function listJobsByStatus(status: JobStatus, limit: number): Promise<JobsPage> {
+  const q = new URLSearchParams({ status, limit: String(limit) })
   return apiFetch<JobsPage>(`/jobs?${q}`)
 }
 

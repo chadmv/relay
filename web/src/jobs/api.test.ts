@@ -5,6 +5,7 @@ import { fakeSseServer, tick } from '../test/sseStream'
 import { ApiError } from '../lib/api'
 import {
   BACKFILL_PAGE_SIZE,
+  JOB_STATUSES,
   cancelJob,
   createJob,
   getJobStats,
@@ -12,6 +13,7 @@ import {
   getTaskLogsDesc,
   listJobs,
   listJobsBySchedule,
+  listJobsByStatus,
   retryJob,
   streamTaskLog,
   type JobsPage,
@@ -277,4 +279,29 @@ test('listJobsBySchedule sends scheduled_job_id and limit and NEVER sends sort',
   // default (api.ts:50-56), so a copy-paste reintroduces it.
   expect(captured?.has('sort')).toBe(false)
   expect(captured?.has('status')).toBe(false)
+})
+
+test('listJobsByStatus sends status and limit and NEVER sends sort or cursor', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listJobsByStatus('failed', 10)
+  // Presence controls FIRST: without them the absence assertions below pass
+  // against a function that sends no parameters at all.
+  expect(captured?.get('status')).toBe('failed')
+  expect(captured?.get('limit')).toBe('10')
+  // ?sort= combined with ANY filter is a hard 400, 'sort not supported on filtered
+  // list variant' (internal/api/jobs.go), and listJobs sets sort by default on its
+  // unfiltered branch, so a copy-paste reintroduces it. A cursor is meaningless on a
+  // capped lane and would page it away from the newest rows.
+  expect(captured?.has('sort')).toBe(false)
+  expect(captured?.has('cursor')).toBe(false)
+})
+
+test('JOB_STATUSES is the jobs.status vocabulary and JobStatus derives from it', () => {
+  expect([...JOB_STATUSES]).toEqual(['pending', 'running', 'done', 'failed', 'cancelled'])
 })

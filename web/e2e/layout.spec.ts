@@ -4,9 +4,9 @@ import { closeNavPanel, expectDestinationsReachable } from './nav'
 import { surfaces } from './surfaces'
 
 // jsdom performs NO layout. Every offsetWidth, scrollWidth and
-// getBoundingClientRect() across web/src's 152 test files returns 0, so every
-// layout assertion there is a structural guard or a class-string pin. This file
-// is the only place in the repo where a width is a real number.
+// getBoundingClientRect() in the vitest suite returns 0, so every layout
+// assertion there is a structural guard or a class-string pin. This file is the
+// only place in the repo where a width is a real number.
 //
 // Five qualifiers below are lessons the 2026-08-13 narrow-viewport slice paid
 // for, converted into config so nobody re-learns them:
