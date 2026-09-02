@@ -6,10 +6,12 @@ import { Chip, GlassPanel, KpiStat, Panel, StatusDot } from '../components/holo'
 import { MetricChart } from './MetricChart'
 import { WorkerActions } from './WorkerActions'
 import { WorkerLabels } from './WorkerLabels'
+import { WorkerTasksPanel } from './WorkerTasksPanel'
 import { WorkspacesPanel } from './WorkspacesPanel'
 import { formatGB, formatRelativeTime, livenessView } from './liveness'
 import { useWorker } from './useWorker'
 import { useWorkerMetrics } from './useWorkerMetrics'
+import { useWorkerTasks } from './useWorkerTasks'
 import type { MetricSample } from './api'
 
 function pct(n: number): string {
@@ -26,6 +28,7 @@ export function WorkerDetailPage() {
   const isAdmin = Boolean(user?.is_admin)
   const { data: worker, error, isLoading, refetch } = useWorker(id)
   const { data: metrics } = useWorkerMetrics(id)
+  const { data: tasks } = useWorkerTasks(id)
 
   if (isLoading && !worker) {
     return <GlassPanel className="h-40" />
@@ -66,6 +69,11 @@ export function WorkerDetailPage() {
   const gpuMemTotal = latest?.gpu_mem_total ?? 0
   const view = livenessView(worker.status)
   const isStale = worker.status === 'stale'
+  // used slots = this worker's active task count, the same number the dispatcher
+  // derives when it decides whether the worker has capacity. It can exceed
+  // max_slots: max_slots is a dispatcher input, not a constraint, and lowering it
+  // via PATCH requeues nothing. ProgressBar clamps the fill.
+  const usedSlots = tasks?.total ?? 0
 
   return (
     <div className={`flex flex-col gap-4 ${view.dimClass}`}>
@@ -103,11 +111,13 @@ export function WorkerDetailPage() {
           label="GPU"
           value={hasGpu ? `${worker.gpu_count} × ${worker.gpu_model}` : 'No GPU'}
         />
-        {/* `used` (active slots) is not on the Worker type yet: render "— / max" with an
-            empty progress bar until feature-2026-06-05-worker-detail-activity-panel lands. */}
-        <KpiStat label="Slots" value={`— / ${worker.max_slots}`} progress={{ used: 0, max: worker.max_slots }} />
+        <KpiStat
+          label="Slots"
+          value={`${usedSlots} / ${worker.max_slots}`}
+          progress={{ used: usedSlots, max: worker.max_slots }}
+        />
         {/* Backend-blocked: no per-worker activity aggregate exists yet.
-            Enabler: feature-2026-06-05-worker-detail-activity-panel. */}
+            Enabler: feature-2026-09-01-worker-activity-aggregate. */}
         <KpiStat label="Jobs today" value="—" sub="activity endpoint pending" />
       </div>
 
@@ -115,12 +125,8 @@ export function WorkerDetailPage() {
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {/* Left column. */}
         <div className="flex flex-col gap-3">
-          {/* Backend-blocked: no per-worker task feed endpoint exists yet.
-              Enabler: feature-2026-06-05-worker-detail-activity-panel. */}
-          <Panel title="Current tasks" meta="ACTIVITY ENDPOINT PENDING">
-            <div className="px-4 py-6 font-mono text-[11px] tracking-[0.04em] text-fg-dim">
-              no per-worker task feed yet
-            </div>
+          <Panel title="Current tasks" meta="GET /v1/workers/{id}/tasks">
+            <WorkerTasksPanel workerId={id} />
           </Panel>
 
           {isAdmin && (

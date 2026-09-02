@@ -40,12 +40,21 @@ function metrics(over: Record<string, unknown> = {}) {
   }
 }
 
-function renderDetail(isAdmin: boolean) {
+// Every test needs a handler for /v1/workers/:id/tasks: the page mounts
+// useWorkerTasks unconditionally (hooks run before the loading and error early
+// returns), and setup.ts fails on an unhandled request. Registered here rather
+// than per test so a test that does not care about tasks does not have to. The
+// fixture is a hand-written literal, not the app's WorkerTasksPage type.
+function renderDetail(
+  isAdmin: boolean,
+  tasks: Record<string, unknown> = { items: [], next_cursor: '', total: 0 },
+) {
   setToken('test-token')
   server.use(
     http.get('/v1/users/me', () =>
       HttpResponse.json({ id: 'u1', email: 'a@b.co', name: 'A', is_admin: isAdmin }),
     ),
+    http.get(`/v1/workers/${ID}/tasks`, () => HttpResponse.json(tasks)),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -75,10 +84,24 @@ test('renders the breadcrumb, worker name, and identity sub-line', async () => {
 test('renders the CPU/RAM and Slots KPI cards', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
-  renderDetail(false)
+  renderDetail(false, { items: [], next_cursor: '', total: 3 })
   expect(await screen.findByText('32c · 128G')).toBeInTheDocument()
-  // Slots: no active-slots field exists yet, so used renders as an em dash.
-  expect(screen.getByText('— / 4')).toBeInTheDocument()
+  // Slots is real now: used comes from the tasks page total, which is the same
+  // number the dispatcher treats as a used slot.
+  expect(await screen.findByText('3 / 4')).toBeInTheDocument()
+})
+
+test('the Slots progress bar clamps when used exceeds max_slots', async () => {
+  // max_slots is a dispatcher input, not a database constraint: lowering it via
+  // PATCH requeues nothing, so used > max is a reachable state and the fill must
+  // not render above 100%.
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false, { items: [], next_cursor: '', total: 6 })
+  expect(await screen.findByText('6 / 4')).toBeInTheDocument()
+  const fills = screen.getAllByTestId('progress-fill')
+  expect(fills).toHaveLength(1)
+  expect(fills[0].style.width).toBe('100%')
 })
 
 test('renders the Jobs-today placeholder KPI with no fabricated data', async () => {
@@ -90,13 +113,6 @@ test('renders the Jobs-today placeholder KPI with no fabricated data', async () 
   expect(screen.queryByText('47')).not.toBeInTheDocument()
 })
 
-test('renders the current-tasks placeholder note, not an empty table', async () => {
-  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
-  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
-  renderDetail(false)
-  expect(await screen.findByText('no per-worker task feed yet')).toBeInTheDocument()
-})
-
 test('the GPU KPI card renders no fabricated telemetry sub-string', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
@@ -106,29 +122,22 @@ test('the GPU KPI card renders no fabricated telemetry sub-string', async () => 
   expect(screen.queryByText(/nvidia-smi/i)).not.toBeInTheDocument()
 })
 
-test('the current-tasks panel contains no fabricated task rows', async () => {
-  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
-  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
-  renderDetail(false)
-  await screen.findByText('no per-worker task feed yet')
-  expect(screen.queryByRole('row')).not.toBeInTheDocument()
-  expect(screen.queryByRole('table')).not.toBeInTheDocument()
-})
-
 test('the reservations panel contains no fabricated reservation rows', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
   renderDetail(true)
   expect(await screen.findByText('no per-worker reservation lookup yet')).toBeInTheDocument()
-  // Page-global getAllByRole, but identified by accessible name rather than
-  // asserted absent: the admin Source workspaces table is a real table and with no
-  // workspaces it contributes exactly its header row. A fabricated reservations
-  // table would show up here as a second table or as extra rows.
+  // Identified by accessible name rather than asserted absent. Both real tables
+  // on an admin's page are empty here, so each contributes only its header row.
+  // A fabricated reservations table would show up as a third table or as an
+  // extra row.
   const tables = screen.getAllByRole('table')
-  expect(tables).toHaveLength(1)
-  expect(tables[0]).toHaveAccessibleName('Source workspaces')
-  expect(screen.getAllByRole('row')).toHaveLength(1)
+  expect(tables.map((el) => el.getAttribute('aria-label')).sort()).toEqual([
+    'Current tasks',
+    'Source workspaces',
+  ])
+  expect(screen.getAllByRole('row')).toHaveLength(2)
 })
 
 test('renders CPU/memory telemetry charts', async () => {
