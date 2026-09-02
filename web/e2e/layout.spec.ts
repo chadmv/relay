@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { readSeed } from './fixtures'
+import { closeNavPanel, expectDestinationsReachable } from './nav'
 import { surfaces } from './surfaces'
 
 // jsdom performs NO layout. Every offsetWidth, scrollWidth and
@@ -36,7 +37,15 @@ for (const width of WIDTHS) {
     test.use({ viewport: { width, height: 900 } })
 
     for (const s of surfaces()) {
-      test(`${s.name} does not overflow horizontally`, async ({ page }, testInfo) => {
+      // The title is conditional because the body is. /auth renders no shell, so
+      // there is nothing to navigate and no header to find - and a title claiming
+      // reachability over a body that does not assert it is the test-honesty
+      // problem this harness exists to avoid. The surface is still measured: it is
+      // the control that makes a header finding an attribution.
+      const title = s.anonymous
+        ? `${s.name} fits the viewport (no shell to navigate)`
+        : `${s.name} fits the viewport and keeps every destination reachable`
+      test(title, async ({ page }, testInfo) => {
         const seed = readSeed()
         if (s.anonymous) {
           // The stored storageState (playwright.config.ts) carries the seeded
@@ -94,6 +103,44 @@ for (const width of WIDTHS) {
         if (m.mainScroll !== null) {
           expect(m.mainScroll, `${path}: <main> overflows at ${width}px`).toBeLessThanOrEqual(m.docClient)
         }
+
+        // ORDERING IS LOAD-BEARING. Everything above measures, attaches and asserts
+        // the CLOSED state, which is the state the defect is about. Only now does
+        // anything open the menu.
+        if (s.anonymous) return
+
+        const opened = await expectDestinationsReachable(page)
+        if (!opened) return
+
+        // One extra screenshot on ONE surface: the header is the same component
+        // everywhere, and a near-identical PNG per surface would make the human pass
+        // worse rather than better. Artifact, not assertion.
+        if (s.name === 'jobs') {
+          const openShot = testInfo.outputPath(`${s.name}-${width}-nav-open.png`)
+          await page.screenshot({ path: openShot, fullPage: true })
+          await testInfo.attach(`screenshot-${s.name}-${width}-nav-open`, {
+            path: openShot,
+            contentType: 'image/png',
+          })
+        }
+
+        // The panel is a full-bleed dropdown pinned to both viewport edges, so it
+        // cannot overflow by construction - which is exactly the kind of claim that
+        // needs measuring rather than asserting in prose.
+        const open = await page.evaluate(() => ({
+          docScroll: document.documentElement.scrollWidth,
+          docClient: document.documentElement.clientWidth,
+        }))
+        await testInfo.attach(`widths-${s.name}-${width}-nav-open`, {
+          body: JSON.stringify({ surface: s.name, path, width, ...open }, null, 2),
+          contentType: 'application/json',
+        })
+        expect(
+          open.docScroll,
+          `${path}: document overflows at ${width}px with the nav panel open`,
+        ).toBeLessThanOrEqual(open.docClient)
+
+        await closeNavPanel(page)
       })
     }
   })

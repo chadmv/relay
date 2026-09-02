@@ -99,14 +99,21 @@ which is the one production runs.
 
 **A `scrollWidth <= clientWidth` gate cannot distinguish "fits" from "clipped
 behind a scroller".** `layout.spec.ts` only fails when content overflows past
-the document edge; an element that overflows into its OWN `overflow-x-auto`
-wrapper instead (a horizontally-scrollable nav with no keyboard affordance, for
-instance) reads as zero document overflow and passes. That gap is real, not
-hypothetical: it is the shape of `bug-2026-08-24-header-nav-is-clipped-at-narrow-viewports`
-in `docs/backlog/` - the shipped header nav is already an `overflow-x-auto`
-scroll container and never wraps, so no mutation was needed to demonstrate the
-gap. It was found by a human reviewing the screenshots from the harness's
-first CI run, with the full 51-test suite green throughout.
+the document edge; an element that overflows into its OWN horizontal scroll
+wrapper instead reads as zero document overflow and passes. The gap was found by
+a human reviewing the screenshots from the harness's first CI run, with the full
+suite green throughout - the header nav was clipped behind its own scroller at
+320 and 375, and no number in this harness could say so.
+
+That known instance is fixed by this change. `layout.spec.ts` now also asserts,
+per surface and per width, that every top-level destination is visible or
+reachable through a visible control (`nav.ts`), using `toBeInViewport` so that
+clipping by an ancestor scroller is caught rather than reported as visible, and
+`header-nav.spec.ts` pins the breakpoint by value.
+
+The GENERAL gap remains: no assertion here covers any other scroller, and other
+in-tree scroll wrappers are not audited by this harness. See
+`docs/backlog/idea-2026-08-24-layout-overflow-gate-cannot-see-inner-scrollers.md`.
 
 ## Rules
 

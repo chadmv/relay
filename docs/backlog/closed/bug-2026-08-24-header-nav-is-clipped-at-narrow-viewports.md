@@ -1,7 +1,9 @@
 ---
 title: At narrow viewports the header nav is clipped with no affordance, so Schedules and Admin look like they do not exist
 type: bug
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-24
 priority: medium
 source: first visual confirmation of the SPA at 320/375, from the browser harness's first CI run (2026-08-24 web-e2e-harness slice)
@@ -75,3 +77,6 @@ a control that is visible.
   invisible; this is the first instance it surfaced
 - [[bug-2026-08-12-web-narrow-viewport-horizontal-overflow]] - the slice that fixed the overflow and
   shipped the two design decisions nobody had seen rendered (closed)
+
+## Resolution
+Collapsed the four destinations into a disclosure below the md breakpoint: one DOM copy of the links always mounted inside the Main navigation landmark, a Menu toggle with aria-expanded and aria-controls in both states, a header-anchored full-bleed panel, and UserMenu's handler set for Escape, outside mousedown, focusout and modifier clicks. The Playwright reachability predicate uses toBeInViewport (isVisible cannot see clipping inside a scroller and was green against this very bug) plus a no-scroll assertion on the panel at 768 and 1280; measured RED on all thirteen shell surfaces against the original shell at 320 and 375, green after. An emitted-CSS A/B control attributes all sixteen breakpoint utilities to HoloShell.tsx alone. Touch dismissal rides on mousedown with no touch lane; filed separately.
