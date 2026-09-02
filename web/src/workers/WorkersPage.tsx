@@ -5,9 +5,10 @@ import { useWorkers } from './useWorkers'
 import { useWorkerStats } from './useWorkerStats'
 import { useRevokedWorkers } from './useRevokedWorkers'
 import { WorkersGrid } from './WorkersGrid'
-import { WorkersTable, type SortField } from './WorkersTable'
+import { WorkersTable } from './WorkersTable'
 import { RevokedWorkersTable } from './RevokedWorkersTable'
 import { computePageRange } from '../lib/pageRange'
+import { toggleSort } from '../lib/toggleSort'
 import { useCursorPager } from '../lib/useCursorPager'
 import type { Worker, WorkerSort, WorkerStats, WorkerStatus } from './api'
 
@@ -18,13 +19,6 @@ const VIEW_KEY = 'relay.workers.view'
 
 function loadView(): View {
   return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'grid'
-}
-
-function toggleSort(field: SortField, current: WorkerSort): WorkerSort {
-  if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as WorkerSort
-  }
-  return field
 }
 
 function countByStatus(workers: Worker[]): Record<WorkerStatus, number> {

@@ -3,6 +3,7 @@ import { Button } from '../../components/Button'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { toggleSort } from '../../lib/toggleSort'
 import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { CreateReservationForm } from './CreateReservationForm'
@@ -16,15 +17,6 @@ import type {
   ReservationSort,
   ReservationSortField,
 } from './api'
-
-// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx): clicking the
-// active column flips its direction, clicking another selects it ascending.
-function toggleSort(field: ReservationSortField, current: ReservationSort): ReservationSort {
-  if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as ReservationSort
-  }
-  return field
-}
 
 // M2 (review 2026-08-09): the delete confirm body used to be unconditional -
 // "returns its N worker(s) to the general dispatch pool" - regardless of whether the

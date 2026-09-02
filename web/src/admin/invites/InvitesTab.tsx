@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from '../../components/Button'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { toggleSort } from '../../lib/toggleSort'
 import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { TokenRevealDialog } from '../TokenRevealDialog'
@@ -10,25 +11,6 @@ import { InvitesTable } from './InvitesTable'
 import { useInviteActions } from './useInviteActions'
 import { useInvites } from './useInvites'
 import type { CreateInviteBody, InviteSort, InviteSortField } from './api'
-
-// Same shape as EnrollmentsTab's toggleSort (EnrollmentsTab.tsx): clicking
-// the active column flips its direction, clicking the other selects it ascending.
-//
-// FIFTH copy of this helper - WorkersPage, UsersTab, EnrollmentsTab and
-// ReservationsTab are the first four. (This note previously read FOURTH, an
-// off-by-one it inherited from the invites spec and plan, which were written before
-// the copy count moved.) Still not extracted: each copy is typed over its own
-// per-module sort union, so a shared version needs a generic plus a cast at every
-// call site - a type-level design question deliberately kept out of the cursor-pager
-// extraction, whose whole premise was that nothing changes.
-//
-// The pager half of this debt is discharged: see web/src/lib/useCursorPager.ts.
-function toggleSort(field: InviteSortField, current: InviteSort): InviteSort {
-  if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as InviteSort
-  }
-  return field
-}
 
 export function InvitesTab() {
   const [sort, setSort] = useState<InviteSort>('-created_at')
