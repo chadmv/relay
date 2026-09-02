@@ -189,4 +189,30 @@ test.describe('job-detail task selection @webkit', () => {
     await expect(after).toHaveText(target as string)
     await expect(table.locator('[aria-selected]')).toHaveCount(0)
   })
+
+  // COMPUTED STYLE, NOT A SCREENSHOT DIFF. getComputedStyle reads what the
+  // cascade actually resolved the Tailwind classes to on THIS element, in a
+  // real layout engine (jsdom does none) - it discriminates the two states
+  // that matter here directly: a positive-or-default outline-offset (painted
+  // outside the border box, where the ancestor's `truncate` clip removes it)
+  // from a negative one (painted inside, where the clip cannot reach it). A
+  // screenshot diff would also catch a change here, but could not name WHICH
+  // CSS property moved; this can.
+  test('the focused task control gets a negative-offset outline, not the (clipped) browser default', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const table = page.getByRole('table', { name: 'Tasks' })
+    const anyTaskButton = table.getByRole('button').first()
+    await anyTaskButton.focus()
+    await expect(anyTaskButton).toBeFocused()
+
+    const outline = await anyTaskButton.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { style: s.outlineStyle, offset: s.outlineOffset }
+    })
+    expect(outline.style, 'outline-style is none while focused - no ring at all').not.toBe('none')
+    expect(parseFloat(outline.offset), `outline-offset was "${outline.offset}", not negative`).toBeLessThan(0)
+  })
 })

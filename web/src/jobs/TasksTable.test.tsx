@@ -36,6 +36,18 @@ test("the selected task's control is marked aria-current and no row carries aria
   expect(container.querySelectorAll('[aria-selected]')).toHaveLength(0)
 })
 
+test('the name-cell button carries a negative-offset focus ring, not the browser default', () => {
+  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
+  const button = screen.getByRole('button', { name: 'frame-001' })
+  // The button fills its TableCell exactly (w-full) and both carry `truncate`
+  // (overflow: hidden), so a ring drawn OUTSIDE the border box is clipped by the
+  // ancestor to zero visible pixels. A negative outline-offset draws it INSIDE
+  // instead, which that clip cannot reach - proved in a real browser (not jsdom,
+  // which does no layout) by the job-detail keyboard describe in
+  // web/e2e/keyboard.spec.ts, reading getComputedStyle on the focused element.
+  expect(button).toHaveClass('focus-visible:outline-offset-[-2px]')
+})
+
 test('each task row exposes a button named for the task, and one activation selects once', async () => {
   const onSelect = vi.fn()
   render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
