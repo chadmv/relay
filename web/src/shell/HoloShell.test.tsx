@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, test } from 'vitest'
@@ -89,12 +90,41 @@ test('the nav is the only shrinkable scroll container in the header', async () =
   renderShell(true)
   await screen.findByRole('link', { name: 'Admin' })
 
-  const nav = screen.getByRole('navigation')
-  expect(nav).toHaveClass('min-w-0', 'overflow-x-auto')
-  // A flex item's automatic minimum size is its content, so the group holding the
-  // wordmark and the nav cannot shrink at all without this.
+  // The scroll container MOVED and the rule did not. The links now live in an
+  // always-mounted panel inside the <nav>, so the two pins that described the
+  // <nav> describe the panel, and the scroll is scoped to md and up because below
+  // it the panel is the dropdown and must not scroll. The whole shrink chain is
+  // asserted, not just the leaf: a flex item's automatic minimum size is its
+  // content, so panel, <nav> and the group holding the wordmark all need min-w-0
+  // or the header gets a content floor back.
+  const panel = screen.getByTestId('header-nav-panel')
+  expect(panel).toHaveClass('min-w-0', 'md:overflow-x-auto')
+  const nav = panel.parentElement as HTMLElement
+  expect(nav).toHaveAttribute('aria-label', 'Main')
+  expect(nav).toHaveClass('min-w-0')
   expect(nav.parentElement).toHaveClass('min-w-0')
 
   const header = screen.getByRole('banner')
   expect(header.className).not.toMatch(/\boverflow-/)
+})
+
+// AC1. The collapsed nav is an ARIA disclosure, and its panel is ALWAYS mounted -
+// which is why aria-controls is present in both states here and only while open in
+// UserMenu, whose panel is conditionally mounted. An IDREF to a node that does not
+// exist is an authoring error; an IDREF to a node that is merely display:none is
+// not. A reviewer "fixing" this into agreement with UserMenu would be wrong.
+test('the nav toggle exposes disclosure semantics in both states', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  const panel = screen.getByTestId('header-nav-panel')
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(toggle).toHaveAttribute('aria-controls', panel.id)
+  expect(panel.id).toBeTruthy()
+
+  await userEvent.click(toggle)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  expect(toggle).toHaveAttribute('aria-controls', panel.id)
 })
