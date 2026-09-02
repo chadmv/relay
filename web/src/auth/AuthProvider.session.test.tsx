@@ -110,9 +110,10 @@ test('applyUser replaces the user row in place with no refetch', async () => {
   await userEvent.click(screen.getByText('apply'))
 
   await waitFor(() => expect(screen.getByTestId('name')).toHaveTextContent('Mira Renamed'))
-  // The PATCH response IS the authoritative row (internal/api/users.go:429 and
-  // :410 both call toUserResponse), so there is nothing to confirm with a second
-  // round trip. A confirming refetch would be a second source of truth.
+  // The PATCH response IS the authoritative row (both paths in
+  // internal/api/users.go call toUserResponse), so there is nothing to confirm
+  // with a second round trip. A confirming refetch would be a second source of
+  // truth.
   expect(meCalls).toBe(1)
   expect(screen.getByTestId('status')).toHaveTextContent('authenticated')
 })

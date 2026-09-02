@@ -1422,13 +1422,15 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 #### Query-string validation
 
-These rules apply to **every paginated list endpoint** - each of the ones documented above as "Paginated" - not only to `GET /v1/jobs`. They are enforced once, where the query string is parsed, so a new parameter on any of them inherits all three without doing anything.
+These rules apply to **every paginated list endpoint** - each of the ones marked "Paginated" in the endpoint tables below - not only to `GET /v1/jobs`. The first two are enforced once, where the query string is parsed, so a new parameter on any endpoint inherits them without doing anything. The arity rule is not automatic: `parsePage` checks only `limit`, `sort` and `cursor`, and every other parameter has to be named in its own endpoint's check.
 
 | Condition | Status | Message |
 |-----------|--------|---------|
 | the query string is not decodable | `400` | `malformed query string` |
 | any value contains a NUL byte | `400` | `query string contains a NUL byte` |
 | a parameter the endpoint reads appears more than once | `400` | `query parameter "<name>" must appear at most once` |
+
+All three are decided before any endpoint-specific rule. On `GET /v1/jobs` the one exception runs earlier still: the sort-versus-filter `400` below outranks this endpoint's own arity check, so `?sort=name&status=a&status=b` answers with the sort message.
 
 The repeated-parameter rule covers `limit`, `sort` and `cursor` on every endpoint, plus whichever parameters that endpoint reads itself (`GET /v1/jobs` adds `status`, `scheduled_job_id`, `q`, `mine`, `since` and `until`; `GET /v1/users` adds `email` and `include_archived`). Taking the first value of a repeated parameter silently renders a list that looks authoritative.
 
@@ -1545,7 +1547,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. Paginated. |
+| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. Paginated. The `?email=` lookup validates `limit`, `sort` and `cursor` like any other list request, even though it returns a fixed one-row envelope. |
 | `POST` | `/v1/users` | Create a user (body: `email`, `password`, optional `name`, optional `is_admin`) |
 | `POST` | `/v1/users/password-reset` | Reset a user's password (body: `email`, `new_password`); revokes all of their sessions |
 | `PATCH` | `/v1/users/me` | Update own profile (body: `name`) |

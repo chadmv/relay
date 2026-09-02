@@ -141,7 +141,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
             SHOWING <span className="text-fg">{rangeText}</span>
             {' · '}/v1/users{filtering ? ' · EXACT EMAIL MATCH' : ' · CURSOR PAGINATED'}
           </span>
-          {/* The server returns before parsePage on the ?email= branch, so while a
+          {/* A filtered lookup answers with a fixed one-row envelope, so while a
               filter is active there is no page to walk. */}
           {!filtering && (
             <div className="flex gap-2">

@@ -31,7 +31,7 @@ export function IdentityTab() {
     mutationFn: (nextName: string) => updateMe(nextName),
     onSuccess: (updated, submittedName) => {
       // ONE owner of identity. The PATCH response is the same userResponse struct
-      // GET /v1/users/me returns (internal/api/users.go:429, :410), so it is
+      // GET /v1/users/me returns (internal/api/users.go, via toUserResponse), so it is
       // authoritative and needs no confirming round trip - and pushing it here
       // avoids a second ['me'] query that could disagree with the provider.
       applyUser(updated)
