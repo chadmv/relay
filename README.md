@@ -1514,7 +1514,57 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/v1/tasks/{id}` | Get a task |
-| `GET` | `/v1/tasks/{id}/logs` | Get task log entries |
+| `GET` | `/v1/tasks/{id}/logs` | Get task log entries. Paged by `seq`, forward or backward. See "Task log paging" below. |
+
+**Task log paging.** `GET /v1/tasks/{id}/logs` pages by `seq`, which is the log
+row's id. It is ordered but **not contiguous**: it comes from a table-wide
+sequence shared by every task, so neither `total` nor arithmetic on `seq` yields
+an offset.
+
+| Parameter | Default | Rule |
+|---|---|---|
+| `limit` | 50 | 1..200. Out of range or unparseable: 400 `limit must be 1..200`. |
+| `order` | `asc` | `asc` or `desc`, nothing else. Absent or empty is `asc`. Anything else: 400 `order must be asc or desc`. |
+| `since_seq` | 0 | Ascending only. **Exclusive**: returns rows with `seq > since_seq`. Negative or unparseable: 400. Sent with `order=desc`: 400. |
+| `before_seq` | none | Descending only. **Exclusive**: returns rows with `seq < before_seq`. Absent with `order=desc` means "the newest page". Less than 1 or unparseable: 400. Sent without `order=desc`: 400. |
+
+The response always carries all four keys, on every page including an empty one:
+
+```json
+{
+  "items":    [ { "seq": 41, "stream": "stdout", "content": "...", "created_at": "..." } ],
+  "next_seq": 0,
+  "prev_seq": 41,
+  "total":    94312
+}
+```
+
+- **`items` is always ASCENDING by `seq`, in both directions.** `order` selects
+  WHICH rows the page contains, not the order they appear in it. A descending
+  page is the newest `limit` rows, listed oldest-first.
+- `next_seq` is the ascending cursor: the last row's `seq`, or `0` when the page
+  was short (drained). It is always `0` in a descending response.
+- `prev_seq` is the descending cursor: the FIRST row's `seq` (the lowest), or `0`
+  when the page was short (the beginning of the log has been reached). It is
+  always `0` in an ascending response.
+- `total` counts the task's log ENTRIES, not lines. An entry is an arbitrary
+  chunk of output; one line can straddle two entries.
+
+Stop when the cursor for your direction is `0`. Do not feed a `0` cursor back:
+`before_seq=0` is a 400, not an empty page.
+
+Read the end of a long log with one request, then walk earlier:
+
+```
+GET /v1/tasks/{id}/logs?order=desc&limit=200
+  -> the newest 200 entries, ascending; prev_seq = the lowest seq in that page
+
+GET /v1/tasks/{id}/logs?order=desc&before_seq=<prev_seq>&limit=200
+  -> the 200 entries immediately older, ascending; repeat until prev_seq is 0
+```
+
+An unknown task is a `404` before any parameter is validated, so a malformed
+`?order=` on a task that does not exist returns `404`, not `400`.
 
 ### Workers
 
@@ -1763,6 +1813,18 @@ both surfaces. `seq` is a per-task total order.
    discarding any event whose `seq <= maxSeq`.
 
 Reversing steps 1 and 2 leaves a hole between the last page and the first event.
+
+**Opening at the tail instead.** Step 2 walks the whole history, which on a long
+log is many requests for output the reader did not ask for. To show the END of
+the log instead, keep step 1 exactly as it is - subscribe FIRST, the ordering is
+the whole guarantee - and replace step 2 with a single
+`GET /v1/tasks/{id}/logs?order=desc&limit=200`. The join stays gapless for the
+same reason: the subscription is live from `T0`, the tail page is read at
+`T1 > T0`, and every event with `seq <= maxSeq` is discarded, so a chunk written
+in that window is either in the page or above `maxSeq`. What this does NOT cover
+is everything OLDER than the page, which is the point - fetch it on demand with
+`?order=desc&before_seq=`, and say so in the UI rather than implying the log is
+complete. See "Task log paging" under the Tasks endpoints.
 
 **`dropped` and reconnection.** If a subscriber stops reading, the server closes
 its 64-slot buffer rather than blocking the producer, and writes one final
