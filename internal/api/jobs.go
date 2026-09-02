@@ -410,8 +410,6 @@ func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) 
 }
 
 // jobsListArityParams are the parameters handleListJobs reads itself.
-// parsePage covers limit, sort and cursor, so between them every parameter
-// this endpoint recognises is arity-checked.
 var jobsListArityParams = append([]string{"status", "scheduled_job_id"}, jobFilterParams...)
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -422,14 +420,14 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !rejectRepeatedParams(w, pp.Query, jobsListArityParams...) {
-		return
-	}
-
 	hasSort := pp.Query.Get("sort") != ""
 	hasFilter := pp.Query.Get("status") != "" || pp.Query.Get("scheduled_job_id") != ""
 	if hasSort && hasFilter {
 		writeError(w, http.StatusBadRequest, "sort not supported on filtered list variant; remove the filter or remove the sort")
+		return
+	}
+
+	if !rejectRepeatedParams(w, pp.Query, jobsListArityParams...) {
 		return
 	}
 
