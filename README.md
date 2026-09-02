@@ -1528,7 +1528,8 @@ an offset.
 | `since_seq` | 0 | Ascending only. **Exclusive**: returns rows with `seq > since_seq`. Negative or unparseable: 400. Sent with `order=desc`: 400. |
 | `before_seq` | none | Descending only. **Exclusive**: returns rows with `seq < before_seq`. Absent with `order=desc` means "the newest page". Less than 1 or unparseable: 400. Sent without `order=desc`: 400. |
 
-The response always carries all four keys, on every page including an empty one:
+The response always carries all four keys, on every page including an empty
+one. This is `?order=desc&limit=1` against a 94312-entry log:
 
 ```json
 {
@@ -1546,7 +1547,9 @@ The response always carries all four keys, on every page including an empty one:
   was short (drained). It is always `0` in a descending response.
 - `prev_seq` is the descending cursor: the FIRST row's `seq` (the lowest), or `0`
   when the page was short (the beginning of the log has been reached). It is
-  always `0` in an ascending response.
+  always `0` in an ascending response. A FULL final page still mints a
+  non-zero `prev_seq`, and the request that follows it returns an empty page
+  with `prev_seq` `0`: stop on a `0` cursor, never on a short page.
 - `total` counts the task's log ENTRIES, not lines. An entry is an arbitrary
   chunk of output; one line can straddle two entries.
 
@@ -1818,13 +1821,16 @@ Reversing steps 1 and 2 leaves a hole between the last page and the first event.
 log is many requests for output the reader did not ask for. To show the END of
 the log instead, keep step 1 exactly as it is - subscribe FIRST, the ordering is
 the whole guarantee - and replace step 2 with a single
-`GET /v1/tasks/{id}/logs?order=desc&limit=200`. The join stays gapless for the
-same reason: the subscription is live from `T0`, the tail page is read at
-`T1 > T0`, and every event with `seq <= maxSeq` is discarded, so a chunk written
-in that window is either in the page or above `maxSeq`. What this does NOT cover
-is everything OLDER than the page, which is the point - fetch it on demand with
-`?order=desc&before_seq=`, and say so in the UI rather than implying the log is
-complete. See "Task log paging" under the Tasks endpoints.
+`GET /v1/tasks/{id}/logs?order=desc&limit=200`. State the window this gives you
+precisely, because it is NOT the same guarantee as the forward walk: you hold
+the newest `limit` entries as of the read, plus everything appended after it.
+Anything older is reachable only through `?order=desc&before_seq=`. That
+includes chunks written between the subscribe and the read: if more than
+`limit` newer chunks land in that window, an earlier one is pushed below the
+page, and the `seq <= maxSeq` rule then discards it from the replay, so it is
+in neither. It is not lost - it is simply older history, fetched on demand like
+the rest. Say so in the UI rather than implying the log is complete. See "Task
+log paging" under the Tasks endpoints.
 
 **`dropped` and reconnection.** If a subscriber stops reading, the server closes
 its 64-slot buffer rather than blocking the producer, and writes one final

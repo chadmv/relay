@@ -114,9 +114,8 @@ func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-nil so an empty page marshals as [] rather than null; four clients
-	// decode this envelope expecting a list.
-	items := []logEntry{}
+	// Non-nil so an empty page marshals as [] rather than null.
+	items := make([]logEntry, 0, len(logs))
 	for _, l := range logs {
 		items = append(items, logEntry{
 			Seq:       l.ID,

@@ -722,7 +722,7 @@ type GetTaskLogsBeforePageParams struct {
 }
 
 // The row_limit rows immediately OLDER than before_seq (exclusive), returned
-// ASCENDING. Same backward index scan and same outer re-order as
+// ASCENDING. Same bounded backward scan and same outer re-order as
 // GetTaskLogsTailPage.
 //
 //	SELECT t.id, t.task_id, t.stream, t.content, t.created_at
@@ -825,11 +825,9 @@ type GetTaskLogsTailPageParams struct {
 }
 
 // The newest row_limit rows for a task, returned ASCENDING. The inner
-// ORDER BY id DESC is what makes this a bounded backward scan of
-// idx_task_logs_task_id_id instead of a full read of the task log; the outer
-// ORDER BY is the response contract, since items are ascending in both
-// directions. The subquery alias and the qualified columns are load-bearing
-// for sqlc's analyzer.
+// ORDER BY id DESC plus LIMIT is what bounds the scan instead of reading the
+// task's whole log; the outer ORDER BY is the response contract, since items
+// are ascending in both directions.
 //
 //	SELECT t.id, t.task_id, t.stream, t.content, t.created_at
 //	FROM (

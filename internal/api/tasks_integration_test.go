@@ -326,8 +326,7 @@ func TestTaskLogs_EnvelopeCarriesAllFourKeysOnAnEmptyLog(t *testing.T) {
 		require.Equal(t, http.StatusOK, rr.Code, "q=%s", query)
 
 		// The RAW key set, not a decoded struct: a decoded page cannot tell a
-		// present-and-zero key from a missing one, which is the distinction
-		// four clients depend on.
+		// present-and-zero key from a missing one.
 		var keys map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &keys), "q=%s", query)
 		got := make([]string, 0, len(keys))

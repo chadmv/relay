@@ -17,8 +17,7 @@ const (
 
 // taskLogQuery is the validated query string of GET /v1/tasks/{id}/logs.
 // Exactly one cursor is ever populated: SinceSeq ascending, BeforeSeq
-// descending. BeforeSeq 0 means "no cursor", which descending is the newest
-// page.
+// descending.
 type taskLogQuery struct {
 	Limit     int32
 	Order     taskLogOrder
@@ -27,10 +26,10 @@ type taskLogQuery struct {
 }
 
 // parseTaskLogQuery validates the query string and returns a 400-worthy error
-// whose message is written to the client verbatim. It is pure so the
-// cross-parameter matrix is testable without a database; the handler must keep
+// whose message is written to the client verbatim. The handler must keep
 // calling it AFTER its existence check, or the endpoint's 404-before-400
-// precedence inverts.
+// precedence inverts; TestTaskLogs_UnknownTaskIs404AheadOfParameterValidation
+// goes RED when it does.
 //
 // A cursor for the wrong direction is an error, never an ignored parameter:
 // ignoring it leaves a client looping over one page while believing it is
@@ -72,9 +71,8 @@ func parseTaskLogQuery(v url.Values) (taskLogQuery, error) {
 			return taskLogQuery{}, errors.New("before_seq requires order=desc")
 		}
 		n, err := strconv.ParseInt(s, 10, 64)
-		// 0 is rejected rather than served as an empty page: it is far more
-		// likely an unset client variable than an intention, and the contract
-		// says to stop when prev_seq is 0 rather than to send it back.
+		// 0 is rejected rather than served as an empty page: the contract says
+		// to stop when prev_seq is 0 rather than to send it back.
 		if err != nil || n < 1 {
 			return taskLogQuery{}, errors.New("before_seq must be a positive integer")
 		}
