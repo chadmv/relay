@@ -127,6 +127,12 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
       // control the user just clicked. Identical rule to the Escape path below,
       // opposite answer, purely because the event ordering differs. This is why the
       // DialogShell reasoning had to be re-derived here rather than copied.
+      // A press on NON-FOCUSABLE content is the uncovered case, accepted rather
+      // than overlooked: nothing takes focus, so it falls to <body> when the panel
+      // unmounts ('pressing non-focusable dead space...' in UserMenu.test.tsx pins
+      // that). A fix must fire after the browser has moved focus for this press
+      // and must still require focus to have been inside the panel, or it steals
+      // focus in the mouse-open case closeAndRestoreFocus guards against.
       if (ref.current && !ref.current.contains(e.target as Node)) close()
     }
     function onKey(e: KeyboardEvent) {

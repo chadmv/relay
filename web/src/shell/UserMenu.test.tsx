@@ -173,6 +173,21 @@ function renderMenuWithSibling(onLogout = vi.fn()) {
   return onLogout
 }
 
+// A NON-FOCUSABLE sibling AFTER the component. Pressing document.body is not the
+// same probe: user-event's focusElement blurs the active element when the click
+// target has no focusable ancestor (event/focus.js:12-23), so the two inputs take
+// different branches. renderMenu and renderMenuWithSibling above are shipped and
+// stay byte-identical.
+function renderMenuWithDeadSpace(onLogout = vi.fn()) {
+  render(
+    <MemoryRouter>
+      <UserMenu email="ada@studio.dev" onLogout={onLogout} />
+      <div data-testid="dead-space">dead space</div>
+    </MemoryRouter>
+  )
+  return onLogout
+}
+
 test('Escape returns focus to the toggle when focus was inside the panel', async () => {
   renderMenu()
   const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
@@ -248,6 +263,36 @@ test('an outside mousedown closes the menu and never touches the toggle focus', 
   expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
   expect(toggleFocus).not.toHaveBeenCalled()
   expect(document.activeElement).toBe(after)
+  toggleFocus.mockRestore()
+})
+
+// The accepted gap, pinned so that reversing the decision is a red light rather
+// than a silent flip: pressing non-focusable content closes the menu and lets
+// focus fall to <body>, because close() does not touch focus at all. Its partner
+// above pins the other half - a press on a FOCUSABLE control must also leave
+// toggle.focus uncalled - and both use the same spy, so neither can pass by
+// measuring something the other does not.
+//
+// The macrotask turn after the click is what makes this a pin: without it the
+// test stays green against a restore deferred with setTimeout or queueMicrotask
+// and its claim to pin the decision would be false. It does not flush a
+// requestAnimationFrame-deferred restore, which jsdom schedules on a timer.
+test('pressing non-focusable dead space closes the menu and leaves focus on <body>', async () => {
+  renderMenuWithDeadSpace()
+  const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  // Positive control: focus really is inside the panel, so this cannot pass
+  // against a menu that never opened.
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Profile' }))
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  await userEvent.click(screen.getByTestId('dead-space'))
+  await new Promise((r) => setTimeout(r, 0))
+
+  expect(screen.queryByTestId('user-menu-panel')).not.toBeInTheDocument()
+  expect(toggleFocus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(document.body)
   toggleFocus.mockRestore()
 })
 
