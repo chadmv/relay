@@ -18,6 +18,13 @@ interface UserMenuProps {
 // decision rather than an omission - see
 // docs/superpowers/specs/2026-08-13-usermenu-menu-roles.md.
 //
+// shell/HoloShell.tsx's collapsed nav is the sibling disclosure and carries a
+// transcription of this file's handler set - Escape, outside mousedown, focusout
+// containment, modifier-click guard, containment-checked focus restore. The two
+// differ deliberately: its panel is always mounted, so its aria-controls is present
+// in both states where this one's is set only while open. A change to the behaviour
+// here almost certainly belongs there too.
+//
 // WHY NO role="menu" / role="menuitem" / ARROW KEYS. Three of the four entries are
 // site navigation links, which is the case the menu role's own specification
 // excludes, and role="menuitem" on an <a href> REPLACES the link role: the item
