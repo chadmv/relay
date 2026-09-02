@@ -152,6 +152,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/workers/stats", auth(http.HandlerFunc(s.handleWorkerStats)))
 	mux.Handle("GET /v1/workers/{id}", auth(http.HandlerFunc(s.handleGetWorker)))
 	mux.Handle("GET /v1/workers/{id}/metrics", auth(http.HandlerFunc(s.handleGetWorkerMetrics)))
+	mux.Handle("GET /v1/workers/{id}/tasks", auth(http.HandlerFunc(s.handleListWorkerTasks)))
 	mux.Handle("PATCH /v1/workers/{id}", auth(admin(http.HandlerFunc(s.handleUpdateWorker))))
 
 	// Server-wide counters (admin-only). NOT auth-only like /v1/workers/stats:

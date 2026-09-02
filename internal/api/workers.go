@@ -431,6 +431,72 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleListWorkerTasks lists the tasks CURRENTLY ASSIGNED to one worker, newest
+// assignment first. Read-only, and auth-only rather than admin: both neighbouring
+// worker reads and every task read route are auth-only, and this is a projection
+// of task rows keyed by worker, so gating it on admin would be stricter than
+// either thing it is made of.
+//
+// The worker is read before the page is built, so an unknown id is a 404 rather
+// than an empty list - the same ordering handleGetTaskLogs uses. That read runs
+// before parsePage, so an unknown worker with a bad ?limit= is a 404, not a 400.
+// A revoked worker is returned by GetWorker and is therefore not a 404 here,
+// matching GET /v1/workers/{id}.
+//
+// items and total come from two statements, so under concurrent dispatch they
+// can disagree by one for an instant. Every list endpoint here has that property.
+func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid worker id")
+		return
+	}
+
+	if _, err := s.q.GetWorker(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	pp, ok := parsePage(w, r, WorkerTasksSortSpec)
+	if !ok {
+		return
+	}
+	// The SQL ordering is fixed, so an ascending request cannot be honored.
+	// Refuse it rather than silently returning descending rows, exactly as
+	// handleListRevokedWorkers does.
+	if pp.Sort != "-assigned_at" {
+		writeError(w, http.StatusBadRequest, "worker tasks can only be sorted by -assigned_at")
+		return
+	}
+
+	total, err := s.q.CountActiveTasksForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count worker tasks failed")
+		return
+	}
+
+	rows, err := s.q.ListActiveTasksForWorkerPage(ctx, store.ListActiveTasksForWorkerPageParams{
+		WorkerID:     id,
+		CursorSet:    pp.Cursor.Set,
+		CursorIsNull: pp.Cursor.IsNull,
+		CursorTs:     pp.CursorTs(),
+		CursorID:     pp.Cursor.ID,
+		PageLimit:    pp.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list worker tasks failed")
+		return
+	}
+
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerTaskResponse, workerTasksRowKey)
+	writeJSON(w, http.StatusOK, page[workerTaskResponse]{Items: items, NextCursor: next, Total: total})
+}
+
 func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {
 	// Note: this is a read-modify-write without a transaction.
 	// Concurrent PATCH requests could race; acceptable for v1 admin operations.
