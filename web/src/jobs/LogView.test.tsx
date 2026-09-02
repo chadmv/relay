@@ -78,9 +78,13 @@ test('renders the drop marker as a distinct in-stream row', () => {
   expect(screen.getByText(new RegExp(DROP_MARKER_TEXT))).toBeInTheDocument()
 })
 
+// earlierComplete is true throughout: historyTruncated is now the THIRD branch
+// of the notice, so without it the tail notice wins and this case never renders.
 test('shows the truncation notice with real counts, then the eviction notice', () => {
   const { rerender } = render(
-    <LogView stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, total: 94312 })} />,
+    <LogView
+      stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, earlierComplete: true, total: 94312 })}
+    />,
   )
   expect(
     screen.getByText(
@@ -92,9 +96,92 @@ test('shows the truncation notice with real counts, then the eviction notice', (
   ).toBeInTheDocument()
 
   rerender(
-    <LogView stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, evicted: true, total: 94312 })} />,
+    <LogView
+      stream={streamOf({
+        rows: [row(1, 'a')],
+        historyTruncated: true,
+        earlierComplete: true,
+        evicted: true,
+        total: 94312,
+      })}
+    />,
   )
   expect(screen.getByText('Earlier output not shown.')).toBeInTheDocument()
+})
+
+test('renders Load earlier only when the stream says a page is available', async () => {
+  const loadEarlier = vi.fn()
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: true, loadEarlier })} />,
+  )
+  await userEvent.click(screen.getByRole('button', { name: /load earlier/i }))
+  expect(loadEarlier).toHaveBeenCalledTimes(1)
+
+  // A complete log must not grow a control that implies missing history.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: false, earlierComplete: true })} />,
+  )
+  expect(screen.queryByRole('button', { name: /load earlier/i })).toBeNull()
+  expect(screen.queryByText(/loading earlier/i)).toBeNull()
+})
+
+test('shows a loading state instead of the button while a page is in flight', () => {
+  render(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: true, loadingEarlier: true })} />,
+  )
+  expect(screen.getByText(/loading earlier/i)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /load earlier/i })).toBeNull()
+})
+
+test('the tail notice keeps lines and entries as separate units, and eviction wins', () => {
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(1, 'a'), row(2, 'b')], earlierComplete: false, total: 94312 })} />,
+  )
+  expect(
+    screen.getByText(`Showing the most recent 2 lines of ${(94312).toLocaleString('en-US')} log entries.`),
+  ).toBeInTheDocument()
+
+  // Eviction resolves first: it is the stronger statement, and both can be true.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], earlierComplete: false, evicted: true, total: 94312 })} />,
+  )
+  expect(screen.getByText('Earlier output not shown.')).toBeInTheDocument()
+
+  // A complete log shows no notice and no control at all.
+  rerender(<LogView stream={streamOf({ rows: [row(1, 'a')], earlierComplete: true, total: 1 })} />)
+  expect(screen.queryByText(/showing the most recent/i)).toBeNull()
+  expect(screen.queryByText(/earlier output not shown/i)).toBeNull()
+})
+
+test('anchors the viewport when rows are added above it', () => {
+  const onPrependAdjust = vi.fn()
+  // jsdom reports every geometry as 0, so the pixel is untestable here and only
+  // the DECISION is asserted; preservedScrollTop owns the arithmetic.
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(10, 'tail')] })} onPrependAdjust={onPrependAdjust} />,
+  )
+  // Follow is on by default, so an append must not adjust anything.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(10, 'tail'), row(11, 'more')] })} onPrependAdjust={onPrependAdjust} />,
+  )
+  expect(onPrependAdjust).not.toHaveBeenCalled()
+
+  const box = screen.getByTestId('log-body')
+  Object.defineProperty(box, 'scrollHeight', { value: 2000, configurable: true })
+  Object.defineProperty(box, 'clientHeight', { value: 1000, configurable: true })
+  box.scrollTop = 0
+  act(() => {
+    box.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  // Prepended rows carry FRESH keys, so the first row's key changes; an append
+  // leaves it alone. That is the signal a prepend happened.
+  rerender(
+    <LogView
+      stream={streamOf({ rows: [row(12, 'earlier'), row(10, 'tail'), row(11, 'more')] })}
+      onPrependAdjust={onPrependAdjust}
+    />,
+  )
+  expect(onPrependAdjust).toHaveBeenCalledTimes(1)
 })
 
 test('shows loading, empty and error states', async () => {

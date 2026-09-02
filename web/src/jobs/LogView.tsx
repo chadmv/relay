@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '../components/Button'
 import { PillButton } from '../components/holo'
-import { MAX_LINES, shouldFollow, type LogRow } from './logBuffer'
+import { MAX_LINES, preservedScrollTop, shouldFollow, type LogRow } from './logBuffer'
 import type { LogStreamStatus, TaskLogStreamResult } from './useTaskLogStream'
 
 // Status vocabulary for the header strip, replacing LogTab's old
@@ -75,6 +75,8 @@ export interface LogViewProps {
   bodyClassName?: string
   /** Test seam: called whenever the view scrolls itself to the bottom. */
   onScrolledToBottom?: () => void
+  /** Test seam: called with the scrollTop applied after content was added above. */
+  onPrependAdjust?: (scrollTop: number) => void
 }
 
 export function LogView({
@@ -83,8 +85,10 @@ export function LogView({
   headerExtra,
   bodyClassName,
   onScrolledToBottom,
+  onPrependAdjust,
 }: LogViewProps) {
   const { rows, status, attempt, evicted, historyTruncated, total, errorMessage } = stream
+  const { canLoadEarlier, loadingEarlier, earlierComplete } = stream
   const [follow, setFollow] = useState(true)
   const boxRef = useRef<HTMLDivElement>(null)
 
@@ -103,19 +107,41 @@ export function LogView({
     if (el) setFollow(shouldFollow(el.scrollTop, el.scrollHeight, el.clientHeight))
   }
 
+  const prevFirstKey = useRef<number | undefined>(undefined)
+  const prevHeight = useRef(0)
+
+  useLayoutEffect(() => {
+    const firstKey = rows[0]?.key
+    const changedAtTop = prevFirstKey.current !== undefined && firstKey !== prevFirstKey.current
+    prevFirstKey.current = firstKey
+    const el = boxRef.current
+    if (!el) return
+    const before = prevHeight.current
+    prevHeight.current = el.scrollHeight
+    // Only when content changed ABOVE the viewport and the user is reading
+    // history rather than following the tail. A prepend gives its rows fresh
+    // keys, so the first row's key moving is the signal; an append never
+    // touches it.
+    if (!changedAtTop || follow) return
+    el.scrollTop = preservedScrollTop(el.scrollTop, before, el.scrollHeight)
+    onPrependAdjust?.(el.scrollTop)
+  }, [rows, follow, onPrependAdjust])
+
   const live = status === 'live'
 
-  // The page cap holds the OLDEST lines of a long history, which is the wrong end
-  // for a tail view (spec Decision 7). The notice says so with the real total,
-  // and switches once drop-oldest has converged the view to a true tail.
-  // MAX_LINES counts reassembled LINES; `total` counts server-side log ENTRIES
-  // - two different units (code review, L5) - so the notice names them
-  // separately rather than implying a single "N of M" count of the same thing.
-  const notice = evicted
-    ? 'Earlier output not shown.'
-    : historyTruncated
-      ? `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} log entries. Live output continues below.`
-      : null
+  // Four-way, first match wins. MAX_LINES and rows count reassembled LINES;
+  // `total` counts server-side log ENTRIES - two different units (code review,
+  // L5) - so each notice names them separately rather than implying a single
+  // "N of M" count of the same thing. The forward-walk notice can now only
+  // appear after a recovery that hit MAX_BACKFILL_PAGES, so it resolves last.
+  let notice: string | null = null
+  if (evicted) {
+    notice = 'Earlier output not shown.'
+  } else if (!earlierComplete && rows.length > 0) {
+    notice = `Showing the most recent ${rows.length.toLocaleString('en-US')} lines of ${total.toLocaleString('en-US')} log entries.`
+  } else if (historyTruncated) {
+    notice = `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} log entries. Live output continues below.`
+  }
 
   let body: ReactNode
   if (status === 'error') {
@@ -196,6 +222,15 @@ export function LogView({
           bodyClassName ?? 'max-h-[420px] overflow-auto'
         }`}
       >
+        {loadingEarlier ? (
+          <div className="pb-1 text-[11px] text-fg-mute">Loading earlier...</div>
+        ) : canLoadEarlier ? (
+          <div className="pb-1">
+            <PillButton className="!px-3 !py-1 !text-[10px]" onClick={stream.loadEarlier}>
+              Load earlier
+            </PillButton>
+          </div>
+        ) : null}
         {body}
       </div>
     </div>
