@@ -25,12 +25,27 @@ test('renders each task name and status', () => {
   expect(screen.getByText('running')).toBeInTheDocument()
 })
 
-test('marks the selected row with aria-selected', () => {
-  render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
-  const rows = screen.getAllByRole('row')
-  const selected = rows.filter((r) => r.getAttribute('aria-selected') === 'true')
-  expect(selected).toHaveLength(1)
-  expect(selected[0]).toHaveTextContent('denoise')
+test("the selected task's control is marked aria-current and no row carries aria-selected", () => {
+  const { container } = render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
+  // aria-selected is not surfaced under role="table": it advertised a selection
+  // model the container does not have. aria-current is valid on any element and is
+  // not conditional on the container role.
+  const current = container.querySelectorAll('[aria-current="true"]')
+  expect(current).toHaveLength(1)
+  expect(current[0]).toHaveAccessibleName('denoise')
+  expect(container.querySelectorAll('[aria-selected]')).toHaveLength(0)
+})
+
+test('each task row exposes a button named for the task, and one activation selects once', async () => {
+  const onSelect = vi.fn()
+  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
+  expect(screen.getByRole('button', { name: 'frame-001' })).toBeInTheDocument()
+  const denoise = screen.getByRole('button', { name: 'denoise' })
+  await userEvent.click(denoise)
+  // ONE handler. The row owns onClick; the button owns none, and the button's click
+  // bubbles to it. Giving the button its own handler makes this two.
+  expect(onSelect).toHaveBeenCalledTimes(1)
+  expect(onSelect).toHaveBeenCalledWith('t2')
 })
 
 test('clicking a row calls onSelect with its id (selection, not navigation)', async () => {

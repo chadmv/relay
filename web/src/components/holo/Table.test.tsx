@@ -163,23 +163,30 @@ test('a right-aligned header carries text-right, and a plain one carries no clas
   expect(screen.getByRole('columnheader', { name: 'A' })).not.toHaveAttribute('class')
 })
 
-test('TableRow renders as the element named by `as` and forwards arbitrary props', async () => {
+test('TableRow always renders a div and cannot have its role overridden', async () => {
   const onClick = vi.fn()
   render(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]}>
-      <TableRow as="button" type="button" aria-selected data-testid="row-btn" onClick={onClick}>
+      <TableRow data-testid="row-div" onClick={onClick}>
         <TableCell>x</TableCell>
       </TableRow>
     </Table>,
   )
-  const row = screen.getByTestId('row-btn')
-  expect(row.tagName).toBe('BUTTON')
+  const row = screen.getByTestId('row-div')
+  expect(row.tagName).toBe('DIV')
   expect(row).toHaveAttribute('role', 'row')
-  expect(row).toHaveAttribute('aria-selected', 'true')
-  expect(row).toHaveAttribute('type', 'button')
   await userEvent.click(row)
   expect(onClick).toHaveBeenCalledTimes(1)
 })
+
+// A TYPE-LEVEL PIN, checked by `tsc -b` and not by vitest. TableRow no longer
+// accepts an element-type escape hatch: `as="button"` produced a
+// <button role="row">, the arrangement that made aria-selected look supported on a
+// table row. Restore the prop and this directive has no error to suppress, so tsc
+// fails it as unused - the pin goes red exactly when the guard is lost. Precedent:
+// the SortFieldOf pin in web/src/lib/toggleSort.test.ts.
+// @ts-expect-error `as` is not a prop of TableRow
+void (<TableRow as="button">x</TableRow>)
 
 test('TableCell exposes role=cell and merges its className', () => {
   render(

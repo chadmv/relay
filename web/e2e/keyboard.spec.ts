@@ -137,3 +137,56 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
     })
   }
 })
+
+// WHY A BROWSER FOR THIS. The jsdom tests next to TasksTable prove the attributes
+// are in the DOM and prove nothing about whether a real Tab press reaches the
+// control or whether a real Enter activates it. Removing the row's element-type
+// override changed exactly that: the per-row tab stop moved from the row onto one
+// button inside the name cell, and only a real key press can say it survived.
+//
+// THE TAG IS LOAD-BEARING. playwright.config.ts gives the webkit project
+// grep: /@webkit/, so an untagged describe runs in chromium only. WebKit's
+// focusability semantics are the reason the other describe in this file exists, so
+// this one pays for the second engine too.
+//
+// DEFAULT VIEWPORT. The other describe's test.use is scoped to that describe; this
+// one deliberately measures the surface at the size the screenshots use.
+test.describe('job-detail task selection @webkit', () => {
+  test('Enter on a task control moves the sole aria-current mark, and no row is aria-selected', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const table = page.getByRole('table', { name: 'Tasks' })
+    await expect(table).toHaveCount(1)
+    // aria-selected is not surfaced under role="table". Asserted in the browser as
+    // well as in jsdom because this is the advertisement the lane exists to remove.
+    await expect(table.locator('[aria-selected]')).toHaveCount(0)
+
+    const current = table.locator('[aria-current="true"]')
+    await expect(current).toHaveCount(1)
+    const startingName = ((await current.textContent()) ?? '').trim()
+
+    // Target a task that is NOT already marked. A test that re-selects the default
+    // selection passes against a mark hardcoded onto the first row.
+    const target = ['alpha', 'beta', 'gamma'].find((n) => n !== startingName)
+    expect(target, `the marked task was ${JSON.stringify(startingName)}, which is not one of the seeded tasks`).toBeTruthy()
+    const targetButton = table.getByRole('button', { name: target as string, exact: true })
+    await expect(targetButton).toHaveCount(1)
+
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    let reached = false
+    for (let i = 0; i < 80 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await targetButton.evaluate((el) => el === document.activeElement)
+    }
+    expect(reached, `Tab never reached the "${target}" task control within 80 presses`).toBe(true)
+
+    await page.keyboard.press('Enter')
+
+    const after = table.locator('[aria-current="true"]')
+    await expect(after).toHaveCount(1)
+    await expect(after).toHaveText(target as string)
+    await expect(table.locator('[aria-selected]')).toHaveCount(0)
+  })
+})
