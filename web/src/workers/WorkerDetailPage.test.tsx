@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
@@ -39,6 +39,10 @@ function metrics(over: Record<string, unknown> = {}) {
     ...over,
   }
 }
+// Counts the requests the page makes to the tasks route. renderDetail owns the
+// only handler for it, so a test can assert the poll never started.
+let taskRequests = 0
+
 
 // Every test needs a handler for /v1/workers/:id/tasks: the page mounts
 // useWorkerTasks unconditionally (hooks run before the loading and error early
@@ -48,13 +52,17 @@ function metrics(over: Record<string, unknown> = {}) {
 function renderDetail(
   isAdmin: boolean,
   tasks: Record<string, unknown> = { items: [], next_cursor: '', total: 0 },
+  tasksStatus = 200,
 ) {
   setToken('test-token')
   server.use(
     http.get('/v1/users/me', () =>
       HttpResponse.json({ id: 'u1', email: 'a@b.co', name: 'A', is_admin: isAdmin }),
     ),
-    http.get(`/v1/workers/${ID}/tasks`, () => HttpResponse.json(tasks)),
+    http.get(`/v1/workers/${ID}/tasks`, () => {
+      taskRequests++
+      return HttpResponse.json(tasks, { status: tasksStatus })
+    }),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -70,7 +78,10 @@ function renderDetail(
   )
 }
 
-afterEach(() => clearToken())
+afterEach(() => {
+  clearToken()
+  taskRequests = 0
+})
 
 test('renders the breadcrumb, worker name, and identity sub-line', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
@@ -89,6 +100,44 @@ test('renders the CPU/RAM and Slots KPI cards', async () => {
   // Slots is real now: used comes from the tasks page total, which is the same
   // number the dispatcher treats as a used slot.
   expect(await screen.findByText('3 / 4')).toBeInTheDocument()
+  expect(taskRequests).toBeGreaterThan(0)
+})
+
+test('the Slots KPI shows no used count until the tasks page actually loads', async () => {
+  // A fabricated 0 reads as an idle worker. A failed tasks read says nothing
+  // about how many slots are in use, so the card falls back to the placeholder
+  // it carried before the endpoint existed.
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  renderDetail(false, { error: 'boom' }, 500)
+  // The worker heading is the positive control: the page rendered, so the Slots
+  // card was reached.
+  expect(await screen.findByText('render-rig-A')).toBeInTheDocument()
+  await waitFor(() => expect(taskRequests).toBeGreaterThan(0))
+  expect(screen.getByText('— / 4')).toBeInTheDocument()
+  expect(screen.queryByText('0 / 4')).not.toBeInTheDocument()
+})
+
+test('a 404 worker stops the tasks and metrics polls', async () => {
+  // Both hooks sit above the not-found early return, so without an enabled gate
+  // they keep polling a worker the page has already given up on.
+  let metricCalls = 0
+  server.use(
+    http.get(`/v1/workers/${ID}`, () =>
+      HttpResponse.json({ error: 'worker not found' }, { status: 404 }),
+    ),
+  )
+  server.use(
+    http.get(`/v1/workers/${ID}/metrics`, () => {
+      metricCalls++
+      return HttpResponse.json(metrics({ samples: [] }))
+    }),
+  )
+  renderDetail(false)
+  expect(await screen.findByText('Worker not found.')).toBeInTheDocument()
+  await new Promise((r) => setTimeout(r, 50))
+  expect(taskRequests).toBe(0)
+  expect(metricCalls).toBe(0)
 })
 
 test('the Slots progress bar clamps when used exceeds max_slots', async () => {

@@ -44,7 +44,7 @@ test('an injected interval drives the poll', async () => {
       return HttpResponse.json(EMPTY)
     }),
   )
-  renderHook(() => useWorkerTasks('w1', 20), { wrapper: makeWrapper(newClient()) })
+  renderHook(() => useWorkerTasks('w1', { intervalMs: 20 }), { wrapper: makeWrapper(newClient()) })
   await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
 })
 
@@ -52,9 +52,8 @@ test('polls on the DEFAULT 3s worker cadence, and not before', async () => {
   // Behavioral, not constant-reading: a test that imports an exported constant
   // proves nothing about what the hook passes to refetchInterval. The call
   // counter is its own positive control, so the equality below is about the
-  // interval and not about a dead instrument. 2.5s discriminates against both
-  // other cadences in this directory - useWorkerMetrics' 10s and
-  // useWorkerWorkspaces' 15s.
+  // interval and not about a dead instrument. 2.5s then 1s discriminates
+  // against any cadence above 3s.
   vi.useFakeTimers({ shouldAdvanceTime: true })
   let calls = 0
   server.use(

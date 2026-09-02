@@ -19,7 +19,7 @@ test('fetches metrics and refetches on the interval', async () => {
       return HttpResponse.json({ worker_id: 'w1', sample_interval_seconds: 10, samples: [] })
     }),
   )
-  const { result } = renderHook(() => useWorkerMetrics('w1', 20), { wrapper })
+  const { result } = renderHook(() => useWorkerMetrics('w1', { intervalMs: 20 }), { wrapper })
   await waitFor(() => expect(count).toBeGreaterThanOrEqual(1))
   await waitFor(() => expect(count).toBeGreaterThanOrEqual(2))
   await waitFor(() => expect(result.current.data?.sample_interval_seconds).toBe(10))

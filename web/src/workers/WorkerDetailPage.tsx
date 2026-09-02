@@ -27,8 +27,10 @@ export function WorkerDetailPage() {
   const { user } = useAuth()
   const isAdmin = Boolean(user?.is_admin)
   const { data: worker, error, isLoading, refetch } = useWorker(id)
-  const { data: metrics } = useWorkerMetrics(id)
-  const { data: tasks } = useWorkerTasks(id)
+  const { data: metrics } = useWorkerMetrics(id, { enabled: worker !== undefined })
+  const { data: tasks, isPlaceholderData: tasksArePlaceholder } = useWorkerTasks(id, {
+    enabled: worker !== undefined,
+  })
 
   if (isLoading && !worker) {
     return <GlassPanel className="h-40" />
@@ -73,7 +75,16 @@ export function WorkerDetailPage() {
   // derives when it decides whether the worker has capacity. It can exceed
   // max_slots: max_slots is a dispatcher input, not a constraint, and lowering it
   // via PATCH requeues nothing. ProgressBar clamps the fill.
+  //
+  // The FRACTION falls back to the placeholder unless a real page for THIS worker
+  // has arrived: a fabricated 0 reads as an idle worker while it runs a full load,
+  // and placeholder data belongs to the previously viewed worker, so pairing it
+  // with this worker's max_slots would state a fraction neither worker has.
   const usedSlots = tasks?.total ?? 0
+  const slotsValue =
+    tasks && !tasksArePlaceholder
+      ? `${tasks.total} / ${worker.max_slots}`
+      : `— / ${worker.max_slots}`
 
   return (
     <div className={`flex flex-col gap-4 ${view.dimClass}`}>
@@ -113,7 +124,7 @@ export function WorkerDetailPage() {
         />
         <KpiStat
           label="Slots"
-          value={`${usedSlots} / ${worker.max_slots}`}
+          value={slotsValue}
           progress={{ used: usedSlots, max: worker.max_slots }}
         />
         {/* Backend-blocked: no per-worker activity aggregate exists yet.
