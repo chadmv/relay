@@ -7,13 +7,13 @@ import (
 )
 
 // TestIsReservedIdentityNameFor_FoldsExactlyWhereOsExecFolds drives the goos
-// seam directly rather than through runtime.GOOS, because CI runs on Linux only
-// and the Windows half of the rule would otherwise be killed by no lane at all.
+// seam directly rather than through runtime.GOOS, so both halves of the rule are
+// exercised wherever the tests run.
 //
-// The long-s rows are the discriminating ones. os/exec folds a Windows key with
-// strings.ToLower; U+017F simple-folds with 'S' under strings.EqualFold but is
-// already lower-case under ToLower, so an EqualFold predicate deletes a spec key
-// that os/exec would have carried through as a distinct variable. It is written
+// The Windows long-s row is the discriminating one. os/exec folds a Windows key
+// with strings.ToLower; U+017F simple-folds with 'S' under strings.EqualFold but
+// is already lower-case under ToLower, so an EqualFold predicate deletes a spec
+// key that os/exec would have carried through as a distinct variable. It is written
 // as a Go escape: a raw non-ASCII byte in a source literal is unverifiable by
 // eye.
 func TestIsReservedIdentityNameFor_FoldsExactlyWhereOsExecFolds(t *testing.T) {

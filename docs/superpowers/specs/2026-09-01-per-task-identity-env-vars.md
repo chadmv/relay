@@ -299,6 +299,10 @@ through `(*url.URL).Redacted()`, which is the standard library's own answer to t
 (username preserved, password replaced). The single branch that echoes the raw trimmed value is the
 `url.Parse` failure in step 3, where there is no structured URL to redact; `url.Parse` almost never
 fails, so that branch is near-dead by construction, which is the right place for the one concession.
+(Implemented as a closed set of fixed messages that render nothing derived from the input, rather
+than the `Redacted()` mechanism described here: `Redacted()` substitutes only when the userinfo has
+a password, so a username-only userinfo - the shape of a pasted bearer token - prints verbatim, and
+the step 3 concession leaks too, because net/url builds its parse errors from slices of the input.)
 
 ### 5.4 The startup line
 

@@ -7,6 +7,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// parsePublicURLMessages is the closed set of rejections parsePublicURL may
+// emit, hand-written here rather than derived from the function so it is an
+// independent statement of the redaction rule and not a restatement of whatever
+// the code does. requireFixedRejection holds every rejection row in this file to
+// it, which is what makes a branch that starts interpolating anything derived
+// from the input go red without needing a sentinel that reaches that branch.
+func parsePublicURLMessages(name string) []string {
+	return []string{
+		name + " must not contain whitespace or control characters",
+		name + " is not a URL",
+		name + " is not a URL: it contains an invalid percent-escape",
+		name + " is not a URL: it contains a character that is not allowed in a host",
+		name + " must use the http or https scheme",
+		name + " is missing a host",
+		name + " must use an ASCII host; supply the punycode (xn--) form of an IDN",
+		name + " must not end in a bare colon; give a port or leave it off",
+		name + " has a port outside 1-65535",
+		name + " must not carry userinfo",
+		name + " must not carry a query or fragment; relay appends a path to it",
+	}
+}
+
+func requireFixedRejection(t *testing.T, name string, err error) {
+	t.Helper()
+	require.Error(t, err)
+	require.Contains(t, parsePublicURLMessages(name), err.Error(),
+		"a rejection may name the variable and the rule broken and nothing else; this message "+
+			"is not one of the fixed strings, so it carries something derived from the input")
+}
+
 // TestParsePublicURL_AcceptsAndNormalizes pins the normalization contract jobURL
 // and taskURL depend on: the returned base NEVER ends in a slash, which is why
 // those two joiners can concatenate with no separator logic at all.
@@ -76,8 +106,6 @@ func TestParsePublicURL_Rejects(t *testing.T) {
 		{"a port-only authority has no host", "https://:8080"},
 		{"a port-only authority with a path has no host either", "https://:8080/relay"},
 		{"port out of range", "https://relay.example.com:99999"},
-		// u.Port() is "" for a bare trailing colon, so the range check above
-		// never sees it and the dangling colon reaches every published link.
 		{"a bare trailing colon is not a port", "https://relay.example.com:"},
 		{"a bare trailing colon before a path", "https://relay.example.com:/relay"},
 		// The three characters browsers map to '.' before resolving a name. The
@@ -101,11 +129,42 @@ func TestParsePublicURL_Rejects(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parsePublicURL("RELAY_PUBLIC_URL", tc.raw)
-			require.Error(t, err)
+			requireFixedRejection(t, "RELAY_PUBLIC_URL", err)
 			require.Empty(t, got, "a rejected value must not also return a usable base")
 			require.Contains(t, err.Error(), "RELAY_PUBLIC_URL",
 				"the message must name the variable, or an operator cannot tell which setting "+
 					"stopped the boot")
+		})
+	}
+}
+
+// TestParsePublicURL_ClassifiesTheParseFailuresItCanName is what the closed set
+// above cannot do on its own: the set is satisfied by a branch that reports a
+// bad percent-escape as a bad host character, and by no classification at all.
+// Both inputs reach url.Parse - neither carries a control byte - and each
+// produces one of the two *url.Error inner types the switch names.
+func TestParsePublicURL_ClassifiesTheParseFailuresItCanName(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			"an invalid percent-escape",
+			"https://relay.example.com/%zz",
+			"RELAY_PUBLIC_URL is not a URL: it contains an invalid percent-escape",
+		},
+		{
+			"a character that is not allowed in a host",
+			"https://relay.example.com|x",
+			"RELAY_PUBLIC_URL is not a URL: it contains a character that is not allowed in a host",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePublicURL("RELAY_PUBLIC_URL", tc.raw)
+			require.Empty(t, got)
+			require.EqualError(t, err, tc.want)
 		})
 	}
 }
@@ -145,8 +204,8 @@ func TestParsePublicURL_RejectionDoesNotLeakAPassword(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := parsePublicURL("RELAY_PUBLIC_URL", tc.raw)
-			require.Error(t, err)
 			require.NotContains(t, err.Error(), "hunter2")
+			requireFixedRejection(t, "RELAY_PUBLIC_URL", err)
 		})
 	}
 }

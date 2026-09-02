@@ -35,8 +35,7 @@ func isReservedIdentityName(k string) bool {
 }
 
 // isReservedIdentityNameFor takes goos as a parameter so both halves of the case
-// rule are exercised wherever the tests run; CI is Linux-only, so a
-// runtime.GOOS-only predicate leaves the Windows half killed by no lane.
+// rule are exercised wherever the tests run.
 //
 // The fold is strings.ToLower and NOT strings.EqualFold, because os/exec's
 // duplicate-key rule lower-cases the key. The two disagree on U+017F, which
@@ -201,12 +200,12 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	// APPEND BELOW; TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL and
 	// its workspace twin are the legs that redden.
 	//
-	// A key CONTAINING "=" is refused outright rather than parsed: os/exec splits
-	// an entry at its first "=", so such a key is a different string to the
-	// reserved-name predicate and the same variable to the child.
+	// A key CONTAINING "=" is refused outright rather than parsed: an entry is
+	// split at a "=", so the name the child resolves need not be the string the
+	// reserved-name predicate was shown - the key "RELAY_JOB_URL=x" reaches the
+	// child as RELAY_JOB_URL.
 	// TestRunner_ASpecEnvKeyContainingAnEqualsCannotSupplyAReservedName and its
-	// workspace twin pin it. A key containing NUL needs no guard here - os/exec
-	// refuses to Start at all rather than splitting the entry.
+	// workspace twin pin it.
 	//
 	// The append has to come after os.Environ(), which is inherited unfiltered,
 	// or relay's own value loses to whatever the agent operator exported;

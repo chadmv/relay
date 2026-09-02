@@ -513,7 +513,7 @@ The table above describes the **agent's own** process environment. This section 
 | `RELAY_JOB_URL` | `<RELAY_PUBLIC_URL>/jobs/<job-id>` | `RELAY_PUBLIC_URL` is set on the **server** |
 | `RELAY_TASK_URL` | `<RELAY_PUBLIC_URL>/jobs/<job-id>/tasks/<task-id>` | `RELAY_PUBLIC_URL` is set on the **server** |
 
-**A job spec cannot override these four names.** The agent strips them from the spec's `env` map and from the workspace provider's environment before merging either, then appends its own. Stripping rather than merely appending last is what makes the guarantee unconditional: with no `RELAY_PUBLIC_URL` set there is no coordinator value to append, so a spec's `RELAY_JOB_URL` would otherwise be the only occurrence and win by default. That is the point: a step that posts `$RELAY_JOB_URL` into chat is posting a link other people will click, and the guarantee is what makes the value worth trusting. It covers **exactly these four names** and nothing that merely resembles them.
+**A job spec cannot override these four names**, and neither can a workspace provider. The guarantee holds whether or not `RELAY_PUBLIC_URL` is set on the server. That is the point: a step that posts `$RELAY_JOB_URL` into chat is posting a link other people will click, and the guarantee is what makes the value worth trusting.
 
 **Never set-and-empty.** Each name is either absent or carries a non-empty value, so one check is enough and there is no second case for "set but blank":
 

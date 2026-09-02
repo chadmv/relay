@@ -20,10 +20,10 @@ import (
 // and log.Fatalf writes to a stderr that is usually shipped somewhere with
 // broader read access than the environment variable had. The operator already
 // has the value, so a rejection only has to name the variable and the rule it
-// broke. Every attempt at rendering it safely instead has had a hole:
-// (*url.URL).Redacted() substitutes nothing for a userinfo with no password,
-// and net/url's own errors embed slices of the input.
-// TestParsePublicURL_RejectionDoesNotLeakAPassword pins it.
+// broke. TestParsePublicURL_Rejects and
+// TestParsePublicURL_RejectionDoesNotLeakAPassword hold every rejection to a
+// fixed set of messages, so a branch that starts interpolating goes red whether
+// or not a row happens to carry a sentinel into it.
 func parsePublicURL(name, raw string) (string, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
