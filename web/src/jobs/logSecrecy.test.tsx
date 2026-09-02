@@ -1,4 +1,5 @@
-import { render, renderHook, waitFor } from '@testing-library/react'
+import { act, render, renderHook, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
@@ -86,25 +87,50 @@ test('no console method ever receives log content, across mount-stream-drop-unmo
 
   const fake = fakeSseServer()
   server.use(
-    http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      if (new URL(request.url).searchParams.has('before_seq')) {
+        return HttpResponse.json({
+          items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
+          next_seq: 0,
+          prev_seq: 0,
+          total: 2,
+        })
+      }
+      return HttpResponse.json({
+        items: [{ seq: 9, stream: 'stdout', content: 'tail\n', created_at: '2026-08-09T00:00:00Z' }],
+        next_seq: 0,
+        prev_seq: 9,
+        total: 2,
+      })
+    }),
   )
   const { result, unmount } = renderHook(() =>
     useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
   )
   await waitFor(() => expect(result.current.status).toBe('live'))
 
+  await act(async () => {
+    result.current.loadEarlier()
+  })
+  // Positive control: the prepended content really did flow through the code
+  // path under test.
+  await waitFor(() => expect(result.current.rows.some((r) => r.text === SECRET)).toBe(true))
+
   const conn = fake.latest()
+  // Above the tail page's seq, and distinct text: a live frame at or below
+  // maxSeq is deduped away, and reusing SECRET verbatim would let the prepend's
+  // own row satisfy this positive control.
   conn.emit('task_log', {
     task_id: 't1',
     job_id: 'j1',
-    seq: 1,
+    seq: 10,
     stream: 'stdout',
-    content: `${SECRET}\n`,
+    content: `${SECRET}-live\n`,
     created_at: '2026-08-09T00:00:00Z',
   })
   // Positive control: the content really did flow through the code path under
   // test. Without this, a broken transport would make the absence assertion pass.
-  await waitFor(() => expect(result.current.rows.some((r) => r.text === SECRET)).toBe(true))
+  await waitFor(() => expect(result.current.rows.some((r) => r.text === `${SECRET}-live`)).toBe(true))
 
   conn.emit('dropped', { reason: 'slow_consumer' })
   conn.close()
@@ -123,14 +149,27 @@ test('no console method receives log content rendered through LogTab', async () 
   const SECRET = 'P4PASSWD=hunter2-via-logtab'
   const spies = spyOnConsole()
 
+  // prev_seq non-zero on the tail page, so the Load earlier control renders and
+  // a click drives the prepend, the loading row and the scroll-anchor layout
+  // effect inside the assertion below - none of which the hook-only test above
+  // can reach, since it mounts no component.
   server.use(
-    http.get('/v1/tasks/t1/logs', () =>
-      HttpResponse.json({
-        items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      if (new URL(request.url).searchParams.has('before_seq')) {
+        return HttpResponse.json({
+          items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
+          next_seq: 0,
+          prev_seq: 0,
+          total: 2,
+        })
+      }
+      return HttpResponse.json({
+        items: [{ seq: 9, stream: 'stdout', content: 'tail\n', created_at: '2026-08-09T00:00:00Z' }],
         next_seq: 0,
-        total: 1,
-      }),
-    ),
+        prev_seq: 9,
+        total: 2,
+      })
+    }),
   )
   server.use(http.get('/v1/events', () => openSseResponse()))
 
@@ -139,13 +178,14 @@ test('no console method receives log content rendered through LogTab', async () 
     return <LogTab jobId="j1" taskId="t1" stream={stream} />
   }
 
-  const { findByText, unmount } = render(
+  const { findByText, findByRole, unmount } = render(
     <MemoryRouter>
       <Harness />
     </MemoryRouter>,
   )
+  await userEvent.click(await findByRole('button', { name: /load earlier/i }))
   // Positive control: the secret really did reach the DOM through the full
-  // hook -> LogTab -> LogView -> LogRowView pipeline.
+  // hook -> LogTab -> LogView -> LogRowView pipeline, on the prepend path.
   expect(await findByText(SECRET)).toBeInTheDocument()
   unmount()
 
@@ -200,6 +240,7 @@ test('no console method receives log content rendered through the full-screen Ta
       HttpResponse.json({
         items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
         next_seq: 0,
+        prev_seq: 0,
         total: 1,
       }),
     ),

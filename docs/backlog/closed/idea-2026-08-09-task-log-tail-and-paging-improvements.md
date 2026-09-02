@@ -1,7 +1,9 @@
 ---
 title: Task-log history has no tail fetch, no virtualization, and no export
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: Spec phase of the task-log view iteration (2026-08-09)
@@ -67,3 +69,6 @@ Also noted during the same spec work and deliberately not filed as separate item
 rendering (the client currently strips ANSI rather than interpreting it) and in-log search. Both are
 presentation polish that only becomes worthwhile once long logs are actually navigable, so they
 belong behind (1) if they are wanted at all.
+
+## Resolution
+Piece 1 shipped: GET /v1/tasks/{id}/logs gained order=desc (allow-listed), before_seq as the descending cursor and a prev_seq response field, with items kept ascending within a page in both directions, a pure parseTaskLogQuery so the validation matrix is testable in the default lane, two bounded store statements and no migration (the existing task_logs index covers the backward scan). The SPA log view opens at the tail in one request, subscribes, backfills, and offers Load earlier with an exact seam join and a predictive line-cap guard. Pieces 2 and 3 are re-filed as idea-2026-09-02-task-log-row-virtualization and idea-2026-09-02-task-log-export-endpoint (the latter carries the byte-exactness foreclosure verbatim). The spec refuted the page-envelope premise this endpoint was assumed to share: it never used buildPage and four clients depend on the seq envelope, which stays.

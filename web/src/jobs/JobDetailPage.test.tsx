@@ -98,7 +98,7 @@ test('does NOT hit the log endpoint or open a stream while the Spec tab is activ
   server.use(
     http.get('/v1/tasks/:tid/logs', () => {
       logCount++
-      return HttpResponse.json({ items: [], next_seq: 0, total: 0 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })
     }),
   )
   server.use(
@@ -124,6 +124,7 @@ test('switching to the Log tab subscribes once, backfills once, and renders line
       return HttpResponse.json({
         items: [{ seq: 1, stream: 'stdout', content: 'rendering\n', created_at: '2026-07-01T00:00:00Z' }],
         next_seq: 0,
+        prev_seq: 0,
         total: 1,
       })
     }),
@@ -237,6 +238,7 @@ test('the Log tab shows LIVE for a running task and HISTORY for a terminal one',
       HttpResponse.json({
         items: [{ seq: 1, stream: 'stdout', content: 'rendering\n', created_at: '2026-07-01T00:00:00Z' }],
         next_seq: 0,
+        prev_seq: 0,
         total: 1,
       }),
     ),

@@ -20,7 +20,7 @@ type getTaskLogsArgs struct {
 func (s *Server) registerTaskLogs() {
 	addTool(s, &mcpsdk.Tool{
 		Name:        "relay_get_task_logs",
-		Description: "Fetch stdout/stderr log lines for a relay task, with optional sequence-number pagination.",
+		Description: "Fetch stdout/stderr log lines for a relay task, with optional sequence-number pagination. This tool pages forward only, so prev_seq in the response is always 0 and does not mean there is no earlier history.",
 	}, s.callGetTaskLogs)
 }
 

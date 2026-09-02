@@ -20,6 +20,10 @@ function streamOf(over: Partial<TaskLogStreamResult> = {}): TaskLogStreamResult 
     total: 2,
     errorMessage: '',
     reconnect: () => {},
+    canLoadEarlier: false,
+    loadingEarlier: false,
+    earlierComplete: false,
+    loadEarlier: () => {},
     ...over,
   }
 }

@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"relay/internal/store"
@@ -78,31 +77,32 @@ func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := int32(50)
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, perr := strconv.Atoi(v)
-		if perr != nil || n < 1 || n > 200 {
-			writeError(w, http.StatusBadRequest, "limit must be 1..200")
-			return
-		}
-		limit = int32(n)
+	q, qerr := parseTaskLogQuery(r.URL.Query())
+	if qerr != nil {
+		writeError(w, http.StatusBadRequest, qerr.Error())
+		return
 	}
 
-	var sinceSeq int64
-	if v := r.URL.Query().Get("since_seq"); v != "" {
-		n, perr := strconv.ParseInt(v, 10, 64)
-		if perr != nil || n < 0 {
-			writeError(w, http.StatusBadRequest, "since_seq must be a non-negative integer")
-			return
-		}
-		sinceSeq = n
+	var logs []store.TaskLog
+	switch {
+	case q.Order == taskLogOrderDesc && q.BeforeSeq > 0:
+		logs, err = s.q.GetTaskLogsBeforePage(ctx, store.GetTaskLogsBeforePageParams{
+			TaskID:    id,
+			BeforeSeq: q.BeforeSeq,
+			RowLimit:  q.Limit,
+		})
+	case q.Order == taskLogOrderDesc:
+		logs, err = s.q.GetTaskLogsTailPage(ctx, store.GetTaskLogsTailPageParams{
+			TaskID:   id,
+			RowLimit: q.Limit,
+		})
+	default:
+		logs, err = s.q.GetTaskLogsPage(ctx, store.GetTaskLogsPageParams{
+			TaskID: id,
+			ID:     q.SinceSeq,
+			Limit:  q.Limit,
+		})
 	}
-
-	logs, err := s.q.GetTaskLogsPage(ctx, store.GetTaskLogsPageParams{
-		TaskID: id,
-		ID:     sinceSeq,
-		Limit:  limit,
-	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "get task logs failed")
 		return
@@ -114,24 +114,33 @@ func (s *Server) handleGetTaskLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := make([]logEntry, len(logs))
-	var nextSeq int64
-	for i, l := range logs {
-		items[i] = logEntry{
+	// Non-nil so an empty page marshals as [] rather than null.
+	items := make([]logEntry, 0, len(logs))
+	for _, l := range logs {
+		items = append(items, logEntry{
 			Seq:       l.ID,
 			Stream:    l.Stream,
 			Content:   l.Content,
 			CreatedAt: l.CreatedAt.Time,
-		}
-		nextSeq = l.ID
+		})
 	}
-	if int32(len(items)) < limit {
-		nextSeq = 0 // drained
+
+	// Each direction populates exactly one cursor and zeroes the other, so a
+	// direction-confused client stops immediately instead of looping. A short
+	// page has drained that direction, and 0 is never a valid seq.
+	var nextSeq, prevSeq int64
+	if len(items) > 0 && int32(len(items)) >= q.Limit {
+		if q.Order == taskLogOrderDesc {
+			prevSeq = items[0].Seq
+		} else {
+			nextSeq = items[len(items)-1].Seq
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":    items,
 		"next_seq": nextSeq,
+		"prev_seq": prevSeq,
 		"total":    total,
 	})
 }

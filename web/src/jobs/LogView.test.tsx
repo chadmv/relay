@@ -2,7 +2,7 @@ import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test, vi } from 'vitest'
 import { LogView } from './LogView'
-import { DROP_MARKER_TEXT, MAX_LINES, type LogRow } from './logBuffer'
+import { DROP_MARKER_TEXT, type LogRow } from './logBuffer'
 import type { TaskLogStreamResult } from './useTaskLogStream'
 
 function row(key: number, text: string, over: Partial<LogRow> = {}): LogRow {
@@ -20,6 +20,10 @@ function streamOf(over: Partial<TaskLogStreamResult> = {}): TaskLogStreamResult 
     total: 0,
     errorMessage: '',
     reconnect: () => {},
+    canLoadEarlier: false,
+    loadingEarlier: false,
+    earlierComplete: false,
+    loadEarlier: () => {},
     ...over,
   }
 }
@@ -74,23 +78,133 @@ test('renders the drop marker as a distinct in-stream row', () => {
   expect(screen.getByText(new RegExp(DROP_MARKER_TEXT))).toBeInTheDocument()
 })
 
-test('shows the truncation notice with real counts, then the eviction notice', () => {
+test('shows the truncation notice, then the eviction notice', () => {
   const { rerender } = render(
-    <LogView stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, total: 94312 })} />,
+    <LogView
+      stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, earlierComplete: true, total: 94312 })}
+    />,
   )
+  // No line cap in the text: it counts reassembled lines while total counts
+  // server entries, and after a tail open the retained lines are not "the
+  // first" of anything.
   expect(
     screen.getByText(
-      // MAX_LINES counts reassembled LINES; total counts server-side log
-      // ENTRIES - two different units (code review, L5). Comparing "2,000 of
-      // 94,312 lines" implies they are the same unit, which they are not.
-      `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${(94312).toLocaleString('en-US')} log entries. Live output continues below.`,
+      `Recovered output is incomplete: paging stopped early. ${(94312).toLocaleString('en-US')} log entries in total.`,
     ),
   ).toBeInTheDocument()
 
   rerender(
-    <LogView stream={streamOf({ rows: [row(1, 'a')], historyTruncated: true, evicted: true, total: 94312 })} />,
+    <LogView
+      stream={streamOf({
+        rows: [row(1, 'a')],
+        historyTruncated: true,
+        earlierComplete: true,
+        evicted: true,
+        total: 94312,
+      })}
+    />,
   )
   expect(screen.getByText('Earlier output not shown.')).toBeInTheDocument()
+})
+
+// The triple the old ordering hid: a recovery that hit MAX_BACKFILL_PAGES on a
+// log that still has earlier history, so earlierComplete is false. A tail notice
+// resolving first swallows the ONLY notice that says there is a hole in the
+// MIDDLE, and substitutes a weaker, different claim about the beginning.
+test('truncation outranks the tail notice when both are true', () => {
+  render(
+    <LogView
+      stream={streamOf({
+        rows: [row(1, 'a')],
+        historyTruncated: true,
+        earlierComplete: false,
+        evicted: false,
+        total: 94312,
+      })}
+    />,
+  )
+  expect(screen.getByText(/recovered output is incomplete/i)).toBeInTheDocument()
+  expect(screen.queryByText(/earlier output is not loaded/i)).toBeNull()
+})
+
+test('renders Load earlier only when the stream says a page is available', async () => {
+  const loadEarlier = vi.fn()
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: true, loadEarlier })} />,
+  )
+  await userEvent.click(screen.getByRole('button', { name: /load earlier/i }))
+  expect(loadEarlier).toHaveBeenCalledTimes(1)
+
+  // A complete log must not grow a control that implies missing history.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: false, earlierComplete: true })} />,
+  )
+  expect(screen.queryByRole('button', { name: /load earlier/i })).toBeNull()
+  expect(screen.queryByText(/loading earlier/i)).toBeNull()
+})
+
+test('shows a loading state instead of the button while a page is in flight', () => {
+  render(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], canLoadEarlier: true, loadingEarlier: true })} />,
+  )
+  expect(screen.getByText(/loading earlier/i)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /load earlier/i })).toBeNull()
+})
+
+test('the tail notice counts no lines, and eviction wins', () => {
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(1, 'a'), row(2, 'b')], earlierComplete: false, total: 94312 })} />,
+  )
+  // No count of what is on screen. Retained lines grow with every live frame
+  // while total is written only by a page fetch, so any "N lines of T entries"
+  // drifts into nonsense on a busy task - and rows carries markers and partials
+  // that are not log lines at all.
+  expect(
+    screen.getByText(`Earlier output is not loaded. ${(94312).toLocaleString('en-US')} log entries in total.`),
+  ).toBeInTheDocument()
+  expect(screen.queryByText(/2 lines/)).toBeNull()
+
+  // Eviction resolves first: it is the stronger statement, and both can be true.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(1, 'a')], earlierComplete: false, evicted: true, total: 94312 })} />,
+  )
+  expect(screen.getByText('Earlier output not shown.')).toBeInTheDocument()
+
+  // A complete log shows no notice and no control at all.
+  rerender(<LogView stream={streamOf({ rows: [row(1, 'a')], earlierComplete: true, total: 1 })} />)
+  expect(screen.queryByText(/earlier output is not loaded/i)).toBeNull()
+  expect(screen.queryByText(/earlier output not shown/i)).toBeNull()
+})
+
+test('anchors the viewport when rows are added above it', () => {
+  const onPrependAdjust = vi.fn()
+  // jsdom reports every geometry as 0, so the pixel is untestable here and only
+  // the DECISION is asserted; preservedScrollTop owns the arithmetic.
+  const { rerender } = render(
+    <LogView stream={streamOf({ rows: [row(10, 'tail')] })} onPrependAdjust={onPrependAdjust} />,
+  )
+  // Follow is on by default, so an append must not adjust anything.
+  rerender(
+    <LogView stream={streamOf({ rows: [row(10, 'tail'), row(11, 'more')] })} onPrependAdjust={onPrependAdjust} />,
+  )
+  expect(onPrependAdjust).not.toHaveBeenCalled()
+
+  const box = screen.getByTestId('log-body')
+  Object.defineProperty(box, 'scrollHeight', { value: 2000, configurable: true })
+  Object.defineProperty(box, 'clientHeight', { value: 1000, configurable: true })
+  box.scrollTop = 0
+  act(() => {
+    box.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  // Prepended rows carry FRESH keys, so the first row's key changes; an append
+  // leaves it alone. That is the signal a prepend happened.
+  rerender(
+    <LogView
+      stream={streamOf({ rows: [row(12, 'earlier'), row(10, 'tail'), row(11, 'more')] })}
+      onPrependAdjust={onPrependAdjust}
+    />,
+  )
+  expect(onPrependAdjust).toHaveBeenCalledTimes(1)
 })
 
 test('shows loading, empty and error states', async () => {

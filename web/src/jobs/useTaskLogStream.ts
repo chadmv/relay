@@ -3,6 +3,7 @@ import { ApiError } from '../lib/api'
 import {
   BACKFILL_PAGE_SIZE,
   getTaskLogs,
+  getTaskLogsDesc,
   streamTaskLog,
   type TaskLogEvent,
   type TaskLogPage,
@@ -12,7 +13,9 @@ import {
   createLogState,
   finalizePartials,
   markDropped,
+  prependEntries,
   visibleRows,
+  MAX_LINES,
   type LogChunk,
   type LogRow,
   type LogState,
@@ -56,6 +59,12 @@ export interface TaskLogStreamResult {
   total: number
   errorMessage: string
   reconnect: () => void
+  /** prev_seq was 0: the window reaches the beginning of the log. */
+  earlierComplete: boolean
+  /** A click will fetch one page of older history. */
+  canLoadEarlier: boolean
+  loadingEarlier: boolean
+  loadEarlier: () => void
 }
 
 export interface UseTaskLogStreamOptions {
@@ -90,10 +99,19 @@ export function useTaskLogStream(
   const [historyTruncated, setHistoryTruncated] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
   const [manualRetry, setManualRetry] = useState(0)
+  const [earlierComplete, setEarlierComplete] = useState(false)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
 
   const reconnect = useCallback(() => {
     setAttempt(0)
     setManualRetry((n) => n + 1)
+  }, [])
+
+  // Holds the CURRENT effect run's loader. A click always drives the run that
+  // owns the window on screen; a torn-down run's loader is never reachable.
+  const loadEarlierRef = useRef<(() => void) | null>(null)
+  const loadEarlier = useCallback(() => {
+    loadEarlierRef.current?.()
   }, [])
 
   // Carries log state across an effect re-run that should CONTINUE the same
@@ -113,6 +131,8 @@ export function useTaskLogStream(
     if (!enabled || taskId === '') {
       carry.current = null
       setView(createLogState())
+      setEarlierComplete(false)
+      setLoadingEarlier(false)
       setStatus('idle')
       return
     }
@@ -162,6 +182,12 @@ export function useTaskLogStream(
     setStatus('loading')
     setHistoryTruncated(false)
     setErrorMessage('')
+    setLoadingEarlier(false)
+    // Only for a genuinely fresh window. A same-task re-run with a carry (a
+    // terminal transition, a manual reconnect) keeps whatever the user has
+    // already walked back to; blanket-resetting would re-offer "Load earlier"
+    // on a log that has none.
+    if (carried === null) setEarlierComplete(false)
 
     function setLogState(next: LogState) {
       logState = next
@@ -192,6 +218,53 @@ export function useTaskLogStream(
       }
       publish()
     }
+
+    // In-flight guard. A local, not React state: two clicks in one tick must
+    // not both fetch, and a state update is not visible until the next render.
+    let earlierInFlight = false
+
+    async function loadEarlierPage() {
+      const myGen = gen
+      const before = logState.minSeq
+      // minSeq 0 means the window is empty: there is no cursor to walk back
+      // from, and before_seq=0 is a 400 by contract rather than an empty page.
+      if (earlierInFlight || before <= 0 || logState.evicted) return
+      earlierInFlight = true
+      setLoadingEarlier(true)
+
+      let page: TaskLogPage
+      try {
+        page = await getTaskLogsDesc(taskId, before, BACKFILL_PAGE_SIZE)
+      } catch {
+        earlierInFlight = false
+        if (!cancelled) setLoadingEarlier(false)
+        return
+      }
+      earlierInFlight = false
+      // No AbortSignal on this request (apiFetch has no realm-mismatch
+      // fallback), so the response always arrives and these guards are the only
+      // control. Cancelled: the next run owns the state, touch NOTHING - the
+      // loading flag included, since the succeeding run may have a click of its
+      // own outstanding. Superseded within this run: clear the flag so the
+      // control re-enables, then discard, because prepending here would join a
+      // page onto a window it is not contiguous with. Guards:
+      // 'a landing page after cancellation touches no cross-run state',
+      // 'a landing page after cancellation does not clear the next window
+      // loading flag', 'a superseded earlier page does not prepend into the
+      // recovered window', 'a discarded earlier page re-enables the control'.
+      if (cancelled) return
+      if (myGen !== gen) {
+        setLoadingEarlier(false)
+        return
+      }
+      setLoadingEarlier(false)
+
+      setLogState(prependEntries(logState, page.items))
+      if (page.prev_seq === 0) setEarlierComplete(true)
+      setTotal(page.total)
+      flushNow()
+    }
+    loadEarlierRef.current = loadEarlierPage
 
     // A connection earns a backoff-counter reset only by PROVING itself: staying
     // open past RESET_AFTER_MS or delivering at least one frame. Resetting on
@@ -315,6 +388,21 @@ export function useTaskLogStream(
       })
     }
 
+    // Ends the generation BEFORE releasing the resource. The SSE stream this
+    // run opened is still open, and aborting makes its promise settle on the
+    // next microtask; without bumping gen (and setting fatal) first, that dying
+    // connection's own handler still passes the staleness guard and overwrites
+    // 'error' with 'reconnecting', inserting a bogus drop marker for lines that
+    // were never missed. Guard: 'a failing backfill page settles to error and
+    // the dying stream cannot resurrect it'.
+    function failHistory(err: unknown) {
+      fatal = true
+      gen++
+      setErrorMessage(err instanceof Error ? err.message : 'failed to load logs')
+      setStatus('error')
+      controller.abort()
+    }
+
     async function run(sinceSeq: number) {
       const myGen = ++gen
       buffering = true
@@ -354,39 +442,47 @@ export function useTaskLogStream(
         if (cancelled || myGen !== gen) return
       }
 
-      let since = sinceSeq
-      let pages = 0
-      for (;;) {
+      if (logState.maxSeq === 0) {
+        // We hold nothing, so open at the END. One request, and the rows the
+        // reader came for. Paging forward from 0 returns the OLDEST page, which
+        // on a long log is the wrong end and costs up to MAX_BACKFILL_PAGES
+        // requests to still not reach the tail.
         let page: TaskLogPage
         try {
-          page = await getTaskLogs(taskId, since, BACKFILL_PAGE_SIZE)
+          page = await getTaskLogsDesc(taskId, 0, BACKFILL_PAGE_SIZE)
         } catch (err) {
           if (cancelled || myGen !== gen) return
-          // End the assignment BEFORE aborting: the SSE stream opened by this
-          // same run is still open, and aborting it makes its promise
-          // reject/resolve on the very next microtask. Without bumping gen
-          // (and setting fatal) first, that dying connection's own
-          // .then()/.catch() would see myGen still === gen and call
-          // recover('closed'), silently overwriting this 'error' status with
-          // 'reconnecting' and inserting a bogus drop marker for lines that
-          // were never actually missed.
-          fatal = true
-          gen++
-          setErrorMessage(err instanceof Error ? err.message : 'failed to load logs')
-          setStatus('error')
-          controller.abort()
+          failHistory(err)
           return
         }
         if (cancelled || myGen !== gen) return
         ingest(page.items)
         setTotal(page.total)
-        pages++
-        if (page.next_seq === 0) break
-        if (pages >= MAX_BACKFILL_PAGES) {
-          setHistoryTruncated(true)
-          break
+        setEarlierComplete(page.prev_seq === 0)
+      } else {
+        // We hold something: continue FORWARD from it.
+        let since = sinceSeq
+        let pages = 0
+        for (;;) {
+          let page: TaskLogPage
+          try {
+            page = await getTaskLogs(taskId, since, BACKFILL_PAGE_SIZE)
+          } catch (err) {
+            if (cancelled || myGen !== gen) return
+            failHistory(err)
+            return
+          }
+          if (cancelled || myGen !== gen) return
+          ingest(page.items)
+          setTotal(page.total)
+          pages++
+          if (page.next_seq === 0) break
+          if (pages >= MAX_BACKFILL_PAGES) {
+            setHistoryTruncated(true)
+            break
+          }
+          since = page.next_seq
         }
-        since = page.next_seq
       }
 
       // Step 3 of the README join: apply what arrived while we were paging.
@@ -412,6 +508,10 @@ export function useTaskLogStream(
     return () => {
       cancelled = true
       gen++
+      // Identity-checked teardown: only this run's own loader is cleared. A
+      // cleanup that runs after a later effect has already registered its
+      // loader would otherwise unregister a live one.
+      if (loadEarlierRef.current === loadEarlierPage) loadEarlierRef.current = null
       controller.abort()
       if (flushTimer !== null) clearTimeout(flushTimer)
       if (retryTimer !== null) clearTimeout(retryTimer)
@@ -420,6 +520,22 @@ export function useTaskLogStream(
   }, [taskId, live, enabled, fetchImpl, manualRetry])
 
   const rows = useMemo(() => visibleRows(view), [view])
+
+  // minSeq > 0 is "we hold a page whose start we could walk back from". Without
+  // it the control renders over "Loading logs..." between the effect starting
+  // and its tail page landing, and a click would issue before_seq=0, a 400.
+  //
+  // The cap check is PREDICTIVE, against the window a click would produce. A
+  // check on the current length lets a click at MAX_LINES - 1 fetch a whole
+  // page, have capLines discard most of it from the front, set evicted and
+  // disable the control for good - the user pays a request for a few lines and
+  // loses the rest of the history. Guard: 'canLoadEarlier goes off before a
+  // page would overflow the line cap'.
+  const canLoadEarlier =
+    !earlierComplete &&
+    !view.evicted &&
+    view.minSeq > 0 &&
+    view.lines.length + BACKFILL_PAGE_SIZE <= MAX_LINES
 
   return {
     rows,
@@ -431,5 +547,9 @@ export function useTaskLogStream(
     total,
     errorMessage,
     reconnect,
+    earlierComplete,
+    canLoadEarlier,
+    loadingEarlier,
+    loadEarlier,
   }
 }

@@ -50,6 +50,8 @@ export interface LogState {
   lines: LogRow[]
   /** Highest seq accepted. The dedupe key of README.md, "Events (Server-Sent Events)". */
   maxSeq: number
+  /** Lowest seq accepted; 0 when the window is empty. The backwards cursor. */
+  minSeq: number
   /** One in-progress trailing fragment per stream, because an entry is not a line. */
   partials: Record<LogStream, PendingPartial | null>
   nextKey: number
@@ -63,6 +65,7 @@ export function createLogState(): LogState {
   return {
     lines: [],
     maxSeq: 0,
+    minSeq: 0,
     partials: { stdout: null, stderr: null },
     nextKey: 1,
     evicted: false,
@@ -178,12 +181,14 @@ export function appendEntries(state: LogState, entries: LogChunk[]): LogState {
   let lines = state.lines
   let partials = state.partials
   let maxSeq = state.maxSeq
+  let minSeq = state.minSeq
   let nextKey = state.nextKey
   let changed = false
 
   for (const e of entries) {
     if (e.seq <= maxSeq) continue
     maxSeq = e.seq
+    if (minSeq === 0) minSeq = e.seq
     if (!changed) {
       lines = lines.slice()
       partials = { ...partials }
@@ -211,7 +216,62 @@ export function appendEntries(state: LogState, entries: LogChunk[]): LogState {
     lines: capped.lines,
     partials,
     maxSeq,
+    minSeq,
     nextKey,
+    evicted: state.evicted || capped.evicted,
+  }
+}
+
+/**
+ * Prepends an older page. Entries are ascending and every seq is below
+ * state.minSeq, so the batch is contiguous with the window by construction -
+ * which is what makes the seam join exact: the window's first COMPLETED line of
+ * a given stream is the text from the window's start to that stream's first
+ * newline, so the batch's dangling fragment for that stream is precisely its
+ * missing prefix.
+ *
+ * Refuses once evicted is set. Drop-oldest has then removed the front of the
+ * window, so its first row is no longer the continuation of minSeq and there is
+ * no seam to join to.
+ *
+ * The join skips marker rows: markDropped emits its marker with stream 'stdout'
+ * whichever stream dropped, so matching on stream alone would concatenate a
+ * fragment onto the drop notice. Guard: 'prependEntries does not join into a
+ * marker row'.
+ */
+export function prependEntries(state: LogState, entries: LogChunk[]): LogState {
+  if (state.evicted || entries.length === 0) return state
+
+  // Reuse the tested reassembly rather than forking it.
+  const batch = appendEntries(createLogState(), entries)
+
+  const lines = state.lines.slice()
+  const partials = { ...state.partials }
+  const streams: LogStream[] = ['stdout', 'stderr']
+  for (const s of streams) {
+    const dangling = batch.partials[s]
+    if (dangling === null) continue
+    const i = lines.findIndex((r) => r.kind === 'line' && r.stream === s)
+    if (i === -1) {
+      // No completed line for this stream in the window: the fragment is the
+      // prefix of whatever partial is still open there, or is itself the only
+      // text that stream has.
+      const open = partials[s]
+      partials[s] = { text: dangling.text + (open?.text ?? ''), time: open?.time ?? dangling.time }
+      continue
+    }
+    lines[i] = { ...lines[i], text: collapseCR(dangling.text + lines[i].text) }
+  }
+
+  let nextKey = state.nextKey
+  const prepended = batch.lines.map((r) => ({ ...r, key: nextKey++ }))
+  const capped = capLines([...prepended, ...lines])
+  return {
+    ...state,
+    lines: capped.lines,
+    partials,
+    nextKey,
+    minSeq: state.minSeq === 0 ? entries[0].seq : Math.min(state.minSeq, entries[0].seq),
     evicted: state.evicted || capped.evicted,
   }
 }
@@ -302,4 +362,18 @@ export function markDropped(state: LogState): LogState {
  */
 export function shouldFollow(scrollTop: number, scrollHeight: number, clientHeight: number): boolean {
   return scrollHeight - scrollTop - clientHeight <= FOLLOW_EPSILON
+}
+
+/**
+ * Where the scroll cursor must move to keep the same content under the
+ * viewport when rows are added above it (or removed above it, which is the
+ * negative case). Pure for the same reason shouldFollow is: jsdom reports every
+ * geometry as 0, so a pixel assertion in a component test is vacuously green.
+ */
+export function preservedScrollTop(
+  scrollTop: number,
+  prevHeight: number,
+  nextHeight: number,
+): number {
+  return Math.max(0, scrollTop + (nextHeight - prevHeight))
 }

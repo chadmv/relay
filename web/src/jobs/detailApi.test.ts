@@ -44,7 +44,7 @@ test('getTaskLogs fetches /tasks/:id/logs with no since_seq by default', async (
   server.use(
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       captured = new URL(request.url).searchParams
-      return HttpResponse.json({ items: [], next_seq: 0, total: 0 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })
     }),
   )
   await getTaskLogs('t1')
@@ -56,7 +56,7 @@ test('getTaskLogs passes since_seq when provided', async () => {
   server.use(
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       captured = new URL(request.url).searchParams
-      return HttpResponse.json({ items: [], next_seq: 0, total: 0 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })
     }),
   )
   await getTaskLogs('t1', 42)

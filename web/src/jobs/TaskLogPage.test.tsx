@@ -51,6 +51,7 @@ test('the /jobs/:id/tasks/:taskId route renders the header and tails the task', 
       HttpResponse.json({
         items: [{ seq: 1, stream: 'stdout', content: 'rendering\n', created_at: '2026-08-09T14:36:25Z' }],
         next_seq: 0,
+        prev_seq: 0,
         total: 1,
       }),
     ),
@@ -76,7 +77,7 @@ test('a task id that is not in the job renders a not-found panel and opens no st
   let streamCount = 0
   server.use(http.get('/v1/jobs/j1', () => HttpResponse.json(JOB)))
   server.use(http.get('/v1/events', () => { streamCount++; return openSseResponse() }))
-  server.use(http.get('/v1/tasks/:tid/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })))
+  server.use(http.get('/v1/tasks/:tid/logs', () => HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })))
 
   renderRoute('/jobs/j1/tasks/does-not-exist')
   expect(await screen.findByText(/task not found in this job/i)).toBeInTheDocument()
