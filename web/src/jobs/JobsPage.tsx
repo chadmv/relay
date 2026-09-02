@@ -4,10 +4,13 @@ import { Button } from '../components/Button'
 import { useJobs } from './useJobs'
 import { useJobStats } from './useJobStats'
 import { JobsTable } from './JobsTable'
+import { JobsLanes } from './JobsLanes'
+import { useJobLanes } from './useJobLanes'
+import { LANE_CHIP_KEY } from './lanes'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
-import type { JobSort } from './api'
+import type { JobSort, JobStatus } from './api'
 import { Eyebrow, GlassPanel } from '../components/holo'
 
 export const FILTERS: { key: string; label: string; status: string }[] = [
@@ -43,8 +46,17 @@ export function JobsPage() {
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
-  const { data, error, isLoading, isFetching, isPlaceholderData, refetch } = useJobs(sort, status, pager.cursor)
+  const { data, error, isLoading, isFetching, isPlaceholderData, refetch } = useJobs(
+    sort,
+    status,
+    pager.cursor,
+    undefined,
+    view === 'table',
+  )
   const { data: stats } = useJobStats()
+  // Called unconditionally and gated by `enabled`, so the lanes stop polling the
+  // moment the page returns to the table rather than running behind it.
+  const lanes = useJobLanes(view === 'lanes')
 
   function pickFilter(key: string) {
     setFilter(key)
@@ -67,6 +79,17 @@ export function JobsPage() {
     }
   }
 
+  function showAll(s: JobStatus) {
+    // pickFilter also resets the pager and snaps sort back to the default, which is
+    // exactly what a freshly filtered table needs.
+    pickFilter(LANE_CHIP_KEY[s])
+    chooseView('table')
+  }
+
+  // The table query is disabled in lanes view, so its isFetching would leave the
+  // dot permanently dark beside text claiming the page is auto-refreshing.
+  const polling = view === 'lanes' ? lanes.some((l) => l.isFetching) : isFetching
+
   const pageHeader = (
       <div className="flex flex-wrap items-end gap-6">
         <div>
@@ -81,7 +104,7 @@ export function JobsPage() {
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-3">
           <span className="font-mono text-[10px] text-fg-mute">
-            <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
+            <span className={polling ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
           </span>
           <div className="flex rounded-full border border-border p-0.5">
             {(['table', 'lanes'] as View[]).map((v) => (
@@ -105,6 +128,18 @@ export function JobsPage() {
         </div>
       </div>
   )
+
+  // Before the table's loading and error early returns, which belong to the table
+  // query: in lanes view that query is disabled, and a lane owns its own loading,
+  // empty and error states so one lane's 500 cannot blank the page.
+  if (view === 'lanes') {
+    return (
+      <div className="flex flex-col gap-4">
+        {pageHeader}
+        <JobsLanes lanes={lanes} onShowAll={showAll} />
+      </div>
+    )
+  }
 
   if (isLoading && !data) {
     return (

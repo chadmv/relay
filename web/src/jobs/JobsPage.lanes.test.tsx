@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, expect, test } from 'vitest'
@@ -83,4 +83,55 @@ test('a stored value that is not the literal lanes falls back to the table view'
   localStorage.setItem('relay.jobs.view', 'timeline')
   renderPage()
   expect(await screen.findByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('the lanes view renders five lanes and issues no unfiltered jobs request', async () => {
+  localStorage.setItem('relay.jobs.view', 'lanes')
+  renderPage()
+
+  const queued = await screen.findByRole('region', { name: /^queued$/i })
+  // The lane header renders in every state, so the region resolves while its query
+  // is still in flight; the card has to be awaited separately.
+  expect(await within(queued).findByRole('link', { name: /job-pending/ })).toHaveAttribute(
+    'href',
+    '/jobs/ID-pending',
+  )
+  for (const name of ['Running', 'Done', 'Failed', 'Cancelled']) {
+    expect(screen.getByRole('region', { name: new RegExp(`^${name}$`, 'i') })).toBeInTheDocument()
+  }
+
+  // Five lane requests and nothing else. An unfiltered request is the 50-row
+  // enriched page the table view polls; in lanes view nobody is looking at it.
+  await waitFor(() => expect(seen).toHaveLength(5))
+  expect(seen.every((p) => p.get('status') !== null)).toBe(true)
+  expect(seen.every((p) => p.get('limit') === '10')).toBe(true)
+})
+
+test('table-view controls are absent in lanes view', async () => {
+  localStorage.setItem('relay.jobs.view', 'lanes')
+  renderPage()
+  await screen.findByRole('region', { name: /^queued$/i })
+  expect(screen.queryByLabelText('Sort jobs')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'All' })).toBeNull()
+  expect(screen.queryByRole('button', { name: /prev/i })).toBeNull()
+  expect(screen.queryByRole('button', { name: /next/i })).toBeNull()
+  expect(screen.queryByTestId('jobs-table')).toBeNull()
+})
+
+test('a 500 on one lane leaves the other four rendering their jobs', async () => {
+  localStorage.setItem('relay.jobs.view', 'lanes')
+  server.use(jobsHandler({ failStatus: 'failed' }))
+  renderPage()
+
+  const failed = await screen.findByRole('region', { name: /^failed$/i })
+  expect(await within(failed).findByRole('button', { name: /retry/i })).toBeInTheDocument()
+  for (const [name, status] of [
+    ['Queued', 'pending'],
+    ['Running', 'running'],
+    ['Done', 'done'],
+    ['Cancelled', 'cancelled'],
+  ] as const) {
+    const r = screen.getByRole('region', { name: new RegExp(`^${name}$`, 'i') })
+    expect(await within(r).findByRole('link', { name: new RegExp(`job-${status}`) })).toBeInTheDocument()
+  }
 })
