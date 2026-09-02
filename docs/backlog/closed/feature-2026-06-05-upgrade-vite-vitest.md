@@ -1,7 +1,9 @@
 ---
 title: Upgrade vite 5→8 and vitest 2→4 to clear dev-tooling audit advisories
 type: feature
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-06-05
 priority: low
 source: noticed during jsdom bump (commit 3b058f6) — `npm audit` flagged 5 dev-only vulnerabilities
@@ -58,3 +60,6 @@ it rather than precede it. Three concrete additions to this item's scope:
 3. **A green `npm test` is no longer sufficient evidence.** `make test-e2e` and the `web-ci` workflow are
    now part of the frontend gate, and the harness pins `@playwright/test` exactly. An upgrade that moves
    vite must be checked against the production bundle the harness serves, not just the dev server.
+
+## Resolution
+Shipped in lane T of the 2026-09-02 web-frontend batch: vite 5.4.21 to 8.2.2, vitest 2.1.9 to 4.1.11, @vitejs/plugin-react 4.7.0 to 6.1.1, holding every other dependency fixed. The item had understated the baseline: npm audit at HEAD reported 11 advisories, not 5; the toolchain swap cleared 8 (esbuild, vite, vitest, @vitest/mocker, vite-node as packages, plus browserslist, nanoid and postcss as side effects), leaving react-router and undici, which are out of this item scope. Unit tests unchanged at 162 files / 1234 tests; make test-e2e green at 65 on chromium and the webkit-tagged subset; the tsconfig "node" types entry was re-measured and is load-bearing, refuting the 2026-08-24 addendum claim that it widens nothing.
