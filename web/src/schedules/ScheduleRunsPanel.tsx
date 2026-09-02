@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Panel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import { NESTED_HEADER_CLASS, Panel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import type { Job } from '../jobs/api'
 import { formatDuration, formatStarted, statusColor } from '../jobs/status'
 
@@ -33,7 +33,7 @@ export function ScheduleRunsPanel({ runs, total }: { runs: Job[]; total: number 
           this schedule has never fired
         </div>
       ) : (
-        <Table label="Recent runs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
+        <Table label="Recent runs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName={NESTED_HEADER_CLASS}>
           {runs.map((j) => {
             const c = statusColor(j.status)
             return (

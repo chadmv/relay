@@ -1,4 +1,4 @@
-import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './enrollmentStatus'
 import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api'
 
@@ -44,7 +44,7 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {enrollments.map((e) => {
           const status = deriveStatus(e.expires_at, now)

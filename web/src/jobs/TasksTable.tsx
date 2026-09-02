@@ -1,4 +1,4 @@
-import { GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import { GlassPanel, NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
@@ -50,7 +50,7 @@ export function TasksTable({
   }
   return (
     <GlassPanel>
-      <Table label="Tasks" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
+      <Table label="Tasks" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName={NESTED_HEADER_CLASS}>
         {tasks.map((t) => {
           const c = taskStatusColor(t.status)
           const selected = t.id === selectedTaskId

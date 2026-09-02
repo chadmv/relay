@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
 import { formatDateTime } from '../../lib/time'
 import { deriveStatus, statusTone } from './reservationStatus'
 import type { Reservation, ReservationSort, ReservationSortField } from './api'
@@ -66,7 +66,7 @@ export function ReservationsTable({
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {reservations.map((r) => {
           const status = deriveStatus(r, now)

@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../components/holo'
 import type { Job } from './api'
 import { statusColor, progressPct, formatDuration, formatStarted } from './status'
 
@@ -41,7 +49,7 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
            padding with 0.16em letter-spacing, identical across its jobs, workers,
            schedules, users, enrollments and reservations tables. The four admin
            tables already carried it; this is the value the other three join. */
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {jobs.map((j) => {
           const c = statusColor(j.status)
@@ -57,7 +65,7 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
                  144px of slack against this table's 700px of fixed track - free space
                  stays non-negative, so fr resolves identically in both grids. The
                  vertical component is deliberately unchanged. */
-              className={`border-b border-border/40 px-[18px] py-2 font-mono text-[11.5px] ${
+              className={`border-b border-border/40 ${TOP_LEVEL_ROW_PX} py-2 font-mono text-[11.5px] ${
                 j.status === 'running' ? 'bg-accent/[0.04]' : ''
               }`}
             >

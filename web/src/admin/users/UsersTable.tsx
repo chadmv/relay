@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
 import { Input } from '../../components/Input'
 import type { AdminUser, UserSort, UserSortField } from './api'
 
@@ -77,7 +77,7 @@ export function UsersTable({
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {users.map((u) => {
           const archived = showArchived && Boolean(u.archived_at)

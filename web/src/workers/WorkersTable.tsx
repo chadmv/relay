@@ -1,5 +1,14 @@
 import { Link } from 'react-router-dom'
-import { GlassPanel, StatusDot, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  GlassPanel,
+  StatusDot,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../components/holo'
 import { formatRelativeTime, labelChips, livenessView, specLine } from './liveness'
 import type { Worker, WorkerSort } from './api'
 
@@ -36,12 +45,12 @@ export function WorkersTable({
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {workers.map((w) => (
           <TableRow
             key={w.id}
-            className={`border-b border-border/40 px-[18px] py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
+            className={`border-b border-border/40 ${TOP_LEVEL_ROW_PX} py-2 font-mono text-[11.5px] ${livenessView(w.status).dimClass}`}
           >
             <TableCell>
               <Link to={`/workers/${w.id}`} className="text-fg hover:text-accent">

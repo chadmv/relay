@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import { Chip, NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import { formatRelativeTime } from './liveness'
 import { useWorkerActions } from './useWorkerActions'
 import { useWorkerWorkspaces } from './useWorkerWorkspaces'
@@ -50,7 +50,7 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
           header. A second value exists because the hi-fi has a second value, for
           tables that sit inside a panel or a detail-page column rather than being
           the page's own list. */}
-      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
+      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName={NESTED_HEADER_CLASS}>
         {rows.map((ws) => (
           <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
             <TableCell className="text-fg">{ws.short_id}</TableCell>

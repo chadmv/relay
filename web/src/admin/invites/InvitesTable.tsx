@@ -1,4 +1,4 @@
-import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './inviteStatus'
 import type { Invite, InviteSort, InviteSortField } from './api'
 
@@ -54,7 +54,7 @@ export function InvitesTable({ invites, sort, onSort, now }: InvitesTableProps) 
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {invites.map((inv) => {
           const status = deriveStatus(inv, now)

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import { NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
 import { taskStatusColor } from '../jobs/taskStatus'
 import { formatRelativeTime } from './liveness'
 import { useWorkerTasks } from './useWorkerTasks'
@@ -39,7 +39,7 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
         columns={COLS}
         minWidth={MIN_W}
         headers={HEADERS}
-        headerClassName="px-4 py-2.5 tracking-[0.14em]"
+        headerClassName={NESTED_HEADER_CLASS}
       >
         {rows.map((t) => {
           const c = taskStatusColor(t.status)
