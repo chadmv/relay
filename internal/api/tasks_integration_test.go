@@ -414,3 +414,96 @@ func TestTaskLogs_TailUsesTheSameAuthorizationAsTheForwardRead(t *testing.T) {
 		require.Equal(t, []string{"secret-ish output"}, logContents(page), "q=%s", query)
 	}
 }
+
+func TestTaskLogs_BeforePageIsAscendingAndExact(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Kim", "kim@logs-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID := submitTrivialJob(t, srv, token)
+	taskID := firstTaskID(t, srv, token, jobID)
+	for i := 0; i < 7; i++ {
+		seedLogRow(t, pool, taskID, "stdout", fmt.Sprintf("line %d", i))
+	}
+
+	// The walk test pins the assembled sequence, which a before-page returned
+	// DESCENDING would still reproduce once each page is prepended. This pins
+	// the order inside a single before-page directly.
+	_, tail := getLogs(t, srv, token, taskID, "order=desc&limit=2")
+	require.Equal(t, []string{"line 5", "line 6"}, logContents(tail))
+
+	_, mid := getLogs(t, srv, token, taskID,
+		fmt.Sprintf("order=desc&limit=2&before_seq=%d", tail.PrevSeq))
+	require.Equal(t, []string{"line 3", "line 4"}, logContents(mid))
+	require.Less(t, mid.Items[0].Seq, mid.Items[1].Seq, "items inside a before-page are ascending")
+	require.Equal(t, mid.Items[0].Seq, mid.PrevSeq)
+	require.Equal(t, int64(0), mid.NextSeq)
+}
+
+func TestTaskLogs_BeforeSeqAtAGapValueReturnsOnlyRowsStrictlyBelowIt(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Lee", "lee@logs-test.com", false)
+	token := createTestToken(t, q, user.ID)
+
+	jobA := submitTrivialJob(t, srv, token)
+	taskA := firstTaskID(t, srv, token, jobA)
+	jobB := submitTrivialJob(t, srv, token)
+	taskB := firstTaskID(t, srv, token, jobB)
+
+	for i := 0; i < 5; i++ {
+		seedLogRow(t, pool, taskA, "stdout", fmt.Sprintf("a-%d", i))
+		seedLogRow(t, pool, taskB, "stdout", fmt.Sprintf("b-%d", i))
+	}
+
+	// A cursor is compared against a table-wide sequence, so a client may hold a
+	// seq that belongs to no row of the task it is paging - here another task's
+	// id, which is exactly the shape a gap has. The predicate is a strict
+	// inequality, not a lookup, so such a value is valid and selects the rows
+	// below it rather than erroring or snapping to a neighbour.
+	_, bAll := getLogs(t, srv, token, taskB, "limit=200")
+	gap := bAll.Items[2].Seq
+
+	_, aBelow := getLogs(t, srv, token, taskA, fmt.Sprintf("order=desc&limit=200&before_seq=%d", gap))
+	require.Equal(t, []string{"a-0", "a-1", "a-2"}, logContents(aBelow))
+
+	// Non-vacuity: the cursor really is absent from task A, so this cannot pass
+	// by the value happening to be one of A's own ids.
+	_, aAll := getLogs(t, srv, token, taskA, "limit=200")
+	for _, it := range aAll.Items {
+		require.NotEqual(t, gap, it.Seq, "before_seq must be a value task A does not own")
+	}
+}
+
+func TestTaskLogs_ExactMultipleWalkEndsWithAnEmptyPageNotAShortOne(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Mo", "mo@logs-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID := submitTrivialJob(t, srv, token)
+	taskID := firstTaskID(t, srv, token, jobID)
+	for i := 0; i < 4; i++ {
+		seedLogRow(t, pool, taskID, "stdout", fmt.Sprintf("line %d", i))
+	}
+
+	// 4 rows at limit=2: every page is FULL, so no page is ever short and the
+	// walk can only terminate on the empty page. A client that stopped on a
+	// short page would never stop here, which is why the contract is "stop when
+	// the cursor is 0", not "stop when the page is short".
+	_, p1 := getLogs(t, srv, token, taskID, "order=desc&limit=2")
+	require.Equal(t, []string{"line 2", "line 3"}, logContents(p1))
+	require.NotEqual(t, int64(0), p1.PrevSeq)
+
+	_, p2 := getLogs(t, srv, token, taskID, fmt.Sprintf("order=desc&limit=2&before_seq=%d", p1.PrevSeq))
+	require.Equal(t, []string{"line 0", "line 1"}, logContents(p2))
+	require.NotEqual(t, int64(0), p2.PrevSeq, "a full final page still mints a cursor")
+
+	rr3, p3 := getLogs(t, srv, token, taskID, fmt.Sprintf("order=desc&limit=2&before_seq=%d", p2.PrevSeq))
+	require.Equal(t, http.StatusOK, rr3.Code, rr3.Body.String())
+	require.Empty(t, p3.Items)
+	require.Equal(t, int64(0), p3.PrevSeq)
+
+	// Raw, because a decoded empty page cannot tell [] from null and the SPA
+	// iterates this key on every page of the walk, including the last.
+	var keys map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr3.Body.Bytes(), &keys))
+	require.Equal(t, "[]", string(keys["items"]), "the terminating page is [], never null")
+	require.Equal(t, "0", string(keys["prev_seq"]))
+}
