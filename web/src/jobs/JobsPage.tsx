@@ -10,7 +10,7 @@ import { useCursorPager } from '../lib/useCursorPager'
 import type { JobSort } from './api'
 import { Eyebrow, GlassPanel } from '../components/holo'
 
-const FILTERS: { key: string; label: string; status: string }[] = [
+export const FILTERS: { key: string; label: string; status: string }[] = [
   { key: 'all', label: 'All', status: '' },
   { key: 'running', label: 'Running', status: 'running' },
   { key: 'queued', label: 'Queued', status: 'pending' },
@@ -20,9 +20,25 @@ const FILTERS: { key: string; label: string; status: string }[] = [
 
 const DEFAULT_SORT: JobSort = '-created_at'
 
+type View = 'table' | 'lanes'
+
+const VIEW_KEY = 'relay.jobs.view'
+
+// Anything but the literal 'lanes' means the table, so a missing key, a value
+// written by a future version, and a storage read that throws all land on the
+// shipped default rather than on a blank page.
+function loadView(): View {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'lanes' ? 'lanes' : 'table'
+  } catch {
+    return 'table'
+  }
+}
+
 export function JobsPage() {
   const [sort, setSort] = useState<JobSort>(DEFAULT_SORT)
   const [filter, setFilter] = useState('all')
+  const [view, setView] = useState<View>(loadView)
   const pager = useCursorPager()
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
@@ -40,6 +56,55 @@ export function JobsPage() {
     setSort(s)
     pager.resetPaging()
   }
+
+  function chooseView(v: View) {
+    setView(v)
+    try {
+      localStorage.setItem(VIEW_KEY, v)
+    } catch {
+      // A storage failure must not take the click with it: the view still changes
+      // for this session, it just does not survive a reload.
+    }
+  }
+
+  const pageHeader = (
+      <div className="flex flex-wrap items-end gap-6">
+        <div>
+          <Eyebrow>OVERVIEW</Eyebrow>
+          <h1 className="text-[32px] font-normal tracking-tight">Jobs</h1>
+        </div>
+        <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
+          <span><b className="text-[18px] text-accent">{stats?.running ?? 0}</b> RUNNING</span>
+          <span><b className="text-[18px] text-warn">{stats?.queued ?? 0}</b> QUEUED</span>
+          <span><b className="text-[18px] text-ok">{stats?.done_24h ?? 0}</b> DONE·24H</span>
+          <span><b className="text-[18px] text-err">{stats?.failed_24h ?? 0}</b> FAILED·24H</span>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <span className="font-mono text-[10px] text-fg-mute">
+            <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
+          </span>
+          <div className="flex rounded-full border border-border p-0.5">
+            {(['table', 'lanes'] as View[]).map((v) => (
+              <button
+                key={v}
+                type="button"
+                aria-pressed={view === v}
+                onClick={() => chooseView(v)}
+                className={`rounded-full px-3 py-1 text-[12px] ${view === v ? 'bg-accent text-bg' : 'text-fg-mute'}`}
+              >
+                {v === 'table' ? 'Table' : 'Lanes'}
+              </button>
+            ))}
+          </div>
+          <Link
+            to="/jobs/new"
+            className="rounded-[8px] bg-accent px-3 py-2 text-[13px] font-medium text-bg transition hover:bg-accent-b"
+          >
+            + New job
+          </Link>
+        </div>
+      </div>
+  )
 
   if (isLoading && !data) {
     return (
@@ -72,29 +137,7 @@ export function JobsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-end gap-6">
-        <div>
-          <Eyebrow>OVERVIEW</Eyebrow>
-          <h1 className="text-[32px] font-normal tracking-tight">Jobs</h1>
-        </div>
-        <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
-          <span><b className="text-[18px] text-accent">{stats?.running ?? 0}</b> RUNNING</span>
-          <span><b className="text-[18px] text-warn">{stats?.queued ?? 0}</b> QUEUED</span>
-          <span><b className="text-[18px] text-ok">{stats?.done_24h ?? 0}</b> DONE·24H</span>
-          <span><b className="text-[18px] text-err">{stats?.failed_24h ?? 0}</b> FAILED·24H</span>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-3">
-          <span className="font-mono text-[10px] text-fg-mute">
-            <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
-          </span>
-          <Link
-            to="/jobs/new"
-            className="rounded-[8px] bg-accent px-3 py-2 text-[13px] font-medium text-bg transition hover:bg-accent-b"
-          >
-            + New job
-          </Link>
-        </div>
-      </div>
+      {pageHeader}
 
       {/*
         The hi-fi HoloJobsList also shows a view-switch (Table/Lanes/Timeline), a
