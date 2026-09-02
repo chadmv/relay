@@ -92,6 +92,12 @@ WebKit's focusability semantics - the reason `components/holo/Table.tsx` carries
 an explicit `tabIndex={0}` - and nothing about Safari's chrome, extensions or
 platform integration. Do not cite this harness as Safari coverage.
 
+`keyboard.spec.ts`'s `job-detail task selection @webkit` describe covers the
+populated `job-detail` surface: a real Tab press reaching a task's name-cell
+button, Enter moving the sole `aria-current` mark, and the focused control's
+computed `outline-offset` being negative (proving its focus ring is not
+clipped by the cell's own `truncate`).
+
 The **rate limiter is not exercised**: the test server runs
 `RELAY_LOGIN_RATE_LIMIT=1000:1m`. Register/self-registration flows are out too -
 covering them would mean the one test server never runs the default posture,

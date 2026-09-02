@@ -167,10 +167,15 @@ test.describe('job-detail task selection @webkit', () => {
     await expect(current).toHaveCount(1)
     const startingName = ((await current.textContent()) ?? '').trim()
 
+    // startingName must actually be one of the seeded tasks. `.find()` below
+    // returns a truthy value for ANY input string unless it equals all three
+    // seeded names at once - impossible for a single string - so it cannot
+    // report seed drift on its own; this is the check that can.
+    expect(['alpha', 'beta', 'gamma'], `the marked task was ${JSON.stringify(startingName)}, which is not one of the seeded tasks`).toContain(startingName)
+
     // Target a task that is NOT already marked. A test that re-selects the default
     // selection passes against a mark hardcoded onto the first row.
     const target = ['alpha', 'beta', 'gamma'].find((n) => n !== startingName)
-    expect(target, `the marked task was ${JSON.stringify(startingName)}, which is not one of the seeded tasks`).toBeTruthy()
     const targetButton = table.getByRole('button', { name: target as string, exact: true })
     await expect(targetButton).toHaveCount(1)
 
