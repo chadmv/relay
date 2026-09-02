@@ -8,6 +8,7 @@ import {
   FOLLOW_EPSILON,
   DROP_MARKER_TEXT,
   markDropped,
+  prependEntries,
   shouldFollow,
   type LogChunk,
 } from './logBuffer'
@@ -352,4 +353,90 @@ test('minSeq records the lowest seq ever accepted and never rises', () => {
   // A duplicate below maxSeq is discarded before it can move anything.
   s = appendEntries(s, [chunk(5, 'old\n')])
   expect(s.minSeq).toBe(10)
+})
+
+test('prependEntries joins a line that straddles the seam', () => {
+  // The window starts mid-line: the tail page began at 'World\n', so its first
+  // row is the text from the window's start to that stream's first newline.
+  let s = createLogState()
+  s = appendEntries(s, [chunk(10, 'World\nsecond\n')])
+  expect(s.lines.map((l) => l.text)).toEqual(['World', 'second'])
+
+  // The earlier page ends mid-line with 'Hello ' dangling.
+  s = prependEntries(s, [chunk(8, 'zero\n'), chunk(9, 'one\nHello ')])
+
+  // Exact text AND exact count: an implementation that appends the fragment as
+  // its own row produces four rows that read almost the same.
+  expect(s.lines.map((l) => l.text)).toEqual(['zero', 'one', 'Hello World', 'second'])
+  expect(s.lines).toHaveLength(4)
+})
+
+test('prependEntries keeps the two streams seams apart', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(20, 'out-tail\n'), chunk(21, 'err-tail\n', 'stderr')])
+  s = prependEntries(s, [chunk(10, 'out-head ', 'stdout'), chunk(11, 'err-head ', 'stderr')])
+
+  const out = s.lines.filter((l) => l.stream === 'stdout').map((l) => l.text)
+  const err = s.lines.filter((l) => l.stream === 'stderr').map((l) => l.text)
+  expect(out).toEqual(['out-head out-tail'])
+  expect(err).toEqual(['err-head err-tail'])
+})
+
+test('prependEntries does not join into a marker row', () => {
+  // The reachable shape: a drop happens before any line arrives, so markDropped
+  // puts a marker at index 0 and the tail page's lines follow it. markDropped
+  // emits its marker with stream 'stdout' REGARDLESS of which stream dropped,
+  // so a naive "first row of this stream" scan joins into the marker text.
+  let s = createLogState()
+  s = markDropped(s)
+  s = appendEntries(s, [chunk(20, 'World\n')])
+  expect(s.lines[0].kind).toBe('marker')
+
+  s = prependEntries(s, [chunk(10, 'Hello ')])
+
+  expect(s.lines[0].kind).toBe('marker')
+  expect(s.lines[0].text).toBe(DROP_MARKER_TEXT)
+  expect(s.lines.map((l) => l.text)).toEqual([DROP_MARKER_TEXT, 'Hello World'])
+})
+
+test('prependEntries refuses after eviction', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1, 'x\n'.repeat(MAX_LINES + 1))])
+  expect(s.evicted).toBe(true)
+  const before = s
+  s = prependEntries(s, [chunk(1, 'earlier\n')])
+  // Reference equality: once drop-oldest has evicted the front of the window,
+  // the first row is no longer the continuation of minSeq, so there is no seam
+  // to join to and the control that produced this call is disabled anyway.
+  expect(s).toBe(before)
+})
+
+test('prependEntries that overflows the cap keeps the newest lines', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(1000, 'keep-me\n')])
+  const batch = Array.from({ length: MAX_LINES + 5 }, (_, i) => chunk(i + 1, `old-${i}\n`))
+  s = prependEntries(s, batch)
+
+  expect(s.lines).toHaveLength(MAX_LINES)
+  expect(s.evicted).toBe(true)
+  // The FIRST retained line, not the length: keeping the OLDEST lines would
+  // also produce MAX_LINES rows and would drop the live tail.
+  expect(s.lines[0].text).toBe('old-6')
+  expect(s.lines[s.lines.length - 1].text).toBe('keep-me')
+})
+
+test('prependEntries lowers minSeq only', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(100, 'a\n')])
+  s = prependEntries(s, [chunk(40, 'b\n'), chunk(50, 'c\n')])
+  expect(s.minSeq).toBe(40)
+  expect(s.maxSeq).toBe(100)
+})
+
+test('prependEntries assigns fresh keys that collide with nothing', () => {
+  let s = createLogState()
+  s = appendEntries(s, [chunk(100, 'a\nb\n')])
+  s = prependEntries(s, [chunk(40, 'c\nd\n')])
+  const keys = s.lines.map((l) => l.key)
+  expect(new Set(keys).size).toBe(keys.length)
 })

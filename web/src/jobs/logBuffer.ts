@@ -223,6 +223,60 @@ export function appendEntries(state: LogState, entries: LogChunk[]): LogState {
 }
 
 /**
+ * Prepends an older page. Entries are ascending and every seq is below
+ * state.minSeq, so the batch is contiguous with the window by construction -
+ * which is what makes the seam join exact: the window's first COMPLETED line of
+ * a given stream is the text from the window's start to that stream's first
+ * newline, so the batch's dangling fragment for that stream is precisely its
+ * missing prefix.
+ *
+ * Refuses once evicted is set. Drop-oldest has then removed the front of the
+ * window, so its first row is no longer the continuation of minSeq and there is
+ * no seam to join to.
+ *
+ * The join skips marker rows: markDropped emits its marker with stream 'stdout'
+ * whichever stream dropped, so matching on stream alone would concatenate a
+ * fragment onto the drop notice. Guard: 'prependEntries does not join into a
+ * marker row'.
+ */
+export function prependEntries(state: LogState, entries: LogChunk[]): LogState {
+  if (state.evicted || entries.length === 0) return state
+
+  // Reuse the tested reassembly rather than forking it.
+  const batch = appendEntries(createLogState(), entries)
+
+  const lines = state.lines.slice()
+  const partials = { ...state.partials }
+  const streams: LogStream[] = ['stdout', 'stderr']
+  for (const s of streams) {
+    const dangling = batch.partials[s]
+    if (dangling === null) continue
+    const i = lines.findIndex((r) => r.kind === 'line' && r.stream === s)
+    if (i === -1) {
+      // No completed line for this stream in the window: the fragment is the
+      // prefix of whatever partial is still open there, or is itself the only
+      // text that stream has.
+      const open = partials[s]
+      partials[s] = { text: dangling.text + (open?.text ?? ''), time: open?.time ?? dangling.time }
+      continue
+    }
+    lines[i] = { ...lines[i], text: collapseCR(dangling.text + lines[i].text) }
+  }
+
+  let nextKey = state.nextKey
+  const prepended = batch.lines.map((r) => ({ ...r, key: nextKey++ }))
+  const capped = capLines([...prepended, ...lines])
+  return {
+    ...state,
+    lines: capped.lines,
+    partials,
+    nextKey,
+    minSeq: state.minSeq === 0 ? entries[0].seq : Math.min(state.minSeq, entries[0].seq),
+    evicted: state.evicted || capped.evicted,
+  }
+}
+
+/**
  * Rows to render: the retained lines plus one provisional row per dangling
  * partial. A task that prints a prompt with no trailing newline must not look
  * silent. Provisional rows use fixed NEGATIVE keys so they can never collide with
