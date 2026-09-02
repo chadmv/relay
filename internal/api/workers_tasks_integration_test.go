@@ -160,3 +160,31 @@ func TestListWorkerTasks_RejectsBadLimitAndUnsupportedSort(t *testing.T) {
 	code, _ := getWorkerTasks(t, srv, token, workerID, "limit=200&sort=-assigned_at")
 	assert.Equal(t, http.StatusOK, code, "control: the supported limit and sort are accepted")
 }
+
+// job_name comes from a second statement over the page's job ids rather than a
+// JOIN, so two tasks of the same job must both carry it.
+func TestListWorkerTasks_CarriesTheJobName(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "JN", "jobname@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	shared := seedJob(t, pool, user, "nightly-render")
+	other := seedJob(t, pool, user, "smoke")
+
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	seedWorkerTask(t, pool, shared, workerID, "shot-1", "running", &at, &at)
+	seedWorkerTask(t, pool, shared, workerID, "shot-2", "dispatched", &at, nil)
+	seedWorkerTask(t, pool, other, workerID, "smoke-1", "running", &at, &at)
+
+	code, p := getWorkerTasks(t, srv, token, workerID, "")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, p.Items, 3)
+
+	byName := map[string]string{}
+	for _, it := range p.Items {
+		byName[it["name"].(string)] = it["job_name"].(string)
+	}
+	assert.Equal(t, "nightly-render", byName["shot-1"])
+	assert.Equal(t, "nightly-render", byName["shot-2"])
+	assert.Equal(t, "smoke", byName["smoke-1"])
+}

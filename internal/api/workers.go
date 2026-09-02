@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -494,7 +496,53 @@ func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerTaskResponse, workerTasksRowKey)
+	if err := s.fillJobNames(ctx, items); err != nil {
+		writeError(w, http.StatusInternalServerError, "list worker tasks failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, page[workerTaskResponse]{Items: items, NextCursor: next, Total: total})
+}
+
+// fillJobNames resolves job_name for one page of tasks in a single lookup on the
+// jobs primary key, bounded by the page limit. It is a second statement rather
+// than a JOIN so the list query stays a bare SELECT * that sqlc emits as
+// []store.Task: a JOIN row would have to be hand-copied into a store.Task to
+// reach toTaskResponse, and such a copy silently loses any column tasks gains.
+// tasks.job_id is NOT NULL with an FK, so a missing name is a database fault,
+// not a normal absence - hence an error rather than an empty string.
+func (s *Server) fillJobNames(ctx context.Context, items []workerTaskResponse) error {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	ids := make([]pgtype.UUID, 0, len(items))
+	for _, it := range items {
+		if _, ok := seen[it.JobID]; ok {
+			continue
+		}
+		seen[it.JobID] = struct{}{}
+		id, err := parseUUID(it.JobID)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows, err := s.q.GetJobNamesByIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	nameByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		nameByID[uuidStr(row.ID)] = row.Name
+	}
+	for i := range items {
+		name, ok := nameByID[items[i].JobID]
+		if !ok {
+			return fmt.Errorf("no job name for task %s (job %s)", items[i].ID, items[i].JobID)
+		}
+		items[i].JobName = name
+	}
+	return nil
 }
 
 func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {
