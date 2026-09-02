@@ -1416,9 +1416,51 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 **Cursor semantics:** A cursor is valid only for the sort it was issued under. Resending a cursor with a different `?sort=` returns `400 cursor sort key does not match requested sort`. Drop the cursor when changing sort.
 
-**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. Other endpoints' filters do not currently combine with sort.
+**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. That rejection is scoped to exactly those two parameters, because each has its own statement with a hard-coded `ORDER BY`. The four filters in [Filtering the jobs list](#filtering-the-jobs-list) - `?q=`, `?mine=`, `?since=`, `?until=` - are threaded into every sort variant and **do** compose with `?sort=`. Other endpoints' filters do not currently combine with sort.
 
 **Unknown keys:** `?sort=<key>` where `<key>` is not in the allowlist returns `400 unsupported sort key '<key>'; supported: <list>`.
+
+#### Filtering the jobs list
+
+`GET /v1/jobs` accepts four optional filters beyond `?status=` and `?scheduled_job_id=`. They AND together, and they compose with `?limit=`, `?cursor=`, `?sort=`, `?status=` and `?scheduled_job_id=`.
+
+| Parameter | Format | Absent means |
+|-----------|--------|--------------|
+| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Empty or whitespace-only is treated as absent. | No text filter |
+| `mine` | `true` / `false` (Go `strconv.ParseBool` spellings: `1`, `t`, `T`, `TRUE`, `true`, `True` and their false counterparts). `true` restricts to jobs you submitted, resolved from your bearer token; `false` means the same as absent. | No owner filter |
+| `since` | RFC3339 timestamp. An offset or `Z` is required; fractional seconds are allowed. | Window open at the start |
+| `until` | RFC3339 timestamp, same format. | Window open at the end |
+
+`since` and `until` bound `created_at` as a **half-open** interval: `created_at >= since AND created_at < until`. A job created exactly at `since` is included; a job created exactly at `until` is excluded, so consecutive time buckets tile without a job appearing in two of them. Either bound may be given alone, and `until == since` is a legal empty window.
+
+There is no parameter that selects another user's jobs. `mine=true` resolves the owner from the token.
+
+`total` counts every row matching every active filter, so the page footer's denominator always belongs to the same set as the rows.
+
+**Errors.** All are `400` with the body `{"error": "<message>"}`:
+
+| Condition | Message |
+|-----------|---------|
+| `mine` is not a boolean | `invalid mine; expected true or false` |
+| `since` is not RFC3339 | `invalid since; expected an RFC3339 timestamp` |
+| `until` is not RFC3339 | `invalid until; expected an RFC3339 timestamp` |
+| `until` is earlier than `since` | `until is earlier than since` |
+| `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
+| `q` is not valid UTF-8 | `q is not valid UTF-8` |
+| any of the four appears more than once | `query parameter "<name>" must appear at most once` |
+
+**Drop the cursor when a filter changes.** A cursor carries no record of the filters that were active when it was issued and the server does not reject a mismatched one - the same requirement that already applies to `?status=`. Filter correctness is nevertheless cursor-independent: a stale cursor can start a page at a surprising position but can never return a row that fails the current filters.
+
+**Examples:**
+
+```
+GET /v1/jobs?q=nightly                                   # name or submitter email contains "nightly"
+GET /v1/jobs?mine=true&sort=-priority                    # your jobs, highest priority first
+GET /v1/jobs?since=2026-09-01T00:00:00Z&until=2026-09-02T00:00:00Z
+GET /v1/jobs?q=etl&status=failed                         # composes with the status filter
+```
+
+`?q=` is a sequential scan and is not index-served; debounce it client-side at 250 ms or more.
 
 ### Public
 
@@ -1503,7 +1545,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/jobs` | Submit a job |
-| `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional). Paginated. |
+| `GET` | `/v1/jobs` | List jobs. Optional filters: `?status=`, `?scheduled_job_id=`, `?q=`, `?mine=`, `?since=`, `?until=` - see [Filtering the jobs list](#filtering-the-jobs-list). Paginated. |
 | `GET` | `/v1/jobs/{id}` | Get a job |
 | `DELETE` | `/v1/jobs/{id}` | Cancel a job (`?force=true` for forced termination, skips pipe drain and workspace cleanup) |
 | `POST` | `/v1/jobs/{id}/retry` | Re-run a finished job's tasks. `?task=failed` reopens `failed` **and `timed_out`** tasks; `?task=all` also reopens `done` tasks. `task` is **required** and has no default; absent, empty, repeated or unrecognized values are a 400. Owner or admin (404 on deny). 409 if the job is not `done` or `failed`, if the job was cancelled, if nothing matched the mode, or if a selected task has dependents that already ran. Returns the job plus `tasks_retried` (always >= 1). |
