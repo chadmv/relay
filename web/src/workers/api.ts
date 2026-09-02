@@ -1,4 +1,5 @@
 import { apiFetch } from '../lib/api'
+import type { TaskStatus } from '../jobs/api'
 
 export type WorkerStatus = 'online' | 'stale' | 'offline' | 'disabled' | 'revoked'
 
@@ -152,4 +153,43 @@ export function revokeWorkerToken(id: string): Promise<void> {
 // inventory update. A held workspace is refused by the agent, not this endpoint.
 export function evictWorkspace(id: string, shortId: string): Promise<void> {
   return apiFetch<void>(`/workers/${id}/workspaces/${shortId}/evict`, { method: 'POST' })
+}
+
+// One currently-assigned task, field-for-field the Go workerTaskResponse
+// (internal/api/workers.go). Narrower than TaskDetail on three fields, and the
+// difference is the wire contract, not a preference: tasks.commands, tasks.env
+// and tasks.requires are NOT NULL with defaults and toTaskResponse routes env
+// and requires through rawObject, which normalizes both empty and the literal
+// null to {}. assignment_epoch is a fence token and is not on the wire;
+// depends_on is not either.
+export interface WorkerTask {
+  id: string
+  name: string
+  status: TaskStatus
+  commands: string[][]
+  env: Record<string, string>
+  requires: Record<string, string>
+  timeout_seconds: number | null
+  retries: number
+  retry_count: number
+  worker_id?: string
+  job_id: string
+  job_name: string
+  assigned_at?: string
+  // Absent, not null, for a dispatched task that has not begun executing.
+  started_at?: string
+}
+
+export interface WorkerTasksPage {
+  items: WorkerTask[]
+  next_cursor: string
+  total: number
+}
+
+// The worker's currently assigned tasks (dispatched or running), newest
+// assignment first. First page only: `total` is the active count for the whole
+// worker, which the Slots KPI renders as used slots, so the panel is correct
+// about that number without a paging control.
+export function listWorkerTasks(id: string): Promise<WorkerTasksPage> {
+  return apiFetch<WorkerTasksPage>(`/workers/${id}/tasks`)
 }
