@@ -73,5 +73,20 @@ Decide the tolerance deliberately: sub-pixel rounding produces `scrollWidth` one
 
 - `web/e2e/layout.spec.ts` - the gate
 - `web/src/components/holo/Table.tsx` - the wrapper that already satisfies the proposed contract
-- `web/src/shell/HoloShell.tsx` - the shipped instance of the unreachable form
-- [[bug-2026-08-24-header-nav-is-clipped-at-narrow-viewports]] - that instance, filed separately
+- `web/src/shell/HoloShell.tsx` - the former shipped instance, fixed by the collapsed nav
+- [[bug-2026-08-24-header-nav-is-clipped-at-narrow-viewports]] - that instance, closed 2026-09-02
+- `web/e2e/nav.ts` - the header-only reachability predicate built on `toBeInViewport()`
+- [[bug-2026-09-02-taskdag-scroller-has-no-tab-stop-or-name]] - the first instance outside the header
+
+## Notes
+
+2026-09-02: the known instance is fixed (the header nav collapses into a disclosure below `md`,
+PR #171), and the instrument this item asks for now partly exists. `web/e2e/nav.ts` carries a
+reachability predicate that uses Playwright's `toBeInViewport()`, which does clip against
+intermediate scroll containers, plus a `scrollWidth <= clientWidth` assertion on the nav panel at
+768 and 1280. It was measured RED against the pre-fix shell on all thirteen shell surfaces at 320 and
+375. Two limits keep this item open: the predicate runs only over the header's four destinations, not
+over every scroll container the page renders, and the plan-supplied first version used `isVisible()`,
+which cannot see clipping at all and was green against the bug (recorded in `web/CLAUDE.md`). The
+general predicate is still owed, and the TaskDag scroller on `/jobs/:id` is its first instance outside
+the header.
