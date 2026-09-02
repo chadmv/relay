@@ -1,7 +1,9 @@
 ---
 title: Three cross-file line citations in test files went stale during the cursor-pager extraction and were deliberately left
 type: bug
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 priority: low
 created: 2026-08-14
 source: deliberate deferral recorded at Phase 4 of the 2026-08-14-cursor-pager-hook slice, filed at Phase 6 so the deferral does not become an omission
@@ -83,3 +85,6 @@ the rule. The durable fix is to stop writing the citations that can drift.
   `docs/retros/2026-08-14-cursor-pager-hook.md` ("This diff invalidated 13 line-number citations")
 - Prior instance of the same class: `docs/retros/2026-08-13-cross-generation-401.md`
 - The gate that forced the deferral: `reference_refactor_gate_byte_identical_tests`
+
+## Resolution
+All three citations now name symbols or phrases (6944fcf). The item's prescribed symbol deleteWarning does not exist; the real one is confirmDeleteBody. UsersTab carries two reset conventions, so the enrollments citation names create.reset() specifically. web/CLAUDE.md gained the rule against line citations in comments.
