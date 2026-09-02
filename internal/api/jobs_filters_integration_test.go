@@ -101,8 +101,8 @@ func seedJobsFilterFixture(t *testing.T) (*api.Server, jobsFilterFixture) {
 }
 
 // TestListJobs_FiltersApplyOnEveryArm crosses every filter predicate with
-// every list arm the endpoint can dispatch to. The arms are the ten derived
-// from JobsSortSpec.Keys plus the two filtered branches, which have their own
+// every list arm the endpoint can dispatch to. The arms are derived from
+// JobsSortSpec.Keys plus the two filtered branches, which have their own
 // statements and cannot carry ?sort=.
 func TestListJobs_FiltersApplyOnEveryArm(t *testing.T) {
 	srv, fx := seedJobsFilterFixture(t)

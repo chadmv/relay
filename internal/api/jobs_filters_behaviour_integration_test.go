@@ -34,7 +34,6 @@ func insertJobAt(t *testing.T, pool *pgxpool.Pool, ownerID pgtype.UUID, name str
 	return id
 }
 
-
 // mine=true is resolved from the bearer token, so two users issuing the
 // IDENTICAL request get disjoint lists. The request strings are byte-identical
 // on purpose: nothing in the URL names a user, so nothing in the URL can be

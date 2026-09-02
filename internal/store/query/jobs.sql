@@ -52,8 +52,8 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- it, an unfiltered count hash-joins every jobs row against users for a
 -- column it never reads. handleListJobs forks on whether q is present, so
 -- the join is paid only by the requests that need it. Routing a q request
--- to the join-free twin drops the email arm silently; the arm test's
--- "q matches the owner email" case is what pins the fork.
+-- to the join-free twin drops the email arm silently;
+-- TestListJobs_FiltersApplyOnEveryArm is what pins the fork.
 SELECT COUNT(*)
 FROM jobs j
 WHERE (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
