@@ -1,7 +1,9 @@
 ---
 title: "Closing the account dropdown by pressing dead space drops focus to <body>"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-13
 priority: low
 source: Phase 6 triage of the 2026-08-13-usermenu-menu-roles slice (deferred review finding)
@@ -93,3 +95,6 @@ Filed at low priority with route 1 as the recommendation, which means the cheape
 this item is a one-sentence comment. That is a legitimate close. The item exists so the decision is
 made once, by someone who has read both cases, rather than being re-derived from a comment that only
 discusses one of them.
+
+## Resolution
+Route 1 from the item: the dead-space press stays an accepted gap, recorded as a hazard comment in UserMenu's mousedown handler and pinned by 'pressing non-focusable dead space closes the menu and leaves focus on <body>' in UserMenu.test.tsx (81a16bd). Route 2's microtask restore was refuted at spec time: a microtask runs before the browser's mousedown focusing step, so its body gate reads body in both branches; a real-browser version is proposed as a follow-up.

@@ -37,11 +37,13 @@ export function LoginScreen() {
         <h1 className="text-[28px] font-normal tracking-tight">Sign in</h1>
         <div className="mb-5 text-[13px] text-fg-mute">Sign in to the coordinator</div>
 
+        {/* PublicOnlyRoute renders this screen while auth status is still loading, so an authenticated direct visit to /auth briefly focuses a form that unmounts on the redirect; accepted rather than gated on status. */}
         <Field label="Email" htmlFor="email">
           <Input
             id="email"
             type="email"
             autoComplete="username"
+            autoFocus
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />

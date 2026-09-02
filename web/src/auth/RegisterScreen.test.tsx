@@ -67,3 +67,18 @@ test('shows email-exists error with sign-in link on 409', async () => {
   expect(await screen.findByText(/already registered/i)).toBeInTheDocument()
   expect(screen.getByRole('link', { name: /sign in/i })).toBeInTheDocument()
 })
+
+// The register form renders on a LATER commit than the component - the /config
+// early return holds until that request resolves - so this test is what
+// discriminates the autoFocus attribute from a []-deps mount effect, which would
+// run when there is no node to focus and never run again.
+test('the display name field takes focus once the register form renders', async () => {
+  server.use(http.get('/v1/config', () => HttpResponse.json({ allow_self_register: true })))
+  renderRegister()
+  const name = await screen.findByLabelText('Display name')
+  // Positive control: the form rendered, not just the empty placeholder.
+  expect(
+    screen.getByRole('heading', { name: 'Create your relay account', level: 1 }),
+  ).toBeInTheDocument()
+  expect(document.activeElement).toBe(name)
+})

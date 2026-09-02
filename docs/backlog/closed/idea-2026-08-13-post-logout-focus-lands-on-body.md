@@ -1,7 +1,9 @@
 ---
 title: "Signing out leaves keyboard focus on <body> on the sign-in page"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-13
 priority: low
 source: Phase 6 triage of the 2026-08-13-usermenu-menu-roles slice
@@ -98,3 +100,6 @@ It is filed because the cost lands on exactly the user who has the least slack: 
 keyboard or by screen reader loses their position at the moment the application changes out from
 under them, which is the moment orientation matters most. It is also cheap - route 1 is two lines and
 a test.
+
+## Resolution
+Route 1 from the item, at the destination: autoFocus on the first control of LoginScreen and RegisterScreen (9d4006b). Pinned by unit tests on both screens, three route-level tests in authArrivalFocus.test.tsx (direct visit, sign-out through the real UserMenu, 401 teardown through the real AuthProvider) and a Playwright assertion on the logout path. UserMenu's close-then-hand-off ordering is unchanged.
