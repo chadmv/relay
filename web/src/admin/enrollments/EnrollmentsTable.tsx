@@ -1,4 +1,4 @@
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './enrollmentStatus'
 import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api'
 
@@ -36,7 +36,7 @@ interface EnrollmentsTableProps {
 
 export function EnrollmentsTable({ enrollments, sort, onSort, now }: EnrollmentsTableProps) {
   return (
-    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+    <GlassPanel>
       <Table
         label="Agent enrollments"
         columns={COLS}
@@ -75,6 +75,6 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
           )
         })}
       </Table>
-    </div>
+    </GlassPanel>
   )
 }

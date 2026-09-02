@@ -46,13 +46,13 @@ export function SchedulesTable({
   }
   return (
     <GlassPanel data-testid="schedules-table">
-      <Table label="Schedules" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
+      <Table label="Schedules" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-[18px] py-3 tracking-[0.16em]">
         {schedules.map((s) => {
           const pending = pendingId === s.id
           return (
             <TableRow
               key={s.id}
-              className={`border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${s.enabled ? '' : 'opacity-[0.55]'}`}
+              className={`border-b border-border/40 px-[18px] py-2 font-mono text-[11.5px] ${s.enabled ? '' : 'opacity-[0.55]'}`}
             >
               <TableCell className="flex min-w-0 items-center gap-2">
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.enabled ? 'bg-ok' : 'bg-fg-dim'}`} />

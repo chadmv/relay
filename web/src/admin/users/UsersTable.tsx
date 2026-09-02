@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
 import { Input } from '../../components/Input'
 import type { AdminUser, UserSort, UserSortField } from './api'
 
@@ -69,7 +69,7 @@ export function UsersTable({
   }
 
   return (
-    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+    <GlassPanel>
       <Table
         label="Users"
         columns={COLS}
@@ -181,6 +181,6 @@ export function UsersTable({
           )
         })}
       </Table>
-    </div>
+    </GlassPanel>
   )
 }

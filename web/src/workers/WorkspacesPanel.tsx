@@ -45,7 +45,12 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+      {/* The hi-fi's NESTED table header treatment, transcribed: 10px/16px padding
+          with 0.14em letter-spacing, from its own worker-detail source-workspaces
+          header. A second value exists because the hi-fi has a second value, for
+          tables that sit inside a panel or a detail-page column rather than being
+          the page's own list. */}
+      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
         {rows.map((ws) => (
           <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
             <TableCell className="text-fg">{ws.short_id}</TableCell>

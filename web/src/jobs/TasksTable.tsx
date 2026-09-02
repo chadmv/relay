@@ -50,7 +50,7 @@ export function TasksTable({
   }
   return (
     <GlassPanel>
-      <Table label="Tasks" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+      <Table label="Tasks" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
         {tasks.map((t) => {
           const c = taskStatusColor(t.status)
           const selected = t.id === selectedTaskId

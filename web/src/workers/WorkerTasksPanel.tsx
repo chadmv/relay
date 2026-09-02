@@ -39,7 +39,7 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
         columns={COLS}
         minWidth={MIN_W}
         headers={HEADERS}
-        headerClassName="px-4 py-2 tracking-wider"
+        headerClassName="px-4 py-2.5 tracking-[0.14em]"
       >
         {rows.map((t) => {
           const c = taskStatusColor(t.status)

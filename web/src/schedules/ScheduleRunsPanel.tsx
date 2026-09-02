@@ -33,7 +33,7 @@ export function ScheduleRunsPanel({ runs, total }: { runs: Job[]; total: number 
           this schedule has never fired
         </div>
       ) : (
-        <Table label="Recent runs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-wider">
+        <Table label="Recent runs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2.5 tracking-[0.14em]">
           {runs.map((j) => {
             const c = statusColor(j.status)
             return (

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
 import { formatDateTime } from '../../lib/time'
 import { deriveStatus, statusTone } from './reservationStatus'
 import type { Reservation, ReservationSort, ReservationSortField } from './api'
@@ -58,7 +58,7 @@ export function ReservationsTable({
   onDelete,
 }: ReservationsTableProps) {
   return (
-    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+    <GlassPanel>
       <Table
         label="Reservations"
         columns={COLS}
@@ -138,6 +138,6 @@ export function ReservationsTable({
           )
         })}
       </Table>
-    </div>
+    </GlassPanel>
   )
 }

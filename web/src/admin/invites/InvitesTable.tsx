@@ -1,4 +1,4 @@
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import { Chip, GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './inviteStatus'
 import type { Invite, InviteSort, InviteSortField } from './api'
 
@@ -46,7 +46,7 @@ interface InvitesTableProps {
 
 export function InvitesTable({ invites, sort, onSort, now }: InvitesTableProps) {
   return (
-    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+    <GlassPanel>
       <Table
         label="Invites"
         columns={COLS}
@@ -100,6 +100,6 @@ export function InvitesTable({ invites, sort, onSort, now }: InvitesTableProps) 
           )
         })}
       </Table>
-    </div>
+    </GlassPanel>
   )
 }
