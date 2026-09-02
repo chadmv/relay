@@ -1,16 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
+import { DESTINATIONS } from './nav'
 
-// ONE PAGE, not every surface. The header is the same component on all thirteen
-// shell surfaces, and layout.spec.ts already runs the reachability predicate across
-// all of them at three widths. What this file adds is what that loop cannot say: at
-// which width, exactly, the collapse happens, and whether a real key press can
-// drive it.
-//
-// No fourth entry was added to layout.spec.ts's WIDTHS for the same reason: a
-// fourth width there costs fourteen surfaces times two engines for a property one
-// page needs.
-
-const DESTINATIONS = ['Jobs', 'Workers', 'Schedules', 'Admin'] as const
+// ONE PAGE, not every surface. The header is the same component on every shell
+// surface, and layout.spec.ts already runs the reachability predicate across all of
+// them at three widths. What this file adds is what that loop cannot say: at which
+// width, exactly, the collapse happens, and whether a real key press can drive it.
 
 // Gated on the page's own <h1> rather than on the header: the header renders as
 // soon as AuthProvider reports authenticated, so a header-only gate can resolve
@@ -25,18 +19,29 @@ function header(page: Page) {
   return page.getByRole('banner')
 }
 
+// Above the breakpoint the destinations must FIT, not sit behind a scroller. A
+// panel that overflows into its own horizontal scroll hides destinations behind a
+// gesture with no keyboard affordance while every document-level width gate stays
+// green, which is the shape of the defect this slice closes.
+async function expectPanelDoesNotScroll(page: Page, width: number) {
+  const panel = page.getByTestId('header-nav-panel')
+  const overflow = await panel.evaluate((el) => el.scrollWidth - el.clientWidth)
+  expect(overflow, `the header nav panel scrolls horizontally at ${width}px`).toBeLessThanOrEqual(0)
+}
+
 test.describe('header nav collapse', () => {
   test('at 1280 every destination is inline and the collapse toggle is not exposed', async ({
     page,
   }) => {
     await gotoJobs(page, 1280)
     for (const name of DESTINATIONS) {
-      await expect(header(page).getByRole('link', { name, exact: true })).toBeVisible()
+      await expect(header(page).getByRole('link', { name, exact: true })).toBeInViewport()
     }
     // toBeHidden, not toHaveCount(0): the toggle is always in the DOM and is removed
     // from the user's reach by CSS alone. An absence assertion would pass against a
     // component that stopped rendering it at every width.
     await expect(header(page).getByRole('button', { name: /menu/i })).toBeHidden()
+    await expectPanelDoesNotScroll(page, 1280)
   })
 
   // TWO VIEWPORTS ONE PIXEL APART. This is what makes the pair a test of the md
@@ -45,9 +50,10 @@ test.describe('header nav collapse', () => {
   test('at 768 the nav is still inline', async ({ page }) => {
     await gotoJobs(page, 768)
     for (const name of DESTINATIONS) {
-      await expect(header(page).getByRole('link', { name, exact: true })).toBeVisible()
+      await expect(header(page).getByRole('link', { name, exact: true })).toBeInViewport()
     }
     await expect(header(page).getByRole('button', { name: /menu/i })).toBeHidden()
+    await expectPanelDoesNotScroll(page, 768)
     const m = await page.evaluate(() => ({
       s: document.documentElement.scrollWidth,
       c: document.documentElement.clientWidth,
@@ -78,11 +84,10 @@ test.describe('header nav collapse', () => {
 })
 
 // TAGGED so playwright.config.ts's webkit project grep runs this describe in both
-// engines. This is the only lane in the repo that can send a real key, and the
-// engine divergence it is here for is the one UserMenu documents: WebKit does not
-// focus a <button> on click, so a focus-restore contract proven only through a
-// click in chromium says nothing about it. Opening via Tab plus Enter puts focus on
-// the toggle in BOTH engines by construction.
+// engines. The engine divergence it is here for is the one UserMenu documents:
+// WebKit does not focus a <button> on click, so a focus-restore contract proven
+// only through a click in chromium says nothing about it. Opening via Tab plus
+// Enter puts focus on the toggle in BOTH engines by construction.
 test.describe('header nav collapse keyboard @webkit', () => {
   async function tabToToggle(page: Page) {
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
