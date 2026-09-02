@@ -576,8 +576,14 @@ menu item is exactly what nobody reads before re-proposing a shipped slice.
 9. A new `internal/cli` integration test drives `doListJobs` against the live
    harness server, bare and with `--status`, and passes. No production change to
    `internal/cli`, `internal/mcp`, the python SDK or `web/`.
-10. Migration `000023` adds `idx_jobs_submitted_created_id` with a matching down
-    migration, plain `CREATE INDEX`, and the integration lane runs it.
+10. ~~Migration `000023` adds `idx_jobs_submitted_created_id` with a matching
+    down migration, plain `CREATE INDEX`, and the integration lane runs it.~~
+    **Superseded during the fix round (commit a0a3f0d).** Measured against
+    30000 jobs / 300 users, the `mine=true` list statement never uses that
+    index under `plan_cache_mode=auto` or `force_generic_plan`, and the count
+    uses it only on a custom plan. The migration, its down file and its guard
+    test were removed; re-adding the index belongs with a query shape that can
+    use it.
 11. `make generate` has been run and the CRLF procedure in CLAUDE.md followed: only
     content hunks kept, `git ls-files --eol` reads `i/lf` on every touched path,
     and the diffstat matches the intended change size.
