@@ -128,6 +128,7 @@ export interface LogEntry {
 export interface TaskLogPage {
   items: LogEntry[]
   next_seq: number
+  prev_seq: number
   total: number
 }
 
@@ -153,9 +154,13 @@ export interface TaskLogEvent extends LogEntry {
 }
 
 /**
- * One page of a task's log history, forward-only from sinceSeq. next_seq is 0
+ * One page of a task's log history walking FORWARD from sinceSeq. next_seq is 0
  * when drained (internal/api/tasks.go:128-130). Always sends an explicit limit so
  * the caller is never silently truncated to the server default of 50.
+ *
+ * Sends no order parameter: order=desc here would return the NEWEST page where
+ * the oldest is expected. Guard: api.test.ts 'getTaskLogs sends limit=200 and
+ * omits since_seq on the first page'.
  */
 export function getTaskLogs(
   taskId: string,
@@ -164,6 +169,26 @@ export function getTaskLogs(
 ): Promise<TaskLogPage> {
   const q = new URLSearchParams({ limit: String(limit) })
   if (sinceSeq > 0) q.set('since_seq', String(sinceSeq))
+  return apiFetch<TaskLogPage>(`/tasks/${taskId}/logs?${q}`)
+}
+
+/**
+ * One page of a task's log history walking BACKWARD. With no cursor this is the
+ * newest page, which is how a log view opens at the end in one request rather
+ * than paging forward through everything ahead of it.
+ *
+ * items are ASCENDING inside the page in both directions, so appendEntries and
+ * the SSE dedupe consume this identically to a forward page. beforeSeq 0 means
+ * "no cursor" and is omitted: the server 400s before_seq=0 rather than serving
+ * an empty page, so a prev_seq of 0 means stop, not "ask again".
+ */
+export function getTaskLogsDesc(
+  taskId: string,
+  beforeSeq = 0,
+  limit = BACKFILL_PAGE_SIZE,
+): Promise<TaskLogPage> {
+  const q = new URLSearchParams({ order: 'desc', limit: String(limit) })
+  if (beforeSeq > 0) q.set('before_seq', String(beforeSeq))
   return apiFetch<TaskLogPage>(`/tasks/${taskId}/logs?${q}`)
 }
 

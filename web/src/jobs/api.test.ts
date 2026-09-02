@@ -9,6 +9,7 @@ import {
   createJob,
   getJobStats,
   getTaskLogs,
+  getTaskLogsDesc,
   listJobs,
   listJobsBySchedule,
   retryJob,
@@ -128,13 +129,16 @@ test('getTaskLogs sends limit=200 and omits since_seq on the first page', async 
   server.use(
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       params = new URL(request.url).searchParams
-      return HttpResponse.json({ items: [], next_seq: 0, total: 0 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })
     }),
   )
   await getTaskLogs('t1')
   expect(params?.get('limit')).toBe(String(BACKFILL_PAGE_SIZE))
   expect(BACKFILL_PAGE_SIZE).toBe(200) // the server's documented maximum
   expect(params?.has('since_seq')).toBe(false)
+  // The forward reader must never acquire a direction: order=desc would make
+  // this the newest page rather than the oldest, silently.
+  expect(params?.has('order')).toBe(false)
 })
 
 test('getTaskLogs sends since_seq when paging forward', async () => {
@@ -142,12 +146,51 @@ test('getTaskLogs sends since_seq when paging forward', async () => {
   server.use(
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       params = new URL(request.url).searchParams
-      return HttpResponse.json({ items: [], next_seq: 0, total: 7 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 7 })
     }),
   )
   const page = await getTaskLogs('t1', 41, 200)
   expect(params?.get('since_seq')).toBe('41')
   expect(page.total).toBe(7)
+})
+
+test('getTaskLogsDesc asks for the tail with no cursor, and for a page before one when given', async () => {
+  let search = ''
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      search = new URL(request.url).search
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })
+    }),
+  )
+  // The exact query string, not a subset: a leftover since_seq or a missing
+  // order would still satisfy a per-key assertion.
+  await getTaskLogsDesc('t1')
+  expect(search).toBe('?order=desc&limit=200')
+
+  await getTaskLogsDesc('t1', 93913)
+  expect(search).toBe('?order=desc&limit=200&before_seq=93913')
+
+  // 0 means "no cursor", and the server 400s before_seq=0, so it is never sent.
+  await getTaskLogsDesc('t1', 0, 50)
+  expect(search).toBe('?order=desc&limit=50')
+})
+
+test('getTaskLogsDesc reads prev_seq off the envelope', async () => {
+  server.use(
+    http.get('/v1/tasks/t1/logs', () =>
+      // Hand-written, never marshalled through TaskLogPage: a fixture built
+      // from the production type agrees with the decoder by construction.
+      HttpResponse.json({
+        items: [{ seq: 41, stream: 'stdout', content: 'x\n', created_at: '2026-09-01T00:00:00Z' }],
+        next_seq: 0,
+        prev_seq: 41,
+        total: 94312,
+      }),
+    ),
+  )
+  const page = await getTaskLogsDesc('t1')
+  expect(page.prev_seq).toBe(41)
+  expect(page.total).toBe(94312)
 })
 
 test('streamTaskLog routes task_log frames to onLine and dropped frames to onDropped', async () => {
