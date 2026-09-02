@@ -41,8 +41,7 @@ test('applies bodyClassName to the body wrapper', () => {
 })
 
 test('publishes a string title as data-panel-title and omits it for a node title', () => {
-  // An inert hook, in the manner of data-testid="user-menu-panel" and
-  // data-dialog-layer. It exists so a page test can walk a table up to its own
+  // An inert hook. It exists so a page test can walk a table up to its own
   // panel and compare the RENDERED title with the RENDERED accessible name. A test
   // asserting "both sites use the same imported constant" cannot fail, because they
   // are the same symbol.

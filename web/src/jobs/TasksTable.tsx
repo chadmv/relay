@@ -28,10 +28,11 @@ const HEADERS: TableColumn[] = [
 // once` pins the call count, and the job-detail describe in web/e2e/keyboard.spec.ts
 // pins the key-press half in a real browser.
 //
-// NO aria-selected AND NO interactive row element. aria-selected is not surfaced
-// under role="table", and an interactive row element would replace the row role.
-// The selected task is marked with aria-current on its button instead, which is
-// valid on any element and announced by every major screen reader.
+// NO aria-selected AND NO interactive row element: this table implements
+// neither grid nor listbox semantics, so it advertises none. aria-selected is
+// not surfaced under role="table", and an interactive row element would
+// replace the row role. The selected task is marked with aria-current on its
+// button instead, which is valid on any element.
 //
 // No per-task duration/percent column: the API returns neither per-task timing nor
 // a percent (docs/backlog/feature-2026-07-01-per-task-timing.md). The worker cell

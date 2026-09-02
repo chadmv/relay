@@ -27,9 +27,9 @@ test('renders each task name and status', () => {
 
 test("the selected task's control is marked aria-current and no row carries aria-selected", () => {
   const { container } = render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
-  // aria-selected is not surfaced under role="table": it advertised a selection
-  // model the container does not have. aria-current is valid on any element and is
-  // not conditional on the container role.
+  // See TasksTable.tsx for why: no aria-selected, no interactive row.
+  // aria-current is valid on any element and is not conditional on the
+  // container role.
   const current = container.querySelectorAll('[aria-current="true"]')
   expect(current).toHaveLength(1)
   expect(current[0]).toHaveAccessibleName('denoise')

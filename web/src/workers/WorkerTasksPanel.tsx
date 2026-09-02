@@ -12,7 +12,7 @@ const COLS = 'grid-cols-[1fr_1fr_100px_90px_60px]'
 const MIN_W = 'min-w-[560px]'
 
 // One literal, shared with WorkerDetailPage's Panel title. Same reasoning as
-// WORKSPACES_PANEL_TITLE, and this file is the second instance of the same defect.
+// WORKSPACES_PANEL_TITLE.
 export const WORKER_TASKS_PANEL_TITLE = 'Current tasks'
 
 const HEADERS: TableColumn[] = [

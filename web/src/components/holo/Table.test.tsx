@@ -120,7 +120,7 @@ test('the caret is still rendered for sighted users', () => {
   // name" from "deleted". Located by position, NOT by accessible name, so this test
   // stays red only for a missing caret and cannot also fail for a missing aria-hidden.
   // Escapes, not raw characters: a raw non-ASCII literal in source is unverifiable by
-  // eye and survives every check this repo runs.
+  // eye.
   const headers = [{ label: 'NAME', field: 'name' as const }]
   const { rerender } = render(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
@@ -180,11 +180,9 @@ test('TableRow always renders a div and cannot have its role overridden', async 
 })
 
 // A TYPE-LEVEL PIN, checked by `tsc -b` and not by vitest. TableRow no longer
-// accepts an element-type escape hatch: `as="button"` produced a
-// <button role="row">, the arrangement that made aria-selected look supported on a
-// table row. Restore the prop and this directive has no error to suppress, so tsc
-// fails it as unused - the pin goes red exactly when the guard is lost. Precedent:
-// the SortFieldOf pin in web/src/lib/toggleSort.test.ts.
+// accepts an element-type escape hatch. Restore the prop and this directive has
+// no error to suppress, so tsc fails it as unused - the pin goes red when the
+// guard is lost. Precedent: the SortFieldOf pin in web/src/lib/toggleSort.ts.
 // @ts-expect-error `as` is not a prop of TableRow
 void (<TableRow as="button">x</TableRow>)
 

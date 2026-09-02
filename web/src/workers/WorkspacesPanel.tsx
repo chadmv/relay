@@ -11,10 +11,10 @@ const COLS = 'grid-cols-[120px_90px_1fr_120px_90px_90px]'
 // scrollbar on a maximized desktop window. Task 7 measures this one specifically.
 const MIN_W = 'min-w-[600px]'
 
-// ONE literal for the panel title and the table's accessible name. They were two
-// hand-kept-equal strings in two files; the structural test on WorkerDetailPage
-// (`every table on the page is named by its own panel title`) pins the RENDERED
-// pair, since a test comparing two references to this constant could not fail.
+// ONE literal for the panel title and the table's accessible name. The
+// structural test on WorkerDetailPage (`every table on the page is named by
+// its own panel title`) pins the RENDERED pair, since a test comparing two
+// references to this constant could not fail.
 export const WORKSPACES_PANEL_TITLE = 'Source workspaces'
 
 const HEADERS: TableColumn[] = [

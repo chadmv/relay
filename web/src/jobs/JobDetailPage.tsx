@@ -166,10 +166,9 @@ export function JobDetailPage() {
 
         <div className="flex flex-col lg:w-[45%]">
           {/* The name carries the selected task, so a user moving to Spec or Log hears
-              whose spec and log they are about to read. The linkage between the task
-              selection and the panes is otherwise announced nowhere. React escapes
-              attribute values and an aria-label is not parsed as markup, so a hostile
-              task name is a nuisance in an announcement, not an injection. */}
+              whose spec and log they are about to read. React escapes attribute
+              values and an aria-label is not parsed as markup, so a hostile task
+              name is a nuisance in an announcement, not an injection. */}
           <div
             role="tablist"
             aria-label={selectedTask ? `Task detail: ${selectedTask.name}` : 'Task detail'}

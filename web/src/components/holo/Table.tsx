@@ -172,9 +172,8 @@ export function Table<F extends string = string>({
                   {h.label}
                   {/* aria-hidden, so the button's accessible name is the label alone and
                       aria-sort is the sole machine-readable carrier of direction. The
-                      leading space stays INSIDE the span, so the rendered text is
-                      byte-identical to what it was. `the sort caret is hidden from the
-                      header's accessible name` and `the caret is still rendered for
+                      leading space stays INSIDE the span. `the sort caret is hidden from
+                      the header's accessible name` and `the caret is still rendered for
                       sighted users` are the pair that pins both halves. */}
                   <span aria-hidden="true">{sortCaret(field, sort)}</span>
                 </button>
@@ -212,10 +211,9 @@ export function Table<F extends string = string>({
 // No element-type escape hatch and no `type`. A caller that renders a row AS a
 // button produces a <button role="row">, which is what made aria-selected look
 // like supported API on a table row; aria-selected is not surfaced under
-// role="table" at all. An interactive control belongs INSIDE a cell, where every
-// other table in this app puts one. TasksTable was the only consumer of the two
-// removed props, and `TableRow always renders a div and cannot have its role
-// overridden` plus the @ts-expect-error pin beside it are the guards.
+// role="table" at all. An interactive control belongs INSIDE a cell instead.
+// `TableRow always renders a div and cannot have its role overridden` plus the
+// type-level pin beside it (@ts-expect-error, in Table.test.tsx) are the guards.
 type TableRowProps = Omit<ComponentPropsWithoutRef<'div'>, 'role' | 'dangerouslySetInnerHTML'>
 
 export function TableRow({ ...rest }: TableRowProps) {

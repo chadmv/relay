@@ -34,8 +34,7 @@ test('renders all six headers', () => {
   renderTable()
   // CREATED is checked separately and ANCHORED-EXACT: "CREATED BY" is a second,
   // non-sortable columnheader that also begins with "CREATED", so an unanchored
-  // /CREATED/ resolves two elements. The anchoring is load-bearing on its own now
-  // that the sort caret no longer lengthens the active header's name.
+  // /CREATED/ resolves two elements.
   for (const label of ['BINDS TO', 'EXPIRES', 'CREATED BY', 'STATUS', 'NOTE']) {
     expect(screen.getByRole('columnheader', { name: new RegExp(label) })).toBeInTheDocument()
   }

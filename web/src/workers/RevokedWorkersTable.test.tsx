@@ -31,10 +31,7 @@ test('renders an empty state when there are no revoked workers', () => {
 
 test('the table is named, like every grid table in the app', () => {
   render(<RevokedWorkersTable workers={[revoked]} />)
-  // The one native <table> in web/src. Named invisibly rather than with a caption:
-  // the page already shows an h1 and a pressed section tab saying the same thing,
-  // and a caption would make this the only table in the app announcing its name on
-  // screen. It is also a zero-pixel change, which matters because no e2e surface
-  // reaches this table.
+  // Named invisibly rather than with a caption: the page already shows an h1
+  // and a pressed section tab saying the same thing. Zero-pixel change.
   expect(screen.getByRole('table', { name: 'Revoked workers' })).toBeInTheDocument()
 })

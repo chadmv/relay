@@ -17,8 +17,8 @@ export function Panel({ title, meta, footer, className, bodyClassName, children 
   return (
     // data-panel-title is inert. It exists so a page-level test can walk a table up
     // to the panel that wraps it and compare the rendered title with the rendered
-    // accessible name, which is the only comparison that can catch the two drifting
-    // apart. Omitted for a node title, which has no single string to publish.
+    // accessible name. Omitted for a node title, which has no single string to
+    // publish.
     <GlassPanel
       className={`flex flex-col ${className ?? ''}`}
       data-panel-title={typeof title === 'string' ? title : undefined}

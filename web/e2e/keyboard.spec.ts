@@ -141,8 +141,8 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
 // WHY A BROWSER FOR THIS. The jsdom tests next to TasksTable prove the attributes
 // are in the DOM and prove nothing about whether a real Tab press reaches the
 // control or whether a real Enter activates it. Removing the row's element-type
-// override changed exactly that: the per-row tab stop moved from the row onto one
-// button inside the name cell, and only a real key press can say it survived.
+// override changed exactly that: only a real key press can say the per-row tab
+// stop survived.
 //
 // THE TAG IS LOAD-BEARING. playwright.config.ts gives the webkit project
 // grep: /@webkit/, so an untagged describe runs in chromium only. WebKit's
@@ -159,8 +159,9 @@ test.describe('job-detail task selection @webkit', () => {
 
     const table = page.getByRole('table', { name: 'Tasks' })
     await expect(table).toHaveCount(1)
-    // aria-selected is not surfaced under role="table". Asserted in the browser as
-    // well as in jsdom because this is the advertisement the lane exists to remove.
+    // Asserted in the browser as well as in jsdom (see TasksTable.tsx for why
+    // there is no aria-selected) because this is the advertisement the lane
+    // exists to remove.
     await expect(table.locator('[aria-selected]')).toHaveCount(0)
 
     const current = table.locator('[aria-current="true"]')

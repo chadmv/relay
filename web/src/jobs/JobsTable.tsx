@@ -46,9 +46,7 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
         minWidth={MIN_W}
         headers={HEADERS}
         /* The hi-fi's top-level list header treatment, transcribed: 12px/18px
-           padding with 0.16em letter-spacing, identical across its jobs, workers,
-           schedules, users, enrollments and reservations tables. The four admin
-           tables already carried it; this is the value the other three join. */
+           padding with 0.16em letter-spacing. */
         headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {jobs.map((j) => {
@@ -60,11 +58,8 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
               data-testid={`job-row-${j.id}`}
               /* Horizontal padding tracks the header's, and must: the header row and
                  the body rows are sibling grid containers sharing one template, so a
-                 disagreement puts every column label off its own data. Content width
-                 becomes the min-width less 36px instead of less 32px, which leaves
-                 144px of slack against this table's 700px of fixed track - free space
-                 stays non-negative, so fr resolves identically in both grids. The
-                 vertical component is deliberately unchanged. */
+                 disagreement puts every column label off its own data. The vertical
+                 component is deliberately unchanged. */
               className={`border-b border-border/40 ${TOP_LEVEL_ROW_PX} py-2 font-mono text-[11.5px] ${
                 j.status === 'running' ? 'bg-accent/[0.04]' : ''
               }`}
