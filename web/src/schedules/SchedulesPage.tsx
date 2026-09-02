@@ -90,6 +90,10 @@ export function SchedulesPage() {
   const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
   const { x, y } = computePageRange(pager.startOffset, schedules.length)
+  const rangeText =
+    schedules.length === 0
+      ? `0 of ${total.toLocaleString()}`
+      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}`
   const actionError = (runNow.error ?? setEnabled.error) as Error | null
 
   return (
@@ -146,7 +150,7 @@ export function SchedulesPage() {
         footer={
           <div className="flex items-center justify-between font-mono text-[10.5px] tracking-wide text-fg-mute">
             <span>
-              SHOWING <span className="text-fg">{x}-{y} of {total}</span>
+              SHOWING <span className="text-fg">{rangeText}</span>
               {' · '}SORT <span className="text-accent-b">{sort}</span> · OWNED + ADMINISTRATIVE
             </span>
             <div className="flex gap-1.5">
