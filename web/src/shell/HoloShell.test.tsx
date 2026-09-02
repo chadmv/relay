@@ -32,6 +32,17 @@ function renderShell(isAdmin: boolean) {
 
 afterEach(() => clearToken())
 
+// The breakpoint prefixes are spelled as a constant plus a bare suffix, never as
+// one literal string, and that is load-bearing rather than stylistic. Tailwind v4
+// scans every file under web/ for class-shaped substrings - test files included -
+// and emits a rule for each one it finds. A literal here would put these rules in
+// the production bundle on its own, so the post-build check that is supposed to
+// attribute them to HoloShell.tsx would pass with the classes deleted from the
+// component. The bare suffixes still emit their own unprefixed utilities, which is
+// harmless dead CSS.
+const NARROW = 'max-md:'
+const WIDE = 'md:'
+
 test('always shows the non-admin nav entries', async () => {
   renderShell(false)
   await waitFor(() => expect(screen.getByText('page body')).toBeInTheDocument())
@@ -98,7 +109,7 @@ test('the nav is the only shrinkable scroll container in the header', async () =
   // content, so panel, <nav> and the group holding the wordmark all need min-w-0
   // or the header gets a content floor back.
   const panel = screen.getByTestId('header-nav-panel')
-  expect(panel).toHaveClass('min-w-0', 'md:overflow-x-auto')
+  expect(panel).toHaveClass('min-w-0', WIDE + 'overflow-x-auto')
   const nav = panel.parentElement as HTMLElement
   expect(nav).toHaveAttribute('aria-label', 'Main')
   expect(nav).toHaveClass('min-w-0')
@@ -127,4 +138,48 @@ test('the nav toggle exposes disclosure semantics in both states', async () => {
 
   expect(toggle).toHaveAttribute('aria-expanded', 'true')
   expect(toggle).toHaveAttribute('aria-controls', panel.id)
+})
+
+// REGRESSION PIN: the collapsed nav is a full-bleed opaque panel below md and
+// inline above it.
+//
+// A PIN, NOT A GUARD. jsdom applies no CSS and does no layout, so nothing here
+// evaluates a breakpoint, a position or a fill - every one of these classes was
+// chosen for an effect only a browser can show. Its whole job is to make a silent
+// deletion visible in this lane. The behaviour is header-nav.spec.ts's.
+//
+// Full bleed rather than a fixed-width panel anchored at the nav: a 224px panel
+// starting past the wordmark at a 320px viewport reaches beyond the viewport edge
+// and re-creates the document overflow the previous narrow-viewport slice closed.
+// left-0 with right-0 cannot overflow by construction. The <header> is the
+// positioned ancestor it anchors to.
+//
+// The bg fill is load-bearing for the same reason it is in UserMenu: GlassPanel
+// and the header set no background-color at all, so a panel floating over live
+// content without its own fill reads straight through.
+test('REGRESSION PIN: the collapsed nav is a full-bleed opaque panel below md and inline above it', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  const panel = screen.getByTestId('header-nav-panel')
+
+  expect(toggle).toHaveClass(WIDE + 'hidden')
+  expect(panel).toHaveClass(WIDE + 'flex')
+  expect(panel).toHaveClass(
+    NARROW + 'absolute',
+    NARROW + 'left-0',
+    NARROW + 'right-0',
+    NARROW + 'top-full',
+    NARROW + 'z-50',
+    NARROW + 'flex-col',
+    NARROW + 'bg-popover',
+  )
+
+  // The state switch itself, which is the entire collapse mechanism and the one
+  // part of it jsdom can see.
+  expect(panel).toHaveClass('hidden')
+  expect(panel).not.toHaveClass('flex')
+  await userEvent.click(toggle)
+  expect(panel).toHaveClass('flex')
+  expect(panel).not.toHaveClass('hidden')
 })

@@ -39,7 +39,9 @@ export function HoloShell({ children }: { children: ReactNode }) {
   // `hidden` with `md:flex` is the Tailwind idiom: the variant rule is emitted
   // after the base utility, so md:flex wins at and above the breakpoint whatever
   // the open state is.
-  const navPanelClass = `min-w-0 gap-0.5 md:flex md:overflow-x-auto ${navOpen ? 'flex' : 'hidden'}`
+  const navPanelClass = `min-w-0 gap-0.5 md:flex md:overflow-x-auto ${
+    navOpen ? 'flex' : 'hidden'
+  } max-md:absolute max-md:left-0 max-md:right-0 max-md:top-full max-md:z-50 max-md:flex-col max-md:border-b max-md:border-border max-md:bg-popover max-md:p-1.5 max-md:shadow-xl`
 
   return (
     <div className="min-h-screen bg-bg text-fg">
@@ -97,11 +99,17 @@ export function HoloShell({ children }: { children: ReactNode }) {
                 and no visual difference. */}
             <div id={navPanelId} data-testid="header-nav-panel" className={navPanelClass}>
               {nav.map((n) => (
+                /* In a vertical panel a full-width bottom border reads as a row
+                   separator rather than a selection marker, so the active
+                   accent becomes a left bar below the breakpoint and stays an
+                   underline above it. border-accent already sets the colour on
+                   all four sides. Deliberately unpinned: deleting these two
+                   changes how the active row looks and breaks nothing. */
                 <NavLink
                   key={n.to}
                   to={n.to}
                   className={({ isActive }) =>
-                    `border-b-2 px-[14px] py-[7px] text-[13px] tracking-[0.02em] transition-colors ${
+                    `border-b-2 px-[14px] py-[7px] text-[13px] tracking-[0.02em] transition-colors max-md:border-b-0 max-md:border-l-2 ${
                       isActive
                         ? 'border-accent text-fg'
                         : 'border-transparent text-fg-mute hover:text-fg'
