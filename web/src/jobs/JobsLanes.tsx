@@ -6,19 +6,12 @@ import { LANE_LABELS } from './lanes'
 import { progressPct, statusColor } from './status'
 import type { LaneState } from './useJobLanes'
 
-// One horizontal scroll region holding every lane. tabIndex + role="group" follow
-// components/holo/Table.tsx: a scroll container with no focusable descendant is an
-// axe scrollable-region-focusable violation and WebKit grants no implicit scroller
-// focusability. With every lane empty there is no focusable descendant at all,
-// which is that case. role="group" is not a landmark; it exists so aria-label has
-// a role to attach a name to.
+// A scroll container needs its own tab stop; with every lane empty it has no
+// focusable descendant.
 const SCROLLER = 'min-w-0 overflow-x-auto'
 const ROW = 'flex gap-3 pb-2'
-// Fixed width, no grow and no shrink: the lanes are together wider than any
-// viewport this app is tested at, so the row scrolls inside SCROLLER instead of
-// widening the document. Same width at 320 as at 1280 - no breakpoint, because
-// stacking would nest a vertical scroller inside a vertical scroller per lane and
-// would mean the widths measured at 320 are not the widths shipped at 1280.
+// Fixed width and no shrink: the row scrolls inside SCROLLER rather than
+// compressing the lanes.
 const LANE = 'flex w-[280px] shrink-0 flex-col gap-2 p-3'
 // Capped height so a full lane scrolls within itself rather than stretching the page.
 const LANE_BODY = 'flex max-h-[520px] flex-col gap-2 overflow-y-auto'
@@ -63,8 +56,7 @@ function JobLane({
             {LANE_LABELS[lane.status]}
           </h2>
         </div>
-        {/* "total" is spelled out because the KPI strip's DONE-24H sits just above
-            and is a different, 24-hour-scoped number. This one is all-time. */}
+        {/* All-time, not the 24-hour scope the KPI strip uses. */}
         <span className={`flex-none font-mono text-[11px] ${c.text}`}>
           {lane.total === null ? '-' : `${lane.total.toLocaleString()} total`}
         </span>

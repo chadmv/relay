@@ -1,7 +1,6 @@
 import type { JobStatus } from './api'
 
-// Cards fetched per lane. Fixed rather than user-adjustable in this slice: five
-// lanes at this cap is one table page of rows per poll.
+// Cards fetched per lane.
 export const LANE_LIMIT = 10
 
 // Left-to-right lane order. A presentation choice, so it is listed rather than

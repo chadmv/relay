@@ -6,9 +6,6 @@ import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { useJobs } from './useJobs'
 
-// Sibling to useJobs.test.tsx, which is gate-frozen for this slice. The `enabled`
-// parameter gets its own test with itself as the subject rather than a passing
-// mention inside an existing one.
 // The client is built ONCE and closed over, not per render: a wrapper that
 // constructs one in its body gives every rerender a fresh cache, so the flip
 // below would measure a remount rather than the gate opening.

@@ -1,10 +1,7 @@
 import { apiFetch, apiStream } from '../lib/api'
 
 // The jobs.status vocabulary, in lifecycle order. JobStatus derives from the tuple
-// so the type and the runtime list cannot drift from each other. Nothing compares
-// this to the database's own constraint: TestJobsStatusVocabularyIsExactly pins the
-// Go side and cannot see this file, so a sixth status added server-side would be
-// dropped from the lanes view silently.
+// so the type and the runtime list cannot drift from each other.
 export const JOB_STATUSES = ['pending', 'running', 'done', 'failed', 'cancelled'] as const
 
 export type JobStatus = (typeof JOB_STATUSES)[number]

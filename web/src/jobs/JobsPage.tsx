@@ -30,7 +30,7 @@ const VIEW_KEY = 'relay.jobs.view'
 
 // Anything but the literal 'lanes' means the table, so a missing key, a value
 // written by a future version, and a storage read that throws all land on the
-// shipped default rather than on a blank page.
+// shipped default.
 function loadView(): View {
   try {
     return localStorage.getItem(VIEW_KEY) === 'lanes' ? 'lanes' : 'table'
@@ -181,7 +181,7 @@ export function JobsPage() {
         omitted here (a dead list control reads as broken):
           - Timeline view: docs/backlog/idea-2026-06-05-jobs-timeline-view.md
           - My jobs + search: docs/backlog/idea-2026-06-05-my-jobs-toggle-mine-filter.md
-        When those land, the remaining filters re-appear with real backing.
+        When those land, the remaining controls re-appear with real backing.
       */}
       <div className="flex flex-wrap items-center gap-2">
         {FILTERS.map((f) => (

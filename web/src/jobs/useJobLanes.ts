@@ -25,9 +25,9 @@ export interface LaneState {
 // five queries running behind the table.
 //
 // Keys are ['job-lanes', ...] and deliberately NOT under the 'jobs' prefix: a broad
-// invalidateQueries(['jobs']) must not fan out into five more requests. Same
-// argument as useJobStats' ['job-stats'] key; the guard here is
-// useJobLanes.test.tsx's 'invalidating the jobs list does not refetch the lanes'.
+// invalidateQueries(['jobs']) must not fan out into five more requests. The guard
+// is useJobLanes.test.tsx's 'invalidating the jobs list does not refetch the
+// lanes'; mutations that move a job between lanes name the key explicitly.
 export function useJobLanes(enabled: boolean, limit = LANE_LIMIT, intervalMs = 3000): LaneState[] {
   const results = useQueries({
     queries: LANE_ORDER.map((status) => ({

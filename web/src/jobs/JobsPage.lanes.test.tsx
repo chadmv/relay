@@ -9,9 +9,6 @@ import { JOB_STATUSES } from './api'
 import { LANE_CHIP_KEY } from './lanes'
 import { FILTERS, JobsPage } from './JobsPage'
 
-// Sibling to JobsPage.test.tsx, which is gate-frozen apart from one narrowed
-// assertion, following the JobsPage.pager.test.tsx precedent.
-
 function renderPage() {
   return renderWithQuery(
     <MemoryRouter>

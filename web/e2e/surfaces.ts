@@ -153,9 +153,8 @@ export function surfaces(): Surface[] {
       },
       ready: async (p, seed) => {
         // Scoped to the Queued lane, not the bare link: a seeded job never leaves
-        // `pending` (no relay-agent runs in slice 1), so a pass here means the
-        // populated lane really rendered, rather than an empty lanes view being
-        // measured under a populated name.
+        // `pending`, so a pass here means the populated lane really rendered,
+        // rather than an empty lanes view being measured under a populated name.
         //
         // Case-insensitive name: the lane heading is uppercased by CSS, and
         // Chromium reflects text-transform in the accessible name.
@@ -208,9 +207,8 @@ export function surfaces(): Surface[] {
       // pixel. The healthy surface above is the CONTROL: if both overflow, the
       // chip is not the cause.
       //
-      // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH, measured 2026-08-28 rather
-      // than argued. Widening SchedulesTable's own MIN_W to 2400px changes
-      // NOTHING here: the suite stays green. That is not a hole in this
+      // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH. Widening SchedulesTable's own
+      // MIN_W to 2400px changes NOTHING here. That is not a hole in this
       // surface, it is the documented limit in e2e/README.md - a
       // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped behind
       // a scroller", and Table wraps the whole role="table" subtree in an
