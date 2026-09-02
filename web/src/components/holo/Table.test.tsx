@@ -103,16 +103,33 @@ test('emits aria-sort only on sortable headers, and follows the active sort', ()
   expect(screen.getByRole('columnheader', { name: /^CREATED/ })).toHaveAttribute('aria-sort', 'ascending')
 })
 
-test('the caret follows the active sort direction', () => {
+test("the sort caret is hidden from the header's accessible name", () => {
+  // The glyph announces as "black down-pointing triangle" and is not a name. Direction
+  // travels on aria-sort, which `emits aria-sort only on sortable headers` pins.
+  // Both queries are EXACT: with the glyph still in the name they resolve nothing.
+  const headers = [{ label: 'NAME', field: 'name' as const }]
+  render(
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
+  )
+  expect(screen.getByRole('button', { name: 'NAME' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'NAME' })).toBeInTheDocument()
+})
+
+test('the caret is still rendered for sighted users', () => {
+  // The partner of the test above, and neither alone distinguishes "hidden from the
+  // name" from "deleted". Located by position, NOT by accessible name, so this test
+  // stays red only for a missing caret and cannot also fail for a missing aria-hidden.
+  // Escapes, not raw characters: a raw non-ASCII literal in source is unverifiable by
+  // eye and survives every check this repo runs.
   const headers = [{ label: 'NAME', field: 'name' as const }]
   const { rerender } = render(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
   )
-  expect(screen.getByRole('button', { name: 'NAME ▼' })).toBeInTheDocument()
+  expect(screen.getAllByRole('columnheader')[0].textContent).toContain('\u25BC')
   rerender(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="name" onSort={() => {}} />,
   )
-  expect(screen.getByRole('button', { name: 'NAME ▲' })).toBeInTheDocument()
+  expect(screen.getAllByRole('columnheader')[0].textContent).toContain('\u25B2')
 })
 
 test('clicking a sortable header calls onSort with that column field', async () => {

@@ -131,9 +131,9 @@ test('exposes aria-sort on the active column and "none" on the others', () => {
   expect(screen.getByRole('columnheader', { name: /NAME/ })).toHaveAttribute('aria-sort', 'none')
 })
 
-test('descending sort shows a descending caret', () => {
+test('the active sort column button is named by its label alone', () => {
   renderTable({ sort: '-name' })
-  expect(screen.getByRole('button', { name: 'NAME ▼' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'NAME' })).toBeInTheDocument()
 })
 
 test('Rename turns the name cell into an input and submits the trimmed value', async () => {

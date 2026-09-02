@@ -160,7 +160,13 @@ export function Table<F extends string = string>({
               >
                 <button type="button" className="text-left" onClick={() => onSort(field)}>
                   {h.label}
-                  {sortCaret(field, sort)}
+                  {/* aria-hidden, so the button's accessible name is the label alone and
+                      aria-sort is the sole machine-readable carrier of direction. The
+                      leading space stays INSIDE the span, so the rendered text is
+                      byte-identical to what it was. `the sort caret is hidden from the
+                      header's accessible name` and `the caret is still rendered for
+                      sighted users` are the pair that pins both halves. */}
+                  <span aria-hidden="true">{sortCaret(field, sort)}</span>
                 </button>
               </div>
             )

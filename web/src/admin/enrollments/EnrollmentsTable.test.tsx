@@ -86,17 +86,17 @@ test('clicking a sortable header calls onSort with that field', async () => {
   expect(props.onSort).toHaveBeenCalledWith('expires_at')
 })
 
-test('aria-sort marks the active column and caret direction follows the sort', () => {
+test('aria-sort marks the active column and the button is named by its label alone', () => {
   renderTable({ sort: '-created_at' })
   expect(screen.getByRole('columnheader', { name: /CREATED/ })).toHaveAttribute('aria-sort', 'descending')
   expect(screen.getByRole('columnheader', { name: /EXPIRES/ })).toHaveAttribute('aria-sort', 'none')
-  expect(screen.getByRole('button', { name: 'CREATED ▼' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'CREATED' })).toBeInTheDocument()
 })
 
-test('ascending sort shows an ascending caret', () => {
+test('an ascending sort leaves the button named by its label alone', () => {
   renderTable({ sort: 'expires_at' })
   expect(screen.getByRole('columnheader', { name: /EXPIRES/ })).toHaveAttribute('aria-sort', 'ascending')
-  expect(screen.getByRole('button', { name: 'EXPIRES ▲' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'EXPIRES' })).toBeInTheDocument()
 })
 
 test('a different now re-derives the pill and the label from the same row', () => {
