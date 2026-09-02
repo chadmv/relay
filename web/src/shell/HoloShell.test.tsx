@@ -97,7 +97,7 @@ test('stacks the header above the page content', async () => {
 // of the header over <main> - the behaviour established by the 275-point hit test
 // recorded in HoloShell.tsx. "Just put overflow-x-auto on the header" is the
 // tempting wrong fix, and this line is what reddens for it.
-test('the nav is the only shrinkable scroll container in the header', async () => {
+test('the header shrinks through the nav panel, and never scrolls itself', async () => {
   renderShell(true)
   await screen.findByRole('link', { name: 'Admin' })
 
@@ -111,7 +111,7 @@ test('the nav is the only shrinkable scroll container in the header', async () =
   const panel = screen.getByTestId('header-nav-panel')
   expect(panel).toHaveClass('min-w-0', WIDE + 'overflow-x-auto')
   const nav = panel.parentElement as HTMLElement
-  expect(nav).toHaveAttribute('aria-label', 'Main')
+  expect(nav).toHaveAttribute('aria-label', 'Main navigation')
   expect(nav).toHaveClass('min-w-0')
   expect(nav.parentElement).toHaveClass('min-w-0')
 
@@ -314,6 +314,26 @@ test('a modifier-clicked destination leaves the nav panel open and does not touc
   // takes to open a new tab. That warning is proof the click was NOT intercepted.
 })
 
+// The inline path, at and above the breakpoint: the panel is closed and the toggle
+// is out of the user's reach by CSS, so activating a destination must not call
+// focus() on it. Without the open check the restore fires here too and only
+// display:none hides the consequence.
+test('clicking a destination while the panel is closed does not move focus to the toggle', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+  try {
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await userEvent.click(screen.getByRole('link', { name: 'Workers' }))
+
+    expect(toggleFocus).not.toHaveBeenCalled()
+  } finally {
+    toggleFocus.mockRestore()
+  }
+})
+
 // AC5, half one. Tab out is a DISMISS route for a disclosure, not something to
 // intercept: no Tab trap, because nothing here is modal and the page behind stays
 // interactive. The destination after the last link is the user chip, which is the
@@ -456,9 +476,8 @@ test('the nav panel is a plain disclosure - no menu roles, no roving tabindex', 
   expect(panel.querySelectorAll('[tabindex]')).toHaveLength(0)
 
   // Positive control: the sweep is looking at a POPULATED panel, so it cannot pass
-  // against an empty one. Four elements whose computed role is LINK, and the same
-  // four as real anchors with an href - the semantic a menu contract destroys.
-  expect(screen.getAllByRole('link')).toHaveLength(4)
+  // against an empty one. Scoped to the panel, so a link rendered elsewhere in the
+  // fixture cannot satisfy or redden it.
   expect(panel.querySelectorAll('a[href]')).toHaveLength(4)
 })
 

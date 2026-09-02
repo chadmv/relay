@@ -61,6 +61,10 @@ export function HoloShell({ children }: { children: ReactNode }) {
   // user is still on. Same predicate react-router uses for the same question.
   function onNavItemClick(e: ReactMouseEvent<HTMLAnchorElement>) {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+    // Only when the panel is open. At and above the breakpoint the destinations
+    // are inline and the toggle is out of reach by CSS, so restoring focus to it
+    // there would depend on display:none to hide the consequence.
+    if (!navOpen) return
     closeNavAndRestoreFocus()
   }
 
@@ -154,7 +158,7 @@ export function HoloShell({ children }: { children: ReactNode }) {
               every width even while the panel is collapsed, and aria-label names
               it now that it contains a control. It must NOT become positioned:
               the panel anchors to the <header>, which is already `relative`. */}
-          <nav ref={navRef} onBlur={onNavBlur} aria-label="Main" className="min-w-0">
+          <nav ref={navRef} onBlur={onNavBlur} aria-label="Main navigation" className="min-w-0">
             <button
               ref={navToggleRef}
               type="button"
