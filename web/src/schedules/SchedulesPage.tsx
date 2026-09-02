@@ -161,7 +161,7 @@ export function SchedulesPage() {
               <button
                 type="button"
                 disabled={!data?.next_cursor || isPlaceholderData}
-                onClick={() => pager.next(data?.next_cursor, schedules.length)}
+                onClick={() => pager.next(data)}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 next 50 →

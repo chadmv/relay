@@ -6,6 +6,13 @@ import { useCursorPager } from './useCursorPager'
 // re-read after each act, so a second call inside the same act would close over
 // the pre-update render's state and silently test the wrong thing.
 
+// A real array of the stated length, never an object with a `length` property: the
+// hook reads items.length, and a fake that only carries `length` would let a
+// mutation reading some other property survive.
+function page(next_cursor: string, size: number) {
+  return { next_cursor, items: Array.from({ length: size }, (_, i) => i) }
+}
+
 test('starts on the first page', () => {
   const { result } = renderHook(() => useCursorPager())
   expect(result.current.cursor).toBe('')
@@ -16,25 +23,37 @@ test('starts on the first page', () => {
 test('next advances the cursor and accumulates the real page size', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next('CUR1', 50)
+    result.current.next(page('CUR1', 50))
   })
   expect(result.current.cursor).toBe('CUR1')
   expect(result.current.startOffset).toBe(50)
   expect(result.current.canPrev).toBe(true)
   act(() => {
-    result.current.next('CUR2', 50)
+    result.current.next(page('CUR2', 50))
   })
   expect(result.current.cursor).toBe('CUR2')
   expect(result.current.startOffset).toBe(100)
 })
 
+// The page carries the cursor and the rows together, so a caller cannot state a size
+// that disagrees with the page it is leaving. 7 discriminates: an accumulation that
+// adds a constant page size instead of items.length reports 50 here.
+test("the offset advances by the page's own row count, not by a caller-supplied number", () => {
+  const { result } = renderHook(() => useCursorPager())
+  act(() => {
+    result.current.next(page('CUR1', 7))
+  })
+  expect(result.current.cursor).toBe('CUR1')
+  expect(result.current.startOffset).toBe(7)
+})
+
 test('prev walks back to the cursor of the page we came from', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next('CUR1', 50)
+    result.current.next(page('CUR1', 50))
   })
   act(() => {
-    result.current.next('CUR2', 50)
+    result.current.next(page('CUR2', 50))
   })
   act(() => {
     result.current.prev()
@@ -53,19 +72,19 @@ test('prev walks back to the cursor of the page we came from', () => {
 test('a page with no next_cursor is a no-op', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next('CUR1', 50)
+    result.current.next(page('CUR1', 50))
   })
   act(() => {
-    result.current.next('', 13)
+    result.current.next(page('', 13))
   })
   expect(result.current.cursor).toBe('CUR1')
   expect(result.current.startOffset).toBe(50)
 })
 
-test('next(undefined, n) is a no-op', () => {
+test('next(undefined) is a no-op', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next(undefined, 50)
+    result.current.next(undefined)
   })
   expect(result.current.cursor).toBe('')
   expect(result.current.startOffset).toBe(0)
@@ -75,10 +94,10 @@ test('next(undefined, n) is a no-op', () => {
 test('paging back off a partial last page restores the previous offset, not pageSize * depth', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next('CUR1', 50)
+    result.current.next(page('CUR1', 50))
   })
   act(() => {
-    result.current.next('CUR2', 13)
+    result.current.next(page('CUR2', 13))
   })
   expect(result.current.startOffset).toBe(63)
   act(() => {
@@ -102,13 +121,13 @@ test('paging back off a partial last page restores the previous offset, not page
 test('paging back through three partial pages restores each real offset, not a fixed-page-size guess', () => {
   const { result } = renderHook(() => useCursorPager())
   act(() => {
-    result.current.next('CUR1', 13)
+    result.current.next(page('CUR1', 13))
   })
   act(() => {
-    result.current.next('CUR2', 50)
+    result.current.next(page('CUR2', 50))
   })
   act(() => {
-    result.current.next('CUR3', 7)
+    result.current.next(page('CUR3', 7))
   })
   expect(result.current.startOffset).toBe(70)
   act(() => {
@@ -128,10 +147,10 @@ test('resetPaging returns to the first page', () => {
     return useCursorPager()
   })
   act(() => {
-    result.current.next('CUR1', 50)
+    result.current.next(page('CUR1', 50))
   })
   act(() => {
-    result.current.next('CUR2', 50)
+    result.current.next(page('CUR2', 50))
   })
   act(() => {
     result.current.resetPaging()

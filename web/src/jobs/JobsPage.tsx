@@ -148,7 +148,7 @@ export function JobsPage() {
               </button>
               <button
                 type="button"
-                onClick={() => pager.next(data?.next_cursor, jobs.length)}
+                onClick={() => pager.next(data)}
                 disabled={!data?.next_cursor || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >

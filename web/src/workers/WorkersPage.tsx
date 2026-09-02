@@ -115,7 +115,7 @@ export function WorkersPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => revokedPager.next(revoked.data?.next_cursor, revokedWorkers.length)}
+                  onClick={() => revokedPager.next(revoked.data)}
                   disabled={!revoked.data?.next_cursor || revoked.isPlaceholderData}
                   className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
                 >
