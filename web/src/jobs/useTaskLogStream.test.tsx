@@ -21,7 +21,7 @@ test('subscribes to the stream BEFORE it requests the first history page', async
   server.use(
     http.get('/v1/tasks/t1/logs', () => {
       order.push('logs')
-      return HttpResponse.json({ items: [entry(1)], next_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 1 })
     }),
   )
   const wrapped = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -45,7 +45,7 @@ test('applies frames buffered during backfill, deduping any also present in a pa
   server.use(
     http.get('/v1/tasks/t1/logs', async () => {
       await gate
-      return HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, total: 2 })
+      return HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, prev_seq: 0, total: 2 })
     }),
   )
   const { result } = renderHook(() =>
@@ -408,7 +408,7 @@ test('an event: dropped frame produces exactly ONE re-backfill plus a permanent 
   server.use(
     http.get('/v1/tasks/t1/logs', () => {
       requests++
-      return HttpResponse.json({ items: [entry(requests)], next_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(requests)], next_seq: 0, prev_seq: 0, total: 1 })
     }),
   )
   const { result } = renderHook(() =>
@@ -451,7 +451,7 @@ test('repeated dropped frames are bounded: after 2 immediate recoveries, the bac
   try {
     const fake = fakeSseServer()
     server.use(
-      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })),
     )
     const { result } = renderHook(() =>
       useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
@@ -542,7 +542,7 @@ test('the backoff counter resets only for a connection that PROVED itself', asyn
   vi.useFakeTimers()
   try {
     const fake = fakeSseServer()
-    server.use(http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })))
+    server.use(http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })))
 
     // Direction A: opens and closes immediately, never delivering a frame. This
     // is the 2026-06-20-reconnect-backoff-never-resets bug class - resetting on
@@ -602,7 +602,7 @@ test('a terminal task opens no stream at all, while a live one opens exactly one
   const fake = fakeSseServer()
   server.use(
     http.get('/v1/tasks/t1/logs', () =>
-      HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, total: 2 }),
+      HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, prev_seq: 0, total: 2 }),
     ),
   )
   const terminal = renderHook(() =>
@@ -629,8 +629,8 @@ test('a task that becomes terminal mid-tail closes the stream and reconciles onc
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       const since = new URL(request.url).searchParams.get('since_seq')
       sinceParams.push(since)
-      if (since === null) return HttpResponse.json({ items: [entry(10)], next_seq: 0, total: 1 })
-      return HttpResponse.json({ items: [entry(30, 'tail\n')], next_seq: 0, total: 3 })
+      if (since === null) return HttpResponse.json({ items: [entry(10)], next_seq: 0, prev_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(30, 'tail\n')], next_seq: 0, prev_seq: 0, total: 3 })
     }),
   )
   const { result, rerender } = renderHook(
@@ -732,7 +732,7 @@ test('cancelling a run before its stream opens settles cleanly with no zombie si
 test('switching tasks opens exactly one stream each and leaves none open', async () => {
   const fake = fakeSseServer()
   server.use(
-    http.get('/v1/tasks/:tid/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+    http.get('/v1/tasks/:tid/logs', () => HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })),
   )
   const { result, rerender, unmount } = renderHook(
     ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -787,8 +787,8 @@ test('a manual reconnect after a drop preserves the marker and pages from maxSeq
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       const since = new URL(request.url).searchParams.get('since_seq')
       sinceSeqsRequested.push(since)
-      if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, total: 1 })
-      return HttpResponse.json({ items: [entry(2)], next_seq: 0, total: 2 })
+      if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 1 })
+      return HttpResponse.json({ items: [entry(2)], next_seq: 0, prev_seq: 0, total: 2 })
     }),
   )
   const { result } = renderHook(() =>
@@ -841,8 +841,8 @@ test('a manual reconnect on an always-terminal task re-backfills from maxSeq and
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       const since = new URL(request.url).searchParams.get('since_seq')
       sinceSeqsRequested.push(since)
-      if (since === null) return HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, total: 2 })
-      return HttpResponse.json({ items: [], next_seq: 0, total: 2 })
+      if (since === null) return HttpResponse.json({ items: [entry(1), entry(2)], next_seq: 0, prev_seq: 0, total: 2 })
+      return HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 2 })
     }),
   )
   const { result } = renderHook(() =>
@@ -881,9 +881,9 @@ test('a manual reconnect from disconnected (not just from live) preserves the ma
       http.get('/v1/tasks/t1/logs', ({ request }) => {
         const since = new URL(request.url).searchParams.get('since_seq')
         sinceSeqsRequested.push(since)
-        if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, total: 1 })
-        if (since === '1') return HttpResponse.json({ items: [entry(2)], next_seq: 0, total: 2 })
-        return HttpResponse.json({ items: [entry(3)], next_seq: 0, total: 3 })
+        if (since === null) return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 1 })
+        if (since === '1') return HttpResponse.json({ items: [entry(2)], next_seq: 0, prev_seq: 0, total: 2 })
+        return HttpResponse.json({ items: [entry(3)], next_seq: 0, prev_seq: 0, total: 3 })
       }),
     )
     const { result } = renderHook(() =>
@@ -934,7 +934,7 @@ test('coalesces a burst of 50 frames into far fewer than 50 renders', async () =
   try {
     const fake = fakeSseServer()
     server.use(
-      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, total: 0 })),
+      http.get('/v1/tasks/t1/logs', () => HttpResponse.json({ items: [], next_seq: 0, prev_seq: 0, total: 0 })),
     )
     let renders = 0
     const { result } = renderHook(() => {
