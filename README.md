@@ -1424,16 +1424,18 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 `GET /v1/jobs` accepts four optional filters beyond `?status=` and `?scheduled_job_id=`. They AND together, and they compose with `?limit=`, `?cursor=`, `?sort=`, `?status=` and `?scheduled_job_id=`.
 
+For all four, an **empty value is treated as absent**: `?mine=`, `?since=`, `?until=` and `?q=` each mean the same as omitting the parameter, so a cleared form field does not need to be stripped from the query string.
+
 | Parameter | Format | Absent means |
 |-----------|--------|--------------|
-| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Empty or whitespace-only is treated as absent. | No text filter |
+| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Whitespace-only is treated as absent. | No text filter |
 | `mine` | `true` / `false` (Go `strconv.ParseBool` spellings: `1`, `t`, `T`, `TRUE`, `true`, `True` and their false counterparts). `true` restricts to jobs you submitted, resolved from your bearer token; `false` means the same as absent. | No owner filter |
 | `since` | RFC3339 timestamp. An offset or `Z` is required; fractional seconds are allowed. | Window open at the start |
 | `until` | RFC3339 timestamp, same format. | Window open at the end |
 
 `since` and `until` bound `created_at` as a **half-open** interval: `created_at >= since AND created_at < until`. A job created exactly at `since` is included; a job created exactly at `until` is excluded, so consecutive time buckets tile without a job appearing in two of them. Either bound may be given alone, and `until == since` is a legal empty window.
 
-There is no parameter that selects another user's jobs. `mine=true` resolves the owner from the token.
+`GET /v1/jobs` lists jobs across the whole farm for any authenticated caller. `mine=true` is a convenience filter over that list, not an authorization boundary; it resolves the owner from your bearer token.
 
 `total` counts every row matching every active filter, so the page footer's denominator always belongs to the same set as the rows.
 
@@ -1461,7 +1463,7 @@ GET /v1/jobs?since=2026-09-01T00:00:00Z&until=2026-09-02T00:00:00Z
 GET /v1/jobs?q=etl&status=failed                         # composes with the status filter
 ```
 
-`?q=` is a sequential scan and is not index-served; debounce it client-side at 250 ms or more.
+**`?q=` cost.** Substring containment cannot be index-served, so a `?q=` request walks every candidate row of the active sort's index and, for the count, joins `users` to reach the submitter email. A needle that matches nothing is the worst case: it pays the full walk and returns an empty page. The server applies no rate limit and no statement timeout to this today, so the cost is bounded only by the table size and by how often clients ask. Debouncing at 250 ms or more client-side reduces how many of these a typing user generates; it does not bound what a caller can request.
 
 ### Public
 
