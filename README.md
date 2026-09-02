@@ -1420,6 +1420,18 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 **Unknown keys:** `?sort=<key>` where `<key>` is not in the allowlist returns `400 unsupported sort key '<key>'; supported: <list>`.
 
+#### Query-string validation
+
+These rules apply to **every paginated list endpoint** - each of the ones documented above as "Paginated" - not only to `GET /v1/jobs`. They are enforced once, where the query string is parsed, so a new parameter on any of them inherits all three without doing anything.
+
+| Condition | Status | Message |
+|-----------|--------|---------|
+| the query string is not decodable | `400` | `malformed query string` |
+| any value contains a NUL byte | `400` | `query string contains a NUL byte` |
+| a parameter the endpoint reads appears more than once | `400` | `query parameter "<name>" must appear at most once` |
+
+The repeated-parameter rule covers `limit`, `sort` and `cursor` on every endpoint, plus whichever parameters that endpoint reads itself (`GET /v1/jobs` adds `status`, `scheduled_job_id`, `q`, `mine`, `since` and `until`; `GET /v1/users` adds `email` and `include_archived`). Taking the first value of a repeated parameter silently renders a list that looks authoritative.
+
 #### Filtering the jobs list
 
 `GET /v1/jobs` accepts four optional filters beyond `?status=` and `?scheduled_job_id=`. They AND together, and they compose with `?limit=`, `?cursor=`, `?sort=`, `?status=` and `?scheduled_job_id=`.
@@ -1439,7 +1451,7 @@ For all four, an **empty value is treated as absent**: `?mine=`, `?since=`, `?un
 
 `total` counts every row matching every active filter, so the page footer's denominator always belongs to the same set as the rows.
 
-**Errors.** These are `400` with the body `{"error": "<message>"}`. The arity rule covers every parameter this endpoint recognises - `limit`, `sort`, `cursor`, `status`, `scheduled_job_id` and the four above - not only the four filters.
+**Errors.** These are `400` with the body `{"error": "<message>"}`. The query-string rules that apply to every paginated endpoint - malformed input, repeated parameters and NUL bytes - are under [Query-string validation](#query-string-validation).
 
 | Condition | Message |
 |-----------|---------|
@@ -1449,8 +1461,6 @@ For all four, an **empty value is treated as absent**: `?mine=`, `?since=`, `?un
 | `until` is earlier than `since` | `until is earlier than since` |
 | `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
 | `q` is not valid UTF-8 | `q is not valid UTF-8` |
-| any parameter this endpoint reads appears more than once | `query parameter "<name>" must appear at most once` |
-| the query string is not decodable (a bad `%` escape) | `malformed query string` |
 
 **Drop the cursor when a filter changes.** A cursor carries no record of the filters that were active when it was issued and the server does not reject a mismatched one - the same requirement that already applies to `?status=`. Filter correctness is nevertheless cursor-independent: a stale cursor can start a page at a surprising position but can never return a row that fails the current filters.
 
