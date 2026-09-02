@@ -143,6 +143,17 @@ var RevokedWorkersSortSpec = SortSpec{
 	},
 }
 
+// WorkerTasksSortSpec drives GET /v1/workers/{id}/tasks. The endpoint serves one
+// order; the assigned_at key exists so the "-assigned_at" default resolves in
+// parseSort and tags the cursor. handleListWorkerTasks refuses an ascending
+// request, as handleListRevokedWorkers does.
+var WorkerTasksSortSpec = SortSpec{
+	Default: "-assigned_at",
+	Keys: map[string]SortKeyKind{
+		"assigned_at": SortKeyTimestamp,
+	},
+}
+
 func workersRowKey(w store.Worker) (anySortVal, pgtype.UUID) {
 	return w.CreatedAt.Time, w.ID
 }
@@ -161,6 +172,49 @@ func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
 	}
 	t := w.LastSeenAt.Time
 	return &t, w.ID
+}
+
+// workerTaskResponse is one currently-assigned task. It EMBEDS taskResponse so
+// this endpoint cannot drift from GET /v1/tasks/{id} on the task's own fields,
+// exactly as disableWorkerResponse embeds workerResponse.
+// assignment_epoch is deliberately absent and must stay absent: it is a fence
+// token, and this response would otherwise publish live (task id, epoch) pairs
+// for a named worker to any authenticated user - the two values RequeueTask's
+// comment says a forged status update would otherwise have to guess.
+// TestWorkerTaskResponseDoesNotDeclareAssignmentEpoch and
+// TestListWorkerTasks_DoesNotExposeAssignmentEpoch pin the absence.
+type workerTaskResponse struct {
+	taskResponse
+	JobID      string     `json:"job_id"`
+	JobName    string     `json:"job_name"`
+	AssignedAt *time.Time `json:"assigned_at,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+}
+
+func toWorkerTaskResponse(t store.Task) workerTaskResponse {
+	resp := workerTaskResponse{
+		taskResponse: toTaskResponse(t, nil),
+		JobID:        uuidStr(t.JobID),
+	}
+	if t.AssignedAt.Valid {
+		at := t.AssignedAt.Time
+		resp.AssignedAt = &at
+	}
+	if t.StartedAt.Valid {
+		st := t.StartedAt.Time
+		resp.StartedAt = &st
+	}
+	return resp
+}
+
+// A nil *time.Time is how encodeCursorV2 represents a NULL sort value, which is
+// the NULLS LAST tail of the query's order.
+func workerTasksRowKey(t store.Task) (anySortVal, pgtype.UUID) {
+	if !t.AssignedAt.Valid {
+		return (*time.Time)(nil), t.ID
+	}
+	at := t.AssignedAt.Time
+	return &at, t.ID
 }
 
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
