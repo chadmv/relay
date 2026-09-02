@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
@@ -383,4 +383,60 @@ test('a blur with a null relatedTarget does NOT close the nav panel', async () =
   })
 
   expect(toggle).toHaveAttribute('aria-expanded', 'true')
+})
+
+// AC6. The document keydown listener has an OPEN-ONLY lifetime. Every other test in
+// this file opens the panel before asserting anything, so this is the only one that
+// looks at the closed state's listener lifetime at all. The filter on type is what
+// makes it robust: React attaches its own document-level listeners for other event
+// types on mount.
+test('no document keydown listener is registered while the nav panel is closed', async () => {
+  const addSpy = vi.spyOn(document, 'addEventListener')
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+
+  const keydownRegistrations = addSpy.mock.calls.filter(([type]) => type === 'keydown')
+
+  expect(keydownRegistrations).toHaveLength(0)
+  addSpy.mockRestore()
+})
+
+// AC7. A disclosure containing navigation links, which is the case the menu role's
+// own specification excludes: role="menuitem" on an <a href> REPLACES the link role,
+// so the item stops being announced as a link and drops out of a screen reader's
+// links list, and a conforming menu's roving tabindex would make the destinations
+// unreachable by Tab.
+test('the nav panel is a plain disclosure - no menu roles, no roving tabindex', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  await userEvent.click(screen.getByRole('button', { name: /menu/i }))
+  const panel = screen.getByTestId('header-nav-panel')
+
+  expect(panel).not.toHaveAttribute('role')
+  expect(panel.querySelectorAll('[role="menu"]')).toHaveLength(0)
+  expect(panel.querySelectorAll('[role="menuitem"]')).toHaveLength(0)
+  // No tabindex AT ALL, not merely no negative one: a roving tabindex is exactly
+  // tabindex="0" on one item and tabindex="-1" on the rest, so asserting the
+  // attribute is absent catches a half-built one too.
+  expect(panel.querySelectorAll('[tabindex]')).toHaveLength(0)
+
+  // Positive control: the sweep is looking at a POPULATED panel, so it cannot pass
+  // against an empty one. Four elements whose computed role is LINK, and the same
+  // four as real anchors with an href - the semantic a menu contract destroys.
+  expect(screen.getAllByRole('link')).toHaveLength(4)
+  expect(panel.querySelectorAll('a[href]')).toHaveLength(4)
+})
+
+// AC8. The reason the collapse renders ONE copy of the links rather than an inline
+// nav plus a hidden mobile nav. Two copies put two links named "Jobs" in the
+// accessibility tree, and jsdom applies no CSS, so no assertion in this lane could
+// tell the intended state from the broken one. This is the test that reddens if
+// someone re-solves the problem with a duplicated nav.
+test('each destination is rendered exactly once in the header', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const header = within(screen.getByRole('banner'))
+  for (const label of ['Jobs', 'Workers', 'Schedules', 'Admin']) {
+    expect(header.getAllByRole('link', { name: label })).toHaveLength(1)
+  }
 })
