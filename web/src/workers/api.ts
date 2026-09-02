@@ -155,18 +155,13 @@ export function evictWorkspace(id: string, shortId: string): Promise<void> {
   return apiFetch<void>(`/workers/${id}/workspaces/${shortId}/evict`, { method: 'POST' })
 }
 
-// One currently-assigned task, field-for-field the Go workerTaskResponse
-// (internal/api/workers.go). Narrower than TaskDetail on three fields, and the
-// difference is the wire contract, not a preference: tasks.commands, tasks.env
-// and tasks.requires are NOT NULL with defaults and toTaskResponse routes env
-// and requires through rawObject, which normalizes both empty and the literal
-// null to {}. assignment_epoch is a fence token and is not on the wire;
-// depends_on is not either.
+// One currently-assigned task. assignment_epoch is a fence token and is not on
+// the wire; depends_on is not either.
 export interface WorkerTask {
   id: string
   name: string
   status: TaskStatus
-  commands: string[][]
+  commands: string[][] | null
   env: Record<string, string>
   requires: Record<string, string>
   timeout_seconds: number | null
@@ -187,9 +182,12 @@ export interface WorkerTasksPage {
 }
 
 // The worker's currently assigned tasks (dispatched or running), newest
-// assignment first. First page only: `total` is the active count for the whole
-// worker, which the Slots KPI renders as used slots, so the panel is correct
-// about that number without a paging control.
+// assignment first. One page, no cursor: `total` is the active count for the
+// whole worker, so the Slots KPI is exact, but `items` can still stop short of
+// it and the caller must say so rather than presenting the table as complete.
+// 200 is the server maximum and a literal, because a value outside [1, 200] is
+// a 400 from parsePage, not a clamp - never compute it.
 export function listWorkerTasks(id: string): Promise<WorkerTasksPage> {
-  return apiFetch<WorkerTasksPage>(`/workers/${id}/tasks`)
+  const q = new URLSearchParams({ limit: '200' })
+  return apiFetch<WorkerTasksPage>(`/workers/${id}/tasks?${q}`)
 }

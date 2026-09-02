@@ -23,8 +23,7 @@ const HEADERS: TableColumn[] = [
 // supplies the frame and the "Current tasks" title), so this component is only
 // the header row, the data rows and the panel-level states.
 //
-// No progress column is rendered: relay has none on the row, in the proto or in
-// the agent, so there is nothing to render honestly.
+// No progress column is rendered: relay has no per-task progress to render.
 export function WorkerTasksPanel({ workerId }: { workerId: string }) {
   const { data, isLoading, error, refetch } = useWorkerTasks(workerId)
   const rows = data?.items ?? []
@@ -93,6 +92,15 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
           </button>
         </div>
       ) : null}
+
+      {/* A short page must say so: `total` is the worker's whole active count
+          while `items` is one page of it, so a table that silently stops at the
+          page limit reads as the full load. */}
+      {data && (data.next_cursor !== '' || rows.length < data.total) && (
+        <div className="px-4 py-2 font-mono text-[10px] tracking-[0.04em] text-fg-dim">
+          {`showing ${rows.length} of ${data.total}`}
+        </div>
+      )}
 
       {/* One message, not the hi-fi's two. An offline worker inside the grace
           window still has its tasks assigned, so an empty list does not

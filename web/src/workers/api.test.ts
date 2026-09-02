@@ -183,9 +183,11 @@ test('listRevokedWorkers fetches /workers/revoked with limit=50', async () => {
 
 test('listWorkerTasks requests the worker tasks route and decodes the envelope', async () => {
   let path: string | undefined
+  let limit: string | null = null
   server.use(
     http.get('/v1/workers/w1/tasks', ({ request }) => {
       path = new URL(request.url).pathname
+      limit = new URL(request.url).searchParams.get('limit')
       // Hand-written JSON. A fixture marshalled through the app's own response
       // type agrees with the decoder by construction and can never detect drift.
       // The timestamps carry the server's local offset, which is what the Go
@@ -216,6 +218,11 @@ test('listWorkerTasks requests the worker tasks route and decodes the envelope',
   )
   const page = await listWorkerTasks('w1')
   expect(path).toBe('/v1/workers/w1/tasks')
+  // The panel renders one page and no pager, so it asks for the server maximum
+  // rather than the default 50: a worker whose max_slots was raised past 50 would
+  // otherwise show a silently short table. 200 is a literal because a value
+  // outside [1, 200] is a 400 from parsePage, not a clamp.
+  expect(limit).toBe('200')
   expect(page.total).toBe(1)
   expect(page.items[0].job_name).toBe('nightly-render')
   expect(page.items[0].started_at).toBe('2026-09-01T09:16:40.902-07:00')

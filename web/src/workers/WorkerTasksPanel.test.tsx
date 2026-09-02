@@ -151,3 +151,26 @@ test('renders no progress affordance', async () => {
   expect(screen.queryByTestId('progress-fill')).not.toBeInTheDocument()
   expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument()
 })
+
+test('says how much of the active set the table is showing when it is short', async () => {
+  // total is the worker's whole active count while items is one page, so a table
+  // that stops short must say so rather than reading as the full picture.
+  server.use(
+    http.get('/v1/workers/w1/tasks', () =>
+      HttpResponse.json({ items: [RUNNING, DISPATCHED], next_cursor: 'c2', total: 3 }),
+    ),
+  )
+  renderPanel(<WorkerTasksPanel workerId="w1" />)
+
+  expect(await screen.findByText('showing 2 of 3')).toBeInTheDocument()
+})
+
+test('says nothing about truncation when the page holds every active task', async () => {
+  server.use(
+    http.get('/v1/workers/w1/tasks', () => HttpResponse.json(tasksPage([RUNNING, DISPATCHED]))),
+  )
+  renderPanel(<WorkerTasksPanel workerId="w1" />)
+
+  await screen.findByText('render-shot-042')
+  expect(screen.queryByText(/showing/)).not.toBeInTheDocument()
+})
