@@ -3,6 +3,7 @@ import {
   useId,
   useRef,
   useState,
+  type FocusEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react'
@@ -61,6 +62,19 @@ export function HoloShell({ children }: { children: ReactNode }) {
   function onNavItemClick(e: ReactMouseEvent<HTMLAnchorElement>) {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
     closeNavAndRestoreFocus()
+  }
+
+  // React maps onBlur to the native, BUBBLING focusout, so this fires for focus
+  // leaving any descendant of the container.
+  function onNavBlur(e: FocusEvent<HTMLElement>) {
+    // "Blurred to nothing" has a correct owner already - the document mousedown
+    // handler - and closing on it would make the panel vanish under the cursor.
+    if (!e.relatedTarget) return
+    // Shift+Tab from the first destination lands on the toggle, which is INSIDE
+    // this container, so the containment check is what keeps the panel open there.
+    // closeNav(), not closeNavAndRestoreFocus(): by construction focus is already
+    // outside, so a restore would be a theft from where the user just Tabbed.
+    if (navRef.current && !navRef.current.contains(e.relatedTarget)) closeNav()
   }
 
   useEffect(() => {
@@ -140,7 +154,7 @@ export function HoloShell({ children }: { children: ReactNode }) {
               every width even while the panel is collapsed, and aria-label names
               it now that it contains a control. It must NOT become positioned:
               the panel anchors to the <header>, which is already `relative`. */}
-          <nav ref={navRef} aria-label="Main" className="min-w-0">
+          <nav ref={navRef} onBlur={onNavBlur} aria-label="Main" className="min-w-0">
             <button
               ref={navToggleRef}
               type="button"

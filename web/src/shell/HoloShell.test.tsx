@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
@@ -312,4 +312,75 @@ test('a modifier-clicked destination leaves the nav panel open and does not touc
   // Document" because react-router sees the modifier and skips preventDefault,
   // letting the anchor's native default action run - the same route a real browser
   // takes to open a new tab. That warning is proof the click was NOT intercepted.
+})
+
+// AC5, half one. Tab out is a DISMISS route for a disclosure, not something to
+// intercept: no Tab trap, because nothing here is modal and the page behind stays
+// interactive. The destination after the last link is the user chip, which is the
+// next control in the header.
+test('Tab out of the last destination closes the nav panel without stealing the destination', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  const chip = screen.getByRole('button', { name: /me@studio\.dev/i })
+  await userEvent.click(toggle)
+  await userEvent.tab() // Jobs
+  await userEvent.tab() // Workers
+  await userEvent.tab() // Schedules
+  await userEvent.tab() // Admin
+  // Positive control on the tab order itself: the panel follows the toggle in DOM
+  // order and every destination is a natural tab stop, which is the whole reason
+  // this surface is not portalled and carries no roving tabindex.
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Admin' }))
+
+  await userEvent.tab()
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  // The close must not also yank focus back: the user asked to go forward.
+  expect(document.activeElement).toBe(chip)
+})
+
+// AC5, half two. The toggle is INSIDE the container, so the containment check is
+// what keeps the panel open here. Without this control, a rule that closed on EVERY
+// focusout would pass the Tab-out test above.
+test('Shift+Tab from the first destination lands on the toggle and leaves the panel open', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Jobs' }))
+
+  await userEvent.tab({ shift: true })
+
+  expect(document.activeElement).toBe(toggle)
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+})
+
+// A blur with a NULL relatedTarget means "blurred to nothing" - jsdom fires exactly
+// that for a bare blur(), and in a real browser it is what pressing the mouse on a
+// panel's own non-focusable content produces. Closing on it would make the panel
+// vanish under the user's cursor, and the document mousedown handler already owns
+// the "pressed somewhere else" case. A naive onBlur={() => setNavOpen(false)} passes
+// every other test in this file and fails exactly here.
+//
+// The blur MUST be flushed through act(). A bare first.blur() reaches the handler
+// either way, but React defers the resulting state update outside act(), so the
+// attribute still reads "true" on the next line whether or not the guard ran - the
+// assertion would pass against a handler that closes on every focusout. Flushing is
+// what makes deleting the guard turn this red.
+test('a blur with a null relatedTarget does NOT close the nav panel', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  const first = screen.getByRole('link', { name: 'Jobs' })
+  expect(document.activeElement).toBe(first)
+
+  await act(async () => {
+    first.blur()
+  })
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
 })
