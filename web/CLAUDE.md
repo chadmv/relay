@@ -17,3 +17,10 @@ emits a rule nor rescues one; only a literal class-shaped substring counts. If a
 not to reproduce, suspect a stale `web/dist` embed before suspecting the scanner - `//go:embed`
 snapshots `web/dist` at compile time, so a Go binary built without a fresh `make web-build` serves the
 previous bundle.
+
+**Cite a symbol or a phrase, not a file and a line.** A `File.tsx:123` reference inside a comment
+is invalidated by an edit above line 123 that changes the line count, and nothing reports it:
+nothing in this repo checks one, so it quietly becomes a pointer at the wrong code. Name the
+function, the constant, or a distinctive phrase from the text instead - a symbol travels with its
+file, and a rename is visible to a search. Where the target sits in the same file as the comment, a
+phrase the reader can find without leaving the file is enough.

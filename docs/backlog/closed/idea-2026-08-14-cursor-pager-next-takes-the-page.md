@@ -1,7 +1,9 @@
 ---
 title: useCursorPager hides the stacks but takes an unvalidatable pageSize, which is the exact value both closed footer-range bugs were about
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 priority: medium
 created: 2026-08-14
 source: review finding at Phase 4 of the 2026-08-14-cursor-pager-hook slice; deliberately not fixed there because it is an API change, not a refactor
@@ -99,3 +101,6 @@ change, which is correct - the hook's API is the thing being changed.
 - Design record: `docs/superpowers/specs/2026-08-14-cursor-pager-hook.md` (Decision 1 - the tradeoff
   as it was taken), `docs/retros/2026-08-14-cursor-pager-hook.md`
 - Same file, different question: [[idea-2026-08-14-toggle-sort-generic]]
+
+## Resolution
+useCursorPager.next takes a CursorPage (75a8670). next_cursor is REQUIRED, refuting the item's optional sketch: optional fails open (a renamed field becomes a permanent silent no-op), required fails closed at all seven call sites. items is readonly and read only for its length; startOffset keeps accumulating. Zero-line diff to the twelve frozen test files; the wrong-page substitution at WorkersPage is pinned by a new sibling test.

@@ -259,8 +259,8 @@ test('a create error renders inside the panel and leaves the table mounted', asy
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(screen.getByText('farm-west-13')).toBeInTheDocument()
 
-  // Reopening the panel clears the stale error - the reset()-before-reopen
-  // convention from UsersTab.tsx:238-245.
+  // Reopening the panel clears the stale error - the create.reset()-before-reopen
+  // convention in UsersTab.
   await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
   await userEvent.click(screen.getByRole('button', { name: '+ Enroll agent' }))
   expect(screen.queryByText('500 failed to create enrollment')).not.toBeInTheDocument()

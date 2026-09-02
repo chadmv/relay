@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Button } from '../../components/Button'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { toggleSort } from '../../lib/toggleSort'
 import { useCursorPager } from '../../lib/useCursorPager'
 import { useNow } from '../../lib/useNow'
 import { TokenRevealDialog } from '../TokenRevealDialog'
@@ -10,15 +11,6 @@ import { EnrollmentsTable } from './EnrollmentsTable'
 import { useAgentEnrollmentActions } from './useAgentEnrollmentActions'
 import { useAgentEnrollments } from './useAgentEnrollments'
 import type { CreateEnrollmentBody, EnrollmentSort, EnrollmentSortField } from './api'
-
-// Same shape as UsersTab's toggleSort (web/src/admin/users/UsersTab.tsx): clicking
-// the active column flips its direction, clicking the other selects it ascending.
-function toggleSort(field: EnrollmentSortField, current: EnrollmentSort): EnrollmentSort {
-  if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as EnrollmentSort
-  }
-  return field
-}
 
 export function EnrollmentsTab() {
   const [sort, setSort] = useState<EnrollmentSort>('-created_at')
@@ -114,7 +106,7 @@ export function EnrollmentsTab() {
             </button>
             <button
               type="button"
-              onClick={() => pager.next(data?.next_cursor, enrollments.length)}
+              onClick={() => pager.next(data)}
               disabled={!data?.next_cursor || isPlaceholderData}
               className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
             >

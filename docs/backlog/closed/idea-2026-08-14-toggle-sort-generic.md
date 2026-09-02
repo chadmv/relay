@@ -1,7 +1,9 @@
 ---
 title: toggleSort is duplicated in five list surfaces, each typed over its own sort union
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 priority: low
 created: 2026-08-14
 source: deliberately excluded from the 2026-08-14-cursor-pager-hook slice (spec Decision 3); the surviving half of the extraction debt that slice discharged
@@ -93,3 +95,6 @@ Points to settle at spec time:
 - Design record: `docs/superpowers/specs/2026-08-14-cursor-pager-hook.md` (Decision 3),
   `docs/retros/2026-08-14-cursor-pager-hook.md`
 - Same rule, different primitive: [[idea-2026-08-12-detail-page-state-triad-primitive]]
+
+## Resolution
+One toggleSort in web/src/lib, generic over the module's sort union (a3518ba), with field constrained to the union's base names via SortFieldOf<S> so a typo'd column is a compile error again (5d89c8e, pinned by a ts-expect-error line the tsc lane compiles). A template-literal generic relating field and sort was refuted: WorkersPage's field union is SortField in WorkersTable.tsx and is narrower than WorkerSort. Five copies and their comment blocks deleted; zero-line diff to the frozen files.

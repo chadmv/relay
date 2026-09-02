@@ -4,6 +4,7 @@ import { Button } from '../../components/Button'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { GlassPanel, PillButton } from '../../components/holo'
 import { computePageRange } from '../../lib/pageRange'
+import { toggleSort } from '../../lib/toggleSort'
 import { useCursorPager } from '../../lib/useCursorPager'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
 import { CreateUserForm } from './CreateUserForm'
@@ -12,15 +13,6 @@ import { UsersTable } from './UsersTable'
 import { useAdminUserActions } from './useAdminUserActions'
 import { useAdminUsers } from './useAdminUsers'
 import type { AdminUser, CreateUserBody, UserSort, UserSortField } from './api'
-
-// Same shape as WorkersPage's toggleSort: clicking the active column flips its
-// direction, clicking another column selects it ascending.
-function toggleSort(field: UserSortField, current: UserSort): UserSort {
-  if (current.replace('-', '') === field) {
-    return (current.startsWith('-') ? field : `-${field}`) as UserSort
-  }
-  return field
-}
 
 type Confirm = { kind: 'archive' | 'unarchive'; user: AdminUser } | null
 
@@ -163,7 +155,7 @@ export function UsersTab({ debounceMs = 300 }: { debounceMs?: number }) {
               </button>
               <button
                 type="button"
-                onClick={() => pager.next(data?.next_cursor, users.length)}
+                onClick={() => pager.next(data)}
                 disabled={!data?.next_cursor || isPlaceholderData}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >

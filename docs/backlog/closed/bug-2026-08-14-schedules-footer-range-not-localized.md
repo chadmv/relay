@@ -1,7 +1,9 @@
 ---
 title: The schedules footer renders its row range unlocalized where the other six paginated surfaces localize
 type: bug
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 priority: low
 created: 2026-08-14
 source: found while verifying the footer for scope exclusion during the 2026-08-14-cursor-pager-hook slice; not fixable there because changing rendered text would have broken that slice's zero-diff gate
@@ -80,3 +82,6 @@ arguably the better fix; decide before writing.
 - The same footer's arithmetic, twice shipped wrong:
   `docs/backlog/closed/bug-2026-06-05-jobs-pagination-footer-absolute-range.md`,
   `docs/backlog/closed/bug-2026-06-21-schedules-pagination-footer-absolute-range.md`
+
+## Resolution
+One-file change (b44b95a): SchedulesPage joins the six as they are, zero-rows branch included, which also makes it honour computePageRange's documented empty-page contract. The seven-file explicit en-US option was rejected: a product regression for non-US readers, and the suite already depends on the runner locale in JobsPage.test.tsx and StatSection.test.tsx. Tests assert literal strings. The range half of toLocaleString stays unpinned on all seven surfaces; filed separately.

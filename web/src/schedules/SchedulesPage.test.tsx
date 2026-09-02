@@ -259,6 +259,45 @@ test('pagination footer restores prior range when paging back', async () => {
   expect(await screen.findByText(/1-50 of 63/i)).toBeInTheDocument()
 })
 
+test('the footer thousands-separates a four-digit total', async () => {
+  server.use(
+    http.get('/v1/scheduled-jobs', () =>
+      HttpResponse.json({ items: makeSchedules(50), next_cursor: '', total: 2341 }),
+    ),
+  )
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
+  await screen.findByText('sched-0')
+  expect(await screen.findByText('1-50 of 2,341')).toBeInTheDocument()
+})
+
+// A literal, never (2341).toLocaleString(): comparing the component's output against
+// the same call it makes would pass on any runner, including one with no group
+// separator, and assert nothing.
+//
+// The total is 1234 rather than 0 so the assertion discriminates on both axes at once.
+// A range with no zero-rows branch reads `0-0 of 1,234` and a zero-rows branch that
+// does not format reads `0 of 1234`, both distinct from `0 of 1,234`, so a
+// half-applied change cannot pass. A total of 0 would leave
+// the formatting half unpinned.
+test('the footer renders a bare count and no range when the page has no rows', async () => {
+  server.use(
+    http.get('/v1/scheduled-jobs', () =>
+      HttpResponse.json({ items: [], next_cursor: '', total: 1234 }),
+    ),
+  )
+  renderWithQuery(
+    <MemoryRouter>
+      <SchedulesPage />
+    </MemoryRouter>,
+  )
+  await screen.findByText('No schedules yet.')
+  expect(await screen.findByText('0 of 1,234')).toBeInTheDocument()
+})
+
 test('clicking Disable PATCHes the schedule', async () => {
   let patched: unknown
   server.use(

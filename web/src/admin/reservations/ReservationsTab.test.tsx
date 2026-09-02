@@ -119,8 +119,8 @@ test('the confirm dialog also carries no affinity claim when open', async () => 
   // longer sees it and every negative assertion below would be vacuous. The
   // test's stated intent has always been "the confirm dialog carries no affinity
   // claim"; `container` was only ever a proxy for "what the user sees", and the
-  // assertion's scope was narrower than its intent. Line 84's sweep, in the test
-  // where no dialog is open, is unaffected and deliberately untouched.
+  // assertion's scope was narrower than its intent. The container-scoped sweep in
+  // the test where no dialog is open is unaffected and deliberately untouched.
   const html = document.body.innerHTML
 
   for (const claim of [
@@ -133,11 +133,10 @@ test('the confirm dialog also carries no affinity claim when open', async () => 
   ]) {
     expect(html).not.toMatch(claim)
   }
-  // Positive control on the same instrument, on a phrase that exists ONLY in the
-  // dialog body (ReservationsTab.tsx:45). The previous control was
-  // /general dispatch pool/i, which also matches the tab's own footnote at
-  // ReservationsTab.tsx:253 - so it stayed green under exactly the scope error it
-  // existed to catch.
+  // Positive control on the same instrument, on a phrase carried by the ACTIVE
+  // branch of confirmDeleteBody in ReservationsTab.tsx. A control phrase must not
+  // also appear in the tab's own explanatory footnote: one that does stays green
+  // under exactly the scope error this control exists to catch.
   expect(html).toMatch(/tasks already running on them are unaffected/i)
 })
 
