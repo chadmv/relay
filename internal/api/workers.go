@@ -181,8 +181,8 @@ func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
 // exactly as disableWorkerResponse embeds workerResponse.
 // assignment_epoch is deliberately absent and must stay absent: it is a fence
 // token, and this response would otherwise publish live (task id, epoch) pairs
-// for a named worker to any authenticated user - the two values RequeueTask's
-// comment says a forged status update would otherwise have to guess.
+// for a named worker to any authenticated user - both of the values a forged
+// task-status update needs, which it would otherwise have to guess.
 // TestWorkerTaskResponseDoesNotDeclareAssignmentEpoch and
 // TestListWorkerTasks_DoesNotExposeAssignmentEpoch pin the absence.
 type workerTaskResponse struct {
@@ -435,9 +435,9 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 
 // handleListWorkerTasks lists the tasks CURRENTLY ASSIGNED to one worker, newest
 // assignment first. Read-only, and auth-only rather than admin: both neighbouring
-// worker reads and every task read route are auth-only, and this is a projection
-// of task rows keyed by worker, so gating it on admin would be stricter than
-// either thing it is made of.
+// worker reads are auth-only, and this is a projection of task rows keyed by
+// worker, so gating it on admin would be stricter than either thing it is made
+// of.
 //
 // The worker is read before the page is built, so an unknown id is a 404 rather
 // than an empty list - the same ordering handleGetTaskLogs uses. That read runs
@@ -446,7 +446,7 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 // matching GET /v1/workers/{id}.
 //
 // items and total come from two statements, so under concurrent dispatch they
-// can disagree by one for an instant. Every list endpoint here has that property.
+// can disagree for an instant.
 func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, err := parseUUID(r.PathValue("id"))
@@ -505,10 +505,8 @@ func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // fillJobNames resolves job_name for one page of tasks in a single lookup on the
-// jobs primary key, bounded by the page limit. It is a second statement rather
-// than a JOIN so the list query stays a bare SELECT * that sqlc emits as
-// []store.Task: a JOIN row would have to be hand-copied into a store.Task to
-// reach toTaskResponse, and such a copy silently loses any column tasks gains.
+// jobs primary key, bounded by the page limit. It is a second statement, not a
+// JOIN; see ListActiveTasksForWorkerPage.
 // tasks.job_id is NOT NULL, so a missing name is not a normal absence. The
 // reachable cause is a concurrent DeleteJob cascading to tasks (tasks.job_id
 // ... ON DELETE CASCADE, migration 000001) between the list statement and this

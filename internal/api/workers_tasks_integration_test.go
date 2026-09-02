@@ -116,8 +116,7 @@ func TestListWorkerTasks_DoesNotLeakAnotherWorkersTasks(t *testing.T) {
 }
 
 // The posture pin. This goes RED if the route is ever wrapped in admin(...):
-// both neighbours (GET /v1/workers/{id} and /metrics) are auth-only, and every
-// task read route is auth-only under an explicit render-farm-semantics comment.
+// both neighbours (GET /v1/workers/{id} and /metrics) are auth-only.
 func TestListWorkerTasks_IsReadableByANonAdmin(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
 	user := createTestUser(t, q, "Plain", "plain@tasks-test.com", false)

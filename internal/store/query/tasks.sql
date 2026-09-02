@@ -943,8 +943,7 @@ SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 
 -- name: ListActiveTasksForWorkerPage :many
--- One page of the tasks CURRENTLY ASSIGNED to a worker. Read-only, and the only
--- thing it can break is what an operator sees.
+-- One page of the tasks CURRENTLY ASSIGNED to a worker.
 --
 -- READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
 -- invisible in the panel and uncounted by CountActiveTasksForWorker, so an
@@ -959,12 +958,10 @@ WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 -- real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
 -- there is no hand-written store.Task copy to lose a column `tasks` gains.
 --
--- Ordered by assigned_at, not started_at: started_at is NULL for every
--- `dispatched` row and a task spends the whole workspace sync as `dispatched`,
--- so ordering by it would bury the rows this panel exists to show. Every row
--- here has an assigned_at in practice (ClaimTaskForWorker is the only route into
--- this partition and stamps it in the same statement), but the column has no NOT
--- NULL constraint, so the NULLS LAST branch stays.
+-- Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
+-- row and a task spends the whole workspace sync as `dispatched`, so ordering by
+-- it would bury the rows this panel exists to show. assigned_at is nullable, so
+-- the NULLS LAST branch stays.
 SELECT * FROM tasks
 WHERE worker_id = sqlc.arg(worker_id)
   AND status IN ('dispatched', 'running')

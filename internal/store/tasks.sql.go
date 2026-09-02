@@ -945,8 +945,7 @@ type ListActiveTasksForWorkerPageParams struct {
 	PageLimit    int32              `json:"page_limit"`
 }
 
-// One page of the tasks CURRENTLY ASSIGNED to a worker. Read-only, and the only
-// thing it can break is what an operator sees.
+// One page of the tasks CURRENTLY ASSIGNED to a worker.
 //
 // READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
 // invisible in the panel and uncounted by CountActiveTasksForWorker, so an
@@ -961,12 +960,10 @@ type ListActiveTasksForWorkerPageParams struct {
 // real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
 // there is no hand-written store.Task copy to lose a column `tasks` gains.
 //
-// Ordered by assigned_at, not started_at: started_at is NULL for every
-// `dispatched` row and a task spends the whole workspace sync as `dispatched`,
-// so ordering by it would bury the rows this panel exists to show. Every row
-// here has an assigned_at in practice (ClaimTaskForWorker is the only route into
-// this partition and stamps it in the same statement), but the column has no NOT
-// NULL constraint, so the NULLS LAST branch stays.
+// Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
+// row and a task spends the whole workspace sync as `dispatched`, so ordering by
+// it would bury the rows this panel exists to show. assigned_at is nullable, so
+// the NULLS LAST branch stays.
 //
 //	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
 //	WHERE worker_id = $1

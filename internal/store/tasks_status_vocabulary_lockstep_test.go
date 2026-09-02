@@ -232,8 +232,9 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
 			"SelectRetryableTaskIDs, AppendTaskLog, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
 			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
-			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker. "+
-			"Revisit ALL OF THEM. AppendTaskLog and every statement carrying the 'currently assigned' partition "+
+			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker, "+
+			"and the partial index idx_tasks_worker_active (migration 000018). Revisit ALL OF THEM. "+
+			"AppendTaskLog and every statement carrying the 'currently assigned' partition "+
 			"fail OPEN in the damaging direction. A new NON-TERMINAL status omitted from AppendTaskLog's first "+
 			"arm silently discards 100% of that state's log output. One omitted from the nine that carry the "+
 			"'currently assigned' partition - ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
