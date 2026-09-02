@@ -50,6 +50,8 @@ export interface LogState {
   lines: LogRow[]
   /** Highest seq accepted. The dedupe key of README.md, "Events (Server-Sent Events)". */
   maxSeq: number
+  /** Lowest seq accepted; 0 when the window is empty. The backwards cursor. */
+  minSeq: number
   /** One in-progress trailing fragment per stream, because an entry is not a line. */
   partials: Record<LogStream, PendingPartial | null>
   nextKey: number
@@ -63,6 +65,7 @@ export function createLogState(): LogState {
   return {
     lines: [],
     maxSeq: 0,
+    minSeq: 0,
     partials: { stdout: null, stderr: null },
     nextKey: 1,
     evicted: false,
@@ -178,12 +181,14 @@ export function appendEntries(state: LogState, entries: LogChunk[]): LogState {
   let lines = state.lines
   let partials = state.partials
   let maxSeq = state.maxSeq
+  let minSeq = state.minSeq
   let nextKey = state.nextKey
   let changed = false
 
   for (const e of entries) {
     if (e.seq <= maxSeq) continue
     maxSeq = e.seq
+    if (minSeq === 0) minSeq = e.seq
     if (!changed) {
       lines = lines.slice()
       partials = { ...partials }
@@ -211,6 +216,7 @@ export function appendEntries(state: LogState, entries: LogChunk[]): LogState {
     lines: capped.lines,
     partials,
     maxSeq,
+    minSeq,
     nextKey,
     evicted: state.evicted || capped.evicted,
   }

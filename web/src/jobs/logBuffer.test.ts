@@ -334,3 +334,22 @@ test('an upgraded and an un-upgraded agent render the same line', () => {
   expect(upgraded.lines.map((l) => l.text)).toEqual(['x'])
   expect(notUpgraded.lines.map((l) => l.text)).toEqual(['x'])
 })
+
+test('minSeq records the lowest seq ever accepted and never rises', () => {
+  let s = createLogState()
+  expect(s.minSeq).toBe(0)
+
+  s = appendEntries(s, [chunk(10, 'a\n'), chunk(40, 'b\n')])
+  // The FIRST accepted entry, not the last, and not the smallest of a later
+  // batch: this is the cursor a backwards fetch continues from.
+  expect(s.minSeq).toBe(10)
+  expect(s.maxSeq).toBe(40)
+
+  s = appendEntries(s, [chunk(41, 'c\n')])
+  expect(s.minSeq).toBe(10)
+  expect(s.maxSeq).toBe(41)
+
+  // A duplicate below maxSeq is discarded before it can move anything.
+  s = appendEntries(s, [chunk(5, 'old\n')])
+  expect(s.minSeq).toBe(10)
+})
