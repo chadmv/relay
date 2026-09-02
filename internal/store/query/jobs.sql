@@ -13,6 +13,16 @@ JOIN users u ON u.id = j.submitted_by
 WHERE j.id = $1;
 
 -- name: ListJobsWithEmailPage :many
+-- The four optional predicates below are sqlc.narg: a NULL argument means "no
+-- filter". A Params field left at its zero value therefore disables that filter
+-- for this statement while the other list arms keep filtering, silently and
+-- with no error. Spread parseJobFilters' output at every call site;
+-- TestListJobs_FiltersApplyOnEveryArm is the behavioural guard.
+--
+-- strpos, not ILIKE: the needle is user input, and % and _ must stay literal
+-- characters rather than becoming wildcards. A trigram index cannot serve
+-- strpos, so adopting pg_trgm means rewriting this predicate to an escaped
+-- ILIKE.
 SELECT j.*, u.email AS submitted_by_email,
        ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
        sj.name AS scheduled_job_name
@@ -28,11 +38,25 @@ LEFT JOIN LATERAL (
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE (sqlc.arg(cursor_set)::bool = FALSE
        OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountJobs :one
-SELECT COUNT(*) FROM jobs;
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
 
 -- name: ListJobsByStatusWithEmailPage :many
 SELECT j.*, u.email AS submitted_by_email,
@@ -51,11 +75,26 @@ LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.status = sqlc.arg(status)::text
   AND (sqlc.arg(cursor_set)::bool = FALSE
        OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountJobsByStatus :one
-SELECT COUNT(*) FROM jobs WHERE status = $1;
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.status = sqlc.arg(status)::text
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
 
 -- name: ListJobsByScheduledJobWithEmailPage :many
 SELECT j.*, u.email AS submitted_by_email,
@@ -74,11 +113,26 @@ LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.scheduled_job_id = sqlc.arg(scheduled_job_id)::uuid
   AND (sqlc.arg(cursor_set)::bool = FALSE
        OR (j.created_at, j.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountJobsByScheduledJob :one
-SELECT COUNT(*) FROM jobs WHERE scheduled_job_id = $1;
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.scheduled_job_id = sqlc.arg(scheduled_job_id)::uuid
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
 
 -- name: UpdateJobStatus :one
 UPDATE jobs
@@ -131,7 +185,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.created_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.created_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.created_at ASC, j.id ASC
 LIMIT @page_limit + 1;
 
@@ -149,7 +209,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.name, j.id) < (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.name, j.id) < (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.name DESC, j.id DESC
 LIMIT @page_limit + 1;
 
@@ -167,7 +233,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.name, j.id) > (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.name, j.id) > (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.name ASC, j.id ASC
 LIMIT @page_limit + 1;
 
@@ -185,7 +257,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.priority, j.id) < (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.priority, j.id) < (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.priority DESC, j.id DESC
 LIMIT @page_limit + 1;
 
@@ -203,7 +281,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.priority, j.id) > (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.priority, j.id) > (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.priority ASC, j.id ASC
 LIMIT @page_limit + 1;
 
@@ -221,7 +305,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.status, j.id) < (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.status, j.id) < (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.status DESC, j.id DESC
 LIMIT @page_limit + 1;
 
@@ -239,7 +329,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.status, j.id) > (@cursor_v::text, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.status, j.id) > (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.status ASC, j.id ASC
 LIMIT @page_limit + 1;
 
@@ -257,7 +353,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.updated_at, j.id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.updated_at, j.id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.updated_at DESC, j.id DESC
 LIMIT @page_limit + 1;
 
@@ -275,7 +377,13 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT @cursor_set::bool OR (j.updated_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
+WHERE (NOT @cursor_set::bool OR (j.updated_at, j.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(j.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0)
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz)
 ORDER BY j.updated_at ASC, j.id ASC
 LIMIT @page_limit + 1;
 
