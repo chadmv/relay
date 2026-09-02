@@ -13,7 +13,8 @@ source: 2026-08-26 worker-delete slice - two false survivals in one session, six
 
 Mutation testing is load-bearing on this project - it is how several guards were shown to be
 decorative and how several "unkillable" claims were refuted. But there is no committed harness. Each
-slice writes an ad-hoc script, and those scripts have now lied in at least six recorded instances.
+slice writes an ad-hoc script, and those scripts have now lied in at least ten recorded instances
+(see Notes; the count is maintained there, not here).
 
 Two of them happened in one session on 2026-08-26, and both were **false survivals** - the most
 dangerous direction, because a survival reads as "this code is not covered" and invites someone to
@@ -59,6 +60,9 @@ outcome accounting, not coverage scoring.
 - A committed harness exists and the next slice uses it instead of an ad-hoc script.
 - A mutation that fails to apply is reported as **not applied**, never as survived.
 - A compile error is a distinct outcome from a survival.
+- The applied-check is a diff against a saved copy taken immediately before the test runs,
+  not a string count performed once at batch start - so an edit invalidated in between is
+  reported as not applied.
 - A batch without a control fails.
 
 ## Related
@@ -69,6 +73,33 @@ outcome accounting, not coverage scoring.
   mode is indistinguishable from a real result
 
 ## Notes
+
+**2026-09-01, per-task-identity-env-vars slice - a tenth instance, and the mechanism is new.** Every
+instance above is an anchor that NEVER matched: CRLF against a `sed`, a mangled backslash, a `$` that
+does not match before `\r\n`, a unique string in the wrong function. This one **matched when it was
+written and went stale afterwards.**
+
+A fix round's battery ran a `git stash` round-trip partway through, to check `gofmt` at HEAD. The
+round-trip re-materialised the working copy with CRLF, so the harness's LF-only anchors stopped
+matching from that point on and every subsequent mutation silently no-opped. It reported three
+mutants SURVIVING against a guard that had just been written specifically to kill them - the
+false-survival direction this item names, on the worst possible subject. The engineer caught it from
+its own applied-check and re-ran; the conductor then re-ran two of the three independently in an
+isolated tree with the application verified by file diff, and both died.
+
+**What this changes about the Proposal, and it is not covered by the current wording.** "Assert the
+mutation landed there" is stated as a property of the edit. It has to be a property of the edit
+**at the moment the test runs**. An `assert count(anchor) == 1` performed once at batch start is
+necessary and insufficient in exactly the way the wrong-occurrence check was: anything that touches
+the working tree between the check and the run invalidates it, and `git stash`, `git checkout`, a
+formatter, and a second agent in a shared worktree all qualify. The check that survives this is a
+DIFF against a saved copy immediately before the run, not a string count performed earlier - and the
+same diff should gate the restore, rather than assuming the write-back landed.
+
+This also sharpens the item's own argument for a committed harness over per-slice scripts. Each of
+the ten instances was a different script making a different mistake; the CRLF ones were fixed one at
+a time, in one script at a time, and the fix never propagated because there was nothing to propagate
+it into.
 
 **2026-08-25, windows-crlf-log-lines slice - three more instances, and the scope is wider than this
 item states.** Three independent actors in one slice each lost mutations to a silently-unapplied
