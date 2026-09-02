@@ -1,4 +1,5 @@
 import { apiFetch } from '../lib/api'
+import type { TaskStatus } from '../jobs/api'
 
 export type WorkerStatus = 'online' | 'stale' | 'offline' | 'disabled' | 'revoked'
 
@@ -152,4 +153,41 @@ export function revokeWorkerToken(id: string): Promise<void> {
 // inventory update. A held workspace is refused by the agent, not this endpoint.
 export function evictWorkspace(id: string, shortId: string): Promise<void> {
   return apiFetch<void>(`/workers/${id}/workspaces/${shortId}/evict`, { method: 'POST' })
+}
+
+// One currently-assigned task. assignment_epoch is a fence token and is not on
+// the wire; depends_on is not either.
+export interface WorkerTask {
+  id: string
+  name: string
+  status: TaskStatus
+  commands: string[][] | null
+  env: Record<string, string>
+  requires: Record<string, string>
+  timeout_seconds: number | null
+  retries: number
+  retry_count: number
+  worker_id?: string
+  job_id: string
+  job_name: string
+  assigned_at?: string
+  // Absent, not null, for a dispatched task that has not begun executing.
+  started_at?: string
+}
+
+export interface WorkerTasksPage {
+  items: WorkerTask[]
+  next_cursor: string
+  total: number
+}
+
+// The worker's currently assigned tasks (dispatched or running), newest
+// assignment first. One page, no cursor: `total` is the active count for the
+// whole worker, so the Slots KPI is exact, but `items` can still stop short of
+// it and the caller must say so rather than presenting the table as complete.
+// 200 is the server maximum and a literal, because a value outside [1, 200] is
+// a 400 from parsePage, not a clamp - never compute it.
+export function listWorkerTasks(id: string): Promise<WorkerTasksPage> {
+  const q = new URLSearchParams({ limit: '200' })
+  return apiFetch<WorkerTasksPage>(`/workers/${id}/tasks?${q}`)
 }

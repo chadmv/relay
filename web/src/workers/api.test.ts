@@ -9,6 +9,7 @@ import {
   getWorkerMetrics,
   listWorkerWorkspaces,
   listRevokedWorkers,
+  listWorkerTasks,
   type WorkersPage,
 } from './api'
 
@@ -178,4 +179,88 @@ test('listRevokedWorkers fetches /workers/revoked with limit=50', async () => {
   const page = await listRevokedWorkers()
   expect(captured).toBe('/v1/workers/revoked')
   expect(page.items[0].revoked_at).toBe('2026-01-02T03:04:05Z')
+})
+
+test('listWorkerTasks requests the worker tasks route and decodes the envelope', async () => {
+  let path: string | undefined
+  let limit: string | null = null
+  server.use(
+    http.get('/v1/workers/w1/tasks', ({ request }) => {
+      path = new URL(request.url).pathname
+      limit = new URL(request.url).searchParams.get('limit')
+      // Hand-written JSON. A fixture marshalled through the app's own response
+      // type agrees with the decoder by construction and can never detect drift.
+      // The timestamps carry the server's local offset, which is what the Go
+      // handler emits; a test that only ever sees a Z suffix pins nothing.
+      return HttpResponse.json({
+        items: [
+          {
+            id: 't1',
+            name: 'render-shot-042',
+            status: 'running',
+            commands: [['blender', '-b', 'shot042.blend']],
+            env: {},
+            requires: {},
+            timeout_seconds: 3600,
+            retries: 2,
+            retry_count: 1,
+            worker_id: 'w1',
+            job_id: 'j1',
+            job_name: 'nightly-render',
+            assigned_at: '2026-09-01T09:14:02.118-07:00',
+            started_at: '2026-09-01T09:16:40.902-07:00',
+          },
+        ],
+        next_cursor: '',
+        total: 1,
+      })
+    }),
+  )
+  const page = await listWorkerTasks('w1')
+  expect(path).toBe('/v1/workers/w1/tasks')
+  // The panel renders one page and no pager, so it asks for the server maximum
+  // rather than the default 50: a worker whose max_slots was raised past 50 would
+  // otherwise show a silently short table. 200 is a literal because a value
+  // outside [1, 200] is a 400 from parsePage, not a clamp.
+  expect(limit).toBe('200')
+  expect(page.total).toBe(1)
+  expect(page.items[0].job_name).toBe('nightly-render')
+  expect(page.items[0].started_at).toBe('2026-09-01T09:16:40.902-07:00')
+})
+
+test('listWorkerTasks decodes a dispatched task with no start time', async () => {
+  server.use(
+    http.get('/v1/workers/w1/tasks', () =>
+      HttpResponse.json({
+        items: [
+          {
+            id: 't2',
+            name: 'sync-depot',
+            status: 'dispatched',
+            commands: [['p4', 'sync']],
+            env: {},
+            requires: {},
+            timeout_seconds: null,
+            retries: 0,
+            retry_count: 0,
+            worker_id: 'w1',
+            job_id: 'j1',
+            job_name: 'nightly-render',
+            assigned_at: '2026-09-01T09:13:55.004-07:00',
+          },
+        ],
+        next_cursor: '',
+        total: 1,
+      }),
+    ),
+  )
+  const page = await listWorkerTasks('w1')
+  expect(page.items[0].started_at).toBeUndefined()
+})
+
+test('listWorkerTasks throws ApiError on the error envelope', async () => {
+  server.use(
+    http.get('/v1/workers/w1/tasks', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+  )
+  await expect(listWorkerTasks('w1')).rejects.toBeInstanceOf(ApiError)
 })

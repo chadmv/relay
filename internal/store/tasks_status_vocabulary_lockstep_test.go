@@ -100,31 +100,43 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     allow-list would reject the write regardless. Including one simply buys a
 //     guaranteed zero-row round trip on every sweep, forever.
 //   - THE ASSIGNMENT-PARTITION GROUP - GetActiveTasksForWorker,
-//     ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks and
-//     RequeueWorkerTasksIfEpoch (query/tasks.sql), all carrying the identical
+//     ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks,
+//     RequeueWorkerTasksIfEpoch, CountActiveTasksByAllWorkers,
+//     ListActiveTasksForWorkerPage and CountActiveTasksForWorker
+//     (query/tasks.sql), all carrying the identical
 //     `status IN ('dispatched','running')`. THESE ARE INVERTED, exactly like
-//     ListOverdueAssignedTasks, and they were missing from this list until the
-//     RequeueTaskByID fence slice - which means five of the eight sites that
-//     slice the "currently assigned" partition were unlisted while the one that
-//     motivated the warning was spelled out at length.
+//     ListOverdueAssignedTasks.
 //     A new NON-TERMINAL status omitted here fails OPEN in the damaging
 //     direction at every one of them at once. Trace `preparing`, this file's own
 //     named candidate: a task sitting in it through a long P4 sync is invisible
 //     to GetActiveTasksForWorker, so reconcile never sees it and never requeues
 //     it; invisible to ListGraceCandidates, so no grace timer covers it;
 //     unmatched by all three requeue statements, so neither a disconnect nor an
-//     admin disable releases it; and already unswept by
+//     admin disable releases it; uncounted by CountActiveTasksByAllWorkers, so
+//     the dispatcher reads the slot it holds as free and can overcommit the
+//     worker; absent from the worker-detail Current-tasks panel and undercounted
+//     by its Slots KPI (ListActiveTasksForWorkerPage, CountActiveTasksForWorker),
+//     so an operator sees an idle worker that is busy; and already unswept by
 //     ListOverdueAssignedTasks. It holds its worker slot and its job FOREVER,
 //     with no error and no log line - and it is outside idx_tasks_worker_active
-//     as well. A new non-terminal status MUST BE ADDED to all five. A new
-//     TERMINAL status must stay OUT: the three requeue statements write, so
-//     admitting one would let a requeue resurrect a finished task, which is the
-//     guarantee TestRequeueTaskByID_TerminalTaskIsNotResurrected pins.
+//     as well, whose WHERE clause is a copy of this same predicate that nothing
+//     on this list reads: a status added to the statements but not to the index
+//     turns the two panel queries into sequential scans rather than making them
+//     wrong. A new non-terminal status MUST BE ADDED to all eight.
+//     A new TERMINAL status must stay OUT. For the three requeue statements the
+//     reason is that they WRITE, so admitting one would let a requeue resurrect
+//     a finished task, which is the guarantee
+//     TestRequeueTaskByID_TerminalTaskIsNotResurrected pins. For the two panel
+//     statements the reason is different: they are read-only and can admit no
+//     write at all, but a terminal task holds no slot, so including one would
+//     over-report used slots on a card an operator reads as capacity.
 //     The positive arm is pinned too, and needs to stay pinned:
 //     TestRequeueTaskByID_RequeuesARunningTaskForItsAssignee exists because
 //     halving that IN list to ('dispatched') left the store, worker, scheduler
 //     and api suites ALL GREEN while silently stranding reconcile's dominant
-//     case.
+//     case, and
+//     TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses is the same
+//     guard for the panel statement.
 //   - RequeueTask (query/tasks.sql) - `status = 'dispatched'`, and the one
 //     member of the requeue family that is DELIBERATELY NARROWER than the group
 //     above. Do not "harmonize" it by adding 'running'. Its only caller is the
@@ -135,7 +147,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     status belongs here only if a task can be in it while its DispatchTask is
 //     still in flight.
 //
-// THE FOURTEENTH ENTRY IS NOT A STATEMENT, and it is here because the list above
+// ONE ENTRY IS NOT A STATEMENT, and it is here because the list above
 // presented itself as complete while something else sliced the same set:
 //
 //   - taskStatusIsWritable (internal/worker/taskstatus_fence_counters.go) - A GO
@@ -154,7 +166,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     exactly why a completeness claim has to name it anyway. A claim about the
 //     complement cannot be checked by opening its subject.
 //
-// THE FIFTEENTH ENTRY IS NOT A STATEMENT EITHER, and it is not even in the server
+// A SECOND ENTRY IS NOT A STATEMENT EITHER, and it is not even in the server
 // binary:
 //
 //   - taskIsTerminal and jobIsTerminal (internal/cli/logs.go) - the CLI's own two
@@ -192,13 +204,13 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // "currently assigned" partition - ListOverdueAssignedTasks plus the
 // assignment-partition group - are where the allow-list points the OTHER way and
 // omission fails open, which is why they are spelled out at length above rather
-// than folded into the list. Count them before assuming the fail-closed default:
-// seven of the thirteen STATEMENTS named here are inverted. The fourteenth and
-// fifteenth entries are not statements and are not among the seven; neither gates
-// a write, so neither is fail-open or fail-closed in that sense. Drift in the
-// fourteenth mislabels a counter. Drift in the fifteenth silently breaks a promise
-// the CLI makes to a shell script, which is the fail-OPEN direction for the one
-// thing that entry does control.
+// than folded into the list. Count them before assuming the fail-closed
+// default: the inverted sites are AppendTaskLog, ListOverdueAssignedTasks, and
+// every member of the assignment-partition group above. The two non-statement
+// entries are not among them; neither gates a write, so neither is fail-open or
+// fail-closed in that sense. Drift in the first mislabels a counter. Drift in the
+// second silently breaks a promise the CLI makes to a shell script, which is the
+// fail-OPEN direction for the one thing that entry does control.
 func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -219,22 +231,27 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 		"tasks.status vocabulary changed - read this test's comment before updating it. These statements slice "+
 			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
 			"SelectRetryableTaskIDs, AppendTaskLog, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
-			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks and RequeueWorkerTasksIfEpoch. "+
-			"Revisit ALL OF THEM. SEVEN fail OPEN in the damaging direction. A new NON-TERMINAL status omitted "+
-			"from AppendTaskLog's first arm silently discards 100% of that state's log output. One omitted from "+
-			"the six that carry the 'currently assigned' partition - ListOverdueAssignedTasks, "+
-			"GetActiveTasksForWorker, ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks and "+
-			"RequeueWorkerTasksIfEpoch - means a task in that state is never seen by reconcile, never covered by "+
-			"a grace timer, never requeued on disconnect or disable, and never swept: it holds its worker slot "+
-			"and its job forever, with no error and no log line. RequeueTask's narrower 'dispatched'-only "+
-			"predicate is deliberate - see its own comment before touching it. THERE ARE ALSO TWO NON-STATEMENT "+
-			"SITES. taskStatusIsWritable in internal/worker/taskstatus_fence_counters.go mirrors "+
-			"UpdateTaskStatus's allow-list in Go to label fence-rejection counters. It gates nothing, so drift "+
-			"there mislabels a number rather than admitting a write - but a new non-terminal status left out of "+
-			"it makes every rejection for that state read as a healthy race. taskIsTerminal and jobIsTerminal in "+
-			"internal/cli/logs.go are the CLI's copies, and jobIsTerminal is the only site on this list slicing "+
-			"the JOBS vocabulary. A new TERMINAL task status omitted from taskIsTerminal means relay logs never "+
-			"fetches that task's log while still exiting 0, which it documents as meaning every task's log "+
-			"printed in full; a new terminal JOB status omitted from jobIsTerminal makes relay logs hang until "+
-			"the connection drops and then report 'connection lost' about a job that finished long ago")
+			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
+			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker, "+
+			"and the partial index idx_tasks_worker_active (migration 000018). Revisit ALL OF THEM. "+
+			"AppendTaskLog and every statement carrying the 'currently assigned' partition "+
+			"fail OPEN in the damaging direction. A new NON-TERMINAL status omitted from AppendTaskLog's first "+
+			"arm silently discards 100% of that state's log output. One omitted from the nine that carry the "+
+			"'currently assigned' partition - ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
+			"ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
+			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker - means a "+
+			"task in that state is never seen by reconcile, never covered by a grace timer, never requeued on "+
+			"disconnect or disable, never swept, counted as a free slot by the dispatcher, and missing from the "+
+			"worker-detail panel and its Slots KPI: it holds its worker slot and its job forever, with no error "+
+			"and no log line. RequeueTask's narrower 'dispatched'-only predicate is deliberate - see its own "+
+			"comment before touching it. THERE ARE ALSO TWO NON-STATEMENT SITES. taskStatusIsWritable in "+
+			"internal/worker/taskstatus_fence_counters.go mirrors UpdateTaskStatus's allow-list in Go to label "+
+			"fence-rejection counters. It gates nothing, so drift there mislabels a number rather than admitting "+
+			"a write - but a new non-terminal status left out of it makes every rejection for that state read as "+
+			"a healthy race. taskIsTerminal and jobIsTerminal in internal/cli/logs.go are the CLI's copies, and "+
+			"jobIsTerminal is the only site on this list slicing the JOBS vocabulary. A new TERMINAL task status "+
+			"omitted from taskIsTerminal means relay logs never fetches that task's log while still exiting 0, "+
+			"which it documents as meaning every task's log printed in full; a new terminal JOB status omitted "+
+			"from jobIsTerminal makes relay logs hang until the connection drops and then report 'connection "+
+			"lost' about a job that finished long ago")
 }

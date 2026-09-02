@@ -299,6 +299,29 @@ func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActi
 	return items, nil
 }
 
+const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
+SELECT COUNT(*) FROM tasks
+WHERE worker_id = $1
+  AND status IN ('dispatched', 'running')
+`
+
+// `total` for the page above, and the number the Slots KPI renders as used
+// slots. The status predicate must stay byte-identical to
+// ListActiveTasksForWorkerPage's - change both or neither, or the fraction an
+// operator reads contradicts the rows underneath it.
+// Do NOT serve one worker from CountActiveTasksByAllWorkers: it has no worker
+// filter and aggregates the whole table on every poll.
+//
+//	SELECT COUNT(*) FROM tasks
+//	WHERE worker_id = $1
+//	  AND status IN ('dispatched', 'running')
+func (q *Queries) CountActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTasksForWorker, workerID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countTaskLogs = `-- name: CountTaskLogs :one
 SELECT COUNT(*) FROM task_logs WHERE task_id = $1
 `
@@ -892,6 +915,115 @@ func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTask
 		&i.AssignedAt,
 	)
 	return i, err
+}
+
+const listActiveTasksForWorkerPage = `-- name: ListActiveTasksForWorkerPage :many
+SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
+WHERE worker_id = $1
+  AND status IN ('dispatched', 'running')
+  AND (
+       NOT $2::bool
+    OR (
+       CASE WHEN $3::bool THEN
+            assigned_at IS NULL AND id < $4::uuid
+       ELSE
+            (assigned_at IS NOT NULL AND
+             (assigned_at, id) < ($5::timestamptz, $4::uuid))
+         OR assigned_at IS NULL
+       END
+   ))
+ORDER BY assigned_at DESC NULLS LAST, id DESC
+LIMIT $6::int + 1
+`
+
+type ListActiveTasksForWorkerPageParams struct {
+	WorkerID     pgtype.UUID        `json:"worker_id"`
+	CursorSet    bool               `json:"cursor_set"`
+	CursorIsNull bool               `json:"cursor_is_null"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	CursorTs     pgtype.Timestamptz `json:"cursor_ts"`
+	PageLimit    int32              `json:"page_limit"`
+}
+
+// One page of the tasks CURRENTLY ASSIGNED to a worker.
+//
+// READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
+// invisible in the panel and uncounted by CountActiveTasksForWorker, so an
+// operator sees an idle worker that is busy and a Slots KPI that under-reports
+// its load - no error, no log line. `preparing` is the live candidate. A new
+// TERMINAL status must stay OUT: a finished task holds no slot.
+// TestTasksStatusVocabularyIsExactly names this statement, and
+// TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses pins the positive
+// arm - halving this IN list must turn it RED.
+//
+// SELECT * so sqlc emits []store.Task and the handler calls toTaskResponse on a
+// real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
+// there is no hand-written store.Task copy to lose a column `tasks` gains.
+//
+// Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
+// row and a task spends the whole workspace sync as `dispatched`, so ordering by
+// it would bury the rows this panel exists to show. assigned_at is nullable, so
+// the NULLS LAST branch stays.
+//
+//	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
+//	WHERE worker_id = $1
+//	  AND status IN ('dispatched', 'running')
+//	  AND (
+//	       NOT $2::bool
+//	    OR (
+//	       CASE WHEN $3::bool THEN
+//	            assigned_at IS NULL AND id < $4::uuid
+//	       ELSE
+//	            (assigned_at IS NOT NULL AND
+//	             (assigned_at, id) < ($5::timestamptz, $4::uuid))
+//	         OR assigned_at IS NULL
+//	       END
+//	   ))
+//	ORDER BY assigned_at DESC NULLS LAST, id DESC
+//	LIMIT $6::int + 1
+func (q *Queries) ListActiveTasksForWorkerPage(ctx context.Context, arg ListActiveTasksForWorkerPageParams) ([]Task, error) {
+	rows, err := q.db.Query(ctx, listActiveTasksForWorkerPage,
+		arg.WorkerID,
+		arg.CursorSet,
+		arg.CursorIsNull,
+		arg.CursorID,
+		arg.CursorTs,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.Name,
+			&i.Env,
+			&i.Requires,
+			&i.TimeoutSeconds,
+			&i.Retries,
+			&i.RetryCount,
+			&i.Status,
+			&i.WorkerID,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CreatedAt,
+			&i.AssignmentEpoch,
+			&i.Source,
+			&i.Commands,
+			&i.AssignedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listGraceCandidates = `-- name: ListGraceCandidates :many

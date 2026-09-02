@@ -941,3 +941,51 @@ RETURNING t.id;
 -- names this site so the partition is revisited rather than desynchronized.
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
+
+-- name: ListActiveTasksForWorkerPage :many
+-- One page of the tasks CURRENTLY ASSIGNED to a worker.
+--
+-- READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
+-- invisible in the panel and uncounted by CountActiveTasksForWorker, so an
+-- operator sees an idle worker that is busy and a Slots KPI that under-reports
+-- its load - no error, no log line. `preparing` is the live candidate. A new
+-- TERMINAL status must stay OUT: a finished task holds no slot.
+-- TestTasksStatusVocabularyIsExactly names this statement, and
+-- TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses pins the positive
+-- arm - halving this IN list must turn it RED.
+--
+-- SELECT * so sqlc emits []store.Task and the handler calls toTaskResponse on a
+-- real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
+-- there is no hand-written store.Task copy to lose a column `tasks` gains.
+--
+-- Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
+-- row and a task spends the whole workspace sync as `dispatched`, so ordering by
+-- it would bury the rows this panel exists to show. assigned_at is nullable, so
+-- the NULLS LAST branch stays.
+SELECT * FROM tasks
+WHERE worker_id = sqlc.arg(worker_id)
+  AND status IN ('dispatched', 'running')
+  AND (
+       NOT sqlc.arg(cursor_set)::bool
+    OR (
+       CASE WHEN sqlc.arg(cursor_is_null)::bool THEN
+            assigned_at IS NULL AND id < sqlc.arg(cursor_id)::uuid
+       ELSE
+            (assigned_at IS NOT NULL AND
+             (assigned_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+         OR assigned_at IS NULL
+       END
+   ))
+ORDER BY assigned_at DESC NULLS LAST, id DESC
+LIMIT sqlc.arg(page_limit)::int + 1;
+
+-- name: CountActiveTasksForWorker :one
+-- `total` for the page above, and the number the Slots KPI renders as used
+-- slots. The status predicate must stay byte-identical to
+-- ListActiveTasksForWorkerPage's - change both or neither, or the fraction an
+-- operator reads contradicts the rows underneath it.
+-- Do NOT serve one worker from CountActiveTasksByAllWorkers: it has no worker
+-- filter and aggregates the whole table on every poll.
+SELECT COUNT(*) FROM tasks
+WHERE worker_id = sqlc.arg(worker_id)
+  AND status IN ('dispatched', 'running');

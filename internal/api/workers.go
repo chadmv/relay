@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -143,6 +145,17 @@ var RevokedWorkersSortSpec = SortSpec{
 	},
 }
 
+// WorkerTasksSortSpec drives GET /v1/workers/{id}/tasks. The endpoint serves one
+// order; the assigned_at key exists so the "-assigned_at" default resolves in
+// parseSort and tags the cursor. handleListWorkerTasks refuses an ascending
+// request, as handleListRevokedWorkers does.
+var WorkerTasksSortSpec = SortSpec{
+	Default: "-assigned_at",
+	Keys: map[string]SortKeyKind{
+		"assigned_at": SortKeyTimestamp,
+	},
+}
+
 func workersRowKey(w store.Worker) (anySortVal, pgtype.UUID) {
 	return w.CreatedAt.Time, w.ID
 }
@@ -161,6 +174,49 @@ func workersRowKeyByLastSeen(w store.Worker) (anySortVal, pgtype.UUID) {
 	}
 	t := w.LastSeenAt.Time
 	return &t, w.ID
+}
+
+// workerTaskResponse is one currently-assigned task. It EMBEDS taskResponse so
+// this endpoint cannot drift from GET /v1/tasks/{id} on the task's own fields,
+// exactly as disableWorkerResponse embeds workerResponse.
+// assignment_epoch is deliberately absent and must stay absent: it is a fence
+// token, and this response would otherwise publish live (task id, epoch) pairs
+// for a named worker to any authenticated user - both of the values a forged
+// task-status update needs, which it would otherwise have to guess.
+// TestWorkerTaskResponseDoesNotDeclareAssignmentEpoch and
+// TestListWorkerTasks_DoesNotExposeAssignmentEpoch pin the absence.
+type workerTaskResponse struct {
+	taskResponse
+	JobID      string     `json:"job_id"`
+	JobName    string     `json:"job_name"`
+	AssignedAt *time.Time `json:"assigned_at,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+}
+
+func toWorkerTaskResponse(t store.Task) workerTaskResponse {
+	resp := workerTaskResponse{
+		taskResponse: toTaskResponse(t, nil),
+		JobID:        uuidStr(t.JobID),
+	}
+	if t.AssignedAt.Valid {
+		at := t.AssignedAt.Time
+		resp.AssignedAt = &at
+	}
+	if t.StartedAt.Valid {
+		st := t.StartedAt.Time
+		resp.StartedAt = &st
+	}
+	return resp
+}
+
+// A nil *time.Time is how encodeCursorV2 represents a NULL sort value, which is
+// the NULLS LAST tail of the query's order.
+func workerTasksRowKey(t store.Task) (anySortVal, pgtype.UUID) {
+	if !t.AssignedAt.Valid {
+		return (*time.Time)(nil), t.ID
+	}
+	at := t.AssignedAt.Time
+	return &at, t.ID
 }
 
 func (s *Server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +431,120 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleListWorkerTasks lists the tasks CURRENTLY ASSIGNED to one worker, newest
+// assignment first. Read-only, and auth-only rather than admin: both neighbouring
+// worker reads are auth-only, and this is a projection of task rows keyed by
+// worker, so gating it on admin would be stricter than either thing it is made
+// of.
+//
+// The worker is read before the page is built, so an unknown id is a 404 rather
+// than an empty list - the same ordering handleGetTaskLogs uses. That read runs
+// before parsePage, so an unknown worker with a bad ?limit= is a 404, not a 400.
+// A revoked worker is returned by GetWorker and is therefore not a 404 here,
+// matching GET /v1/workers/{id}.
+//
+// items and total come from two statements, so under concurrent dispatch they
+// can disagree for an instant.
+func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid worker id")
+		return
+	}
+
+	if _, err := s.q.GetWorker(ctx, id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "worker not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	pp, ok := parsePage(w, r, WorkerTasksSortSpec)
+	if !ok {
+		return
+	}
+	// The SQL ordering is fixed, so an ascending request cannot be honored.
+	// Refuse it rather than silently returning descending rows, exactly as
+	// handleListRevokedWorkers does.
+	if pp.Sort != "-assigned_at" {
+		writeError(w, http.StatusBadRequest, "worker tasks can only be sorted by -assigned_at")
+		return
+	}
+
+	total, err := s.q.CountActiveTasksForWorker(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "count worker tasks failed")
+		return
+	}
+
+	rows, err := s.q.ListActiveTasksForWorkerPage(ctx, store.ListActiveTasksForWorkerPageParams{
+		WorkerID:     id,
+		CursorSet:    pp.Cursor.Set,
+		CursorIsNull: pp.Cursor.IsNull,
+		CursorTs:     pp.CursorTs(),
+		CursorID:     pp.Cursor.ID,
+		PageLimit:    pp.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list worker tasks failed")
+		return
+	}
+
+	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerTaskResponse, workerTasksRowKey)
+	if err := s.fillJobNames(ctx, items); err != nil {
+		log.Printf("list worker tasks: fill job names: %v", err)
+		writeError(w, http.StatusInternalServerError, "list worker tasks failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, page[workerTaskResponse]{Items: items, NextCursor: next, Total: total})
+}
+
+// fillJobNames resolves job_name for one page of tasks in a single lookup on the
+// jobs primary key, bounded by the page limit. It is a second statement, not a
+// JOIN; see ListActiveTasksForWorkerPage.
+// tasks.job_id is NOT NULL, so a missing name is not a normal absence. The
+// reachable cause is a concurrent DeleteJob cascading to tasks (tasks.job_id
+// ... ON DELETE CASCADE, migration 000001) between the list statement and this
+// one. That is an error rather than an empty string because a blank job on a
+// task reads as data, not as a row that vanished mid-request.
+func (s *Server) fillJobNames(ctx context.Context, items []workerTaskResponse) error {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	ids := make([]pgtype.UUID, 0, len(items))
+	for _, it := range items {
+		if _, ok := seen[it.JobID]; ok {
+			continue
+		}
+		seen[it.JobID] = struct{}{}
+		id, err := parseUUID(it.JobID)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	rows, err := s.q.GetJobNamesByIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	nameByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		nameByID[uuidStr(row.ID)] = row.Name
+	}
+	for i := range items {
+		name, ok := nameByID[items[i].JobID]
+		if !ok {
+			return fmt.Errorf("no job name for task %s (job %s)", items[i].ID, items[i].JobID)
+		}
+		items[i].JobName = name
+	}
+	return nil
 }
 
 func (s *Server) handleUpdateWorker(w http.ResponseWriter, r *http.Request) {

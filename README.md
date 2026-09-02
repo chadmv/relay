@@ -1532,6 +1532,9 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | `GET` | `/v1/workers/{id}/workspaces` | List source workspaces on the worker (admin only) |
 | `POST` | `/v1/workers/{id}/workspaces/{short_id}/evict` | Request eviction of a workspace (admin only); returns 202 even if the worker is offline |
 | `GET` | `/v1/workers/{id}/metrics` | Get the worker's short-term utilization history (CPU, memory, GPU). Returns an empty `samples` array for offline workers or workers with no data yet. 404 if the worker does not exist. Same bearer-auth as `GET /v1/workers/{id}`. |
+| `GET` | `/v1/workers/{id}/tasks` | List the tasks currently assigned to a worker (`dispatched` or `running`), newest assignment first. Paginated, standard `page` envelope; `total` is the count of ACTIVE tasks for this worker, which is the same number the dispatcher treats as used slots. Fixed order, sortable only by `-assigned_at` (the default). 404 if the worker does not exist. Same bearer-auth as `GET /v1/workers/{id}`. |
+
+`GET /v1/workers/{id}/tasks` does not return a worker's terminal tasks. `items` and `total` come from two statements, so under concurrent dispatch they can disagree for an instant. The used-slot count can legitimately exceed `max_slots`, because `max_slots` is a dispatcher input rather than a database constraint and lowering it via `PATCH /v1/workers/{id}` requeues nothing.
 
 ### Server
 

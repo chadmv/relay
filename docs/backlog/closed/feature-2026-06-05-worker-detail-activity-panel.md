@@ -1,7 +1,9 @@
 ---
 title: Worker detail running-tasks and activity stats panel
 type: feature
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-06-05
 priority: medium
 source: deferred from the worker-detail-page read-only slice (2026-06-05 brainstorm)
@@ -38,3 +40,6 @@ a live current-tasks table and a jobs-today summary.
 - `internal/store/query/tasks.sql` (`ActiveTaskCounts`)
 - `internal/api/tasks.go`, `internal/api/workers.go`
 - `docs/superpowers/specs/2026-06-05-worker-detail-page-design.md`
+
+## Resolution
+GET /v1/workers/{id}/tasks lists a worker's currently assigned tasks (dispatched and running, an allow-list on the existing partial index, any authenticated user, page envelope with total as the dispatcher's used-slot count, assignment_epoch deliberately absent and pinned by closed-set key tests). The worker detail page renders a current-tasks panel on the holo primitives and the Slots KPI now shows the real used count. The item's second half, the jobs-today activity aggregate, is carved out to feature-2026-09-01-worker-activity-aggregate: it needs an index, a migration and a product decision (relay assigns tasks, not jobs, to workers). The item named ActiveTaskCounts, which does not exist; the statement is CountActiveTasksByAllWorkers and it has no worker filter.
