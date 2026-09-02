@@ -41,11 +41,17 @@ test('the name-cell button carries a negative-offset focus ring, not the browser
   const button = screen.getByRole('button', { name: 'frame-001' })
   // The button fills its TableCell exactly (w-full) and both carry `truncate`
   // (overflow: hidden), so a ring drawn OUTSIDE the border box is clipped by the
-  // ancestor to zero visible pixels. A negative outline-offset draws it INSIDE
+  // ancestor to zero visible pixels. A negative outline offset draws it INSIDE
   // instead, which that clip cannot reach - proved in a real browser (not jsdom,
   // which does no layout) by the job-detail keyboard describe in
   // web/e2e/keyboard.spec.ts, reading getComputedStyle on the focused element.
-  expect(button).toHaveClass('focus-visible:outline-offset-[-2px]')
+  //
+  // The value is interpolated INSIDE the brackets rather than spelled as a
+  // literal class-shaped substring: Tailwind v4 scans this file too, and a
+  // literal match here would keep the CSS rule alive even if the component
+  // stopped emitting the class.
+  const OFFSET = '-2px'
+  expect(button).toHaveClass(`focus-visible:outline-offset-[${OFFSET}]`)
 })
 
 test('each task row exposes a button named for the task, and one activation selects once', async () => {

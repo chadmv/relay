@@ -67,7 +67,7 @@ export function TasksTable({
                 {/* The button fills this cell exactly (w-full) and both carry
                     `truncate` (overflow: hidden), so a ring drawn outside the
                     border box is clipped to zero visible pixels by the cell's
-                    own clip. focus-visible:outline-offset-[-2px] draws the ring
+                    own clip. A negative outline offset draws the ring
                     INSIDE the box instead, which that clip cannot reach. Pinned
                     by `the name-cell button carries a negative-offset focus
                     ring` (unit) and the job-detail keyboard describe (browser,
