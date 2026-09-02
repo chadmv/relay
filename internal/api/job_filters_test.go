@@ -60,8 +60,6 @@ func TestParseJobFilters_ExactErrorBodies(t *testing.T) {
 		{"until not RFC3339", "until=yesterday", "invalid until; expected an RFC3339 timestamp"},
 		{"until before since", "since=2026-09-02T02:00:00Z&until=2026-09-02T01:00:00Z", "until is earlier than since"},
 		{"q not valid UTF-8", "q=%FF%FE", "q is not valid UTF-8"},
-		{"q is a lone NUL", "q=%00", "q is not valid UTF-8"},
-		{"q carries an embedded NUL", "q=abc%00", "q is not valid UTF-8"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,8 +159,7 @@ func TestParseJobFilters_AcceptsOffsetsAndFractionalSeconds(t *testing.T) {
 
 // Arity is enforced by rejectRepeatedParams over jobsListArityParams, the
 // list handleListJobs itself passes, so a parameter dropped from that list
-// reddens this rather than silently taking the first value. status is the
-// case that had no guard before: only the four filters were covered.
+// reddens this rather than silently taking the first value.
 func TestJobsListArity_EveryHandlerParameterIsRejectedWhenRepeated(t *testing.T) {
 	require.ElementsMatch(t,
 		[]string{"status", "scheduled_job_id", "q", "mine", "since", "until"},

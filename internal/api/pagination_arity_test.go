@@ -72,3 +72,19 @@ func TestParsePage_SingleOccurrenceStillParses(t *testing.T) {
 	assert.EqualValues(t, 10, pp.Limit)
 	assert.Equal(t, "name", pp.Sort)
 }
+
+// Postgres text cannot hold a NUL byte and rejects one with SQLSTATE 22021, so
+// any parameter carrying one must be refused before it reaches a query as a
+// text argument. The rejection lives here rather than per-parameter: ?status=,
+// ?email= and ?limit= all reached the database the same way, and a per-reader
+// guard would have to be repeated at every one.
+func TestParsePage_NulByteInAnyParameterIsRejected(t *testing.T) {
+	for _, raw := range []string{"status=%00", "q=%00", "limit=%00", "q=abc%00", "cursor=%00"} {
+		t.Run(raw, func(t *testing.T) {
+			_, ok, code, body := callParsePage(t, raw)
+			require.False(t, ok, "rawQuery=%s must not parse", raw)
+			assert.Equal(t, 400, code)
+			assert.Equal(t, "query string contains a NUL byte", body)
+		})
+	}
+}

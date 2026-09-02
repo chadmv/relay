@@ -48,11 +48,10 @@ func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilte
 	var f jobFilters
 
 	if raw := qs.Get("q"); raw != "" {
-		// Postgres text cannot hold a NUL byte and rejects one with SQLSTATE
-		// 22021, so a needle carrying one must be refused here rather than
-		// reaching the query as a parameter. utf8.ValidString does not cover
-		// it: NUL is valid UTF-8.
-		if !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+		// Go's query parser percent-decodes without validating UTF-8, so an
+		// invalid byte sequence would otherwise reach Postgres as a text
+		// parameter. NUL is handled at the chokepoint, not here.
+		if !utf8.ValidString(raw) {
 			writeError(w, http.StatusBadRequest, "q is not valid UTF-8")
 			return jobFilters{}, false
 		}

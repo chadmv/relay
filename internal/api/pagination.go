@@ -225,7 +225,8 @@ type pageParams struct {
 	Sort     string      // canonical sort string ("name" / "-name" / "-created_at")
 	SortKind SortKeyKind // value type for the active sort key
 
-	// Query is the request's decoded query string, parsed once here.
+	// Query is the request's decoded query string, parsed once here. The map
+	// is shared by value with the caller: read it, never mutate it.
 	// Handlers must read their own parameters from this rather than
 	// calling r.URL.Query() again: that method discards percent-decoding
 	// errors, so a second parse can disagree with the one that was
@@ -259,6 +260,24 @@ func rejectRepeatedParams(w http.ResponseWriter, qs url.Values, names ...string)
 	return true
 }
 
+// rejectNulBytes writes a 400 and returns false if any query value carries a
+// NUL. Postgres text cannot hold one and rejects it with SQLSTATE 22021, so a
+// value reaching a query as a text argument turns user input into a 5xx.
+// Checked over every value rather than per parameter: ?status=, ?email= and
+// ?q= all reached the database by different readers, and a per-reader guard
+// has to be remembered at each new one.
+func rejectNulBytes(w http.ResponseWriter, qs url.Values) bool {
+	for _, vs := range qs {
+		for _, v := range vs {
+			if strings.ContainsRune(v, 0) {
+				writeError(w, http.StatusBadRequest, "query string contains a NUL byte")
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParams, bool) {
 	pp := pageParams{Limit: defaultLimit}
 
@@ -269,6 +288,9 @@ func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParam
 	qs, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "malformed query string")
+		return pageParams{}, false
+	}
+	if !rejectNulBytes(w, qs) {
 		return pageParams{}, false
 	}
 	if !rejectRepeatedParams(w, qs, "limit", "sort", "cursor") {

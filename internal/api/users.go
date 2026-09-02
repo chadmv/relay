@@ -148,11 +148,22 @@ func usersListIncArchivedRowByEmailAscToResponse(r store.ListUsersIncludingArchi
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	includeArchived := r.URL.Query().Get("include_archived") == "true"
+	// parsePage runs first so this endpoint answers a malformed query string,
+	// a NUL byte or a repeated parameter the same way every other list endpoint
+	// does. Reading email or include_archived ahead of it skipped all three.
+	pp, ok := parsePage(w, r, UsersSortSpec)
+	if !ok {
+		return
+	}
+	if !rejectRepeatedParams(w, pp.Query, "email", "include_archived") {
+		return
+	}
+
+	includeArchived := pp.Query.Get("include_archived") == "true"
 
 	// ?email=<exact> branch — at most one row, but still wrapped in the envelope
 	// for shape uniformity (so SPA clients parse one shape per endpoint).
-	if email := r.URL.Query().Get("email"); email != "" {
+	if email := pp.Query.Get("email"); email != "" {
 		u, err := s.q.GetUserByEmailPublic(r.Context(), email)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -171,11 +182,6 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 			NextCursor: "",
 			Total:      1,
 		})
-		return
-	}
-
-	pp, ok := parsePage(w, r, UsersSortSpec)
-	if !ok {
 		return
 	}
 
