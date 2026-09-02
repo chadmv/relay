@@ -703,6 +703,63 @@ func (q *Queries) GetTaskLogs(ctx context.Context, taskID pgtype.UUID) ([]TaskLo
 	return items, nil
 }
 
+const getTaskLogsBeforePage = `-- name: GetTaskLogsBeforePage :many
+SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+FROM (
+    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+    FROM task_logs l
+    WHERE l.task_id = $1 AND l.id < $2::bigint
+    ORDER BY l.id DESC
+    LIMIT $3::int
+) AS t
+ORDER BY t.id
+`
+
+type GetTaskLogsBeforePageParams struct {
+	TaskID    pgtype.UUID `json:"task_id"`
+	BeforeSeq int64       `json:"before_seq"`
+	RowLimit  int32       `json:"row_limit"`
+}
+
+// The row_limit rows immediately OLDER than before_seq (exclusive), returned
+// ASCENDING. Same backward index scan and same outer re-order as
+// GetTaskLogsTailPage.
+//
+//	SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+//	FROM (
+//	    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+//	    FROM task_logs l
+//	    WHERE l.task_id = $1 AND l.id < $2::bigint
+//	    ORDER BY l.id DESC
+//	    LIMIT $3::int
+//	) AS t
+//	ORDER BY t.id
+func (q *Queries) GetTaskLogsBeforePage(ctx context.Context, arg GetTaskLogsBeforePageParams) ([]TaskLog, error) {
+	rows, err := q.db.Query(ctx, getTaskLogsBeforePage, arg.TaskID, arg.BeforeSeq, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskLog
+	for rows.Next() {
+		var i TaskLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.TaskID,
+			&i.Stream,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTaskLogsPage = `-- name: GetTaskLogsPage :many
 SELECT id, task_id, stream, content, created_at
 FROM task_logs
@@ -726,6 +783,65 @@ type GetTaskLogsPageParams struct {
 //	LIMIT $3
 func (q *Queries) GetTaskLogsPage(ctx context.Context, arg GetTaskLogsPageParams) ([]TaskLog, error) {
 	rows, err := q.db.Query(ctx, getTaskLogsPage, arg.TaskID, arg.ID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskLog
+	for rows.Next() {
+		var i TaskLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.TaskID,
+			&i.Stream,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getTaskLogsTailPage = `-- name: GetTaskLogsTailPage :many
+SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+FROM (
+    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+    FROM task_logs l
+    WHERE l.task_id = $1
+    ORDER BY l.id DESC
+    LIMIT $2::int
+) AS t
+ORDER BY t.id
+`
+
+type GetTaskLogsTailPageParams struct {
+	TaskID   pgtype.UUID `json:"task_id"`
+	RowLimit int32       `json:"row_limit"`
+}
+
+// The newest row_limit rows for a task, returned ASCENDING. The inner
+// ORDER BY id DESC is what makes this a bounded backward scan of
+// idx_task_logs_task_id_id instead of a full read of the task log; the outer
+// ORDER BY is the response contract, since items are ascending in both
+// directions. The subquery alias and the qualified columns are load-bearing
+// for sqlc's analyzer.
+//
+//	SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+//	FROM (
+//	    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+//	    FROM task_logs l
+//	    WHERE l.task_id = $1
+//	    ORDER BY l.id DESC
+//	    LIMIT $2::int
+//	) AS t
+//	ORDER BY t.id
+func (q *Queries) GetTaskLogsTailPage(ctx context.Context, arg GetTaskLogsTailPageParams) ([]TaskLog, error) {
+	rows, err := q.db.Query(ctx, getTaskLogsTailPage, arg.TaskID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}

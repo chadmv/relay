@@ -727,6 +727,37 @@ WHERE task_id = $1 AND id > $2
 ORDER BY id
 LIMIT $3;
 
+-- name: GetTaskLogsTailPage :many
+-- The newest row_limit rows for a task, returned ASCENDING. The inner
+-- ORDER BY id DESC is what makes this a bounded backward scan of
+-- idx_task_logs_task_id_id instead of a full read of the task log; the outer
+-- ORDER BY is the response contract, since items are ascending in both
+-- directions. The subquery alias and the qualified columns are load-bearing
+-- for sqlc's analyzer.
+SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+FROM (
+    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+    FROM task_logs l
+    WHERE l.task_id = sqlc.arg(task_id)
+    ORDER BY l.id DESC
+    LIMIT sqlc.arg(row_limit)::int
+) AS t
+ORDER BY t.id;
+
+-- name: GetTaskLogsBeforePage :many
+-- The row_limit rows immediately OLDER than before_seq (exclusive), returned
+-- ASCENDING. Same backward index scan and same outer re-order as
+-- GetTaskLogsTailPage.
+SELECT t.id, t.task_id, t.stream, t.content, t.created_at
+FROM (
+    SELECT l.id, l.task_id, l.stream, l.content, l.created_at
+    FROM task_logs l
+    WHERE l.task_id = sqlc.arg(task_id) AND l.id < sqlc.arg(before_seq)::bigint
+    ORDER BY l.id DESC
+    LIMIT sqlc.arg(row_limit)::int
+) AS t
+ORDER BY t.id;
+
 -- name: CountTaskLogs :one
 SELECT COUNT(*) FROM task_logs WHERE task_id = $1;
 
