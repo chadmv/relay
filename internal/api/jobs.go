@@ -409,6 +409,9 @@ func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) 
 	return resp
 }
 
+// jobsListArityParams are the parameters handleListJobs reads itself.
+var jobsListArityParams = append([]string{"status", "scheduled_job_id"}, jobFilterParams...)
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -417,15 +420,30 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hasSort := r.URL.Query().Get("sort") != ""
-	hasFilter := r.URL.Query().Get("status") != "" || r.URL.Query().Get("scheduled_job_id") != ""
+	hasSort := pp.Query.Get("sort") != ""
+	hasFilter := pp.Query.Get("status") != "" || pp.Query.Get("scheduled_job_id") != ""
 	if hasSort && hasFilter {
 		writeError(w, http.StatusBadRequest, "sort not supported on filtered list variant; remove the filter or remove the sort")
 		return
 	}
 
+	if !rejectRepeatedParams(w, pp.Query, jobsListArityParams...) {
+		return
+	}
+
+	// Parsed after the sort-versus-filter guard so that rule's 400 keeps its
+	// precedence. The four parameters are deliberately NOT part of that
+	// guard and must not be added to hasFilter: they are threaded into every
+	// sort variant as optional arguments and never touch ORDER BY, so they
+	// cannot create the ordering gap the guard exists to close.
+	u, _ := UserFromCtx(ctx)
+	filters, ok := parseJobFilters(w, pp.Query, u)
+	if !ok {
+		return
+	}
+
 	// Branch 1: ?scheduled_job_id=<uuid>
-	if schedIDStr := r.URL.Query().Get("scheduled_job_id"); schedIDStr != "" {
+	if schedIDStr := pp.Query.Get("scheduled_job_id"); schedIDStr != "" {
 		schedID, err := parseUUID(schedIDStr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid scheduled_job_id")
@@ -441,12 +459,16 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			CursorTs:       pp.CursorTs(),
 			CursorID:       pp.Cursor.ID,
 			PageLimit:      pp.Limit,
+			Q:              filters.Q,
+			OwnerID:        filters.OwnerID,
+			Since:          filters.Since,
+			Until:          filters.Until,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		total, err := s.q.CountJobsByScheduledJob(ctx, schedID)
+		total, err := s.countJobsByScheduledJob(ctx, schedID, filters)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
@@ -457,19 +479,23 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Branch 2: ?status=<status>
-	if status := r.URL.Query().Get("status"); status != "" {
+	if status := pp.Query.Get("status"); status != "" {
 		rows, err := s.q.ListJobsByStatusWithEmailPage(ctx, store.ListJobsByStatusWithEmailPageParams{
 			Status:    status,
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		total, err := s.q.CountJobsByStatus(ctx, status)
+		total, err := s.countJobsByStatus(ctx, status, filters)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
@@ -480,7 +506,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Default branch: no filter — dispatch on pp.Sort.
-	items, next, total, err := s.listJobsBySort(ctx, pp)
+	items, next, total, err := s.listJobsBySort(ctx, pp, filters)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "list jobs failed")
 		return
@@ -490,8 +516,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 // listJobsBySort dispatches to the correct sqlc query based on pp.Sort and
 // returns (items, nextCursor, total, error). All 10 sort arms are covered.
-func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobResponse, string, int64, error) {
-	total, err := s.q.CountJobs(ctx)
+func (s *Server) listJobsBySort(ctx context.Context, pp pageParams, filters jobFilters) ([]jobResponse, string, int64, error) {
+	total, err := s.countJobs(ctx, filters)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -503,6 +529,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -516,6 +546,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -529,6 +563,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -542,6 +580,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -555,6 +597,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -568,6 +614,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -581,6 +631,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -594,6 +648,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -607,6 +665,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -620,6 +682,10 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
 			PageLimit: pp.Limit,
+			Q:         filters.Q,
+			OwnerID:   filters.OwnerID,
+			Since:     filters.Since,
+			Until:     filters.Until,
 		})
 		if err != nil {
 			return nil, "", 0, err
@@ -630,6 +696,62 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams) ([]jobRespon
 	default:
 		panic("listJobsBySort: missing dispatch arm for sort key " + pp.Sort)
 	}
+}
+
+// The three count helpers fork on whether q is present. The joined ...WithText
+// twin is needed only for the owner-email arm of q; an inner join is not
+// elidable, so without the fork an unfiltered count hash-joins every jobs row
+// against users for a column it never reads.
+func (s *Server) countJobs(ctx context.Context, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsWithText(ctx, store.CountJobsWithTextParams{
+			Q:       filters.Q,
+			OwnerID: filters.OwnerID,
+			Since:   filters.Since,
+			Until:   filters.Until,
+		})
+	}
+	return s.q.CountJobs(ctx, store.CountJobsParams{
+		OwnerID: filters.OwnerID,
+		Since:   filters.Since,
+		Until:   filters.Until,
+	})
+}
+
+func (s *Server) countJobsByStatus(ctx context.Context, status string, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsByStatusWithText(ctx, store.CountJobsByStatusWithTextParams{
+			Status:  status,
+			Q:       filters.Q,
+			OwnerID: filters.OwnerID,
+			Since:   filters.Since,
+			Until:   filters.Until,
+		})
+	}
+	return s.q.CountJobsByStatus(ctx, store.CountJobsByStatusParams{
+		Status:  status,
+		OwnerID: filters.OwnerID,
+		Since:   filters.Since,
+		Until:   filters.Until,
+	})
+}
+
+func (s *Server) countJobsByScheduledJob(ctx context.Context, schedID pgtype.UUID, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsByScheduledJobWithText(ctx, store.CountJobsByScheduledJobWithTextParams{
+			ScheduledJobID: schedID,
+			Q:              filters.Q,
+			OwnerID:        filters.OwnerID,
+			Since:          filters.Since,
+			Until:          filters.Until,
+		})
+	}
+	return s.q.CountJobsByScheduledJob(ctx, store.CountJobsByScheduledJobParams{
+		ScheduledJobID: schedID,
+		OwnerID:        filters.OwnerID,
+		Since:          filters.Since,
+		Until:          filters.Until,
+	})
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

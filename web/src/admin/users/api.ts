@@ -38,8 +38,8 @@ export interface ListUsersParams {
 }
 
 // limit=50 is the server default, passed explicitly so the client's page size is
-// self-documenting (same as listWorkers). The server short-circuits the ?email=
-// branch before pagination, returning the same envelope with 0 or 1 items.
+// self-documenting (same as listWorkers). The ?email= branch answers with the
+// same envelope carrying 0 or 1 items.
 export function listUsers({ sort, includeArchived, cursor, email }: ListUsersParams): Promise<AdminUsersPage> {
   const q = new URLSearchParams({ sort, limit: '50' })
   if (includeArchived) q.set('include_archived', 'true')
@@ -48,7 +48,7 @@ export function listUsers({ sort, includeArchived, cursor, email }: ListUsersPar
   return apiFetch<AdminUsersPage>(`/users?${q}`)
 }
 
-// Mirrors createUserRequest (internal/api/users.go:569-575). This is the ONLY
+// Mirrors createUserRequest in internal/api/users.go. This is the ONLY
 // place is_admin can be set; no endpoint mutates it afterwards. A blank name
 // defaults to the email server-side. 409 on a duplicate email.
 export interface CreateUserBody {

@@ -1416,9 +1416,66 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 **Cursor semantics:** A cursor is valid only for the sort it was issued under. Resending a cursor with a different `?sort=` returns `400 cursor sort key does not match requested sort`. Drop the cursor when changing sort.
 
-**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. Other endpoints' filters do not currently combine with sort.
+**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. That rejection is scoped to exactly those two parameters, because each has its own statement with a hard-coded `ORDER BY`. The four filters in [Filtering the jobs list](#filtering-the-jobs-list) - `?q=`, `?mine=`, `?since=`, `?until=` - are threaded into every sort variant and **do** compose with `?sort=`. Other endpoints' filters do not currently combine with sort.
 
 **Unknown keys:** `?sort=<key>` where `<key>` is not in the allowlist returns `400 unsupported sort key '<key>'; supported: <list>`.
+
+#### Query-string validation
+
+These rules apply to **every paginated list endpoint** - each of the ones marked "Paginated" in the endpoint tables below - not only to `GET /v1/jobs`. The first two are enforced once, where the query string is parsed, so a new parameter on any endpoint inherits them without doing anything. The arity rule is not automatic: `parsePage` checks only `limit`, `sort` and `cursor`, and every other parameter has to be named in its own endpoint's check.
+
+| Condition | Status | Message |
+|-----------|--------|---------|
+| the query string is not decodable | `400` | `malformed query string` |
+| any value contains a NUL byte | `400` | `query string contains a NUL byte` |
+| a parameter the endpoint reads appears more than once | `400` | `query parameter "<name>" must appear at most once` |
+
+All three are decided before any endpoint-specific rule. On `GET /v1/jobs` the one exception runs earlier still: the sort-versus-filter `400` below outranks this endpoint's own arity check, so `?sort=name&status=a&status=b` answers with the sort message.
+
+The repeated-parameter rule covers `limit`, `sort` and `cursor` on every endpoint, plus whichever parameters that endpoint reads itself (`GET /v1/jobs` adds `status`, `scheduled_job_id`, `q`, `mine`, `since` and `until`; `GET /v1/users` adds `email` and `include_archived`). Taking the first value of a repeated parameter silently renders a list that looks authoritative.
+
+#### Filtering the jobs list
+
+`GET /v1/jobs` accepts four optional filters beyond `?status=` and `?scheduled_job_id=`. They AND together, and they compose with `?limit=`, `?cursor=`, `?sort=`, `?status=` and `?scheduled_job_id=`.
+
+For all four, an **empty value is treated as absent**: `?mine=`, `?since=`, `?until=` and `?q=` each mean the same as omitting the parameter, so a cleared form field does not need to be stripped from the query string.
+
+| Parameter | Format | Absent means |
+|-----------|--------|--------------|
+| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Whitespace-only is treated as absent. | No text filter |
+| `mine` | `true` / `false` (Go `strconv.ParseBool` spellings: `1`, `t`, `T`, `TRUE`, `true`, `True` and their false counterparts). `true` restricts to jobs you submitted, resolved from your bearer token; `false` means the same as absent. | No owner filter |
+| `since` | RFC3339 timestamp. An offset or `Z` is required; fractional seconds are allowed. | Window open at the start |
+| `until` | RFC3339 timestamp, same format. | Window open at the end |
+
+`since` and `until` bound `created_at` as a **half-open** interval: `created_at >= since AND created_at < until`. A job created exactly at `since` is included; a job created exactly at `until` is excluded, so consecutive time buckets tile without a job appearing in two of them. Either bound may be given alone, and `until == since` is a legal empty window.
+
+`GET /v1/jobs` lists jobs across the whole farm for any authenticated caller. `mine=true` is a convenience filter over that list, not an authorization boundary; it resolves the owner from your bearer token.
+
+`total` counts every row matching every active filter, so the page footer's denominator always belongs to the same set as the rows.
+
+**Errors.** These are `400` with the body `{"error": "<message>"}`. The query-string rules that apply to every paginated endpoint - malformed input, repeated parameters and NUL bytes - are under [Query-string validation](#query-string-validation).
+
+| Condition | Message |
+|-----------|---------|
+| `mine` is not a boolean | `invalid mine; expected true or false` |
+| `since` is not RFC3339 | `invalid since; expected an RFC3339 timestamp` |
+| `until` is not RFC3339 | `invalid until; expected an RFC3339 timestamp` |
+| `until` is earlier than `since` | `until is earlier than since` |
+| `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
+| `q` is not valid UTF-8 | `q is not valid UTF-8` |
+
+**Drop the cursor when a filter changes.** A cursor carries no record of the filters that were active when it was issued and the server does not reject a mismatched one - the same requirement that already applies to `?status=`. Filter correctness is nevertheless cursor-independent: a stale cursor can start a page at a surprising position but can never return a row that fails the current filters.
+
+**Examples:**
+
+```
+GET /v1/jobs?q=nightly                                   # name or submitter email contains "nightly"
+GET /v1/jobs?mine=true&sort=-priority                    # your jobs, highest priority first
+GET /v1/jobs?since=2026-09-01T00:00:00Z&until=2026-09-02T00:00:00Z
+GET /v1/jobs?q=etl&status=failed                         # composes with the status filter
+```
+
+**`?q=` cost.** Substring containment cannot be index-served, so a `?q=` request walks every candidate row of the active sort's index and, for the count, joins `users` to reach the submitter email. A needle that matches nothing is the worst case: it pays the full walk and returns an empty page. The server applies no rate limit and no statement timeout to this today, so the cost is bounded only by the table size and by how often clients ask. Debouncing at 250 ms or more client-side reduces how many of these a typing user generates; it does not bound what a caller can request.
 
 ### Public
 
@@ -1490,7 +1547,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. Paginated. |
+| `GET` | `/v1/users` | List users (`?email=` filter for exact-match lookup). Optional `?include_archived=true` includes archived users. Paginated. The `?email=` lookup validates `limit`, `sort` and `cursor` like any other list request, even though it returns a fixed one-row envelope. |
 | `POST` | `/v1/users` | Create a user (body: `email`, `password`, optional `name`, optional `is_admin`) |
 | `POST` | `/v1/users/password-reset` | Reset a user's password (body: `email`, `new_password`); revokes all of their sessions |
 | `PATCH` | `/v1/users/me` | Update own profile (body: `name`) |
@@ -1503,7 +1560,7 @@ All user-management endpoints other than `PATCH /v1/users/me` are admin-only.
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/jobs` | Submit a job |
-| `GET` | `/v1/jobs` | List jobs (`?status=` and `?scheduled_job_id=` filters optional). Paginated. |
+| `GET` | `/v1/jobs` | List jobs. Optional filters: `?status=`, `?scheduled_job_id=`, `?q=`, `?mine=`, `?since=`, `?until=` - see [Filtering the jobs list](#filtering-the-jobs-list). Paginated. |
 | `GET` | `/v1/jobs/{id}` | Get a job |
 | `DELETE` | `/v1/jobs/{id}` | Cancel a job (`?force=true` for forced termination, skips pipe drain and workspace cleanup) |
 | `POST` | `/v1/jobs/{id}/retry` | Re-run a finished job's tasks. `?task=failed` reopens `failed` **and `timed_out`** tasks; `?task=all` also reopens `done` tasks. `task` is **required** and has no default; absent, empty, repeated or unrecognized values are a 400. Owner or admin (404 on deny). 409 if the job is not `done` or `failed`, if the job was cancelled, if nothing matched the mode, or if a selected task has dependents that already ran. Returns the job plus `tasks_retried` (always >= 1). |

@@ -21,7 +21,7 @@ interface AuthContextValue {
   logout: () => Promise<void>
   // Replaces the in-memory user row with an authoritative server response.
   // PATCH /v1/users/me returns the same userResponse struct GET /v1/users/me
-  // returns (internal/api/users.go:429 and :410 both call toUserResponse), so
+  // returns (both paths in internal/api/users.go call toUserResponse), so
   // there is nothing to confirm with a second round trip. This exists so the
   // profile page does NOT introduce a second ['me'] query: one owner of
   // identity, not two caches that can disagree.

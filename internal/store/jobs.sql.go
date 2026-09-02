@@ -12,42 +12,240 @@ import (
 )
 
 const countJobs = `-- name: CountJobs :one
-SELECT COUNT(*) FROM jobs
+SELECT COUNT(*)
+FROM jobs j
+WHERE ($1::uuid IS NULL OR j.submitted_by = $1::uuid)
+  AND ($2::timestamptz IS NULL OR j.created_at >= $2::timestamptz)
+  AND ($3::timestamptz IS NULL OR j.created_at <  $3::timestamptz)
 `
 
-// CountJobs
+type CountJobsParams struct {
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
+
+// The q predicate needs users.email, and an inner join is not elidable: with
+// it, an unfiltered count hash-joins every jobs row against users for a
+// column it never reads. handleListJobs forks on whether q is present, so
+// the join is paid only by the requests that need it. The join-free twin has
+// no q parameter at all, so routing a q request to it drops the text
+// predicate entirely; TestListJobs_FiltersApplyOnEveryArm is what pins the
+// fork.
 //
-//	SELECT COUNT(*) FROM jobs
-func (q *Queries) CountJobs(ctx context.Context) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobs)
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	WHERE ($1::uuid IS NULL OR j.submitted_by = $1::uuid)
+//	  AND ($2::timestamptz IS NULL OR j.created_at >= $2::timestamptz)
+//	  AND ($3::timestamptz IS NULL OR j.created_at <  $3::timestamptz)
+func (q *Queries) CountJobs(ctx context.Context, arg CountJobsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobs, arg.OwnerID, arg.Since, arg.Until)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countJobsByScheduledJob = `-- name: CountJobsByScheduledJob :one
-SELECT COUNT(*) FROM jobs WHERE scheduled_job_id = $1
+SELECT COUNT(*)
+FROM jobs j
+WHERE j.scheduled_job_id = $1::uuid
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
 `
+
+type CountJobsByScheduledJobParams struct {
+	ScheduledJobID pgtype.UUID        `json:"scheduled_job_id"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	Since          pgtype.Timestamptz `json:"since"`
+	Until          pgtype.Timestamptz `json:"until"`
+}
 
 // CountJobsByScheduledJob
 //
-//	SELECT COUNT(*) FROM jobs WHERE scheduled_job_id = $1
-func (q *Queries) CountJobsByScheduledJob(ctx context.Context, scheduledJobID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobsByScheduledJob, scheduledJobID)
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	WHERE j.scheduled_job_id = $1::uuid
+//	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+//	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+//	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+func (q *Queries) CountJobsByScheduledJob(ctx context.Context, arg CountJobsByScheduledJobParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByScheduledJob,
+		arg.ScheduledJobID,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsByScheduledJobWithText = `-- name: CountJobsByScheduledJobWithText :one
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.scheduled_job_id = $1::uuid
+  AND ($2::text IS NULL
+       OR strpos(lower(j.name), lower($2::text)) > 0
+       OR strpos(lower(u.email), lower($2::text)) > 0)
+  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
+  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
+  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
+`
+
+type CountJobsByScheduledJobWithTextParams struct {
+	ScheduledJobID pgtype.UUID        `json:"scheduled_job_id"`
+	Q              *string            `json:"q"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	Since          pgtype.Timestamptz `json:"since"`
+	Until          pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsByScheduledJobWithText
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE j.scheduled_job_id = $1::uuid
+//	  AND ($2::text IS NULL
+//	       OR strpos(lower(j.name), lower($2::text)) > 0
+//	       OR strpos(lower(u.email), lower($2::text)) > 0)
+//	  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
+//	  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
+//	  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
+func (q *Queries) CountJobsByScheduledJobWithText(ctx context.Context, arg CountJobsByScheduledJobWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByScheduledJobWithText,
+		arg.ScheduledJobID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countJobsByStatus = `-- name: CountJobsByStatus :one
-SELECT COUNT(*) FROM jobs WHERE status = $1
+SELECT COUNT(*)
+FROM jobs j
+WHERE j.status = $1::text
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
 `
+
+type CountJobsByStatusParams struct {
+	Status  string             `json:"status"`
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
 
 // CountJobsByStatus
 //
-//	SELECT COUNT(*) FROM jobs WHERE status = $1
-func (q *Queries) CountJobsByStatus(ctx context.Context, status string) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobsByStatus, status)
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	WHERE j.status = $1::text
+//	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+//	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+//	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+func (q *Queries) CountJobsByStatus(ctx context.Context, arg CountJobsByStatusParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByStatus,
+		arg.Status,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsByStatusWithText = `-- name: CountJobsByStatusWithText :one
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE j.status = $1::text
+  AND ($2::text IS NULL
+       OR strpos(lower(j.name), lower($2::text)) > 0
+       OR strpos(lower(u.email), lower($2::text)) > 0)
+  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
+  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
+  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
+`
+
+type CountJobsByStatusWithTextParams struct {
+	Status  string             `json:"status"`
+	Q       *string            `json:"q"`
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsByStatusWithText
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE j.status = $1::text
+//	  AND ($2::text IS NULL
+//	       OR strpos(lower(j.name), lower($2::text)) > 0
+//	       OR strpos(lower(u.email), lower($2::text)) > 0)
+//	  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
+//	  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
+//	  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
+func (q *Queries) CountJobsByStatusWithText(ctx context.Context, arg CountJobsByStatusWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByStatusWithText,
+		arg.Status,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsWithText = `-- name: CountJobsWithText :one
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE ($1::text IS NULL
+       OR strpos(lower(j.name), lower($1::text)) > 0
+       OR strpos(lower(u.email), lower($1::text)) > 0)
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+`
+
+type CountJobsWithTextParams struct {
+	Q       *string            `json:"q"`
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsWithText
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE ($1::text IS NULL
+//	       OR strpos(lower(j.name), lower($1::text)) > 0
+//	       OR strpos(lower(u.email), lower($1::text)) > 0)
+//	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+//	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+//	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+func (q *Queries) CountJobsWithText(ctx context.Context, arg CountJobsWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsWithText,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -382,8 +580,14 @@ LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.scheduled_job_id = $1::uuid
   AND ($2::bool = FALSE
        OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
+  AND ($5::text IS NULL
+       OR strpos(lower(j.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0)
+  AND ($6::uuid IS NULL OR j.submitted_by = $6::uuid)
+  AND ($7::timestamptz IS NULL OR j.created_at >= $7::timestamptz)
+  AND ($8::timestamptz IS NULL OR j.created_at <  $8::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
-LIMIT $5::int + 1
+LIMIT $9::int + 1
 `
 
 type ListJobsByScheduledJobWithEmailPageParams struct {
@@ -391,6 +595,10 @@ type ListJobsByScheduledJobWithEmailPageParams struct {
 	CursorSet      bool               `json:"cursor_set"`
 	CursorTs       pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID       pgtype.UUID        `json:"cursor_id"`
+	Q              *string            `json:"q"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	Since          pgtype.Timestamptz `json:"since"`
+	Until          pgtype.Timestamptz `json:"until"`
 	PageLimit      int32              `json:"page_limit"`
 }
 
@@ -430,14 +638,24 @@ type ListJobsByScheduledJobWithEmailPageRow struct {
 //	WHERE j.scheduled_job_id = $1::uuid
 //	  AND ($2::bool = FALSE
 //	       OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(j.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0)
+//	  AND ($6::uuid IS NULL OR j.submitted_by = $6::uuid)
+//	  AND ($7::timestamptz IS NULL OR j.created_at >= $7::timestamptz)
+//	  AND ($8::timestamptz IS NULL OR j.created_at <  $8::timestamptz)
 //	ORDER BY j.created_at DESC, j.id DESC
-//	LIMIT $5::int + 1
+//	LIMIT $9::int + 1
 func (q *Queries) ListJobsByScheduledJobWithEmailPage(ctx context.Context, arg ListJobsByScheduledJobWithEmailPageParams) ([]ListJobsByScheduledJobWithEmailPageRow, error) {
 	rows, err := q.db.Query(ctx, listJobsByScheduledJobWithEmailPage,
 		arg.ScheduledJobID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -491,8 +709,14 @@ LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE j.status = $1::text
   AND ($2::bool = FALSE
        OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
+  AND ($5::text IS NULL
+       OR strpos(lower(j.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0)
+  AND ($6::uuid IS NULL OR j.submitted_by = $6::uuid)
+  AND ($7::timestamptz IS NULL OR j.created_at >= $7::timestamptz)
+  AND ($8::timestamptz IS NULL OR j.created_at <  $8::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
-LIMIT $5::int + 1
+LIMIT $9::int + 1
 `
 
 type ListJobsByStatusWithEmailPageParams struct {
@@ -500,6 +724,10 @@ type ListJobsByStatusWithEmailPageParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
 	PageLimit int32              `json:"page_limit"`
 }
 
@@ -539,14 +767,24 @@ type ListJobsByStatusWithEmailPageRow struct {
 //	WHERE j.status = $1::text
 //	  AND ($2::bool = FALSE
 //	       OR (j.created_at, j.id) < ($3::timestamptz, $4::uuid))
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(j.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0)
+//	  AND ($6::uuid IS NULL OR j.submitted_by = $6::uuid)
+//	  AND ($7::timestamptz IS NULL OR j.created_at >= $7::timestamptz)
+//	  AND ($8::timestamptz IS NULL OR j.created_at <  $8::timestamptz)
 //	ORDER BY j.created_at DESC, j.id DESC
-//	LIMIT $5::int + 1
+//	LIMIT $9::int + 1
 func (q *Queries) ListJobsByStatusWithEmailPage(ctx context.Context, arg ListJobsByStatusWithEmailPageParams) ([]ListJobsByStatusWithEmailPageRow, error) {
 	rows, err := q.db.Query(ctx, listJobsByStatusWithEmailPage,
 		arg.Status,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -599,14 +837,24 @@ LEFT JOIN LATERAL (
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 WHERE ($1::bool = FALSE
        OR (j.created_at, j.id) < ($2::timestamptz, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.created_at DESC, j.id DESC
-LIMIT $4::int + 1
+LIMIT $8::int + 1
 `
 
 type ListJobsWithEmailPageParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
 	PageLimit int32              `json:"page_limit"`
 }
 
@@ -628,7 +876,16 @@ type ListJobsWithEmailPageRow struct {
 	ScheduledJobName *string            `json:"scheduled_job_name"`
 }
 
-// ListJobsWithEmailPage
+// The four optional predicates below are sqlc.narg: a NULL argument means "no
+// filter". A Params field left at its zero value therefore disables that filter
+// for this statement while the other list arms keep filtering, silently and
+// with no error. Spread parseJobFilters' output at every call site;
+// TestListJobs_FiltersApplyOnEveryArm is the behavioural guard.
+//
+// strpos, not ILIKE: the needle is user input, and % and _ must stay literal
+// characters rather than becoming wildcards. A trigram index cannot serve
+// strpos, so adopting pg_trgm means rewriting this predicate to an escaped
+// ILIKE.
 //
 //	SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email,
 //	       ts.total_tasks, ts.done_tasks, ts.started_at, ts.finished_at,
@@ -645,13 +902,23 @@ type ListJobsWithEmailPageRow struct {
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
 //	WHERE ($1::bool = FALSE
 //	       OR (j.created_at, j.id) < ($2::timestamptz, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.created_at DESC, j.id DESC
-//	LIMIT $4::int + 1
+//	LIMIT $8::int + 1
 func (q *Queries) ListJobsWithEmailPage(ctx context.Context, arg ListJobsWithEmailPageParams) ([]ListJobsWithEmailPageRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPage,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -702,15 +969,25 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
+WHERE (NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.created_at ASC, j.id ASC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByCreatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
@@ -747,14 +1024,24 @@ type ListJobsWithEmailPageByCreatedAscRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.created_at, j.id) > ($2::timestamptz, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.created_at ASC, j.id ASC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByCreatedAsc(ctx context.Context, arg ListJobsWithEmailPageByCreatedAscParams) ([]ListJobsWithEmailPageByCreatedAscRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByCreatedAsc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -805,16 +1092,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.name ASC, j.id ASC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByNameAscParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByNameAscRow struct {
@@ -850,14 +1147,24 @@ type ListJobsWithEmailPageByNameAscRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.name, j.id) > ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.name ASC, j.id ASC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByNameAsc(ctx context.Context, arg ListJobsWithEmailPageByNameAscParams) ([]ListJobsWithEmailPageByNameAscRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByNameAsc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -908,16 +1215,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.name DESC, j.id DESC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByNameDescParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByNameDescRow struct {
@@ -953,14 +1270,24 @@ type ListJobsWithEmailPageByNameDescRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.name, j.id) < ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.name DESC, j.id DESC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByNameDesc(ctx context.Context, arg ListJobsWithEmailPageByNameDescParams) ([]ListJobsWithEmailPageByNameDescRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByNameDesc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1011,16 +1338,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.priority ASC, j.id ASC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByPriorityAscParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByPriorityAscRow struct {
@@ -1056,14 +1393,24 @@ type ListJobsWithEmailPageByPriorityAscRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.priority, j.id) > ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.priority ASC, j.id ASC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByPriorityAsc(ctx context.Context, arg ListJobsWithEmailPageByPriorityAscParams) ([]ListJobsWithEmailPageByPriorityAscRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByPriorityAsc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1114,16 +1461,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.priority DESC, j.id DESC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByPriorityDescParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByPriorityDescRow struct {
@@ -1159,14 +1516,24 @@ type ListJobsWithEmailPageByPriorityDescRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.priority, j.id) < ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.priority DESC, j.id DESC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByPriorityDesc(ctx context.Context, arg ListJobsWithEmailPageByPriorityDescParams) ([]ListJobsWithEmailPageByPriorityDescRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByPriorityDesc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1217,16 +1584,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.status ASC, j.id ASC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByStatusAscParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByStatusAscRow struct {
@@ -1262,14 +1639,24 @@ type ListJobsWithEmailPageByStatusAscRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.status, j.id) > ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.status ASC, j.id ASC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByStatusAsc(ctx context.Context, arg ListJobsWithEmailPageByStatusAscParams) ([]ListJobsWithEmailPageByStatusAscRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByStatusAsc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1320,16 +1707,26 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
+WHERE (NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.status DESC, j.id DESC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByStatusDescParams struct {
-	CursorSet bool        `json:"cursor_set"`
-	CursorV   string      `json:"cursor_v"`
-	CursorID  pgtype.UUID `json:"cursor_id"`
-	PageLimit int32       `json:"+page_limit"`
+	CursorSet bool               `json:"cursor_set"`
+	CursorV   string             `json:"cursor_v"`
+	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	PageLimit int32              `json:"+page_limit"`
 }
 
 type ListJobsWithEmailPageByStatusDescRow struct {
@@ -1365,14 +1762,24 @@ type ListJobsWithEmailPageByStatusDescRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.status, j.id) < ($2::text, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.status DESC, j.id DESC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByStatusDesc(ctx context.Context, arg ListJobsWithEmailPageByStatusDescParams) ([]ListJobsWithEmailPageByStatusDescRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByStatusDesc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1423,15 +1830,25 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
+WHERE (NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.updated_at ASC, j.id ASC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByUpdatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
@@ -1468,14 +1885,24 @@ type ListJobsWithEmailPageByUpdatedAscRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.updated_at, j.id) > ($2::timestamptz, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.updated_at ASC, j.id ASC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByUpdatedAsc(ctx context.Context, arg ListJobsWithEmailPageByUpdatedAscParams) ([]ListJobsWithEmailPageByUpdatedAscRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByUpdatedAsc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1526,15 +1953,25 @@ LEFT JOIN LATERAL (
   FROM tasks t WHERE t.job_id = j.id
 ) ts ON TRUE
 LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
+WHERE (NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid))
+  AND ($4::text IS NULL
+       OR strpos(lower(j.name), lower($4::text)) > 0
+       OR strpos(lower(u.email), lower($4::text)) > 0)
+  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 ORDER BY j.updated_at DESC, j.id DESC
-LIMIT $4+ 1
+LIMIT $8+ 1
 `
 
 type ListJobsWithEmailPageByUpdatedDescParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Q         *string            `json:"q"`
+	OwnerID   pgtype.UUID        `json:"owner_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
@@ -1571,14 +2008,24 @@ type ListJobsWithEmailPageByUpdatedDescRow struct {
 //	  FROM tasks t WHERE t.job_id = j.id
 //	) ts ON TRUE
 //	LEFT JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-//	WHERE NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid)
+//	WHERE (NOT $1::bool OR (j.updated_at, j.id) < ($2::timestamptz, $3::uuid))
+//	  AND ($4::text IS NULL
+//	       OR strpos(lower(j.name), lower($4::text)) > 0
+//	       OR strpos(lower(u.email), lower($4::text)) > 0)
+//	  AND ($5::uuid IS NULL OR j.submitted_by = $5::uuid)
+//	  AND ($6::timestamptz IS NULL OR j.created_at >= $6::timestamptz)
+//	  AND ($7::timestamptz IS NULL OR j.created_at <  $7::timestamptz)
 //	ORDER BY j.updated_at DESC, j.id DESC
-//	LIMIT $4+ 1
+//	LIMIT $8+ 1
 func (q *Queries) ListJobsWithEmailPageByUpdatedDesc(ctx context.Context, arg ListJobsWithEmailPageByUpdatedDescParams) ([]ListJobsWithEmailPageByUpdatedDescRow, error) {
 	rows, err := q.db.Query(ctx, listJobsWithEmailPageByUpdatedDesc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
 		arg.PageLimit,
 	)
 	if err != nil {
