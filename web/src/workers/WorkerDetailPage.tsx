@@ -76,15 +76,17 @@ export function WorkerDetailPage() {
   // max_slots: max_slots is a dispatcher input, not a constraint, and lowering it
   // via PATCH requeues nothing. ProgressBar clamps the fill.
   //
-  // The FRACTION falls back to the placeholder unless a real page for THIS worker
-  // has arrived: a fabricated 0 reads as an idle worker while it runs a full load,
-  // and placeholder data belongs to the previously viewed worker, so pairing it
-  // with this worker's max_slots would state a fraction neither worker has.
-  const usedSlots = tasks?.total ?? 0
-  const slotsValue =
-    tasks && !tasksArePlaceholder
-      ? `${tasks.total} / ${worker.max_slots}`
-      : `— / ${worker.max_slots}`
+  // Both halves of the card wait for a real page for THIS worker. A fabricated 0
+  // reads as an idle worker while it runs a full load, and placeholder data
+  // belongs to the previously viewed worker, so pairing it with this worker's
+  // max_slots would state a fraction neither worker has. The bar shares the gate
+  // rather than falling back to `total`, or it draws the previous worker's load
+  // underneath the placeholder fraction.
+  const hasTaskPage = tasks !== undefined && !tasksArePlaceholder
+  const usedSlots = hasTaskPage ? tasks.total : 0
+  const slotsValue = hasTaskPage
+    ? `${tasks.total} / ${worker.max_slots}`
+    : `— / ${worker.max_slots}`
 
   return (
     <div className={`flex flex-col gap-4 ${view.dimClass}`}>

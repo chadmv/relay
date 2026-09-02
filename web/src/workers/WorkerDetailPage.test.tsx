@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { server } from '../test/setup-helpers'
 import { AuthProvider } from '../auth/AuthProvider'
@@ -10,6 +10,7 @@ import { clearToken, setToken } from '../lib/token'
 import { WorkerDetailPage } from './WorkerDetailPage'
 
 const ID = 'w1abc234'
+const OTHER_ID = 'w2def567'
 const GB = 1024 ** 3
 
 const WORKER = {
@@ -49,6 +50,17 @@ let taskRequests = 0
 // returns), and setup.ts fails on an unhandled request. Registered here rather
 // than per test so a test that does not care about tasks does not have to. The
 // fixture is a hand-written literal, not the app's WorkerTasksPage type.
+// Renders inside the router so a test can move the page from one worker id to
+// the next, which is the only way to reach the keepPreviousData window.
+function GoToOtherWorker() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(`/workers/${OTHER_ID}`)}>
+      go to the other worker
+    </button>
+  )
+}
+
 function renderDetail(
   isAdmin: boolean,
   tasks: Record<string, unknown> = { items: [], next_cursor: '', total: 0 },
@@ -69,6 +81,7 @@ function renderDetail(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[`/workers/${ID}`]}>
         <AuthProvider>
+          <GoToOtherWorker />
           <Routes>
             <Route path="/workers/:id" element={<WorkerDetailPage />} />
           </Routes>
@@ -116,6 +129,31 @@ test('the Slots KPI shows no used count until the tasks page actually loads', as
   await waitFor(() => expect(taskRequests).toBeGreaterThan(0))
   expect(screen.getByText('— / 4')).toBeInTheDocument()
   expect(screen.queryByText('0 / 4')).not.toBeInTheDocument()
+  // The bar is the other half of the same card and must not contradict it.
+  expect(screen.getByTestId('progress-fill').style.width).toBe('0%')
+})
+
+test('the Slots bar draws nothing while the tasks page belongs to the previous worker', async () => {
+  // keepPreviousData hands worker B the page it fetched for worker A, so a bar
+  // fed straight from `total` draws A's load under B's placeholder fraction.
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(
+    http.get(`/v1/workers/${OTHER_ID}`, () => HttpResponse.json({ ...WORKER, id: OTHER_ID, name: 'render-rig-B' })),
+  )
+  server.use(http.get(`/v1/workers/${OTHER_ID}/metrics`, () => HttpResponse.json(metrics())))
+  // B's tasks never answer, which is the whole window this test is about.
+  server.use(http.get(`/v1/workers/${OTHER_ID}/tasks`, () => new Promise(() => {})))
+  renderDetail(false, { items: [], next_cursor: '', total: 3 })
+
+  expect(await screen.findByText('3 / 4')).toBeInTheDocument()
+  expect(screen.getByTestId('progress-fill').style.width).toBe('75%')
+
+  await userEvent.click(screen.getByRole('button', { name: 'go to the other worker' }))
+
+  expect(await screen.findByText('render-rig-B')).toBeInTheDocument()
+  expect(screen.getByText('— / 4')).toBeInTheDocument()
+  expect(screen.getByTestId('progress-fill').style.width).toBe('0%')
 })
 
 test('a 404 worker stops the tasks and metrics polls', async () => {
