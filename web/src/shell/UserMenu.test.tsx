@@ -173,11 +173,7 @@ function renderMenuWithSibling(onLogout = vi.fn()) {
   return onLogout
 }
 
-// A NON-FOCUSABLE sibling AFTER the component. Pressing document.body is not the
-// same probe: user-event's focusElement blurs the active element when the click
-// target has no focusable ancestor (event/focus.js:12-23), so the two inputs take
-// different branches. renderMenu and renderMenuWithSibling above are shipped and
-// stay byte-identical.
+// A NON-FOCUSABLE sibling AFTER the component.
 function renderMenuWithDeadSpace(onLogout = vi.fn()) {
   render(
     <MemoryRouter>
@@ -274,9 +270,9 @@ test('an outside mousedown closes the menu and never touches the toggle focus', 
 // measuring something the other does not.
 //
 // The macrotask turn after the click is what makes this a pin: without it the
-// test stays green against a restore deferred with setTimeout or queueMicrotask
-// and its claim to pin the decision would be false. It does not flush a
-// requestAnimationFrame-deferred restore, which jsdom schedules on a timer.
+// test stays green against a restore deferred with setTimeout or queueMicrotask.
+// It does not flush a requestAnimationFrame-deferred restore, which jsdom
+// schedules on a timer.
 test('pressing non-focusable dead space closes the menu and leaves focus on <body>', async () => {
   renderMenuWithDeadSpace()
   const toggle = screen.getByRole('button', { name: /ada@studio.dev/i })

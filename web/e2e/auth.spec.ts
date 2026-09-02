@@ -96,8 +96,7 @@ test('logout returns to /auth and clears relay.token', async ({ page }) => {
   // The destination claims focus, so a keyboard user who signs out does not land
   // on <body> with their next Tab starting from the top of the document. Polled
   // rather than read once: focus lands on the commit that mounts the form, which
-  // is after the URL settles. jsdom cannot answer this - it has no browser event
-  // loop and no real navigation.
+  // is after the URL settles.
   await expect
     .poll(() => page.evaluate(() => document.activeElement?.id ?? null))
     .toBe('email')

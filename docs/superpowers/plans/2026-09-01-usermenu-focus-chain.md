@@ -111,8 +111,9 @@ function focusElement(element) {
 `findClosest` (`utils/misc/findClosest.js:1-10`) stops when it reaches `document.body`, and
 `FOCUSABLE_SELECTOR` (`utils/focus/selector.js`) is inputs, buttons, selects, textareas,
 contenteditable, `a[href]` and `[tabindex]`. A bare `<div>` inside the RTL container therefore
-genuinely has no focusable ancestor. **This is why the new test must press a `<div>` and not
-`document.body`: the two inputs take different branches of that function.**
+genuinely has no focusable ancestor - and neither does `document.body`, since `findClosest`
+stops there too. `focusElement` takes the SAME branch for both, as the walkthrough below
+concludes.
 
 **@testing-library/react 16.3.2, `dist/pure.js:104-108`** - every dispatched event is wrapped in
 `act`:

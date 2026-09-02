@@ -15,10 +15,9 @@ afterEach(() => clearToken())
 
 const ME = { id: '1', email: 'ada@studio.dev', name: 'Ada', is_admin: false }
 
-// Render shape from app/ProtectedRoute.test.tsx. The protected element is a bare
-// div: ProtectedRoute still renders HoloShell and the real UserMenu around it,
-// which is the departure point these tests need, while the page itself issues no
-// request the lane would have to stub.
+// The protected element is a bare div: ProtectedRoute still renders HoloShell
+// and the real UserMenu around it, which is the departure point these tests
+// need, while the page itself issues no request the lane would have to stub.
 function renderAt(path: string) {
   return render(
     <QueryClientProvider client={new QueryClient()}>
