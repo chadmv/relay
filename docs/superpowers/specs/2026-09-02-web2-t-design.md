@@ -167,14 +167,17 @@ harness cannot detect a real-world regression here. This is a stated limitation 
 not a claim that nothing changed for end users.
 
 **Security lens.** The advisories are dev-only and the item's reasoning for that is correct: vite,
-vitest and esbuild never ship, because the SPA is built to static assets and embedded. The upgrade's
-own security cost is the opposite direction, and it is worth stating plainly rather than leaving
-implicit: it swaps one native-binary toolchain with install scripts (esbuild) for two
-(`rolldown`, `lightningcss`), each with its own per-platform binary packages fetched at `npm ci`
-time in CI and on every developer machine. That is a supply-chain surface change, accepted here
-because the alternative is staying on a vite major whose dev server has a published cross-origin read
-advisory. Nothing about relay's own threat model - the epoch fence, the identity-checked teardown,
-the single job-spec pipeline - is touched by this change; no Go file moves.
+vitest and esbuild never ship, because the SPA is built to static assets and embedded. Read against
+the actual lock rather than assumed: esbuild's own postinstall script leaves with esbuild; rolldown
+arrives as prebuilt-binary packages with no install script of its own; and lightningcss is not new to
+this change at all - `@tailwindcss/vite` already pulled it before this diff - the upgrade adds a
+second lightningcss copy (vite's own, nested under `vite/node_modules`) beside the one already there.
+That second copy, and rolldown's own per-platform binary packages, are still a supply-chain surface
+change worth naming - more native binary packages fetched at `npm ci` time in CI and on every
+developer machine - accepted here because the alternative is staying on a vite major whose dev server
+has a published cross-origin read advisory. Nothing about relay's own threat model - the epoch fence,
+the identity-checked teardown, the single job-spec pipeline - is touched by this change; no Go file
+moves.
 
 **No invariant is in scope.** This lane writes no Go, no SQL and no React. If a proposed fix here
 starts editing `web/src`, that is a signal the migration has found a real behavioural change and it
