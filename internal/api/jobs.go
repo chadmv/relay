@@ -461,13 +461,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		total, err := s.q.CountJobsByScheduledJob(ctx, store.CountJobsByScheduledJobParams{
-			ScheduledJobID: schedID,
-			Q:              filters.Q,
-			OwnerID:        filters.OwnerID,
-			Since:          filters.Since,
-			Until:          filters.Until,
-		})
+		total, err := s.countJobsByScheduledJob(ctx, schedID, filters)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
@@ -494,13 +488,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "list jobs failed")
 			return
 		}
-		total, err := s.q.CountJobsByStatus(ctx, store.CountJobsByStatusParams{
-			Status:  status,
-			Q:       filters.Q,
-			OwnerID: filters.OwnerID,
-			Since:   filters.Since,
-			Until:   filters.Until,
-		})
+		total, err := s.countJobsByStatus(ctx, status, filters)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count jobs failed")
 			return
@@ -522,12 +510,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // listJobsBySort dispatches to the correct sqlc query based on pp.Sort and
 // returns (items, nextCursor, total, error). All 10 sort arms are covered.
 func (s *Server) listJobsBySort(ctx context.Context, pp pageParams, filters jobFilters) ([]jobResponse, string, int64, error) {
-	total, err := s.q.CountJobs(ctx, store.CountJobsParams{
-		Q:       filters.Q,
-		OwnerID: filters.OwnerID,
-		Since:   filters.Since,
-		Until:   filters.Until,
-	})
+	total, err := s.countJobs(ctx, filters)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -706,6 +689,62 @@ func (s *Server) listJobsBySort(ctx context.Context, pp pageParams, filters jobF
 	default:
 		panic("listJobsBySort: missing dispatch arm for sort key " + pp.Sort)
 	}
+}
+
+// The three count helpers fork on whether q is present. The joined ...WithText
+// twin is needed only for the owner-email arm of q; an inner join is not
+// elidable, so without the fork an unfiltered count hash-joins every jobs row
+// against users for a column it never reads.
+func (s *Server) countJobs(ctx context.Context, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsWithText(ctx, store.CountJobsWithTextParams{
+			Q:       filters.Q,
+			OwnerID: filters.OwnerID,
+			Since:   filters.Since,
+			Until:   filters.Until,
+		})
+	}
+	return s.q.CountJobs(ctx, store.CountJobsParams{
+		OwnerID: filters.OwnerID,
+		Since:   filters.Since,
+		Until:   filters.Until,
+	})
+}
+
+func (s *Server) countJobsByStatus(ctx context.Context, status string, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsByStatusWithText(ctx, store.CountJobsByStatusWithTextParams{
+			Status:  status,
+			Q:       filters.Q,
+			OwnerID: filters.OwnerID,
+			Since:   filters.Since,
+			Until:   filters.Until,
+		})
+	}
+	return s.q.CountJobsByStatus(ctx, store.CountJobsByStatusParams{
+		Status:  status,
+		OwnerID: filters.OwnerID,
+		Since:   filters.Since,
+		Until:   filters.Until,
+	})
+}
+
+func (s *Server) countJobsByScheduledJob(ctx context.Context, schedID pgtype.UUID, filters jobFilters) (int64, error) {
+	if filters.Q != nil {
+		return s.q.CountJobsByScheduledJobWithText(ctx, store.CountJobsByScheduledJobWithTextParams{
+			ScheduledJobID: schedID,
+			Q:              filters.Q,
+			OwnerID:        filters.OwnerID,
+			Since:          filters.Since,
+			Until:          filters.Until,
+		})
+	}
+	return s.q.CountJobsByScheduledJob(ctx, store.CountJobsByScheduledJobParams{
+		ScheduledJobID: schedID,
+		OwnerID:        filters.OwnerID,
+		Since:          filters.Since,
+		Until:          filters.Until,
+	})
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

@@ -48,6 +48,19 @@ ORDER BY j.created_at DESC, j.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountJobs :one
+-- The q predicate needs users.email, and an inner join is not elidable: with
+-- it, an unfiltered count hash-joins every jobs row against users for a
+-- column it never reads. handleListJobs forks on whether q is present, so
+-- the join is paid only by the requests that need it. Routing a q request
+-- to the join-free twin drops the email arm silently; the arm test's
+-- "q matches the owner email" case is what pins the fork.
+SELECT COUNT(*)
+FROM jobs j
+WHERE (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
+
+-- name: CountJobsWithText :one
 SELECT COUNT(*)
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
@@ -87,6 +100,14 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- name: CountJobsByStatus :one
 SELECT COUNT(*)
 FROM jobs j
+WHERE j.status = sqlc.arg(status)::text
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
+
+-- name: CountJobsByStatusWithText :one
+SELECT COUNT(*)
+FROM jobs j
 JOIN users u ON u.id = j.submitted_by
 WHERE j.status = sqlc.arg(status)::text
   AND (sqlc.narg(q)::text IS NULL
@@ -123,6 +144,14 @@ ORDER BY j.created_at DESC, j.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountJobsByScheduledJob :one
+SELECT COUNT(*)
+FROM jobs j
+WHERE j.scheduled_job_id = sqlc.arg(scheduled_job_id)::uuid
+  AND (sqlc.narg(owner_id)::uuid IS NULL OR j.submitted_by = sqlc.narg(owner_id)::uuid)
+  AND (sqlc.narg(since)::timestamptz IS NULL OR j.created_at >= sqlc.narg(since)::timestamptz)
+  AND (sqlc.narg(until)::timestamptz IS NULL OR j.created_at <  sqlc.narg(until)::timestamptz);
+
+-- name: CountJobsByScheduledJobWithText :one
 SELECT COUNT(*)
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by

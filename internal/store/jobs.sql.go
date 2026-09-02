@@ -14,36 +14,63 @@ import (
 const countJobs = `-- name: CountJobs :one
 SELECT COUNT(*)
 FROM jobs j
-JOIN users u ON u.id = j.submitted_by
-WHERE ($1::text IS NULL
-       OR strpos(lower(j.name), lower($1::text)) > 0
-       OR strpos(lower(u.email), lower($1::text)) > 0)
-  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
-  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
-  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+WHERE ($1::uuid IS NULL OR j.submitted_by = $1::uuid)
+  AND ($2::timestamptz IS NULL OR j.created_at >= $2::timestamptz)
+  AND ($3::timestamptz IS NULL OR j.created_at <  $3::timestamptz)
 `
 
 type CountJobsParams struct {
-	Q       *string            `json:"q"`
 	OwnerID pgtype.UUID        `json:"owner_id"`
 	Since   pgtype.Timestamptz `json:"since"`
 	Until   pgtype.Timestamptz `json:"until"`
 }
 
-// CountJobs
+// The q predicate needs users.email, and an inner join is not elidable: with
+// it, an unfiltered count hash-joins every jobs row against users for a
+// column it never reads. handleListJobs forks on whether q is present, so
+// the join is paid only by the requests that need it. Routing a q request
+// to the join-free twin drops the email arm silently; the arm test's
+// "q matches the owner email" case is what pins the fork.
 //
 //	SELECT COUNT(*)
 //	FROM jobs j
-//	JOIN users u ON u.id = j.submitted_by
-//	WHERE ($1::text IS NULL
-//	       OR strpos(lower(j.name), lower($1::text)) > 0
-//	       OR strpos(lower(u.email), lower($1::text)) > 0)
+//	WHERE ($1::uuid IS NULL OR j.submitted_by = $1::uuid)
+//	  AND ($2::timestamptz IS NULL OR j.created_at >= $2::timestamptz)
+//	  AND ($3::timestamptz IS NULL OR j.created_at <  $3::timestamptz)
+func (q *Queries) CountJobs(ctx context.Context, arg CountJobsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobs, arg.OwnerID, arg.Since, arg.Until)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsByScheduledJob = `-- name: CountJobsByScheduledJob :one
+SELECT COUNT(*)
+FROM jobs j
+WHERE j.scheduled_job_id = $1::uuid
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+`
+
+type CountJobsByScheduledJobParams struct {
+	ScheduledJobID pgtype.UUID        `json:"scheduled_job_id"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	Since          pgtype.Timestamptz `json:"since"`
+	Until          pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsByScheduledJob
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	WHERE j.scheduled_job_id = $1::uuid
 //	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
 //	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
 //	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
-func (q *Queries) CountJobs(ctx context.Context, arg CountJobsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobs,
-		arg.Q,
+func (q *Queries) CountJobsByScheduledJob(ctx context.Context, arg CountJobsByScheduledJobParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByScheduledJob,
+		arg.ScheduledJobID,
 		arg.OwnerID,
 		arg.Since,
 		arg.Until,
@@ -53,7 +80,7 @@ func (q *Queries) CountJobs(ctx context.Context, arg CountJobsParams) (int64, er
 	return count, err
 }
 
-const countJobsByScheduledJob = `-- name: CountJobsByScheduledJob :one
+const countJobsByScheduledJobWithText = `-- name: CountJobsByScheduledJobWithText :one
 SELECT COUNT(*)
 FROM jobs j
 JOIN users u ON u.id = j.submitted_by
@@ -66,7 +93,7 @@ WHERE j.scheduled_job_id = $1::uuid
   AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
 `
 
-type CountJobsByScheduledJobParams struct {
+type CountJobsByScheduledJobWithTextParams struct {
 	ScheduledJobID pgtype.UUID        `json:"scheduled_job_id"`
 	Q              *string            `json:"q"`
 	OwnerID        pgtype.UUID        `json:"owner_id"`
@@ -74,7 +101,7 @@ type CountJobsByScheduledJobParams struct {
 	Until          pgtype.Timestamptz `json:"until"`
 }
 
-// CountJobsByScheduledJob
+// CountJobsByScheduledJobWithText
 //
 //	SELECT COUNT(*)
 //	FROM jobs j
@@ -86,8 +113,8 @@ type CountJobsByScheduledJobParams struct {
 //	  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
 //	  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
 //	  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
-func (q *Queries) CountJobsByScheduledJob(ctx context.Context, arg CountJobsByScheduledJobParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobsByScheduledJob,
+func (q *Queries) CountJobsByScheduledJobWithText(ctx context.Context, arg CountJobsByScheduledJobWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByScheduledJobWithText,
 		arg.ScheduledJobID,
 		arg.Q,
 		arg.OwnerID,
@@ -102,6 +129,42 @@ func (q *Queries) CountJobsByScheduledJob(ctx context.Context, arg CountJobsBySc
 const countJobsByStatus = `-- name: CountJobsByStatus :one
 SELECT COUNT(*)
 FROM jobs j
+WHERE j.status = $1::text
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+`
+
+type CountJobsByStatusParams struct {
+	Status  string             `json:"status"`
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsByStatus
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	WHERE j.status = $1::text
+//	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+//	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+//	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+func (q *Queries) CountJobsByStatus(ctx context.Context, arg CountJobsByStatusParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByStatus,
+		arg.Status,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsByStatusWithText = `-- name: CountJobsByStatusWithText :one
+SELECT COUNT(*)
+FROM jobs j
 JOIN users u ON u.id = j.submitted_by
 WHERE j.status = $1::text
   AND ($2::text IS NULL
@@ -112,7 +175,7 @@ WHERE j.status = $1::text
   AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
 `
 
-type CountJobsByStatusParams struct {
+type CountJobsByStatusWithTextParams struct {
 	Status  string             `json:"status"`
 	Q       *string            `json:"q"`
 	OwnerID pgtype.UUID        `json:"owner_id"`
@@ -120,7 +183,7 @@ type CountJobsByStatusParams struct {
 	Until   pgtype.Timestamptz `json:"until"`
 }
 
-// CountJobsByStatus
+// CountJobsByStatusWithText
 //
 //	SELECT COUNT(*)
 //	FROM jobs j
@@ -132,9 +195,51 @@ type CountJobsByStatusParams struct {
 //	  AND ($3::uuid IS NULL OR j.submitted_by = $3::uuid)
 //	  AND ($4::timestamptz IS NULL OR j.created_at >= $4::timestamptz)
 //	  AND ($5::timestamptz IS NULL OR j.created_at <  $5::timestamptz)
-func (q *Queries) CountJobsByStatus(ctx context.Context, arg CountJobsByStatusParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countJobsByStatus,
+func (q *Queries) CountJobsByStatusWithText(ctx context.Context, arg CountJobsByStatusWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsByStatusWithText,
 		arg.Status,
+		arg.Q,
+		arg.OwnerID,
+		arg.Since,
+		arg.Until,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countJobsWithText = `-- name: CountJobsWithText :one
+SELECT COUNT(*)
+FROM jobs j
+JOIN users u ON u.id = j.submitted_by
+WHERE ($1::text IS NULL
+       OR strpos(lower(j.name), lower($1::text)) > 0
+       OR strpos(lower(u.email), lower($1::text)) > 0)
+  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+`
+
+type CountJobsWithTextParams struct {
+	Q       *string            `json:"q"`
+	OwnerID pgtype.UUID        `json:"owner_id"`
+	Since   pgtype.Timestamptz `json:"since"`
+	Until   pgtype.Timestamptz `json:"until"`
+}
+
+// CountJobsWithText
+//
+//	SELECT COUNT(*)
+//	FROM jobs j
+//	JOIN users u ON u.id = j.submitted_by
+//	WHERE ($1::text IS NULL
+//	       OR strpos(lower(j.name), lower($1::text)) > 0
+//	       OR strpos(lower(u.email), lower($1::text)) > 0)
+//	  AND ($2::uuid IS NULL OR j.submitted_by = $2::uuid)
+//	  AND ($3::timestamptz IS NULL OR j.created_at >= $3::timestamptz)
+//	  AND ($4::timestamptz IS NULL OR j.created_at <  $4::timestamptz)
+func (q *Queries) CountJobsWithText(ctx context.Context, arg CountJobsWithTextParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countJobsWithText,
 		arg.Q,
 		arg.OwnerID,
 		arg.Since,
