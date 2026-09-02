@@ -5,7 +5,9 @@ import { afterEach, beforeEach, expect, test } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
-import { JobsPage } from './JobsPage'
+import { JOB_STATUSES } from './api'
+import { LANE_CHIP_KEY } from './lanes'
+import { FILTERS, JobsPage } from './JobsPage'
 
 // Sibling to JobsPage.test.tsx, which is gate-frozen apart from one narrowed
 // assertion, following the JobsPage.pager.test.tsx precedent.
@@ -134,4 +136,48 @@ test('a 500 on one lane leaves the other four rendering their jobs', async () =>
     const r = screen.getByRole('region', { name: new RegExp(`^${name}$`, 'i') })
     expect(await within(r).findByRole('link', { name: new RegExp(`job-${status}`) })).toBeInTheDocument()
   }
+})
+
+test('every lane chip key names a real table filter for its own status', () => {
+  const byKey = new Map(FILTERS.map((f) => [f.key, f.status]))
+  for (const status of JOB_STATUSES) {
+    // A key that is not in FILTERS makes the status lookup fall back to '' and the
+    // table shows EVERY job while the chip row looks filtered - a wrong answer, not
+    // a missing one.
+    expect(byKey.has(LANE_CHIP_KEY[status])).toBe(true)
+    expect(byKey.get(LANE_CHIP_KEY[status])).toBe(status)
+  }
+})
+
+test('the Cancelled chip requests status=cancelled and sends no sort', async () => {
+  renderPage()
+  await screen.findByRole('button', { name: 'Cancelled' })
+  await userEvent.click(screen.getByRole('button', { name: 'Cancelled' }))
+  await waitFor(() => expect(seen.some((p) => p.get('status') === 'cancelled')).toBe(true))
+  const req = seen.find((p) => p.get('status') === 'cancelled')
+  expect(req?.get('limit')).toBe('50')
+  expect(req?.has('sort')).toBe(false)
+})
+
+test('overflow switches to the table with that status chip selected', async () => {
+  localStorage.setItem('relay.jobs.view', 'lanes')
+  renderPage()
+
+  const failed = await screen.findByRole('region', { name: /^failed$/i })
+  // total 3, one card shown.
+  await userEvent.click(await within(failed).findByRole('button', { name: '+ 2 more' }))
+
+  // The table's own request: limit=50 discriminates it from the lane's limit=10.
+  await waitFor(() =>
+    expect(seen.some((p) => p.get('status') === 'failed' && p.get('limit') === '50')).toBe(true),
+  )
+  const req = seen.find((p) => p.get('status') === 'failed' && p.get('limit') === '50')
+  // A cursor minted under the previous filter is rejected by the server.
+  expect(req?.has('cursor')).toBe(false)
+  expect(req?.has('sort')).toBe(false)
+
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Failed' })).toHaveAttribute('aria-pressed', 'true'),
+  )
+  expect(localStorage.getItem('relay.jobs.view')).toBe('table')
 })

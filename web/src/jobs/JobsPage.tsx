@@ -19,6 +19,7 @@ export const FILTERS: { key: string; label: string; status: string }[] = [
   { key: 'queued', label: 'Queued', status: 'pending' },
   { key: 'done', label: 'Done', status: 'done' },
   { key: 'failed', label: 'Failed', status: 'failed' },
+  { key: 'cancelled', label: 'Cancelled', status: 'cancelled' },
 ]
 
 const DEFAULT_SORT: JobSort = '-created_at'
@@ -175,13 +176,12 @@ export function JobsPage() {
       {pageHeader}
 
       {/*
-        The hi-fi HoloJobsList also shows a view-switch (Table/Lanes/Timeline), a
-        "My jobs" pill, and a free-text search input. All three are backend-blocked
-        and deliberately omitted here (a dead list control reads as broken):
-          - Lanes view:    docs/backlog/idea-2026-06-05-jobs-lanes-swimlanes-view.md
+        The hi-fi HoloJobsList also shows a Timeline view, a "My jobs" pill, and a
+        free-text search input. All three are backend-blocked and deliberately
+        omitted here (a dead list control reads as broken):
           - Timeline view: docs/backlog/idea-2026-06-05-jobs-timeline-view.md
           - My jobs + search: docs/backlog/idea-2026-06-05-my-jobs-toggle-mine-filter.md
-        When those land, the view switch and filters re-appear with real backing.
+        When those land, the remaining filters re-appear with real backing.
       */}
       <div className="flex flex-wrap items-center gap-2">
         {FILTERS.map((f) => (
