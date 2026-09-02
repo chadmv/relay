@@ -73,23 +73,28 @@ func TestParseJobFilters_ExactErrorBodies(t *testing.T) {
 	}
 }
 
-// The cap is on runes, not bytes. U+00E9 encodes as two UTF-8 bytes, so 200 of
-// them are 400 bytes and must be accepted, and 201 must not. A byte-length cap
-// set to 200 rejects both, so the pair discriminates. The rune is written as a
-// \u escape the compiler expands: a raw non-ASCII byte in a source file is
-// unverifiable by eye and survives every check this repo runs.
+// The cap is on runes, not bytes. U+00E9 encodes as two UTF-8 bytes, so a
+// needle at the cap is twice as many bytes as runes and must still be
+// accepted, while one rune more must not. A byte-length cap set to the same
+// number rejects both, so the pair discriminates. Both fixtures and the
+// expected message derive from maxJobFilterQRunes: hard-coding them would let
+// the constant move without reddening anything.
+//
+// The rune is a \u escape the compiler expands, not a raw byte: a non-ASCII
+// literal in a source file is unverifiable by eye.
 func TestParseJobFilters_QLengthCapIsInRunes(t *testing.T) {
-	at200 := strings.Repeat("\u00e9", 200)
-	at201 := at200 + "\u00e9"
-	require.Equal(t, 400, len(at200), "fixture: the needle must be longer in bytes than in runes")
+	atCap := strings.Repeat("\u00e9", maxJobFilterQRunes)
+	overCap := atCap + "\u00e9"
+	require.Equal(t, 2*maxJobFilterQRunes, len(atCap),
+		"fixture: the needle must be longer in bytes than in runes")
 
-	_, ok, _, _ := callParseJobFilters(t, "q="+at200, testAuthUser())
-	assert.True(t, ok, "200 runes must be accepted")
+	_, ok, _, _ := callParseJobFilters(t, "q="+atCap, testAuthUser())
+	assert.True(t, ok, "%d runes must be accepted", maxJobFilterQRunes)
 
-	_, ok, code, body := callParseJobFilters(t, "q="+at201, testAuthUser())
+	_, ok, code, body := callParseJobFilters(t, "q="+overCap, testAuthUser())
 	require.False(t, ok)
 	assert.Equal(t, 400, code)
-	assert.Equal(t, "q is too long; maximum 200 characters", body)
+	assert.Equal(t, maxJobFilterQMessage, body)
 }
 
 func TestParseJobFilters_EmptyAndWhitespaceQAreAbsent(t *testing.T) {
@@ -125,11 +130,9 @@ func TestParseJobFilters_MineFalseIsAbsent(t *testing.T) {
 	}
 }
 
-// mine=true with no authenticated identity must fail closed. Failing open
-// would answer with every job on the farm under a URL that says "mine", which
-// is a wrong list that looks authoritative. Unreachable through Handler()
-// because BearerAuth always injects a user; the guard exists so a future route
-// registration cannot make it reachable silently.
+// mine=true with no authenticated identity fails closed. Failing open would
+// answer with every job on the farm under a URL that says "mine", which is a
+// wrong list that looks authoritative.
 func TestParseJobFilters_MineWithoutAnAuthenticatedUserFailsClosed(t *testing.T) {
 	_, ok, code, body := callParseJobFilters(t, "mine=true", AuthUser{})
 	require.False(t, ok)

@@ -17,26 +17,23 @@ import (
 // insertJobAt inserts one job with an EXACT created_at, which the POST /v1/jobs
 // path cannot give (it stamps NOW()). Half-open window assertions need the
 // bound to equal a row's timestamp to the microsecond, so the fixture writes
-// the column directly. updated_at is set to the same instant so the
-// updated_at sort arms are equally deterministic.
+// the column directly.
+//
+// updated_at is offset by a uniform interval rather than set to the same
+// instant. Equal columns make every window assertion pass under a predicate
+// rewritten to updated_at, so the tests would not discriminate which column
+// the filter reads. The offset is uniform, so the updated_at sort arms keep
+// the same total order as the created_at ones.
 func insertJobAt(t *testing.T, pool *pgxpool.Pool, ownerID pgtype.UUID, name string, at time.Time) pgtype.UUID {
 	t.Helper()
 	var id pgtype.UUID
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`INSERT INTO jobs (name, priority, submitted_by, created_at, updated_at)
-		 VALUES ($1, 'normal', $2, $3, $3) RETURNING id`,
+		 VALUES ($1, 'normal', $2, $3::timestamptz, $3::timestamptz + interval '1 year') RETURNING id`,
 		name, ownerID, at).Scan(&id))
 	return id
 }
 
-func jobNames(items []map[string]any) []string {
-	out := make([]string, 0, len(items))
-	for _, it := range items {
-		n, _ := it["name"].(string)
-		out = append(out, n)
-	}
-	return out
-}
 
 // mine=true is resolved from the bearer token, so two users issuing the
 // IDENTICAL request get disjoint lists. The request strings are byte-identical
@@ -57,12 +54,12 @@ func TestListJobs_MineIsResolvedFromTheToken(t *testing.T) {
 
 	code, alicePage := getJobsPage(t, srv, aliceTok, query)
 	require.Equal(t, 200, code)
-	assert.Equal(t, []string{"alice-job"}, jobNames(alicePage.Items))
+	assert.Equal(t, []string{"alice-job"}, names(alicePage))
 	assert.EqualValues(t, 1, alicePage.Total)
 
 	code, bobPage := getJobsPage(t, srv, bobTok, query)
 	require.Equal(t, 200, code)
-	assert.Equal(t, []string{"bob-job"}, jobNames(bobPage.Items))
+	assert.Equal(t, []string{"bob-job"}, names(bobPage))
 	assert.EqualValues(t, 1, bobPage.Total)
 
 	// Control: without the filter, the identical token sees both, so the
@@ -99,7 +96,7 @@ func TestListJobs_WindowIsHalfOpen(t *testing.T) {
 	code, page := getJobsPage(t, srv, token, qs.Encode())
 	require.Equal(t, 200, code)
 
-	got := jobNames(page.Items)
+	got := names(page)
 	sort.Strings(got)
 	assert.Equal(t, []string{"at-since", "inside"}, got,
 		"since is inclusive and until is exclusive")
@@ -183,4 +180,39 @@ func TestListJobs_FilterCorrectnessIsCursorIndependent(t *testing.T) {
 			"a stale cursor may move the starting position but must never return a row that fails the current predicate")
 	}
 	require.NotEmpty(t, second.Items, "the assertion above is vacuous on an empty page")
+}
+
+// CountJobsByScheduledJob carries its own scheduled_job_id predicate, and
+// the arm fixture cannot discriminate it: every job there hangs off the one
+// schedule, so a count that ignored the predicate would still read 2. The
+// out-of-schedule row is what separates them.
+func TestListJobs_ScheduledJobTotalIsScopedToTheSchedule(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	alice := createTestUser(t, q, "Alice", "alice@schedtotal.test", false)
+	token := createTestToken(t, q, alice.ID)
+
+	var schedID pgtype.UUID
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`INSERT INTO scheduled_jobs (name, owner_id, cron_expr, job_spec, next_run_at)
+		 VALUES ('schedtotal', $1, '@daily', '{}'::jsonb, NOW()) RETURNING id`,
+		alice.ID).Scan(&schedID))
+
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	inSched := insertJobAt(t, pool, alice.ID, "in-schedule", base)
+	insertJobAt(t, pool, alice.ID, "outside-schedule", base.Add(time.Hour))
+	_, err := pool.Exec(t.Context(),
+		`UPDATE jobs SET scheduled_job_id = $1 WHERE id = $2`, schedID, inSched)
+	require.NoError(t, err)
+
+	code, page := getJobsPage(t, srv, token, "scheduled_job_id="+uuidString(schedID)+"&limit=50")
+	require.Equal(t, 200, code)
+	assert.Equal(t, []string{"in-schedule"}, names(page))
+	assert.EqualValues(t, 1, page.Total,
+		"total must count only jobs under this schedule")
+
+	// Control: the out-of-schedule row exists and is visible unfiltered, so
+	// the 1 above is the predicate's doing and not a seeding accident.
+	code, all := getJobsPage(t, srv, token, "limit=50")
+	require.Equal(t, 200, code)
+	assert.EqualValues(t, 2, all.Total)
 }

@@ -9,16 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The CLI sends only status and sort; it sends none of q, mine, since or
-// until. The change is additive, so nothing it sends can break - but that is
-// an argument, and this is the evidence.
-//
-// --status is the discriminating case: it is the only CLI path that reaches
-// handleListJobs' status branch, whose list statement gained four predicates
-// and whose count moved from a bare string argument to a Params struct. The
-// bare case is covered elsewhere in this package; the empty case is here so a
-// total that stopped being the filtered count cannot pass by rendering rows
-// alone.
+// --status drives handleListJobs status branch, whose count is asserted at
+// zero on the empty case so a total that stopped being the filtered count
+// cannot pass on rendered rows alone.
 func TestIntegration_ListJobs_StatusFilterStillMatchesTheServer(t *testing.T) {
 	s := startRelayServer(t)
 	jobID := submitLaneJob(t, s)

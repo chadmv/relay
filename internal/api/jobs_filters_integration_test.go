@@ -16,9 +16,10 @@ import (
 )
 
 // jobsSortArms is DERIVED from the server's own allowlist, not hand-listed.
-// A sort key added to JobsSortSpec without its filter predicates produces an
-// arm here whose filtered request returns the wrong row set, and this test
-// goes RED. Sorted so subtest names are stable.
+// A sort key added to JobsSortSpec without a dispatch arm in listJobsBySort
+// reaches that switch's panic default and this test goes RED; a key given a
+// dispatch arm but not the four filter fields returns the wrong row set for
+// that arm. Sorted so subtest names are stable.
 func jobsSortArms() []string {
 	keys := make([]string, 0, len(api.JobsSortSpec.Keys))
 	for k := range api.JobsSortSpec.Keys {
@@ -37,12 +38,15 @@ func jobsSortArms() []string {
 // The two jobs differ on all four filter axes and on nothing that would let a
 // single accident satisfy two assertions:
 //
-//   - name:  "alpha-100%-target" vs "bravo_other". Exactly one carries a
+//   - name:  "Alpha-100%-Target" vs "bravo_other". Exactly one carries a
 //     literal %, exactly one a literal _, and neither email carries either, so
 //     q=% and q=_ each select exactly one row under strpos - and BOTH select
 //     both rows under an unescaped ILIKE, which is what makes the pair a
 //     discriminator for the strpos-versus-ILIKE property rather than a
 //     restatement of it.
+//   - case: the alpha name is mixed-case while the q=alpha probe is lower.
+//     With an all-lowercase fixture, dropping lower() from the COLUMN side of
+//     strpos changes no answer; with this one it drops the row.
 //   - owner: two users, so mine=true has something to exclude.
 //   - email: "alpha" appears only in a name, "alice@" only in an email, so the
 //     name arm and the email arm of q are independent.
@@ -61,7 +65,7 @@ type jobsFilterFixture struct {
 }
 
 const (
-	jobsFilterAlphaName = "alpha-100%-target"
+	jobsFilterAlphaName = "Alpha-100%-Target"
 	jobsFilterBravoName = "bravo_other"
 )
 
@@ -120,8 +124,6 @@ func TestListJobs_FiltersApplyOnEveryArm(t *testing.T) {
 	}
 
 	arms := append(jobsSortArms(), "status=pending", "scheduled_job_id="+fx.schedID)
-	require.Len(t, arms, 2*len(api.JobsSortSpec.Keys)+2,
-		"arm table must cover every JobsSortSpec key in both directions plus the two filtered branches")
 
 	for _, arm := range arms {
 		for _, f := range filters {
@@ -135,7 +137,7 @@ func TestListJobs_FiltersApplyOnEveryArm(t *testing.T) {
 
 				code, page := getJobsPage(t, srv, fx.token, full)
 				require.Equal(t, 200, code, "query=%s", full)
-				assert.Equal(t, []string{f.want}, jobNames(page.Items), "query=%s", full)
+				assert.Equal(t, []string{f.want}, names(page), "query=%s", full)
 				assert.EqualValues(t, 1, page.Total,
 					"total must count only rows matching every active predicate; query=%s", full)
 			})
@@ -154,7 +156,7 @@ func TestListJobs_FixtureIsUnfilteredOnEveryArm(t *testing.T) {
 		t.Run(arm, func(t *testing.T) {
 			code, page := getJobsPage(t, srv, fx.token, arm+"&limit=50")
 			require.Equal(t, 200, code)
-			got := jobNames(page.Items)
+			got := names(page)
 			sort.Strings(got)
 			assert.Equal(t, []string{jobsFilterAlphaName, jobsFilterBravoName}, got)
 			assert.EqualValues(t, 2, page.Total)

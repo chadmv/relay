@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -23,10 +24,11 @@ type jobFilters struct {
 	Until   pgtype.Timestamptz
 }
 
-// maxJobFilterQRunes bounds the substring needle. strpos cannot be served by
-// any index, so the needle length is one of the few things that bounds a
-// single request's scan cost.
+// maxJobFilterQRunes bounds the substring needle in runes, not bytes.
 const maxJobFilterQRunes = 200
+
+// maxJobFilterQMessage is derived from the constant so the two cannot drift.
+var maxJobFilterQMessage = fmt.Sprintf("q is too long; maximum %d characters", maxJobFilterQRunes)
 
 // jobFilterParams are the four query parameters parseJobFilters reads.
 // handleListJobs passes them to rejectRepeatedParams before calling in.
@@ -56,7 +58,7 @@ func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilte
 		}
 		needle := strings.TrimSpace(raw)
 		if utf8.RuneCountInString(needle) > maxJobFilterQRunes {
-			writeError(w, http.StatusBadRequest, "q is too long; maximum 200 characters")
+			writeError(w, http.StatusBadRequest, maxJobFilterQMessage)
 			return jobFilters{}, false
 		}
 		// A cleared search box sends q=; empty after trimming means absent,
@@ -75,8 +77,6 @@ func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilte
 			return jobFilters{}, false
 		}
 		if b {
-			// The owner is resolved here and only here. There is no parameter
-			// that names another user, so no request can ask for one.
 			if !u.ID.Valid {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return jobFilters{}, false
@@ -106,9 +106,8 @@ func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilte
 	return f, true
 }
 
-// parseJobFilterTime parses one RFC3339 bound. RFC3339Nano is the layout so a
-// fractional-seconds value is accepted; both layouts require an offset or Z, so
-// a zone-less timestamp is rejected rather than silently read as UTC.
+// parseJobFilterTime parses one RFC3339 bound. The layout requires an offset
+// or Z, so a zone-less timestamp is rejected rather than silently read as UTC.
 func parseJobFilterTime(w http.ResponseWriter, raw, name string) (pgtype.Timestamptz, bool) {
 	if raw == "" {
 		return pgtype.Timestamptz{}, true

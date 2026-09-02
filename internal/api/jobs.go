@@ -434,7 +434,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parsed after the sort-versus-filter guard so that rule's 400 keeps its
-	// precedence. The four new parameters are deliberately NOT part of that
+	// precedence. The four parameters are deliberately NOT part of that
 	// guard and must not be added to hasFilter: they are threaded into every
 	// sort variant as optional arguments and never touch ORDER BY, so they
 	// cannot create the ordering gap the guard exists to close.
