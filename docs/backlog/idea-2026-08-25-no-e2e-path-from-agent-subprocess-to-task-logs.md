@@ -50,3 +50,18 @@ it needs no Playwright and belongs in the existing integration lane.
   inside the PLAYWRIGHT harness so browser surfaces become reachable. This is byte fidelity at the Go
   integration level and is closeable without a browser. Doing either does not close the other.
 - Adjacent: [[idea-2026-08-23-integration-only-guards-ci-never-runs]]
+
+## Notes
+
+**The DISPATCH direction has the same gap, found 2026-09-01.** The per-task identity env vars slice
+(`feature-2026-08-31-per-task-identity-env-vars`, closed) put four variables into every task
+subprocess and proved it in three disjoint slices: `Dispatcher` to a `fakeSender`, a proto marshal
+round trip, and `Runner.Run` handed a `*relayv1.DispatchTask` built in process. Nothing carried a
+dispatch across a real gRPC stream into a real subprocess, so the composition was assumed exactly
+as the log direction's is.
+
+That widens this item rather than adding a second one: the harness proposed above (a real
+`agent.Runner` against a real gRPC worker service, testcontainers Postgres, no browser) covers both
+directions, since a dispatch has to reach the runner before any log can come back. If it is built,
+assert both: bytes written by the subprocess arrive in `task_logs`, AND the four identity variables
+the coordinator rendered are the ones the subprocess observes.
