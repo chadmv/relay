@@ -262,3 +262,54 @@ test('an outside mousedown closes the nav panel and never touches the toggle foc
   expect(document.activeElement).toBe(chip)
   toggleFocus.mockRestore()
 })
+
+// AC4, half one. The shell is persistent and is not remounted by a route change,
+// and the outside-mousedown handler does not fire because the press target is
+// INSIDE the container - so without an explicit close the panel hangs open over the
+// page it just navigated to.
+test('selecting a destination closes the nav panel and returns focus to the toggle', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  for (const name of ['Workers', 'Schedules', 'Admin']) {
+    await userEvent.click(toggle)
+    // Positive control inside the loop: prove the panel was OPEN before asserting
+    // it closed, so a component that failed to open cannot pass this for the wrong
+    // reason.
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await userEvent.click(screen.getByRole('link', { name }))
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(document.activeElement).toBe(toggle)
+  }
+})
+
+// AC4, half two. React Router's Link calls the caller's onClick BEFORE it decides
+// whether to navigate, so an unconditional close runs even for a
+// Ctrl/Cmd/Shift/Alt or non-primary click: the destination opens in a new tab AND
+// the panel collapses and yanks focus in the tab the user is still looking at. The
+// predicate is the one react-router itself uses to decide whether it will handle
+// the click.
+test('a modifier-clicked destination leaves the nav panel open and does not touch focus', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  await userEvent.click(toggle)
+  const link = screen.getByRole('link', { name: 'Workers' })
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  // Each bare userEvent.X() call spins up a fresh input-device System unless one is
+  // threaded through explicitly, so a held modifier from one call is invisible to
+  // the next by default. Passing the System back in as keyboardState is what makes
+  // Control still be down for the click.
+  const heldControl = await userEvent.keyboard('{Control>}')
+  await userEvent.click(link, { keyboardState: heldControl })
+  await userEvent.keyboard('{/Control}', { keyboardState: heldControl })
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  expect(toggleFocus).not.toHaveBeenCalled()
+  toggleFocus.mockRestore()
+  // Expected stderr noise: jsdom logs "Not implemented: navigation to another
+  // Document" because react-router sees the modifier and skips preventDefault,
+  // letting the anchor's native default action run - the same route a real browser
+  // takes to open a new tab. That warning is proof the click was NOT intercepted.
+})

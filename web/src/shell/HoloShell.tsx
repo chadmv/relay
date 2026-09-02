@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { Eyebrow } from '../components/holo'
@@ -44,6 +51,16 @@ export function HoloShell({ children }: { children: ReactNode }) {
   // focus itself and a restore would fight the user.
   function closeNav() {
     setNavOpen(false)
+  }
+
+  // One guard for every destination's onClick rather than a copy per link. React
+  // Router's Link calls this BEFORE it decides whether to navigate, so an
+  // unconditional close would also run for a modified or non-primary click, which
+  // opens a new tab while collapsing the panel and stealing focus in the tab the
+  // user is still on. Same predicate react-router uses for the same question.
+  function onNavItemClick(e: ReactMouseEvent<HTMLAnchorElement>) {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return
+    closeNavAndRestoreFocus()
   }
 
   useEffect(() => {
@@ -153,6 +170,7 @@ export function HoloShell({ children }: { children: ReactNode }) {
                 <NavLink
                   key={n.to}
                   to={n.to}
+                  onClick={onNavItemClick}
                   className={({ isActive }) =>
                     `border-b-2 px-[14px] py-[7px] text-[13px] tracking-[0.02em] transition-colors max-md:border-b-0 max-md:border-l-2 ${
                       isActive
