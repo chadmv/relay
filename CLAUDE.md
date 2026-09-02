@@ -50,6 +50,8 @@ go test ./internal/api/... -run TestRegister_HappyPath -v -timeout 30s
 
 # Run integration tests for one package
 go test -tags integration -p 1 ./internal/api/... -run TestRegister -v -timeout 120s
+# The whole internal/api integration package runs about 9.5 minutes; a 600s timeout is inside
+# its variance band and reports FAIL with no --- FAIL line beneath it. Use -timeout 1800s.
 ```
 
 Integration tests use `//go:build integration` and spin up real Postgres containers via testcontainers-go. On Windows the `desktop-linux` Docker context is used automatically.

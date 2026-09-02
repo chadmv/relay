@@ -1,5 +1,12 @@
 # web/ - Frontend Notes
 
+**Playwright `isVisible()` cannot see clipping inside a scroll container.** It is `checkVisibility`
+plus a non-empty box, so a link scrolled out of an `overflow-x-auto` wrapper still reports visible; a
+reachability predicate built on it was green against the header-nav clipping bug it existed to catch.
+A claim that a control is reachable needs `toBeInViewport()` (which clips against intermediate
+scrollers) or a `scrollWidth <= clientWidth` assertion on the scroller, and a plan-supplied "fails at
+HEAD" claim is measured by putting the pre-fix file back and running the test.
+
 **Tailwind v4 scans the whole project, so prose is compiled input.** `@tailwindcss/vite` builds its
 scanner over the Vite root with `pattern: '**/*'` and reads **source files on disk**, not the emitted
 bundle - so a class-shaped substring anywhere under `web/`, including inside a comment or a test file,
