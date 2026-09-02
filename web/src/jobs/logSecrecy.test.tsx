@@ -1,4 +1,5 @@
 import { act, render, renderHook, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { http, HttpResponse } from 'msw'
@@ -148,15 +149,27 @@ test('no console method receives log content rendered through LogTab', async () 
   const SECRET = 'P4PASSWD=hunter2-via-logtab'
   const spies = spyOnConsole()
 
+  // prev_seq non-zero on the tail page, so the Load earlier control renders and
+  // a click drives the prepend, the loading row and the scroll-anchor layout
+  // effect inside the assertion below - none of which the hook-only test above
+  // can reach, since it mounts no component.
   server.use(
-    http.get('/v1/tasks/t1/logs', () =>
-      HttpResponse.json({
-        items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      if (new URL(request.url).searchParams.has('before_seq')) {
+        return HttpResponse.json({
+          items: [{ seq: 1, stream: 'stdout', content: `${SECRET}\n`, created_at: '2026-08-09T00:00:00Z' }],
+          next_seq: 0,
+          prev_seq: 0,
+          total: 2,
+        })
+      }
+      return HttpResponse.json({
+        items: [{ seq: 9, stream: 'stdout', content: 'tail\n', created_at: '2026-08-09T00:00:00Z' }],
         next_seq: 0,
-        prev_seq: 0,
-        total: 1,
-      }),
-    ),
+        prev_seq: 9,
+        total: 2,
+      })
+    }),
   )
   server.use(http.get('/v1/events', () => openSseResponse()))
 
@@ -165,13 +178,14 @@ test('no console method receives log content rendered through LogTab', async () 
     return <LogTab jobId="j1" taskId="t1" stream={stream} />
   }
 
-  const { findByText, unmount } = render(
+  const { findByText, findByRole, unmount } = render(
     <MemoryRouter>
       <Harness />
     </MemoryRouter>,
   )
+  await userEvent.click(await findByRole('button', { name: /load earlier/i }))
   // Positive control: the secret really did reach the DOM through the full
-  // hook -> LogTab -> LogView -> LogRowView pipeline.
+  // hook -> LogTab -> LogView -> LogRowView pipeline, on the prepend path.
   expect(await findByText(SECRET)).toBeInTheDocument()
   unmount()
 
