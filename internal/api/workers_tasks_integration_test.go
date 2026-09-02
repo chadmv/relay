@@ -91,6 +91,9 @@ func TestListWorkerTasks_ReturnsOnlyTheAssignmentPartition(t *testing.T) {
 	code, p := getWorkerTasks(t, srv, token, workerID, "")
 	require.Equal(t, http.StatusOK, code)
 	assert.ElementsMatch(t, []string{"t-dispatched", "t-running"}, names(p))
+	assert.EqualValues(t, 2, p.Total,
+		"total slices the same partition as items; a count that disagrees shows an operator a "+
+			"fraction the rows underneath it contradict")
 }
 
 // Rows are scoped to the path worker, in both directions.
@@ -144,6 +147,13 @@ func TestListWorkerTasks_UnknownWorkerIs404AndMalformedIdIs400(t *testing.T) {
 
 	code, _ = getWorkerTasks(t, srv, token, "not-a-uuid", "")
 	assert.Equal(t, http.StatusBadRequest, code)
+
+	// GetWorker runs BEFORE parsePage, so the resource's existence is answered
+	// first. Swapping the two makes this a 400 and tells a caller the worker
+	// might exist.
+	code, _ = getWorkerTasks(t, srv, token, "3f7c1b6e-0000-4000-8000-000000000000", "limit=0")
+	assert.Equal(t, http.StatusNotFound, code,
+		"an unknown worker with a bad limit is a 404, not a 400")
 }
 
 // limit is validated, not clamped, and the endpoint serves exactly one order.
@@ -282,8 +292,29 @@ func TestListWorkerTasks_TotalIsTheActiveCount(t *testing.T) {
 	assert.EqualValues(t, 2, p.Total, "and it is the same on every page")
 }
 
+// workerTaskWireKeys is every key this endpoint may put on a task item, written
+// out as a literal rather than derived from the Go type: a set derived from the
+// type under test agrees with it by construction. workerTaskResponse embeds
+// taskResponse so that new task fields arrive for free, which is exactly why the
+// wire needs a closed set - a field added to taskResponse ships here with a
+// zero-line diff in workers.go.
+var workerTaskWireKeys = []string{
+	"id", "name", "status", "commands", "env", "requires", "timeout_seconds",
+	"retries", "retry_count", "depends_on", "worker_id",
+	"job_id", "job_name", "assigned_at", "started_at",
+}
+
+// The subset of workerTaskWireKeys carrying no omitempty, so they are on the
+// wire for every row. depends_on, worker_id, assigned_at and started_at are the
+// omitempty keys and are deliberately absent from this list.
+var workerTaskAlwaysPresentKeys = []string{
+	"id", "name", "status", "commands", "env", "requires", "timeout_seconds",
+	"retries", "retry_count", "job_id", "job_name",
+}
+
 // assignment_epoch is a fence token and appears nowhere. Decoded into
-// map[string]any so this sees the WIRE, not the struct definition.
+// map[string]any so this sees the WIRE, not the struct definition, and asserted
+// as a CLOSED set so a new field on the embedded taskResponse turns it RED.
 func TestListWorkerTasks_DoesNotExposeAssignmentEpoch(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
 	user := createTestUser(t, q, "Ep", "epoch@tasks-test.com", false)
@@ -308,8 +339,17 @@ func TestListWorkerTasks_DoesNotExposeAssignmentEpoch(t *testing.T) {
 	require.Len(t, items, 1, "control: the assertion below must have a row to inspect")
 	for _, raw := range items {
 		item := raw.(map[string]any)
-		assert.NotContains(t, item, "assignment_epoch")
-		assert.Contains(t, item, "id", "control: the item decoded into real keys")
+		assert.NotContains(t, item, "assignment_epoch",
+			"assignment_epoch is a fence token; publishing (task id, epoch) pairs for a named worker "+
+				"hands out both values a forged status update would otherwise have to guess")
+		for k := range item {
+			assert.Contains(t, workerTaskWireKeys, k,
+				"unexpected key %q on the wire - if this is a new taskResponse field, decide whether it "+
+					"belongs on a per-worker view before widening workerTaskWireKeys", k)
+		}
+		for _, k := range workerTaskAlwaysPresentKeys {
+			assert.Contains(t, item, k, "key %q carries no omitempty and must be present", k)
+		}
 	}
 }
 
@@ -331,4 +371,73 @@ func TestListWorkerTasks_ADispatchedTaskWithNoStartTimeIsReturned(t *testing.T) 
 	assert.Equal(t, "sync-depot", p.Items[0]["name"])
 	assert.NotContains(t, p.Items[0], "started_at", "an absent start time must be absent, not a zero time")
 	assert.Contains(t, p.Items[0], "assigned_at", "control: the sibling timestamp IS present")
+}
+
+// A NULL assigned_at is reachable only by direct SQL here, because
+// ClaimTaskForWorker stamps the column in the same statement that assigns the
+// task. The column is nevertheless nullable, so the query carries a NULLS LAST
+// branch and a cursor arm for it, and this is what exercises them: the walk uses
+// TWO null rows so a cursor is actually ISSUED from a null-valued row, which is
+// the only way into the cursor_is_null predicate and the (*time.Time)(nil) row
+// key. One null row would order correctly and never reach that arm.
+func TestListWorkerTasks_PagesThroughTheNullAssignedAtTail(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Null", "nulltail@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	newer := base.Add(time.Hour)
+	seedWorkerTask(t, pool, jobID, workerID, "ts-newer", "running", &newer, &newer)
+	seedWorkerTask(t, pool, jobID, workerID, "ts-older", "running", &base, &base)
+	seedWorkerTask(t, pool, jobID, workerID, "null-a", "dispatched", nil, nil)
+	seedWorkerTask(t, pool, jobID, workerID, "null-b", "dispatched", nil, nil)
+
+	var seen []string
+	cursor := ""
+	lastCursor := "unset"
+	for i := 0; i < 6; i++ {
+		query := "limit=1"
+		if cursor != "" {
+			query += "&cursor=" + cursor
+		}
+		code, p := getWorkerTasks(t, srv, token, workerID, query)
+		require.Equal(t, http.StatusOK, code)
+		require.Len(t, p.Items, 1, "limit=1 must return exactly one row while rows remain")
+		assert.EqualValues(t, 4, p.Total, "total is the whole active set on every page")
+		seen = append(seen, names(p)...)
+		lastCursor = p.NextCursor
+		if p.NextCursor == "" {
+			break
+		}
+		cursor = p.NextCursor
+	}
+
+	assert.Equal(t, "", lastCursor, "the walk must terminate with an empty next_cursor")
+	require.Len(t, seen, 4, "gapless and duplicate-free: every row exactly once")
+	assert.Equal(t, []string{"ts-newer", "ts-older"}, seen[:2],
+		"timestamped rows come first, newest assignment first")
+	assert.ElementsMatch(t, []string{"null-a", "null-b"}, seen[2:],
+		"the NULL assigned_at rows are the tail, after every timestamped row")
+}
+
+// The handler's comment claims a revoked worker is not a 404 here, matching
+// GET /v1/workers/{id}. GetWorker has no status filter, so nothing but this
+// pins it - and a revoked worker is exactly the one an operator is trying to
+// look at when they want to know what it was still holding.
+func TestListWorkerTasks_RevokedWorkerStillReturnsItsTasks(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Rev", "revoked@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-gone", "revoked", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	seedWorkerTask(t, pool, jobID, workerID, "still-held", "running", &at, &at)
+
+	code, p := getWorkerTasks(t, srv, token, workerID, "")
+	require.Equal(t, http.StatusOK, code, "a revoked worker is a real row, not a 404")
+	assert.Equal(t, []string{"still-held"}, names(p))
+	assert.EqualValues(t, 1, p.Total)
 }

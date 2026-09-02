@@ -497,6 +497,7 @@ func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
 
 	items, next := buildPage(rows, pp.Limit, pp.Sort, toWorkerTaskResponse, workerTasksRowKey)
 	if err := s.fillJobNames(ctx, items); err != nil {
+		log.Printf("list worker tasks: fill job names: %v", err)
 		writeError(w, http.StatusInternalServerError, "list worker tasks failed")
 		return
 	}
@@ -508,8 +509,11 @@ func (s *Server) handleListWorkerTasks(w http.ResponseWriter, r *http.Request) {
 // than a JOIN so the list query stays a bare SELECT * that sqlc emits as
 // []store.Task: a JOIN row would have to be hand-copied into a store.Task to
 // reach toTaskResponse, and such a copy silently loses any column tasks gains.
-// tasks.job_id is NOT NULL with an FK, so a missing name is a database fault,
-// not a normal absence - hence an error rather than an empty string.
+// tasks.job_id is NOT NULL, so a missing name is not a normal absence. The
+// reachable cause is a concurrent DeleteJob cascading to tasks (tasks.job_id
+// ... ON DELETE CASCADE, migration 000001) between the list statement and this
+// one. That is an error rather than an empty string because a blank job on a
+// task reads as data, not as a row that vanished mid-request.
 func (s *Server) fillJobNames(ctx context.Context, items []workerTaskResponse) error {
 	if len(items) == 0 {
 		return nil
