@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '../components/Button'
 import { PillButton } from '../components/holo'
-import { MAX_LINES, preservedScrollTop, shouldFollow, type LogRow } from './logBuffer'
+import { preservedScrollTop, shouldFollow, type LogRow } from './logBuffer'
 import type { LogStreamStatus, TaskLogStreamResult } from './useTaskLogStream'
 
 // Status vocabulary for the header strip, replacing LogTab's old
@@ -129,18 +129,18 @@ export function LogView({
 
   const live = status === 'live'
 
-  // Four-way, first match wins. MAX_LINES and rows count reassembled LINES;
-  // `total` counts server-side log ENTRIES - two different units (code review,
-  // L5) - so each notice names them separately rather than implying a single
-  // "N of M" count of the same thing. The forward-walk notice can now only
-  // appear after a recovery that hit MAX_BACKFILL_PAGES, so it resolves last.
+  // Truncation outranks the tail notice: it is the only one that reports a hole
+  // in the MIDDLE, and earlierComplete is false in exactly the case that
+  // produces one, so ranking the tail notice first would suppress it. No notice
+  // states a count of what is on screen: retained lines grow with every live
+  // frame while `total` is written only by a page fetch, so the two drift apart.
   let notice: string | null = null
   if (evicted) {
     notice = 'Earlier output not shown.'
-  } else if (!earlierComplete && rows.length > 0) {
-    notice = `Showing the most recent ${rows.length.toLocaleString('en-US')} lines of ${total.toLocaleString('en-US')} log entries.`
   } else if (historyTruncated) {
-    notice = `Showing the first ${MAX_LINES.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} log entries. Live output continues below.`
+    notice = `Recovered output is incomplete: paging stopped early. ${total.toLocaleString('en-US')} log entries in total.`
+  } else if (!earlierComplete && rows.length > 0) {
+    notice = `Earlier output is not loaded. ${total.toLocaleString('en-US')} log entries in total.`
   }
 
   let body: ReactNode

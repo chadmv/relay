@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { fakeSseServer, tick } from '../test/sseStream'
+import { BACKFILL_PAGE_SIZE } from './api'
 import { MAX_LINES } from './logBuffer'
 import { FLUSH_MS, MAX_BACKFILL_PAGES, useTaskLogStream } from './useTaskLogStream'
 
@@ -152,7 +153,9 @@ test('a recovery stops at MAX_BACKFILL_PAGES, flags truncation, and still applie
     http.get('/v1/tasks/t1/logs', ({ request }) => {
       const since = new URL(request.url).searchParams.get('since_seq')
       if (since === null) {
-        return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 0, total: 94_312 })
+        // prev_seq non-zero: this log still has earlier history, which is what
+        // makes the truncation-and-tail pair asserted below reachable at all.
+        return HttpResponse.json({ items: [entry(1)], next_seq: 0, prev_seq: 1, total: 94_312 })
       }
       forwardRequests++
       // A server that never drains: next_seq is always non-zero.
@@ -175,6 +178,11 @@ test('a recovery stops at MAX_BACKFILL_PAGES, flags truncation, and still applie
   // Exact count, not "several": an off-by-one or a missing cap is a request loop.
   expect(forwardRequests).toBe(MAX_BACKFILL_PAGES)
   expect(result.current.total).toBe(94_312)
+  // The pair the view has to be able to say at once: history was truncated in
+  // the MIDDLE and earlier history also exists below the window. A notice
+  // ordering that lets earlierComplete decide whether truncation is mentioned
+  // renders this state as if only the second half were true.
+  expect(result.current.earlierComplete).toBe(false)
 
   fake.latest().emit('task_log', logEvent(5000, 'after-cap\n'))
   await waitFor(() => expect(result.current.rows.some((r) => r.text === 'after-cap')).toBe(true))
@@ -258,10 +266,53 @@ test('canLoadEarlier is false in each of the terminal cases', async () => {
   pending.unmount()
 })
 
-// The generation fence. loadEarlier carries no AbortSignal (apiFetch has no
-// realm-mismatch fallback, and jsdom + a native fetch is exactly where that
-// bites), so the response always arrives and the fence is the only control.
-test('a stale earlier page is discarded', async () => {
+test('canLoadEarlier goes off before a page would overflow the line cap', async () => {
+  // The guard has to be PREDICTIVE, not a check on the window as it stands. A
+  // click at MAX_LINES - 1 fetches a whole page, capLines keeps the newest
+  // MAX_LINES, and the front of what was just fetched is discarded - which sets
+  // evicted, disables the control permanently, and costs the user the rest of
+  // the history in exchange for a few lines.
+  async function windowOf(lines: number) {
+    const fake = fakeSseServer()
+    server.use(
+      http.get('/v1/tasks/t1/logs', () =>
+        HttpResponse.json({
+          items: [
+            { seq: 500, stream: 'stdout', content: 'x\n'.repeat(lines), created_at: '2026-09-01T00:00:00Z' },
+          ],
+          next_seq: 0,
+          prev_seq: 499,
+          total: 9000,
+        }),
+      ),
+    )
+    const h = renderHook(() =>
+      useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+    )
+    await waitFor(() => expect(h.result.current.status).toBe('live'))
+    return h
+  }
+
+  // Exactly one page still fits.
+  const fits = await windowOf(MAX_LINES - BACKFILL_PAGE_SIZE)
+  expect(fits.result.current.evicted).toBe(false)
+  expect(fits.result.current.canLoadEarlier).toBe(true)
+  fits.unmount()
+
+  // One line more and it does not. The paired control above is what stops this
+  // passing for a guard that is simply always false.
+  const overflows = await windowOf(MAX_LINES - BACKFILL_PAGE_SIZE + 1)
+  expect(overflows.result.current.evicted).toBe(false)
+  expect(overflows.result.current.canLoadEarlier).toBe(false)
+  overflows.unmount()
+})
+
+// loadEarlier carries no AbortSignal (apiFetch has no realm-mismatch fallback,
+// and jsdom plus a native fetch is exactly where that bites), so the response
+// always arrives and the landing guards are the only control. This one is about
+// CANCELLATION - the effect was torn down - not about the generation fence: a
+// task switch runs cleanup, so the gen check is never reached here.
+test('a landing page after cancellation touches no cross-run state', async () => {
   const fake = fakeSseServer()
   let release: () => void = () => {}
   const gate = new Promise<void>((r) => {
@@ -300,12 +351,70 @@ test('a stale earlier page is discarded', async () => {
   expect(result.current.rows.map((r) => r.text)).toEqual(['line-20'])
   // The rows assertion alone is vacuous here and is kept only as the statement
   // of intent: logState is a per-run local and publish() has its own cancelled
-  // guard, so a stale prepend cannot reach the view even with the fence gone.
-  // What DOES escape a missing fence is the state shared across runs. The stale
-  // page's prev_seq is 0 and t2's is not, so an unfenced landing marks t2's log
-  // complete and disables its control - the assertion that actually discriminates.
+  // guard, so a stale prepend cannot reach the view even with the guard gone.
+  // What DOES escape is the state shared across runs. The stale page's prev_seq
+  // is 0 and t2's is not, so an unguarded landing marks t2's log complete and
+  // disables its control - the assertion that actually discriminates.
   expect(result.current.earlierComplete).toBe(false)
   expect(result.current.canLoadEarlier).toBe(true)
+})
+
+// The other half of the cancelled guard, and the half the assertions above
+// cannot see: a landing after cancellation must not clear the loading flag that
+// the SUCCEEDING run is currently using. Both runs have a click in flight, so
+// the flag the dead run would clear is a live one.
+test('a landing page after cancellation does not clear the next window loading flag', async () => {
+  const fake = fakeSseServer()
+  const releases: Record<string, () => void> = {}
+  const gates: Record<string, Promise<void>> = {}
+  for (const id of ['t1', 't2']) {
+    gates[id] = new Promise<void>((r) => {
+      releases[id] = r
+    })
+  }
+  server.use(
+    http.get('/v1/tasks/:tid/logs', async ({ request, params }) => {
+      const tid = String(params.tid)
+      const url = new URL(request.url)
+      if (url.searchParams.has('before_seq')) {
+        await gates[tid]
+        return HttpResponse.json({ items: [entry(1, `EARLIER-${tid}\n`)], next_seq: 0, prev_seq: 0, total: 9 })
+      }
+      const seq = tid === 't1' ? 10 : 20
+      return HttpResponse.json({ items: [entry(seq)], next_seq: 0, prev_seq: seq - 1, total: 9 })
+    }),
+  )
+  const { result, rerender } = renderHook(
+    ({ id }: { id: string }) =>
+      useTaskLogStream(id, { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+    { initialProps: { id: 't1' } },
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  act(() => {
+    result.current.loadEarlier()
+  })
+  expect(result.current.loadingEarlier).toBe(true)
+
+  // Switch tasks with t1's page still in flight, then click on t2 as well.
+  rerender({ id: 't2' })
+  await waitFor(() => expect(result.current.rows.map((r) => r.text)).toEqual(['line-20']))
+  act(() => {
+    result.current.loadEarlier()
+  })
+  expect(result.current.loadingEarlier).toBe(true)
+
+  // t1's dead page lands while t2's click is still outstanding.
+  releases.t1()
+  await tick()
+  await tick()
+
+  // t2's control stays in its loading state: the dead run may not answer for it.
+  expect(result.current.loadingEarlier).toBe(true)
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-20'])
+
+  releases.t2()
+  await waitFor(() => expect(result.current.loadingEarlier).toBe(false))
+  expect(result.current.rows.map((r) => r.text)).toEqual(['EARLIER-t2', 'line-20'])
 })
 
 test('a discarded earlier page re-enables the control', async () => {
@@ -346,6 +455,57 @@ test('a discarded earlier page re-enables the control', async () => {
   // visibly refused rather than silently swallowed.
   expect(result.current.rows.some((r) => r.text === 'STALE')).toBe(false)
   expect(result.current.canLoadEarlier).toBe(true)
+})
+
+// The generation fence with the DISCARD itself as the subject rather than the
+// control's state. Same effect run throughout - a drop-recovery bumps gen
+// without ever setting cancelled - so this is the only shape that reaches the
+// gen check, and the window is asserted positionally: the recovered rows exactly,
+// with nothing joined onto the front at a seam the page was not contiguous with.
+test('a superseded earlier page does not prepend into the recovered window', async () => {
+  const fake = fakeSseServer()
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  server.use(
+    http.get('/v1/tasks/t1/logs', async ({ request }) => {
+      const url = new URL(request.url)
+      if (url.searchParams.has('before_seq')) {
+        await gate
+        return HttpResponse.json({
+          items: [entry(2, 'SUPERSEDED-A\n'), entry(3, 'SUPERSEDED-B\n')],
+          next_seq: 0,
+          prev_seq: 1,
+          total: 40,
+        })
+      }
+      if (url.searchParams.has('since_seq')) {
+        return HttpResponse.json({ items: [entry(11)], next_seq: 0, prev_seq: 0, total: 40 })
+      }
+      return HttpResponse.json({ items: [entry(10)], next_seq: 0, prev_seq: 9, total: 40 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  act(() => {
+    result.current.loadEarlier()
+  })
+
+  fake.latest().emit('dropped', { reason: 'slow_consumer' })
+  await waitFor(() => expect(result.current.rows.some((r) => r.text === 'line-11')).toBe(true))
+  release()
+  await waitFor(() => expect(result.current.loadingEarlier).toBe(false))
+
+  // The exact window, in order. A page that landed would put its two rows at
+  // the front and would also drag total back from what the recovery set.
+  expect(result.current.rows.filter((r) => r.kind === 'line').map((r) => r.text)).toEqual([
+    'line-10',
+    'line-11',
+  ])
+  expect(result.current.earlierComplete).toBe(false)
 })
 
 // H1 regression (code review): the catch around a failing backfill page set

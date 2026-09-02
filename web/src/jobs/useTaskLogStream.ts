@@ -242,15 +242,22 @@ export function useTaskLogStream(
       }
       earlierInFlight = false
       // No AbortSignal on this request (apiFetch has no realm-mismatch
-      // fallback), so the response always arrives and this fence is the only
-      // control. Cancelled: the next run owns the state, touch nothing.
-      // Superseded: clear the flag so the control re-enables, then discard -
-      // prepending here would join a page onto a window it is not contiguous
-      // with. Guards: 'a stale earlier page is discarded', 'a discarded
-      // earlier page re-enables the control'.
+      // fallback), so the response always arrives and these guards are the only
+      // control. Cancelled: the next run owns the state, touch NOTHING - the
+      // loading flag included, since the succeeding run may have a click of its
+      // own outstanding. Superseded within this run: clear the flag so the
+      // control re-enables, then discard, because prepending here would join a
+      // page onto a window it is not contiguous with. Guards:
+      // 'a landing page after cancellation touches no cross-run state',
+      // 'a landing page after cancellation does not clear the next window
+      // loading flag', 'a superseded earlier page does not prepend into the
+      // recovered window', 'a discarded earlier page re-enables the control'.
       if (cancelled) return
+      if (myGen !== gen) {
+        setLoadingEarlier(false)
+        return
+      }
       setLoadingEarlier(false)
-      if (myGen !== gen) return
 
       setLogState(prependEntries(logState, page.items))
       if (page.prev_seq === 0) setEarlierComplete(true)
@@ -502,7 +509,10 @@ export function useTaskLogStream(
     return () => {
       cancelled = true
       gen++
-      loadEarlierRef.current = null
+      // Identity-checked teardown: only this run's own loader is cleared. A
+      // cleanup that runs after a later effect has already registered its
+      // loader would otherwise unregister a live one.
+      if (loadEarlierRef.current === loadEarlierPage) loadEarlierRef.current = null
       controller.abort()
       if (flushTimer !== null) clearTimeout(flushTimer)
       if (retryTimer !== null) clearTimeout(retryTimer)
@@ -515,8 +525,18 @@ export function useTaskLogStream(
   // minSeq > 0 is "we hold a page whose start we could walk back from". Without
   // it the control renders over "Loading logs..." between the effect starting
   // and its tail page landing, and a click would issue before_seq=0, a 400.
+  //
+  // The cap check is PREDICTIVE, against the window a click would produce. A
+  // check on the current length lets a click at MAX_LINES - 1 fetch a whole
+  // page, have capLines discard most of it from the front, set evicted and
+  // disable the control for good - the user pays a request for a few lines and
+  // loses the rest of the history. Guard: 'canLoadEarlier goes off before a
+  // page would overflow the line cap'.
   const canLoadEarlier =
-    !earlierComplete && !view.evicted && view.minSeq > 0 && view.lines.length < MAX_LINES
+    !earlierComplete &&
+    !view.evicted &&
+    view.minSeq > 0 &&
+    view.lines.length + BACKFILL_PAGE_SIZE <= MAX_LINES
 
   return {
     rows,
