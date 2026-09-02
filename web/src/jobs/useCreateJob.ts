@@ -2,11 +2,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { createJob } from './api'
 
 // Create-job mutation. Router-free by design: the page owns navigation in its
-// own onSuccess. On success it invalidates TWO keys:
+// own onSuccess. On success it invalidates:
 //   - ['jobs']       (bare prefix) so every list view ['jobs', sort, status,
 //     cursor] refetches and the new job appears.
 //   - ['job-stats']  MUST be explicit; it is decoupled from ['jobs'] (see
 //     queryKeyDecoupling.test.tsx), so ['jobs'] alone leaves the KPI strip stale.
+//   - ['job-lanes']  decoupled for the same reason, so the new job would not
+//     appear in the lanes view until the next poll.
 // There is NO ['job', id] to invalidate: the job is brand new and not yet cached.
 // No optimistic update.
 export function useCreateJob() {
@@ -17,6 +19,7 @@ export function useCreateJob() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['jobs'] })
       qc.invalidateQueries({ queryKey: ['job-stats'] })
+      qc.invalidateQueries({ queryKey: ['job-lanes'] })
     },
   })
 }

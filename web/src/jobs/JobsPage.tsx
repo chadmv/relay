@@ -107,7 +107,7 @@ export function JobsPage() {
           <span className="font-mono text-[10px] text-fg-mute">
             <span className={polling ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
           </span>
-          <div className="flex rounded-full border border-border p-0.5">
+          <div role="group" aria-label="Jobs view" className="flex rounded-full border border-border p-0.5">
             {(['table', 'lanes'] as View[]).map((v) => (
               <button
                 key={v}

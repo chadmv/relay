@@ -69,6 +69,10 @@ afterEach(() => localStorage.clear())
 test('the view switch persists the choice to localStorage and a remount restores it', async () => {
   const first = renderPage()
   await screen.findByRole('button', { name: 'Lanes' })
+  // The pair is one control, not two loose buttons: without a group name the two
+  // aria-pressed states are announced with nothing saying what they switch.
+  const viewSwitch = screen.getByRole('group', { name: 'Jobs view' })
+  expect(within(viewSwitch).getAllByRole('button')).toHaveLength(2)
   expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
   expect(screen.getByRole('button', { name: 'Lanes' })).toHaveAttribute('aria-pressed', 'false')
 

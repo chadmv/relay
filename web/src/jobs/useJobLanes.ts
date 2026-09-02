@@ -1,4 +1,4 @@
-import { keepPreviousData, useQueries } from '@tanstack/react-query'
+import { useQueries } from '@tanstack/react-query'
 import { listJobsByStatus, type Job, type JobStatus } from './api'
 import { LANE_LIMIT, LANE_ORDER } from './lanes'
 
@@ -7,9 +7,13 @@ import { LANE_LIMIT, LANE_ORDER } from './lanes'
 // a lane's state directly instead of driving a query to reach it.
 export interface LaneState {
   status: JobStatus
-  items: Job[]
-  // The status's all-time total, from the same response as the items.
-  total: number
+  // Readonly: this is the cached array, shared by every consumer of the lane.
+  // Sorting or pushing it in place would mutate the cache under React Query.
+  items: readonly Job[]
+  // The status's all-time total, from the same response as the items. null until
+  // a response exists - a lane that failed or has not answered has no count, and
+  // 0 beside a heading reads as "this status is empty".
+  total: number | null
   isLoading: boolean
   isFetching: boolean
   error: Error | null
@@ -31,7 +35,6 @@ export function useJobLanes(enabled: boolean, limit = LANE_LIMIT, intervalMs = 3
       queryFn: () => listJobsByStatus(status, limit),
       enabled,
       refetchInterval: intervalMs,
-      placeholderData: keepPreviousData,
     })),
   })
 
@@ -40,8 +43,8 @@ export function useJobLanes(enabled: boolean, limit = LANE_LIMIT, intervalMs = 3
     return {
       status,
       items: r.data?.items ?? [],
-      total: r.data?.total ?? 0,
-      isLoading: r.isLoading && !r.data,
+      total: r.data?.total ?? null,
+      isLoading: r.isLoading,
       isFetching: r.isFetching,
       // A failed poll that still has rows keeps showing them: the error surfaces
       // only when there is nothing else to render, matching the table view's own

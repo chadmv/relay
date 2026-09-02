@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import { expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { useCreateJob } from './useCreateJob'
+import { useJobLanes } from './useJobLanes'
 import { useJobStats } from './useJobStats'
 
 function makeWrapper(client: QueryClient) {
@@ -93,4 +94,33 @@ test('a failed create rejects and does not invalidate', async () => {
     result.current.mutateAsync({ name: 'x', tasks: [{ name: 't' }] }),
   ).rejects.toBeTruthy()
   expect(spy).not.toHaveBeenCalledWith({ queryKey: ['jobs'] })
+})
+
+test('the create refetches an ACTIVE lanes observer', async () => {
+  const client = newClient()
+  let laneCalls = 0
+  const bigInterval = 100_000 // never auto-refetch during the test
+  server.use(
+    http.get('/v1/jobs', () => {
+      laneCalls++
+      return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
+    }),
+    http.post('/v1/jobs', () =>
+      HttpResponse.json({ id: 'job-1', name: 'my-job', status: 'pending' }, { status: 201 }),
+    ),
+  )
+  const wrapper = makeWrapper(client)
+
+  // A REAL lanes observer, for the same reason the stats test mounts one: an
+  // invalidation only refetches queries something is watching, so a seeded cache
+  // entry would make the refetch un-observable. The lane keys sit outside the
+  // 'jobs' prefix, so the bare ['jobs'] invalidation does not reach them.
+  const lanes = renderHook(() => useJobLanes(true, 10, bigInterval), { wrapper })
+  await waitFor(() => expect(laneCalls).toBe(5))
+  expect(lanes.result.current).toHaveLength(5)
+
+  const create = renderHook(() => useCreateJob(), { wrapper })
+  await create.result.current.mutateAsync({ name: 'my-job', tasks: [{ name: 't' }] })
+
+  await waitFor(() => expect(laneCalls).toBe(10))
 })

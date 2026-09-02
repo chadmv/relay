@@ -139,3 +139,16 @@ test('a 409 retry rejects and invalidates nothing', async () => {
   await expect(result.current.retry.mutateAsync('failed')).rejects.toBeTruthy()
   expect(spy).not.toHaveBeenCalledWith({ queryKey: ['job', ID] })
 })
+
+test('a cancel invalidates the decoupled lanes key', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(http.delete(`/v1/jobs/${ID}`, () => HttpResponse.json({ id: ID, status: 'cancelled' })))
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.cancel.mutateAsync(false)
+
+  // The lane keys sit outside the 'jobs' prefix so a broad list invalidation
+  // cannot fan out into five requests, which means a cancel has to name them.
+  // A cancel is exactly the mutation that moves a job between two lanes.
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-lanes'] }))
+})

@@ -60,6 +60,12 @@ import (
 //     new status omitted from all of them is simply invisible in the dashboard
 //     counts; that is quiet rather than dangerous, but it is the site an operator
 //     notices first.
+//   - JOB_STATUSES (web/src/jobs/api.ts) - the SPA's copy of this vocabulary,
+//     which JobStatus, LANE_LABELS and LANE_CHIP_KEY all derive from. Go cannot
+//     see it and nothing on the TypeScript side compares the two, so a new
+//     status omitted there has no lane in the jobs board and no chip in the
+//     table: its jobs are simply absent from a view that looks complete. FAILS
+//     OPEN, and quietly.
 func TestJobsStatusVocabularyIsExactly(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
@@ -80,12 +86,15 @@ func TestJobsStatusVocabularyIsExactly(t *testing.T) {
 		"jobs.status vocabulary changed - read this test's comment before updating it. These sites slice this "+
 			"set: jobIsTerminal (internal/cli/logs.go), terminalStatuses (internal/mcp/wait.go), "+
 			"handleCancelJob's gate and handleRetryJob's switch (internal/api/jobs.go), and RecomputeJobStatus "+
-			"and GetJobStats (internal/store/query/jobs.sql). Revisit ALL OF THEM. THREE FAIL OPEN. A new "+
+			"and GetJobStats (internal/store/query/jobs.sql), and JOB_STATUSES (web/src/jobs/api.ts), from "+
+			"which the SPA's JobStatus, LANE_LABELS and LANE_CHIP_KEY all derive. Revisit ALL OF THEM. FOUR "+
+			"FAIL OPEN. A new "+
 			"TERMINAL status omitted from jobIsTerminal makes relay logs hang on a finished job until the "+
 			"connection drops and then report 'connection lost'; omitted from terminalStatuses it makes the MCP "+
 			"wait_for_job tool poll a finished job until its timeout; omitted from handleCancelJob's DENY-list "+
 			"it lets an operator cancel an already-finished job and run CancelJobTasks over its tasks. "+
-			"handleRetryJob fails closed into its 409 default. RecomputeJobStatus emits only running/done/"+
+			"omitted from JOB_STATUSES the SPA gives it no lane and no chip, so its jobs vanish from a view "+
+			"that looks complete. handleRetryJob fails closed into its 409 default. RecomputeJobStatus emits only running/done/"+
 			"failed, so the statuses a job can HOLD are strictly more than the ones it can PRODUCE - do not add "+
 			"one there by symmetry")
 }

@@ -24,16 +24,19 @@ function job(id: string, name: string): Job {
 }
 
 function lane(over: Partial<LaneState> & { status: LaneState['status'] }): LaneState {
-  return { items: [], total: 0, isLoading: false, isFetching: false, error: null, refetch: () => {}, ...over }
+  return { items: [], total: null, isLoading: false, isFetching: false, error: null, refetch: () => {}, ...over }
 }
 
+// Five lanes whose requests SUCCEEDED and returned nothing. total 0 is a real
+// answer and is stated here; the helper's own default is null, which is the
+// different state of having no answer at all.
 function fiveEmpty(): LaneState[] {
   return [
-    lane({ status: 'pending' }),
-    lane({ status: 'running' }),
-    lane({ status: 'done' }),
-    lane({ status: 'failed' }),
-    lane({ status: 'cancelled' }),
+    lane({ status: 'pending', total: 0 }),
+    lane({ status: 'running', total: 0 }),
+    lane({ status: 'done', total: 0 }),
+    lane({ status: 'failed', total: 0 }),
+    lane({ status: 'cancelled', total: 0 }),
   ]
 }
 
@@ -88,6 +91,9 @@ test('a failing lane renders its own error and Retry while the others keep their
 
   const failed = region('Failed')
   expect(within(failed).getByText('list jobs failed')).toBeInTheDocument()
+  // No response means no count. Rendering '0 total' beside the heading would
+  // state that this status is empty, which is a wrong answer, not a missing one.
+  expect(within(failed).queryByText('0 total')).toBeNull()
   await userEvent.click(within(failed).getByRole('button', { name: /retry/i }))
   expect(refetch).toHaveBeenCalledTimes(1)
 
@@ -109,6 +115,10 @@ test('a loading lane shows skeletons, not an empty message', () => {
   renderLanes(lanes)
   expect(within(region('Queued')).queryByText('No jobs')).toBeNull()
   expect(within(region('Running')).getByText('No jobs')).toBeInTheDocument()
+  // The control for the absence assertions elsewhere: the header is still there
+  // in the no-count state, so a passing queryByText('0 total') cannot be a header
+  // that rendered nothing at all.
+  expect(within(region('Queued')).getByText('-')).toBeInTheDocument()
 })
 
 test('overflow shows total minus shown, and is absent when nothing is hidden', async () => {
@@ -122,6 +132,16 @@ test('overflow shows total minus shown, and is absent when nothing is hidden', a
   expect(within(region('Running')).queryByRole('button', { name: /more/i })).toBeNull()
   await userEvent.click(more)
   expect(onShowAll).toHaveBeenCalledWith('pending')
+})
+
+test('a lane with a count but no rows offers no overflow control', () => {
+  const lanes = fiveEmpty()
+  // A list-then-count skew: the count arrived, the rows did not. Rendering
+  // 'No jobs' and '+ 3 more' together states two contradictory things at once.
+  lanes[0] = lane({ status: 'pending', items: [], total: 3 })
+  renderLanes(lanes)
+  expect(within(region('Queued')).getByText('No jobs')).toBeInTheDocument()
+  expect(within(region('Queued')).queryByRole('button', { name: /more/i })).toBeNull()
 })
 
 test('tab order is the scroll container, then each lane in document order', async () => {

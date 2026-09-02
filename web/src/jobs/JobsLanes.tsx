@@ -51,7 +51,7 @@ function JobLane({
 }) {
   const headingId = `lane-${lane.status}`
   const c = statusColor(lane.status)
-  const hidden = lane.total - lane.items.length
+  const hidden = lane.total === null ? 0 : lane.total - lane.items.length
   return (
     <GlassPanel as="section" role="region" aria-labelledby={headingId} className={LANE}>
       {/* The header renders in every state, so a lane never disappears from the
@@ -66,7 +66,7 @@ function JobLane({
         {/* "total" is spelled out because the KPI strip's DONE-24H sits just above
             and is a different, 24-hour-scoped number. This one is all-time. */}
         <span className={`flex-none font-mono text-[11px] ${c.text}`}>
-          {lane.total.toLocaleString()} total
+          {lane.total === null ? '-' : `${lane.total.toLocaleString()} total`}
         </span>
       </div>
 
@@ -104,7 +104,9 @@ function JobLane({
         </ul>
       )}
 
-      {hidden > 0 && (
+      {/* Gated on rows being shown as well as hidden: with a count but no rows,
+          "No jobs" and "+ 3 more" would render together and contradict. */}
+      {lane.items.length > 0 && hidden > 0 && (
         <button
           type="button"
           onClick={() => onShowAll(lane.status)}
