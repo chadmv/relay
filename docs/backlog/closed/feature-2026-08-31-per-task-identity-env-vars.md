@@ -1,7 +1,9 @@
 ---
 title: Inject per-task identity env vars (RELAY_JOB_ID, RELAY_TASK_ID, RELAY_JOB_URL) into task subprocesses
 type: feature
-status: open
+status: closed
+closed: 2026-09-01
+resolution: fixed
 created: 2026-08-31
 priority: medium
 source: asked whether a running job's process can discover its own relay job URL; it cannot
@@ -67,3 +69,35 @@ since the whole value of these variables is that a downstream notifier can trust
 - [internal/scheduler/dispatch.go](internal/scheduler/dispatch.go) - builds `DispatchTask`
 - [proto/relayv1/relay.proto](proto/relayv1/relay.proto) - `DispatchTask`, would gain the URL field
 - [web/src/app/router.tsx](web/src/app/router.tsx) - job detail and task log routes
+
+## Resolution
+Implemented AS AMENDED, not as written. The item named three variables and left the task-URL
+question open; four shipped: `RELAY_JOB_ID`, `RELAY_TASK_ID`, `RELAY_JOB_URL` and `RELAY_TASK_URL`.
+The ids need no configuration; the two URLs are rendered coordinator-side from a new fail-closed
+`RELAY_PUBLIC_URL` and carried on `DispatchTask.job_url` / `.task_url`.
+
+Three of the item's own claims were wrong and two changed the design. `RELAY_CORS_ORIGINS` is also
+URL-shaped and is parsed by `api.ParseCORSOrigins`, which is the fail-closed precedent this slice
+followed rather than the warn-and-default numeric parsers. The criterion "with it unconfigured, the
+variable is absent rather than wrong" was already green at HEAD and satisfiable by doing nothing; it
+was replaced by a conjunction. And `Runner.run` does not exist.
+
+**The item's central remedy was also wrong, and that took three fix rounds to establish.** It
+prescribed injecting the identity block last so a job spec could not override it. Ordering alone
+protects nothing on a coordinator with no `RELAY_PUBLIC_URL`, which is the default: there is no
+coordinator value to append, so a spec's `RELAY_JOB_URL` is the only occurrence and reaches the
+subprocess intact. The shipped control is a STRIP of the four reserved names from the spec's `env`
+and the workspace provider's env, plus a refusal of any spec key containing `=`, since such a key is
+a different string to a name predicate and the same variable to `os/exec`.
+
+Also fixed along the way, none of it anticipated by the item: `parsePublicURL` leaked an operator
+password to the boot log in eight shapes, so no rejection branch now renders anything derived from
+the input; and the host check accepted a port-only authority and non-ASCII hosts including the three
+code points browsers fold to `.`, which made a host reading as relay's own resolve under an
+attacker's registrable domain.
+
+Two follow-ups filed rather than folded in:
+[[feature-2026-09-01-strip-inherited-relay-identity-vars]] (the agent's own `os.Environ()` is still
+inherited unfiltered) and
+[[feature-2026-09-01-validate-env-keys-in-the-job-spec-pipeline]] (the `=` refusal is silent on the
+agent instead of a 400 at submit).
