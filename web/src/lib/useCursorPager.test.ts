@@ -6,9 +6,6 @@ import { useCursorPager } from './useCursorPager'
 // re-read after each act, so a second call inside the same act would close over
 // the pre-update render's state and silently test the wrong thing.
 
-// A real array of the stated length, never an object with a `length` property: the
-// hook reads items.length, and a fake that only carries `length` would let a
-// mutation reading some other property survive.
 function page(next_cursor: string, size: number) {
   return { next_cursor, items: Array.from({ length: size }, (_, i) => i) }
 }

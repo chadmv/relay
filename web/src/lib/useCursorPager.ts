@@ -8,8 +8,8 @@ import { useState } from 'react'
 // page. `offsets` holds the real row offset each of those pages started at, and
 // `startOffset` is the rows accumulated before the CURRENT page. startOffset grows by
 // the ACTUAL page size on each forward step rather than by a fixed limit, so a partial
-// final page keeps the footer's absolute range honest - that has already been shipped
-// as a bug twice, on jobs and on schedules:
+// final page keeps the footer's absolute range honest - a partial final page has
+// shipped a wrong footer range before:
 //   docs/backlog/closed/bug-2026-06-05-jobs-pagination-footer-absolute-range.md
 //   docs/backlog/closed/bug-2026-06-21-schedules-pagination-footer-absolute-range.md
 //
@@ -24,12 +24,9 @@ import { useState } from 'react'
 /**
  * One page of a cursor-paginated list response, as the pager needs to see it.
  *
- * `next_cursor` is REQUIRED, not optional. Every list response declares it, and with
- * the field required a response type that loses or renames it is a compile error at
- * the call site; with it optional the property would simply read `undefined`, `next`
- * would become a silent permanent no-op and the next button would be permanently
- * disabled with nothing red. `items` is read only for its length, and is `readonly`
- * because the pager does not own the array.
+ * `next_cursor` is REQUIRED, not optional, so a response type that drops or renames it
+ * fails to compile at the call site rather than reading `undefined`.
+ * The pager reads `items` only for its length and never mutates it.
  */
 export interface CursorPage {
   next_cursor: string
@@ -52,7 +49,7 @@ export interface CursorPager {
   /**
    * Advance one page, given the page being LEFT. A page whose `next_cursor` is falsy
    * (there is no further page) is a no-op, and so is `undefined`. The parameter
-   * admits `undefined` on purpose: every call site reads it off a possibly-undefined
+   * admits `undefined` on purpose: call sites read it off a possibly-undefined
    * query result, and the union makes tsc ENFORCE the falsy guard - delete the guard
    * and `page.next_cursor` stops compiling, so it is a compile error rather than an
    * untested regression. The offset advances by `page.items.length`, the ACTUAL rows
@@ -112,9 +109,7 @@ export function useCursorPager(): CursorPager {
     setOffsets([])
   }
 
-  // Not wrapped in useCallback on purpose. The surfaces this hook replaced declared
-  // these as plain function declarations in the component body, so a fresh identity
-  // per render IS the shipped behaviour. Memoizing here would be a change, not a
-  // cleanup.
+  // Not memoized: a fresh identity per render is intentional; memoizing would change
+  // effect dependencies for a consumer that captures these.
   return { cursor, startOffset, canPrev: stack.length > 0, next, prev, resetPaging }
 }

@@ -279,9 +279,9 @@ test('the footer thousands-separates a four-digit total', async () => {
 // separator, and assert nothing.
 //
 // The total is 1234 rather than 0 so the assertion discriminates on both axes at once.
-// A range with no zero-rows branch reads `0-0 of 1,234`, a zero-rows branch that does
-// not format reads `0 of 1234`, and today's output is `0-0 of 1234`. All three differ
-// from `0 of 1,234`, so a half-applied change cannot pass. A total of 0 would leave
+// A range with no zero-rows branch reads `0-0 of 1,234` and a zero-rows branch that
+// does not format reads `0 of 1234`, both distinct from `0 of 1,234`, so a
+// half-applied change cannot pass. A total of 0 would leave
 // the formatting half unpinned.
 test('the footer renders a bare count and no range when the page has no rows', async () => {
   server.use(
