@@ -1345,7 +1345,7 @@ test('prependEntries refuses after eviction', () => {
   s = appendEntries(s, [chunk(1, 'x\n'.repeat(MAX_LINES + 1))])
   expect(s.evicted).toBe(true)
   const before = s
-  s = prependEntries(s, [chunk(0.5 as number, 'earlier\n')])
+  s = prependEntries(s, [chunk(1, 'earlier\n')])
   // Reference equality: once drop-oldest has evicted the front of the window,
   // the first row is no longer the continuation of minSeq, so there is no seam
   // to join to and the control that produced this call is disabled anyway.
