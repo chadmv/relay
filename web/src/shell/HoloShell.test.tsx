@@ -392,13 +392,48 @@ test('a blur with a null relatedTarget does NOT close the nav panel', async () =
 // types on mount.
 test('no document keydown listener is registered while the nav panel is closed', async () => {
   const addSpy = vi.spyOn(document, 'addEventListener')
-  renderShell(true)
-  await screen.findByRole('link', { name: 'Admin' })
+  try {
+    renderShell(true)
+    await screen.findByRole('link', { name: 'Admin' })
 
-  const keydownRegistrations = addSpy.mock.calls.filter(([type]) => type === 'keydown')
+    const keydownRegistrations = addSpy.mock.calls.filter(([type]) => type === 'keydown')
 
-  expect(keydownRegistrations).toHaveLength(0)
-  addSpy.mockRestore()
+    expect(keydownRegistrations).toHaveLength(0)
+  } finally {
+    // vite.config.ts sets no restoreMocks, so a spy left installed by a failing
+    // assertion leaks into every later test in this file.
+    addSpy.mockRestore()
+  }
+})
+
+// The other half of that lifetime: what the open panel registers, the close must
+// remove. Counting adds against removes per type rather than asserting a bare zero,
+// because React registers document listeners of its own and the panel is closed
+// again by the time this asserts.
+test('the document listeners the open panel registers are removed when it closes', async () => {
+  const addSpy = vi.spyOn(document, 'addEventListener')
+  const removeSpy = vi.spyOn(document, 'removeEventListener')
+  try {
+    renderShell(true)
+    await screen.findByRole('link', { name: 'Admin' })
+    const toggle = screen.getByRole('button', { name: /menu/i })
+
+    await userEvent.click(toggle)
+    await userEvent.keyboard('{Escape}')
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    for (const type of ['mousedown', 'keydown']) {
+      const added = addSpy.mock.calls.filter(([t]) => t === type).length
+      const removed = removeSpy.mock.calls.filter(([t]) => t === type).length
+      // Positive control: a run that never registered anything would satisfy a
+      // bare added === removed.
+      expect(added, `${type} was never registered while the panel was open`).toBeGreaterThan(0)
+      expect(removed, `${type} adds and removes do not balance`).toBe(added)
+    }
+  } finally {
+    addSpy.mockRestore()
+    removeSpy.mockRestore()
+  }
 })
 
 // AC7. A disclosure containing navigation links, which is the case the menu role's
