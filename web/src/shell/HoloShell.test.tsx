@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { AuthProvider } from '../auth/AuthProvider'
 import { clearToken, setToken } from '../lib/token'
@@ -182,4 +182,83 @@ test('REGRESSION PIN: the collapsed nav is a full-bleed opaque panel below md an
   await userEvent.click(toggle)
   expect(panel).toHaveClass('flex')
   expect(panel).not.toHaveClass('hidden')
+})
+
+// AC2, half one. Escape is a DOCUMENT listener, not an onKeyDown on the panel:
+// focus leaves the panel through more routes than a panel-scoped handler sees, and
+// WebKit does not focus a <button> on click, so the panel can legitimately be open
+// with activeElement === <body>, where a panel-scoped handler would never fire.
+// Same reasoning as UserMenu's, which owns the sibling copy of this handler set.
+test('Escape closes the nav panel and returns focus to the toggle when focus was inside', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  await userEvent.click(toggle)
+  // Put focus GENUINELY inside the panel and assert it landed, before pressing
+  // Escape. Without this the test also passes against a component that focuses the
+  // toggle unconditionally - the implementation its partner below refutes.
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Jobs' }))
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  await userEvent.keyboard('{Escape}')
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(document.activeElement).toBe(toggle)
+  // Paired with the not.toHaveBeenCalled() below: the two use the SAME instrument,
+  // so one cannot pass by measuring something the other does not.
+  expect(toggleFocus).toHaveBeenCalled()
+  toggleFocus.mockRestore()
+})
+
+// AC2, half two. The containment check is what stops a close from STEALING focus a
+// user never put inside the panel.
+test('Escape does not steal focus when focus was outside the nav container', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  await userEvent.click(toggle)
+  // STANDS IN for WebKit, which does not focus a <button> on click. user-event
+  // always focuses the closest focusable on click, so jsdom cannot reach that state
+  // naturally; this blur() is a stand-in, not a reproduction. It fires focusout with
+  // a NULL relatedTarget, which the focusout rule added later deliberately ignores,
+  // so the panel is still open when Escape arrives.
+  ;(document.activeElement as HTMLElement).blur()
+  expect(document.activeElement).toBe(document.body)
+  expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+  await userEvent.keyboard('{Escape}')
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(document.activeElement).toBe(document.body)
+})
+
+// AC3. mousedown fires BEFORE the browser moves focus, so at that instant focus is
+// still inside the panel and a restore would steal it from the control being
+// pressed. Opposite answer to the Escape path above, purely because the event
+// ordering differs.
+//
+// Spying on the CALL rather than reading activeElement at the end, because the end
+// state cannot tell the two implementations apart: user-event moves focus to the
+// clicked control AFTER the mousedown listeners run, so a focus-stealing close is
+// overwritten a moment later and both versions finish with activeElement on the
+// chip. The steal is only observable as the call. The real-browser harm: press on
+// non-focusable page content while the panel is open, nothing else takes focus, and
+// the stolen focus is never overwritten.
+test('an outside mousedown closes the nav panel and never touches the toggle focus', async () => {
+  renderShell(true)
+  await screen.findByRole('link', { name: 'Admin' })
+  const toggle = screen.getByRole('button', { name: /menu/i })
+  const chip = screen.getByRole('button', { name: /me@studio\.dev/i })
+  await userEvent.click(toggle)
+  await userEvent.tab()
+  expect(document.activeElement).toBe(screen.getByRole('link', { name: 'Jobs' }))
+  const toggleFocus = vi.spyOn(toggle, 'focus')
+
+  await userEvent.click(chip)
+
+  expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  expect(toggleFocus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(chip)
+  toggleFocus.mockRestore()
 })

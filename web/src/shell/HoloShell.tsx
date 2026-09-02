@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
 import { Eyebrow } from '../components/holo'
@@ -23,6 +23,51 @@ export function HoloShell({ children }: { children: ReactNode }) {
   const navRef = useRef<HTMLElement>(null)
   const navToggleRef = useRef<HTMLButtonElement>(null)
   const navPanelId = useId()
+
+  // The open/close behaviour below is a transcription of shell/UserMenu.tsx's, not
+  // an invention. The two disclosures differ in mount model, alignment and item
+  // kinds, so nothing is shared yet; what they DO share is this handler set, and
+  // each site points at the other so the pair is discoverable from either end.
+  //
+  // Close AND return focus to the toggle, but ONLY if focus was inside the
+  // container: a mouse user in an engine that does not focus a <button> on click
+  // can legitimately have the panel open with activeElement on <body>, and must not
+  // have focus yanked onto a toggle it was never on. The containment check is read
+  // BEFORE setOpen.
+  function closeNavAndRestoreFocus() {
+    const focusWasInside = !!navRef.current && navRef.current.contains(document.activeElement)
+    setNavOpen(false)
+    if (focusWasInside) navToggleRef.current?.focus()
+  }
+
+  // Close WITHOUT touching focus, for the paths where the browser is already moving
+  // focus itself and a restore would fight the user.
+  function closeNav() {
+    setNavOpen(false)
+  }
+
+  useEffect(() => {
+    if (!navOpen) return
+    function onDown(e: MouseEvent) {
+      // closeNav(), NOT closeNavAndRestoreFocus(): mousedown fires before the
+      // browser moves focus to whatever was pressed, so a restore here would steal
+      // focus away from the control the user just clicked.
+      if (navRef.current && !navRef.current.contains(e.target as Node)) closeNav()
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') closeNavAndRestoreFocus()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+    // Both helpers are captured from the render that ran this effect and are
+    // deliberately not dependencies: they touch only refs and setNavOpen, all
+    // stable for the component's life, so a stale closure cannot observe stale
+    // state. Listing them would re-subscribe both listeners on every render.
+  }, [navOpen])
 
   async function onLogout() {
     await logout()
