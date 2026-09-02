@@ -1,13 +1,11 @@
-// The cast asserts on behalf of the caller. `field` is a plain string, so the returned
-// value is a member of S only while the field argument is drawn from the union S is
-// built over; a field that is not reports as S and is not. toggleSort.test.ts pins the
-// four transitions and the prefix case, not that property.
-export function toggleSort<S extends string>(field: string, current: S): S {
-  const next =
-    current.replace('-', '') === field
-      ? current.startsWith('-')
-        ? field
-        : `-${field}`
-      : field
+// The base name of a sort value: 'name' and '-name' both reduce to 'name'. Constraining
+// `field` to this is what makes a typo'd column a compile error at the call site rather
+// than an S-typed value that is not a member of S. S still infers from `current` alone.
+type SortFieldOf<S extends string> = S extends `-${infer F}` ? F : S
+
+// The cast asserts on behalf of the caller: the template literal widens to string, and
+// only the constraint above keeps the result inside S.
+export function toggleSort<S extends string>(field: SortFieldOf<S>, current: S): S {
+  const next = current === field ? `-${field}` : field
   return next as S
 }

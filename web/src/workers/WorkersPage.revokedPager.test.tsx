@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, expect, test } from 'vitest'
@@ -86,9 +86,14 @@ test('the decommissioned next button advances the revoked cursor, not the active
   await screen.findByText('gone-0')
 
   await userEvent.click(screen.getByRole('button', { name: /next/i }))
-  await screen.findByText('gone-50')
 
-  expect(cursors).toContain('REVOKED_CUR')
+  // The cursor is asserted BEFORE the row text. Asserting the rows first makes a
+  // wrong-page substitution surface as a findBy timeout with a DOM dump, and the
+  // cursor assertion below never runs - so the failure would not name its own cause.
+  await waitFor(() => expect(cursors).toHaveLength(2))
+  expect(cursors[1]).toBe('REVOKED_CUR')
   expect(cursors).not.toContain('ACTIVE_CUR')
+
+  await screen.findByText('gone-50')
   expect(await screen.findByText(/51-63 of 63/i)).toBeInTheDocument()
 })
