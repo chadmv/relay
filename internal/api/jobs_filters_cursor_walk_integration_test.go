@@ -29,17 +29,25 @@ func TestListJobs_QFilterCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 	bob := createTestUser(t, q, "Bob", "bob@walkq.test", false)
 	token := createTestToken(t, q, alice.ID)
 
+	// Every third row fails the predicate, so excluded rows sit BETWEEN kept
+	// ones and the page boundary at 20 lands beside one. Seeding all the
+	// excluded rows contiguously after the kept ones puts no boundary next to
+	// an exclusion, which is the case a keyset that mishandles a skipped row
+	// would survive.
 	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-	const matching = 45
-	const noise = 15
-	wantIDs := make(map[string]bool, matching)
-	for i := 0; i < matching; i++ {
-		id := insertJobAt(t, pool, alice.ID, "walkq-target-"+padSeq(i), base.Add(time.Duration(i)*time.Minute))
+	const total = 60
+	wantIDs := make(map[string]bool)
+	for i := 0; i < total; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if i%3 == 2 {
+			insertJobAt(t, pool, bob.ID, "no-match-"+padSeq(i), at)
+			continue
+		}
+		id := insertJobAt(t, pool, alice.ID, "walkq-target-"+padSeq(i), at)
 		wantIDs[uuidString(id)] = true
 	}
-	for i := 0; i < noise; i++ {
-		insertJobAt(t, pool, bob.ID, "no-match-"+padSeq(i), base.Add(time.Duration(matching+i)*time.Minute))
-	}
+	matching := len(wantIDs)
+	require.Greater(t, matching, 20, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
@@ -81,17 +89,22 @@ func TestListJobs_MineFilterCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 	bob := createTestUser(t, q, "Bob", "bob@walkmine.test", false)
 	token := createTestToken(t, q, alice.ID)
 
+	// Every third row belongs to bob, so the page boundary at 20 lands beside a
+	// row the predicate excludes rather than after a contiguous run of them.
 	base := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
-	const mine = 45
-	const others = 15
-	wantIDs := make(map[string]bool, mine)
-	for i := 0; i < mine; i++ {
-		id := insertJobAt(t, pool, alice.ID, "mine-"+padSeq(i), base.Add(time.Duration(i)*time.Minute))
+	const total = 60
+	wantIDs := make(map[string]bool)
+	for i := 0; i < total; i++ {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if i%3 == 2 {
+			insertJobAt(t, pool, bob.ID, "theirs-"+padSeq(i), at)
+			continue
+		}
+		id := insertJobAt(t, pool, alice.ID, "mine-"+padSeq(i), at)
 		wantIDs[uuidString(id)] = true
 	}
-	for i := 0; i < others; i++ {
-		insertJobAt(t, pool, bob.ID, "theirs-"+padSeq(i), base.Add(time.Duration(mine+i)*time.Minute))
-	}
+	mine := len(wantIDs)
+	require.Greater(t, mine, 20, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
@@ -132,19 +145,26 @@ func TestListJobs_WindowCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 	user := createTestUser(t, q, "Wendy", "wendy@walkwindow.test", false)
 	token := createTestToken(t, q, user.ID)
 
+	// Every third row is placed AFTER the window rather than inside it, and the
+	// out-of-window rows are interleaved in created_at order with the in-window
+	// ones, so the page boundary at 20 lands beside an excluded row. The two
+	// ranges alternate rather than forming two contiguous blocks.
 	since := time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC)
 	until := since.Add(60 * time.Minute)
-	const inWindow = 45
-	const outside = 15
-	wantIDs := make(map[string]bool, inWindow)
-	for i := 0; i < inWindow; i++ {
-		at := since.Add(time.Duration(i) * time.Minute * 60 / inWindow)
+	const total = 60
+	wantIDs := make(map[string]bool)
+	for i := 0; i < total; i++ {
+		if i%3 == 2 {
+			// Outside [since, until): placed past the upper bound.
+			insertJobAt(t, pool, user.ID, "outwin-"+padSeq(i), until.Add(time.Duration(i+1)*time.Minute))
+			continue
+		}
+		at := since.Add(time.Duration(i) * time.Minute)
 		id := insertJobAt(t, pool, user.ID, "inwin-"+padSeq(i), at)
 		wantIDs[uuidString(id)] = true
 	}
-	for i := 0; i < outside; i++ {
-		insertJobAt(t, pool, user.ID, "outwin-"+padSeq(i), until.Add(time.Duration(i+1)*time.Minute))
-	}
+	inWindow := len(wantIDs)
+	require.Greater(t, inWindow, 20, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
