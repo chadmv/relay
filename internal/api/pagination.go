@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,6 +224,13 @@ type pageParams struct {
 	Cursor   cursor
 	Sort     string      // canonical sort string ("name" / "-name" / "-created_at")
 	SortKind SortKeyKind // value type for the active sort key
+
+	// Query is the request's decoded query string, parsed once here.
+	// Handlers must read their own parameters from this rather than
+	// calling r.URL.Query() again: that method discards percent-decoding
+	// errors, so a second parse can disagree with the one that was
+	// validated.
+	Query url.Values
 }
 
 // CursorTs returns the cursor timestamp as a pgtype.Timestamptz. The Valid
@@ -236,10 +244,39 @@ func (p pageParams) CursorTs() pgtype.Timestamptz {
 // invalid input it writes the 400 response itself and returns ok=false.
 // Defaults: limit=50, sort=spec.Default. Range: limit [1, 200]. Bad cursor
 // or sort -> 400.
+// rejectRepeatedParams writes a 400 and returns false if any named
+// parameter appears more than once. url.Values.Get returns the first of a
+// repeated parameter silently, and a silently wrong filter or page bound
+// renders a list that looks authoritative.
+func rejectRepeatedParams(w http.ResponseWriter, qs url.Values, names ...string) bool {
+	for _, name := range names {
+		if len(qs[name]) > 1 {
+			writeError(w, http.StatusBadRequest,
+				`query parameter "`+name+`" must appear at most once`)
+			return false
+		}
+	}
+	return true
+}
+
 func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParams, bool) {
 	pp := pageParams{Limit: defaultLimit}
 
-	if s := r.URL.Query().Get("limit"); s != "" {
+	// Parsed here rather than through r.URL.Query(), which drops the error
+	// and returns whatever it could salvage: ?q=%zz became an absent filter
+	// and listed every row, and a=1&q=%zz was salvaged into a single-valued
+	// q that slipped past the arity guard.
+	qs, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed query string")
+		return pageParams{}, false
+	}
+	if !rejectRepeatedParams(w, qs, "limit", "sort", "cursor") {
+		return pageParams{}, false
+	}
+	pp.Query = qs
+
+	if s := qs.Get("limit"); s != "" {
 		n, err := strconv.ParseInt(s, 10, 32)
 		if err != nil || n < 1 || n > int64(maxLimit) {
 			writeError(w, http.StatusBadRequest, "invalid limit")
@@ -248,7 +285,7 @@ func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParam
 		pp.Limit = int32(n)
 	}
 
-	sortRaw := r.URL.Query().Get("sort")
+	sortRaw := qs.Get("sort")
 	canon, kind, err := parseSort(sortRaw, spec)
 	if err != nil {
 		var uke *unsupportedSortKeyError
@@ -264,7 +301,7 @@ func parsePage(w http.ResponseWriter, r *http.Request, spec SortSpec) (pageParam
 	pp.Sort = canon
 	pp.SortKind = kind
 
-	c, err := decodeCursor(r.URL.Query().Get("cursor"))
+	c, err := decodeCursor(qs.Get("cursor"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid cursor")
 		return pageParams{}, false

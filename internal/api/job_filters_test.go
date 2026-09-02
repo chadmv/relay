@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +25,10 @@ func testAuthUser() AuthUser {
 // body. rawQuery is used verbatim so a repeated parameter can be expressed.
 func callParseJobFilters(t *testing.T, rawQuery string, u AuthUser) (jobFilters, bool, int, string) {
 	t.Helper()
-	r := httptest.NewRequest("GET", "/v1/jobs?"+rawQuery, nil)
+	qs, err := url.ParseQuery(rawQuery)
+	require.NoError(t, err, "rawQuery must be decodable; malformed input is parsePage's case")
 	rec := httptest.NewRecorder()
-	f, ok := parseJobFilters(rec, r, u)
+	f, ok := parseJobFilters(rec, qs, u)
 	var body struct {
 		Error string `json:"error"`
 	}
@@ -60,10 +62,6 @@ func TestParseJobFilters_ExactErrorBodies(t *testing.T) {
 		{"q not valid UTF-8", "q=%FF%FE", "q is not valid UTF-8"},
 		{"q is a lone NUL", "q=%00", "q is not valid UTF-8"},
 		{"q carries an embedded NUL", "q=abc%00", "q is not valid UTF-8"},
-		{"q repeated", "q=a&q=b", `query parameter "q" must appear at most once`},
-		{"mine repeated", "mine=true&mine=false", `query parameter "mine" must appear at most once`},
-		{"since repeated", "since=2026-09-02T00:00:00Z&since=2026-09-03T00:00:00Z", `query parameter "since" must appear at most once`},
-		{"until repeated", "until=2026-09-02T00:00:00Z&until=2026-09-03T00:00:00Z", `query parameter "until" must appear at most once`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,4 +154,30 @@ func TestParseJobFilters_AcceptsOffsetsAndFractionalSeconds(t *testing.T) {
 	want, err := time.Parse(time.RFC3339Nano, "2026-09-02T01:00:00.123456+02:00")
 	require.NoError(t, err)
 	assert.True(t, f.Since.Time.Equal(want))
+}
+
+// Arity is enforced by rejectRepeatedParams over jobsListArityParams, the
+// list handleListJobs itself passes, so a parameter dropped from that list
+// reddens this rather than silently taking the first value. status is the
+// case that had no guard before: only the four filters were covered.
+func TestJobsListArity_EveryHandlerParameterIsRejectedWhenRepeated(t *testing.T) {
+	require.ElementsMatch(t,
+		[]string{"status", "scheduled_job_id", "q", "mine", "since", "until"},
+		jobsListArityParams,
+		"every parameter handleListJobs reads itself must be arity-checked")
+
+	for _, name := range jobsListArityParams {
+		t.Run(name, func(t *testing.T) {
+			qs := url.Values{name: {"a", "b"}}
+			rec := httptest.NewRecorder()
+			ok := rejectRepeatedParams(rec, qs, jobsListArityParams...)
+			require.False(t, ok)
+			assert.Equal(t, 400, rec.Code)
+			var body struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, `query parameter "`+name+`" must appear at most once`, body.Error)
+		})
+	}
 }

@@ -1437,7 +1437,7 @@ There is no parameter that selects another user's jobs. `mine=true` resolves the
 
 `total` counts every row matching every active filter, so the page footer's denominator always belongs to the same set as the rows.
 
-**Errors.** All are `400` with the body `{"error": "<message>"}`:
+**Errors.** These are `400` with the body `{"error": "<message>"}`. The arity rule covers every parameter this endpoint recognises - `limit`, `sort`, `cursor`, `status`, `scheduled_job_id` and the four above - not only the four filters.
 
 | Condition | Message |
 |-----------|---------|
@@ -1447,7 +1447,8 @@ There is no parameter that selects another user's jobs. `mine=true` resolves the
 | `until` is earlier than `since` | `until is earlier than since` |
 | `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
 | `q` is not valid UTF-8 | `q is not valid UTF-8` |
-| any of the four appears more than once | `query parameter "<name>" must appear at most once` |
+| any parameter this endpoint reads appears more than once | `query parameter "<name>" must appear at most once` |
+| the query string is not decodable (a bad `%` escape) | `malformed query string` |
 
 **Drop the cursor when a filter changes.** A cursor carries no record of the filters that were active when it was issued and the server does not reject a mismatched one - the same requirement that already applies to `?status=`. Filter correctness is nevertheless cursor-independent: a stale cursor can start a page at a surprising position but can never return a row that fails the current filters.
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,30 +28,22 @@ type jobFilters struct {
 // single request's scan cost.
 const maxJobFilterQRunes = 200
 
-// jobFilterParams are the four query parameters parseJobFilters owns. Nothing
-// else may read them; a second reader is a second parser that can disagree.
-var jobFilterParams = [...]string{"q", "mine", "since", "until"}
+// jobFilterParams are the four query parameters parseJobFilters reads.
+// handleListJobs passes them to rejectRepeatedParams before calling in.
+var jobFilterParams = []string{"q", "mine", "since", "until"}
 
-// parseJobFilters is the only reader of ?q=, ?mine=, ?since= and ?until=. On
+// parseJobFilters produces the four optional GET /v1/jobs predicates. On
 // invalid input it writes the response itself and returns ok=false. The caller
 // spreads the result into every list and count Params struct on its path; a
 // call site that omits a field disables that filter for its arm alone, with no
 // error.
 //
-// Each parameter is read with Query()[name] rather than Query().Get(name):
-// Get returns the first of a repeated parameter silently, and a silently wrong
-// filter renders a list that looks authoritative.
-func parseJobFilters(w http.ResponseWriter, r *http.Request, u AuthUser) (jobFilters, bool) {
+// qs is the query string parsePage already parsed and arity-checked. Taking
+// it as an argument rather than re-reading r.URL.Query() keeps one parse per
+// request: r.URL.Query() discards percent-decoding errors, so a second parse
+// can disagree with the one that was validated.
+func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilters, bool) {
 	var f jobFilters
-	qs := r.URL.Query()
-
-	for _, name := range jobFilterParams {
-		if len(qs[name]) > 1 {
-			writeError(w, http.StatusBadRequest,
-				`query parameter "`+name+`" must appear at most once`)
-			return jobFilters{}, false
-		}
-	}
 
 	if raw := qs.Get("q"); raw != "" {
 		// Postgres text cannot hold a NUL byte and rejects one with SQLSTATE

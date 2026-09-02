@@ -409,6 +409,11 @@ func jobRowToResponseByUpdatedAsc(r store.ListJobsWithEmailPageByUpdatedAscRow) 
 	return resp
 }
 
+// jobsListArityParams are the parameters handleListJobs reads itself.
+// parsePage covers limit, sort and cursor, so between them every parameter
+// this endpoint recognises is arity-checked.
+var jobsListArityParams = append([]string{"status", "scheduled_job_id"}, jobFilterParams...)
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -417,8 +422,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hasSort := r.URL.Query().Get("sort") != ""
-	hasFilter := r.URL.Query().Get("status") != "" || r.URL.Query().Get("scheduled_job_id") != ""
+	if !rejectRepeatedParams(w, pp.Query, jobsListArityParams...) {
+		return
+	}
+
+	hasSort := pp.Query.Get("sort") != ""
+	hasFilter := pp.Query.Get("status") != "" || pp.Query.Get("scheduled_job_id") != ""
 	if hasSort && hasFilter {
 		writeError(w, http.StatusBadRequest, "sort not supported on filtered list variant; remove the filter or remove the sort")
 		return
@@ -430,13 +439,13 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// sort variant as optional arguments and never touch ORDER BY, so they
 	// cannot create the ordering gap the guard exists to close.
 	u, _ := UserFromCtx(ctx)
-	filters, ok := parseJobFilters(w, r, u)
+	filters, ok := parseJobFilters(w, pp.Query, u)
 	if !ok {
 		return
 	}
 
 	// Branch 1: ?scheduled_job_id=<uuid>
-	if schedIDStr := r.URL.Query().Get("scheduled_job_id"); schedIDStr != "" {
+	if schedIDStr := pp.Query.Get("scheduled_job_id"); schedIDStr != "" {
 		schedID, err := parseUUID(schedIDStr)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid scheduled_job_id")
@@ -472,7 +481,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Branch 2: ?status=<status>
-	if status := r.URL.Query().Get("status"); status != "" {
+	if status := pp.Query.Get("status"); status != "" {
 		rows, err := s.q.ListJobsByStatusWithEmailPage(ctx, store.ListJobsByStatusWithEmailPageParams{
 			Status:    status,
 			CursorSet: pp.Cursor.Set,
