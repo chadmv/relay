@@ -4,6 +4,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -187,4 +188,147 @@ func TestListWorkerTasks_CarriesTheJobName(t *testing.T) {
 	assert.Equal(t, "nightly-render", byName["shot-1"])
 	assert.Equal(t, "nightly-render", byName["shot-2"])
 	assert.Equal(t, "smoke", byName["smoke-1"])
+}
+
+// Order is assigned_at DESC with id DESC as the tiebreak. uuid comparison in
+// Postgres is bytewise, and the canonical text form is those bytes in hex, so
+// sorting the two ids as strings agrees with the SQL.
+func TestListWorkerTasks_OrdersByAssignedAtDescThenIDDesc(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Ord", "order@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	newest := base.Add(2 * time.Hour)
+	middle := base.Add(time.Hour)
+
+	seedWorkerTask(t, pool, jobID, workerID, "newest", "running", &newest, &newest)
+	seedWorkerTask(t, pool, jobID, workerID, "middle", "running", &middle, &middle)
+	tieA := seedWorkerTask(t, pool, jobID, workerID, "tie-a", "dispatched", &base, nil)
+	tieB := seedWorkerTask(t, pool, jobID, workerID, "tie-b", "dispatched", &base, nil)
+
+	code, p := getWorkerTasks(t, srv, token, workerID, "")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, p.Items, 4)
+	assert.Equal(t, []string{"newest", "middle"}, names(p)[:2])
+
+	firstTie, secondTie := "tie-a", "tie-b"
+	if tieB > tieA {
+		firstTie, secondTie = "tie-b", "tie-a"
+	}
+	assert.Equal(t, []string{firstTie, secondTie}, names(p)[2:],
+		"equal assigned_at must break on id DESC")
+}
+
+// Crosses a REAL page boundary: limit=1 over three rows, following next_cursor,
+// asserting the union is the full set with no duplicate and no skip.
+func TestListWorkerTasks_PagesAcrossARealBoundary(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Pg", "paging@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	for i, n := range []string{"a", "b", "c"} {
+		ts := base.Add(time.Duration(i) * time.Hour)
+		seedWorkerTask(t, pool, jobID, workerID, n, "running", &ts, &ts)
+	}
+
+	var seen []string
+	cursor := ""
+	for i := 0; i < 4; i++ {
+		query := "limit=1"
+		if cursor != "" {
+			query += "&cursor=" + cursor
+		}
+		code, p := getWorkerTasks(t, srv, token, workerID, query)
+		require.Equal(t, http.StatusOK, code)
+		seen = append(seen, names(p)...)
+		if p.NextCursor == "" {
+			break
+		}
+		cursor = p.NextCursor
+	}
+	assert.Equal(t, []string{"c", "b", "a"}, seen, "no duplicate and no skip across the boundary")
+}
+
+// total is the ACTIVE count, on every page: not the worker's total task count
+// and not a table count.
+func TestListWorkerTasks_TotalIsTheActiveCount(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Tot", "total@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	seedWorkerTask(t, pool, jobID, workerID, "live-1", "running", &base, &base)
+	seedWorkerTask(t, pool, jobID, workerID, "live-2", "dispatched", &base, nil)
+	for i, status := range []string{"done", "failed", "timed_out"} {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		seedWorkerTask(t, pool, jobID, workerID, "old-"+status, status, &ts, &ts)
+	}
+
+	code, p := getWorkerTasks(t, srv, token, workerID, "limit=1")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, p.Items, 1)
+	assert.EqualValues(t, 2, p.Total, "total is the active count, not the row count of this page")
+
+	code, p = getWorkerTasks(t, srv, token, workerID, fmt.Sprintf("limit=1&cursor=%s", p.NextCursor))
+	require.Equal(t, http.StatusOK, code)
+	assert.EqualValues(t, 2, p.Total, "and it is the same on every page")
+}
+
+// assignment_epoch is a fence token and appears nowhere. Decoded into
+// map[string]any so this sees the WIRE, not the struct definition.
+func TestListWorkerTasks_DoesNotExposeAssignmentEpoch(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Ep", "epoch@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	seedWorkerTask(t, pool, jobID, workerID, "shot-1", "running", &at, &at)
+
+	req := httptest.NewRequest("GET", "/v1/workers/"+workerID+"/tasks", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+	assert.NotContains(t, envelope, "assignment_epoch")
+	items, ok := envelope["items"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1, "control: the assertion below must have a row to inspect")
+	for _, raw := range items {
+		item := raw.(map[string]any)
+		assert.NotContains(t, item, "assignment_epoch")
+		assert.Contains(t, item, "id", "control: the item decoded into real keys")
+	}
+}
+
+// A dispatched row mid-workspace-sync has no started_at. It must still be
+// returned, and the key must be ABSENT rather than a zero timestamp.
+func TestListWorkerTasks_ADispatchedTaskWithNoStartTimeIsReturned(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Sync", "sync@tasks-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	workerID := seedWorker(t, pool, "rig-a", "online", nil)
+	jobID := seedJob(t, pool, user, "nightly-render")
+
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	seedWorkerTask(t, pool, jobID, workerID, "sync-depot", "dispatched", &at, nil)
+
+	code, p := getWorkerTasks(t, srv, token, workerID, "")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, p.Items, 1)
+	assert.Equal(t, "sync-depot", p.Items[0]["name"])
+	assert.NotContains(t, p.Items[0], "started_at", "an absent start time must be absent, not a zero time")
+	assert.Contains(t, p.Items[0], "assigned_at", "control: the sibling timestamp IS present")
 }
