@@ -157,3 +157,88 @@ func TestTaskLogs_LimitClamping(t *testing.T) {
 			"q=%s: expected 'limit' in error body, got: %s", query, rr.Body.String())
 	}
 }
+
+// logsPageResp is a hand-written decode of the logs envelope. Its json tags are
+// deliberately independent of anything in package api: a fixture or decoder
+// derived from the production type agrees with it by construction and can never
+// detect drift.
+type logsPageResp struct {
+	Items []struct {
+		Seq       int64  `json:"seq"`
+		Stream    string `json:"stream"`
+		Content   string `json:"content"`
+		CreatedAt string `json:"created_at"`
+	} `json:"items"`
+	NextSeq int64 `json:"next_seq"`
+	PrevSeq int64 `json:"prev_seq"`
+	Total   int64 `json:"total"`
+}
+
+func getLogs(t *testing.T, srv *api.Server, token, taskID, query string) (*httptest.ResponseRecorder, logsPageResp) {
+	t.Helper()
+	req := httptest.NewRequest("GET", fmt.Sprintf("/v1/tasks/%s/logs?%s", taskID, query), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	var page logsPageResp
+	if rr.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &page), "body=%s", rr.Body.String())
+	}
+	return rr, page
+}
+
+func logContents(p logsPageResp) []string {
+	out := make([]string, len(p.Items))
+	for i, it := range p.Items {
+		out[i] = it.Content
+	}
+	return out
+}
+
+func TestTaskLogs_DescendingTailReturnsTheNewestPageInAscendingOrder(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Carol", "carol@logs-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID := submitTrivialJob(t, srv, token)
+	taskID := firstTaskID(t, srv, token, jobID)
+	for i := 0; i < 5; i++ {
+		seedLogRow(t, pool, taskID, "stdout", fmt.Sprintf("line %d", i))
+	}
+
+	rr, page := getLogs(t, srv, token, taskID, "order=desc&limit=2")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	// The exact ordered slice, not a length: order=desc selects the NEWEST rows
+	// and the items inside the page are ASCENDING. A page returned descending
+	// would still be length 2 and would still contain the right rows.
+	require.Equal(t, []string{"line 3", "line 4"}, logContents(page))
+	require.Equal(t, int64(5), page.Total)
+}
+
+func TestTaskLogs_CursorsAreDirectionExclusive(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Dan", "dan@logs-test.com", false)
+	token := createTestToken(t, q, user.ID)
+	jobID := submitTrivialJob(t, srv, token)
+	taskID := firstTaskID(t, srv, token, jobID)
+	for i := 0; i < 5; i++ {
+		seedLogRow(t, pool, taskID, "stdout", fmt.Sprintf("line %d", i))
+	}
+
+	// Descending, full page: prev_seq is the page's LOWEST seq, next_seq is 0.
+	_, desc := getLogs(t, srv, token, taskID, "order=desc&limit=2")
+	require.Len(t, desc.Items, 2)
+	require.Equal(t, desc.Items[0].Seq, desc.PrevSeq)
+	require.Equal(t, int64(0), desc.NextSeq)
+
+	// Descending, short page: the beginning of the log has been reached.
+	_, drained := getLogs(t, srv, token, taskID, "order=desc&limit=200")
+	require.Len(t, drained.Items, 5)
+	require.Equal(t, int64(0), drained.PrevSeq)
+	require.Equal(t, int64(0), drained.NextSeq)
+
+	// Ascending is unchanged and zeroes the descending cursor.
+	_, asc := getLogs(t, srv, token, taskID, "limit=2")
+	require.Equal(t, []string{"line 0", "line 1"}, logContents(asc))
+	require.Equal(t, asc.Items[1].Seq, asc.NextSeq)
+	require.Equal(t, int64(0), asc.PrevSeq)
+}
