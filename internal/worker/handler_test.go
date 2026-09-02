@@ -753,7 +753,7 @@ func TestRegisterAndDispatch_SourceTaskHeldOnProviderlessWorker(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run one dispatch cycle.
-	disp := scheduler.NewDispatcher(q, registry, broker)
+	disp := scheduler.NewDispatcher(q, registry, broker, "")
 	disp.RunOnce(ctx)
 
 	// The source-bearing task on a providerless worker must stay pending, not
@@ -820,7 +820,7 @@ func TestRegisterAndDispatch_CapableWorkerReDispatchesHeldSourceTask(t *testing.
 	require.Equal(t, int32(0), initial.AssignmentEpoch)
 
 	// Wire the dispatcher now (after task creation so RunOnce sees it).
-	disp = scheduler.NewDispatcher(q, registry, broker)
+	disp = scheduler.NewDispatcher(q, registry, broker, "")
 
 	// Seed a capable worker with an agent token.
 	capableID, capableToken := seedWorkerWithAgentToken(t, ctx, q, "capable-01")

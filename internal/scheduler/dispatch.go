@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"relay/internal/api"
@@ -20,19 +21,30 @@ import (
 
 // Dispatcher runs the scheduling loop, matching eligible tasks to available workers.
 type Dispatcher struct {
-	q        *store.Queries
-	registry *worker.Registry
-	broker   *events.Broker
-	trigger  chan struct{} // buffered 1, coalesced
+	q             *store.Queries
+	registry      *worker.Registry
+	broker        *events.Broker
+	publicBaseURL string        // "" disables the rendered URLs; see jobURL/taskURL
+	trigger       chan struct{} // buffered 1, coalesced
 }
 
-// NewDispatcher returns a ready-to-use Dispatcher.
-func NewDispatcher(q *store.Queries, r *worker.Registry, b *events.Broker) *Dispatcher {
+// NewDispatcher returns a ready-to-use Dispatcher. publicBaseURL is the
+// normalized RELAY_PUBLIC_URL, or "" when the operator has not set one.
+//
+// It is a parameter rather than a settable field because a caller that forgets
+// to set it produces silently absent URLs - indistinguishable from an
+// unconfigured server, with every test green.
+//
+// The trailing slash is trimmed HERE because jobURL and taskURL concatenate
+// with no separator logic and the guarantee they rely on is produced in
+// package main, which this package cannot reference.
+func NewDispatcher(q *store.Queries, r *worker.Registry, b *events.Broker, publicBaseURL string) *Dispatcher {
 	return &Dispatcher{
-		q:        q,
-		registry: r,
-		broker:   b,
-		trigger:  make(chan struct{}, 1),
+		q:             q,
+		registry:      r,
+		broker:        b,
+		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
+		trigger:       make(chan struct{}, 1),
 	}
 }
 
@@ -302,9 +314,17 @@ func (d *Dispatcher) sendTask(ctx context.Context, task store.Task, w store.Work
 	for _, argv := range commandsArgv {
 		dtCommands = append(dtCommands, &relayv1.CommandLine{Argv: argv})
 	}
+	// Both ids come off `claimed` - the RETURNING row of the fenced
+	// ClaimTaskForWorker - and the URLs are rendered from those same two locals.
+	// One row, so a link cannot name a different row than the dispatch it
+	// travels on.
+	jobIDStr := uuidStr(claimed.JobID)
+	taskIDStr := uuidStr(claimed.ID)
 	dt := &relayv1.DispatchTask{
-		TaskId:         uuidStr(claimed.ID),
-		JobId:          uuidStr(claimed.JobID),
+		TaskId:         taskIDStr,
+		JobId:          jobIDStr,
+		JobUrl:         jobURL(d.publicBaseURL, jobIDStr),
+		TaskUrl:        taskURL(d.publicBaseURL, jobIDStr, taskIDStr),
 		Commands:       dtCommands,
 		Env:            env,
 		TimeoutSeconds: timeoutSecs,

@@ -270,6 +270,7 @@ All configuration is via environment variables:
 | `RELAY_DATABASE_URL` | `postgres://relay:relay@localhost:5432/relay?sslmode=disable` | PostgreSQL connection string |
 | `RELAY_HTTP_ADDR` | `:8080` | HTTP server bind address |
 | `RELAY_GRPC_ADDR` | `:9090` | gRPC server bind address |
+| `RELAY_PUBLIC_URL` | _(empty)_ | Browser-facing base URL of the relay web UI, e.g. `https://relay.example.com`, or `https://ops.example.com/relay` behind a reverse proxy that strips a path prefix. The coordinator renders `RELAY_JOB_URL` and `RELAY_TASK_URL` from it into every task subprocess (see **relay-agent -> Task subprocess environment**). Unset means those two variables are simply absent - relay never guesses an origin, and `RELAY_JOB_ID` / `RELAY_TASK_ID` are injected either way. **An invalid value refuses to boot** rather than warning and disabling: a warn-and-disable typo would be indistinguishable from never having set the variable, and there is no defensible default origin to fall back to. Rejected: any scheme other than `http`/`https`, a missing host (`https://:8080` included - a port is not a host), a non-ASCII host (supply the punycode `xn--` form; the characters browsers fold to `.` before resolving a name make `https://relay.example.com<ideographic full stop>evil.com` read as relay's host), a port outside 1-65535, an authority ending in a bare `:`, userinfo (`https://user:pass@host`), a query string, a fragment, and any embedded whitespace or control character. Surrounding whitespace and trailing slashes are trimmed. The effective value is printed at startup on every boot, which is what an operator has instead of a validator for a value that parses perfectly and names the wrong host. A path prefix here is a string, not a route rewrite: relay serves its SPA from its own routes, so `https://ops.example.com/relay` produces working links only if your proxy actually strips `/relay`. |
 | `RELAY_BOOTSTRAP_ADMIN` | _(empty)_ | Email address — creates or promotes this user to admin on startup when no admin exists. Cleared from process env after consumption. |
 | `RELAY_BOOTSTRAP_PASSWORD` | _(empty)_ | Required when `RELAY_BOOTSTRAP_ADMIN` is set. Cleared from process env after consumption; operators should also unset it from their shell. |
 | `RELAY_DB_MAX_CONNS` | `25` | Maximum PostgreSQL connection pool size |
@@ -500,6 +501,32 @@ hidden: a legitimately refused agent produces no server-side line identifying it
 | `RELAY_WORKSPACE_MIN_FREE_GB` | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted until the threshold is met. |
 | `RELAY_WORKSPACE_SWEEP_INTERVAL` | How often the sweeper runs. Default `15m`. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
 | `RELAY_EVICTION_TIMEOUT` | Per-eviction deadline (Go duration, e.g. `45m`, `2h`) bounding the `p4 client -d` call during workspace eviction. Default `30m`. A wedged delete becomes a logged, retryable best-effort skip instead of stalling the sweeper. Does NOT bound the on-disk `os.RemoveAll`. |
+
+### Task subprocess environment
+
+The table above describes the **agent's own** process environment. This section is a different thing: it is what relay adds to the environment of every **task subprocess** the agent spawns.
+
+| Variable | Value | Present when |
+|----------|-------|--------------|
+| `RELAY_JOB_ID` | The job's UUID | Every dispatch from a relay coordinator. No server configuration needed. |
+| `RELAY_TASK_ID` | The task's UUID | Every dispatch from a relay coordinator. No server configuration needed. |
+| `RELAY_JOB_URL` | `<RELAY_PUBLIC_URL>/jobs/<job-id>` | `RELAY_PUBLIC_URL` is set on the **server** |
+| `RELAY_TASK_URL` | `<RELAY_PUBLIC_URL>/jobs/<job-id>/tasks/<task-id>` | `RELAY_PUBLIC_URL` is set on the **server** |
+
+**A job spec cannot override these four names**, and neither can a workspace provider. The guarantee holds whether or not `RELAY_PUBLIC_URL` is set on the server. That is the point: a step that posts `$RELAY_JOB_URL` into chat is posting a link other people will click, and the guarantee is what makes the value worth trusting.
+
+**Never set-and-empty.** Each name is either absent or carries a non-empty value, so one check is enough and there is no second case for "set but blank":
+
+```sh
+if [ -n "$RELAY_JOB_URL" ]; then notify "build running at $RELAY_JOB_URL"; fi
+```
+
+**Two limitations.**
+
+- **The strip covers the job spec and the workspace provider, not the agent's own environment.** If `relay-agent` is itself started from a shell that exported `RELAY_JOB_URL`, every task inherits that value wherever relay has no value of its own. The trust boundary this feature defends is the job spec author, not the agent operator, who already chooses the agent binary and owns the machine the subprocess runs on.
+- **Windows resolves environment variable names case-insensitively; other platforms do not.** The strip matches that rule rather than a rule of its own, so a job spec key `relay_job_id` is removed on a Windows agent, where it would otherwise be the same variable as `RELAY_JOB_ID`, and is kept everywhere else, where it is a genuinely distinct variable relay has no claim on. Neither is a defect - a distinct variable is not an override - and the guarantee above is stated over these exact names for that reason.
+
+A task that itself submits a relay job runs with its parent's `RELAY_JOB_ID` in scope, so a script that reads the variable after submitting gets the parent's id, not the new one.
 
 ### Hardware detection
 

@@ -55,7 +55,7 @@ func TestDispatcher_ClaimStampsAssignedAt(t *testing.T) {
 	registry.Register(uuidStr(w.ID), &fakeSender{})
 
 	before := time.Now()
-	scheduler.NewDispatcher(q, registry, events.NewBroker()).RunOnce(ctx)
+	scheduler.NewDispatcher(q, registry, events.NewBroker(), "").RunOnce(ctx)
 
 	got, err := q.GetTask(ctx, task.ID)
 	require.NoError(t, err)

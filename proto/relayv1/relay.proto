@@ -115,6 +115,11 @@ message DispatchTask {
   int64               epoch           = 6;
   SourceSpec          source          = 7;
   repeated CommandLine commands       = 8;
+  // Rendered by the coordinator, never by the agent: the frontend's route shape
+  // is not an independently-deployed agent's to know. Empty when the server has
+  // no RELAY_PUBLIC_URL.
+  string              job_url         = 9;
+  string              task_url        = 10;
 }
 
 // CommandLine carries a single argv (executable + args). A task runs each

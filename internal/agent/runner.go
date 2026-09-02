@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,48 @@ import (
 	"relay/internal/agent/source"
 	relayv1 "relay/internal/proto/relayv1"
 )
+
+// reservedIdentityNames are the environment names the coordinator owns in a task
+// subprocess. Nothing else may supply them; see the merge in Run.
+var reservedIdentityNames = [...]string{"RELAY_TASK_ID", "RELAY_JOB_ID", "RELAY_JOB_URL", "RELAY_TASK_URL"}
+
+// isReservedIdentityName reports whether k is a name the coordinator owns for
+// the platform this agent is running on. Windows resolves environment names
+// case-insensitively, every other platform does not: folding everywhere would
+// delete a spec key that is a genuinely distinct variable on Unix, folding
+// nowhere would let a Windows spec key differing only in case supply the name
+// relay owns.
+// TestRunner_TheReservedNamesAreCaseFoldedExactlyWhereOsExecFoldsThem pins both
+// directions on the platform it runs on.
+func isReservedIdentityName(k string) bool {
+	return isReservedIdentityNameFor(runtime.GOOS, k)
+}
+
+// isReservedIdentityNameFor takes goos as a parameter so both halves of the case
+// rule are exercised wherever the tests run.
+//
+// The fold is strings.ToLower and NOT strings.EqualFold, because os/exec's
+// duplicate-key rule lower-cases the key. The two disagree on U+017F, which
+// EqualFold treats as an 's' - stripping a key os/exec would have carried
+// through as a distinct variable.
+// TestIsReservedIdentityNameFor_FoldsExactlyWhereOsExecFolds pins both.
+func isReservedIdentityNameFor(goos, k string) bool {
+	if goos == "windows" {
+		k = strings.ToLower(k)
+		for _, r := range reservedIdentityNames {
+			if k == strings.ToLower(r) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, r := range reservedIdentityNames {
+		if k == r {
+			return true
+		}
+	}
+	return false
+}
 
 // Runner manages the execution of a single dispatched task as a subprocess.
 type Runner struct {
@@ -152,13 +195,48 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		return
 	}
 
-	// Merge env: current process env first, task env overrides, then workspace env.
+	// Merge env: current process env first, task env, then workspace env. THE
+	// RESERVED NAMES ARE STRIPPED FROM BOTH MAPS, NOT MERELY OUTRANKED BY THE
+	// APPEND BELOW; TestRunner_UnconfiguredCoordinatorStillRefusesASpecEnvURL and
+	// its workspace twin are the legs that redden.
+	//
+	// A key CONTAINING "=" is refused outright rather than parsed: an entry is
+	// split at a "=", so the name the child resolves need not be the string the
+	// reserved-name predicate was shown - the key "RELAY_JOB_URL=x" reaches the
+	// child as RELAY_JOB_URL.
+	// TestRunner_ASpecEnvKeyContainingAnEqualsCannotSupplyAReservedName and its
+	// workspace twin pin it.
+	//
+	// The append has to come after os.Environ(), which is inherited unfiltered,
+	// or relay's own value loses to whatever the agent operator exported;
+	// TestRunner_ACoordinatorValueBeatsAnInheritedOne is that leg. Each name is
+	// appended only when its value is non-empty, so relay never sets one of them
+	// to the empty string and a consumer needs one check rather than a second for
+	// "set but blank".
 	env := os.Environ()
 	for k, v := range task.Env {
+		if strings.Contains(k, "=") || isReservedIdentityName(k) {
+			continue
+		}
 		env = append(env, k+"="+v)
 	}
 	for k, v := range extraEnv {
+		if strings.Contains(k, "=") || isReservedIdentityName(k) {
+			continue
+		}
 		env = append(env, k+"="+v)
+	}
+	if r.taskID != "" {
+		env = append(env, "RELAY_TASK_ID="+r.taskID)
+	}
+	if task.JobId != "" {
+		env = append(env, "RELAY_JOB_ID="+task.JobId)
+	}
+	if task.JobUrl != "" {
+		env = append(env, "RELAY_JOB_URL="+task.JobUrl)
+	}
+	if task.TaskUrl != "" {
+		env = append(env, "RELAY_TASK_URL="+task.TaskUrl)
 	}
 
 	// Send a single RUNNING status before the first step. Subsequent steps

@@ -43,6 +43,14 @@ func main() {
 		grpcAddr = ":9090"
 	}
 
+	// Read before anything with an effect: parsePublicURL is fatal on a bad
+	// value, and a typo should stop the process before it advances the schema.
+	publicBaseURL, err := parsePublicURL("RELAY_PUBLIC_URL", os.Getenv("RELAY_PUBLIC_URL"))
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	log.Print(publicURLLine(publicBaseURL))
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -110,7 +118,7 @@ func main() {
 	}
 	metricsStore := metrics.NewStore(int(telemetryWindow / metrics.DefaultSampleInterval))
 
-	dispatcher := scheduler.NewDispatcher(q, registry, broker)
+	dispatcher := scheduler.NewDispatcher(q, registry, broker, publicBaseURL)
 	notifyListener := scheduler.NewNotifyListener(pool, dispatcher.Trigger)
 	go notifyListener.Run(ctx)
 

@@ -142,7 +142,7 @@ func TestDispatcher_DispatchesEligibleTask(t *testing.T) {
 	registry.Register(uuidStr(w.ID), sender)
 
 	broker := events.NewBroker()
-	d := scheduler.NewDispatcher(q, registry, broker)
+	d := scheduler.NewDispatcher(q, registry, broker, "")
 
 	d.Trigger()
 	d.RunOnce(ctx)
@@ -211,7 +211,7 @@ func TestDispatcher_UsesAggregateCountQuery(t *testing.T) {
 	registry.Register(uuidStr(w.ID), sender)
 
 	broker := events.NewBroker()
-	d := scheduler.NewDispatcher(q, registry, broker)
+	d := scheduler.NewDispatcher(q, registry, broker, "")
 	d.RunOnce(ctx)
 
 	// Only 1 of the 3 tasks should have been dispatched despite all 3 being eligible.
@@ -337,7 +337,7 @@ func TestDispatcher_PrefersWarmWorker(t *testing.T) {
 	registry.Register(uuidStr(cold.ID), coldSender)
 	registry.Register(uuidStr(warm.ID), warmSender)
 
-	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
 	d.RunOnce(ctx)
 
 	// warm must win: score = 1 (free slot) + 1,000 (stream match) = 1001 vs cold = 8.
@@ -379,7 +379,7 @@ func TestDispatcher_ColdFallback_NoWarmWorker(t *testing.T) {
 	registry := worker.NewRegistry()
 	registry.Register(uuidStr(w.ID), sender)
 
-	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
 	d.RunOnce(ctx)
 
 	require.Len(t, sender.sent, 1, "task must still be dispatched when no warm worker exists")
@@ -454,7 +454,7 @@ func TestDispatcher_PassesSourceToAgent(t *testing.T) {
 	registry.Register(uuidStr(w.ID), sender)
 
 	broker := events.NewBroker()
-	d := scheduler.NewDispatcher(q, registry, broker)
+	d := scheduler.NewDispatcher(q, registry, broker, "")
 	d.RunOnce(ctx)
 
 	// Task should be dispatched.
@@ -511,7 +511,7 @@ func TestDispatcher_BadCommandsJSON_FailsTaskNoRequeue(t *testing.T) {
 	sender := &fakeSender{}
 	registry.Register(uuidStr(w.ID), sender)
 
-	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
 
 	// Run two cycles. The bug requeued, so the second cycle would re-claim and the
 	// epoch would climb. The fix marks the task 'failed' on cycle one; cycle two is
@@ -571,7 +571,7 @@ func TestDispatcher_FailClaimedTask_PublishesJobEventOnTerminal(t *testing.T) {
 	ch, cancel := broker.Subscribe(events.Filter{})
 	defer cancel()
 
-	d := scheduler.NewDispatcher(q, registry, broker)
+	d := scheduler.NewDispatcher(q, registry, broker, "")
 	d.RunOnce(ctx)
 
 	jobIDStr := uuidStr(job.ID)
@@ -636,7 +636,7 @@ func TestDispatcher_BadSourceJSON_FailsTaskNoLeak(t *testing.T) {
 	sender := &fakeSender{}
 	registry.Register(uuidStr(w.ID), sender)
 
-	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
 	d.RunOnce(ctx)
 
 	got, err := q.GetTask(ctx, task.ID)
@@ -715,7 +715,7 @@ func TestDispatcher_SendFailureRequeuesWithRealFenceValues(t *testing.T) {
 	sender := &failingSender{}
 	registry.Register(uuidStr(w.ID), sender)
 
-	d := scheduler.NewDispatcher(q, registry, events.NewBroker())
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
 	d.Trigger()
 	d.RunOnce(ctx)
 
@@ -728,4 +728,106 @@ func TestDispatcher_SendFailureRequeuesWithRealFenceValues(t *testing.T) {
 	assert.False(t, after.WorkerID.Valid, "the failed assignment must be cleared")
 	assert.Equal(t, int32(2), after.AssignmentEpoch,
 		"claim bumps 0 -> 1 and the requeue bumps 1 -> 2; a fence bound to zero values would stop at 1")
+}
+
+// TestDispatcher_RendersJobAndTaskURLsFromTheClaimedRow is the wire-level half
+// of the feature. It asserts the URLs against THE IDS THIS TEST SEEDED, never
+// against dt.JobId / dt.TaskId: sourcing both sides of the comparison from the
+// same message makes the test agree with itself by construction and blind both
+// to the two ids being swapped and to the URLs being built from the wrong row.
+//
+// The base carries a path prefix because that is the shape a reverse-proxied
+// deployment uses and the one where an accidental separator shows up.
+func TestDispatcher_RendersJobAndTaskURLsFromTheClaimedRow(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "urls@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "url-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "url-task", Commands: []byte(`[["echo","hello"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "url-worker", Hostname: "url-worker", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "https://ops.example.com/relay")
+	d.RunOnce(ctx)
+
+	require.Len(t, sender.sent, 1)
+	dt := sender.sent[0].GetDispatchTask()
+	require.NotNil(t, dt)
+	assert.Equal(t, "https://ops.example.com/relay/jobs/"+uuidStr(job.ID), dt.JobUrl)
+	assert.Equal(t,
+		"https://ops.example.com/relay/jobs/"+uuidStr(job.ID)+"/tasks/"+uuidStr(task.ID),
+		dt.TaskUrl,
+		"the task URL must nest the TASK id under the JOB id; the two are independently "+
+			"generated UUIDs, so a transposed argument pair cannot produce this string")
+}
+
+// TestDispatcher_NoPublicURLSendsEmptyURLFieldsButStillSendsTheIds is the
+// conjunction. The empty-URL half alone is green against a dispatcher that
+// never learned to render anything at all.
+func TestDispatcher_NoPublicURLSendsEmptyURLFieldsButStillSendsTheIds(t *testing.T) {
+	ctx := context.Background()
+	q := newTestStore(t)
+
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "u", Email: "nourls@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "no-url-job", Priority: "normal", SubmittedBy: user.ID, Labels: []byte(`{}`),
+		ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "no-url-task", Commands: []byte(`[["echo","hello"]]`),
+		Env: []byte(`{}`), Requires: []byte(`{}`), Retries: 0,
+	})
+	require.NoError(t, err)
+
+	wRow, err := q.UpsertWorkerByHostname(ctx, store.UpsertWorkerByHostnameParams{
+		Name: "no-url-worker", Hostname: "no-url-worker", CpuCores: 1, RamGb: 1, Os: "linux",
+	})
+	require.NoError(t, err)
+	w, err := q.UpdateWorkerStatus(ctx, store.UpdateWorkerStatusParams{
+		ID: wRow.ID, Status: "online", LastSeenAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	})
+	require.NoError(t, err)
+
+	registry := worker.NewRegistry()
+	sender := &fakeSender{}
+	registry.Register(uuidStr(w.ID), sender)
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), "")
+	d.RunOnce(ctx)
+
+	require.Len(t, sender.sent, 1)
+	dt := sender.sent[0].GetDispatchTask()
+	require.NotNil(t, dt)
+	assert.Empty(t, dt.JobUrl)
+	assert.Empty(t, dt.TaskUrl)
+	assert.Equal(t, uuidStr(job.ID), dt.JobId,
+		"only the URLs depend on RELAY_PUBLIC_URL; the ids must still reach the agent")
+	assert.Equal(t, uuidStr(task.ID), dt.TaskId)
 }
