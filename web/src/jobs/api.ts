@@ -138,8 +138,8 @@ export function getJob(id: string): Promise<JobDetail> {
 }
 
 /**
- * Backfill page size. The server caps ?limit= at 200 (internal/api/tasks.go:84),
- * and 200 is used so a full history costs the fewest requests.
+ * Backfill page size. 200 is the server's maximum ?limit=; anything higher is a
+ * 400, so this is the fewest requests a history can cost.
  */
 export const BACKFILL_PAGE_SIZE = 200
 
@@ -155,8 +155,8 @@ export interface TaskLogEvent extends LogEntry {
 
 /**
  * One page of a task's log history walking FORWARD from sinceSeq. next_seq is 0
- * when drained (internal/api/tasks.go:128-130). Always sends an explicit limit so
- * the caller is never silently truncated to the server default of 50.
+ * when drained. Always sends an explicit limit so the caller is never silently
+ * truncated to the server default of 50.
  *
  * Sends no order parameter: order=desc here would return the NEWEST page where
  * the oldest is expected. Guard: api.test.ts 'getTaskLogs sends limit=200 and

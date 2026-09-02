@@ -460,8 +460,7 @@ export function useTaskLogStream(
         setTotal(page.total)
         setEarlierComplete(page.prev_seq === 0)
       } else {
-        // We hold something: continue FORWARD from it. This is the recovery,
-        // the reconciliation and the manual reconnect, all unchanged.
+        // We hold something: continue FORWARD from it.
         let since = sinceSeq
         let pages = 0
         for (;;) {

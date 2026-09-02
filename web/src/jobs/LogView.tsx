@@ -120,8 +120,7 @@ export function LogView({
     prevHeight.current = el.scrollHeight
     // Only when content changed ABOVE the viewport and the user is reading
     // history rather than following the tail. A prepend gives its rows fresh
-    // keys, so the first row's key moving is the signal; an append never
-    // touches it.
+    // keys, so the first row's key moving is the signal.
     if (!changedAtTop || follow) return
     el.scrollTop = preservedScrollTop(el.scrollTop, before, el.scrollHeight)
     onPrependAdjust?.(el.scrollTop)
@@ -129,11 +128,11 @@ export function LogView({
 
   const live = status === 'live'
 
-  // Truncation outranks the tail notice: it is the only one that reports a hole
-  // in the MIDDLE, and earlierComplete is false in exactly the case that
-  // produces one, so ranking the tail notice first would suppress it. No notice
-  // states a count of what is on screen: retained lines grow with every live
-  // frame while `total` is written only by a page fetch, so the two drift apart.
+  // Truncation outranks the tail notice: earlierComplete is false in exactly
+  // the case that truncates, so ranking the tail notice first suppresses the
+  // only report of a hole in the middle. No notice counts what is on screen:
+  // retained lines grow with every live frame while `total` moves only on a
+  // page fetch, and rows carries markers and partials that are not log lines.
   let notice: string | null = null
   if (evicted) {
     notice = 'Earlier output not shown.'
