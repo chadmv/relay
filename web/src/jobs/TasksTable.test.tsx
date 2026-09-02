@@ -60,12 +60,16 @@ test('each task row exposes a button named for the task, and one activation sele
   expect(onSelect).toHaveBeenCalledWith('t2')
 })
 
-test('clicking a row calls onSelect with its id (selection, not navigation)', async () => {
+test('clicking a non-button cell in a row calls onSelect with its id (row-level handler, not just the button)', async () => {
   const onSelect = vi.fn()
   render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
-  await userEvent.click(screen.getByText('denoise'))
+  // 'running' is denoise's STATUS cell, a plain text node with no button
+  // ancestor - unlike 'denoise' itself, which resolves inside the name-cell
+  // button and so cannot tell a row handler apart from a button-only one.
+  await userEvent.click(screen.getByText('running'))
   expect(onSelect).toHaveBeenCalledWith('t2')
-  // Rows are buttons/selectable, never anchors.
+  // The table has no anchors: task selection is a click or key action, never
+  // navigation.
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
 })
 
