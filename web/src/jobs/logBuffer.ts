@@ -363,3 +363,17 @@ export function markDropped(state: LogState): LogState {
 export function shouldFollow(scrollTop: number, scrollHeight: number, clientHeight: number): boolean {
   return scrollHeight - scrollTop - clientHeight <= FOLLOW_EPSILON
 }
+
+/**
+ * Where the scroll cursor must move to keep the same content under the
+ * viewport when rows are added above it (or removed above it, which is the
+ * negative case). Pure for the same reason shouldFollow is: jsdom reports every
+ * geometry as 0, so a pixel assertion in a component test is vacuously green.
+ */
+export function preservedScrollTop(
+  scrollTop: number,
+  prevHeight: number,
+  nextHeight: number,
+): number {
+  return Math.max(0, scrollTop + (nextHeight - prevHeight))
+}

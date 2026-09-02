@@ -9,6 +9,7 @@ import {
   DROP_MARKER_TEXT,
   markDropped,
   prependEntries,
+  preservedScrollTop,
   shouldFollow,
   type LogChunk,
 } from './logBuffer'
@@ -439,4 +440,15 @@ test('prependEntries assigns fresh keys that collide with nothing', () => {
   s = prependEntries(s, [chunk(40, 'c\nd\n')])
   const keys = s.lines.map((l) => l.key)
   expect(new Set(keys).size).toBe(keys.length)
+})
+
+test('preservedScrollTop keeps the viewport anchored', () => {
+  // Content added ABOVE the viewport: the same content stays under the cursor
+  // only if scrollTop moves by the height delta.
+  expect(preservedScrollTop(100, 500, 900)).toBe(500)
+  // Nothing changed.
+  expect(preservedScrollTop(100, 500, 500)).toBe(100)
+  // A shrinking container (drop-oldest evicted rows above): never negative.
+  expect(preservedScrollTop(100, 900, 500)).toBe(0)
+  expect(preservedScrollTop(700, 900, 500)).toBe(300)
 })
