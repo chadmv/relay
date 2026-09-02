@@ -11,6 +11,10 @@ const COLS = 'grid-cols-[1fr_1fr_100px_90px_60px]'
 // minimum added to the sum.
 const MIN_W = 'min-w-[560px]'
 
+// One literal, shared with WorkerDetailPage's Panel title. Same reasoning as
+// WORKSPACES_PANEL_TITLE, and this file is the second instance of the same defect.
+export const WORKER_TASKS_PANEL_TITLE = 'Current tasks'
+
 const HEADERS: TableColumn[] = [
   { label: 'TASK' },
   { label: 'JOB' },
@@ -30,9 +34,8 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      {/* aria-label matches the visible title on the page Panel that wraps this. */}
       <Table
-        label="Current tasks"
+        label={WORKER_TASKS_PANEL_TITLE}
         columns={COLS}
         minWidth={MIN_W}
         headers={HEADERS}

@@ -6,8 +6,8 @@ import { Chip, GlassPanel, KpiStat, Panel, StatusDot } from '../components/holo'
 import { MetricChart } from './MetricChart'
 import { WorkerActions } from './WorkerActions'
 import { WorkerLabels } from './WorkerLabels'
-import { WorkerTasksPanel } from './WorkerTasksPanel'
-import { WorkspacesPanel } from './WorkspacesPanel'
+import { WorkerTasksPanel, WORKER_TASKS_PANEL_TITLE } from './WorkerTasksPanel'
+import { WorkspacesPanel, WORKSPACES_PANEL_TITLE } from './WorkspacesPanel'
 import { formatGB, formatRelativeTime, livenessView } from './liveness'
 import { useWorker } from './useWorker'
 import { useWorkerMetrics } from './useWorkerMetrics'
@@ -138,12 +138,12 @@ export function WorkerDetailPage() {
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {/* Left column. */}
         <div className="flex flex-col gap-3">
-          <Panel title="Current tasks" meta="GET /v1/workers/{id}/tasks">
+          <Panel title={WORKER_TASKS_PANEL_TITLE} meta="GET /v1/workers/{id}/tasks">
             <WorkerTasksPanel workerId={id} />
           </Panel>
 
           {isAdmin && (
-            <Panel title="Source workspaces" meta="/v1/workers/.../workspaces">
+            <Panel title={WORKSPACES_PANEL_TITLE} meta="/v1/workers/.../workspaces">
               <WorkspacesPanel workerId={id} />
             </Panel>
           )}

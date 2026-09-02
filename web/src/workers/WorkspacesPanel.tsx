@@ -11,6 +11,12 @@ const COLS = 'grid-cols-[120px_90px_1fr_120px_90px_90px]'
 // scrollbar on a maximized desktop window. Task 7 measures this one specifically.
 const MIN_W = 'min-w-[600px]'
 
+// ONE literal for the panel title and the table's accessible name. They were two
+// hand-kept-equal strings in two files; the structural test on WorkerDetailPage
+// (`every table on the page is named by its own panel title`) pins the RENDERED
+// pair, since a test comparing two references to this constant could not fail.
+export const WORKSPACES_PANEL_TITLE = 'Source workspaces'
+
 const HEADERS: TableColumn[] = [
   { label: 'SHORT ID' },
   { label: 'TYPE' },
@@ -39,8 +45,7 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      {/* aria-label matches the visible title on the page Panel that wraps this. */}
-      <Table label="Source workspaces" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
         {rows.map((ws) => (
           <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
             <TableCell className="text-fg">{ws.short_id}</TableCell>

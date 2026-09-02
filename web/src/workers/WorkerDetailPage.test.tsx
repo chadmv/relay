@@ -328,6 +328,26 @@ test('admins see the action bar, the Source workspaces panel, and the reservatio
   expect(screen.getByText('no per-worker reservation lookup yet')).toBeInTheDocument()
 })
 
+test('every table on the page is named by its own panel title', async () => {
+  server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
+  server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
+  server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
+  renderDetail(true)
+  await screen.findByText('no per-worker reservation lookup yet')
+
+  const tables = screen.getAllByRole('table')
+  // The count assertion is not decoration. Without it the loop below passes
+  // vacuously the moment a panel stops rendering, or the moment Panel stops
+  // publishing the attribute - which is the same failure the Panel unit test
+  // catches from the other side, deliberately.
+  expect(tables).toHaveLength(2)
+  for (const table of tables) {
+    const panel = table.closest('[data-panel-title]')
+    expect(panel).not.toBeNull()
+    expect(table).toHaveAccessibleName(panel!.getAttribute('data-panel-title')!)
+  }
+})
+
 test('non-admins see none of the action controls and never fetch workspaces', async () => {
   let wsCount = 0
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))

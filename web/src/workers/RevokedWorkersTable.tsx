@@ -15,7 +15,7 @@ export function RevokedWorkersTable({ workers }: { workers: Worker[] }) {
     )
   }
   return (
-    <table className="w-full text-left text-[13px]">
+    <table aria-label="Revoked workers" className="w-full text-left text-[13px]">
       <thead className="font-mono text-[11px] text-fg-mute">
         <tr>
           <th className="py-2 pr-4">NAME</th>
