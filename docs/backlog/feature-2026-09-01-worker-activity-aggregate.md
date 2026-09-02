@@ -39,6 +39,6 @@ product decision. And the list slice was already one PR.
 - The placeholder comment and the item pointer are gone.
 
 ## Related
-- `docs/backlog/closed/feature-2026-06-05-worker-detail-activity-panel.md` (the parent, closed with this carved out)
+- [[feature-2026-06-05-worker-detail-activity-panel]] (the parent, closed with this carved out)
 - `docs/superpowers/specs/2026-09-01-worker-detail-tasks-panel-design.md` (Decision 2)
 - [[feature-2026-09-01-per-worker-task-history]] would share the index
