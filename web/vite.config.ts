@@ -20,11 +20,21 @@ export default defineConfig({
     // default include matches them and its default exclude does not - they would
     // be collected and run in jsdom, where `page` does not exist.
     //
-    // configDefaults.exclude is SPREAD, never replaced. Setting `exclude` at all
-    // overwrites vitest's defaults wholesale, and dropping `**/node_modules/**`
-    // makes vitest walk web/node_modules collecting every *.spec.js it finds.
-    // The guard on that is acceptance criterion 7: `npm test`'s collected file
-    // count must be unchanged from HEAD, which a node_modules walk explodes.
+    // configDefaults.exclude is SPREAD, never replaced. The default exclude is
+    // node_modules and .git only, so this spread is the whole node_modules guard
+    // rather than one entry of a broad list: setting `exclude` without it sends
+    // vitest walking web/node_modules collecting every *.spec.js it finds. The
+    // guard on that is that `npm test`'s collected file count must not move,
+    // which a node_modules walk explodes.
     exclude: [...configDefaults.exclude, 'e2e/**'],
+    fakeTimers: {
+      // Faking `performance` (vitest's default toFake list includes it) freezes
+      // the clock React 18's scheduler reads from, inside every test that calls
+      // vi.useFakeTimers() - this list holds that surface to exactly the
+      // JS-timer primitives it was before, so behaviour under fake timers stays
+      // what the existing suite already pins. Widening this list is a deliberate
+      // change and needs its own test.
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'Date'],
+    },
   },
 })
