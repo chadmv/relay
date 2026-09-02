@@ -31,8 +31,8 @@ export default defineConfig({
       // Faking `performance` (vitest's default toFake list includes it) freezes
       // the clock React 18's scheduler reads from, inside every test that calls
       // vi.useFakeTimers() - this list holds that surface to exactly the
-      // JS-timer primitives it was before, so behaviour under fake timers stays
-      // what the existing suite already pins. Widening this list is a deliberate
+      // JS-timer primitives, so behaviour under fake timers stays
+      // what the existing suite pins. Widening this list is a deliberate
       // change and needs its own test.
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'Date'],
     },
