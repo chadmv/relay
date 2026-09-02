@@ -5,12 +5,18 @@ package api_test
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// walkPageLimit is both the ?limit= the three walks request and the floor their
+// fixtures must exceed, so a fixture can never quietly stop spanning a page
+// boundary while its guard still passes.
+const walkPageLimit = 20
 
 // jobIDs is what makes the walk assertions identity-based: names repeat across
 // fixtures, ids do not, so a duplicate here is a real duplicate row.
@@ -47,14 +53,14 @@ func TestListJobs_QFilterCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 		wantIDs[uuidString(id)] = true
 	}
 	matching := len(wantIDs)
-	require.Greater(t, matching, 20, "fixture must span more than one page")
+	require.Greater(t, matching, walkPageLimit, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
 	cursor := ""
 	pages := 0
 	for {
-		qs := url.Values{"q": {"walkq-target"}, "limit": {"20"}}
+		qs := url.Values{"q": {"walkq-target"}, "limit": {strconv.Itoa(walkPageLimit)}}
 		if cursor != "" {
 			qs.Set("cursor", cursor)
 		}
@@ -104,14 +110,14 @@ func TestListJobs_MineFilterCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 		wantIDs[uuidString(id)] = true
 	}
 	mine := len(wantIDs)
-	require.Greater(t, mine, 20, "fixture must span more than one page")
+	require.Greater(t, mine, walkPageLimit, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
 	cursor := ""
 	pages := 0
 	for {
-		qs := url.Values{"mine": {"true"}, "limit": {"20"}}
+		qs := url.Values{"mine": {"true"}, "limit": {strconv.Itoa(walkPageLimit)}}
 		if cursor != "" {
 			qs.Set("cursor", cursor)
 		}
@@ -145,10 +151,14 @@ func TestListJobs_WindowCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 	user := createTestUser(t, q, "Wendy", "wendy@walkwindow.test", false)
 	token := createTestToken(t, q, user.ID)
 
-	// Every third row is placed AFTER the window rather than inside it, and the
-	// out-of-window rows are interleaved in created_at order with the in-window
-	// ones, so the page boundary at 20 lands beside an excluded row. The two
-	// ranges alternate rather than forming two contiguous blocks.
+	// since/until is a predicate on the sort key itself, so excluded rows can
+	// never interleave with kept ones under -created_at: they are exactly the
+	// rows outside the range, so each end of the window contributes a contiguous
+	// block. Here every excluded row is placed past the upper bound, so all
+	// twenty sort first and the first page must walk past the lot before it can
+	// emit a row. That is the shape this walk exercises. A page boundary sitting
+	// BESIDE an excluded row is unreachable under this sort; the q and mine walks
+	// cover that, their predicates being independent of the ordering column.
 	since := time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC)
 	until := since.Add(60 * time.Minute)
 	const total = 60
@@ -164,7 +174,7 @@ func TestListJobs_WindowCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 		wantIDs[uuidString(id)] = true
 	}
 	inWindow := len(wantIDs)
-	require.Greater(t, inWindow, 20, "fixture must span more than one page")
+	require.Greater(t, inWindow, walkPageLimit, "fixture must span more than one page")
 
 	seen := map[string]bool{}
 	var totals []int64
@@ -174,7 +184,7 @@ func TestListJobs_WindowCursorWalkHasNoDuplicatesOrGaps(t *testing.T) {
 		qs := url.Values{
 			"since": {since.Format(time.RFC3339Nano)},
 			"until": {until.Format(time.RFC3339Nano)},
-			"limit": {"20"},
+			"limit": {strconv.Itoa(walkPageLimit)},
 		}
 		if cursor != "" {
 			qs.Set("cursor", cursor)

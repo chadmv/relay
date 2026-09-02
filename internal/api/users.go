@@ -150,7 +150,7 @@ func usersListIncArchivedRowByEmailAscToResponse(r store.ListUsersIncludingArchi
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	// parsePage runs first so this endpoint answers a malformed query string,
 	// a NUL byte or a repeated parameter the same way every other list endpoint
-	// does. Reading email or include_archived ahead of it skipped all three.
+	// does, on the ?email= branch as much as on the paginated one.
 	pp, ok := parsePage(w, r, UsersSortSpec)
 	if !ok {
 		return

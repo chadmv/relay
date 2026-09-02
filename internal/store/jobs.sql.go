@@ -28,9 +28,10 @@ type CountJobsParams struct {
 // The q predicate needs users.email, and an inner join is not elidable: with
 // it, an unfiltered count hash-joins every jobs row against users for a
 // column it never reads. handleListJobs forks on whether q is present, so
-// the join is paid only by the requests that need it. Routing a q request
-// to the join-free twin drops the email arm silently;
-// TestListJobs_FiltersApplyOnEveryArm is what pins the fork.
+// the join is paid only by the requests that need it. The join-free twin has
+// no q parameter at all, so routing a q request to it drops the text
+// predicate entirely; TestListJobs_FiltersApplyOnEveryArm is what pins the
+// fork.
 //
 //	SELECT COUNT(*)
 //	FROM jobs j

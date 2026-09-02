@@ -263,9 +263,8 @@ func rejectRepeatedParams(w http.ResponseWriter, qs url.Values, names ...string)
 // rejectNulBytes writes a 400 and returns false if any query value carries a
 // NUL. Postgres text cannot hold one and rejects it with SQLSTATE 22021, so a
 // value reaching a query as a text argument turns user input into a 5xx.
-// Checked over every value rather than per parameter: ?status=, ?email= and
-// ?q= all reached the database by different readers, and a per-reader guard
-// has to be remembered at each new one.
+// Checked over every value rather than per parameter, so a reader added later
+// inherits it.
 func rejectNulBytes(w http.ResponseWriter, qs url.Values) bool {
 	for _, vs := range qs {
 		for _, v := range vs {

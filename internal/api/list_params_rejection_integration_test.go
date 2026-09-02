@@ -27,11 +27,9 @@ func doListRequest(t *testing.T, srv interface{ Handler() http.Handler }, token,
 	return rec.Code, body.Error
 }
 
-// A NUL byte in any query parameter used to reach Postgres as a text argument
-// and surface as a 500. The four cases span three different readers - the
-// filter branch, the status branch and the page bound - plus a non-jobs
-// endpoint, because the guard is at the shared chokepoint and not in any one
-// of them.
+// A NUL byte in any query parameter is a 400, not a 500. The cases span the
+// filter branch, the status branch, a page bound and a non-jobs endpoint,
+// because the guard is at the shared chokepoint and not in any one of them.
 func TestListEndpoints_NulByteInAQueryParameterIs400(t *testing.T) {
 	srv, q, _ := newTestServerWithPool(t)
 	admin := createTestUser(t, q, "Admin", "admin@nulparam.test", true)
@@ -53,8 +51,7 @@ func TestListEndpoints_NulByteInAQueryParameterIs400(t *testing.T) {
 }
 
 // The handler-level arity call is what covers status and scheduled_job_id;
-// parsePage's own call covers only limit, sort and cursor. Deleting the
-// handler-level call leaves both lanes green without this.
+// parsePage's own call covers only limit, sort and cursor.
 func TestListJobs_RepeatedStatusIs400(t *testing.T) {
 	srv, q, _ := newTestServerWithPool(t)
 	user := createTestUser(t, q, "Alice", "alice@arity.test", false)
@@ -65,9 +62,8 @@ func TestListJobs_RepeatedStatusIs400(t *testing.T) {
 	assert.Equal(t, `query parameter "status" must appear at most once`, body)
 }
 
-// handleListUsers read include_archived and email from r.URL.Query() before
-// parsePage ran, so a malformed query string was a 200 here while the same
-// input was a 400 on every other list endpoint.
+// A malformed query string is a 400 on this endpoint, as on every other
+// paginated one.
 func TestListUsers_MalformedQueryStringIs400(t *testing.T) {
 	srv, q, _ := newTestServerWithPool(t)
 	admin := createTestUser(t, q, "Admin", "admin@userparam.test", true)
@@ -89,8 +85,8 @@ func TestListUsers_RepeatedIncludeArchivedIs400(t *testing.T) {
 }
 
 // The sort-versus-filter 400 keeps precedence over the arity 400. Both apply
-// to sort=name&status=a&status=b; the handler's own comment claims the sort
-// rule is decided first, and the arity call sitting above it made that false.
+// to sort=name&status=a&status=b, so the input discriminates which guard runs
+// first.
 func TestListJobs_SortVersusFilterGuardOutranksArity(t *testing.T) {
 	srv, q, _ := newTestServerWithPool(t)
 	user := createTestUser(t, q, "Alice", "alice@precedence.test", false)

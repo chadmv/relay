@@ -75,9 +75,11 @@ func TestParsePage_SingleOccurrenceStillParses(t *testing.T) {
 
 // Postgres text cannot hold a NUL byte and rejects one with SQLSTATE 22021, so
 // any parameter carrying one must be refused before it reaches a query as a
-// text argument. The rejection lives here rather than per-parameter: ?status=,
-// ?email= and ?limit= all reached the database the same way, and a per-reader
-// guard would have to be repeated at every one.
+// text argument. The rejection lives here rather than per-parameter: ?status=
+// and ?email= reached the database by different readers, and a per-reader
+// guard would have to be repeated at every one. ?limit= and ?cursor= never
+// reach it - they are consumed by ParseInt and the cursor decoder - and are
+// in the table to pin that the NUL check runs ahead of both.
 func TestParsePage_NulByteInAnyParameterIsRejected(t *testing.T) {
 	for _, raw := range []string{"status=%00", "q=%00", "limit=%00", "q=abc%00", "cursor=%00"} {
 		t.Run(raw, func(t *testing.T) {
