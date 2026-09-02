@@ -48,3 +48,13 @@ test('shows a rate-limit hint on 429', async () => {
   await userEvent.click(screen.getByRole('button', { name: /sign in/i }))
   expect(await screen.findByText(/too many attempts/i)).toBeInTheDocument()
 })
+
+// The sign-in page is the arrival point for a sign-out, a 401 teardown and a
+// direct unauthenticated visit; if it claims no focus, the user's next Tab starts
+// from the top of the document. The heading assertion is the positive control - an
+// activeElement assertion against an unmounted tree is trivially satisfiable.
+test('the email field takes focus when the sign-in screen mounts', () => {
+  renderLogin()
+  expect(screen.getByRole('heading', { name: 'Sign in', level: 1 })).toBeInTheDocument()
+  expect(document.activeElement).toBe(screen.getByLabelText('Email'))
+})

@@ -66,8 +66,13 @@ export function RegisterScreen() {
           {selfRegister ? 'Open registration is enabled.' : 'You need an invite to register.'}
         </div>
 
+        {/* autoFocus, NOT a useEffect mount focus: the form renders on a later
+            commit than the component (the early return above holds until /config
+            resolves), so a []-deps effect would run with no node to focus and never
+            run again. React applies the attribute when this element mounts.
+            RegisterScreen.test.tsx's focus test is the pin. */}
         <Field label="Display name" htmlFor="name">
-          <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input id="name" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         <Field label="Email" htmlFor="email">
           <Input

@@ -37,11 +37,16 @@ export function LoginScreen() {
         <h1 className="text-[28px] font-normal tracking-tight">Sign in</h1>
         <div className="mb-5 text-[13px] text-fg-mute">Sign in to the coordinator</div>
 
+        {/* The sign-in page claims arrival focus here; authArrivalFocus.test.tsx
+            pins the sign-out, 401-teardown and direct-visit paths. Keep the
+            attribute rather than a mount effect - RegisterScreen.tsx states why the
+            two are not interchangeable. */}
         <Field label="Email" htmlFor="email">
           <Input
             id="email"
             type="email"
             autoComplete="username"
+            autoFocus
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
