@@ -173,6 +173,39 @@ func (q *Queries) GetJobForUpdate(ctx context.Context, id pgtype.UUID) (Job, err
 	return i, err
 }
 
+const getJobNamesByIDs = `-- name: GetJobNamesByIDs :many
+SELECT id, name FROM jobs WHERE id = ANY($1::uuid[])
+`
+
+type GetJobNamesByIDsRow struct {
+	ID   pgtype.UUID `json:"id"`
+	Name string      `json:"name"`
+}
+
+// Job names for one page of tasks. Mirrors GetUserEmailsByIDs; the handler builds
+// a map and reads it per row. Bounded by the page limit, on the primary key.
+//
+//	SELECT id, name FROM jobs WHERE id = ANY($1::uuid[])
+func (q *Queries) GetJobNamesByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]GetJobNamesByIDsRow, error) {
+	rows, err := q.db.Query(ctx, getJobNamesByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetJobNamesByIDsRow
+	for rows.Next() {
+		var i GetJobNamesByIDsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getJobWithEmail = `-- name: GetJobWithEmail :one
 SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
 FROM jobs j

@@ -328,3 +328,8 @@ FROM jobs;
 -- be able to queue for this lock. That read decides nothing else. Every gate on
 -- a mutable column reads the row returned HERE, and so does every write.
 SELECT * FROM jobs WHERE id = $1 FOR UPDATE;
+
+-- name: GetJobNamesByIDs :many
+-- Job names for one page of tasks. Mirrors GetUserEmailsByIDs; the handler builds
+-- a map and reads it per row. Bounded by the page limit, on the primary key.
+SELECT id, name FROM jobs WHERE id = ANY($1::uuid[]);
