@@ -13,7 +13,9 @@ import {
   createLogState,
   finalizePartials,
   markDropped,
+  prependEntries,
   visibleRows,
+  MAX_LINES,
   type LogChunk,
   type LogRow,
   type LogState,
@@ -59,6 +61,10 @@ export interface TaskLogStreamResult {
   reconnect: () => void
   /** prev_seq was 0: the window reaches the beginning of the log. */
   earlierComplete: boolean
+  /** A click will fetch one page of older history. */
+  canLoadEarlier: boolean
+  loadingEarlier: boolean
+  loadEarlier: () => void
 }
 
 export interface UseTaskLogStreamOptions {
@@ -94,10 +100,18 @@ export function useTaskLogStream(
   const [errorMessage, setErrorMessage] = useState('')
   const [manualRetry, setManualRetry] = useState(0)
   const [earlierComplete, setEarlierComplete] = useState(false)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
 
   const reconnect = useCallback(() => {
     setAttempt(0)
     setManualRetry((n) => n + 1)
+  }, [])
+
+  // Holds the CURRENT effect run's loader. A click always drives the run that
+  // owns the window on screen; a torn-down run's loader is never reachable.
+  const loadEarlierRef = useRef<(() => void) | null>(null)
+  const loadEarlier = useCallback(() => {
+    loadEarlierRef.current?.()
   }, [])
 
   // Carries log state across an effect re-run that should CONTINUE the same
@@ -118,6 +132,7 @@ export function useTaskLogStream(
       carry.current = null
       setView(createLogState())
       setEarlierComplete(false)
+      setLoadingEarlier(false)
       setStatus('idle')
       return
     }
@@ -167,6 +182,7 @@ export function useTaskLogStream(
     setStatus('loading')
     setHistoryTruncated(false)
     setErrorMessage('')
+    setLoadingEarlier(false)
     // Only for a genuinely fresh window. A same-task re-run with a carry (a
     // terminal transition, a manual reconnect) keeps whatever the user has
     // already walked back to; blanket-resetting would re-offer "Load earlier"
@@ -202,6 +218,46 @@ export function useTaskLogStream(
       }
       publish()
     }
+
+    // In-flight guard. A local, not React state: two clicks in one tick must
+    // not both fetch, and a state update is not visible until the next render.
+    let earlierInFlight = false
+
+    async function loadEarlierPage() {
+      const myGen = gen
+      const before = logState.minSeq
+      // minSeq 0 means the window is empty: there is no cursor to walk back
+      // from, and before_seq=0 is a 400 by contract rather than an empty page.
+      if (earlierInFlight || before <= 0 || logState.evicted) return
+      earlierInFlight = true
+      setLoadingEarlier(true)
+
+      let page: TaskLogPage
+      try {
+        page = await getTaskLogsDesc(taskId, before, BACKFILL_PAGE_SIZE)
+      } catch {
+        earlierInFlight = false
+        if (!cancelled) setLoadingEarlier(false)
+        return
+      }
+      earlierInFlight = false
+      // No AbortSignal on this request (apiFetch has no realm-mismatch
+      // fallback), so the response always arrives and this fence is the only
+      // control. Cancelled: the next run owns the state, touch nothing.
+      // Superseded: clear the flag so the control re-enables, then discard -
+      // prepending here would join a page onto a window it is not contiguous
+      // with. Guards: 'a stale earlier page is discarded', 'a discarded
+      // earlier page re-enables the control'.
+      if (cancelled) return
+      setLoadingEarlier(false)
+      if (myGen !== gen) return
+
+      setLogState(prependEntries(logState, page.items))
+      if (page.prev_seq === 0) setEarlierComplete(true)
+      setTotal(page.total)
+      flushNow()
+    }
+    loadEarlierRef.current = loadEarlierPage
 
     // A connection earns a backoff-counter reset only by PROVING itself: staying
     // open past RESET_AFTER_MS or delivering at least one frame. Resetting on
@@ -446,6 +502,7 @@ export function useTaskLogStream(
     return () => {
       cancelled = true
       gen++
+      loadEarlierRef.current = null
       controller.abort()
       if (flushTimer !== null) clearTimeout(flushTimer)
       if (retryTimer !== null) clearTimeout(retryTimer)
@@ -454,6 +511,12 @@ export function useTaskLogStream(
   }, [taskId, live, enabled, fetchImpl, manualRetry])
 
   const rows = useMemo(() => visibleRows(view), [view])
+
+  // minSeq > 0 is "we hold a page whose start we could walk back from". Without
+  // it the control renders over "Loading logs..." between the effect starting
+  // and its tail page landing, and a click would issue before_seq=0, a 400.
+  const canLoadEarlier =
+    !earlierComplete && !view.evicted && view.minSeq > 0 && view.lines.length < MAX_LINES
 
   return {
     rows,
@@ -466,5 +529,8 @@ export function useTaskLogStream(
     errorMessage,
     reconnect,
     earlierComplete,
+    canLoadEarlier,
+    loadingEarlier,
+    loadEarlier,
   }
 }

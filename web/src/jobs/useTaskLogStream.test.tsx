@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { fakeSseServer, tick } from '../test/sseStream'
+import { MAX_LINES } from './logBuffer'
 import { FLUSH_MS, MAX_BACKFILL_PAGES, useTaskLogStream } from './useTaskLogStream'
 
 function entry(seq: number, content = `line-${seq}\n`) {
@@ -101,6 +102,7 @@ test('a short tail page means the log is complete', async () => {
   )
   await waitFor(() => expect(result.current.status).toBe('live'))
   expect(result.current.earlierComplete).toBe(true)
+  expect(result.current.canLoadEarlier).toBe(false)
 })
 
 // The forward loop is now reached only by a RECOVERY: a fresh open takes the
@@ -176,6 +178,174 @@ test('a recovery stops at MAX_BACKFILL_PAGES, flags truncation, and still applie
 
   fake.latest().emit('task_log', logEvent(5000, 'after-cap\n'))
   await waitFor(() => expect(result.current.rows.some((r) => r.text === 'after-cap')).toBe(true))
+})
+
+test('load earlier fetches one page per click', async () => {
+  const fake = fakeSseServer()
+  const searches: string[] = []
+  server.use(
+    http.get('/v1/tasks/t1/logs', ({ request }) => {
+      const url = new URL(request.url)
+      searches.push(url.search)
+      if (url.searchParams.get('before_seq') === '10') {
+        return HttpResponse.json({ items: [entry(8), entry(9)], next_seq: 0, prev_seq: 8, total: 12 })
+      }
+      return HttpResponse.json({ items: [entry(10), entry(11)], next_seq: 0, prev_seq: 10, total: 12 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  expect(result.current.canLoadEarlier).toBe(true)
+
+  await act(async () => {
+    result.current.loadEarlier()
+    // A second click while one is in flight must be a no-op, not a second page.
+    result.current.loadEarlier()
+  })
+  await waitFor(() => expect(result.current.loadingEarlier).toBe(false))
+
+  expect(searches).toEqual(['?order=desc&limit=200', '?order=desc&limit=200&before_seq=10'])
+  expect(result.current.rows.map((r) => r.text)).toEqual([
+    'line-8',
+    'line-9',
+    'line-10',
+    'line-11',
+  ])
+})
+
+test('canLoadEarlier is false in each of the terminal cases', async () => {
+  const fake = fakeSseServer()
+  server.use(
+    http.get('/v1/tasks/t1/logs', () =>
+      HttpResponse.json({ items: [entry(5)], next_seq: 0, prev_seq: 0, total: 1 }),
+    ),
+  )
+  const drained = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(drained.result.current.status).toBe('live'))
+  // prev_seq was 0: the beginning of the log is already on screen.
+  expect(drained.result.current.canLoadEarlier).toBe(false)
+  drained.unmount()
+
+  // Nothing held yet: no cursor exists, so there is nothing to walk back from.
+  const fake2 = fakeSseServer()
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  server.use(
+    http.get('/v1/tasks/t1/logs', async () => {
+      await gate
+      return HttpResponse.json({ items: [entry(5)], next_seq: 0, prev_seq: 4, total: 9 })
+    }),
+  )
+  const pending = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake2.fetchImpl }),
+  )
+  await fake2.waitForConnection()
+  expect(pending.result.current.canLoadEarlier).toBe(false)
+  release()
+  await waitFor(() => expect(pending.result.current.canLoadEarlier).toBe(true))
+
+  // Evicted: the front of the window is gone, so there is no seam to join to.
+  const conn = fake2.latest()
+  conn.emit('task_log', logEvent(6, 'x\n'.repeat(MAX_LINES + 1)))
+  await waitFor(() => expect(pending.result.current.evicted).toBe(true))
+  expect(pending.result.current.canLoadEarlier).toBe(false)
+  pending.unmount()
+})
+
+// The generation fence. loadEarlier carries no AbortSignal (apiFetch has no
+// realm-mismatch fallback, and jsdom + a native fetch is exactly where that
+// bites), so the response always arrives and the fence is the only control.
+test('a stale earlier page is discarded', async () => {
+  const fake = fakeSseServer()
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  server.use(
+    http.get('/v1/tasks/:tid/logs', async ({ request, params }) => {
+      const url = new URL(request.url)
+      if (url.searchParams.has('before_seq')) {
+        await gate
+        return HttpResponse.json({ items: [entry(1, 'STALE-EARLIER\n')], next_seq: 0, prev_seq: 0, total: 9 })
+      }
+      const seq = params.tid === 't1' ? 10 : 20
+      return HttpResponse.json({ items: [entry(seq)], next_seq: 0, prev_seq: seq - 1, total: 9 })
+    }),
+  )
+  const { result, rerender } = renderHook(
+    ({ id }: { id: string }) =>
+      useTaskLogStream(id, { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+    { initialProps: { id: 't1' } },
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  act(() => {
+    result.current.loadEarlier()
+  })
+
+  // Switch tasks while the earlier page is still in flight, then let it land.
+  rerender({ id: 't2' })
+  await waitFor(() => expect(result.current.rows.map((r) => r.text)).toEqual(['line-20']))
+  release()
+  await tick()
+  await tick()
+
+  // The stale page never reaches the new task's window - which would otherwise
+  // be a prepend at a seam that does not exist there.
+  expect(result.current.rows.map((r) => r.text)).toEqual(['line-20'])
+  // The rows assertion alone is vacuous here and is kept only as the statement
+  // of intent: logState is a per-run local and publish() has its own cancelled
+  // guard, so a stale prepend cannot reach the view even with the fence gone.
+  // What DOES escape a missing fence is the state shared across runs. The stale
+  // page's prev_seq is 0 and t2's is not, so an unfenced landing marks t2's log
+  // complete and disables its control - the assertion that actually discriminates.
+  expect(result.current.earlierComplete).toBe(false)
+  expect(result.current.canLoadEarlier).toBe(true)
+})
+
+test('a discarded earlier page re-enables the control', async () => {
+  const fake = fakeSseServer()
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  server.use(
+    http.get('/v1/tasks/t1/logs', async ({ request }) => {
+      const url = new URL(request.url)
+      if (url.searchParams.has('before_seq')) {
+        await gate
+        return HttpResponse.json({ items: [entry(1, 'STALE\n')], next_seq: 0, prev_seq: 0, total: 9 })
+      }
+      if (url.searchParams.has('since_seq')) {
+        return HttpResponse.json({ items: [entry(11)], next_seq: 0, prev_seq: 0, total: 9 })
+      }
+      return HttpResponse.json({ items: [entry(10)], next_seq: 0, prev_seq: 9, total: 9 })
+    }),
+  )
+  const { result } = renderHook(() =>
+    useTaskLogStream('t1', { live: true, enabled: true, fetchImpl: fake.fetchImpl }),
+  )
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  act(() => {
+    result.current.loadEarlier()
+  })
+  expect(result.current.loadingEarlier).toBe(true)
+
+  // A drop-recovery bumps the generation while the earlier page is in flight.
+  fake.latest().emit('dropped', { reason: 'slow_consumer' })
+  await waitFor(() => expect(result.current.status).toBe('live'))
+  release()
+  await waitFor(() => expect(result.current.loadingEarlier).toBe(false))
+
+  // Discarded, not applied - and the control is usable again, so the click is
+  // visibly refused rather than silently swallowed.
+  expect(result.current.rows.some((r) => r.text === 'STALE')).toBe(false)
+  expect(result.current.canLoadEarlier).toBe(true)
 })
 
 // H1 regression (code review): the catch around a failing backfill page set
