@@ -105,13 +105,15 @@ a human reviewing the screenshots from the harness's first CI run, with the full
 suite green throughout - the header nav was clipped behind its own scroller at
 320 and 375, and no number in this harness could say so.
 
-That instance is closed. `layout.spec.ts` now also asserts, per surface and per
-width, that every top-level destination is visible or reachable through a visible
-control (`nav.ts`), and `header-nav.spec.ts` pins the breakpoint by value. The
-GENERAL gap remains: no assertion here covers any other scroller. The remaining
-in-tree ones are `Table`'s wrappers, which have a keyboard affordance and a
-`role="group"` name of their own, so what is missing is the general predicate, not
-a second known defect.
+That known instance is fixed by this change. `layout.spec.ts` now also asserts,
+per surface and per width, that every top-level destination is visible or
+reachable through a visible control (`nav.ts`), using `toBeInViewport` so that
+clipping by an ancestor scroller is caught rather than reported as visible, and
+`header-nav.spec.ts` pins the breakpoint by value.
+
+The GENERAL gap remains: no assertion here covers any other scroller, and other
+in-tree scroll wrappers are not audited by this harness. See
+`docs/backlog/idea-2026-08-24-layout-overflow-gate-cannot-see-inner-scrollers.md`.
 
 ## Rules
 

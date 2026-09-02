@@ -32,16 +32,14 @@ export function HoloShell({ children }: { children: ReactNode }) {
   const navToggleRef = useRef<HTMLButtonElement>(null)
   const navPanelId = useId()
 
-  // The open/close behaviour below is a transcription of shell/UserMenu.tsx's, not
-  // an invention. The two disclosures differ in mount model, alignment and item
-  // kinds, so nothing is shared yet; what they DO share is this handler set, and
-  // each site points at the other so the pair is discoverable from either end.
+  // The open/close behaviour below shares its handler set with shell/UserMenu.tsx;
+  // a change here almost certainly belongs there too.
   //
   // Close AND return focus to the toggle, but ONLY if focus was inside the
   // container: a mouse user in an engine that does not focus a <button> on click
   // can legitimately have the panel open with activeElement on <body>, and must not
   // have focus yanked onto a toggle it was never on. The containment check is read
-  // BEFORE setOpen.
+  // BEFORE setNavOpen.
   function closeNavAndRestoreFocus() {
     const focusWasInside = !!navRef.current && navRef.current.contains(document.activeElement)
     setNavOpen(false)
@@ -71,8 +69,11 @@ export function HoloShell({ children }: { children: ReactNode }) {
   // React maps onBlur to the native, BUBBLING focusout, so this fires for focus
   // leaving any descendant of the container.
   function onNavBlur(e: FocusEvent<HTMLElement>) {
-    // "Blurred to nothing" has a correct owner already - the document mousedown
-    // handler - and closing on it would make the panel vanish under the cursor.
+    // A null relatedTarget is "blurred to nothing", which a press on the panel's own
+    // non-focusable content produces; closing on it would make the panel vanish under
+    // the cursor, and the document mousedown handler covers a press outside. Accepted
+    // consequence: Shift+Tab off the toggle when it is the document's first tabbable
+    // also reports a null relatedTarget, so the panel stays open there.
     if (!e.relatedTarget) return
     // Shift+Tab from the first destination lands on the toggle, which is INSIDE
     // this container, so the containment check is what keeps the panel open there.
@@ -110,15 +111,13 @@ export function HoloShell({ children }: { children: ReactNode }) {
   }
 
   // ONE copy of the links, always mounted, switched between an inline row and a
-  // dropdown by CSS alone. Two copies would put two links named "Jobs" in the
-  // accessibility tree and would break every getByRole('link', { name }) query in
-  // this file's tests, which throw on multiple matches. jsdom applies none of this
-  // app's CSS, so no unit test can tell the collapsed state from a broken one -
-  // the browser lane owns that claim.
+  // dropdown by CSS alone. A second copy would put two nodes with the same
+  // accessible name in the tree; the guard is "each destination is rendered exactly
+  // once in the header".
   //
-  // `hidden` with `md:flex` is the Tailwind idiom: the variant rule is emitted
-  // after the base utility, so md:flex wins at and above the breakpoint whatever
-  // the open state is.
+  // The open state sets display on the panel and the breakpoint variant overrides
+  // it: the variant rule is emitted after the base utility, so at and above the
+  // breakpoint the row displays whatever the open state is.
   const navPanelClass = `min-w-0 gap-0.5 md:flex md:overflow-x-auto ${
     navOpen ? 'flex' : 'hidden'
   } max-md:absolute max-md:left-0 max-md:right-0 max-md:top-full max-md:z-50 max-md:flex-col max-md:border-b max-md:border-border max-md:bg-popover max-md:p-1.5 max-md:shadow-xl`
@@ -145,7 +144,7 @@ export function HoloShell({ children }: { children: ReactNode }) {
 
           Dialogs are unaffected either way: they portal to a layer appended to
           <body>, outside both siblings, and keep their z-50 above them. */}
-      {/* Narrow-viewport rule for this header (measured 2026-08-13): the nav
+      {/* Narrow-viewport rule for this header: the nav
           panel is the ONLY element allowed to become a scroll container. The
           dropdown that UserMenu hangs below this header would be clipped by an
           overflow declared here, which is the same stacking behaviour the comment
@@ -171,20 +170,19 @@ export function HoloShell({ children }: { children: ReactNode }) {
             >
               Menu
             </button>
-            {/* min-w-0 lets this shrink below its content (a flex item's automatic
-                minimum is its content width, which is what made the header a 523px
-                floor); md:overflow-x-auto then makes every route reachable by
-                scrolling at and above the breakpoint. Inert at any width where the
-                links fit: a scroll container with no overflow renders no scrollbar
-                and no visual difference. */}
+            {/* A flex item's automatic minimum size is its content width, so without
+                a zero min-width here the header cannot shrink below the width of the
+                links. The horizontal overflow is scoped to at and above the
+                breakpoint, where the links are inline; below it the panel is the
+                dropdown and must not scroll. Inert at any width where the links fit:
+                a scroll container with no overflow renders no scrollbar. */}
             <div id={navPanelId} data-testid="header-nav-panel" className={navPanelClass}>
               {nav.map((n) => (
                 /* In a vertical panel a full-width bottom border reads as a row
-                   separator rather than a selection marker, so the active
-                   accent becomes a left bar below the breakpoint and stays an
-                   underline above it. border-accent already sets the colour on
-                   all four sides. Deliberately unpinned: deleting these two
-                   changes how the active row looks and breaks nothing. */
+                   separator rather than a selection marker, so the active accent
+                   becomes a left bar below the breakpoint and stays an underline
+                   above it. Deliberately unpinned: no assertion covers these two,
+                   so deleting them changes how the active row looks silently. */
                 <NavLink
                   key={n.to}
                   to={n.to}

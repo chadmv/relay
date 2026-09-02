@@ -180,7 +180,7 @@ export function surfaces(): Surface[] {
       //
       // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH, measured 2026-08-28 rather
       // than argued. Widening SchedulesTable's own MIN_W to 2400px changes
-      // NOTHING here: all 54 tests still pass. That is not a hole in this
+      // NOTHING here: the suite stays green. That is not a hole in this
       // surface, it is the documented limit in e2e/README.md - a
       // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped behind
       // a scroller", and Table wraps the whole role="table" subtree in an

@@ -112,9 +112,9 @@ for (const width of WIDTHS) {
         const opened = await expectDestinationsReachable(page)
         if (!opened) return
 
-        // One extra screenshot on ONE surface, not thirteen: the header is the same
-        // component everywhere, and 26 near-identical PNGs per engine would make the
-        // human pass worse rather than better. Artifact, not assertion.
+        // One extra screenshot on ONE surface: the header is the same component
+        // everywhere, and a near-identical PNG per surface would make the human pass
+        // worse rather than better. Artifact, not assertion.
         if (s.name === 'jobs') {
           const openShot = testInfo.outputPath(`${s.name}-${width}-nav-open.png`)
           await page.screenshot({ path: openShot, fullPage: true })

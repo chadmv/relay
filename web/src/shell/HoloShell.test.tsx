@@ -34,12 +34,10 @@ afterEach(() => clearToken())
 
 // The breakpoint prefixes are spelled as a constant plus a bare suffix, never as
 // one literal string, and that is load-bearing rather than stylistic. Tailwind v4
-// scans every file under web/ for class-shaped substrings - test files included -
-// and emits a rule for each one it finds. A literal here would put these rules in
-// the production bundle on its own, so the post-build check that is supposed to
-// attribute them to HoloShell.tsx would pass with the classes deleted from the
-// component. The bare suffixes still emit their own unprefixed utilities, which is
-// harmless dead CSS.
+// scans every file under web/ for class-shaped substrings, test files included, and
+// emits a rule for each one it finds - so a literal here would emit these rules
+// independently of the component that owns them. See web/CLAUDE.md. The bare
+// suffixes still emit their own unprefixed utilities, which is harmless dead CSS.
 const NARROW = 'max-md:'
 const WIDE = 'md:'
 
@@ -381,8 +379,7 @@ test('Shift+Tab from the first destination lands on the toggle and leaves the pa
 // that for a bare blur(), and in a real browser it is what pressing the mouse on a
 // panel's own non-focusable content produces. Closing on it would make the panel
 // vanish under the user's cursor, and the document mousedown handler already owns
-// the "pressed somewhere else" case. A naive onBlur={() => setNavOpen(false)} passes
-// every other test in this file and fails exactly here.
+// the "pressed somewhere else" case.
 //
 // The blur MUST be flushed through act(). A bare first.blur() reaches the handler
 // either way, but React defers the resulting state update outside act(), so the
@@ -405,11 +402,9 @@ test('a blur with a null relatedTarget does NOT close the nav panel', async () =
   expect(toggle).toHaveAttribute('aria-expanded', 'true')
 })
 
-// AC6. The document keydown listener has an OPEN-ONLY lifetime. Every other test in
-// this file opens the panel before asserting anything, so this is the only one that
-// looks at the closed state's listener lifetime at all. The filter on type is what
-// makes it robust: React attaches its own document-level listeners for other event
-// types on mount.
+// AC6. The document keydown listener has an OPEN-ONLY lifetime. The filter on type
+// is what makes this robust: React attaches its own document-level listeners for
+// other event types on mount.
 test('no document keydown listener is registered while the nav panel is closed', async () => {
   const addSpy = vi.spyOn(document, 'addEventListener')
   try {
