@@ -134,6 +134,36 @@ export function surfaces(): Surface[] {
       },
     },
     {
+      // THE SAME PATH as `jobs` above, in the other view. `prepare` sets the same
+      // preference key the shipped view switch writes, so no state is fabricated
+      // that production cannot produce; addInitScript is required because the SPA
+      // reads the key during its first render, before any test code could run.
+      //
+      // WHAT THIS SURFACE ESTABLISHES: five lanes do not widen the document,
+      // <header> or <main>. WHAT IT CANNOT: whether the lanes are readable, or how
+      // much of the row sits clipped behind its own scroller - a
+      // scrollWidth <= clientWidth gate cannot tell "fits" from "clipped", and this
+      // view is deliberately a scroller (see README, and the same limit spelled out
+      // on schedules-failing). The screenshots are the artifact for that.
+      name: 'jobs-lanes',
+      path: () => '/jobs',
+      population: 'populated',
+      prepare: async (p) => {
+        await p.addInitScript(() => window.localStorage.setItem('relay.jobs.view', 'lanes'))
+      },
+      ready: async (p, seed) => {
+        // Scoped to the Queued lane, not the bare link: a seeded job never leaves
+        // `pending` (no relay-agent runs in slice 1), so a pass here means the
+        // populated lane really rendered, rather than an empty lanes view being
+        // measured under a populated name.
+        //
+        // Case-insensitive name: the lane heading is uppercased by CSS, and
+        // Chromium reflects text-transform in the accessible name.
+        const lane = p.getByRole('region', { name: /^queued$/i })
+        await expect(lane.getByRole('link', { name: seed.jobName })).toBeVisible()
+      },
+    },
+    {
       name: 'job-detail',
       path: (seed) => `/jobs/${seed.jobId}`,
       population: 'populated',
