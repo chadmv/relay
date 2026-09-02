@@ -58,6 +58,8 @@ func TestParseJobFilters_ExactErrorBodies(t *testing.T) {
 		{"until not RFC3339", "until=yesterday", "invalid until; expected an RFC3339 timestamp"},
 		{"until before since", "since=2026-09-02T02:00:00Z&until=2026-09-02T01:00:00Z", "until is earlier than since"},
 		{"q not valid UTF-8", "q=%FF%FE", "q is not valid UTF-8"},
+		{"q is a lone NUL", "q=%00", "q is not valid UTF-8"},
+		{"q carries an embedded NUL", "q=abc%00", "q is not valid UTF-8"},
 		{"q repeated", "q=a&q=b", `query parameter "q" must appear at most once`},
 		{"mine repeated", "mine=true&mine=false", `query parameter "mine" must appear at most once`},
 		{"since repeated", "since=2026-09-02T00:00:00Z&since=2026-09-03T00:00:00Z", `query parameter "since" must appear at most once`},

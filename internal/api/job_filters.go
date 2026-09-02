@@ -53,11 +53,11 @@ func parseJobFilters(w http.ResponseWriter, r *http.Request, u AuthUser) (jobFil
 	}
 
 	if raw := qs.Get("q"); raw != "" {
-		// Checked before anything else touches the value: Go's query parser
-		// percent-decodes without validating UTF-8, so an invalid byte
-		// sequence would otherwise reach Postgres as a text parameter and let
-		// user input produce a 5xx.
-		if !utf8.ValidString(raw) {
+		// Postgres text cannot hold a NUL byte and rejects one with SQLSTATE
+		// 22021, so a needle carrying one must be refused here rather than
+		// reaching the query as a parameter. utf8.ValidString does not cover
+		// it: NUL is valid UTF-8.
+		if !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
 			writeError(w, http.StatusBadRequest, "q is not valid UTF-8")
 			return jobFilters{}, false
 		}
