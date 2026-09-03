@@ -255,3 +255,142 @@ func TestHandleTaskStatus_TheErrorMessageLineSurvivesARequeueingRetry(t *testing
 	require.Len(t, rows, 1, "the cause of the retried attempt must survive the requeue")
 	require.Contains(t, rows[0].Content, "attempt one died")
 }
+
+// A6 - spec 4.4.1 and 4.4.2 together, exercised THROUGH the database, which the
+// sanitiser's own unit test cannot do: without the rune-boundary cut this is a
+// Bind failure and no row is written at all. The assertions are against the
+// constant rather than a byte count, so widening the bound is a decision and a
+// byte-offset cut is a defect.
+func TestHandleTaskStatus_AnOversizedErrorMessageIsTruncatedAtARuneBoundary(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg6", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+
+	// Three bytes per rune, so the bound does not fall on a rune boundary.
+	msg := strings.Repeat("\u20ac", worker.MaxAgentErrorMessageBytes)
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(taskID), Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: msg, Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "an oversized message must still produce a stored line, truncated")
+	stored := strings.TrimSuffix(strings.TrimPrefix(rows[0].Content, "[failed] "), "\n")
+	assert.True(t, utf8.ValidString(rows[0].Content), "the stored content must be valid UTF-8")
+	assert.LessOrEqual(t, len(stored), worker.MaxAgentErrorMessageBytes)
+	assert.Greater(t, len(stored), worker.MaxAgentErrorMessageBytes-4,
+		"the cut must be AT the bound, not far below it")
+	assert.True(t, strings.HasPrefix(msg, stored), "truncation must keep a prefix of the input")
+}
+
+// A7 - spec 4.4.3. A proto3 string may legally carry a NUL; Postgres TEXT may
+// not (SQLSTATE 22021). Without the strip this is a Bind failure, which is not
+// pgx.ErrNoRows, so the row is never written and the silent error arm swallows a
+// real defect.
+func TestHandleTaskStatus_ANulByteInTheErrorMessageIsStripped(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg7", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(taskID), Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "boom\x00boom", Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "a message carrying a NUL must still produce a stored line")
+	assert.Equal(t, "[failed] boomboom\n", rows[0].Content)
+	assert.NotContains(t, rows[0].Content, "\x00")
+}
+
+// A8 - the != "" condition. An empty message must not become a blank line. The
+// positive control uses a SECOND task, because the first is terminal by then and
+// its own re-report is the duplicate case A10 covers.
+func TestHandleTaskStatus_AnEmptyErrorMessageWritesNoLine(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, quietID, qw1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg8a", 0)
+	quiet, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: quietID, WorkerID: qw1})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, qw1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(quietID), Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "", Epoch: int64(quiet.AssignmentEpoch),
+	})
+
+	rows, err := q.GetTaskLogs(ctx, quietID)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "an empty message must not become a blank log line")
+	after, err := q.GetTask(ctx, quietID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", after.Status, "the report itself is still accepted")
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	_, loudID, lw1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg8b", 0)
+	loud, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: loudID, WorkerID: lw1})
+	require.NoError(t, err)
+	h.HandleTaskStatus(ctx, lw1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(loudID), Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "a real cause", Epoch: int64(loud.AssignmentEpoch),
+	})
+	rows, err = q.GetTaskLogs(ctx, loudID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "positive control: the same shape WITH a message must land")
+}
+
+// A9 - the `terminal` condition (spec 4.3). A RUNNING report leaves status,
+// worker_id and assignment_epoch untouched and nothing rate-limits status
+// messages, so admitting one would be an unbudgeted insert the assignee can
+// repeat forever at one gRPC message per row. The task really does go `running`,
+// so the absence is the condition rather than a rejected message.
+func TestHandleTaskStatus_ARunningReportWithAMessageWritesNoLine(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg9", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_RUNNING,
+		ErrorMessage: "chatty", Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	after, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, "running", after.Status, "fixture: the RUNNING report must have been accepted")
+	require.Equal(t, claimed.AssignmentEpoch, after.AssignmentEpoch,
+		"fixture: a non-terminal report ends no generation, which is the whole reason for the bound")
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a non-terminal report must not be able to write a log line")
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	// Positive control on the SAME task: a terminal report with a message lands.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "and now it really died", Epoch: int64(claimed.AssignmentEpoch),
+	})
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "positive control: a terminal report on the same task must land")
+	require.Contains(t, rows[0].Content, "and now it really died")
+}
