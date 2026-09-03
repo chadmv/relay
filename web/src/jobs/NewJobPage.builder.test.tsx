@@ -41,6 +41,12 @@ test('the page opens in form mode, seeded from the starter template', () => {
   expect(screen.queryByRole('textbox', { name: 'Job spec JSON' })).not.toBeInTheDocument()
 })
 
+test('the mode switch explains what each direction does', () => {
+  renderBuilder()
+  expect(screen.getByText(/replaces the editor text with the form.s current spec/i)).toBeInTheDocument()
+  expect(screen.getByText(/refuses anything the form cannot represent/i)).toBeInTheDocument()
+})
+
 test('the preview renders exactly the object that will be posted', () => {
   renderBuilder()
   expect(preview()).toEqual({

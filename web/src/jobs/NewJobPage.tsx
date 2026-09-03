@@ -115,6 +115,10 @@ export function NewJobPage() {
           </button>
         ))}
       </div>
+      <p className="text-[11px] text-fg-dim">
+        Switching to JSON replaces the editor text with the form&apos;s current spec. Switching to
+        Form refuses anything the form cannot represent, leaving the JSON text unchanged.
+      </p>
 
       {mode === 'form' ? (
         <>
