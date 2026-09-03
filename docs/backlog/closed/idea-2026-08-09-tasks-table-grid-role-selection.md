@@ -1,7 +1,9 @@
 ---
 title: "TasksTable row selection is inert to assistive tech: aria-selected under role=table"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: deferred review finding from the shared accessible-table primitive (2026-08-09)
@@ -63,3 +65,6 @@ cell, so `listbox` may be the honest match and would not require the `Table` cha
 Low priority because the visual selection cue (`border-l-2 border-accent bg-accent/[0.08]`) is
 correct and the pane content changes, so a sighted user is fully served; the gap is specific to
 assistive tech.
+
+## Resolution
+Decided in lane TB of the 2026-09-02 web-frontend batch on the UserMenu precedent: TasksTable is neither a grid nor a listbox, so it stops implying selection semantics instead of completing them. aria-selected and the button-as-row override are gone; the name cell holds a real button named by the task, the selected one carries aria-current, the row keeps its single click handler by bubbling, and the Spec/Log tablist is named by the selected task. TableRow lost its as and type props behind a ts-expect-error pin. A Playwright describe presses a real Tab and Enter in both engines. The review found the new button's focus ring fully clipped by the cell's overflow; it now paints inside the border box via a negative outline offset, asserted by computed style in both engines. Still open as a follow-up: activation is silent to assistive technology, and a click on a non-name cell no longer moves focus.
