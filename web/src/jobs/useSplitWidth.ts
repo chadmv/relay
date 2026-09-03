@@ -35,11 +35,9 @@ function readStored(): number {
 // rate; storage is written on pointerup, on pointercancel, and on each key
 // press, since one press is one gesture.
 //
-// A MOVE WRITES THE DOM DIRECTLY AND COMMITS REACT STATE ONCE, ON RELEASE. A
-// 30-move drag through JobDetailPage's tree measured 22 full-page re-renders
-// when every move called setWidth: the split's percentage lived in React
-// state, and JobDetailPage (everything from the tab panel to the task table)
-// re-rendered on every commit. The move handler instead writes the container's
+// A MOVE WRITES THE DOM DIRECTLY AND COMMITS REACT STATE ONCE, ON RELEASE.
+// Committing state on every move re-renders JobDetailPage's whole tree at
+// pointer rate, so the move handler instead writes the container's
 // --relay-split custom property and the separator's aria-valuenow attribute
 // straight onto the DOM nodes it already has references to, and only calls
 // setWidth once, from the SAME finish() that already persists - one commit per
