@@ -591,3 +591,12 @@ test('removing a blank-key row announces its position', async () => {
   await userEvent.click(env.getByRole('button', { name: 'Remove environment variable 1' }))
   expect(screen.getByRole('status')).toHaveTextContent('environment variable 1 removed')
 })
+
+test('a command left with every argument blank shows a note that it is not submitted', async () => {
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  expect(cmd.queryByText(/will not be submitted/i)).not.toBeInTheDocument()
+  await userEvent.clear(cmd.getByRole('textbox', { name: 'Argument 1' }))
+  await userEvent.clear(cmd.getByRole('textbox', { name: 'Argument 2' }))
+  expect(cmd.getByText(/will not be submitted/i)).toBeInTheDocument()
+})

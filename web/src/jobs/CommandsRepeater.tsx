@@ -10,6 +10,14 @@ interface CommandsRepeaterProps {
   announce: (message: string) => void
 }
 
+// A command with no non-blank token - whether that is zero rows or every row
+// left blank - emits no argv (toSpec's argvOf filters blanks the same way)
+// and so drops silently out of the emitted command/commands array while its
+// own panel keeps rendering, exactly like two key-value rows sharing a key.
+function isEmptyCommand(cmd: TaskRow['commands'][number]): boolean {
+  return cmd.tokens.every((t) => t.text === '')
+}
+
 // One input per argv TOKEN, never one input per command line. Splitting a line
 // on whitespace is a correctness bug the first time anyone types a path with a
 // space in it, and a silent one: the spec serializes, dispatches and fails on the
@@ -105,12 +113,16 @@ export const CommandsRepeater = memo(function CommandsRepeater({ task, onChange,
               </PillButton>
             </div>
           ))}
-          {/* The same joined rendering the task-detail spec panel uses, so the
-              reading and the writing surfaces agree. It is a preview, not the
-              value: each argument is its own element on the wire. */}
-          <span className="font-mono text-[11px] text-fg-dim">
-            {cmd.tokens.map((t) => t.text).filter((t) => t !== '').join(' ')}
-          </span>
+          {isEmptyCommand(cmd) ? (
+            <p className="text-[11px] text-fg-dim">This command has no arguments and will not be submitted.</p>
+          ) : (
+            // The same joined rendering the task-detail spec panel uses, so the
+            // reading and the writing surfaces agree. It is a preview, not the
+            // value: each argument is its own element on the wire.
+            <span className="font-mono text-[11px] text-fg-dim">
+              {cmd.tokens.map((t) => t.text).filter((t) => t !== '').join(' ')}
+            </span>
+          )}
           <div className="flex flex-wrap gap-1.5">
             <PillButton id={`task-${task.id}-cmd-${cmd.id}-add-arg`} onClick={() => addToken(ci)}>
               Add argument
