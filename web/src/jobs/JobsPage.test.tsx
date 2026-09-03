@@ -43,17 +43,6 @@ test('renders jobs and the KPI strip', async () => {
   expect(await screen.findByText('12')).toBeInTheDocument() // failed_24h
 })
 
-test('does not render the backend-blocked Timeline view, My-jobs, or search controls', async () => {
-  server.use(http.get('/v1/jobs', () => HttpResponse.json(page)))
-  renderPage()
-  await screen.findByText('film-x render')
-  // Omitted per spec: Timeline view, My jobs pill, free-text search. The Lanes
-  // view shipped; it is covered by JobsPage.lanes.test.tsx.
-  expect(screen.queryByRole('button', { name: /timeline/i })).toBeNull()
-  expect(screen.queryByRole('button', { name: /my jobs/i })).toBeNull()
-  expect(screen.queryByRole('searchbox')).toBeNull()
-})
-
 test('selecting a status chip re-requests with status and disables sort', async () => {
   const requests: URLSearchParams[] = []
   server.use(

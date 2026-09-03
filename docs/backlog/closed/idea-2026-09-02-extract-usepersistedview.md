@@ -1,7 +1,9 @@
 ---
 title: JobsPage and WorkersPage carry near-verbatim persisted view switches that already diverge
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-09-02
 priority: low
 source: Phase 4 invariants lens on the 2026-09-01 jobs-lanes slice (lane F)
@@ -23,3 +25,6 @@ byte-identical-test refactor gate. Add the group role and name both switches sho
 
 ## Related
 - web/src/jobs/JobsPage.tsx, web/src/workers/WorkersPage.tsx
+
+## Resolution
+Shipped in lane JF of the 2026-09-02 web-frontend batch: usePersistedChoice, extracted from the two inline persisted-view switches on the Jobs and Workers pages under a byte-identical gate on the Jobs page tests and a zero-deletion gate on the Workers test, then given the timeline as its third Jobs value; an unknown stored value falls back to the default.

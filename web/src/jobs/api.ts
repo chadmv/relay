@@ -1,4 +1,5 @@
 import { apiFetch, apiStream } from '../lib/api'
+import { TIMELINE_PAGE_SIZE } from './timelineWindow'
 
 // The jobs.status vocabulary, in lifecycle order. JobStatus derives from the tuple
 // so the type and the runtime list cannot drift from each other.
@@ -51,12 +52,25 @@ export type JobSort =
 // First page is 50 (server default), passed explicitly. When a status filter is
 // active the server rejects ?sort= combined with ?status=, so sort is omitted in
 // that case; the unfiltered branch sends sort.
-export function listJobs(sort: JobSort, status = '', cursor = ''): Promise<JobsPage> {
-  const q = new URLSearchParams({ limit: '50' })
-  if (status) q.set('status', status)
-  else q.set('sort', sort)
-  if (cursor) q.set('cursor', cursor)
-  return apiFetch<JobsPage>(`/jobs?${q}`)
+//
+// q and mine are appended trailing parameters with defaults. Both are omitted
+// when empty or false rather than sent blank: the server treats an empty
+// value as absent, so a blank parameter would be a second spelling of the
+// same request.
+export function listJobs(
+  sort: JobSort,
+  status = '',
+  cursor = '',
+  q = '',
+  mine = false,
+): Promise<JobsPage> {
+  const p = new URLSearchParams({ limit: '50' })
+  if (status) p.set('status', status)
+  else p.set('sort', sort)
+  if (cursor) p.set('cursor', cursor)
+  if (q) p.set('q', q)
+  if (mine) p.set('mine', 'true')
+  return apiFetch<JobsPage>(`/jobs?${p}`)
 }
 
 // Fleet-wide KPI counts for the summary strip.
@@ -91,9 +105,46 @@ export function listJobsBySchedule(scheduledJobId: string, limit: number): Promi
 // unfiltered branch, and sort combined with a filter is a hard 400. Do not unify
 // them. A limit outside [1, 200] is REJECTED with a 400, not clamped
 // (internal/api/pagination.go, parsePage), so a caller's cap is a hard ceiling.
-export function listJobsByStatus(status: JobStatus, limit: number): Promise<JobsPage> {
-  const q = new URLSearchParams({ status, limit: String(limit) })
-  return apiFetch<JobsPage>(`/jobs?${q}`)
+export function listJobsByStatus(
+  status: JobStatus,
+  limit: number,
+  q = '',
+  mine = false,
+): Promise<JobsPage> {
+  const p = new URLSearchParams({ status, limit: String(limit) })
+  if (q) p.set('q', q)
+  if (mine) p.set('mine', 'true')
+  return apiFetch<JobsPage>(`/jobs?${p}`)
+}
+
+// One page of the timeline's window walk.
+//
+// Sends NO sort and NO status, relying on the server's default -created_at, so
+// that adding a status filter to this view later cannot silently turn into the
+// sort-versus-filter 400 that listJobs and listJobsByStatus both have to route
+// around. Deliberately not expressed through listJobs for that reason.
+//
+// The signal is threaded so the walk is cancellable. apiFetch spreads its options
+// into fetch, so it forwards one already; TanStack cancels an inactive query's
+// promise only if the signal was CONSUMED, which makes passing it here the thing
+// that turns cancellation on rather than a nicety.
+export function listJobsInWindow(
+  sinceIso: string,
+  untilIso: string,
+  cursor = '',
+  q = '',
+  mine = false,
+  signal?: AbortSignal,
+): Promise<JobsPage> {
+  const p = new URLSearchParams({
+    limit: String(TIMELINE_PAGE_SIZE),
+    since: sinceIso,
+    until: untilIso,
+  })
+  if (cursor) p.set('cursor', cursor)
+  if (q) p.set('q', q)
+  if (mine) p.set('mine', 'true')
+  return apiFetch<JobsPage>(`/jobs?${p}`, { signal })
 }
 
 // Task-status vocabulary (migration 000019). Distinct from JobStatus: tasks add

@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, expect, test } from 'vitest'
@@ -228,4 +228,29 @@ test('decommissioned pagination sends cursor on next page request', async () => 
   expect(await screen.findByText('gone-1')).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: /next/i }))
   await waitFor(() => expect(cursors).toContain('CUR1'))
+})
+
+test('a remount restores the persisted view choice', async () => {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  const first = renderPage()
+  await screen.findByText('render-01')
+  await userEvent.click(screen.getByRole('button', { name: 'Table' }))
+  expect(localStorage.getItem('relay.workers.view')).toBe('table')
+
+  // No existing case here remounts, so a persisted-choice implementation that
+  // never reads storage back (e.g. an empty allow-list) still passes every other
+  // assertion in this file - this is the one that catches it.
+  first.unmount()
+  renderPage()
+  expect(await screen.findByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('the view switch is one named group, not two loose buttons', async () => {
+  server.use(http.get('/v1/workers', () => HttpResponse.json(page)))
+  renderPage()
+  await screen.findByRole('button', { name: 'Grid' })
+  // Without a group name the two aria-pressed states are announced with nothing
+  // saying what they switch.
+  const viewSwitch = screen.getByRole('group', { name: 'Workers view' })
+  expect(within(viewSwitch).getAllByRole('button')).toHaveLength(2)
 })

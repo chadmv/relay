@@ -40,10 +40,14 @@ function fiveEmpty(): LaneState[] {
   ]
 }
 
-function renderLanes(lanes: LaneState[], onShowAll: (s: Job['status']) => void = () => {}) {
+function renderLanes(
+  lanes: LaneState[],
+  onShowAll: (s: Job['status']) => void = () => {},
+  opts: { filtering?: boolean } = {},
+) {
   return render(
     <MemoryRouter>
-      <JobsLanes lanes={lanes} onShowAll={onShowAll} />
+      <JobsLanes lanes={lanes} onShowAll={onShowAll} filtering={opts.filtering} />
     </MemoryRouter>,
   )
 }
@@ -161,6 +165,18 @@ test('tab order is the scroll container, then each lane in document order', asyn
   expect(document.activeElement).toHaveTextContent('+ 7 more')
   await userEvent.tab()
   expect(document.activeElement).toHaveAttribute('href', '/jobs/B1')
+})
+
+test('the lane count says matching while a filter is active', () => {
+  const lanes = fiveEmpty()
+  lanes[0] = lane({ status: 'pending', items: [job('A1', 'ingest frames')], total: 1 })
+
+  renderLanes(lanes, undefined, { filtering: true })
+  // With a filter active the number is no longer that status's all-time count,
+  // and a caption that still says "total" is a wrong answer rather than a
+  // missing one.
+  expect(within(region('Queued')).getByText('1 matching')).toBeInTheDocument()
+  expect(within(region('Queued')).queryByText('1 total')).toBeNull()
 })
 
 test('the lanes sit in one horizontal scroll container with fixed-width lanes', () => {

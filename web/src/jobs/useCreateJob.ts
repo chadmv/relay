@@ -9,6 +9,8 @@ import { createJob } from './api'
 //     queryKeyDecoupling.test.tsx), so ['jobs'] alone leaves the KPI strip stale.
 //   - ['job-lanes']  decoupled for the same reason, so the new job would not
 //     appear in the lanes view until the next poll.
+//   - ['job-timeline'] decoupled for the same reason, so a job created inside
+//     the current window would not appear there until the next poll.
 // There is NO ['job', id] to invalidate: the job is brand new and not yet cached.
 // No optimistic update.
 export function useCreateJob() {
@@ -20,6 +22,7 @@ export function useCreateJob() {
       qc.invalidateQueries({ queryKey: ['jobs'] })
       qc.invalidateQueries({ queryKey: ['job-stats'] })
       qc.invalidateQueries({ queryKey: ['job-lanes'] })
+      qc.invalidateQueries({ queryKey: ['job-timeline'] })
     },
   })
 }

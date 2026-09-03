@@ -69,7 +69,7 @@ test('the view switch persists the choice to localStorage and a remount restores
   // The pair is one control, not two loose buttons: without a group name the two
   // aria-pressed states are announced with nothing saying what they switch.
   const viewSwitch = screen.getByRole('group', { name: 'Jobs view' })
-  expect(within(viewSwitch).getAllByRole('button')).toHaveLength(2)
+  expect(within(viewSwitch).getAllByRole('button')).toHaveLength(3)
   expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
   expect(screen.getByRole('button', { name: 'Lanes' })).toHaveAttribute('aria-pressed', 'false')
 
@@ -82,8 +82,9 @@ test('the view switch persists the choice to localStorage and a remount restores
   expect(await screen.findByRole('button', { name: 'Lanes' })).toHaveAttribute('aria-pressed', 'true')
 })
 
-test('a stored value that is not the literal lanes falls back to the table view', async () => {
-  localStorage.setItem('relay.jobs.view', 'timeline')
+test('a stored value outside the view allow-list falls back to the table view', async () => {
+  // A value no version has ever written is what pins the allow-list.
+  localStorage.setItem('relay.jobs.view', 'gantt')
   renderPage()
   expect(await screen.findByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
 })
