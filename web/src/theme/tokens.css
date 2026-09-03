@@ -67,9 +67,8 @@
    element, which is why it is on this scale at all. The alternative is the
    browser's top layer via a native dialog element, which would take dialogs off
    the scale entirely; the argument and the conditions for revisiting it are in
-   the closed backlog item
-   idea-2026-08-09-native-dialog-element-reconsideration. Adopting it later edits
-   this entry rather than invalidating the block.
+   backlog item idea-2026-08-09-native-dialog-element-reconsideration. Adopting
+   it later edits this entry rather than invalidating the block.
 
    Completeness of the ENTRY lines is enforced by
    components/dialog/dialogShellIsSole.guard.test.ts.

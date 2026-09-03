@@ -17,8 +17,8 @@
 // and leaves the focus trap, the whole point of the route, as the one thing
 // never verified. Any migration is partial by construction in any case:
 // showModal() does not lock document scroll, so the scroll lock below stays
-// here. The full argument and the conditions for revisiting are in the closed
-// backlog item idea-2026-08-09-native-dialog-element-reconsideration.
+// here. The full argument and the conditions for revisiting are in backlog
+// item idea-2026-08-09-native-dialog-element-reconsideration.
 //
 // THE MARKING PASS RUNS ON REGISTER AND UNREGISTER ONLY. A node appended to
 // document.body while a dialog is open is therefore neither marked inert nor
