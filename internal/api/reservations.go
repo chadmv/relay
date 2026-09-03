@@ -108,10 +108,8 @@ var reservationFilterParams = []string{"worker_id"}
 // endpoint cannot distinguish "never existed" from "deleted". It answers an
 // empty page.
 //
-// qs is the query string parsePage already parsed and arity-checked. Taking it
-// as an argument rather than re-reading r.URL.Query() keeps one parse per
-// request: r.URL.Query() discards percent-decoding errors, so a second parse
-// can disagree with the one that was validated.
+// qs is the query string parsePage already parsed and arity-checked; see
+// parseFilterQ for why it is passed rather than re-read.
 func parseReservationFilters(w http.ResponseWriter, qs url.Values) (reservationFilters, bool) {
 	var f reservationFilters
 

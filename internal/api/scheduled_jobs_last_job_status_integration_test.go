@@ -22,14 +22,7 @@ func TestScheduledJob_LastJobStatusIsLive(t *testing.T) {
 
 	schedID := seedFilterSchedule(t, pool, "with-a-job", uuidString(owner.ID), "@daily", true)
 
-	var jobID string
-	require.NoError(t, pool.QueryRow(t.Context(),
-		`INSERT INTO jobs (name, submitted_by, status, scheduled_job_id)
-		 VALUES ('spawned', $1::uuid, 'running', $2::uuid) RETURNING id`,
-		uuidString(owner.ID), schedID).Scan(&jobID))
-	_, err := pool.Exec(t.Context(),
-		`UPDATE scheduled_jobs SET last_job_id = $2::uuid WHERE id = $1::uuid`, schedID, jobID)
-	require.NoError(t, err)
+	jobID := seedLastJob(t, pool, uuidString(owner.ID), schedID, "running")
 
 	read := func() map[string]any {
 		req := httptest.NewRequest("GET", "/v1/scheduled-jobs/"+schedID, nil)
@@ -46,7 +39,7 @@ func TestScheduledJob_LastJobStatusIsLive(t *testing.T) {
 	assert.Equal(t, jobID, m["last_job_id"])
 	assert.Equal(t, "running", m["last_job_status"])
 
-	_, err = pool.Exec(t.Context(), `UPDATE jobs SET status = 'failed' WHERE id = $1::uuid`, jobID)
+	_, err := pool.Exec(t.Context(), `UPDATE jobs SET status = 'failed' WHERE id = $1::uuid`, jobID)
 	require.NoError(t, err)
 
 	m = read()
@@ -71,14 +64,7 @@ func TestListScheduledJobs_EnrichmentFailureIsA500(t *testing.T) {
 	ownerToken := createTestToken(t, q, owner.ID)
 
 	schedID := seedFilterSchedule(t, pool, "has-job", uuidString(owner.ID), "@daily", true)
-	var jobID string
-	require.NoError(t, pool.QueryRow(t.Context(),
-		`INSERT INTO jobs (name, submitted_by, status, scheduled_job_id)
-		 VALUES ('spawned', $1::uuid, 'done', $2::uuid) RETURNING id`,
-		uuidString(owner.ID), schedID).Scan(&jobID))
-	_, err := pool.Exec(t.Context(),
-		`UPDATE scheduled_jobs SET last_job_id = $2::uuid WHERE id = $1::uuid`, schedID, jobID)
-	require.NoError(t, err)
+	seedLastJob(t, pool, uuidString(owner.ID), schedID, "done")
 
 	// Control: the request answers 200 and both keys before the fault.
 	code, p := getScheduledJobsPage(t, srv, ownerToken, "")
@@ -86,7 +72,7 @@ func TestListScheduledJobs_EnrichmentFailureIsA500(t *testing.T) {
 	require.Len(t, p.Items, 1)
 	require.Contains(t, p.Items[0], "last_job_status")
 
-	_, err = pool.Exec(t.Context(), `ALTER TABLE jobs RENAME COLUMN status TO status_broken`)
+	_, err := pool.Exec(t.Context(), `ALTER TABLE jobs RENAME COLUMN status TO status_broken`)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/scheduled-jobs", nil)
@@ -115,14 +101,7 @@ func TestListScheduledJobs_LastJobStatusPairingOnTheWire(t *testing.T) {
 	withJob := seedFilterSchedule(t, pool, "has-job", uuidString(owner.ID), "@daily", true)
 	seedFilterSchedule(t, pool, "no-job", uuidString(owner.ID), "@daily", true)
 
-	var jobID string
-	require.NoError(t, pool.QueryRow(t.Context(),
-		`INSERT INTO jobs (name, submitted_by, status, scheduled_job_id)
-		 VALUES ('spawned', $1::uuid, 'done', $2::uuid) RETURNING id`,
-		uuidString(owner.ID), withJob).Scan(&jobID))
-	_, err := pool.Exec(t.Context(),
-		`UPDATE scheduled_jobs SET last_job_id = $2::uuid WHERE id = $1::uuid`, withJob, jobID)
-	require.NoError(t, err)
+	seedLastJob(t, pool, uuidString(owner.ID), withJob, "done")
 
 	for _, tc := range []struct{ name, token string }{
 		{"admin", adminToken},

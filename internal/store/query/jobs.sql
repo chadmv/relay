@@ -476,9 +476,4 @@ SELECT id, name FROM jobs WHERE id = ANY($1::uuid[]);
 -- Batch enrichment for the schedules list's last_job_status, mirroring
 -- GetUserEmailsByIDs. One primary-key = ANY lookup per request, O(1) in the page
 -- size.
---
--- A join or a scalar subquery would read better and would change the sqlc row
--- type for every schedules list statement from ScheduledJob to a per-statement
--- Row struct, cascading into the response mapper, the row-key functions and the
--- premise of TestScheduledJobResponse_ArityMatchesTheRow.
 SELECT id, status FROM jobs WHERE id = ANY(@ids::uuid[]);

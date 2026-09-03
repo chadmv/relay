@@ -181,7 +181,7 @@ type ListReservationsPageParams struct {
 //
 // Containment (@>) rather than = ANY, even though no index is added here: the
 // two are equivalent for a single element, and only @> can be served by a GIN
-// index, so a later index needs no rewrite across the nine statements.
+// index, so a later index needs no rewrite if one is ever added.
 //
 //	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
 //	WHERE ($1::bool = FALSE
@@ -243,8 +243,8 @@ type ListReservationsPageByCreatedAscParams struct {
 	PageLimit int32              `json:"+page_limit"`
 }
 
-// THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING, here and
-// in the six sibling arms below. Without them,
+// THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING. Without
+// them,
 // `NOT cursor_set OR keyset AND filter` binds as
 // `NOT cursor_set OR (keyset AND filter)`, so on the FIRST page - where
 // cursor_set is false - the whole WHERE is satisfied before the filter is
@@ -698,9 +698,9 @@ type ListReservationsPageByStartsDescParams struct {
 // Cursor non-null -> in non-null head; qualify non-nulls below cursor or any null.
 //
 // THE OUTERMOST PARENTHESES ARE LOAD-BEARING AND ARE NOT THE ONES AROUND THE
-// CASE, here and in the three sibling CASE arms below. Without them the appended
-// AND binds to the CASE arm alone, so a first-page request (cursor_set false)
-// satisfies the WHERE before the filter is reached and returns every row.
+// CASE. Without them the appended AND binds to the CASE arm alone, so a
+// first-page request (cursor_set false) satisfies the WHERE before the filter is
+// reached and returns every row.
 //
 //	SELECT id, name, selector, worker_ids, user_id, project, starts_at, ends_at, created_at FROM reservations
 //	WHERE (

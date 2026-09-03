@@ -53,24 +53,24 @@ func (s *Server) issueToken(ctx context.Context, q *store.Queries, userID pgtype
 }
 
 // authResponse is the body POST /v1/auth/login and both arms of
-// POST /v1/auth/register return.
-//
-// ONE STRUCT RATHER THAN THREE map[string]any LITERALS: three literals that must
-// agree is the drift hazard reusing toUserResponse already exists to avoid, and
-// a typed response makes the key set pinnable by a test. token and expires_at
-// are unchanged on the wire - a time.Time marshals identically as a map value
-// and as a struct field.
-//
-// User is built by toUserResponse and is EXACTLY the GET /v1/users/me body,
-// including archived_at, which is always null here because an archived user is
-// refused at login and a newly created one is never archived. A hand-built
-// literal that dropped it would be the parallel builder this reuse prevents.
-// userResponse cannot carry a password hash: it is a private struct with no such
-// field.
+// POST /v1/auth/register return. User is exactly the GET /v1/users/me body,
+// asserted against that endpoint's live response by
+// TestAuthLogin_UserMatchesUsersMe.
 type authResponse struct {
 	Token     string       `json:"token"`
 	ExpiresAt time.Time    `json:"expires_at"`
 	User      userResponse `json:"user"`
+}
+
+// newAuthResponse is the only builder for that body. The three handlers that
+// return it must not each construct their own, which is the drift reusing
+// toUserResponse already exists to prevent.
+func newAuthResponse(token string, expires time.Time, u store.User) authResponse {
+	return authResponse{
+		Token:     token,
+		ExpiresAt: expires,
+		User:      toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt),
+	}
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -189,11 +189,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{
-		Token:     token,
-		ExpiresAt: expires,
-		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 // registerSelfServe creates a non-admin user with a fresh session token. Caller
@@ -244,11 +240,7 @@ func (s *Server) registerSelfServe(ctx context.Context, w http.ResponseWriter, e
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{
-		Token:     token,
-		ExpiresAt: expires,
-		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -290,11 +282,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{
-		Token:     token,
-		ExpiresAt: expires,
-		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {

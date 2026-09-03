@@ -380,10 +380,8 @@ var scheduleFilterParams = []string{"enabled", "q"}
 // its arm alone, with no error, which is what
 // TestListScheduledJobs_FilterArms_FirstPage enumerates.
 //
-// qs is the query string parsePage already parsed and arity-checked. Taking it
-// as an argument rather than re-reading r.URL.Query() keeps one parse per
-// request: r.URL.Query() discards percent-decoding errors, so a second parse
-// can disagree with the one that was validated.
+// qs is the query string parsePage already parsed and arity-checked; see
+// parseFilterQ for why it is passed rather than re-read.
 func parseScheduleFilters(w http.ResponseWriter, qs url.Values) (scheduleFilters, bool) {
 	var f scheduleFilters
 

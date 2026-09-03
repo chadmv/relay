@@ -15,11 +15,9 @@ import (
 // TestIntegration_LoginAgainstTheRealEndpoint drives the real relay login
 // command against a live internal/api server.
 //
-// It is the pin on CLI-to-server compatibility for the auth body: the harness
-// seeds tokens through the store, so no other test in this lane calls
-// POST /v1/auth/login at all. doLogin decodes into a local anonymous struct
-// carrying token and expires_at only, and encoding/json ignores unknown keys -
-// this is what turns that argument into evidence.
+// doLogin decodes into a local anonymous struct carrying token and expires_at
+// only, and encoding/json ignores unknown keys. Driving the real command
+// against the real endpoint is what turns that argument into evidence.
 func TestIntegration_LoginAgainstTheRealEndpoint(t *testing.T) {
 	s := startRelayServer(t)
 

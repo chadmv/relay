@@ -282,8 +282,8 @@ SELECT COUNT(*) FROM jobs
    AND status IN ('pending','queued','running','dispatched');
 
 -- name: ListScheduledJobsPageByCreatedAsc :many
--- THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING, here and
--- in the six sibling arms below. Without them,
+-- THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING. Without
+-- them,
 -- `NOT cursor_set OR keyset AND filter` binds as
 -- `NOT cursor_set OR (keyset AND filter)`, so on the FIRST page - where
 -- cursor_set is false - the whole WHERE is satisfied before any filter is

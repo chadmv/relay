@@ -172,8 +172,9 @@ func TestToScheduledJobResponse_LastJobStatusIsPairedToLastJobID(t *testing.T) {
 // added to its source: a new column would land in models.go, in the SQL, in the
 // database, and simply never reach a client, with every existing test green.
 //
-// The relationship is response = row + 1, and the +1 is OwnerEmail, which no
-// column supplies - fillOwnerEmails writes it separately from a users lookup.
+// The relationship is response = row + 2. Neither extra field has a column:
+// OwnerEmail comes from fillOwnerEmails and LastJobStatus from
+// fillLastJobStatuses, each a separate lookup.
 // If this fails after adding a column, add the mapping AND its assertions; if it
 // fails after adding a response-only field, update the constant below and say in
 // the commit message what supplies it.

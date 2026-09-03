@@ -21,13 +21,6 @@ type jobFilters struct {
 	Until   pgtype.Timestamptz
 }
 
-// The jobs list's ?q= cap and its over-length body are the shared ones
-// parseFilterQ enforces; these are the names
-// TestParseJobFilters_QLengthCapIsInRunes reads.
-const maxJobFilterQRunes = maxFilterQRunes
-
-var maxJobFilterQMessage = maxFilterQMessage
-
 // jobFilterParams are the four query parameters parseJobFilters reads.
 // handleListJobs passes them to rejectRepeatedParams before calling in.
 var jobFilterParams = []string{"q", "mine", "since", "until"}
@@ -38,10 +31,8 @@ var jobFilterParams = []string{"q", "mine", "since", "until"}
 // call site that omits a field disables that filter for its arm alone, with no
 // error.
 //
-// qs is the query string parsePage already parsed and arity-checked. Taking
-// it as an argument rather than re-reading r.URL.Query() keeps one parse per
-// request: r.URL.Query() discards percent-decoding errors, so a second parse
-// can disagree with the one that was validated.
+// qs is the query string parsePage already parsed and arity-checked; see
+// parseFilterQ for why it is passed rather than re-read.
 func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilters, bool) {
 	var f jobFilters
 

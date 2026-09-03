@@ -417,11 +417,6 @@ type GetJobStatusesByIDsRow struct {
 // GetUserEmailsByIDs. One primary-key = ANY lookup per request, O(1) in the page
 // size.
 //
-// A join or a scalar subquery would read better and would change the sqlc row
-// type for every schedules list statement from ScheduledJob to a per-statement
-// Row struct, cascading into the response mapper, the row-key functions and the
-// premise of TestScheduledJobResponse_ArityMatchesTheRow.
-//
 //	SELECT id, status FROM jobs WHERE id = ANY($1::uuid[])
 func (q *Queries) GetJobStatusesByIDs(ctx context.Context, ids []pgtype.UUID) ([]GetJobStatusesByIDsRow, error) {
 	rows, err := q.db.Query(ctx, getJobStatusesByIDs, ids)

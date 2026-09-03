@@ -97,22 +97,22 @@ func TestParseScheduleFilters_EmptyEnabledIsAbsent(t *testing.T) {
 // as two UTF-8 bytes, so 200 of them are 400 bytes and must be accepted, and 201
 // must not; a byte-length cap set to 200 rejects both, which is what makes the
 // pair discriminate. Both the fixture and the expected message derive from
-// maxJobFilterQRunes and maxJobFilterQMessage, so this cannot pass by
+// maxFilterQRunes and maxFilterQMessage, so this cannot pass by
 // hard-coding what the jobs list happens to return today.
 func TestParseScheduleFilters_QLengthCapIsInRunes(t *testing.T) {
 	twoByteRune := string(rune(0x00e9))
-	atCap := strings.Repeat(twoByteRune, maxJobFilterQRunes)
+	atCap := strings.Repeat(twoByteRune, maxFilterQRunes)
 	overCap := atCap + twoByteRune
-	require.Equal(t, 2*maxJobFilterQRunes, len(atCap),
+	require.Equal(t, 2*maxFilterQRunes, len(atCap),
 		"fixture: the needle must be longer in bytes than in runes")
 
 	_, ok, _ := callParseScheduleFilters(t, "q="+url.QueryEscape(atCap))
-	assert.True(t, ok, "%d runes must be accepted", maxJobFilterQRunes)
+	assert.True(t, ok, "%d runes must be accepted", maxFilterQRunes)
 
 	_, ok, rec := callParseScheduleFilters(t, "q="+url.QueryEscape(overCap))
 	require.False(t, ok)
 	assert.Equal(t, 400, rec.Code)
-	assert.Equal(t, maxJobFilterQMessage, errBody(t, rec))
+	assert.Equal(t, maxFilterQMessage, errBody(t, rec))
 }
 
 func TestParseScheduleFilters_EmptyAndWhitespaceQAreAbsent(t *testing.T) {

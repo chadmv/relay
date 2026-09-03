@@ -3,7 +3,6 @@
 package api_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,31 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/api"
-	"relay/internal/events"
-	"relay/internal/store"
-	"relay/internal/worker"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func postAuthJSON(t *testing.T, srv interface {
-	Handler() http.Handler
-}, path string, body any) (int, map[string]any) {
-	t.Helper()
-	b, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest("POST", path, bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	var m map[string]any
-	if rec.Body.Len() > 0 {
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
-	}
-	return rec.Code, m
-}
 
 // assertAuthBody pins the CLOSED KEY SET of an auth response against
 // HAND-WRITTEN names, decoded from real marshalled JSON. A fixture built from
@@ -85,15 +62,13 @@ func assertAuthBody(t *testing.T, m map[string]any) map[string]any {
 // The user object must be the GET /v1/users/me body, asserted against that
 // endpoint's own live response so the two cannot drift.
 func TestAuthLogin_UserMatchesUsersMe(t *testing.T) {
-	pool := newTestPool(t)
-	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv, q, _ := newTestServerWithPool(t)
 
 	const email = "authuser@test.com"
 	_ = createTestUser(t, q, "Auth User", email, false)
 
 	// createTestUser stores a hash of this plaintext.
-	code, m := postAuthJSON(t, srv, "/v1/auth/login", map[string]string{
+	code, m := postJSON(t, srv, "", "/v1/auth/login", map[string]string{
 		"email":    email,
 		"password": "testpassword1",
 	})
@@ -121,13 +96,11 @@ func TestAuthLogin_UserMatchesUsersMe(t *testing.T) {
 // self-serve path.
 func TestAuthRegister_BothArmsCarryTheUser(t *testing.T) {
 	t.Run("invite redemption", func(t *testing.T) {
-		pool := newTestPool(t)
-		q := store.New(pool)
-		srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+		srv, q, _ := newTestServerWithPool(t)
 		admin := createTestUser(t, q, "Admin", "reginv-admin@test.com", true)
 		inviteToken := createTestInvite(t, q, admin.ID, nil, 72*time.Hour)
 
-		code, m := postAuthJSON(t, srv, "/v1/auth/register", map[string]string{
+		code, m := postJSON(t, srv, "", "/v1/auth/register", map[string]string{
 			"email":        "invitee@reginv.test",
 			"name":         "Invitee",
 			"password":     "invitepassword1",
@@ -140,12 +113,10 @@ func TestAuthRegister_BothArmsCarryTheUser(t *testing.T) {
 	})
 
 	t.Run("self serve", func(t *testing.T) {
-		pool := newTestPool(t)
-		q := store.New(pool)
-		srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+		srv, _, _ := newTestServerWithPool(t)
 		srv.AllowSelfRegister = true
 
-		code, m := postAuthJSON(t, srv, "/v1/auth/register", map[string]string{
+		code, m := postJSON(t, srv, "", "/v1/auth/register", map[string]string{
 			"email":    "selfserve@authbody.test",
 			"name":     "Self Serve",
 			"password": "selfpassword1",
@@ -161,16 +132,14 @@ func TestAuthRegister_BothArmsCarryTheUser(t *testing.T) {
 // existing refusal and the email-enumeration behaviour is unchanged: an unknown
 // address and a wrong password produce the same body.
 func TestAuthLogin_RefusalsCarryNoUser(t *testing.T) {
-	pool := newTestPool(t)
-	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv, q, _ := newTestServerWithPool(t)
 	_ = createTestUser(t, q, "Known", "known@refusal.test", false)
 
-	unknownCode, unknown := postAuthJSON(t, srv, "/v1/auth/login", map[string]string{
+	unknownCode, unknown := postJSON(t, srv, "", "/v1/auth/login", map[string]string{
 		"email":    "nobody@refusal.test",
 		"password": "testpassword1",
 	})
-	wrongCode, wrong := postAuthJSON(t, srv, "/v1/auth/login", map[string]string{
+	wrongCode, wrong := postJSON(t, srv, "", "/v1/auth/login", map[string]string{
 		"email":    "known@refusal.test",
 		"password": "not-the-password",
 	})
@@ -187,16 +156,14 @@ func TestAuthLogin_RefusalsCarryNoUser(t *testing.T) {
 // archived account. The refusal carries neither a token nor a user, which is
 // what keeps archived_at always null on this endpoint's user object.
 func TestAuthLogin_ArchivedUserIsRefusedWithNoUser(t *testing.T) {
-	pool := newTestPool(t)
-	q := store.New(pool)
-	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+	srv, q, pool := newTestServerWithPool(t)
 
 	user := createTestUser(t, q, "Archived", "archived@authbody.test", false)
 	_, err := pool.Exec(t.Context(), `UPDATE users SET archived_at = NOW() WHERE id = $1::uuid`,
 		uuidString(user.ID))
 	require.NoError(t, err)
 
-	code, m := postAuthJSON(t, srv, "/v1/auth/login", map[string]string{
+	code, m := postJSON(t, srv, "", "/v1/auth/login", map[string]string{
 		"email":    "archived@authbody.test",
 		"password": "testpassword1",
 	})
