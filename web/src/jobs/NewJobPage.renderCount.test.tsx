@@ -35,50 +35,43 @@ function renderBuilder() {
 
 const renderCalls = vi.mocked(TaskRowFields)
 
-// Populated through the JSON editor and one mode switch, not 49 "Add task"
-// clicks: Testing Library's getByRole re-scans the whole tree on every call,
-// which against a GROWING 50-row tree is its own O(n^2) cost, unrelated to
-// anything under test here. fromSpec models the whole array in one state
-// transition instead.
-async function populate50Tasks() {
+// 20, not 50: twenty is still enough to discriminate "one row rendered" from
+// "every row rendered" (a stale-loop mutation cannot pass by coincidence at
+// either count), and it is one render shared by both assertions below, not
+// two - populated through the JSON editor and one mode switch, not 19 "Add
+// task" clicks, since Testing Library's getByRole re-scans the whole tree on
+// every call, an O(n^2) cost against a GROWING tree unrelated to anything
+// under test here.
+async function populate20Tasks() {
   renderBuilder()
   await userEvent.click(screen.getByRole('button', { name: 'JSON' }))
   const editor = screen.getByRole('textbox', { name: 'Job spec JSON' })
   await userEvent.clear(editor)
   const spec = {
     name: 'perf',
-    tasks: Array.from({ length: 50 }, (_, i) => ({ name: `t${i + 1}`, command: ['echo'] })),
+    tasks: Array.from({ length: 20 }, (_, i) => ({ name: `t${i + 1}`, command: ['echo'] })),
   }
   await userEvent.paste(JSON.stringify(spec))
   await userEvent.click(screen.getByRole('button', { name: 'Form' }))
 }
 
 test(
-  'a keystroke in task 50 renders only task 50, not the other 49',
+  'memoization holds for both an unrelated edit and a same-row edit',
   async () => {
-    await populate50Tasks()
-    const row50 = screen.getByRole('group', { name: 'Task 50: t50' })
+    await populate20Tasks()
+
+    // An edit outside the task list renders no task row at all.
     renderCalls.mockClear()
-
-    await userEvent.type(within(row50).getByRole('textbox', { name: 'Retries' }), '1')
-
-    // One keystroke, one row's worth of render calls - not fifty. Before the
-    // fix (no memo, a fresh onChange/onRemove closure and a fresh `allTasks`
-    // array handed to every row on every keystroke) this was 50.
-    expect(renderCalls).toHaveBeenCalledTimes(1)
-  },
-  30_000,
-)
-
-test(
-  'a keystroke in the job name renders no task row at all',
-  async () => {
-    await populate50Tasks()
-    renderCalls.mockClear()
-
     await userEvent.type(screen.getByRole('textbox', { name: 'Job name' }), 'x')
-
     expect(renderCalls).not.toHaveBeenCalled()
+
+    // A keystroke in one row renders only that row, not the other nineteen.
+    // Before the fix (no memo, a fresh onChange/onRemove closure and a fresh
+    // `allTasks` array handed to every row on every keystroke) this was 20.
+    const row20 = screen.getByRole('group', { name: 'Task 20: t20' })
+    renderCalls.mockClear()
+    await userEvent.type(within(row20).getByRole('textbox', { name: 'Retries' }), '1')
+    expect(renderCalls).toHaveBeenCalledTimes(1)
   },
   30_000,
 )
