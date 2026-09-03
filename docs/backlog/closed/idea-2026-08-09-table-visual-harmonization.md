@@ -1,7 +1,9 @@
 ---
 title: "Harmonize the eight tables' frames and header spacing now that the structure is shared"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: spec follow-ups 2 and 3 from the shared accessible-table primitive (2026-08-09), proposed and left unfiled
@@ -80,3 +82,6 @@ are deliberately out of scope here - they are per-row density decisions, not con
   [[idea-2026-08-09-tasks-table-grid-role-selection]],
   [[idea-2026-08-09-sort-caret-in-accessible-name]]
 - No visual regression coverage exists to catch drift here: [[idea-2026-06-03-web-e2e-harness]]
+
+## Resolution
+Shipped in lane TB of the 2026-09-02 web-frontend batch. Design call from the hi-fi's glassPanel(), which spreads boxShadow on every list: the shadowless admin surface was drift, so five hand-rolled frames (the item counted four; InvitesTable was a fifth) became GlassPanel with no variant prop. Eleven headers (the item counted eight tables and three values; there were four) take one of two treatments quoted from the hi-fi, exported from Table.tsx as named constants with the paired row padding on all eleven rows. The visual commit touched no test file; the CSS asset hash was byte-identical across the constants refactor; the populated workers page was compared against the jobs page by eye at 1280 since the harness renders workers empty.
