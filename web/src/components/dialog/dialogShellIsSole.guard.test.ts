@@ -41,17 +41,26 @@ function rel(file: string): string {
   return toPosix(relative(SRC_ROOT, file))
 }
 
+// Memoized per file: every assertion below calls stripped() once per file it
+// scans, so without this the whole tree would be parsed once per assertion
+// rather than once per run.
+const strippedCache = new Map<string, string>()
 function stripped(file: string): string {
-  return withoutComments(readFileSync(file, 'utf8'))
+  const cached = strippedCache.get(file)
+  if (cached !== undefined) return cached
+  const result = withoutComments(readFileSync(file, 'utf8'), file)
+  strippedCache.set(file, result)
+  return result
 }
 
 // C0. Shared by every assertion below, and the reason they are not vacuous. A
 // silent zero, or a walk that quietly started including test files, would make
 // every absence assertion in this file pass forever while proving nothing.
 // One representative path per top-level directory under web/src that ships
-// sources, anchored the same way shell/HoloShell.tsx already was. A floor on
-// the total count alone would tolerate an entire directory silently dropping
-// out of the walk as long as the survivors still cleared it.
+// sources, plus App.tsx for the loose top-level files, anchored the same way
+// shell/HoloShell.tsx already was. A floor on the total count alone would
+// tolerate an entire directory silently dropping out of the walk as long as
+// the survivors still cleared it.
 const TOP_LEVEL_ANCHORS = [
   'App.tsx',
   'admin/invites/inviteStatus.ts',
@@ -82,10 +91,7 @@ test('the source walk reaches shipped sources and nothing else', () => {
 
 // PERMANENT KILLS for withoutComments itself, not for any assertion above it:
 // the defect lives in sourceTree.ts, so each is pinned directly against the
-// shared helper rather than through a consumer. Each shape below relies on a
-// stray quote-like character being mistaken for a real string or comment
-// boundary, silently deleting a real producer between it and the next
-// matching delimiter elsewhere in the file.
+// shared helper rather than through a consumer.
 test('a slash-star inside a string literal does not swallow the producer after it', () => {
   const src = "const ACCEPT = 'image/*'\nconst x = <div role=\"dialog\" />\n/* trailing note */\n"
   expect(withoutComments(src)).toContain('role="dialog"')
@@ -93,44 +99,94 @@ test('a slash-star inside a string literal does not swallow the producer after i
 
 test('an apostrophe inside a comment does not pair with an unrelated string', () => {
   const src =
-    "{/* the header's own stacking context */} <b title='x' />\n" +
-    '<div role="dialog" aria-modal="true" />\n' +
+    "function Comp() {\n  return (\n    <>\n      {/* the header's own stacking context */}\n      " +
+    "<b title='x' />\n      <div role=\"dialog\" aria-modal=\"true\" />\n    </>\n  )\n}\n" +
     '/* trailing note */\n'
-  const stripped = withoutComments(src)
-  expect(stripped).toContain('role="dialog"')
-  expect(stripped).toContain('aria-modal="true"')
+  const result = withoutComments(src)
+  expect(result).toContain('role="dialog"')
+  expect(result).toContain('aria-modal="true"')
 })
 
 test('a backtick inside a comment does not pair with an unrelated template literal', () => {
   const src =
-    '/* see the ` SCRIM identifier */ <b>x</b>\n' +
-    'const tpl = `y`\n' +
-    '<div role="dialog" aria-modal="true" />\n' +
+    '/* see the ` SCRIM identifier */\n' +
+    'function Comp() {\n  const tpl = `y`;\n  return <div role="dialog" aria-modal="true" />\n}\n' +
     '/* trailing note */\n'
   expect(withoutComments(src)).toContain('role="dialog"')
 })
 
-// A regex literal is recognised heuristically, not parsed. These two pin the
-// two forms this repo actually writes, producer on the SAME line right after
-// the regex - what a per-line scan actually reads.
-//
-// The character-class form (this file's own ROLE_PROBE shape) turns out to
-// be safe even without the heuristic: a quote inside it opens a string
-// state, but string CONTENT is never blanked here, only comment content is -
-// so a misclassified string cannot itself delete anything. This is a
-// property of the design, not a coincidence, and this test pins it staying
-// true.
 test('a regex literal holding a quote inside a character class is not mistaken for a string', () => {
   const src = "const P = /role=\\{?['\"`]dialog['\"`]/; const x = <div role=\"dialog\" />\n"
   expect(withoutComments(src)).toContain('role="dialog"')
 })
 
-// The escaped-slash-star form (this file's own PORTAL_PROBE-adjacent shape)
-// is the real kill: without the heuristic, its own trailing `//g` reads as a
-// line comment and swallows everything after it on the same line.
 test('a regex literal spelling an escaped slash-star is not mistaken for a comment', () => {
   const src = "const P = /\\/\\*[\\s\\S]*?\\*\\//g; const x = <div role=\"dialog\" />\n"
   expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+// A regex literal following an arrow function's body, or the return
+// keyword, is a real position a text-based heuristic can misread as
+// division - and the regex's own content can then open a fake line comment
+// that eats the rest of the line.
+test('a regex literal after a filter callback does not hide the producer after it', () => {
+  const src =
+    "function Comp() {\n  const xs = ['a'].filter((p) => /[/*]/.test(p));\n  " +
+    'return <div role="dialog" aria-modal="true" />\n}\n/* trailing note */\n'
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+test('a regex literal after return does not hide a producer on the same line', () => {
+  const src = 'function f() { return /[//]/ } const x = <div role="dialog" />\n'
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+// JSX text is not JavaScript, so a character that would open a string or a
+// comment in real code is just literal text there. A scanner with no lexical
+// state for JSX text reads it the same way it would read code, which is
+// wrong for exactly this reason.
+test('an unbalanced backtick in JSX text does not swallow a later comment', () => {
+  const src =
+    'function Comp() {\n  return (\n    <>\n      <p>the `SCRIM value</p>\n      ' +
+    '<div role="dialog" />\n    </>\n  )\n}\n' +
+    '// comment mentioning aria-modal must not leak the attribute name as code\n'
+  const result = withoutComments(src)
+  expect(result).toContain('role="dialog"')
+  expect(result).not.toContain('aria-modal')
+})
+
+test('a URL in JSX text does not hide a producer on the same line', () => {
+  const src = 'function Comp() { return (<><p>see http://x.example</p><div role="dialog" /></>) }\n'
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+test('an apostrophe in JSX text does not retain a trailing comment', () => {
+  const src = "<p>don't</p> // comment naming the role\n"
+  expect(withoutComments(src)).not.toContain('role')
+})
+
+// A `/` immediately after a closing brace (a JSX expression container's own
+// `}`) is a real position a text-based heuristic can misread as a regex
+// start, which then eats the real block comment that follows.
+test('a slash after a closing brace does not eat a real block comment', () => {
+  const src = '<span>{1} / {2} {/* comment naming aria-modal */}</span>\n'
+  expect(withoutComments(src)).not.toContain('aria-modal')
+})
+
+// Verifies the parser-based walk reaches a comment with no code on either
+// side of it inside a JSX expression container - the shape DialogShell.tsx's
+// own header and every {/* ... */} comment in this codebase use.
+test('a comment inside an empty JSX expression container is reached', () => {
+  const src =
+    'function Comp() {\n  return (\n    <>\n      <div>{/* aria-modal should not leak */}</div>\n      ' +
+    '<div role="dialog" />\n    </>\n  )\n}\n'
+  const result = withoutComments(src)
+  expect(result).toContain('role="dialog"')
+  expect(result).not.toContain('aria-modal')
+})
+
+test('a file that fails to parse throws naming the file, rather than stripping nothing', () => {
+  expect(() => withoutComments('const x = (\n', 'broken-producer.tsx')).toThrow('broken-producer.tsx')
 })
 
 // A1. The probe accepts the string form and the braced form, so a role written
@@ -194,8 +250,8 @@ const HAND_ROLLED_SCRIM =
 // lines, so a per-line-only pass cannot see all three distinctive tokens on
 // any ONE line. This second pass joins a trailing plus-then-newline run back
 // into the line before it and re-checks, so a scrim rebuilt that way is still
-// caught. KNOWN GAP: only the trailing-plus spelling this repo writes is
-// joined - a leading plus on the following line instead is not.
+// caught. KNOWN GAP: only a trailing plus is joined - a leading plus on the
+// following line instead is not.
 function joinConcatenatedLines(text: string): string {
   return text.replace(/\s*\+\s*\n\s*/g, ' ')
 }
@@ -316,8 +372,8 @@ const PORTAL_PROBE = new RegExp(
 
 // Files outside DIALOG_DIR that are nonetheless permitted to portal or
 // insert onto the body, each with the reason its layer needs that route
-// rather than moving under components/dialog/. Empty today: every current
-// match already lives under DIALOG_DIR.
+// rather than moving under components/dialog/. Any entry that the probe
+// stops matching goes red below, naming the entry to delete.
 const PORTAL_ALLOWED: string[] = []
 
 const BODY_PORTAL =
@@ -335,6 +391,10 @@ test('the enumerated body-insertion methods are all in the probe', () => {
   // - the probe only requires a word boundary after the name, so it does not
   // care which shape follows.
   const snippets: Record<string, string> = {
+    appendChild: 'document.body.appendChild(x)',
+    append: 'document.body.append(x)',
+    prepend: 'document.body.prepend(x)',
+    insertBefore: 'document.body.insertBefore(x, y)',
     insertAdjacentElement: 'document.body.insertAdjacentElement(x)',
     insertAdjacentHTML: 'document.body.insertAdjacentHTML(x)',
     insertAdjacentText: 'document.body.insertAdjacentText(x)',
@@ -353,6 +413,15 @@ test('a portal outside the dialog module is under it or allowlisted with a reaso
   // C5.
   expect(found, 'the portal probe no longer matches the shell').toContain(SHELL)
   expect(found, 'the portal probe no longer matches the stack').toContain(STACK)
+
+  // Same staleness control as DOC_KEYDOWN_ALLOWED: every allowlisted file
+  // must still be matched by the probe, so a drifted entry goes red instead
+  // of silently exempting a file that no longer needs the exception.
+  expect(
+    PORTAL_ALLOWED.filter((p) => !found.includes(p)),
+    'the portal probe no longer matches a file PORTAL_ALLOWED says needs the exception - delete the entry',
+  ).toEqual([])
+
   const outside = found.filter((p) => !p.startsWith(DIALOG_DIR))
   expect(outside.filter((p) => !PORTAL_ALLOWED.includes(p)), BODY_PORTAL).toEqual([])
 })
