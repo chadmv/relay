@@ -5,14 +5,24 @@ import { CommandsRepeater } from './CommandsRepeater'
 import { KeyValueRepeater } from './KeyValueRepeater'
 import type { TaskRow } from './specBuilder'
 
+// One entry per task, precomputed once by the caller from the whole list, so
+// that a row unrelated to an edit gets the SAME array back across renders
+// (see SpecBuilderForm) - a `TaskRow[]` prop containing the caller's live
+// objects would carry a fresh reference on every keystroke to ANY task,
+// defeating memoization on every other row for no reason this row cares about.
+export interface DepOption {
+  id: string
+  label: string
+}
+
 interface TaskRowFieldsProps {
   task: TaskRow
   index: number
-  // Every task, so the dependency picker can offer the others by their CURRENT
-  // name. The picker stores ids, never names.
-  allTasks: TaskRow[]
-  onChange: (next: TaskRow) => void
-  onRemove: () => void
+  depOptions: DepOption[]
+  // Dispatched WITH the row's id, so one stable function serves every row -
+  // see the identical note on SpecBuilderForm's updateTask/removeTaskById.
+  onChange: (id: string, next: TaskRow) => void
+  onRemove: (id: string) => void
   announce: (message: string) => void
 }
 
@@ -29,16 +39,16 @@ export function taskLabel(task: TaskRow, index: number): string {
   return task.name === '' ? `Task ${index + 1}` : `Task ${index + 1}: ${task.name}`
 }
 
-export function TaskRowFields({ task, index, allTasks, onChange, onRemove, announce }: TaskRowFieldsProps) {
+export function TaskRowFields({ task, index, depOptions, onChange, onRemove, announce }: TaskRowFieldsProps) {
   const label = taskLabel(task, index)
   const removeName = task.name === '' ? `Remove task ${index + 1}` : `Remove task ${index + 1}: ${task.name}`
-  const others = allTasks.filter((t) => t.id !== task.id)
+  const others = depOptions.filter((o) => o.id !== task.id)
 
   function toggleDep(id: string) {
     const next = task.dependsOn.includes(id)
       ? task.dependsOn.filter((d) => d !== id)
       : [...task.dependsOn, id]
-    onChange({ ...task, dependsOn: next })
+    onChange(task.id, { ...task, dependsOn: next })
   }
 
   return (
@@ -50,16 +60,16 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
               id={`task-${task.id}-name`}
               value={task.name}
               spellCheck={false}
-              onChange={(e) => onChange({ ...task, name: e.target.value })}
+              onChange={(e) => onChange(task.id, { ...task, name: e.target.value })}
             />
           </Field>
         </div>
-        <PillButton id={`task-${task.id}-remove`} aria-label={removeName} onClick={onRemove}>
+        <PillButton id={`task-${task.id}-remove`} aria-label={removeName} onClick={() => onRemove(task.id)}>
           Remove task
         </PillButton>
       </div>
 
-      <CommandsRepeater task={task} onChange={onChange} announce={announce} />
+      <CommandsRepeater task={task} onChange={(next) => onChange(task.id, next)} announce={announce} />
 
       <div className="flex flex-wrap gap-2">
         {/* Plain text inputs. No min, no max, no step, no maxlength and no number
@@ -73,7 +83,7 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
               id={`task-${task.id}-timeout`}
               inputMode="numeric"
               value={task.timeout}
-              onChange={(e) => onChange({ ...task, timeout: e.target.value })}
+              onChange={(e) => onChange(task.id, { ...task, timeout: e.target.value })}
             />
           </Field>
         </div>
@@ -83,7 +93,7 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
               id={`task-${task.id}-retries`}
               inputMode="numeric"
               value={task.retries}
-              onChange={(e) => onChange({ ...task, retries: e.target.value })}
+              onChange={(e) => onChange(task.id, { ...task, retries: e.target.value })}
             />
           </Field>
         </div>
@@ -94,7 +104,7 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
         groupLabel="Environment variables"
         itemNoun="environment variable"
         rows={task.env}
-        onChange={(env) => onChange({ ...task, env })}
+        onChange={(env) => onChange(task.id, { ...task, env })}
         announce={announce}
       />
 
@@ -103,7 +113,7 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
         groupLabel="Requires"
         itemNoun="requirement"
         rows={task.requires}
-        onChange={(requires) => onChange({ ...task, requires })}
+        onChange={(requires) => onChange(task.id, { ...task, requires })}
         announce={announce}
       />
 
@@ -127,7 +137,7 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
                     : 'border-border bg-white/5 text-fg-mute'
                 }`}
               >
-                {taskLabel(o, allTasks.indexOf(o))}
+                {o.label}
               </button>
             ))}
           </div>

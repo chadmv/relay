@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { PillButton } from '../components/holo'
 import { Input } from '../components/Input'
 import { newCommandRow, newTokenRow, type TaskRow } from './specBuilder'
@@ -15,7 +16,11 @@ interface CommandsRepeaterProps {
 // agent. A quoting grammar would make this module the owner of a rule relay's Go
 // has nowhere - nothing from jobspec through the dispatcher to Runner splits or
 // unquotes anything - with no server-side counterpart to pin it.
-export function CommandsRepeater({ task, onChange, announce }: CommandsRepeaterProps) {
+//
+// Memoized: a task's own `task` prop is referentially stable across an edit
+// to an UNRELATED task (SpecBuilderForm's array map only replaces the edited
+// row), so this only re-renders for the row that actually changed.
+export const CommandsRepeater = memo(function CommandsRepeater({ task, onChange, announce }: CommandsRepeaterProps) {
   const focusAfterUpdate = useFocusAfterUpdate()
   const addCommandId = `task-${task.id}-add-command`
 
@@ -129,4 +134,4 @@ export function CommandsRepeater({ task, onChange, announce }: CommandsRepeaterP
       </div>
     </div>
   )
-}
+})

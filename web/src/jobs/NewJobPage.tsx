@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { GlassPanel, Eyebrow, PillButton } from '../components/holo'
 import { useCreateJob } from './useCreateJob'
@@ -26,7 +26,7 @@ export function NewJobPage() {
 
   function toJson() {
     if (mode === 'json') return
-    setText(JSON.stringify(toSpec(builder), null, 2))
+    setText(specJson)
     setClientError(null)
     create.reset()
     setMode('json')
@@ -61,7 +61,7 @@ export function NewJobPage() {
       // No pre-check at all. The form owns the ENCODING, not the rules: every
       // semantic answer - a cycle, a duplicate name, a range, a missing command
       // - comes from the server and is rendered verbatim.
-      create.mutate(toSpec(builder), { onSuccess: (job) => navigate(`/jobs/${job.id}`) })
+      create.mutate(spec, { onSuccess: (job) => navigate(`/jobs/${job.id}`) })
       return
     }
 
@@ -77,6 +77,13 @@ export function NewJobPage() {
   // since it is set on the current action and a stale server error was just
   // reset.
   const bannerMessage = clientError ?? (create.error as Error | null)?.message ?? null
+
+  // Memoized on `builder` alone: create.isPending/error/data flipping while
+  // the submit request is in flight re-renders this page without builder
+  // itself changing, and toSpec plus its JSON.stringify would otherwise
+  // re-serialize the whole spec on every one of those unrelated re-renders.
+  const spec = useMemo(() => toSpec(builder), [builder])
+  const specJson = useMemo(() => JSON.stringify(spec, null, 2), [spec])
 
   return (
     <div className="flex flex-col gap-4">
@@ -122,7 +129,7 @@ export function NewJobPage() {
               aria-label="Job spec preview"
               className="max-h-[320px] overflow-auto font-mono text-[11px] leading-relaxed text-fg-mute"
             >
-              {JSON.stringify(toSpec(builder), null, 2)}
+              {specJson}
             </pre>
           </GlassPanel>
         </>

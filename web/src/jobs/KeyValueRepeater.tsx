@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { PillButton } from '../components/holo'
 import { Input } from '../components/Input'
 import { newKvRow, type KvRow } from './specBuilder'
@@ -28,7 +29,10 @@ function hasDuplicateKey(rows: KvRow[]): boolean {
   return false
 }
 
-export function KeyValueRepeater({
+// Memoized: an untouched row's `rows` array keeps its identity across an
+// unrelated edit to the same task (env vs requires are separate array fields,
+// and toSpec never spreads through the item elements themselves).
+export const KeyValueRepeater = memo(function KeyValueRepeater({
   idPrefix,
   groupLabel,
   itemNoun,
@@ -101,4 +105,4 @@ export function KeyValueRepeater({
       </div>
     </div>
   )
-}
+})
