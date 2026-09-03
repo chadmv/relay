@@ -214,6 +214,33 @@ export function surfaces(): Surface[] {
     },
     { name: 'job-new', path: () => '/jobs/new', population: 'populated', ready: h1('New job') },
 
+    {
+      // THE SAME PATH as `job-new` above, in its populated state. The form's
+      // draft lives only in the page, so there is no REST fixture that can
+      // produce a two-row form - the row is added here, in `ready`, which is
+      // also what makes this surface measure the POPULATED form rather than an
+      // empty one wearing its name. Gated on the SECOND row's own name input,
+      // not on the heading, which renders either way.
+      name: 'job-new-builder',
+      path: () => '/jobs/new',
+      population: 'populated',
+      ready: async (p) => {
+        // Clicking a control below the fold scrolls the page to reach it before
+        // the click fires, which is the harness driving the page, not a real
+        // load - every other populated surface arrives from a REST fixture with
+        // no click involved and is measured at the top. Restoring scroll
+        // position here is what makes this surface comparable to those: without
+        // it, expectDestinationsReachable measures the header at whatever
+        // scroll position the click left behind, and the header (not sticky,
+        // HoloShell.tsx) reads as clipped for a reason that has nothing to do
+        // with the surface's own layout.
+        await p.getByRole('button', { name: 'Add task' }).click()
+        const row = p.getByRole('group', { name: 'Task 2' })
+        await expect(row.getByRole('textbox', { name: 'Task name' })).toBeVisible()
+        await p.evaluate(() => window.scrollTo(0, 0))
+      },
+    },
+
     // EMPTY-STATE ONLY: no agent runs, so no worker row exists. Gated on the
     // page's actual empty-state copy (WorkersPage.tsx: "No workers enrolled
     // yet."), not on the <h1> alone - the h1 renders during the pre-fetch

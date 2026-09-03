@@ -1,7 +1,9 @@
 ---
 title: "Structured/visual job-spec form-builder for New Job"
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-07-01
 priority: medium
 source: New Job form slice (2026-07-01 job-submit-form)
@@ -50,3 +52,6 @@ semantic validation to the server (`jobspec.Validate`), to avoid drifting from t
 pipeline invariant. The builder should shape and constrain input for usability, not become a second,
 divergent copy of the server's validation rules. Larger surface than the JSON editor, which is why
 it is deferred to its own item rather than folded into the first slice.
+
+## Resolution
+Shipped in lane FB of the 2026-09-02 web-frontend batch: a structured builder is the default on /jobs/new, rendering into a read-only JSON preview, with the JSON editor kept for everything the builder cannot type and an explicit Form import that refuses (naming the path) rather than drops. One mapping module owns emission; task rows carry name, argv tokens, env and requires repeaters, timeout, retries, priority and an inline dependency picker; every semantic rule stays on the server and the server's message renders verbatim. Rows have positional accessible names, a named remove control and defined focus targets; the dispatchers use the functional updater form and the per-batch side effects (focus target, announced ordinal) are tracked across a batching window. Carve-out: the Perforce source builder is not in this slice and is filed as [[feature-2026-09-03-perforce-source-builder-in-the-new-job-builder]]; the item's dialog framing was refuted (the page is a route).
