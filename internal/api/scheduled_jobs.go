@@ -336,9 +336,13 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Zero value: every predicate absent, so every statement below matches
-	// everything.
-	var filters scheduleFilters
+	if !rejectRepeatedParams(w, pp.Query, scheduleFilterParams...) {
+		return
+	}
+	filters, ok := parseScheduleFilters(w, pp.Query)
+	if !ok {
+		return
+	}
 
 	ctx := r.Context()
 
