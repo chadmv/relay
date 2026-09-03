@@ -78,6 +78,21 @@ test('an out-of-range number is emitted as typed, with no client-side clamp', ()
   expect(toSpec(s).tasks[0].retries).toBe(99)
 })
 
+test('a leading-zero integer like 07 parses as the plain integer, not as JSON', () => {
+  // "07" is not valid JSON (JSON numbers forbid a leading zero before more
+  // digits), so the JSON.parse path alone would fall through to the verbatim
+  // string branch here - an integer-shaped string is still recognized first.
+  const s = oneTask()
+  s.tasks[0].retries = '07'
+  expect(toSpec(s).tasks[0].retries).toBe(7)
+})
+
+test('a decimal like 2.5 still emits the JSON number as before, for the server to refuse', () => {
+  const s = oneTask()
+  s.tasks[0].retries = '2.5'
+  expect(toSpec(s).tasks[0].retries).toBe(2.5)
+})
+
 test('a key-value row with a blank key is dropped and the last duplicate wins', () => {
   const s = oneTask()
   const blank = newKvRow()

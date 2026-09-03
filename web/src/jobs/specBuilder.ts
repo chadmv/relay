@@ -127,7 +127,16 @@ function mapOf(rows: KvRow[]): Record<string, string> | undefined {
 // belong to jobspec.Validate and a copy of one would make this refuse a spec the
 // server accepts on the first release that moves it.
 function numberOf(raw: string): number | string | undefined {
-  if (raw.trim() === '') return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  // An integer-shaped string is recognized before JSON.parse gets a turn:
+  // JSON's own grammar forbids a leading zero ahead of more digits, so "07"
+  // is not valid JSON and would otherwise fall through to the verbatim
+  // string branch below - a shape mismatch the server reports as an opaque
+  // decode failure rather than the field-specific message it would give a
+  // plain integer. This widens the ACCEPTED SHAPE only: "99" still emits 99
+  // exactly as before, for the server to refuse on range.
+  if (/^-?\d+$/.test(trimmed)) return Number(trimmed)
   try {
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed === 'number') return parsed
