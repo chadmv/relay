@@ -156,16 +156,18 @@ test('the modal scrim is painted by the dialog shell only', () => {
   expect(near, HAND_ROLLED_SCRIM).toEqual([])
 })
 
-// A4. Anchored on `document.` so a listener registered on an AbortSignal is not
-// a false positive - lib/api.ts and the SSE test helper each register one.
-// Widened to plain modules as well as JSX: no shipped module adds a document
-// listener today, and that is a fence, not a fix - a future hook that did would
-// otherwise be invisible to a JSX-only walk.
-const DOC_KEYDOWN_PROBE = /document\s*\.\s*addEventListener\s*\(\s*['"`]keydown['"`]/
+// A4. Anchored on document. or window. so a listener registered on some other
+// receiver (an AbortSignal, for instance) is not a false positive. Widened to
+// plain modules as well as JSX: a fence for a future hook, not a fix for
+// anything present, since a JSX-only walk would otherwise miss one.
+const DOC_KEYDOWN_PROBE = /(?:document|window)\s*\.\s*addEventListener\s*\(\s*['"`]keydown['"`]/
 
-// THE ALLOWLIST. An entry may only be added with the reason that surface is not
-// a modal, because the reason is the actual control - a bare count would grow
-// silently.
+// THE ALLOWLIST is per FILE, not per listener: an allowlisted file may
+// register more than one document- or window-level keydown listener and this
+// passes by design, because the reason column is about the SURFACE, not a
+// per-listener count. An entry may only be added with the reason that surface
+// is not a modal, because the reason is the actual control - a bare count
+// would grow silently.
 //
 //  components/dialog/DialogShell.tsx - the modal shell itself. Escape must fire
 //    when focus has left the panel, which a panel-scoped handler cannot see.
@@ -176,11 +178,11 @@ const DOC_KEYDOWN_PROBE = /document\s*\.\s*addEventListener\s*\(\s*['"`]keydown[
 const DOC_KEYDOWN_ALLOWED = [SHELL, 'shell/UserMenu.tsx', 'shell/HoloShell.tsx']
 
 const UNLISTED_KEYDOWN =
-  'a document-level Escape handler. For a modal, compose DialogShell, which already owns a scoped ' +
-  'document Escape gated on being topmost. For a non-modal disclosure, follow the two existing ' +
-  'ones and add an allowlist entry stating why this surface is not a modal.'
+  'a document- or window-level Escape handler. For a modal, compose DialogShell, which already owns ' +
+  'a scoped document Escape gated on being topmost. For a non-modal disclosure, follow the two ' +
+  'existing ones and add an allowlist entry stating why this surface is not a modal.'
 
-test('every document keydown listener is allowlisted with a reason', () => {
+test('every file with a document or window keydown listener is allowlisted with a reason', () => {
   const found = SOURCES.filter((f) => DOC_KEYDOWN_PROBE.test(stripped(f))).map(rel)
 
   // C4, and the strongest control in this file: every allowlisted file is
@@ -192,6 +194,12 @@ test('every document keydown listener is allowlisted with a reason', () => {
   ).toEqual([])
 
   expect(found.filter((p) => !DOC_KEYDOWN_ALLOWED.includes(p)), UNLISTED_KEYDOWN).toEqual([])
+})
+
+test('the keydown probe also catches a window-level listener', () => {
+  // Permanent kill: window.addEventListener('keydown', ...) was invisible to
+  // the document.-only probe before this fix round.
+  expect(DOC_KEYDOWN_PROBE.test("window.addEventListener('keydown', onKey)")).toBe(true)
 })
 
 // CONSIDERED AND DELIBERATELY NOT ASSERTED: both disclosures also register a
