@@ -100,9 +100,8 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 		progress2 = append(progress2, s)
 	})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
-	// The count is part of the property: the per-phrase assertions below let
-	// arbitrary extra output through, which the require.Empty this replaced did
-	// not. Keep both halves.
+	// The count is part of the property: the per-phrase assertions below admit
+	// arbitrary extra output on their own. Keep both halves.
 	require.Len(t, progress2, 2, "the two brackets and nothing else, got: %v", progress2)
 	require.Equal(t, 1, countLinesContaining(progress2, "[sync] starting"),
 		"the second Prepare syncs under exclusive mode, got: %v", progress2)
