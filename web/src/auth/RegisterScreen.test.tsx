@@ -98,3 +98,17 @@ test('a failed config fetch shows the invite field', async () => {
   renderRegister()
   expect(await screen.findByLabelText(/invite token/i)).toBeInTheDocument()
 })
+
+// Mutation-proven gap: `config.data?.allow_self_register ?? null` mutated to
+// `?? true` survives on the invite-token assertion alone, because a true guess
+// ALSO hides the invite field - just for the wrong reason (self-register looks
+// enabled) rather than the right one (nothing has rendered yet). The heading is
+// the real discriminator: the correct code renders the blank placeholder while
+// /config is in flight, so neither the form nor its invite field exists; the
+// mutant renders the full form immediately, guessing open registration.
+test('a pending config fetch renders neither the form nor a premature guess', async () => {
+  server.use(http.get('/v1/config', () => new Promise(() => {})))
+  renderRegister()
+  expect(screen.queryByRole('heading', { name: 'Create your relay account' })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/invite token/i)).not.toBeInTheDocument()
+})
