@@ -406,3 +406,119 @@ test('a stale server error is cleared on the next submit', async () => {
   expect(await screen.findByText('detail for job-9')).toBeInTheDocument()
   expect(screen.queryByText(/name is required/)).not.toBeInTheDocument()
 })
+
+// Captures the body and answers with the server's own message for that input.
+function respondWith(error: string, seen: { body?: unknown }) {
+  server.use(
+    http.post('/v1/jobs', async ({ request }) => {
+      seen.body = await request.json()
+      return HttpResponse.json({ error }, { status: 400 })
+    }),
+  )
+}
+
+test('a dependency cycle is posted, and the server names the tasks', async () => {
+  const seen: { body?: unknown } = {}
+  respondWith('dependency cycle detected involving tasks: hello, second', seen)
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'second')
+  await userEvent.click(
+    within(taskRow('second').getByRole('group', { name: 'Depends on' })).getByRole('button', { name: 'hello' }),
+  )
+  await userEvent.click(
+    within(taskRow('hello').getByRole('group', { name: 'Depends on' })).getByRole('button', { name: 'second' }),
+  )
+
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'dependency cycle detected involving tasks: hello, second',
+  )
+  expect(seen.body).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world'], depends_on: ['second'] },
+    { name: 'second', depends_on: ['hello'] },
+  ])
+})
+
+test('two tasks with the same name are posted, and the server refuses', async () => {
+  const seen: { body?: unknown } = {}
+  respondWith('duplicate task name: hello', seen)
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'hello')
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('duplicate task name: hello')
+  expect(seen.body).toBeDefined()
+})
+
+test('retries typed as 99 is posted as 99', async () => {
+  const seen: { body?: unknown } = {}
+  respondWith('task hello: retries must be between 0 and 10', seen)
+  renderBuilder()
+  await userEvent.type(taskRow('hello').getByRole('textbox', { name: 'Retries' }), '99')
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('task hello: retries must be between 0 and 10')
+  expect(seen.body).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world'], retries: 99 },
+  ])
+})
+
+test('a task with every argument blank is posted with no command key', async () => {
+  const seen: { body?: unknown } = {}
+  respondWith('task hello: commands is required', seen)
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  await userEvent.clear(cmd.getByRole('textbox', { name: 'Argument 1' }))
+  await userEvent.clear(cmd.getByRole('textbox', { name: 'Argument 2' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('task hello: commands is required')
+  expect(seen.body).toHaveProperty('tasks', [{ name: 'hello' }])
+})
+
+test('env keys are posted verbatim, including a reserved name and one with an equals sign', async () => {
+  let body: unknown = null
+  server.use(
+    http.post('/v1/jobs', async ({ request }) => {
+      body = await request.json()
+      return HttpResponse.json({ id: 'job-1' }, { status: 201 })
+    }),
+  )
+  renderBuilder()
+  const env = within(taskRow('hello').getByRole('group', { name: 'Environment variables' }))
+  // The equals-sign key FIRST: it is the one a key regex would reject before
+  // ever reaching the reserved name.
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 1' }), 'A=B')
+  await userEvent.type(env.getByRole('textbox', { name: 'Value 1' }), 'one')
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 2' }), 'RELAY_JOB_ID')
+  await userEvent.type(env.getByRole('textbox', { name: 'Value 2' }), 'two')
+
+  expect(env.queryByRole('alert')).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  await waitFor(() => expect(body).not.toBeNull())
+  expect(body).toHaveProperty('tasks', [
+    {
+      name: 'hello',
+      command: ['echo', 'hello world'],
+      env: { 'A=B': 'one', RELAY_JOB_ID: 'two' },
+    },
+  ])
+})
+
+test('an argument with an internal space reaches the POST body as one element', async () => {
+  let body: unknown = null
+  server.use(
+    http.post('/v1/jobs', async ({ request }) => {
+      body = await request.json()
+      return HttpResponse.json({ id: 'job-1' }, { status: 201 })
+    }),
+  )
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  await waitFor(() => expect(body).not.toBeNull())
+  expect(body).toHaveProperty('tasks', [{ name: 'hello', command: ['echo', 'hello world'] }])
+})
