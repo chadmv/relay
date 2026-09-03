@@ -52,6 +52,25 @@ func (s *Server) issueToken(ctx context.Context, q *store.Queries, userID pgtype
 	return rawHex, expires, nil
 }
 
+// authResponse is the body POST /v1/auth/login and both arms of
+// POST /v1/auth/register return. User is exactly the GET /v1/users/me body,
+// asserted against that endpoint's live response by
+// TestAuthLogin_UserMatchesUsersMe.
+type authResponse struct {
+	Token     string       `json:"token"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	User      userResponse `json:"user"`
+}
+
+// newAuthResponse builds that body from the authenticated user's row.
+func newAuthResponse(token string, expires time.Time, u store.User) authResponse {
+	return authResponse{
+		Token:     token,
+		ExpiresAt: expires,
+		User:      toUserResponse(u.ID, u.Email, u.Name, u.IsAdmin, u.CreatedAt, u.ArchivedAt),
+	}
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email       string `json:"email"`
@@ -168,10 +187,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 // registerSelfServe creates a non-admin user with a fresh session token. Caller
@@ -222,10 +238,7 @@ func (s *Server) registerSelfServe(ctx context.Context, w http.ResponseWriter, e
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -267,10 +280,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
-	})
+	writeJSON(w, http.StatusCreated, newAuthResponse(token, expires, user))
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {

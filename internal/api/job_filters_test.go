@@ -75,24 +75,24 @@ func TestParseJobFilters_ExactErrorBodies(t *testing.T) {
 // needle at the cap is twice as many bytes as runes and must still be
 // accepted, while one rune more must not. A byte-length cap set to the same
 // number rejects both, so the pair discriminates. Both fixtures and the
-// expected message derive from maxJobFilterQRunes: hard-coding them would let
+// expected message derive from maxFilterQRunes: hard-coding them would let
 // the constant move without reddening anything.
 //
 // The rune is a \u escape the compiler expands, not a raw byte: a non-ASCII
 // literal in a source file is unverifiable by eye.
 func TestParseJobFilters_QLengthCapIsInRunes(t *testing.T) {
-	atCap := strings.Repeat("\u00e9", maxJobFilterQRunes)
+	atCap := strings.Repeat("\u00e9", maxFilterQRunes)
 	overCap := atCap + "\u00e9"
-	require.Equal(t, 2*maxJobFilterQRunes, len(atCap),
+	require.Equal(t, 2*maxFilterQRunes, len(atCap),
 		"fixture: the needle must be longer in bytes than in runes")
 
 	_, ok, _, _ := callParseJobFilters(t, "q="+atCap, testAuthUser())
-	assert.True(t, ok, "%d runes must be accepted", maxJobFilterQRunes)
+	assert.True(t, ok, "%d runes must be accepted", maxFilterQRunes)
 
 	_, ok, code, body := callParseJobFilters(t, "q="+overCap, testAuthUser())
 	require.False(t, ok)
 	assert.Equal(t, 400, code)
-	assert.Equal(t, maxJobFilterQMessage, body)
+	assert.Equal(t, maxFilterQMessage, body)
 }
 
 func TestParseJobFilters_EmptyAndWhitespaceQAreAbsent(t *testing.T) {

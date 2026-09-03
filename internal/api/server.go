@@ -195,6 +195,11 @@ func (s *Server) Handler() http.Handler {
 	// Scheduled jobs
 	mux.Handle("POST /v1/scheduled-jobs", auth(http.HandlerFunc(s.handleCreateScheduledJob)))
 	mux.Handle("GET /v1/scheduled-jobs", auth(http.HandlerFunc(s.handleListScheduledJobs)))
+	// Auth-only, matching /v1/workers/stats and deliberately not
+	// /v1/server/counters. ServeMux prefers the literal segment over
+	// /v1/scheduled-jobs/{id}, the same way /v1/jobs/stats already coexists with
+	// /v1/jobs/{id}.
+	mux.Handle("GET /v1/scheduled-jobs/stats", auth(http.HandlerFunc(s.handleScheduledJobStats)))
 	mux.Handle("GET /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleGetScheduledJob)))
 	mux.Handle("PATCH /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handlePatchScheduledJob)))
 	mux.Handle("DELETE /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleDeleteScheduledJob)))

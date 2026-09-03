@@ -172,28 +172,67 @@ func (q *Queries) CountActiveJobsForSchedule(ctx context.Context, scheduledJobID
 }
 
 const countScheduledJobs = `-- name: CountScheduledJobs :one
-SELECT COUNT(*) FROM scheduled_jobs
+SELECT COUNT(*) FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE ($1::bool IS NULL OR sj.enabled = $1::bool)
+  AND ($2::text IS NULL
+       OR strpos(lower(sj.name), lower($2::text)) > 0
+       OR strpos(lower(u.email), lower($2::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($2::text)) > 0)
 `
 
-// CountScheduledJobs
+type CountScheduledJobsParams struct {
+	Enabled *bool   `json:"enabled"`
+	Q       *string `json:"q"`
+}
+
+// total is the count of every row matching every active predicate, independent
+// of the cursor. A count that ignored q would label a three-hit search page
+// "1 - 50 of 312".
 //
-//	SELECT COUNT(*) FROM scheduled_jobs
-func (q *Queries) CountScheduledJobs(ctx context.Context) (int64, error) {
-	row := q.db.QueryRow(ctx, countScheduledJobs)
+//	SELECT COUNT(*) FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE ($1::bool IS NULL OR sj.enabled = $1::bool)
+//	  AND ($2::text IS NULL
+//	       OR strpos(lower(sj.name), lower($2::text)) > 0
+//	       OR strpos(lower(u.email), lower($2::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($2::text)) > 0)
+func (q *Queries) CountScheduledJobs(ctx context.Context, arg CountScheduledJobsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countScheduledJobs, arg.Enabled, arg.Q)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countScheduledJobsByOwner = `-- name: CountScheduledJobsByOwner :one
-SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1
+SELECT COUNT(*) FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND ($2::bool IS NULL OR sj.enabled = $2::bool)
+  AND ($3::text IS NULL
+       OR strpos(lower(sj.name), lower($3::text)) > 0
+       OR strpos(lower(u.email), lower($3::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($3::text)) > 0)
 `
+
+type CountScheduledJobsByOwnerParams struct {
+	OwnerID pgtype.UUID `json:"owner_id"`
+	Enabled *bool       `json:"enabled"`
+	Q       *string     `json:"q"`
+}
 
 // CountScheduledJobsByOwner
 //
-//	SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1
-func (q *Queries) CountScheduledJobsByOwner(ctx context.Context, ownerID pgtype.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countScheduledJobsByOwner, ownerID)
+//	SELECT COUNT(*) FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND ($2::bool IS NULL OR sj.enabled = $2::bool)
+//	  AND ($3::text IS NULL
+//	       OR strpos(lower(sj.name), lower($3::text)) > 0
+//	       OR strpos(lower(u.email), lower($3::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($3::text)) > 0)
+func (q *Queries) CountScheduledJobsByOwner(ctx context.Context, arg CountScheduledJobsByOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countScheduledJobsByOwner, arg.OwnerID, arg.Enabled, arg.Q)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -478,12 +517,18 @@ func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]Sch
 }
 
 const listScheduledJobsByOwnerPage = `-- name: ListScheduledJobsByOwnerPage :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
   AND ($2::bool = FALSE
-       OR (created_at, id) < ($3::timestamptz, $4::uuid))
-ORDER BY created_at DESC, id DESC
-LIMIT $5::int + 1
+       OR (sj.created_at, sj.id) < ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.created_at DESC, sj.id DESC
+LIMIT $7::int + 1
 `
 
 type ListScheduledJobsByOwnerPageParams struct {
@@ -491,23 +536,33 @@ type ListScheduledJobsByOwnerPageParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"page_limit"`
 }
 
 // ListScheduledJobsByOwnerPage
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
 //	  AND ($2::bool = FALSE
-//	       OR (created_at, id) < ($3::timestamptz, $4::uuid))
-//	ORDER BY created_at DESC, id DESC
-//	LIMIT $5::int + 1
+//	       OR (sj.created_at, sj.id) < ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.created_at DESC, sj.id DESC
+//	LIMIT $7::int + 1
 func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListScheduledJobsByOwnerPageParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPage,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -545,11 +600,17 @@ func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListSche
 }
 
 const listScheduledJobsByOwnerPageByCreatedAsc = `-- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
-ORDER BY created_at ASC, id ASC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.created_at, sj.id) > ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.created_at ASC, sj.id ASC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByCreatedAscParams struct {
@@ -557,22 +618,32 @@ type ListScheduledJobsByOwnerPageByCreatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByCreatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (created_at, id) > ($3::timestamptz, $4::uuid))
-//	ORDER BY created_at ASC, id ASC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.created_at, sj.id) > ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.created_at ASC, sj.id ASC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByCreatedAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByCreatedAsc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -610,11 +681,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByNameAsc = `-- name: ListScheduledJobsByOwnerPageByNameAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
-ORDER BY name ASC, id ASC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.name, sj.id) > ($3::text, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.name ASC, sj.id ASC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByNameAscParams struct {
@@ -622,22 +699,32 @@ type ListScheduledJobsByOwnerPageByNameAscParams struct {
 	CursorSet bool        `json:"cursor_set"`
 	CursorV   string      `json:"cursor_v"`
 	CursorID  pgtype.UUID `json:"cursor_id"`
+	Enabled   *bool       `json:"enabled"`
+	Q         *string     `json:"q"`
 	PageLimit int32       `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByNameAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (name, id) > ($3::text, $4::uuid))
-//	ORDER BY name ASC, id ASC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.name, sj.id) > ($3::text, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.name ASC, sj.id ASC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNameAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNameAsc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -675,11 +762,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg
 }
 
 const listScheduledJobsByOwnerPageByNameDesc = `-- name: ListScheduledJobsByOwnerPageByNameDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
-ORDER BY name DESC, id DESC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.name, sj.id) < ($3::text, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.name DESC, sj.id DESC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByNameDescParams struct {
@@ -687,22 +780,32 @@ type ListScheduledJobsByOwnerPageByNameDescParams struct {
 	CursorSet bool        `json:"cursor_set"`
 	CursorV   string      `json:"cursor_v"`
 	CursorID  pgtype.UUID `json:"cursor_id"`
+	Enabled   *bool       `json:"enabled"`
+	Q         *string     `json:"q"`
 	PageLimit int32       `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByNameDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (name, id) < ($3::text, $4::uuid))
-//	ORDER BY name DESC, id DESC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.name, sj.id) < ($3::text, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.name DESC, sj.id DESC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNameDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNameDesc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -740,11 +843,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, ar
 }
 
 const listScheduledJobsByOwnerPageByNextRunAsc = `-- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
-ORDER BY next_run_at ASC, id ASC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.next_run_at, sj.id) > ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.next_run_at ASC, sj.id ASC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByNextRunAscParams struct {
@@ -752,22 +861,32 @@ type ListScheduledJobsByOwnerPageByNextRunAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByNextRunAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (next_run_at, id) > ($3::timestamptz, $4::uuid))
-//	ORDER BY next_run_at ASC, id ASC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.next_run_at, sj.id) > ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.next_run_at ASC, sj.id ASC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNextRunAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNextRunAsc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -805,11 +924,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByNextRunDesc = `-- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
-ORDER BY next_run_at DESC, id DESC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.next_run_at, sj.id) < ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.next_run_at DESC, sj.id DESC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByNextRunDescParams struct {
@@ -817,22 +942,32 @@ type ListScheduledJobsByOwnerPageByNextRunDescParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByNextRunDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (next_run_at, id) < ($3::timestamptz, $4::uuid))
-//	ORDER BY next_run_at DESC, id DESC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.next_run_at, sj.id) < ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.next_run_at DESC, sj.id DESC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByNextRunDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByNextRunDesc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -870,11 +1005,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context,
 }
 
 const listScheduledJobsByOwnerPageByUpdatedAsc = `-- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
-ORDER BY updated_at ASC, id ASC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.updated_at, sj.id) > ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.updated_at ASC, sj.id ASC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByUpdatedAscParams struct {
@@ -882,22 +1023,32 @@ type ListScheduledJobsByOwnerPageByUpdatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByUpdatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (updated_at, id) > ($3::timestamptz, $4::uuid))
-//	ORDER BY updated_at ASC, id ASC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.updated_at, sj.id) > ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.updated_at ASC, sj.id ASC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, arg ListScheduledJobsByOwnerPageByUpdatedAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByUpdatedAsc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -935,11 +1086,17 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, 
 }
 
 const listScheduledJobsByOwnerPageByUpdatedDesc = `-- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE owner_id = $1::uuid
-  AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
-ORDER BY updated_at DESC, id DESC
-LIMIT $5+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = $1::uuid
+  AND (NOT $2::bool OR (sj.updated_at, sj.id) < ($3::timestamptz, $4::uuid))
+  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+  AND ($6::text IS NULL
+       OR strpos(lower(sj.name), lower($6::text)) > 0
+       OR strpos(lower(u.email), lower($6::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+ORDER BY sj.updated_at DESC, sj.id DESC
+LIMIT $7+ 1
 `
 
 type ListScheduledJobsByOwnerPageByUpdatedDescParams struct {
@@ -947,22 +1104,32 @@ type ListScheduledJobsByOwnerPageByUpdatedDescParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsByOwnerPageByUpdatedDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE owner_id = $1::uuid
-//	  AND (NOT $2::bool OR (updated_at, id) < ($3::timestamptz, $4::uuid))
-//	ORDER BY updated_at DESC, id DESC
-//	LIMIT $5+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE sj.owner_id = $1::uuid
+//	  AND (NOT $2::bool OR (sj.updated_at, sj.id) < ($3::timestamptz, $4::uuid))
+//	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
+//	  AND ($6::text IS NULL
+//	       OR strpos(lower(sj.name), lower($6::text)) > 0
+//	       OR strpos(lower(u.email), lower($6::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($6::text)) > 0)
+//	ORDER BY sj.updated_at DESC, sj.id DESC
+//	LIMIT $7+ 1
 func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context, arg ListScheduledJobsByOwnerPageByUpdatedDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsByOwnerPageByUpdatedDesc,
 		arg.OwnerID,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1000,32 +1167,66 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context,
 }
 
 const listScheduledJobsPage = `-- name: ListScheduledJobsPage :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE ($1::bool = FALSE
-       OR (created_at, id) < ($2::timestamptz, $3::uuid))
-ORDER BY created_at DESC, id DESC
-LIMIT $4::int + 1
+       OR (sj.created_at, sj.id) < ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.created_at DESC, sj.id DESC
+LIMIT $6::int + 1
 `
 
 type ListScheduledJobsPageParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"page_limit"`
 }
 
-// ListScheduledJobsPage
+// The two optional predicates below are sqlc.narg: a NULL argument means "no
+// filter". A Params field left at its zero value therefore disables that filter
+// for this statement while the other list arms keep filtering, silently and with
+// no error, which is what parseScheduleFilters plus a single spread in
+// handleListScheduledJobs exists to prevent.
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
+// The users join can neither drop nor duplicate a row: scheduled_jobs.owner_id
+// is NOT NULL REFERENCES users(id) and users.id is the primary key. Only sj.* is
+// selected, so sqlc still emits []ScheduledJob and the response mapper, the
+// row-key functions and the arity test are all untouched.
+//
+// IT MUST STAY LEFT. Postgres can remove only an outer join, so an inner join
+// forecloses join removal here.
+//
+// strpos, not ILIKE: an ILIKE pattern built by concatenating percent signs
+// around the needle makes user input a pattern, so a user typing % matches every
+// row. strpos has no metacharacters and nothing to escape. The cost is that a
+// pg_trgm index can never serve it; adopting one means rewriting this predicate
+// as escaped ILIKE everywhere, which the arm-enumerating tests cover.
+//
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE ($1::bool = FALSE
-//	       OR (created_at, id) < ($2::timestamptz, $3::uuid))
-//	ORDER BY created_at DESC, id DESC
-//	LIMIT $4::int + 1
+//	       OR (sj.created_at, sj.id) < ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.created_at DESC, sj.id DESC
+//	LIMIT $6::int + 1
 func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJobsPageParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPage,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1063,30 +1264,53 @@ func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJo
 }
 
 const listScheduledJobsPageByCreatedAsc = `-- name: ListScheduledJobsPageByCreatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
-ORDER BY created_at ASC, id ASC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.created_at, sj.id) > ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.created_at ASC, sj.id ASC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByCreatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
-// ListScheduledJobsPageByCreatedAsc
+// THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING. Without
+// them,
+// `NOT cursor_set OR keyset AND filter` binds as
+// `NOT cursor_set OR (keyset AND filter)`, so on the FIRST page - where
+// cursor_set is false - the whole WHERE is satisfied before any filter is
+// reached and every row comes back unfiltered. A cursor-bearing request behaves
+// correctly against that bug, so only a no-cursor request discriminates, which
+// is why TestListScheduledJobs_FilterArms_FirstPage sends no cursor.
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (created_at, id) > ($2::timestamptz, $3::uuid)
-//	ORDER BY created_at ASC, id ASC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.created_at, sj.id) > ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.created_at ASC, sj.id ASC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg ListScheduledJobsPageByCreatedAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByCreatedAsc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1124,30 +1348,46 @@ func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByNameAsc = `-- name: ListScheduledJobsPageByNameAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
-ORDER BY name ASC, id ASC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.name, sj.id) > ($2::text, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.name ASC, sj.id ASC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByNameAscParams struct {
 	CursorSet bool        `json:"cursor_set"`
 	CursorV   string      `json:"cursor_v"`
 	CursorID  pgtype.UUID `json:"cursor_id"`
+	Enabled   *bool       `json:"enabled"`
+	Q         *string     `json:"q"`
 	PageLimit int32       `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByNameAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (name, id) > ($2::text, $3::uuid)
-//	ORDER BY name ASC, id ASC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.name, sj.id) > ($2::text, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.name ASC, sj.id ASC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListScheduledJobsPageByNameAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByNameAsc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1185,30 +1425,46 @@ func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListSc
 }
 
 const listScheduledJobsPageByNameDesc = `-- name: ListScheduledJobsPageByNameDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
-ORDER BY name DESC, id DESC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.name, sj.id) < ($2::text, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.name DESC, sj.id DESC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByNameDescParams struct {
 	CursorSet bool        `json:"cursor_set"`
 	CursorV   string      `json:"cursor_v"`
 	CursorID  pgtype.UUID `json:"cursor_id"`
+	Enabled   *bool       `json:"enabled"`
+	Q         *string     `json:"q"`
 	PageLimit int32       `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByNameDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (name, id) < ($2::text, $3::uuid)
-//	ORDER BY name DESC, id DESC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.name, sj.id) < ($2::text, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.name DESC, sj.id DESC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListScheduledJobsPageByNameDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByNameDesc,
 		arg.CursorSet,
 		arg.CursorV,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1246,30 +1502,46 @@ func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListS
 }
 
 const listScheduledJobsPageByNextRunAsc = `-- name: ListScheduledJobsPageByNextRunAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
-ORDER BY next_run_at ASC, id ASC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) > ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.next_run_at ASC, sj.id ASC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByNextRunAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByNextRunAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (next_run_at, id) > ($2::timestamptz, $3::uuid)
-//	ORDER BY next_run_at ASC, id ASC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) > ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.next_run_at ASC, sj.id ASC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg ListScheduledJobsPageByNextRunAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByNextRunAsc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1307,30 +1579,46 @@ func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByNextRunDesc = `-- name: ListScheduledJobsPageByNextRunDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
-ORDER BY next_run_at DESC, id DESC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) < ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.next_run_at DESC, sj.id DESC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByNextRunDescParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByNextRunDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (next_run_at, id) < ($2::timestamptz, $3::uuid)
-//	ORDER BY next_run_at DESC, id DESC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) < ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.next_run_at DESC, sj.id DESC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg ListScheduledJobsPageByNextRunDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByNextRunDesc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1368,30 +1656,46 @@ func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg Li
 }
 
 const listScheduledJobsPageByUpdatedAsc = `-- name: ListScheduledJobsPageByUpdatedAsc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
-ORDER BY updated_at ASC, id ASC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.updated_at, sj.id) > ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.updated_at ASC, sj.id ASC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByUpdatedAscParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByUpdatedAsc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (updated_at, id) > ($2::timestamptz, $3::uuid)
-//	ORDER BY updated_at ASC, id ASC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.updated_at, sj.id) > ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.updated_at ASC, sj.id ASC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg ListScheduledJobsPageByUpdatedAscParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByUpdatedAsc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1429,30 +1733,46 @@ func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg Lis
 }
 
 const listScheduledJobsPageByUpdatedDesc = `-- name: ListScheduledJobsPageByUpdatedDesc :many
-SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
-ORDER BY updated_at DESC, id DESC
-LIMIT $4+ 1
+SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+LEFT JOIN users u ON u.id = sj.owner_id
+WHERE (NOT $1::bool OR (sj.updated_at, sj.id) < ($2::timestamptz, $3::uuid))
+  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+  AND ($5::text IS NULL
+       OR strpos(lower(sj.name), lower($5::text)) > 0
+       OR strpos(lower(u.email), lower($5::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+ORDER BY sj.updated_at DESC, sj.id DESC
+LIMIT $6+ 1
 `
 
 type ListScheduledJobsPageByUpdatedDescParams struct {
 	CursorSet bool               `json:"cursor_set"`
 	CursorTs  pgtype.Timestamptz `json:"cursor_ts"`
 	CursorID  pgtype.UUID        `json:"cursor_id"`
+	Enabled   *bool              `json:"enabled"`
+	Q         *string            `json:"q"`
 	PageLimit int32              `json:"+page_limit"`
 }
 
 // ListScheduledJobsPageByUpdatedDesc
 //
-//	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
-//	WHERE NOT $1::bool OR (updated_at, id) < ($2::timestamptz, $3::uuid)
-//	ORDER BY updated_at DESC, id DESC
-//	LIMIT $4+ 1
+//	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
+//	LEFT JOIN users u ON u.id = sj.owner_id
+//	WHERE (NOT $1::bool OR (sj.updated_at, sj.id) < ($2::timestamptz, $3::uuid))
+//	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
+//	  AND ($5::text IS NULL
+//	       OR strpos(lower(sj.name), lower($5::text)) > 0
+//	       OR strpos(lower(u.email), lower($5::text)) > 0
+//	       OR strpos(lower(sj.cron_expr), lower($5::text)) > 0)
+//	ORDER BY sj.updated_at DESC, sj.id DESC
+//	LIMIT $6+ 1
 func (q *Queries) ListScheduledJobsPageByUpdatedDesc(ctx context.Context, arg ListScheduledJobsPageByUpdatedDescParams) ([]ScheduledJob, error) {
 	rows, err := q.db.Query(ctx, listScheduledJobsPageByUpdatedDesc,
 		arg.CursorSet,
 		arg.CursorTs,
 		arg.CursorID,
+		arg.Enabled,
+		arg.Q,
 		arg.PageLimit,
 	)
 	if err != nil {
@@ -1583,6 +1903,85 @@ func (q *Queries) RecordScheduledJobFailure(ctx context.Context, arg RecordSched
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const scheduledJobCounts = `-- name: ScheduledJobCounts :one
+SELECT
+  COUNT(*) FILTER (WHERE enabled)                AS enabled,
+  COUNT(*) FILTER (WHERE NOT enabled)            AS paused,
+  COUNT(*) FILTER (WHERE last_error IS NOT NULL) AS failing,
+  (SELECT COUNT(*)
+     FROM jobs j
+     JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
+    WHERE j.status = 'failed'
+      AND j.updated_at >= NOW() - INTERVAL '24 hours'
+      AND ($1::uuid IS NULL
+           OR sj.owner_id = $1::uuid)) AS failed_runs_24h
+FROM scheduled_jobs
+WHERE $1::uuid IS NULL
+   OR owner_id = $1::uuid
+`
+
+type ScheduledJobCountsRow struct {
+	Enabled       int64 `json:"enabled"`
+	Paused        int64 `json:"paused"`
+	Failing       int64 `json:"failing"`
+	FailedRuns24h int64 `json:"failed_runs_24h"`
+}
+
+// The schedules summary strip's census, in ONE statement so every field it
+// returns describes the same snapshot. owner_id is sqlc.narg: NULL means
+// fleet-wide, a value scopes to that owner. The handler decides which, and a
+// caller who is not an admin must never reach the NULL.
+//
+// paused is exactly NOT enabled; there is no third state and no paused column.
+// failing is CURRENT STATE and is deliberately NOT windowed: last_error records
+// only the most recent failure, so a schedule that failed many times contributes
+// one, and it is counted in schedules while failed_runs_24h is counted in jobs.
+// Summing the two would produce a number whose loss is invisible where it is
+// read, which is why they are two fields.
+//
+// failed_runs_24h is a scalar subquery rather than a sibling statement so it
+// shares this one's snapshot. Its join to scheduled_jobs is what restricts to
+// schedule-spawned jobs AND what supplies the owner scope; a standalone job has
+// a NULL scheduled_job_id and cannot join.
+//
+// WINDOWED ON jobs.updated_at, matching JobStatusCounts exactly, so the two
+// "in the last 24 hours" numbers on this product's two summary strips mean the
+// same thing and inherit the same limitation and the same future fix.
+// created_at would answer a different question - runs that STARTED in the
+// window - and would count a job that started 23 hours ago and is still running
+// as neither failed nor not.
+//
+// IT EXCLUDES cancelled, unlike jobStatsResponse.failed_24h, which is why the
+// response field is named failed_runs_24h rather than failed_24h. A cancelled
+// job is an operator action, not a schedule fault, and a strip that flags one
+// teaches the operator to ignore the strip.
+//
+//	SELECT
+//	  COUNT(*) FILTER (WHERE enabled)                AS enabled,
+//	  COUNT(*) FILTER (WHERE NOT enabled)            AS paused,
+//	  COUNT(*) FILTER (WHERE last_error IS NOT NULL) AS failing,
+//	  (SELECT COUNT(*)
+//	     FROM jobs j
+//	     JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
+//	    WHERE j.status = 'failed'
+//	      AND j.updated_at >= NOW() - INTERVAL '24 hours'
+//	      AND ($1::uuid IS NULL
+//	           OR sj.owner_id = $1::uuid)) AS failed_runs_24h
+//	FROM scheduled_jobs
+//	WHERE $1::uuid IS NULL
+//	   OR owner_id = $1::uuid
+func (q *Queries) ScheduledJobCounts(ctx context.Context, ownerID pgtype.UUID) (ScheduledJobCountsRow, error) {
+	row := q.db.QueryRow(ctx, scheduledJobCounts, ownerID)
+	var i ScheduledJobCountsRow
+	err := row.Scan(
+		&i.Enabled,
+		&i.Paused,
+		&i.Failing,
+		&i.FailedRuns24h,
+	)
+	return i, err
 }
 
 const updateScheduledJob = `-- name: UpdateScheduledJob :one

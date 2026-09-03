@@ -15,24 +15,6 @@ import (
 	"relay/internal/api"
 )
 
-// jobsSortArms is DERIVED from the server's own allowlist, not hand-listed.
-// A sort key added to JobsSortSpec without a dispatch arm in listJobsBySort
-// reaches that switch's panic default and this test goes RED; a key given a
-// dispatch arm but not the four filter fields returns the wrong row set for
-// that arm. Sorted so subtest names are stable.
-func jobsSortArms() []string {
-	keys := make([]string, 0, len(api.JobsSortSpec.Keys))
-	for k := range api.JobsSortSpec.Keys {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	arms := make([]string, 0, 2*len(keys))
-	for _, k := range keys {
-		arms = append(arms, "sort="+k, "sort=-"+k)
-	}
-	return arms
-}
-
 // jobsFilterFixture seeds the two rows every arm is probed with.
 //
 // The two jobs differ on all four filter axes and on nothing that would let a
@@ -123,7 +105,7 @@ func TestListJobs_FiltersApplyOnEveryArm(t *testing.T) {
 		{"since alone opens the window at the end", url.Values{"since": {fx.otherTS}}, jobsFilterBravoName},
 	}
 
-	arms := append(jobsSortArms(), "status=pending", "scheduled_job_id="+fx.schedID)
+	arms := append(sortArms(api.JobsSortSpec), "status=pending", "scheduled_job_id="+fx.schedID)
 
 	for _, arm := range arms {
 		for _, f := range filters {
@@ -151,7 +133,7 @@ func TestListJobs_FiltersApplyOnEveryArm(t *testing.T) {
 func TestListJobs_FixtureIsUnfilteredOnEveryArm(t *testing.T) {
 	srv, fx := seedJobsFilterFixture(t)
 
-	arms := append(jobsSortArms(), "status=pending", "scheduled_job_id="+fx.schedID)
+	arms := append(sortArms(api.JobsSortSpec), "status=pending", "scheduled_job_id="+fx.schedID)
 	for _, arm := range arms {
 		t.Run(arm, func(t *testing.T) {
 			code, page := getJobsPage(t, srv, fx.token, arm+"&limit=50")

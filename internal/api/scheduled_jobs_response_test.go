@@ -107,6 +107,63 @@ func TestToScheduledJobResponse_FailingScheduleCarriesBothFailureKeys(t *testing
 	}
 }
 
+// TestToScheduledJobResponse_LastJobStatusIsPairedToLastJobID pins the CLOSED
+// KEY SET: last_job_status is present exactly when last_job_id is present. Not
+// "usually" - the two keys appear together or neither appears.
+//
+// Asserted against HAND-WRITTEN key names through a map[string]any decoded from
+// real marshalled JSON, for the reason this file's header gives: an absent
+// omitempty field compares equal on both sides whatever its name, so a
+// deep-equal against a typed fixture could not see the field at all.
+func TestToScheduledJobResponse_LastJobStatusIsPairedToLastJobID(t *testing.T) {
+	t.Run("no last job: neither key", func(t *testing.T) {
+		m := mustResponseMap(t, cleanScheduledJobRow())
+		for _, k := range []string{"last_job_id", "last_job_status"} {
+			if _, present := m[k]; present {
+				t.Errorf("a schedule that has produced no job must omit %q entirely, got %#v", k, m[k])
+			}
+		}
+		// Control: the always-present keys still are, so a mutant that dropped
+		// every optional key would not look like a pass here.
+		for _, k := range []string{"id", "name", "cron_expr", "enabled", "next_run_at"} {
+			if _, present := m[k]; !present {
+				t.Errorf("required key %q is missing from the response", k)
+			}
+		}
+	})
+
+	t.Run("last job present: both keys", func(t *testing.T) {
+		row := cleanScheduledJobRow()
+		row.LastJobID = pgtype.UUID{Valid: true}
+		copy(row.LastJobID.Bytes[:], []byte{
+			0x3f, 0x0a, 0x1b, 0x2c, 0x4d, 0x5e, 0x4f, 0x60,
+			0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8})
+
+		resp := toScheduledJobResponse(row)
+		// fillLastJobStatuses is what supplies the value in production; the
+		// mapper cannot, because no column carries it.
+		resp.LastJobStatus = "failed"
+
+		b, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		for _, k := range []string{"last_job_id", "last_job_status"} {
+			if _, present := m[k]; !present {
+				t.Errorf("a schedule with a last job must carry %q", k)
+			}
+		}
+		if got, _ := m["last_job_status"].(string); got != "failed" {
+			t.Errorf("last_job_status = %#v, want %q", m["last_job_status"], "failed")
+		}
+	})
+}
+
 // TestScheduledJobResponse_ArityMatchesTheRow is the ARITY CHECK for a
 // hand-written field-by-field copy.
 //
@@ -115,13 +172,14 @@ func TestToScheduledJobResponse_FailingScheduleCarriesBothFailureKeys(t *testing
 // added to its source: a new column would land in models.go, in the SQL, in the
 // database, and simply never reach a client, with every existing test green.
 //
-// The relationship is response = row + 1, and the +1 is OwnerEmail, which no
-// column supplies - fillOwnerEmails writes it separately from a users lookup.
+// The relationship is response = row + 2. Neither extra field has a column:
+// OwnerEmail comes from fillOwnerEmails and LastJobStatus from
+// fillLastJobStatuses, each a separate lookup.
 // If this fails after adding a column, add the mapping AND its assertions; if it
 // fails after adding a response-only field, update the constant below and say in
 // the commit message what supplies it.
 func TestScheduledJobResponse_ArityMatchesTheRow(t *testing.T) {
-	const responseOnlyFields = 1 // OwnerEmail, supplied by fillOwnerEmails
+	const responseOnlyFields = 2 // OwnerEmail (fillOwnerEmails), LastJobStatus (fillLastJobStatuses)
 
 	rowFields := reflect.TypeOf(store.ScheduledJob{}).NumField()
 	respFields := reflect.TypeOf(scheduledJobResponse{}).NumField()

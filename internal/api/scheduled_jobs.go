@@ -3,8 +3,11 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"relay/internal/schedrunner"
@@ -29,6 +32,26 @@ type scheduledJobResponse struct {
 	NextRunAt     time.Time       `json:"next_run_at"`
 	LastRunAt     *time.Time      `json:"last_run_at,omitempty"`
 	LastJobID     string          `json:"last_job_id,omitempty"`
+	// The status of the job last_job_id names, verbatim from jobs.status: the
+	// vocabulary migration 000019 constrains and TestJobsStatusVocabularyIsExactly
+	// pins. NOT the pending -> queued rename jobStatsResponse performs; this field
+	// must agree with jobResponse.status, which is what the cell linking to it
+	// shows.
+	//
+	// PRESENT EXACTLY WHEN last_job_id IS PRESENT. The pairing is what makes an
+	// absent key mean one thing - "no scheduled fire has produced a job" - and
+	// never "unknown" or "healthy". It holds because the FK on last_job_id is
+	// ON DELETE SET NULL, so a non-NULL id names a row that exists, and because
+	// fillLastJobStatuses fails the request rather than dropping the key.
+	//
+	// The pairing binds any site that emits a schedule body, so a handler that
+	// skips the enrichment breaks it. The mapper test cannot see that; the wire
+	// tests can - TestListScheduledJobs_LastJobStatusPairingOnTheWire and
+	// TestScheduledJob_LastJobStatusIsLive.
+	//
+	// Independent of last_error below, which records a fire that produced NO job.
+	// Both may be present at once and that is not a contradiction.
+	LastJobStatus string `json:"last_job_status,omitempty"`
 	// The last time the SCHEDULER failed to produce a job from this schedule,
 	// and why. ABSENT MEANS HEALTHY - not "" and not null - which is what makes
 	// `omitempty` on a string safe here: the write site
@@ -174,7 +197,18 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, toScheduledJobResponse(row))
+	items := []scheduledJobResponse{toScheduledJobResponse(row)}
+	// The creator is the owner, so the email needs no lookup.
+	s.fillOwnerEmails(r, items, u.Email)
+	// A freshly created row has never fired, so this can find nothing to fill.
+	// It runs anyway because the pairing is a property of every site that emits
+	// a schedule body, not of the sites that happen to need it today.
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, items[0])
 }
 
 // ownedScheduledJob fetches a schedule and verifies the caller is the owner or
@@ -273,6 +307,170 @@ func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, 
 	}
 }
 
+// fillLastJobStatuses resolves last_job_status for a set of items, mutating them
+// in place, from one batched lookup on the job ids the items already carry.
+//
+// IT FAILS THE REQUEST RATHER THAN DEGRADING, which is a deliberate divergence
+// from fillOwnerEmails immediately above. owner_email is a key that is always
+// present, so an empty value is visibly unknown and the list is still usable.
+// last_job_status signals through key PRESENCE, so degrading would forge the
+// signal "this schedule has never produced a job" out of a database fault, and a
+// renderer would draw a missing dot as a fact.
+func (s *Server) fillLastJobStatuses(r *http.Request, items []scheduledJobResponse) error {
+	ids := make([]pgtype.UUID, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, it := range items {
+		if it.LastJobID == "" {
+			continue
+		}
+		if _, ok := seen[it.LastJobID]; ok {
+			continue
+		}
+		seen[it.LastJobID] = struct{}{}
+		id, err := parseUUID(it.LastJobID)
+		if err != nil {
+			return fmt.Errorf("last_job_id is not a uuid: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := s.q.GetJobStatusesByIDs(r.Context(), ids)
+	if err != nil {
+		return fmt.Errorf("get job statuses (%d id(s)): %w", len(ids), err)
+	}
+	statusByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		statusByID[uuidStr(row.ID)] = row.Status
+	}
+	for i := range items {
+		if items[i].LastJobID == "" {
+			continue
+		}
+		st, ok := statusByID[items[i].LastJobID]
+		if !ok {
+			// The FK guarantees the row exists, so a miss means the pairing
+			// invariant cannot be honoured for this item. Emitting a last_job_id
+			// with no status would break the contract silently.
+			return fmt.Errorf("job %s has no status row", items[i].LastJobID)
+		}
+		items[i].LastJobStatus = st
+	}
+	return nil
+}
+
+// scheduleFilters carries the two optional GET /v1/scheduled-jobs predicates in
+// the exact types the generated sqlc Params fields use, so a call site spreads
+// them without conversion. The zero value means "no filter active": a nil Q and
+// a nil Enabled each send SQL NULL, which the predicates read as "match
+// everything".
+type scheduleFilters struct {
+	Enabled *bool
+	Q       *string
+}
+
+// scheduleFilterParams are the two query parameters parseScheduleFilters reads.
+// handleListScheduledJobs passes them to rejectRepeatedParams before calling in.
+var scheduleFilterParams = []string{"enabled", "q"}
+
+// parseScheduleFilters produces the two optional GET /v1/scheduled-jobs
+// predicates. On invalid input it writes the response itself and returns
+// ok=false. The caller spreads the result into every list and count Params
+// struct on its path; a call site that omits a field disables that filter for
+// its arm alone, with no error, which is what
+// TestListScheduledJobs_FilterArms_FirstPage enumerates.
+//
+// qs is the query string parsePage already parsed and arity-checked; see
+// parseFilterQ for why it is passed rather than re-read.
+func parseScheduleFilters(w http.ResponseWriter, qs url.Values) (scheduleFilters, bool) {
+	var f scheduleFilters
+
+	q, ok := parseFilterQ(w, qs)
+	if !ok {
+		return scheduleFilters{}, false
+	}
+	f.Q = q
+
+	// A tri-state, unlike the jobs list's ?mine=: enabled=false is the real
+	// request "only paused schedules", so it must produce a pointer to false and
+	// never be folded into absent.
+	if raw := qs.Get("enabled"); raw != "" {
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid enabled; expected true or false")
+			return scheduleFilters{}, false
+		}
+		f.Enabled = &b
+	}
+
+	return f, true
+}
+
+// scheduledJobStatsResponse is the schedules summary strip. Every key is always
+// present; there is no omitempty anywhere in it, so a zero is a zero and never
+// an absence.
+type scheduledJobStatsResponse struct {
+	Enabled       int64 `json:"enabled"`
+	Paused        int64 `json:"paused"`
+	Total         int64 `json:"total"`
+	FailedRuns24h int64 `json:"failed_runs_24h"`
+	Failing       int64 `json:"failing"`
+}
+
+// handleScheduledJobStats serves the fleet-wide census for an admin and the
+// owner-scoped census for a non-admin.
+//
+// An absent identity is refused before the scope is built, because a zero
+// pgtype.UUID is the same SQL NULL that means "fleet-wide" to the census
+// statements: without this a non-admin whose id failed to resolve would be
+// answered with the whole farm's numbers.
+//
+// AUTH-ONLY, not admin-only, and deliberately unlike /v1/server/counters: those
+// are process-lifetime in-memory numbers describing adversary activity, while
+// this is a database census of rows the caller may already page through one
+// screen at a time. An admin-only version would leave every non-admin with a
+// page-scoped strip.
+//
+// It accepts NO filters. The strip's purpose is a fleet-accurate count, and the
+// list's own total already answers the filtered question.
+func (s *Server) handleScheduledJobStats(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// SQL NULL for an admin: no owner predicate, so the census is fleet-wide.
+	// The guard above it is what keeps that sentinel out of reach of a caller
+	// who is not an admin.
+	var scope pgtype.UUID
+	if !u.IsAdmin {
+		if !u.ID.Valid {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		scope = u.ID
+	}
+
+	ctx := r.Context()
+	counts, err := s.q.ScheduledJobCounts(ctx, scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scheduled job stats failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, scheduledJobStatsResponse{
+		Enabled: counts.Enabled,
+		Paused:  counts.Paused,
+		// Computed from the two buckets rather than counted separately, so the
+		// identity holds by construction.
+		Total:         counts.Enabled + counts.Paused,
+		FailedRuns24h: counts.FailedRuns24h,
+		Failing:       counts.Failing,
+	})
+}
+
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
 	u, ok := UserFromCtx(r.Context())
 	if !ok {
@@ -281,6 +479,14 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 	}
 
 	pp, ok := parsePage(w, r, ScheduledJobsSortSpec)
+	if !ok {
+		return
+	}
+
+	if !rejectRepeatedParams(w, pp.Query, scheduleFilterParams...) {
+		return
+	}
+	filters, ok := parseScheduleFilters(w, pp.Query)
 	if !ok {
 		return
 	}
@@ -299,6 +505,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -312,6 +520,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -325,6 +535,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorV:   pp.Cursor.StrVal,
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -338,6 +550,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorV:   pp.Cursor.StrVal,
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -351,6 +565,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -364,6 +580,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -377,6 +595,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -390,6 +610,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -402,12 +624,20 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			panic("handleListScheduledJobs admin: missing dispatch arm for sort key " + pp.Sort)
 		}
 
-		total, err := s.q.CountScheduledJobs(ctx)
+		total, err := s.q.CountScheduledJobs(ctx, store.CountScheduledJobsParams{
+			Enabled: filters.Enabled,
+			Q:       filters.Q,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 			return
 		}
 		s.fillOwnerEmails(r, items, "")
+		if err := s.fillLastJobStatuses(r, items); err != nil {
+			log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
 		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -425,6 +655,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -439,6 +671,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -453,6 +687,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -467,6 +703,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -481,6 +719,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -495,6 +735,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -509,6 +751,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -523,6 +767,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -535,12 +781,21 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		panic("handleListScheduledJobs owner: missing dispatch arm for sort key " + pp.Sort)
 	}
 
-	total, err := s.q.CountScheduledJobsByOwner(ctx, u.ID)
+	total, err := s.q.CountScheduledJobsByOwner(ctx, store.CountScheduledJobsByOwnerParams{
+		OwnerID: u.ID,
+		Enabled: filters.Enabled,
+		Q:       filters.Q,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 		return
 	}
 	s.fillOwnerEmails(r, items, u.Email)
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
@@ -565,6 +820,11 @@ func (s *Server) handleGetScheduledJob(w http.ResponseWriter, r *http.Request) {
 	}
 	items := []scheduledJobResponse{toScheduledJobResponse(row)}
 	s.fillOwnerEmails(r, items, selfEmail)
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "get scheduled job failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, items[0])
 }
 
@@ -705,7 +965,23 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, toScheduledJobResponse(updated))
+	items := []scheduledJobResponse{toScheduledJobResponse(updated)}
+	// Owner-or-admin, so resolve per row exactly as the get does: an admin
+	// patching someone else's schedule must see the real owner.
+	selfEmail := ""
+	if u, ok := UserFromCtx(r.Context()); ok && updated.OwnerID == u.ID {
+		selfEmail = u.Email
+	}
+	s.fillOwnerEmails(r, items, selfEmail)
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		// The update COMMITTED; only the response could not be built. Say so,
+		// because "update failed" would send the caller to retry a write that
+		// already landed.
+		writeError(w, http.StatusInternalServerError, "update applied but the response could not be built")
+		return
+	}
+	writeJSON(w, http.StatusOK, items[0])
 }
 
 func (s *Server) handleDeleteScheduledJob(w http.ResponseWriter, r *http.Request) {

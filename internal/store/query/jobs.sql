@@ -471,3 +471,9 @@ SELECT * FROM jobs WHERE id = $1 FOR UPDATE;
 -- Job names for one page of tasks. Mirrors GetUserEmailsByIDs; the handler builds
 -- a map and reads it per row. Bounded by the page limit, on the primary key.
 SELECT id, name FROM jobs WHERE id = ANY($1::uuid[]);
+
+-- name: GetJobStatusesByIDs :many
+-- Batch enrichment for the schedules list's last_job_status, mirroring
+-- GetUserEmailsByIDs. One primary-key = ANY lookup per request, O(1) in the page
+-- size.
+SELECT id, status FROM jobs WHERE id = ANY(@ids::uuid[]);

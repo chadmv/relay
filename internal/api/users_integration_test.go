@@ -409,9 +409,13 @@ func loginAs(t *testing.T, srv *api.Server, email, password string) string {
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	require.Equal(t, http.StatusCreated, rec.Code)
-	var resp map[string]string
+	// map[string]any, not map[string]string: the login body carries an
+	// object-valued "user" key, which a string-valued map cannot decode.
+	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	return resp["token"]
+	token, _ := resp["token"].(string)
+	require.NotEmpty(t, token)
+	return token
 }
 
 // postJSON sends a POST with a JSON body and returns (status code, parsed response body).
