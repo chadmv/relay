@@ -1,7 +1,7 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { afterEach, beforeEach, expect, test } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
@@ -66,6 +66,7 @@ beforeEach(() => {
 })
 
 afterEach(() => localStorage.clear())
+afterEach(() => vi.useRealTimers())
 
 test('the search box sends q on the table request', async () => {
   renderPage()
@@ -108,6 +109,54 @@ test('searching after paging forward drops the cursor', async () => {
   await waitFor(() => expect(seen.some((p) => p.get('q') === 'etl')).toBe(true))
   for (const p of seen.filter((x) => x.get('q') === 'etl')) {
     expect(p.has('cursor')).toBe(false)
+  }
+})
+
+test('a click inside the debounce window cannot mint a cursor the landing search carries', async () => {
+  // The unfiltered page 1 (q='') has a next cursor; the filtered result (q='e')
+  // never does. If a click inside the debounce window could still mint CUR1,
+  // the search that lands afterward would carry it straight into a q=e&cursor=
+  // CUR1 request - a cursor from one filter combined with a different one, and
+  // the server does not reject the mismatch.
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const p = new URL(request.url).searchParams
+      seen.push(p)
+      if (p.get('q')) return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
+      return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: 'CUR1', total: 2 })
+    }),
+  )
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    const typist = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    // A wider debounce than this file's usual 10ms: userEvent's own internal
+    // per-keystroke delay, replayed through advanceTimers, can otherwise land
+    // the debounce before this test ever gets to observe the vulnerable
+    // window between the keystroke and it landing.
+    renderWithQuery(
+      <MemoryRouter>
+        <JobsPage debounceMs={300} />
+      </MemoryRouter>,
+    )
+    await screen.findByText('job-A')
+
+    await typist.type(screen.getByRole('searchbox'), 'e')
+    // The raw input has outrun the debounced q (still '' until the timer
+    // fires), which is exactly the vulnerable window: this is the assertion
+    // that pins the fix itself, not just its absence of an effect.
+    const next = screen.getByRole('button', { name: /next/i })
+    expect(next).toBeDisabled()
+    await typist.click(next)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    await waitFor(() => expect(seen.some((p) => p.get('q') === 'e')).toBe(true))
+    for (const p of seen.filter((x) => x.get('q') === 'e')) {
+      expect(p.has('cursor')).toBe(false)
+    }
+  } finally {
+    vi.useRealTimers()
   }
 })
 

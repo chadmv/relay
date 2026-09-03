@@ -13,6 +13,7 @@ import { LANE_CHIP_KEY } from './lanes'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
+import { useDebouncedPagingGuard } from '../lib/useDebouncedPagingGuard'
 import { useDebouncedValue } from '../lib/useDebouncedValue'
 import { usePersistedChoice } from '../lib/usePersistedChoice'
 import type { JobSort, JobStatus } from './api'
@@ -61,6 +62,13 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const q = useDebouncedValue(qInput, debounceMs).trim()
   const [mine, setMine] = useState(false)
   const pager = useCursorPager()
+  // The debounce-window cursor race: a per-keystroke pager.resetPaging() call
+  // (below) already drops a cursor minted under the OLD filters, but a raw
+  // keystroke and the debounced q landing are two separate moments, and a
+  // click on next/prev IN BETWEEN can still mint a cursor the about-to-land q
+  // then carries into a request for filters it was never issued under. See
+  // web/src/lib/useDebouncedPagingGuard.ts.
+  const pagingUnsettled = useDebouncedPagingGuard(qInput, q, pager)
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
@@ -315,7 +323,7 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
               <button
                 type="button"
                 onClick={pager.prev}
-                disabled={!pager.canPrev || isPlaceholderData}
+                disabled={!pager.canPrev || isPlaceholderData || pagingUnsettled}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 ← prev
@@ -323,7 +331,7 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
               <button
                 type="button"
                 onClick={() => pager.next(data)}
-                disabled={!data?.next_cursor || isPlaceholderData}
+                disabled={!data?.next_cursor || isPlaceholderData || pagingUnsettled}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
                 next 50 →
