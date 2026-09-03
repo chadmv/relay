@@ -9,6 +9,10 @@ import { getServerConfig } from './api'
 // cache entry and let a remount past that window refetch, contradicting "never
 // again". AuthProvider's queryClient.clear() on logout/401 still bounds any
 // cross-user residue, so this doesn't leak config across a user switch.
+// The raw query state is returned and nothing is fabricated here, because the
+// consumers disagree about what a failure means: the sign-up screen must fail
+// closed to the invite-required form, while the admin server tab must render the
+// failure. A default invented in this layer would be wrong for one of them.
 export function useServerConfig() {
   return useQuery({
     queryKey: ['server-config'],
