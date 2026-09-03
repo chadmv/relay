@@ -2,9 +2,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { useJobTimeline } from './useJobTimeline'
+import { ANCHOR_STEP_MS } from './timelineWindow'
+
+afterEach(() => vi.useRealTimers())
 
 // Hand-written wire bodies, never marshalled through the api types.
 function jobRow(id: string, name: string) {
@@ -70,6 +73,46 @@ test('the walk repeats its filters on every page', async () => {
   }
   expect(seen[0].has('cursor')).toBe(false)
   expect(seen[1].get('cursor')).toBe('CUR1')
+})
+
+test('a walk slower than one anchor tick still completes, and the tick does not restart it', async () => {
+  // Reproduces the liveness bug: the old design derived the query key from a
+  // ticking clock (useNow), so every ANCHOR_STEP_MS the key changed, the
+  // in-flight walk's query went inactive, and the walk restarted from page 1 -
+  // forever, for any walk slower than one tick. The fix makes the key STABLE
+  // per window and filters and lets TanStack's own refetchInterval drive the
+  // refresh, which dedupes against a fetch already in flight.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  let requests = 0
+  let release!: () => void
+  const gate = new Promise<void>((r) => {
+    release = r
+  })
+  server.use(
+    http.get('/v1/jobs', async () => {
+      requests++
+      await gate
+      return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: '', total: 1 })
+    }),
+  )
+  const { result } = renderHook(() => useJobTimeline(true, '24h', '', false), {
+    wrapper: makeWrapper(newClient()),
+  })
+  await waitFor(() => expect(requests).toBe(1))
+  expect(result.current.isLoading).toBe(true)
+
+  // Four ticks pass while the single request is still pending. Under the old
+  // design this is where four abandoned requests would appear and isLoading
+  // would still read true with nothing ever completing.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ANCHOR_STEP_MS * 4)
+  })
+  expect(requests).toBe(1)
+  expect(result.current.isLoading).toBe(true)
+
+  release()
+  await waitFor(() => expect(result.current.isLoading).toBe(false))
+  expect(result.current.jobs).toHaveLength(1)
 })
 
 test('the walk stops at the page cap', async () => {

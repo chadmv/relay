@@ -1,5 +1,4 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { useNow } from '../lib/useNow'
 import { listJobsInWindow, type Job } from './api'
 import {
   ANCHOR_STEP_MS,
@@ -28,6 +27,10 @@ export interface TimelineWalk {
   jobs: Job[]
   total: number
   truncated: boolean
+  /** The bounds THIS walk actually queried, so the caption never describes a
+   * different window than the rows it is looking at. */
+  sinceIso: string
+  untilIso: string
 }
 
 /**
@@ -71,21 +74,38 @@ export async function walkJobWindow(
     if (signal.aborted) throw new Error('timeline walk cancelled')
   }
 
-  return { jobs, total, truncated: pages >= TIMELINE_MAX_PAGES && cursor !== '' }
+  return {
+    jobs,
+    total,
+    truncated: pages >= TIMELINE_MAX_PAGES && cursor !== '',
+    sinceIso: args.sinceIso,
+    untilIso: args.untilIso,
+  }
 }
 
 /**
  * One window of jobs, drawn from up to TIMELINE_MAX_PAGES pages.
  *
- * There is no refetchInterval. The anchor's own advance IS the refresh: it moves
- * once per ANCHOR_STEP_MS, which mints a new key. A refetchInterval on a stable
- * key would re-walk three pages on every tick instead.
+ * THE KEY IS STABLE per window and filters - it does not carry since/until, so a
+ * refresh does not mint a new query. The anchor is instead computed ONCE, inside
+ * the queryFn, at the moment each fetch actually starts (`windowBounds(w,
+ * Date.now())`), and travels back out on the result (TimelineWalk.sinceIso/
+ * untilIso) so the caption always describes the rows it is looking at rather than
+ * a bound recomputed separately in render.
  *
- * gcTime is explicit and short. Every anchor step mints a new key, so at the
- * client default of five minutes the cache would accumulate about twenty
- * abandoned entries, each holding up to a full walk's rows. This is a consequence
- * of a per-tick key that nothing else in the app has, so it is a requirement
- * rather than a tuning note.
+ * A per-tick key was tried first and does not work: a walk slower than one
+ * ANCHOR_STEP_MS never completes, because the tick changes the key before the
+ * walk can finish, the query goes inactive, its consumed signal aborts, and the
+ * next tick starts the walk over from page 1 - forever, for any walk slower than
+ * a tick. `refetchInterval: ANCHOR_STEP_MS` is what drives the refresh instead:
+ * TanStack does not start an interval-triggered refetch while one is already in
+ * flight for the same key, so a slow walk is never interrupted by its own tick.
+ * useJobTimeline.test.tsx's 'a walk slower than one anchor tick still completes'
+ * is the regression guard.
+ *
+ * keepPreviousData now matters only across a window or filter change (a
+ * genuinely different key): the tick refetches the SAME key, and TanStack
+ * already keeps the previous successful `data` visible through that on its own.
  */
 export function useJobTimeline(
   enabled: boolean,
@@ -93,14 +113,14 @@ export function useJobTimeline(
   q: string,
   mine: boolean,
 ): TimelineState {
-  const nowMs = useNow(ANCHOR_STEP_MS).getTime()
-  const { sinceIso, untilIso } = windowBounds(w, nowMs)
-
   const query = useQuery({
-    queryKey: ['job-timeline', sinceIso, untilIso, q, mine],
-    queryFn: ({ signal }) => walkJobWindow({ sinceIso, untilIso, q, mine }, signal),
+    queryKey: ['job-timeline', w, q, mine],
+    queryFn: ({ signal }) => {
+      const { sinceIso, untilIso } = windowBounds(w, Date.now())
+      return walkJobWindow({ sinceIso, untilIso, q, mine }, signal)
+    },
     enabled,
-    gcTime: 60_000,
+    refetchInterval: ANCHOR_STEP_MS,
     placeholderData: keepPreviousData,
   })
 
@@ -108,8 +128,8 @@ export function useJobTimeline(
     jobs: query.data?.jobs ?? [],
     total: query.data?.total ?? 0,
     truncated: query.data?.truncated ?? false,
-    sinceIso,
-    untilIso,
+    sinceIso: query.data?.sinceIso ?? '',
+    untilIso: query.data?.untilIso ?? '',
     isLoading: query.isLoading,
     isFetching: query.isFetching,
     // A failed refresh that still has rows keeps showing them; the error surfaces

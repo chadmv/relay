@@ -42,11 +42,12 @@ export const TICKS: Record<TimelineWindow, readonly [string, string, string]> = 
 }
 
 /**
- * How coarsely the axis end is quantized, and therefore how often the query key
- * moves. It is the whole refresh cadence and the whole staleness budget of this
- * view in one number: a job created less than this long ago is not yet inside the
- * window. The panel states the axis end as a wall-clock time so that is visible
- * rather than implicit.
+ * How coarsely the axis end is quantized, and separately the interval useJobTimeline
+ * refetches on. A job created less than this long ago is not yet inside the window;
+ * with the anchor computed fresh at each fetch's start (see useJobTimeline.ts), the
+ * worst-case staleness for a newly created job to appear is one of these intervals
+ * plus however long the walk itself takes. The panel states the axis end as a
+ * wall-clock time so that is visible rather than implicit.
  */
 export const ANCHOR_STEP_MS = 15_000
 
