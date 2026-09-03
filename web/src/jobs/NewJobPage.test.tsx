@@ -19,12 +19,14 @@ function DetailStub() {
   return <div>detail for {id ?? ''}</div>
 }
 
-// Renders NewJobPage at /jobs/new. A stub /jobs/:id route lets us assert
-// navigation lands on the detail page for a real id (and prove /jobs/new does
-// NOT match :id).
-function renderNew() {
+// Renders NewJobPage at /jobs/new and switches it into JSON mode. The page opens
+// in form mode, so every assertion in this file - all of which are about the raw
+// JSON editor's own submit path - has to say so. A stub /jobs/:id route lets us
+// assert navigation lands on the detail page for a real id (and prove /jobs/new
+// does NOT match :id).
+async function renderNewJson() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const utils = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/jobs/new']}>
         <Routes>
@@ -34,14 +36,16 @@ function renderNew() {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  await userEvent.click(screen.getByRole('button', { name: 'JSON' }))
+  return utils
 }
 
 function editor() {
-  return screen.getByRole('textbox') as HTMLTextAreaElement
+  return screen.getByRole('textbox', { name: 'Job spec JSON' }) as HTMLTextAreaElement
 }
 
-test('renders the editor prefilled with the starter template', () => {
-  renderNew()
+test('renders the editor prefilled with the starter template', async () => {
+  await renderNewJson()
   expect(editor().value).toMatch(/"name": "my-job"/)
   expect(editor().value).toMatch(/"hello world"/)
 })
@@ -54,7 +58,7 @@ test('submitting the unedited template POSTs that body', async () => {
       return HttpResponse.json({ id: 'job-1' }, { status: 201 })
     }),
   )
-  renderNew()
+  await renderNewJson()
   await userEvent.click(screen.getByRole('button', { name: /create job/i }))
   await waitFor(() => expect(body).toMatchObject({ name: 'my-job' }))
   expect((body as { tasks: unknown[] }).tasks.length).toBe(1)
@@ -68,7 +72,7 @@ test('happy path: POST body, 201, navigation to /jobs/:id', async () => {
       return HttpResponse.json({ id: 'job-123' }, { status: 201 })
     }),
   )
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{"name":"nj","tasks":[[{{"name":"t","command":[["echo"]}]}')
@@ -81,7 +85,7 @@ test('happy path: POST body, 201, navigation to /jobs/:id', async () => {
 test('local parse error shows a banner and makes NO POST', async () => {
   let posted = false
   server.use(http.post('/v1/jobs', () => { posted = true; return HttpResponse.json({ id: 'x' }, { status: 201 }) }))
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{ not json }')
@@ -94,7 +98,7 @@ test('local parse error shows a banner and makes NO POST', async () => {
 test('local shape error - missing name - banner and NO POST', async () => {
   let posted = false
   server.use(http.post('/v1/jobs', () => { posted = true; return HttpResponse.json({ id: 'x' }, { status: 201 }) }))
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{"tasks":[[{{"name":"t"}]}')
@@ -109,7 +113,7 @@ test('local shape error - missing name - banner and NO POST', async () => {
 test('local shape error - empty tasks - banner and NO POST', async () => {
   let posted = false
   server.use(http.post('/v1/jobs', () => { posted = true; return HttpResponse.json({ id: 'x' }, { status: 201 }) }))
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{"name":"x","tasks":[[]}')
@@ -126,7 +130,7 @@ test('server 400 surfaces inline, no navigation, text preserved', async () => {
       HttpResponse.json({ error: 'duplicate task name: build' }, { status: 400 }),
     ),
   )
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{"name":"nj","tasks":[[{{"name":"t","command":[["echo"]}]}')
@@ -144,7 +148,7 @@ test('413 oversize surfaces inline (same banner path)', async () => {
       HttpResponse.json({ error: 'request body too large' }, { status: 413 }),
     ),
   )
-  renderNew()
+  await renderNewJson()
   await userEvent.click(screen.getByRole('button', { name: /create job/i }))
   expect(await screen.findByText(/request body too large/)).toBeInTheDocument()
 })
@@ -156,7 +160,7 @@ test('submit button is disabled while the create is pending', async () => {
       return HttpResponse.json({ id: 'job-1' }, { status: 201 })
     }),
   )
-  renderNew()
+  await renderNewJson()
   const btn = screen.getByRole('button', { name: /create job/i })
   await userEvent.click(btn)
   await waitFor(() => expect(btn).toBeDisabled())
@@ -171,7 +175,7 @@ test('a stale server error clears on the next submit', async () => {
       return HttpResponse.json({ id: 'job-9' }, { status: 201 })
     }),
   )
-  renderNew()
+  await renderNewJson()
   const ta = editor()
   await userEvent.clear(ta)
   await userEvent.type(ta, '{{"name":"nj","tasks":[[{{"name":"t","command":[["echo"]}]}')
@@ -209,7 +213,7 @@ test('the /jobs/new route renders the form and makes NO GET /v1/jobs/new', async
   )
 
   // The editor renders (proves the form matched, not the detail page).
-  expect(await screen.findByRole('textbox')).toBeInTheDocument()
+  expect(await screen.findByRole('textbox', { name: 'Job name' })).toBeInTheDocument()
   expect(detailFetched).toBe(false)
   clearToken()
 })

@@ -233,8 +233,8 @@ export function ScheduleDetailPage() {
 
           {/* Read-only. The stored value is JSON (scheduledJobResponse.JobSpec is a
               json.RawMessage, internal/api/scheduled_jobs.go:26); web/ has no YAML
-              serializer, and the app's only spec editor is already a JSON textarea
-              (jobs/NewJobPage.tsx:51-59). Rendered as a React TEXT CHILD in a <pre>:
+              serializer, and NewJobPage's JSON mode already edits a spec as JSON
+              text. Rendered as a React TEXT CHILD in a <pre>:
               never dangerouslySetInnerHTML, and nothing from job_spec goes into a
               URL, a title attribute or a log line - it can carry env values a user
               chose to store.
