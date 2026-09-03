@@ -88,3 +88,56 @@ func TestHandleTaskStatus_APrepareFailureMessageIsStoredAsAStderrLogLine(t *test
 	require.NoError(t, err)
 	assert.Equal(t, "failed", after.Status, "PREPARE_FAILED is still routed through the failed path")
 }
+
+// A2 - the publish ordering. A single subscriber filtered on BOTH the job and
+// the task sits in both of the broker's indexes, so it receives both frame types
+// on one channel in publish order (TestBroker_JobAndTaskSubscriberReceivesBoth).
+// Publish is synchronous under the broker's own mutex and HandleTaskStatus is
+// synchronous, so a non-blocking drain after the call is exact - no wall clock.
+func TestHandleTaskStatus_TheLogEventIsPublishedBeforeTheStatusEvent(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	jobID, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg2", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	ch, cancel := broker.Subscribe(events.Filter{JobID: h.UUIDStringForTest(jobID), TaskID: taskIDStr})
+	defer cancel()
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId:       taskIDStr,
+		Status:       relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "sync failed",
+		Epoch:        int64(claimed.AssignmentEpoch),
+	})
+
+	var types []string
+	for done := false; !done; {
+		select {
+		case e := <-ch:
+			types = append(types, e.Type)
+		default:
+			done = true
+		}
+	}
+
+	logAt := indexOfEventType(types, events.TypeTaskLog)
+	statusAt := indexOfEventType(types, "task")
+	require.GreaterOrEqual(t, logAt, 0, "the log frame must be published at all, got %v", types)
+	require.GreaterOrEqual(t, statusAt, 0, "the status frame must still be published, got %v", types)
+	assert.Less(t, logAt, statusAt,
+		"a line published after the terminal status frame is one the live view never shows: %v", types)
+}
+
+func indexOfEventType(ss []string, want string) int {
+	for i, s := range ss {
+		if s == want {
+			return i
+		}
+	}
+	return -1
+}
