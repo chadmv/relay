@@ -1,7 +1,9 @@
 ---
 title: My jobs toggle (server ?mine= filter)
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-06-05
 source: jobs-list-frontend retro (2026-06-05)
 ---
@@ -18,3 +20,6 @@ Deferred from the first jobs-list slice. Implementing `?mine=` means adding an o
 - `internal/api/jobs.go`, `internal/store/query/jobs.sql`
 - `web/src/jobs/JobsPage.tsx`
 - `docs/retros/2026-06-05-web-jobs-list.md`
+
+## Resolution
+Shipped in lane JF of the 2026-09-02 web-frontend batch on the server-side ?mine= from PR #178: a persisted Mine toggle on the Jobs page that travels with q, the timeline and the lanes views, invalidated together with the list on cancel, retry and create.
