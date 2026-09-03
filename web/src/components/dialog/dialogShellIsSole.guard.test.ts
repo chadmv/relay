@@ -33,6 +33,9 @@ const SOURCES = shippedSources(['.ts', '.tsx'])
 const SHELL = 'components/dialog/DialogShell.tsx'
 const STACK = 'components/dialog/dialogStack.ts'
 const DIALOG_DIR = 'components/dialog/'
+// The absolute path derived from SHELL, so the two places that read the
+// shell's own file share one source of truth instead of repeating the join.
+const SHELL_PATH = join(SRC_ROOT, SHELL)
 
 function rel(file: string): string {
   return toPosix(relative(SRC_ROOT, file))
@@ -126,7 +129,7 @@ test('the modal attribute is declared in the dialog shell only', () => {
 // own source at run time, anchored on the SCRIM identifier - an identifier is not
 // class-shaped, so nothing in this file emits CSS, and the probe follows the
 // value if it changes.
-const SHELL_SRC = readFileSync(join(SRC_ROOT, 'components', 'dialog', 'DialogShell.tsx'), 'utf8')
+const SHELL_SRC = readFileSync(SHELL_PATH, 'utf8')
 const SCRIM_MATCH = SHELL_SRC.match(/\bSCRIM\s*=\s*'([^']*)'/)
 const SCRIM_VALUE = SCRIM_MATCH ? SCRIM_MATCH[1] : ''
 const SCRIM_TOKENS = SCRIM_VALUE.split(/\s+/).filter(Boolean)
@@ -167,7 +170,7 @@ test('the modal scrim is painted by the dialog shell only', () => {
   // discriminating, and both sub-probes match the file that owns it.
   expect(SCRIM_TOKENS.length, 'the SCRIM extraction found nothing').toBeGreaterThanOrEqual(5)
   expect(SCRIM_DISTINCTIVE.every(Boolean), 'no stacking-order token in the scrim value').toBe(true)
-  const shellStripped = stripped(join(SRC_ROOT, 'components', 'dialog', 'DialogShell.tsx'))
+  const shellStripped = stripped(SHELL_PATH)
   expect(shellStripped).toContain(SCRIM_VALUE)
   expect(hasDistinctiveLine(shellStripped)).toBe(true)
 
