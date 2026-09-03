@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"time"
 
 	"relay/internal/store"
@@ -84,6 +85,49 @@ func reservationsRowKeyByEnds(res store.Reservation) (anySortVal, pgtype.UUID) {
 	}
 	t := res.EndsAt.Time
 	return &t, res.ID
+}
+
+// reservationFilters carries the one optional GET /v1/reservations predicate in
+// the type the generated sqlc Params field uses. The zero value means "no filter
+// active": an invalid pgtype.UUID sends SQL NULL, which the predicate reads as
+// "match everything".
+type reservationFilters struct {
+	WorkerID pgtype.UUID
+}
+
+// reservationFilterParams are the query parameters parseReservationFilters
+// reads. handleListReservations passes them to rejectRepeatedParams before
+// calling in.
+var reservationFilterParams = []string{"worker_id"}
+
+// parseReservationFilters produces the optional GET /v1/reservations predicate.
+// On invalid input it writes the response itself and returns ok=false.
+//
+// An id that names no worker is NOT an error: reservations.worker_ids is a bare
+// UUID[] with no foreign key, so a worker id can outlive its row and this
+// endpoint cannot distinguish "never existed" from "deleted". It answers an
+// empty page.
+//
+// qs is the query string parsePage already parsed and arity-checked. Taking it
+// as an argument rather than re-reading r.URL.Query() keeps one parse per
+// request: r.URL.Query() discards percent-decoding errors, so a second parse
+// can disagree with the one that was validated.
+func parseReservationFilters(w http.ResponseWriter, qs url.Values) (reservationFilters, bool) {
+	var f reservationFilters
+
+	if raw := qs.Get("worker_id"); raw != "" {
+		id, err := parseUUID(raw)
+		if err != nil {
+			// Renders nothing input-derived, unlike handleCreateReservation's
+			// echo of the supplied value. Pinned by
+			// TestParseReservationFilters_ErrorDoesNotEchoTheInput.
+			writeError(w, http.StatusBadRequest, "invalid worker_id; expected a UUID")
+			return reservationFilters{}, false
+		}
+		f.WorkerID = id
+	}
+
+	return f, true
 }
 
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
