@@ -114,6 +114,13 @@ export async function walkJobWindow(
  * useJobTimeline.test.tsx's 'a walk slower than one anchor tick still completes'
  * is the regression guard.
  *
+ * STALENESS BUDGET. windowBounds still quantizes its anchor to ANCHOR_STEP_MS
+ * (see timelineWindow.ts), so a job created less than that long ago is not yet
+ * inside the window on whichever fetch computes the anchor - the first mount
+ * included, since the anchor is computed fresh per fetch rather than tracked
+ * live. The worst case for that job to appear is one ANCHOR_STEP_MS interval
+ * plus however long the refresh that then picks it up takes to walk.
+ *
  * keepPreviousData covers a window or filter change WHILE its new key's fetch
  * is still pending: TanStack fills query.data from the previous key so the view
  * does not blank while waiting. It does NOT cover the fetch then FAILING - once
