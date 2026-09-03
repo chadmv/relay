@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
-import { newBuilderState, newCommandRow, newKvRow, newTaskRow, toSpec } from './specBuilder'
+import { fromSpec, newBuilderState, newCommandRow, newKvRow, newTaskRow, toSpec } from './specBuilder'
+import { STARTER_TEMPLATE } from './specTemplate'
 
 // A minimal state built by hand rather than through newBuilderState, so these
 // tests keep meaning if the starter template changes.
@@ -129,4 +130,75 @@ test('two commands under the multi-command flag emit both, in order', () => {
   s.tasks[0].multiCommand = true
   s.tasks[0].commands = [newCommandRow(['a']), newCommandRow(['b'])]
   expect(toSpec(s).tasks[0].commands).toEqual([['a'], ['b']])
+})
+
+// The server's own examples, not invented fixtures. This is the README `relay
+// submit` job file, verbatim.
+const README_JOB = {
+  name: 'my-render',
+  priority: 'normal',
+  labels: { project: 'film-x' },
+  tasks: [
+    {
+      name: 'frame-001',
+      command: ['blender', '-b', 'scene.blend', '-f', '1'],
+      env: { SCENE: 'scene.blend' },
+      requires: { gpu: 'true' },
+      timeout_seconds: 3600,
+      retries: 2,
+    },
+    {
+      name: 'frame-002',
+      command: ['blender', '-b', 'scene.blend', '-f', '2'],
+      depends_on: ['frame-001'],
+    },
+  ],
+}
+
+function imported(spec: unknown) {
+  const result = fromSpec(spec)
+  if (!result.ok) throw new Error(`expected an accepted import, got: ${result.error}`)
+  return result.state
+}
+
+test('the README job file round-trips through the form state', () => {
+  expect(toSpec(imported(README_JOB))).toEqual(README_JOB)
+})
+
+test('the starter template round-trips through the form state', () => {
+  const parsed: unknown = JSON.parse(STARTER_TEMPLATE)
+  expect(toSpec(imported(parsed))).toEqual(parsed)
+})
+
+test('a task imported with a one-entry commands re-emits as commands', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', commands: [['echo', 'hi']] }] }
+  expect(toSpec(imported(spec))).toEqual(spec)
+})
+
+test('a task imported with command re-emits as command', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', command: ['echo', 'hi'] }] }
+  expect(toSpec(imported(spec))).toEqual(spec)
+})
+
+test('an imported argument containing a space stays one argv element', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', command: ['echo', 'hello world'] }] }
+  expect(imported(spec).tasks[0].commands[0].tokens.map((t) => t.text)).toEqual(['echo', 'hello world'])
+})
+
+test('a depends_on naming a duplicated task name resolves to the first of them', () => {
+  const spec = {
+    name: 'j',
+    tasks: [
+      { name: 'dup', command: ['a'] },
+      { name: 'dup', command: ['b'] },
+      { name: 'c', command: ['c'], depends_on: ['dup'] },
+    ],
+  }
+  const state = imported(spec)
+  expect(state.tasks[2].dependsOn).toEqual([state.tasks[0].id])
+})
+
+test('every imported row carries a distinct identity', () => {
+  const state = imported(README_JOB)
+  expect(new Set(state.tasks.map((t) => t.id)).size).toBe(2)
 })

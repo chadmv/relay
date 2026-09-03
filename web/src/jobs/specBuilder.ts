@@ -189,6 +189,166 @@ export function newBuilderState(): BuilderState {
 
 export type ImportResult = { ok: true; state: BuilderState } | { ok: false; error: string }
 
-export function fromSpec(_value: unknown): ImportResult {
-  return { ok: false, error: 'not implemented' }
+// The keys the form has controls for. Anything else stops the import instead of
+// disappearing from it, which is the property that keeps this safe as
+// jobspec.TaskSpec grows. `source` is deliberately absent: a spec carrying one
+// is refused by name until the source builder exists.
+const JOB_KEYS = ['name', 'priority', 'labels', 'tasks']
+const TASK_KEYS = [
+  'name',
+  'command',
+  'commands',
+  'env',
+  'requires',
+  'timeout_seconds',
+  'retries',
+  'depends_on',
+]
+
+function refuse(what: string): ImportResult {
+  return { ok: false, error: `The form cannot edit this spec: ${what}. Edit it as JSON instead.` }
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string')
+}
+
+function kvRowsFrom(v: unknown): KvRow[] | null {
+  if (!isObject(v)) return null
+  const rows: KvRow[] = []
+  for (const [key, value] of Object.entries(v)) {
+    if (typeof value !== 'string') return null
+    rows.push({ id: newRowId(), key, value })
+  }
+  return rows
+}
+
+type TaskImport = { row: TaskRow; deps: string[] } | { error: string }
+
+function taskFrom(raw: unknown, i: number): TaskImport {
+  const p = `tasks[${i}]`
+  if (!isObject(raw)) return { error: `${p} is not an object` }
+  for (const k of Object.keys(raw)) {
+    if (!TASK_KEYS.includes(k)) return { error: `${p}.${k} is a field the form does not know` }
+  }
+  if (raw.name !== undefined && typeof raw.name !== 'string') return { error: `${p}.name is not a string` }
+
+  const hasCommand = raw.command !== undefined
+  const hasCommands = raw.commands !== undefined
+  if (hasCommand && hasCommands) return { error: `${p} sets both command and commands` }
+  let commands: CommandRow[]
+  let multiCommand: boolean
+  if (hasCommands) {
+    if (!Array.isArray(raw.commands) || !raw.commands.every(isStringArray)) {
+      return { error: `${p}.commands is not an array of string arrays` }
+    }
+    commands = raw.commands.map((argv) => newCommandRow(argv))
+    multiCommand = true
+  } else if (hasCommand) {
+    if (!isStringArray(raw.command)) return { error: `${p}.command is not an array of strings` }
+    commands = [newCommandRow(raw.command)]
+    multiCommand = false
+  } else {
+    commands = [newCommandRow()]
+    multiCommand = false
+  }
+
+  let env: KvRow[] = []
+  if (raw.env !== undefined) {
+    const rows = kvRowsFrom(raw.env)
+    if (rows === null) return { error: `${p}.env is not an object of strings` }
+    env = rows
+  }
+  let requires: KvRow[] = []
+  if (raw.requires !== undefined) {
+    const rows = kvRowsFrom(raw.requires)
+    if (rows === null) return { error: `${p}.requires is not an object of strings` }
+    requires = rows
+  }
+
+  // A numeric field holds text, but only a JSON number can be imported into it:
+  // accepting a string here would re-emit it as a number and silently change the
+  // type the user wrote. This refuses to MODEL, it does not validate - the server
+  // refuses the same input.
+  if (raw.timeout_seconds !== undefined && typeof raw.timeout_seconds !== 'number') {
+    return { error: `${p}.timeout_seconds is not a number` }
+  }
+  if (raw.retries !== undefined && typeof raw.retries !== 'number') {
+    return { error: `${p}.retries is not a number` }
+  }
+  if (raw.depends_on !== undefined && !isStringArray(raw.depends_on)) {
+    return { error: `${p}.depends_on is not an array of strings` }
+  }
+
+  return {
+    row: {
+      id: newRowId(),
+      name: raw.name === undefined ? '' : (raw.name as string),
+      commands,
+      multiCommand,
+      env,
+      requires,
+      timeout: raw.timeout_seconds === undefined ? '' : String(raw.timeout_seconds),
+      retries: raw.retries === undefined ? '' : String(raw.retries),
+      dependsOn: [],
+    },
+    deps: raw.depends_on === undefined ? [] : (raw.depends_on as string[]),
+  }
+}
+
+// Models every key or refuses, naming the first offending path. It never models
+// the keys it knows and ignores the rest: the server accepts unknown keys
+// silently, so a partial import is a loss with no event anywhere.
+export function fromSpec(value: unknown): ImportResult {
+  if (!isObject(value)) return refuse('the spec is not a JSON object')
+  for (const k of Object.keys(value)) {
+    if (!JOB_KEYS.includes(k)) return refuse(`${k} is a field the form does not know`)
+  }
+  if (value.name !== undefined && typeof value.name !== 'string') return refuse('name is not a string')
+
+  let priority: Priority = ''
+  if (value.priority !== undefined) {
+    const p = value.priority
+    if (p !== '' && p !== 'low' && p !== 'normal' && p !== 'high') {
+      return refuse('priority is not low, normal or high')
+    }
+    priority = p
+  }
+
+  let labels: KvRow[] = []
+  if (value.labels !== undefined) {
+    const rows = kvRowsFrom(value.labels)
+    if (rows === null) return refuse('labels is not an object of strings')
+    labels = rows
+  }
+
+  if (!Array.isArray(value.tasks)) return refuse('tasks is not an array')
+  const rows: TaskRow[] = []
+  const depNames: string[][] = []
+  for (let i = 0; i < value.tasks.length; i++) {
+    const result = taskFrom(value.tasks[i], i)
+    if ('error' in result) return refuse(result.error)
+    rows.push(result.row)
+    depNames.push(result.deps)
+  }
+
+  // Names resolve to ids in a second pass, so a forward reference works. A name
+  // matching no task, or a task's own name, has no control in the picker to
+  // represent it - refused rather than dropped.
+  for (let i = 0; i < rows.length; i++) {
+    const ids: string[] = []
+    for (let j = 0; j < depNames[i].length; j++) {
+      const target = rows.find((t) => t.name === depNames[i][j])
+      if (target === undefined) return refuse(`tasks[${i}].depends_on[${j}] names no task in this spec`)
+      if (target.id === rows[i].id) return refuse(`tasks[${i}].depends_on[${j}] names its own task`)
+      ids.push(target.id)
+    }
+    rows[i].dependsOn = ids
+  }
+
+  return { ok: true, state: { name: value.name === undefined ? '' : value.name, priority, labels, tasks: rows } }
 }
