@@ -40,11 +40,24 @@ export function barGeometry(job: Job, sinceMs: number, untilMs: number): BarGeom
   const t0 = started ?? createdMs
   if (!Number.isFinite(t0)) return { leftPct: 0, widthPct: 0, instant: true }
 
-  const finishedMs = job.finished_at ? new Date(job.finished_at).getTime() : NaN
-  const t1 = Number.isFinite(finishedMs) ? finishedMs : started === null ? t0 : untilMs
+  // Checked BEFORE the finished branch: a job with no started_at never ran,
+  // whatever finished_at says. A job cancelled before it started can carry a
+  // finished_at with no started_at, and that must not borrow a duration from
+  // a timestamp the job never reached.
+  let t1: number
+  if (started === null) {
+    t1 = t0
+  } else {
+    const finishedMs = job.finished_at ? new Date(job.finished_at).getTime() : NaN
+    t1 = Number.isFinite(finishedMs) ? finishedMs : untilMs
+  }
 
   const leftPct = clamp(((t0 - sinceMs) / span) * 100)
   const rightPct = clamp(((t1 - sinceMs) / span) * 100)
   const widthPct = Math.max(0, rightPct - leftPct)
-  return { leftPct, widthPct, instant: widthPct === 0 }
+  // Decided by whether the job ever started, not by the clamped width: a
+  // started job whose whole span clamps to zero (it started at or after the
+  // axis edge) is a zero-width bar, not an unstarted one, and must not say
+  // "not started" in the row text.
+  return { leftPct, widthPct, instant: started === null }
 }
