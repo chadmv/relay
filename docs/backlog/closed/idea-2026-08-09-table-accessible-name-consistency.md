@@ -1,7 +1,9 @@
 ---
 title: "Table accessible-name loose ends: RevokedWorkersTable is unnamed, WorkspacesPanel duplicates its title"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: deferred review findings from the shared accessible-table primitive (2026-08-09)
@@ -45,3 +47,6 @@ behavioral neutrality and so avoided touching anything outside the eight consume
 - The same "a shared primitive shipped without the a11y behaviour and every consumer stayed green"
   pattern, on the form-error surface rather than the table surface:
   [[idea-2026-08-13-field-error-wiring-audit]] - note `WorkspacesPanel.tsx:65` appears in both
+
+## Resolution
+Shipped in lane TB of the 2026-09-02 web-frontend batch: RevokedWorkersTable carries aria-label, and the two worker-detail panel titles (Source workspaces, Current tasks; the second had reproduced the defect since the item was filed) are exported constants their tables import, pinned by a structural page test that compares every table's rendered accessible name to its panel's rendered title and asserts it examined exactly two. ScheduleRunsPanel carries the same duplication within one file and is filed separately.
