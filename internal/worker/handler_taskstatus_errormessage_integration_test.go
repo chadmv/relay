@@ -141,3 +141,117 @@ func indexOfEventType(ss []string, want string) int {
 	}
 	return -1
 }
+
+// A3 - the identity gate must cover the NEW write too. The rows clause is what
+// discriminates; the counters clause is already true at HEAD and is kept as a
+// backstop for the decision that this site adds no counted arm (spec 4.5).
+func TestHandleTaskStatus_ANonAssigneeCannotWriteAnErrorMessageLine(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, w2 := seedTaskAndTwoWorkers(t, ctx, q, "errmsg3", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	before := h.TaskStatusFenceRejections()
+	h.HandleTaskStatus(ctx, w2, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "forged", Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a non-assignee must not be able to write into a task's log")
+	assert.Equal(t, before, h.TaskStatusFenceRejections(),
+		"a forged report is dropped a round trip before any write, so no counter moves")
+	if t.Failed() {
+		t.FailNow() // the forgery got through; the positive control below is moot
+	}
+
+	// Positive control on the SAME code path, without which a handler that had
+	// stopped writing anything at all satisfies every assertion above.
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "genuine", Epoch: int64(claimed.AssignmentEpoch),
+	})
+	rows, err = q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "positive control: the assignee's own message must land")
+	require.Contains(t, rows[0].Content, "genuine")
+}
+
+// A4 - the currency gate. Requeue-then-reclaim is the reachable way to make a
+// NON-ZERO epoch stale while leaving the same worker as the assignee, so the
+// positive control at the end stays reachable. epoch+1 is reported as well as
+// epoch, because an off-by-one fence would admit exactly that one.
+func TestHandleTaskStatus_AStaleEpochWritesNoErrorMessageLine(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg4", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	n, err := q.RequeueTask(ctx, store.RequeueTaskParams{
+		ID: taskID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: w1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "fixture: the requeue must have landed")
+
+	fresh, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	require.Equal(t, claimed.AssignmentEpoch+2, fresh.AssignmentEpoch,
+		"fixture: the requeue and the reclaim must each have bumped the epoch")
+
+	for _, stale := range []int32{claimed.AssignmentEpoch, claimed.AssignmentEpoch + 1} {
+		h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+			TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+			ErrorMessage: "from a dead generation", Epoch: int64(stale),
+		})
+		rows, err := q.GetTaskLogs(ctx, taskID)
+		require.NoError(t, err)
+		require.Empty(t, rows, "epoch %d is stale and must write nothing", stale)
+	}
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "from the live generation", Epoch: int64(fresh.AssignmentEpoch),
+	})
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "positive control: the current generation's message must land")
+	require.Contains(t, rows[0].Content, "from the live generation")
+}
+
+// A5 - the above-the-retry-branch position. A prepare failure that is going to
+// be retried is exactly the case where the operator most needs the cause of this
+// attempt recorded, and the retry branch RETURNS after bumping the epoch.
+func TestHandleTaskStatus_TheErrorMessageLineSurvivesARequeueingRetry(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), events.NewBroker(), func() {})
+
+	_, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg5", 1) // ONE retry
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: h.UUIDStringForTest(taskID), Status: relayv1.TaskStatus_TASK_STATUS_PREPARE_FAILED,
+		ErrorMessage: "attempt one died", Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	after, err := q.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", after.Status, "fixture: this report must take the RETRY branch")
+	require.Equal(t, claimed.AssignmentEpoch+1, after.AssignmentEpoch,
+		"fixture: the retry must have bumped the epoch, which is what makes the position load-bearing")
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the cause of the retried attempt must survive the requeue")
+	require.Contains(t, rows[0].Content, "attempt one died")
+}
