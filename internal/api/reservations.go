@@ -138,9 +138,13 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Zero value: the worker predicate absent, so every statement below matches
-	// everything.
-	var filters reservationFilters
+	if !rejectRepeatedParams(w, pp.Query, reservationFilterParams...) {
+		return
+	}
+	filters, ok := parseReservationFilters(w, pp.Query)
+	if !ok {
+		return
+	}
 
 	total, err := s.q.CountReservations(ctx, filters.WorkerID)
 	if err != nil {
