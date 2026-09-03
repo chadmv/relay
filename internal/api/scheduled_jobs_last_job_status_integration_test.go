@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -148,4 +149,48 @@ func TestListScheduledJobs_LastJobStatusPairingOnTheWire(t *testing.T) {
 					"pairing assertion above vacuous")
 		})
 	}
+
+	// PATCH echoes a schedule body on the same terms. It renames a field
+	// unrelated to the last job, so the row it returns still carries
+	// last_job_id and the pairing must hold there too.
+	t.Run("patch", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{"name": "has-job-renamed"})
+		require.NoError(t, err)
+		req := httptest.NewRequest("PATCH", "/v1/scheduled-jobs/"+withJob, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
+		require.Contains(t, m, "last_job_id",
+			"fixture: the patched row must still carry a last job, or the pairing below is vacuous")
+		assert.Contains(t, m, "last_job_status",
+			"PATCH must run the same enrichment the list and the get run")
+		assert.Equal(t, "done", m["last_job_status"])
+	})
+
+	// POST create cannot violate the pairing - a fresh row has never fired - so
+	// this pins that premise rather than the enrichment.
+	t.Run("create", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{
+			"name":      "freshly-created",
+			"cron_expr": "@daily",
+			"job_spec":  json.RawMessage(`{"name":"c","tasks":[{"name":"t","command":["echo","x"]}]}`),
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest("POST", "/v1/scheduled-jobs", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+ownerToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
+		assert.NotContains(t, m, "last_job_id")
+		assert.NotContains(t, m, "last_job_status")
+	})
 }

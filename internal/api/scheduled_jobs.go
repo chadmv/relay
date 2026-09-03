@@ -42,8 +42,12 @@ type scheduledJobResponse struct {
 	// never "unknown" or "healthy". It holds because the FK on last_job_id is
 	// ON DELETE SET NULL, so a non-NULL id names a row that exists, and because
 	// fillLastJobStatuses fails the request rather than dropping the key.
-	// TestToScheduledJobResponse_LastJobStatusIsPairedToLastJobID pins both
-	// states.
+	//
+	// The pairing binds EVERY site that emits a schedule body - the list, the
+	// get, PATCH and create - so it is pinned end to end by
+	// TestListScheduledJobs_LastJobStatusPairingOnTheWire. The mapper test pins
+	// only the two shapes the mapper itself can produce, and cannot see a
+	// handler that forgets the enrichment.
 	//
 	// Independent of last_error below, which records a fire that produced NO job.
 	// Both may be present at once and that is not a contradiction.
@@ -193,7 +197,16 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, toScheduledJobResponse(row))
+	items := []scheduledJobResponse{toScheduledJobResponse(row)}
+	// A freshly created row has never fired, so this can find nothing to fill.
+	// It runs anyway because the pairing is a property of every site that emits
+	// a schedule body, not of the sites that happen to need it today.
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "create scheduled job failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, items[0])
 }
 
 // ownedScheduledJob fetches a schedule and verifies the caller is the owner or
@@ -947,7 +960,13 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, toScheduledJobResponse(updated))
+	items := []scheduledJobResponse{toScheduledJobResponse(updated)}
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "update failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, items[0])
 }
 
 func (s *Server) handleDeleteScheduledJob(w http.ResponseWriter, r *http.Request) {
