@@ -7,12 +7,11 @@ import type { TaskRow } from './specBuilder'
 
 // Captures the dispatcher SpecBuilderForm hands to every row (one stable
 // function, per updateTask's own design) and the task each row currently
-// renders. A real click or keystroke cannot reach two dispatches inside one
-// batching window today - React flushes each discrete DOM input event
-// synchronously before the next one starts, which a fireEvent-per-row
-// reproduction confirmed does not exhibit the hazard below. Calling the
-// captured dispatcher directly, twice, inside one act() is what puts both
-// calls in the same window without going through any DOM event at all.
+// renders. React flushes each discrete DOM input event synchronously before
+// the next one starts, so two real keystrokes never share a batching window
+// today. Calling the captured dispatcher directly, twice, inside one act()
+// is what puts both calls in the same window without going through any DOM
+// event at all.
 let capturedOnChange: ((id: string, next: TaskRow) => void) | undefined
 let capturedTasks: TaskRow[] = []
 
