@@ -9,15 +9,24 @@
 // INSTANCE identity, which no per-component convention, prop or provider keyed
 // by component type can supply.
 //
-// WHY NOT native <dialog> + showModal(). jsdom 29's
-// living/nodes/HTMLDialogElement-impl.js is, in its entirety,
-// `class HTMLDialogElementImpl extends HTMLElementImpl {}` - no showModal, no
-// close, no open reflection - so every dialog test would throw TypeError, and the
-// only workaround (a hand-rolled polyfill in test setup) means the tests exercise
-// the polyfill rather than the platform, leaving the trap that is the whole point
-// of the route as the one thing never verified. Revisit when jsdom implements
-// HTMLDialogElement, or when the repo gains a real-browser harness
-// (docs/backlog/idea-2026-06-03-web-e2e-harness.md).
+// WHY NOT native <dialog> + showModal(). jsdom's HTMLDialogElement
+// implementation is an empty subclass of the base element implementation - no
+// showModal, no close, no open reflection - so a dialog built on it throws in
+// every test that mounts one here, and the only workaround is a hand-rolled
+// polyfill, which makes the suite exercise the polyfill rather than the platform
+// and leaves the focus trap, the whole point of the route, as the one thing
+// never verified. Any migration is partial by construction in any case:
+// showModal() does not lock document scroll, so the scroll lock below stays
+// here. The full argument and the conditions for revisiting are in the closed
+// backlog item idea-2026-08-09-native-dialog-element-reconsideration.
+//
+// THE MARKING PASS RUNS ON REGISTER AND UNREGISTER ONLY. A node appended to
+// document.body while a dialog is open is therefore neither marked inert nor
+// aria-hidden, and is not covered by the scrim - it stays keyboard-reachable
+// from behind the modal, is announced as though the modal were not there, and
+// paints above the scrim as a later sibling. A body-level portal author must
+// decide whether their layer sits above or below a modal;
+// dialogShellIsSole.guard.test.ts is what stops them to ask.
 //
 // TEARDOWN ORDER IS LOAD-BEARING. This is "end the generation before releasing
 // the resource" - the project invariant - in its frontend form. Three rules,
