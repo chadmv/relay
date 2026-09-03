@@ -278,3 +278,62 @@ test('toggling a dependency emits the other task name, and no task is offered to
     { name: 'second', depends_on: ['hello'] },
   ])
 })
+
+test('adding a task moves focus to the new row name input and announces it', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  expect(taskRow('Task 2').getByRole('textbox', { name: 'Task name' })).toHaveFocus()
+  expect(screen.getByRole('status')).toHaveTextContent('Task 2 added')
+})
+
+test('removing the middle of three rows moves focus to the next remove control and keeps every surviving label scoped', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'middle')
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 3').getByRole('textbox', { name: 'Task name' }), 'last')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Remove task middle' }))
+
+  expect(screen.getByRole('button', { name: 'Remove task last' })).toHaveFocus()
+  expect(screen.queryByRole('group', { name: 'middle' })).not.toBeInTheDocument()
+  expect(screen.getByRole('status')).toHaveTextContent('middle removed')
+  // The surviving rows are still reachable BY THEIR OWN LABEL, scoped to their
+  // own group. Index-keyed control ids survive an add and a remove-the-last but
+  // fail here: the label below a removed row re-associates and names a control
+  // in a different row.
+  expect(taskRow('hello').getByRole('textbox', { name: 'Task name' })).toHaveValue('hello')
+  expect(taskRow('last').getByRole('textbox', { name: 'Task name' })).toHaveValue('last')
+})
+
+test('removing the last remaining row moves focus to the Add task control', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Remove task hello' }))
+  expect(screen.getByRole('button', { name: 'Add task' })).toHaveFocus()
+  expect(preview()).toHaveProperty('tasks', [])
+})
+
+test('adding and removing an environment row moves focus and announces', async () => {
+  renderBuilder()
+  const env = within(taskRow('hello').getByRole('group', { name: 'Environment variables' }))
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  expect(env.getByRole('textbox', { name: 'Key 1' })).toHaveFocus()
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 1' }), 'A')
+  await userEvent.click(env.getByRole('button', { name: 'Remove environment variable A' }))
+  expect(env.getByRole('button', { name: 'Remove environment variable 1' })).toHaveFocus()
+})
+
+test('adding an argument moves focus to the new argument input', async () => {
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  await userEvent.click(cmd.getByRole('button', { name: 'Add argument' }))
+  expect(cmd.getByRole('textbox', { name: 'Argument 3' })).toHaveFocus()
+})
+
+test('the page has exactly one polite live region', () => {
+  renderBuilder()
+  const regions = screen.getAllByRole('status')
+  expect(regions).toHaveLength(1)
+  expect(regions[0]).toHaveAttribute('aria-live', 'polite')
+})
