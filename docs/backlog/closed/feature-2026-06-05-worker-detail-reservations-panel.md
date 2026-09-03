@@ -1,7 +1,9 @@
 ---
 title: Worker detail reservations panel
 type: feature
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-06-05
 priority: low
 source: deferred from the worker-detail-page read-only slice (2026-06-05 brainstorm)
@@ -33,3 +35,6 @@ reservations that apply to the worker being viewed.
 ## Related
 - `internal/api/` reservations handlers
 - `docs/superpowers/specs/2026-06-05-worker-detail-page-design.md`
+
+## Resolution
+Shipped in lane MF of the 2026-09-02 web-frontend batch: an admin-gated reservations panel on the worker detail page fed by GET /v1/reservations?worker_id= (the server filter from PR #180), four columns under a 460 px minimum, the no-end token for an open-ended reservation, and a footnote that the panel shows array-targeted reservations only because the dispatcher reads worker_ids alone. The item's client-side filter branch was refuted by the server filter.
