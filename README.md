@@ -1084,6 +1084,15 @@ Schedules are owned by the user who created them; non-admins see only their own.
 
 Only permanent failures are recorded: a `job_spec` that will not decode, a `cron_expr` that will not parse, and a spec that fails validation. A transient database fault is logged and not recorded, and it does not overwrite an existing record - a blip is not news about the schedule. `last_error` is **cleared by a successful fire**, and by a `PATCH` that supplies a new `job_spec`, `cron_expr` or `timezone` **and leaves a schedule whose stored `job_spec`, `cron_expr` and `timezone` all validate**. A `PATCH` that changes one of the three while another is still broken keeps the record: the handler validates only what the request supplied, so a record about an input it never looked at is not stale, and erasing it would leave nothing to rewrite it until the next fire. It is **preserved** by a skipped fire (`overlap_policy: skip` with the previous run still active), by a `PATCH` that only renames the schedule or changes `overlap_policy` or `enabled`, and by disabling and re-enabling.
 
+**`last_error` and `last_job_status` answer different questions and can both be present.**
+`last_error` is about a fire that produced **no job at all**; `last_job_status` is about
+the last job the schedule did manage to produce. The failure statement touches neither
+`last_job_id` nor `last_run_at`, so a schedule can carry `last_job_status: "done"` and a
+`last_error` at the same time, and the correct reading is "the last job it produced
+finished successfully, and the most recent attempt produced no job". That is not a
+contradiction. `last_error` is the row-level health signal; `last_job_status` belongs to
+the cell that links to the job.
+
 `last_error` is **derived from the schedule's stored configuration and is operator-supplied**: it comes from the stored `job_spec`, or from `cron_expr` and `timezone` when the failure is a `parse cron:` one, and it **may** quote prose the schedule's owner chose - a task name interpolated verbatim into a `task <name>: ...` message, a cron expression echoed back by the parser. Other messages are fixed relay text with nothing operator-chosen in them, and every relay surface labels the whole class the same way rather than string-matching the server's internal branches, so treat any `last_error` as operator-controlled. It is sanitized at the write site - C0 controls and DEL, the C1 range `U+0080`-`U+009F` (which includes the single-byte CSI), and the bidirectional formatting controls (`U+200E`/`U+200F`, `U+202A`-`U+202E`, `U+2066`-`U+2069`) are all replaced with spaces - and truncated to 1 KB on a rune boundary; `run-now` returns the untruncated message. Render it as text, never as markup.
 
 **When a schedule reports a failure:**
@@ -1416,7 +1425,7 @@ GET /v1/jobs?sort=status&limit=10     # group by status, smaller pages
 
 **Cursor semantics:** A cursor is valid only for the sort it was issued under. Resending a cursor with a different `?sort=` returns `400 cursor sort key does not match requested sort`. Drop the cursor when changing sort.
 
-**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. That rejection is scoped to exactly those two parameters, because each has its own statement with a hard-coded `ORDER BY`. The four filters in [Filtering the jobs list](#filtering-the-jobs-list) - `?q=`, `?mine=`, `?since=`, `?until=` - are threaded into every sort variant and **do** compose with `?sort=`. Other endpoints' filters do not currently combine with sort.
+**Filter + sort:** `GET /v1/jobs` rejects `?sort=` combined with `?status=` or `?scheduled_job_id=` with `400 sort not supported on filtered list variant`. That rejection is scoped to exactly those two parameters, because each has its own statement with a hard-coded `ORDER BY`. The four filters in [Filtering the jobs list](#filtering-the-jobs-list) - `?q=`, `?mine=`, `?since=`, `?until=` - are threaded into every sort variant and **do** compose with `?sort=`. `GET /v1/scheduled-jobs`'s `?enabled=` and `?q=` and `GET /v1/reservations`'s `?worker_id=` are threaded into every sort variant the same way and also compose with `?sort=`.
 
 **Unknown keys:** `?sort=<key>` where `<key>` is not in the allowlist returns `400 unsupported sort key '<key>'; supported: <list>`.
 
@@ -1442,7 +1451,7 @@ For all four, an **empty value is treated as absent**: `?mine=`, `?since=`, `?un
 
 | Parameter | Format | Absent means |
 |-----------|--------|--------------|
-| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Whitespace-only is treated as absent. | No text filter |
+| `q` | Free text. Case-insensitive substring of either the job `name` or the submitter's `email`. `%` and `_` are **literal characters**, not wildcards. Maximum 200 characters. Whitespace-only is treated as absent. The same `q` contract applies to `GET /v1/scheduled-jobs`, with a third match axis. | No text filter |
 | `mine` | `true` / `false` (Go `strconv.ParseBool` spellings: `1`, `t`, `T`, `TRUE`, `true`, `True` and their false counterparts). `true` restricts to jobs you submitted, resolved from your bearer token; `false` means the same as absent. | No owner filter |
 | `since` | RFC3339 timestamp. An offset or `Z` is required; fractional seconds are allowed. | Window open at the start |
 | `until` | RFC3339 timestamp, same format. | Window open at the end |
@@ -1477,6 +1486,44 @@ GET /v1/jobs?q=etl&status=failed                         # composes with the sta
 
 **`?q=` cost.** Substring containment cannot be index-served, so a `?q=` request walks every candidate row of the active sort's index and, for the count, joins `users` to reach the submitter email. A needle that matches nothing is the worst case: it pays the full walk and returns an empty page. The server applies no rate limit and no statement timeout to this today, so the cost is bounded only by the table size and by how often clients ask. Debouncing at 250 ms or more client-side reduces how many of these a typing user generates; it does not bound what a caller can request.
 
+#### Filtering the schedules list
+
+`GET /v1/scheduled-jobs` accepts two optional filters. They AND together and compose with
+`?limit=`, `?cursor=` and `?sort=`.
+
+| Parameter | Format | Absent means |
+|-----------|--------|--------------|
+| `enabled` | `true` / `false` (Go `strconv.ParseBool` spellings). A genuine tri-state: **`enabled=false` means "only paused schedules"**, not the same as absent, which is where it differs from `?mine=` on the jobs list. An empty value (`?enabled=`) is treated as absent. | No enabled filter |
+| `q` | Exactly the rules in [Filtering the jobs list](#filtering-the-jobs-list) - case-insensitive substring, `%` and `_` literal, maximum 200 characters, empty or whitespace-only treated as absent - matched against three axes here: the schedule `name`, the owner's `email`, and the `cron_expr`. | No text filter |
+
+The cron axis matches the stored text verbatim, so `@daily` is found by `daily` and
+`0 4 * * *` is found by `0 4`. For a non-admin the email axis can only ever match
+all-or-nothing, because every schedule in scope has the same owner.
+
+`total` counts every row matching every active filter, so the page footer's denominator
+always belongs to the same set as the rows. It is **not** the same number as
+`stats.total`, which is the unfiltered census.
+
+**Errors.** These are `400` with the body `{"error": "<message>"}`. The query-string rules
+that apply to every paginated endpoint - malformed input, repeated parameters and NUL
+bytes - are under [Query-string validation](#query-string-validation).
+
+| Condition | Message |
+|-----------|---------|
+| `enabled` is not a boolean | `invalid enabled; expected true or false` |
+| `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
+| `q` is not valid UTF-8 | `q is not valid UTF-8` |
+
+The two `q` bodies are byte-identical to the jobs list's, and a test asserts that.
+
+**Drop the cursor when a filter changes**, exactly as on the jobs list. A cursor carries
+no record of the filters that were active and the server does not reject a mismatched
+one; filter correctness is nevertheless cursor-independent, so a stale cursor can start a
+page at a surprising position but can never return a row that fails the current filters.
+
+`?q=` here is a sequential scan and is not index-served, the same as on the jobs list;
+debounce it client-side at 250 ms or more.
+
 ### Public
 
 | Method | Path | Description |
@@ -1494,7 +1541,18 @@ GET /v1/jobs?q=etl&status=failed                         # composes with the sta
 `invite_token` is required for new accounts — obtain one from an admin with `relay invite create`. Password must be at least 8 characters. Returns `201 Created`:
 
 ```json
-{ "token": "<hex>", "expires_at": "2026-07-16T00:00:00Z" }
+{
+  "token": "<hex>",
+  "expires_at": "2026-07-16T00:00:00Z",
+  "user": {
+    "id": "<uuid>",
+    "email": "you@example.com",
+    "name": "Your Name",
+    "is_admin": false,
+    "created_at": "2026-07-16T00:00:00Z",
+    "archived_at": null
+  }
+}
 ```
 
 **POST `/v1/auth/login`** body:
@@ -1503,11 +1561,27 @@ GET /v1/jobs?q=etl&status=failed                         # composes with the sta
 { "email": "you@example.com", "password": "..." }
 ```
 
-Returns `201 Created`:
+Returns `201 Created`, with the same body:
 
 ```json
-{ "token": "<hex>", "expires_at": "2026-07-16T00:00:00Z" }
+{
+  "token": "<hex>",
+  "expires_at": "2026-07-16T00:00:00Z",
+  "user": {
+    "id": "<uuid>",
+    "email": "you@example.com",
+    "name": "Your Name",
+    "is_admin": false,
+    "created_at": "2026-07-16T00:00:00Z",
+    "archived_at": null
+  }
+}
 ```
+
+`user` is **exactly** the `GET /v1/users/me` body, built by the same code, so the two can
+never disagree. `archived_at` is always `null` on these two endpoints: an archived user is
+refused at login and a newly created one is never archived. A client that already has the
+login response therefore does not need a `/v1/users/me` round trip to learn who it is.
 
 Tokens are valid for 30 days.
 
@@ -1713,9 +1787,20 @@ All reservation endpoints are admin-only.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/reservations` | List reservations. Paginated. |
+| `GET` | `/v1/reservations` | List reservations. Optional filter `?worker_id=<uuid>`. Paginated. |
 | `POST` | `/v1/reservations` | Create a reservation |
 | `DELETE` | `/v1/reservations/{id}` | Delete a reservation |
+
+**`?worker_id=`** matches reservations whose `worker_ids` array contains that id, and
+composes with `?limit=`, `?cursor=` and `?sort=`. All reservation endpoints are
+admin-only, so a non-admin cannot use it at all.
+
+An id that names no worker, or a worker no reservation targets, returns an **empty page
+with `total: 0`, not a 404**. `reservations.worker_ids` is a bare `UUID[]` with no
+foreign key, so a worker id can legitimately outlive its row and this endpoint cannot
+authoritatively distinguish "never existed" from "deleted". `?worker_id=` with an empty
+value is treated as absent, and a value that is not a UUID returns
+`400 invalid worker_id; expected a UUID`.
 
 ### Agent Enrollments
 
@@ -1793,11 +1878,27 @@ expired invites are what the admin view exists to show. Items:
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/scheduled-jobs` | Create a scheduled job |
-| `GET` | `/v1/scheduled-jobs` | List scheduled jobs (own schedules; admins see all). Paginated. |
+| `GET` | `/v1/scheduled-jobs` | List scheduled jobs (own schedules; admins see all). Optional filters `?enabled=` and `?q=` - see [Filtering the schedules list](#filtering-the-schedules-list). Paginated. |
+| `GET` | `/v1/scheduled-jobs/stats` | Summary counts for the caller's schedules (fleet-wide for admins). Authenticated, not admin-only. |
 | `GET` | `/v1/scheduled-jobs/{id}` | Get a scheduled job |
 | `PATCH` | `/v1/scheduled-jobs/{id}` | Update a scheduled job |
 | `DELETE` | `/v1/scheduled-jobs/{id}` | Delete a scheduled job |
 | `POST` | `/v1/scheduled-jobs/{id}/run-now` | Fire the schedule immediately (owner or admin) |
+
+**`last_job_status`.** Both `GET /v1/scheduled-jobs` and `GET /v1/scheduled-jobs/{id}`
+carry `last_job_status`, the status of the job `last_job_id` names, verbatim from the
+job's own vocabulary: `pending`, `running`, `done`, `failed` or `cancelled`. It agrees
+with `status` on `GET /v1/jobs/{id}` and is deliberately not the `pending` to `queued`
+rename that `GET /v1/jobs/stats` performs.
+
+It is **present exactly when `last_job_id` is present** - the two keys appear together
+or neither appears. Absent means the schedule has never had a fire that produced a job.
+It never means "unknown" and it never means "healthy": a failed lookup is a `500`, not a
+silently absent key.
+
+**A `run-now` job does not move it.** `POST /v1/scheduled-jobs/{id}/run-now` creates a
+job carrying `scheduled_job_id` but does not update `last_job_id` or `last_run_at`, so
+after an interactive run `last_job_status` still describes the previous scheduled fire.
 
 **POST `/v1/scheduled-jobs`** body:
 
@@ -1829,6 +1930,47 @@ expired invites are what the admin view exists to show. Items:
   "enabled": false
 }
 ```
+
+**GET `/v1/scheduled-jobs/stats`** returns a census of the caller's schedules, fleet-wide
+for admins and scoped to `owner_id` for everyone else, by exactly the predicate the list
+endpoint uses. It requires authentication but **not** admin.
+
+```json
+{
+  "enabled": 12,
+  "paused": 3,
+  "total": 15,
+  "failed_runs_24h": 2,
+  "failing": 1
+}
+```
+
+| Field | Definition |
+|-------|------------|
+| `enabled` | Schedules in scope with `enabled = true`. |
+| `paused` | Schedules in scope with `enabled = false`. `paused` is exactly `NOT enabled`; there is no third state and no `paused` column. |
+| `total` | `enabled + paused`, computed from the two buckets so the identity always holds. |
+| `failed_runs_24h` | Jobs a schedule in scope produced that have `status = failed` and were last updated within 24 hours. |
+| `failing` | Schedules in scope carrying a `last_error`. **Not windowed.** |
+
+All five keys are always present and all five are non-negative integers; there is no
+`omitempty` in this response.
+
+`failed_runs_24h` **excludes `cancelled`**, which is why it is not named `failed_24h`
+like the field in `GET /v1/jobs/stats`. A cancelled job is an operator action, not a
+schedule fault, and a strip that flags one teaches the operator to ignore the strip. It
+is windowed on the job's `updated_at`, the same finish-time proxy `GET /v1/jobs/stats`
+uses, so the two "in the last 24 hours" numbers on this product's two summary strips mean
+the same thing.
+
+`failing` is separate from `failed_runs_24h` and is counted in a different unit. A spawn
+failure recorded in `last_error` never becomes a job, so it is invisible to any count over
+jobs, and `last_error` records only the most recent failure, so a schedule that failed 48
+times contributes one.
+
+**`/stats` accepts no filters.** It is always the whole in-scope census, unaffected by
+`?enabled=` and `?q=`, so `stats.total` equals the list's `total` only when no filter is
+active. Read `total` off the list for "N matching" and off `/stats` for the strip.
 
 ### Events (Server-Sent Events)
 
