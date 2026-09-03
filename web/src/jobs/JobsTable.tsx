@@ -45,8 +45,7 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
         columns={COLS}
         minWidth={MIN_W}
         headers={HEADERS}
-        /* The hi-fi's top-level list header treatment, transcribed: 12px/18px
-           padding with 0.16em letter-spacing. */
+        /* The hi-fi's top-level list header treatment. */
         headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {jobs.map((j) => {

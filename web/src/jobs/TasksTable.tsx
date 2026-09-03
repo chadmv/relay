@@ -67,7 +67,7 @@ export function TasksTable({
             <TableRow
               key={t.id}
               onClick={() => onSelect(t.id)}
-              className={`w-full border-b border-border/40 ${NESTED_ROW_PX} py-2 text-left font-mono text-[11.5px] ${
+              className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11.5px] ${
                 selected ? 'border-l-2 border-accent bg-accent/[0.08]' : ''
               }`}
             >
