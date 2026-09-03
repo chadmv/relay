@@ -1,6 +1,7 @@
 import { GlassPanel, PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
+import { CommandsRepeater } from './CommandsRepeater'
 import { KeyValueRepeater } from './KeyValueRepeater'
 import type { TaskRow } from './specBuilder'
 
@@ -51,6 +52,8 @@ export function TaskRowFields({ task, index, allTasks, onChange, onRemove, annou
           Remove task
         </PillButton>
       </div>
+
+      <CommandsRepeater task={task} onChange={onChange} announce={announce} />
 
       <div className="flex flex-wrap gap-2">
         {/* Plain text inputs. No min, no max, no step, no maxlength and no number

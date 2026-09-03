@@ -197,3 +197,84 @@ test('timeout and retries emit numbers', async () => {
     { name: 'hello', command: ['echo', 'hello world'], timeout_seconds: 3600, retries: 2 },
   ])
 })
+
+test('the starter task renders one argument input per argv element', () => {
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  expect(cmd.getByRole('textbox', { name: 'Argument 1' })).toHaveValue('echo')
+  expect(cmd.getByRole('textbox', { name: 'Argument 2' })).toHaveValue('hello world')
+})
+
+test('an argument typed with an internal space is one argv element', async () => {
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  await userEvent.click(cmd.getByRole('button', { name: 'Add argument' }))
+  await userEvent.type(cmd.getByRole('textbox', { name: 'Argument 3' }), 'a b c')
+  expect(preview()).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world', 'a b c'] },
+  ])
+})
+
+test('a command renders a joined preview of its own arguments', () => {
+  renderBuilder()
+  const cmd = within(taskRow('hello').getByRole('group', { name: 'Command 1' }))
+  expect(cmd.getByText('echo hello world')).toBeInTheDocument()
+})
+
+test('adding a command promotes the task to the commands spelling', async () => {
+  renderBuilder()
+  await userEvent.click(taskRow('hello').getByRole('button', { name: 'Add command' }))
+  const second = within(taskRow('hello').getByRole('group', { name: 'Command 2' }))
+  await userEvent.type(second.getByRole('textbox', { name: 'Argument 1' }), 'sleep')
+  expect(preview()).toHaveProperty('tasks', [
+    { name: 'hello', commands: [['echo', 'hello world'], ['sleep']] },
+  ])
+})
+
+test('removing the promoted command leaves the commands spelling in place', async () => {
+  renderBuilder()
+  await userEvent.click(taskRow('hello').getByRole('button', { name: 'Add command' }))
+  await userEvent.click(taskRow('hello').getByRole('button', { name: 'Remove command 2' }))
+  // The flag exists to round-trip an imported spelling; a count-derived rule
+  // would silently rewrite the user's own.
+  expect(preview()).toHaveProperty('tasks', [{ name: 'hello', commands: [['echo', 'hello world']] }])
+})
+
+test('a single-command task offers no remove-command control', () => {
+  renderBuilder()
+  expect(taskRow('hello').queryByRole('button', { name: /^Remove command/ })).not.toBeInTheDocument()
+})
+
+test('an env row and a requires row land under their own keys', async () => {
+  renderBuilder()
+  const row = taskRow('hello')
+  const env = within(row.getByRole('group', { name: 'Environment variables' }))
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 1' }), 'SCENE')
+  await userEvent.type(env.getByRole('textbox', { name: 'Value 1' }), 'a.blend')
+  const req = within(row.getByRole('group', { name: 'Requires' }))
+  await userEvent.click(req.getByRole('button', { name: 'Add requirement' }))
+  await userEvent.type(req.getByRole('textbox', { name: 'Key 1' }), 'gpu')
+  await userEvent.type(req.getByRole('textbox', { name: 'Value 1' }), 'true')
+  expect(preview()).toHaveProperty('tasks', [
+    {
+      name: 'hello',
+      command: ['echo', 'hello world'],
+      env: { SCENE: 'a.blend' },
+      requires: { gpu: 'true' },
+    },
+  ])
+})
+
+test('toggling a dependency emits the other task name, and no task is offered to itself', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'second')
+  const deps = within(taskRow('second').getByRole('group', { name: 'Depends on' }))
+  expect(deps.queryByRole('button', { name: 'second' })).not.toBeInTheDocument()
+  await userEvent.click(deps.getByRole('button', { name: 'hello' }))
+  expect(preview()).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world'] },
+    { name: 'second', depends_on: ['hello'] },
+  ])
+})
