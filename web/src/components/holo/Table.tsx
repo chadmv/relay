@@ -57,11 +57,11 @@ import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 const HEADER_BASE = 'border-b border-border font-mono text-[10px] text-fg-mute'
 const ROW_BASE = 'items-center'
 
-// The hi-fi's two header treatments (see the 2026-09-02 visual-harmonization
-// spec), exported so the eleven `headerClassName` sites and the three row
-// sites whose horizontal padding must agree with a header reference ONE
-// symbol each instead of typing the pair by hand. A literal here still
-// satisfies Tailwind v4's static scan.
+// The hi-fi's two header treatments, exported so header and row sites can
+// reference one symbol each instead of typing the pair by hand. A row's
+// horizontal padding must equal its header's, or the two sibling grids'
+// columns desynchronize. A literal here still satisfies Tailwind v4's
+// static scan.
 export const TOP_LEVEL_HEADER_CLASS = 'px-[18px] py-3 tracking-[0.16em]'
 export const TOP_LEVEL_ROW_PX = 'px-[18px]'
 export const NESTED_HEADER_CLASS = 'px-4 py-2.5 tracking-[0.14em]'
