@@ -254,8 +254,8 @@ test.describe('job-detail task selection @webkit', () => {
 
 // WHY A BROWSER FOR THIS. jsdom performs no layout: every getBoundingClientRect
 // is zero and no stylesheet is loaded, so it can say the ARIA value moved and can
-// say nothing about whether a column moved with it. These four are the only
-// assertions in this feature that need a layout engine.
+// say nothing about whether a column moved with it, or whether a focus outline
+// resolves to real pixels rather than a Tailwind class string.
 //
 // THE TAG IS LOAD-BEARING, as in the describes above: playwright.config.ts gives
 // the webkit project grep: /@webkit/, so an untagged describe runs in chromium

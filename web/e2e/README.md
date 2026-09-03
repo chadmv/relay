@@ -100,6 +100,17 @@ width, colour, and `:focus-visible`) to prove the focus ring paints inside
 the cell's own `truncate` clip rather than outside it, where the clip would
 remove it.
 
+`keyboard.spec.ts`'s `job-detail split resizer @webkit` describe covers the
+job detail page's resizable split at the default viewport: a real Tab press
+reaching the separator and an ArrowRight press moving both `aria-valuenow`
+and the tasks column's measured width, a real mouse drag moving and then
+clamping the split at both edges, the split surviving `page.reload()`, and
+the same focused-separator `getComputedStyle` check the task-selection
+describe runs on the name-cell button. A sibling describe,
+`job-detail split at a narrow viewport @webkit`, covers the one thing no
+jsdom test can see: at 375px the panes stack and the separator resolves zero
+times in the accessibility tree, because no stylesheet loads in jsdom.
+
 The **rate limiter is not exercised**: the test server runs
 `RELAY_LOGIN_RATE_LIMIT=1000:1m`. Register/self-registration flows are out too -
 covering them would mean the one test server never runs the default posture,

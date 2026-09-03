@@ -27,6 +27,10 @@ export function ServerTab() {
   const jobs = useJobStats(POLL_MS)
   const fleet = useWorkerStats(POLL_MS)
   const health = useServerHealth()
+  // RENDERS THE FAILURE, unlike the sign-up screen's own useServerConfig
+  // consumer (RegisterScreen), which fails closed to the invite-required form
+  // instead - the two disagree on what a /config failure means and neither
+  // hides it from the other.
   const config = useServerConfig()
 
   const jobCells: StatCell[] = [
