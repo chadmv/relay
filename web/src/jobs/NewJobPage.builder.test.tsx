@@ -140,3 +140,60 @@ test('two rows sharing a key render the last-one-wins note', async () => {
   await userEvent.type(labels.getByRole('textbox', { name: 'Key 2' }), 'dup')
   expect(labels.getByText(/last row wins/i)).toBeInTheDocument()
 })
+
+function taskRow(name: string) {
+  return within(screen.getByRole('group', { name }))
+}
+
+test('a task row group is named by its task name and falls back to its position', async () => {
+  renderBuilder()
+  expect(screen.getByRole('group', { name: 'hello' })).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  expect(screen.getByRole('group', { name: 'Task 2' })).toBeInTheDocument()
+})
+
+test('adding a task row adds an empty task to the emitted spec', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  expect(preview()).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world'] },
+    { name: '' },
+  ])
+})
+
+test('removing a task row removes it from the emitted spec', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Remove task 2' }))
+  expect(preview()).toHaveProperty('tasks', [{ name: 'hello', command: ['echo', 'hello world'] }])
+})
+
+test('the remove control is named for its task once the task has a name', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'build')
+  expect(screen.getByRole('button', { name: 'Remove task build' })).toBeInTheDocument()
+})
+
+test('timeout and retries carry no range, no step and no number type', () => {
+  renderBuilder()
+  const row = taskRow('hello')
+  for (const label of ['Timeout seconds', 'Retries']) {
+    const input = row.getByRole('textbox', { name: label })
+    expect(input).not.toHaveAttribute('min')
+    expect(input).not.toHaveAttribute('max')
+    expect(input).not.toHaveAttribute('step')
+    expect(input).not.toHaveAttribute('maxlength')
+    expect(input.getAttribute('type')).not.toBe('number')
+  }
+})
+
+test('timeout and retries emit numbers', async () => {
+  renderBuilder()
+  const row = taskRow('hello')
+  await userEvent.type(row.getByRole('textbox', { name: 'Timeout seconds' }), '3600')
+  await userEvent.type(row.getByRole('textbox', { name: 'Retries' }), '2')
+  expect(preview()).toHaveProperty('tasks', [
+    { name: 'hello', command: ['echo', 'hello world'], timeout_seconds: 3600, retries: 2 },
+  ])
+})

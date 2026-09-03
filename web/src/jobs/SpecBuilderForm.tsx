@@ -1,7 +1,10 @@
+import { PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
 import { KeyValueRepeater } from './KeyValueRepeater'
-import type { BuilderState, Priority } from './specBuilder'
+import { TaskRowFields, taskLabel } from './TaskRowFields'
+import { newTaskRow, type BuilderState, type Priority } from './specBuilder'
+import { useFocusAfterUpdate } from './useFocusAfterUpdate'
 
 interface SpecBuilderFormProps {
   state: BuilderState
@@ -16,6 +19,30 @@ interface SpecBuilderFormProps {
 // with one top-level string and no field map, so binding a message to a control
 // would mean matching its text - a coupling whose failure mode is silent.
 export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormProps) {
+  const focusAfterUpdate = useFocusAfterUpdate()
+
+  function addTask() {
+    const task = newTaskRow()
+    onChange({ ...state, tasks: [...state.tasks, task] })
+    announce(`Task ${state.tasks.length + 1} added`)
+    focusAfterUpdate(`task-${task.id}-name`)
+  }
+
+  function removeTask(i: number) {
+    const gone = state.tasks[i]
+    onChange({
+      ...state,
+      // Every dependent's selection is pruned with the row, so no reference
+      // outlives its target.
+      tasks: state.tasks
+        .filter((t) => t.id !== gone.id)
+        .map((t) => ({ ...t, dependsOn: t.dependsOn.filter((d) => d !== gone.id) })),
+    })
+    announce(`${taskLabel(gone, i)} removed`)
+    const next = state.tasks[i + 1] ?? state.tasks[i - 1]
+    focusAfterUpdate(next === undefined ? 'add-task' : `task-${next.id}-remove`)
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <Field label="Job name" htmlFor="job-name">
@@ -52,6 +79,26 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
         onChange={(labels) => onChange({ ...state, labels })}
         announce={announce}
       />
+
+      <div className="flex flex-col gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-fg-mute">Tasks</span>
+        {state.tasks.map((task, i) => (
+          <TaskRowFields
+            key={task.id}
+            task={task}
+            index={i}
+            allTasks={state.tasks}
+            announce={announce}
+            onChange={(next) => onChange({ ...state, tasks: state.tasks.map((t) => (t.id === task.id ? next : t)) })}
+            onRemove={() => removeTask(i)}
+          />
+        ))}
+        <div>
+          <PillButton id="add-task" onClick={addTask}>
+            Add task
+          </PillButton>
+        </div>
+      </div>
     </div>
   )
 }
