@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { SchedulesPage } from './SchedulesPage'
@@ -11,6 +11,21 @@ import { SchedulesPage } from './SchedulesPage'
 // thrown assertion before that finally would leak fake timers into every later
 // test in this file.
 afterEach(() => vi.useRealTimers())
+
+// SchedulesPage issues a second query. MSW matches paths exactly, so the
+// /v1/scheduled-jobs handler each test registers does not answer
+// /v1/scheduled-jobs/stats, and setup.ts runs with onUnhandledRequest: 'error'.
+// See the fuller note on the sibling SchedulesPage.test.tsx.
+//
+// Hand-written, with no type annotation naming ScheduleStats. All five keys,
+// because the response carries no omitempty.
+beforeEach(() => {
+  server.use(
+    http.get('/v1/scheduled-jobs/stats', () =>
+      HttpResponse.json({ enabled: 7, paused: 2, total: 9, failed_runs_24h: 1, failing: 1 }),
+    ),
+  )
+})
 
 // Hand-written, with no type annotation naming Schedule. Every key the server
 // sends is present. last_job_id and last_job_status are BOTH absent here, which
