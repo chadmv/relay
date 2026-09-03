@@ -62,9 +62,7 @@ type authResponse struct {
 	User      userResponse `json:"user"`
 }
 
-// newAuthResponse is the only builder for that body. The three handlers that
-// return it must not each construct their own, which is the drift reusing
-// toUserResponse already exists to prevent.
+// newAuthResponse builds that body from the authenticated user's row.
 func newAuthResponse(token string, expires time.Time, u store.User) authResponse {
 	return authResponse{
 		Token:     token,

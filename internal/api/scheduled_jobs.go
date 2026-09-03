@@ -44,11 +44,10 @@ type scheduledJobResponse struct {
 	// ON DELETE SET NULL, so a non-NULL id names a row that exists, and because
 	// fillLastJobStatuses fails the request rather than dropping the key.
 	//
-	// The pairing binds EVERY site that emits a schedule body - the list, the
-	// get, PATCH and create - so it is pinned end to end by
-	// TestListScheduledJobs_LastJobStatusPairingOnTheWire. The mapper test pins
-	// only the two shapes the mapper itself can produce, and cannot see a
-	// handler that forgets the enrichment.
+	// The pairing binds any site that emits a schedule body, so a handler that
+	// skips the enrichment breaks it. The mapper test cannot see that; the wire
+	// tests can - TestListScheduledJobs_LastJobStatusPairingOnTheWire and
+	// TestScheduledJob_LastJobStatusIsLive.
 	//
 	// Independent of last_error below, which records a fire that produced NO job.
 	// Both may be present at once and that is not a contradiction.

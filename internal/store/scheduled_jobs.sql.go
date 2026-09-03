@@ -1238,10 +1238,8 @@ type ListScheduledJobsPageParams struct {
 // selected, so sqlc still emits []ScheduledJob and the response mapper, the
 // row-key functions and the arity test are all untouched.
 //
-// LEFT, not inner, so the planner may DROP it: with the q argument NULL nothing
-// on the right is referenced, and Postgres eliminates only an outer join, whose
-// row-preserving property it can prove from the schema. An inner join here is
-// paid on every unfiltered request even though the FK makes it a no-op.
+// IT MUST STAY LEFT. Postgres can remove only an outer join, so an inner join
+// forecloses join removal here.
 //
 // strpos, not ILIKE: an ILIKE pattern built by concatenating percent signs
 // around the needle makes user input a pattern, so a user typing % matches every
