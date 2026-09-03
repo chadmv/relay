@@ -33,8 +33,8 @@ const SOURCES = shippedSources(['.ts', '.tsx'])
 const SHELL = 'components/dialog/DialogShell.tsx'
 const STACK = 'components/dialog/dialogStack.ts'
 const DIALOG_DIR = 'components/dialog/'
-// The absolute path derived from SHELL, so the two places that read the
-// shell's own file share one source of truth instead of repeating the join.
+// The absolute path derived from SHELL, so every reader of the shell's own
+// file shares one source of truth instead of repeating the join.
 const SHELL_PATH = join(SRC_ROOT, SHELL)
 
 function rel(file: string): string {
@@ -53,7 +53,7 @@ function stripped(file: string): string {
 // the total count alone would tolerate an entire directory silently dropping
 // out of the walk as long as the survivors still cleared it.
 const TOP_LEVEL_ANCHORS = [
-  SHELL,
+  'App.tsx',
   'admin/invites/inviteStatus.ts',
   'app/router.tsx',
   'auth/LoginScreen.tsx',
@@ -194,7 +194,8 @@ const HAND_ROLLED_SCRIM =
 // lines, so a per-line-only pass cannot see all three distinctive tokens on
 // any ONE line. This second pass joins a trailing plus-then-newline run back
 // into the line before it and re-checks, so a scrim rebuilt that way is still
-// caught.
+// caught. KNOWN GAP: only the trailing-plus spelling this repo writes is
+// joined - a leading plus on the following line instead is not.
 function joinConcatenatedLines(text: string): string {
   return text.replace(/\s*\+\s*\n\s*/g, ' ')
 }
@@ -261,8 +262,8 @@ const DOC_KEYDOWN_ALLOWED = [SHELL, 'shell/UserMenu.tsx', 'shell/HoloShell.tsx']
 
 const UNLISTED_KEYDOWN =
   'a document- or window-level Escape handler. For a modal, compose DialogShell, which already owns ' +
-  'a scoped document Escape gated on being topmost. For a non-modal disclosure, follow the two ' +
-  'existing ones and add an allowlist entry stating why this surface is not a modal.'
+  'a scoped document Escape gated on being topmost. For a non-modal disclosure, follow the existing ' +
+  'entries and add one stating why this surface is not a modal.'
 
 test('every file with a document or window keydown listener is allowlisted with a reason', () => {
   const found = SOURCES.filter((f) => DOC_KEYDOWN_PROBE.test(stripped(f))).map(rel)
@@ -279,8 +280,8 @@ test('every file with a document or window keydown listener is allowlisted with 
 })
 
 test('the keydown probe also catches a window-level listener', () => {
-  // Permanent kill: window.addEventListener('keydown', ...) was invisible to
-  // the document.-only probe before this fix round.
+  // Pins that the probe matches EITHER receiver: a document.-only pattern
+  // would miss a hook that registers on window instead.
   expect(DOC_KEYDOWN_PROBE.test("window.addEventListener('keydown', onKey)")).toBe(true)
 })
 
@@ -304,35 +305,56 @@ const BODY_INSERTIONS = [
   'insertBefore',
   'insertAdjacentElement',
   'insertAdjacentHTML',
+  'insertAdjacentText',
   'replaceChildren',
+  'innerHTML',
+  'outerHTML',
 ]
 const PORTAL_PROBE = new RegExp(
   `createPortal|document\\s*\\.\\s*body\\s*\\.\\s*(?:${BODY_INSERTIONS.join('|')})\\b`,
 )
 
+// Files outside DIALOG_DIR that are nonetheless permitted to portal or
+// insert onto the body, each with the reason its layer needs that route
+// rather than moving under components/dialog/. Empty today: every current
+// match already lives under DIALOG_DIR.
+const PORTAL_ALLOWED: string[] = []
+
 const BODY_PORTAL =
   'a portal or a document.body insertion outside the dialog module. If it lands on the body while a ' +
   'dialog is open, the dialog stack marks background children on register and unregister only, so ' +
   'the new node is never marked inert or aria-hidden and paints above the scrim as a later sibling. ' +
-  'Portal into a container this component owns, or add the entry here and decide at the same time ' +
-  'whether the new layer sits above or below a modal.'
+  'Move it under components/dialog/, or add an entry to PORTAL_ALLOWED stating why this layer needs ' +
+  'to portal from outside the module, and decide at the same time whether it sits above or below a ' +
+  'modal.'
 
-test('the portal probe catches every enumerated body-insertion method', () => {
-  // Permanent kill for the three methods missing before this fix round:
-  // insertAdjacentElement, insertAdjacentHTML and replaceChildren are all
-  // routes onto document.body that the earlier enumeration did not cover.
-  for (const method of ['insertAdjacentElement', 'insertAdjacentHTML', 'replaceChildren']) {
+test('the enumerated body-insertion methods are all in the probe', () => {
+  // Each of these is a distinct route onto document.body from
+  // appendChild/append/prepend/insertBefore, so each needs its own entry to
+  // be matched. innerHTML and outerHTML are property assignments, not calls
+  // - the probe only requires a word boundary after the name, so it does not
+  // care which shape follows.
+  const snippets: Record<string, string> = {
+    insertAdjacentElement: 'document.body.insertAdjacentElement(x)',
+    insertAdjacentHTML: 'document.body.insertAdjacentHTML(x)',
+    insertAdjacentText: 'document.body.insertAdjacentText(x)',
+    replaceChildren: 'document.body.replaceChildren(x)',
+    innerHTML: 'document.body.innerHTML = x',
+    outerHTML: 'document.body.outerHTML = x',
+  }
+  for (const [method, snippet] of Object.entries(snippets)) {
     expect(BODY_INSERTIONS, `${method} is missing from BODY_INSERTIONS`).toContain(method)
-    expect(PORTAL_PROBE.test(`document.body.${method}(x)`), `probe does not match ${method}`).toBe(true)
+    expect(PORTAL_PROBE.test(snippet), `probe does not match ${method}`).toBe(true)
   }
 })
 
-test('any portal outside the dialog module needs an entry', () => {
+test('a portal outside the dialog module is under it or allowlisted with a reason', () => {
   const found = SOURCES.filter((f) => PORTAL_PROBE.test(stripped(f))).map(rel)
   // C5.
   expect(found, 'the portal probe no longer matches the shell').toContain(SHELL)
   expect(found, 'the portal probe no longer matches the stack').toContain(STACK)
-  expect(found.filter((p) => !p.startsWith(DIALOG_DIR)), BODY_PORTAL).toEqual([])
+  const outside = found.filter((p) => !p.startsWith(DIALOG_DIR))
+  expect(outside.filter((p) => !PORTAL_ALLOWED.includes(p)), BODY_PORTAL).toEqual([])
 })
 
 // A6. A document with nothing keeping it honest is the same defect as an
@@ -364,10 +386,9 @@ function scannedPairs(): string[] {
 }
 
 test('the stacking-order scan reads a negative value with its sign', () => {
-  // Permanent kill: a bare negative numeric value and a bare negative
-  // arbitrary value both survived before this fix round, because the
-  // lookbehind treated the sign's own hyphen as disqualifying. Built from
-  // fragments, never spelled as one contiguous class-shaped literal.
+  // A bare negative value's own leading hyphen is not a compound-identifier
+  // hyphen, so it must still match. Built from fragments, never spelled as
+  // one contiguous class-shaped literal.
   const negativeNumeric = '-' + Z + '10'
   const negativeArbitrary = '-' + Z + '[100]'
   const numeric = [...negativeNumeric.matchAll(Z_NUMERIC)]
