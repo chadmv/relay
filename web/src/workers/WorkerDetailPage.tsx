@@ -6,12 +6,14 @@ import { Chip, GlassPanel, KpiStat, Panel, StatusDot } from '../components/holo'
 import { MetricChart } from './MetricChart'
 import { WorkerActions } from './WorkerActions'
 import { WorkerLabels } from './WorkerLabels'
+import { WorkerReservationsPanel, WORKER_RESERVATIONS_PANEL_TITLE } from './WorkerReservationsPanel'
 import { WorkerTasksPanel, WORKER_TASKS_PANEL_TITLE } from './WorkerTasksPanel'
 import { WorkspacesPanel, WORKSPACES_PANEL_TITLE } from './WorkspacesPanel'
 import { formatGB, formatRelativeTime, livenessView } from './liveness'
 import { useWorker } from './useWorker'
 import { useWorkerMetrics } from './useWorkerMetrics'
 import { useWorkerTasks } from './useWorkerTasks'
+import { useNow } from '../lib/useNow'
 import type { MetricSample } from './api'
 
 function pct(n: number): string {
@@ -26,6 +28,9 @@ export function WorkerDetailPage() {
   const { id = '' } = useParams()
   const { user } = useAuth()
   const isAdmin = Boolean(user?.is_admin)
+  // Injected into the panel so its status pill is a pure function of props. 60s
+  // matches the admin reservations table's tick and issues no request.
+  const now = useNow(60_000)
   const { data: worker, error, isLoading, refetch } = useWorker(id)
   const { data: metrics } = useWorkerMetrics(id, { enabled: worker !== undefined })
   const { data: tasks, isPlaceholderData: tasksArePlaceholder } = useWorkerTasks(id, {
@@ -157,17 +162,8 @@ export function WorkerDetailPage() {
 
           {isAdmin && (
             <>
-              {/* Backend-blocked: /v1/reservations is global admin with no worker filter.
-                  Enabler: feature-2026-06-05-worker-detail-reservations-panel. */}
-              <Panel title="Reservations" meta="RESERVATIONS ENDPOINT PENDING">
-                <div className="flex flex-col gap-2 px-4 py-3">
-                  <div className="font-mono text-[11px] tracking-[0.04em] text-fg-dim">
-                    no per-worker reservation lookup yet
-                  </div>
-                  <div className="font-mono text-[10px] tracking-[0.04em] text-fg-dim">
-                    selectors are informational in v1 · only worker_ids are enforced.
-                  </div>
-                </div>
+              <Panel title={WORKER_RESERVATIONS_PANEL_TITLE} meta="GET /v1/reservations?worker_id=">
+                <WorkerReservationsPanel workerId={id} now={now} />
               </Panel>
 
               {/* Agent token: the value is never exposed over HTTP (hash-only by design,

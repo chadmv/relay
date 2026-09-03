@@ -59,14 +59,21 @@ export type ReservationSort =
 export interface ListReservationsParams {
   sort: ReservationSort
   cursor: string
+  // Set only when non-empty, and appended LAST, so the admin caller's URL is
+  // unchanged. The server treats an empty value as absent, so sending one would
+  // be a silent URL change rather than a wire error - which is exactly the kind
+  // that no server-side failure would ever surface.
+  workerId?: string
 }
 
 export function listReservations({
   sort,
   cursor,
+  workerId,
 }: ListReservationsParams): Promise<ReservationsPage> {
   const q = new URLSearchParams({ sort, limit: '50' })
   if (cursor) q.set('cursor', cursor)
+  if (workerId) q.set('worker_id', workerId)
   return apiFetch<ReservationsPage>(`/reservations?${q}`)
 }
 

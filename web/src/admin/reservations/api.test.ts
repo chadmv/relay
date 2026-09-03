@@ -211,3 +211,35 @@ test('a delete 404 surfaces as ApiError(404, "reservation not found")', async ()
   expect(err).toBeInstanceOf(ApiError)
   expect(err).toMatchObject({ status: 404, code: 'reservation not found' })
 })
+
+// The whole query string, not params.get: the claim is that adding this filter
+// leaves the admin caller's URL byte-identical, which only a whole-string
+// comparison can carry. Kills: sending worker_id unconditionally, sending it
+// before sort or limit, sending an empty one.
+test('listReservations sends worker_id last, after sort and limit', async () => {
+  let search: string | undefined
+  server.use(
+    http.get('/v1/reservations', ({ request }) => {
+      search = new URL(request.url).search
+      return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
+    }),
+  )
+  await listReservations({ sort: '-created_at', cursor: '', workerId: 'w-1' })
+  expect(search).toBe('?sort=-created_at&limit=50&worker_id=w-1')
+})
+
+// An empty value is treated as absent by the server anyway, so sending one is
+// not a wire error - it is a silent change to the admin caller's URL, which this
+// pins from the other side.
+test('listReservations omits worker_id entirely when absent or empty', async () => {
+  const seen: string[] = []
+  server.use(
+    http.get('/v1/reservations', ({ request }) => {
+      seen.push(new URL(request.url).search)
+      return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
+    }),
+  )
+  await listReservations({ sort: '-created_at', cursor: '' })
+  await listReservations({ sort: '-created_at', cursor: '', workerId: '' })
+  expect(seen).toEqual(['?sort=-created_at&limit=50', '?sort=-created_at&limit=50'])
+})
