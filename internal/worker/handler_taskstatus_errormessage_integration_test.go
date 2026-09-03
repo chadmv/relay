@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"relay/internal/events"
@@ -13,6 +14,7 @@ import (
 	"relay/internal/store"
 	"relay/internal/worker"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -393,4 +395,66 @@ func TestHandleTaskStatus_ARunningReportWithAMessageWritesNoLine(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "positive control: a terminal report on the same task must land")
 	require.Contains(t, rows[0].Content, "and now it really died")
+}
+
+// A10 - all four clauses of spec 4.5 at once: a fence-refused append stores
+// nothing, publishes nothing, logs nothing and moves no task_log_fence counter.
+//
+// The rejection is driven by an already-terminal row whose finished_at is
+// outside the trailing window, stamped on THIS process's clock - never
+// NOW() - interval, which would compare the container clock against the Go one.
+// A terminal transition bumps neither the epoch nor worker_id, so both Go gates
+// still pass and control genuinely reaches the write.
+func TestHandleTaskStatus_AFenceRefusedErrorMessageIsSilentUncountedAndUnpublished(t *testing.T) {
+	q, pool := newTestStore(t)
+	ctx := context.Background()
+	broker := events.NewBroker()
+	h := worker.NewHandler(q, pool, worker.NewRegistry(), broker, func() {})
+
+	jobID, taskID, w1, _ := seedTaskAndTwoWorkers(t, ctx, q, "errmsg10", 0)
+	claimed, err := q.ClaimTaskForWorker(ctx, store.ClaimTaskForWorkerParams{ID: taskID, WorkerID: w1})
+	require.NoError(t, err)
+	taskIDStr := h.UUIDStringForTest(taskID)
+
+	_, err = q.UpdateTaskStatus(ctx, store.UpdateTaskStatusParams{
+		ID: taskID, Status: "done", WorkerID: w1, AssignmentEpoch: claimed.AssignmentEpoch,
+		FinishedAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true},
+	})
+	require.NoError(t, err, "fixture: the terminal transition must land")
+
+	ch, cancel := broker.Subscribe(events.Filter{JobID: h.UUIDStringForTest(jobID), TaskID: taskIDStr})
+	defer cancel()
+
+	fenceBefore := h.TaskLogFenceRejections()
+	statusBefore := h.TaskStatusFenceRejections()
+	logged := captureLog(t)
+
+	h.HandleTaskStatus(ctx, w1, &relayv1.TaskStatusUpdate{
+		TaskId: taskIDStr, Status: relayv1.TaskStatus_TASK_STATUS_FAILED,
+		ErrorMessage: "too late", Epoch: int64(claimed.AssignmentEpoch),
+	})
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a fence-refused append must store nothing")
+
+	var published []byte
+	select {
+	case e := <-ch:
+		published = e.Data
+	default:
+	}
+	assert.Nil(t, published, "a fence-refused append must publish nothing")
+	assert.Empty(t, logged(), "the fence-rejection arm must be entirely silent")
+	assert.Equal(t, fenceBefore, h.TaskLogFenceRejections(),
+		"the new site must not join task_log_fence, whose published meaning rests on that arm having no Go-side pre-filter")
+
+	// POSITIVE CONTROL, and it is what stops the four assertions above being
+	// vacuous: the message really did reach the write path. The status write one
+	// statement below is refused by its terminality predicate and IS counted,
+	// which is the whole strictly-weaker-fence argument for adding no counter
+	// here.
+	after := h.TaskStatusFenceRejections()
+	assert.Equal(t, statusBefore.Conflicting+1, after.Conflicting,
+		"the following status write must have been reached and refused")
 }
