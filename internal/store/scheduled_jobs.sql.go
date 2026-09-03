@@ -211,7 +211,7 @@ func (q *Queries) CountFailedScheduledRuns24h(ctx context.Context, ownerID pgtyp
 
 const countScheduledJobs = `-- name: CountScheduledJobs :one
 SELECT COUNT(*) FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE ($1::bool IS NULL OR sj.enabled = $1::bool)
   AND ($2::text IS NULL
        OR strpos(lower(sj.name), lower($2::text)) > 0
@@ -229,7 +229,7 @@ type CountScheduledJobsParams struct {
 // "1 - 50 of 312".
 //
 //	SELECT COUNT(*) FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE ($1::bool IS NULL OR sj.enabled = $1::bool)
 //	  AND ($2::text IS NULL
 //	       OR strpos(lower(sj.name), lower($2::text)) > 0
@@ -244,7 +244,7 @@ func (q *Queries) CountScheduledJobs(ctx context.Context, arg CountScheduledJobs
 
 const countScheduledJobsByOwner = `-- name: CountScheduledJobsByOwner :one
 SELECT COUNT(*) FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND ($2::bool IS NULL OR sj.enabled = $2::bool)
   AND ($3::text IS NULL
@@ -262,7 +262,7 @@ type CountScheduledJobsByOwnerParams struct {
 // CountScheduledJobsByOwner
 //
 //	SELECT COUNT(*) FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND ($2::bool IS NULL OR sj.enabled = $2::bool)
 //	  AND ($3::text IS NULL
@@ -556,7 +556,7 @@ func (q *Queries) ListOverdueScheduledJobsForCatchup(ctx context.Context) ([]Sch
 
 const listScheduledJobsByOwnerPage = `-- name: ListScheduledJobsByOwnerPage :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND ($2::bool = FALSE
        OR (sj.created_at, sj.id) < ($3::timestamptz, $4::uuid))
@@ -582,7 +582,7 @@ type ListScheduledJobsByOwnerPageParams struct {
 // ListScheduledJobsByOwnerPage
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND ($2::bool = FALSE
 //	       OR (sj.created_at, sj.id) < ($3::timestamptz, $4::uuid))
@@ -639,7 +639,7 @@ func (q *Queries) ListScheduledJobsByOwnerPage(ctx context.Context, arg ListSche
 
 const listScheduledJobsByOwnerPageByCreatedAsc = `-- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.created_at, sj.id) > ($3::timestamptz, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -664,7 +664,7 @@ type ListScheduledJobsByOwnerPageByCreatedAscParams struct {
 // ListScheduledJobsByOwnerPageByCreatedAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.created_at, sj.id) > ($3::timestamptz, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -720,7 +720,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByCreatedAsc(ctx context.Context, 
 
 const listScheduledJobsByOwnerPageByNameAsc = `-- name: ListScheduledJobsByOwnerPageByNameAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.name, sj.id) > ($3::text, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -745,7 +745,7 @@ type ListScheduledJobsByOwnerPageByNameAscParams struct {
 // ListScheduledJobsByOwnerPageByNameAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.name, sj.id) > ($3::text, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -801,7 +801,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameAsc(ctx context.Context, arg
 
 const listScheduledJobsByOwnerPageByNameDesc = `-- name: ListScheduledJobsByOwnerPageByNameDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.name, sj.id) < ($3::text, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -826,7 +826,7 @@ type ListScheduledJobsByOwnerPageByNameDescParams struct {
 // ListScheduledJobsByOwnerPageByNameDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.name, sj.id) < ($3::text, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -882,7 +882,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNameDesc(ctx context.Context, ar
 
 const listScheduledJobsByOwnerPageByNextRunAsc = `-- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.next_run_at, sj.id) > ($3::timestamptz, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -907,7 +907,7 @@ type ListScheduledJobsByOwnerPageByNextRunAscParams struct {
 // ListScheduledJobsByOwnerPageByNextRunAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.next_run_at, sj.id) > ($3::timestamptz, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -963,7 +963,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunAsc(ctx context.Context, 
 
 const listScheduledJobsByOwnerPageByNextRunDesc = `-- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.next_run_at, sj.id) < ($3::timestamptz, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -988,7 +988,7 @@ type ListScheduledJobsByOwnerPageByNextRunDescParams struct {
 // ListScheduledJobsByOwnerPageByNextRunDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.next_run_at, sj.id) < ($3::timestamptz, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -1044,7 +1044,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByNextRunDesc(ctx context.Context,
 
 const listScheduledJobsByOwnerPageByUpdatedAsc = `-- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.updated_at, sj.id) > ($3::timestamptz, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -1069,7 +1069,7 @@ type ListScheduledJobsByOwnerPageByUpdatedAscParams struct {
 // ListScheduledJobsByOwnerPageByUpdatedAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.updated_at, sj.id) > ($3::timestamptz, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -1125,7 +1125,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedAsc(ctx context.Context, 
 
 const listScheduledJobsByOwnerPageByUpdatedDesc = `-- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE sj.owner_id = $1::uuid
   AND (NOT $2::bool OR (sj.updated_at, sj.id) < ($3::timestamptz, $4::uuid))
   AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -1150,7 +1150,7 @@ type ListScheduledJobsByOwnerPageByUpdatedDescParams struct {
 // ListScheduledJobsByOwnerPageByUpdatedDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE sj.owner_id = $1::uuid
 //	  AND (NOT $2::bool OR (sj.updated_at, sj.id) < ($3::timestamptz, $4::uuid))
 //	  AND ($5::bool IS NULL OR sj.enabled = $5::bool)
@@ -1206,7 +1206,7 @@ func (q *Queries) ListScheduledJobsByOwnerPageByUpdatedDesc(ctx context.Context,
 
 const listScheduledJobsPage = `-- name: ListScheduledJobsPage :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE ($1::bool = FALSE
        OR (sj.created_at, sj.id) < ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
@@ -1238,6 +1238,11 @@ type ListScheduledJobsPageParams struct {
 // selected, so sqlc still emits []ScheduledJob and the response mapper, the
 // row-key functions and the arity test are all untouched.
 //
+// LEFT, not inner, so the planner may DROP it: with the q argument NULL nothing
+// on the right is referenced, and Postgres eliminates only an outer join, whose
+// row-preserving property it can prove from the schema. An inner join here is
+// paid on every unfiltered request even though the FK makes it a no-op.
+//
 // strpos, not ILIKE: an ILIKE pattern built by concatenating percent signs
 // around the needle makes user input a pattern, so a user typing % matches every
 // row. strpos has no metacharacters and nothing to escape. The cost is that a
@@ -1245,7 +1250,7 @@ type ListScheduledJobsPageParams struct {
 // as escaped ILIKE everywhere, which the arm-enumerating tests cover.
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE ($1::bool = FALSE
 //	       OR (sj.created_at, sj.id) < ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
@@ -1300,7 +1305,7 @@ func (q *Queries) ListScheduledJobsPage(ctx context.Context, arg ListScheduledJo
 
 const listScheduledJobsPageByCreatedAsc = `-- name: ListScheduledJobsPageByCreatedAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.created_at, sj.id) > ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1330,7 +1335,7 @@ type ListScheduledJobsPageByCreatedAscParams struct {
 // is why TestListScheduledJobs_FilterArms_FirstPage sends no cursor.
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.created_at, sj.id) > ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1384,7 +1389,7 @@ func (q *Queries) ListScheduledJobsPageByCreatedAsc(ctx context.Context, arg Lis
 
 const listScheduledJobsPageByNameAsc = `-- name: ListScheduledJobsPageByNameAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.name, sj.id) > ($2::text, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1407,7 +1412,7 @@ type ListScheduledJobsPageByNameAscParams struct {
 // ListScheduledJobsPageByNameAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.name, sj.id) > ($2::text, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1461,7 +1466,7 @@ func (q *Queries) ListScheduledJobsPageByNameAsc(ctx context.Context, arg ListSc
 
 const listScheduledJobsPageByNameDesc = `-- name: ListScheduledJobsPageByNameDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.name, sj.id) < ($2::text, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1484,7 +1489,7 @@ type ListScheduledJobsPageByNameDescParams struct {
 // ListScheduledJobsPageByNameDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.name, sj.id) < ($2::text, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1538,7 +1543,7 @@ func (q *Queries) ListScheduledJobsPageByNameDesc(ctx context.Context, arg ListS
 
 const listScheduledJobsPageByNextRunAsc = `-- name: ListScheduledJobsPageByNextRunAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) > ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1561,7 +1566,7 @@ type ListScheduledJobsPageByNextRunAscParams struct {
 // ListScheduledJobsPageByNextRunAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) > ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1615,7 +1620,7 @@ func (q *Queries) ListScheduledJobsPageByNextRunAsc(ctx context.Context, arg Lis
 
 const listScheduledJobsPageByNextRunDesc = `-- name: ListScheduledJobsPageByNextRunDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) < ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1638,7 +1643,7 @@ type ListScheduledJobsPageByNextRunDescParams struct {
 // ListScheduledJobsPageByNextRunDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.next_run_at, sj.id) < ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1692,7 +1697,7 @@ func (q *Queries) ListScheduledJobsPageByNextRunDesc(ctx context.Context, arg Li
 
 const listScheduledJobsPageByUpdatedAsc = `-- name: ListScheduledJobsPageByUpdatedAsc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.updated_at, sj.id) > ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1715,7 +1720,7 @@ type ListScheduledJobsPageByUpdatedAscParams struct {
 // ListScheduledJobsPageByUpdatedAsc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.updated_at, sj.id) > ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
@@ -1769,7 +1774,7 @@ func (q *Queries) ListScheduledJobsPageByUpdatedAsc(ctx context.Context, arg Lis
 
 const listScheduledJobsPageByUpdatedDesc = `-- name: ListScheduledJobsPageByUpdatedDesc :many
 SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-JOIN users u ON u.id = sj.owner_id
+LEFT JOIN users u ON u.id = sj.owner_id
 WHERE (NOT $1::bool OR (sj.updated_at, sj.id) < ($2::timestamptz, $3::uuid))
   AND ($4::bool IS NULL OR sj.enabled = $4::bool)
   AND ($5::text IS NULL
@@ -1792,7 +1797,7 @@ type ListScheduledJobsPageByUpdatedDescParams struct {
 // ListScheduledJobsPageByUpdatedDesc
 //
 //	SELECT sj.id, sj.name, sj.owner_id, sj.cron_expr, sj.timezone, sj.job_spec, sj.overlap_policy, sj.enabled, sj.next_run_at, sj.last_run_at, sj.last_job_id, sj.created_at, sj.updated_at, sj.last_error, sj.last_error_at FROM scheduled_jobs sj
-//	JOIN users u ON u.id = sj.owner_id
+//	LEFT JOIN users u ON u.id = sj.owner_id
 //	WHERE (NOT $1::bool OR (sj.updated_at, sj.id) < ($2::timestamptz, $3::uuid))
 //	  AND ($4::bool IS NULL OR sj.enabled = $4::bool)
 //	  AND ($5::text IS NULL
