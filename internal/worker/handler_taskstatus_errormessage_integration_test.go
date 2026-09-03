@@ -144,9 +144,20 @@ func indexOfEventType(ss []string, want string) int {
 	return -1
 }
 
-// A3 - the identity gate must cover the NEW write too. The rows clause is what
-// discriminates; the counters clause is already true at HEAD and is kept as a
-// backstop for the decision that this site adds no counted arm (spec 4.5).
+// A3 - a non-assignee reaches neither the new write nor a counter.
+//
+// THE TWO CLAUSES ANSWER DIFFERENT QUESTIONS AND EACH HAS ITS OWN MUTANT;
+// neither is the discriminator for the other. Deleting handleTaskStatus's Go
+// identity gate leaves the rows clause GREEN - AppendTaskLog carries its own
+// worker_id predicate and refuses the forged append on its own - and reddens the
+// COUNTERS clause, because the forged report then reaches UpdateTaskStatus and
+// its rejection is recorded. The rows clause is what reddens when the append's
+// WorkerID argument stops being the connection's own identity: binding the row's
+// task.WorkerID instead makes that predicate a self-comparison, and with the Go
+// gate also gone a non-assignee's line lands. Keep both clauses.
+//
+// The counters clause is separately the backstop for the decision that this site
+// adds no counted arm of its own (spec 4.5).
 func TestHandleTaskStatus_ANonAssigneeCannotWriteAnErrorMessageLine(t *testing.T) {
 	q, pool := newTestStore(t)
 	ctx := context.Background()
