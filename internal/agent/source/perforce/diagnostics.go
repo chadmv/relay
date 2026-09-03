@@ -17,7 +17,9 @@ import (
 func classifiableText(err error) string {
 	var pe *p4CommandError
 	if errors.As(err, &pe) {
-		return pe.err.Error() + " " + pe.stderr
+		// %v, not .Error(), so this agrees with Error() on a nil underlying error
+		// instead of panicking where Error() renders "<nil>".
+		return fmt.Sprintf("%v %s", pe.err, pe.stderr)
 	}
 	return err.Error()
 }

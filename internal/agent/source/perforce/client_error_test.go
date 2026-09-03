@@ -45,3 +45,15 @@ func TestP4CommandError_RendersTheSameStringTheInlineWrapDid(t *testing.T) {
 	assert.Equal(t, want.Error(), got.Error())
 	assert.ErrorIs(t, got, underlying, "Unwrap must keep errors.Is working for callers")
 }
+
+// Error() renders the underlying error with %v and so tolerates a nil one;
+// anything reading .Error() off that field directly does not. The two must not
+// disagree, or a classification turns an agent-side error path into a panic.
+func TestClassifyP4Error_ToleratesANilUnderlyingErrorJustLikeErrorDoes(t *testing.T) {
+	e := newP4CommandError([]string{"sync", "//s/x"}, nil, "no space left on device")
+
+	require.NotPanics(t, func() { _ = e.Error() })
+	require.NotPanics(t, func() { _ = classifyP4Error(e) })
+	assert.Contains(t, classifyP4Error(e).Error(), "out of disk space",
+		"stderr still classifies when there is no underlying error")
+}
