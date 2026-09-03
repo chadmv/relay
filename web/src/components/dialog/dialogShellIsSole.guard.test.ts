@@ -209,3 +209,68 @@ test('body-level portals belong to the dialog module', () => {
   expect(found, 'the portal probe no longer matches the stack').toContain(STACK)
   expect(found.filter((p) => !p.startsWith(DIALOG_DIR)), BODY_PORTAL).toEqual([])
 })
+
+// A6. A document with nothing keeping it honest is the same defect as an
+// invariant with nothing enforcing it, one level up - which is the defect this
+// file exists to fix. Both sides are derived: the tree side builds its pattern
+// from fragments, and the document side parses the ENTRY lines out of the block,
+// so neither spells a utility class. KNOWN GAP: a stacking order set through an
+// inline style rather than a utility is invisible to this.
+const Z = 'z' + '-'
+const Z_INDEX = Z + 'index'
+const Z_NUMERIC = new RegExp(`(?<![\\w-])${Z}(\\d+)(?![\\w-])`, 'g')
+const Z_ARBITRARY = new RegExp(`(?<![\\w-])${Z}\\[`)
+const TOKENS_CSS = join(SRC_ROOT, 'theme', 'tokens.css')
+const ENTRY_LINE = new RegExp(`^\\s*ENTRY\\s+${Z_INDEX}\\s+(-?\\d+)\\s+(\\S+\\.tsx?)\\b`)
+
+function scannedPairs(): string[] {
+  const out = new Set<string>()
+  for (const file of SOURCES) {
+    for (const m of stripped(file).matchAll(Z_NUMERIC)) out.add(`${rel(file)} ${m[1]}`)
+  }
+  return [...out].sort()
+}
+
+function documentedPairs(): string[] {
+  const css = readFileSync(TOKENS_CSS, 'utf8')
+  const start = css.indexOf('LAYERING SCALE - begin')
+  const end = css.indexOf('LAYERING SCALE - end')
+  if (start < 0 || end < 0) return []
+  const out = new Set<string>()
+  for (const line of css.slice(start, end).split('\n')) {
+    const m = line.match(ENTRY_LINE)
+    if (m) out.add(`${m[2]} ${m[1]}`)
+  }
+  return [...out].sort()
+}
+
+const DOCUMENT_IT =
+  'a stacking order that the LAYERING SCALE block in theme/tokens.css does not name. Add an ENTRY ' +
+  'line for it - the surface, the value, the owning file, the symbol carrying it, and which ' +
+  'stacking context it lives in - and read rule 3 while you are there: a value is comparable only ' +
+  'to another value in the same context.'
+
+test('the layering block names every stacking order in shipped source', () => {
+  const scanned = scannedPairs()
+  const documented = documentedPairs()
+
+  // C6.
+  expect(scanned.length, 'the stacking-order scan found nothing').toBeGreaterThan(0)
+  expect(documented.length, 'no ENTRY line parsed out of the layering block').toBeGreaterThan(0)
+  expect(documented.some((p) => p.startsWith(SHELL))).toBe(true)
+  expect(documented.some((p) => p.startsWith('shell/HoloShell.tsx'))).toBe(true)
+
+  expect(scanned.filter((p) => !documented.includes(p)), DOCUMENT_IT).toEqual([])
+  expect(
+    documented.filter((p) => !scanned.includes(p)),
+    'the layering block names a stacking order the tree no longer has. Delete the ENTRY line.',
+  ).toEqual([])
+
+  // An arbitrary bracketed value cannot be expressed as an ENTRY number, so it
+  // is refused outright rather than slipping past the pair comparison.
+  expect(
+    SOURCES.filter((f) => Z_ARBITRARY.test(stripped(f))).map(rel),
+    'an arbitrary stacking-order value. Give it a plain number, add its ENTRY line, and widen this ' +
+      'guard deliberately if the arbitrary form is really needed.',
+  ).toEqual([])
+})
