@@ -336,6 +336,10 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Zero value: every predicate absent, so every statement below matches
+	// everything.
+	var filters scheduleFilters
+
 	ctx := r.Context()
 
 	if u.IsAdmin {
@@ -350,6 +354,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -363,6 +369,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -376,6 +384,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorV:   pp.Cursor.StrVal,
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -389,6 +399,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorV:   pp.Cursor.StrVal,
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -402,6 +414,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -415,6 +429,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -428,6 +444,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -441,6 +459,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				CursorSet: pp.Cursor.Set,
 				CursorTs:  pp.CursorTs(),
 				CursorID:  pp.Cursor.ID,
+				Enabled:   filters.Enabled,
+				Q:         filters.Q,
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
@@ -453,7 +473,10 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			panic("handleListScheduledJobs admin: missing dispatch arm for sort key " + pp.Sort)
 		}
 
-		total, err := s.q.CountScheduledJobs(ctx)
+		total, err := s.q.CountScheduledJobs(ctx, store.CountScheduledJobsParams{
+			Enabled: filters.Enabled,
+			Q:       filters.Q,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 			return
@@ -476,6 +499,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -490,6 +515,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -504,6 +531,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -518,6 +547,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -532,6 +563,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -546,6 +579,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -560,6 +595,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -574,6 +611,8 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			Enabled:   filters.Enabled,
+			Q:         filters.Q,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -586,7 +625,11 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		panic("handleListScheduledJobs owner: missing dispatch arm for sort key " + pp.Sort)
 	}
 
-	total, err := s.q.CountScheduledJobsByOwner(ctx, u.ID)
+	total, err := s.q.CountScheduledJobsByOwner(ctx, store.CountScheduledJobsByOwnerParams{
+		OwnerID: u.ID,
+		Enabled: filters.Enabled,
+		Q:       filters.Q,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
 		return

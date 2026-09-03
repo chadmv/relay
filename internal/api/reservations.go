@@ -138,7 +138,11 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	total, err := s.q.CountReservations(ctx)
+	// Zero value: the worker predicate absent, so every statement below matches
+	// everything.
+	var filters reservationFilters
+
+	total, err := s.q.CountReservations(ctx, filters.WorkerID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "count reservations failed")
 		return
@@ -153,6 +157,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			WorkerID:  filters.WorkerID,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -166,6 +171,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorSet: pp.Cursor.Set,
 			CursorTs:  pp.CursorTs(),
 			CursorID:  pp.Cursor.ID,
+			WorkerID:  filters.WorkerID,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -179,6 +185,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			WorkerID:  filters.WorkerID,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -192,6 +199,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorSet: pp.Cursor.Set,
 			CursorV:   pp.Cursor.StrVal,
 			CursorID:  pp.Cursor.ID,
+			WorkerID:  filters.WorkerID,
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
@@ -206,6 +214,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorIsNull: pp.Cursor.IsNull,
 			CursorTs:     pp.CursorTs(),
 			CursorID:     pp.Cursor.ID,
+			WorkerID:     filters.WorkerID,
 			PageLimit:    pp.Limit,
 		})
 		if err != nil {
@@ -220,6 +229,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorIsNull: pp.Cursor.IsNull,
 			CursorTs:     pp.CursorTs(),
 			CursorID:     pp.Cursor.ID,
+			WorkerID:     filters.WorkerID,
 			PageLimit:    pp.Limit,
 		})
 		if err != nil {
@@ -234,6 +244,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorIsNull: pp.Cursor.IsNull,
 			CursorTs:     pp.CursorTs(),
 			CursorID:     pp.Cursor.ID,
+			WorkerID:     filters.WorkerID,
 			PageLimit:    pp.Limit,
 		})
 		if err != nil {
@@ -248,6 +259,7 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 			CursorIsNull: pp.Cursor.IsNull,
 			CursorTs:     pp.CursorTs(),
 			CursorID:     pp.Cursor.ID,
+			WorkerID:     filters.WorkerID,
 			PageLimit:    pp.Limit,
 		})
 		if err != nil {
