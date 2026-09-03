@@ -93,3 +93,45 @@ func TestProvider_ASyncFailureProgressLineDoesNotRepeatTheCause(t *testing.T) {
 			"the cause has one home and it is not this line: %q", l)
 	}
 }
+
+// heldWorkspaceCount reports how many holders the provider's single workspace
+// has right now. Used to observe, from inside the progress callback, whether the
+// failing sync has already released its hold.
+func heldWorkspaceCount(t *testing.T, p *Provider) int {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Len(t, p.workspaces, 1, "fixture drives exactly one workspace")
+	for _, ws := range p.workspaces {
+		ws.mu.Lock()
+		defer ws.mu.Unlock()
+		return len(ws.holders)
+	}
+	return -1
+}
+
+// progress is makePrepareProgressFn's closure in production, and its flush calls
+// Runner.send, which selects only on sendCh and the AGENT context - it cannot be
+// woken by a per-task cancel. So it can park for the length of a coordinator
+// outage. Anything between the sync failure and handle.Release() therefore holds
+// a doomed workspace for that whole time, and every later task for the stream
+// blocks in Workspace.Acquire. The hold must be gone before the line goes out.
+func TestProvider_ASyncFailureReleasesTheWorkspaceBeforeItReportsAnything(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	fr.setStreamErr(syncKey, fmt.Errorf("exit status 1 (stderr: no space left on device)"))
+
+	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr}})
+
+	heldAtFailureLine := -1
+	_, err := p.Prepare(context.Background(), "task-1", spec, func(s string) {
+		if strings.Contains(s, "[sync] failed") {
+			heldAtFailureLine = heldWorkspaceCount(t, p)
+		}
+	})
+
+	require.Error(t, err)
+	require.NotEqual(t, -1, heldAtFailureLine, "the failure line must have been emitted at all")
+	assert.Equal(t, 0, heldAtFailureLine,
+		"the workspace must already be released when the failure line is emitted, "+
+			"because emitting it can park until agent shutdown")
+}
