@@ -149,6 +149,9 @@ func TestListScheduledJobs_LastJobStatusPairingOnTheWire(t *testing.T) {
 		assert.Contains(t, m, "last_job_status",
 			"PATCH must run the same enrichment the list and the get run")
 		assert.Equal(t, "done", m["last_job_status"])
+		assert.Equal(t, "sjpair-owner@test.com", m["owner_email"],
+			"owner_email has no omitempty, so a site that skips its lookup emits an "+
+				"empty string rather than omitting the key")
 	})
 
 	// POST create cannot violate the pairing - a fresh row has never fired - so
@@ -171,6 +174,7 @@ func TestListScheduledJobs_LastJobStatusPairingOnTheWire(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m))
 		assert.NotContains(t, m, "last_job_id")
 		assert.NotContains(t, m, "last_job_status")
+		assert.Equal(t, "sjpair-owner@test.com", m["owner_email"])
 	})
 }
 

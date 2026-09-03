@@ -199,6 +199,8 @@ func (s *Server) handleCreateScheduledJob(w http.ResponseWriter, r *http.Request
 	}
 
 	items := []scheduledJobResponse{toScheduledJobResponse(row)}
+	// The creator is the owner, so the email needs no lookup.
+	s.fillOwnerEmails(r, items, u.Email)
 	// A freshly created row has never fired, so this can find nothing to fill.
 	// It runs anyway because the pairing is a property of every site that emits
 	// a schedule body, not of the sites that happen to need it today.
@@ -970,9 +972,19 @@ func (s *Server) handlePatchScheduledJob(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := []scheduledJobResponse{toScheduledJobResponse(updated)}
+	// Owner-or-admin, so resolve per row exactly as the get does: an admin
+	// patching someone else's schedule must see the real owner.
+	selfEmail := ""
+	if u, ok := UserFromCtx(r.Context()); ok && updated.OwnerID == u.ID {
+		selfEmail = u.Email
+	}
+	s.fillOwnerEmails(r, items, selfEmail)
 	if err := s.fillLastJobStatuses(r, items); err != nil {
 		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
-		writeError(w, http.StatusInternalServerError, "update failed")
+		// The update COMMITTED; only the response could not be built. Say so,
+		// because "update failed" would send the caller to retry a write that
+		// already landed.
+		writeError(w, http.StatusInternalServerError, "update applied but the response could not be built")
 		return
 	}
 	writeJSON(w, http.StatusOK, items[0])
