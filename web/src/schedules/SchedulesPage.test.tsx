@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
-import { expect, test } from 'vitest'
+import { beforeEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { SchedulesPage } from './SchedulesPage'
@@ -13,7 +13,7 @@ const page = {
       id: 's1', name: 'nightly-build', owner_id: 'o1', owner_email: 'dev@studio.com',
       cron_expr: '0 2 * * *', timezone: 'UTC', job_spec: {}, overlap_policy: 'skip',
       enabled: true, next_run_at: '2099-01-01T00:00:00Z', last_run_at: '2026-06-05T11:00:00Z',
-      last_job_id: 'abcdef12-3456', created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-05T11:00:00Z',
+      last_job_id: 'abcdef12-3456', last_job_status: 'done', created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-05T11:00:00Z',
     },
     {
       id: 's2', name: 'weekly-clean', owner_id: 'o1', owner_email: 'dev@studio.com',
@@ -25,6 +25,26 @@ const page = {
   next_cursor: '',
   total: 2,
 }
+
+// SchedulesPage issues a second query. MSW matches paths exactly, so the
+// /v1/scheduled-jobs handler each test registers does not answer
+// /v1/scheduled-jobs/stats, and setup.ts runs with onUnhandledRequest: 'error'.
+//
+// Per file rather than in the shared msw.ts, so the unhandled-request signal stays
+// live for every other suite. server.use inside beforeEach works because setup.ts
+// resets handlers in afterEach, and a per-test server.use still wins, since runtime
+// handlers are prepended.
+//
+// Hand-written, with no type annotation naming ScheduleStats: a fixture marshalled
+// through the response interface agrees with the decoder by construction. All five
+// keys, because the response carries no omitempty.
+beforeEach(() => {
+  server.use(
+    http.get('/v1/scheduled-jobs/stats', () =>
+      HttpResponse.json({ enabled: 7, paused: 2, total: 9, failed_runs_24h: 1, failing: 1 }),
+    ),
+  )
+})
 
 test('renders schedules and the page-scoped summary', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json(page)))

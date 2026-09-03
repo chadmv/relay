@@ -2,7 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
-import { expect, test } from 'vitest'
+import { beforeEach, expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
 import { SchedulesPage } from './SchedulesPage'
@@ -13,6 +13,17 @@ import { SchedulesPage } from './SchedulesPage'
 // `pager.resetPaging()`. Deleting that call leaves SchedulesPage.test.tsx's
 // existing 11 tests green, because none of them page forward and THEN change
 // sort in the same test.
+
+// See the sibling file's fuller note: SchedulesPage issues a second query, and
+// MSW's exact path matching means the /v1/scheduled-jobs handler below does not
+// answer /v1/scheduled-jobs/stats.
+beforeEach(() => {
+  server.use(
+    http.get('/v1/scheduled-jobs/stats', () =>
+      HttpResponse.json({ enabled: 7, paused: 2, total: 9, failed_runs_24h: 1, failing: 1 }),
+    ),
+  )
+})
 
 function makeSchedules(count: number, startId = 0) {
   return Array.from({ length: count }, (_, i) => ({
