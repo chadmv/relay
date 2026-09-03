@@ -13,8 +13,15 @@ vi.mock('./KeyValueRepeater', async (importOriginal) => {
   return { ...actual, KeyValueRepeater: vi.fn(actual.KeyValueRepeater) }
 })
 
+// Same technique for the raw CommandsRepeater export.
+vi.mock('./CommandsRepeater', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./CommandsRepeater')>()
+  return { ...actual, CommandsRepeater: vi.fn(actual.CommandsRepeater) }
+})
+
 import { NewJobPage } from './NewJobPage'
 import { KeyValueRepeater } from './KeyValueRepeater'
+import { CommandsRepeater } from './CommandsRepeater'
 
 function renderBuilder() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -29,13 +36,23 @@ function renderBuilder() {
   )
 }
 
-const renderCalls = vi.mocked(KeyValueRepeater)
+const kvRenderCalls = vi.mocked(KeyValueRepeater)
+const commandsRenderCalls = vi.mocked(CommandsRepeater)
 
 test('a keystroke in Retries calls no KeyValueRepeater body at all', async () => {
   renderBuilder()
-  renderCalls.mockClear()
+  kvRenderCalls.mockClear()
 
   await userEvent.type(screen.getByRole('textbox', { name: 'Retries' }), '1')
 
-  expect(renderCalls).not.toHaveBeenCalled()
+  expect(kvRenderCalls).not.toHaveBeenCalled()
+})
+
+test('a keystroke in Retries calls no CommandsRepeater body at all', async () => {
+  renderBuilder()
+  commandsRenderCalls.mockClear()
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Retries' }), '1')
+
+  expect(commandsRenderCalls).not.toHaveBeenCalled()
 })

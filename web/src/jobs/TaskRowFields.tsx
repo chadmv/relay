@@ -54,14 +54,19 @@ export function TaskRowFields({ task, index, depOptions, onChange, onRemove, ann
   const removeName = task.name === '' ? `Remove task ${index + 1}` : `Remove task ${index + 1}: ${task.name}`
   const others = depOptions.filter((o) => o.id !== task.id)
 
-  // Stable across every render of THIS row, not only across other rows:
-  // each depends on task.id (fixed for the row's lifetime) and onChange
-  // (stable from SpecBuilderForm), never on the task object itself. That is
-  // the precondition for MemoCommandsRepeater and MemoKeyValueRepeater to
-  // bail out when an edit to a sibling field on this same row leaves theirs
-  // untouched - depending on `task` directly would recreate all three on
-  // every keystroke to any field, commands and env and requires included.
-  const onCommandsChange = useCallback((next: TaskRow) => onChange(task.id, next), [task.id, onChange])
+  // Stable across every render of THIS row, not only across other rows: each
+  // depends on task.id (fixed for the row's lifetime) and onChange (stable
+  // from SpecBuilderForm), never on the task object itself - depending on
+  // `task` directly would recreate all three on every keystroke to any field.
+  // Stability alone is not enough for MemoCommandsRepeater and
+  // MemoKeyValueRepeater to bail on a sibling-field edit: both also receive
+  // NARROWED props below (commands/multiCommand, rows), not the whole task,
+  // since the whole task is itself a fresh reference on every field edit.
+  const onCommandsChange = useCallback(
+    (commands: TaskRow['commands'], multiCommand: boolean) =>
+      onChange(task.id, (prev) => ({ ...prev, commands, multiCommand })),
+    [task.id, onChange],
+  )
   const onEnvChange = useCallback(
     (env: KvRow[]) => onChange(task.id, (prev) => ({ ...prev, env })),
     [task.id, onChange],
@@ -96,7 +101,13 @@ export function TaskRowFields({ task, index, depOptions, onChange, onRemove, ann
         </PillButton>
       </div>
 
-      <MemoCommandsRepeater task={task} onChange={onCommandsChange} announce={announce} />
+      <MemoCommandsRepeater
+        taskId={task.id}
+        commands={task.commands}
+        multiCommand={task.multiCommand}
+        onChange={onCommandsChange}
+        announce={announce}
+      />
 
       <div className="flex flex-wrap gap-2">
         {/* Plain text inputs. No min, no max, no step, no maxlength and no number
