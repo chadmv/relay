@@ -212,7 +212,7 @@ export function JobDetailPage() {
           title="Drag to resize"
           onPointerDown={split.onPointerDown}
           onKeyDown={onSeparatorKeyDown}
-          className="relative hidden w-1.5 shrink-0 cursor-col-resize self-stretch lg:block"
+          className="relative hidden w-1.5 shrink-0 cursor-col-resize self-stretch focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent lg:block"
         >
           <span className="absolute left-1/2 top-1/2 h-9 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded bg-accent/30" />
         </div>

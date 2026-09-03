@@ -299,6 +299,50 @@ test.describe('job-detail split resizer @webkit', () => {
       .toBeGreaterThan(before + 20)
   })
 
+  // COMPUTED STYLE, NOT A SCREENSHOT DIFF. Same shape as the task-selection
+  // describe's own outline test: getComputedStyle reads what the cascade
+  // actually resolved on THIS element in a real layout engine, discriminating
+  // a positive-or-default outline (the browser's own, often clipped by an
+  // ancestor) from the app's accent one painted inside the box.
+  test('the focused separator gets the accent outline, not the browser default', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const sep = page.getByRole('separator', { name: SEPARATOR })
+    await expect(sep).toHaveCount(1)
+
+    // A REAL Tab press, not .focus(): a programmatic focus() is not guaranteed
+    // to put an element into :focus-visible in every engine, and
+    // :focus-visible is exactly what the focus-visible: variant gates on.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    let reached = false
+    for (let i = 0; i < 120 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await sep.evaluate((el) => el === document.activeElement)
+    }
+    expect(reached, `Tab never reached the split separator within 120 presses`).toBe(true)
+
+    const outline = await sep.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return {
+        style: s.outlineStyle,
+        offset: s.outlineOffset,
+        width: s.outlineWidth,
+        color: s.outlineColor,
+        focusVisible: el.matches(':focus-visible'),
+      }
+    })
+    expect(outline.focusVisible, 'element is focused but not :focus-visible').toBe(true)
+    expect(outline.style, 'outline-style is none while focused - no ring at all').not.toBe('none')
+    expect(parseFloat(outline.offset), `outline-offset was "${outline.offset}", not negative`).toBeLessThan(0)
+    expect(outline.width, `outline-width was "${outline.width}", not 2px`).toBe('2px')
+    // The exact accent RGB, not merely "not transparent" - see the sibling
+    // outline test above for why a not-transparent check would pass on either
+    // engine's own unstyled fallback and miss a dropped colour variant.
+    expect(outline.color, `outline-color was "${outline.color}", not the accent colour`).toBe('rgb(61, 208, 247)')
+  })
+
   test('a real drag moves and clamps the split', async ({ page }) => {
     const seed = readSeed()
     await page.goto(`/jobs/${seed.jobId}`)
