@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { relative } from 'node:path'
+import { join, relative } from 'node:path'
 import { expect, test } from 'vitest'
 import { SRC_ROOT, shippedSources, toPosix, withoutComments } from '../../test/sourceTree'
 
@@ -87,4 +87,58 @@ test('the modal attribute is declared in the dialog shell only', () => {
   // C2.
   expect(found, 'the aria-modal probe no longer matches DialogShell').toContain(SHELL)
   expect(found.filter((p) => p !== SHELL), HAND_ROLLED_MODAL).toEqual([])
+})
+
+// A3. The scrim string is never spelled here. It is extracted from the shell's
+// own source at run time, anchored on the SCRIM identifier - an identifier is not
+// class-shaped, so nothing in this file emits CSS, and the probe follows the
+// value if it changes.
+const SHELL_SRC = readFileSync(join(SRC_ROOT, 'components', 'dialog', 'DialogShell.tsx'), 'utf8')
+const SCRIM_MATCH = SHELL_SRC.match(/\bSCRIM\s*=\s*'([^']*)'/)
+const SCRIM_VALUE = SCRIM_MATCH ? SCRIM_MATCH[1] : ''
+const SCRIM_TOKENS = SCRIM_VALUE.split(/\s+/).filter(Boolean)
+// The three tokens a near miss has to reproduce: the two the value leads with,
+// plus the stacking-order token wherever it sits. Requiring the stacking token
+// specifically is what keeps a line carrying two common layout tokens from
+// registering.
+const STACK_PREFIX = 'z' + '-'
+const SCRIM_DISTINCTIVE = [
+  SCRIM_TOKENS[0],
+  SCRIM_TOKENS[1],
+  SCRIM_TOKENS.find((t) => t.startsWith(STACK_PREFIX)) ?? '',
+]
+
+const HAND_ROLLED_SCRIM =
+  'this is the modal scrim. Compose DialogShell rather than painting one: the scrim is half of a ' +
+  'modal and the stack that owns the scroll lock, the inert background and the Escape scoping is ' +
+  'the other half.'
+
+test('the modal scrim is painted by the dialog shell only', () => {
+  // C3: the extraction actually produced a value with enough tokens to be
+  // discriminating, and both sub-probes match the file that owns it.
+  expect(SCRIM_TOKENS.length, 'the SCRIM extraction found nothing').toBeGreaterThanOrEqual(5)
+  expect(SCRIM_DISTINCTIVE.every(Boolean), 'no stacking-order token in the scrim value').toBe(true)
+  const shellStripped = stripped(join(SRC_ROOT, 'components', 'dialog', 'DialogShell.tsx'))
+  expect(shellStripped).toContain(SCRIM_VALUE)
+  expect(
+    shellStripped.split('\n').some((line) => SCRIM_DISTINCTIVE.every((t) => line.includes(t))),
+  ).toBe(true)
+
+  const others = SOURCES.filter((f) => rel(f) !== SHELL)
+
+  // Exact: nobody else holds the whole string.
+  const exact = others.filter((f) => stripped(f).includes(SCRIM_VALUE)).map(rel)
+  expect(exact, HAND_ROLLED_SCRIM).toEqual([])
+
+  // Near miss: nobody else has a line carrying all three distinctive tokens.
+  // This is what catches a scrim rebuilt with the tokens reordered or with one
+  // added, which the exact probe cannot see.
+  const near = others
+    .filter((f) =>
+      stripped(f)
+        .split('\n')
+        .some((line) => SCRIM_DISTINCTIVE.every((t) => line.includes(t))),
+    )
+    .map(rel)
+  expect(near, HAND_ROLLED_SCRIM).toEqual([])
 })
