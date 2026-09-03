@@ -1,4 +1,13 @@
-import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
+import {
+  Chip,
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './enrollmentStatus'
 import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api'
 
@@ -51,7 +60,7 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
           return (
             <TableRow
               key={e.id}
-              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+              className={`border-b border-accent/[0.06] ${TOP_LEVEL_ROW_PX} py-2.5 font-mono text-[11.5px] ${
                 status === 'EXPIRED' ? 'opacity-[0.55]' : ''
               }`}
             >

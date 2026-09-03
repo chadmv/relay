@@ -1,4 +1,12 @@
-import { GlassPanel, NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  GlassPanel,
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
@@ -59,7 +67,7 @@ export function TasksTable({
             <TableRow
               key={t.id}
               onClick={() => onSelect(t.id)}
-              className={`w-full border-b border-border/40 px-4 py-2 text-left font-mono text-[11.5px] ${
+              className={`w-full border-b border-border/40 ${NESTED_ROW_PX} py-2 text-left font-mono text-[11.5px] ${
                 selected ? 'border-l-2 border-accent bg-accent/[0.08]' : ''
               }`}
             >

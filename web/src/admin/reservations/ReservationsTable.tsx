@@ -1,5 +1,14 @@
 import { Link } from 'react-router-dom'
-import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
+import {
+  Chip,
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../../components/holo'
 import { formatDateTime } from '../../lib/time'
 import { deriveStatus, statusTone } from './reservationStatus'
 import type { Reservation, ReservationSort, ReservationSortField } from './api'
@@ -77,7 +86,7 @@ export function ReservationsTable({
           return (
             <TableRow
               key={r.id}
-              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+              className={`border-b border-accent/[0.06] ${TOP_LEVEL_ROW_PX} py-2.5 font-mono text-[11.5px] ${
                 status === 'ENDED' ? 'opacity-[0.55]' : ''
               }`}
             >

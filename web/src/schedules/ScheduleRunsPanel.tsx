@@ -1,5 +1,13 @@
 import { Link } from 'react-router-dom'
-import { NESTED_HEADER_CLASS, Panel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Panel,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import type { Job } from '../jobs/api'
 import { formatDuration, formatStarted, statusColor } from '../jobs/status'
 
@@ -39,7 +47,7 @@ export function ScheduleRunsPanel({ runs, total }: { runs: Job[]; total: number 
             return (
               <TableRow
                 key={j.id}
-                className="border-b border-border/40 px-4 py-2 font-mono text-[11px]"
+                className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}
               >
                 {/* started_at / finished_at keys are ABSENT for a run with no started
                     or finished task (internal/api/jobs.go:119-137); both helpers

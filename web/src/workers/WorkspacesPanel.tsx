@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { Chip, NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  Chip,
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import { formatRelativeTime } from './liveness'
 import { useWorkerActions } from './useWorkerActions'
 import { useWorkerWorkspaces } from './useWorkerWorkspaces'
@@ -52,7 +60,7 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
           the page's own list. */}
       <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName={NESTED_HEADER_CLASS}>
         {rows.map((ws) => (
-          <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
+          <TableRow key={ws.short_id} className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}>
             <TableCell className="text-fg">{ws.short_id}</TableCell>
             <TableCell className="text-fg-mute">{ws.source_type}</TableCell>
             <TableCell className="truncate text-fg-mute">{ws.source_key}</TableCell>

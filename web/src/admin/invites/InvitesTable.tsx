@@ -1,4 +1,13 @@
-import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
+import {
+  Chip,
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './inviteStatus'
 import type { Invite, InviteSort, InviteSortField } from './api'
 
@@ -62,7 +71,7 @@ export function InvitesTable({ invites, sort, onSort, now }: InvitesTableProps) 
           return (
             <TableRow
               key={inv.id}
-              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+              className={`border-b border-accent/[0.06] ${TOP_LEVEL_ROW_PX} py-2.5 font-mono text-[11.5px] ${
                 terminal ? 'opacity-[0.55]' : ''
               }`}
             >

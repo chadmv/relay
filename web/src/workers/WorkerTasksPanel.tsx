@@ -1,5 +1,12 @@
 import { Link } from 'react-router-dom'
-import { NESTED_HEADER_CLASS, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import { taskStatusColor } from '../jobs/taskStatus'
 import { formatRelativeTime } from './liveness'
 import { useWorkerTasks } from './useWorkerTasks'
@@ -46,7 +53,7 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
           return (
             <TableRow
               key={t.id}
-              className="border-b border-border/40 px-4 py-2 font-mono text-[11px]"
+              className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}
             >
               <TableCell className="truncate">
                 <Link

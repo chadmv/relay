@@ -1,5 +1,14 @@
 import { useState } from 'react'
-import { Chip, GlassPanel, Table, TableCell, TableRow, TOP_LEVEL_HEADER_CLASS, type TableColumn } from '../../components/holo'
+import {
+  Chip,
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../../components/holo'
 import { Input } from '../../components/Input'
 import type { AdminUser, UserSort, UserSortField } from './api'
 
@@ -85,7 +94,7 @@ export function UsersTable({
           return (
             <TableRow
               key={u.id}
-              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+              className={`border-b border-accent/[0.06] ${TOP_LEVEL_ROW_PX} py-2.5 font-mono text-[11.5px] ${
                 archived ? 'opacity-[0.55]' : ''
               }`}
             >
