@@ -218,3 +218,49 @@ func TestScheduledJobStats_IgnoresFilters(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, int64(1), p.Total)
 }
+
+// failed_runs_24h attributes a run-now failure to the SCHEDULE'S owner, not to
+// whoever triggered the run. The count joins through scheduled_jobs.owner_id,
+// and run-now submits as the schedule owner, so an admin firing someone else's
+// schedule must not move the admin's own numbers as a non-admin would read them.
+func TestScheduledJobStats_RunNowFailureCountsAgainstTheScheduleOwner(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	owner := createTestUser(t, q, "Owner", "sjrunnow-owner@test.com", false)
+	ownerToken := createTestToken(t, q, owner.ID)
+	admin := createTestUser(t, q, "Admin", "sjrunnow-admin@test.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	bystander := createTestUser(t, q, "Bystander", "sjrunnow-bystander@test.com", false)
+	bystanderToken := createTestToken(t, q, bystander.ID)
+
+	schedID := seedFilterSchedule(t, pool, "runnow-target", uuidString(owner.ID), "@daily", true)
+
+	req := httptest.NewRequest("POST", "/v1/scheduled-jobs/"+schedID+"/run-now", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, "run-now body: %s", rec.Body.String())
+	var job map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &job))
+	jobID, _ := job["id"].(string)
+	require.NotEmpty(t, jobID)
+
+	_, err := pool.Exec(t.Context(),
+		`UPDATE jobs SET status = 'failed', updated_at = NOW() WHERE id = $1::uuid`, jobID)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  float64
+	}{
+		{"schedule owner", ownerToken, 1},
+		{"admin", adminToken, 1},
+		{"uninvolved non-admin", bystanderToken, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, m := getScheduledJobStats(t, srv, tc.token)
+			require.Equal(t, http.StatusOK, code)
+			assert.Equal(t, tc.want, m["failed_runs_24h"])
+		})
+	}
+}

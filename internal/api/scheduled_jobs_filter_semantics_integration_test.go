@@ -206,3 +206,84 @@ func TestListScheduledJobs_FilterErrorsAreReachedThroughTheHandler(t *testing.T)
 		})
 	}
 }
+
+// walkScheduledJobs pages the whole filtered set and returns the ids seen, the
+// page count and the Total reported on each page, failing on a duplicate id.
+func walkScheduledJobs(t *testing.T, srv interface {
+	Handler() http.Handler
+}, token string, baseQS url.Values) (map[string]bool, int, []int64) {
+	t.Helper()
+	seen := map[string]bool{}
+	var totals []int64
+	cursor := ""
+	pages := 0
+	for {
+		qs := url.Values{}
+		for k, v := range baseQS {
+			qs[k] = v
+		}
+		if cursor != "" {
+			qs.Set("cursor", cursor)
+		}
+		code, page := getScheduledJobsPage(t, srv, token, qs.Encode())
+		require.Equal(t, http.StatusOK, code)
+		pages++
+		totals = append(totals, page.Total)
+		for _, it := range page.Items {
+			id, _ := it["id"].(string)
+			require.False(t, seen[id], "duplicate schedule id across pages: %s", id)
+			seen[id] = true
+		}
+		if page.NextCursor == "" {
+			return seen, pages, totals
+		}
+		cursor = page.NextCursor
+		require.Less(t, pages, 20, "runaway pagination: cursor never terminated")
+	}
+}
+
+// Both filters stay applied across a real page boundary, and total agrees with
+// the walked set on every page.
+//
+// Every third row fails one predicate or the other, so an excluded row sits
+// beside each boundary: that is the arrangement a filter dropped on page two
+// would show up in, which a single-page assertion cannot see.
+func TestListScheduledJobs_QAndEnabledSurviveACursorWalk(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	admin := createTestUser(t, q, "Admin", "sjwalk-admin@test.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+	owner := createTestUser(t, q, "Owner", "sjwalk-owner@test.com", false)
+	ownerToken := createTestToken(t, q, owner.ID)
+
+	wantIDs := map[string]bool{}
+	for i := 0; i < 60; i++ {
+		name := fmt.Sprintf("walk-needle-%03d", i)
+		switch i % 3 {
+		case 0: // matches q, enabled: excluded by enabled=false
+			seedFilterSchedule(t, pool, name, uuidString(owner.ID), "@daily", true)
+		case 1: // matches q, paused: kept
+			wantIDs[seedFilterSchedule(t, pool, name, uuidString(owner.ID), "@daily", false)] = true
+		case 2: // paused but does not match q: excluded by q
+			seedFilterSchedule(t, pool, fmt.Sprintf("walk-other-%03d", i), uuidString(owner.ID), "@daily", false)
+		}
+	}
+	matching := len(wantIDs)
+
+	baseQS := url.Values{"q": {"walk-needle"}, "enabled": {"false"}, "limit": {"5"}}
+	for _, tc := range []struct{ name, token string }{
+		{"admin", adminToken},
+		{"owner", ownerToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen, pages, totals := walkScheduledJobs(t, srv, tc.token, baseQS)
+			require.Greater(t, pages, 1, "the fixture must force more than one page")
+			assert.Len(t, seen, matching, "the walk must return every matching row and no other")
+			for id := range wantIDs {
+				assert.True(t, seen[id], "matching schedule %s missing from the walk", id)
+			}
+			for _, tot := range totals {
+				assert.EqualValues(t, matching, tot, "total must equal the walked count on every page")
+			}
+		})
+	}
+}

@@ -4,8 +4,10 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -195,4 +197,61 @@ func TestReservations_NonAdminIsForbidden(t *testing.T) {
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT COUNT(*) FROM reservations WHERE id = $1::uuid`, resID).Scan(&count))
 	assert.Equal(t, 1, count, "a forbidden DELETE must not have deleted the row")
+}
+
+// The worker filter stays applied across a real page boundary, and total agrees
+// with the walked set on every page. Every third row names a different worker,
+// so an excluded row sits beside each boundary.
+func TestListReservations_WorkerIDSurvivesACursorWalk(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	admin := createTestUser(t, q, "Admin", "reswalk-admin@test.com", true)
+	adminToken := createTestToken(t, q, admin.ID)
+
+	const wanted = "3f0a1b2c-4d5e-4f60-8192-a3b4c5d6e7f8"
+	const other = "11111111-2222-4333-8444-555555555555"
+
+	wantIDs := map[string]bool{}
+	for i := 0; i < 45; i++ {
+		name := fmt.Sprintf("reswalk-%03d", i)
+		if i%3 == 2 {
+			seedReservationForWorkers(t, pool, name+"-other", []string{other})
+			continue
+		}
+		wantIDs[seedReservationForWorkers(t, pool, name, []string{wanted})] = true
+	}
+	matching := len(wantIDs)
+
+	seen := map[string]bool{}
+	var totals []int64
+	cursor := ""
+	pages := 0
+	for {
+		qs := url.Values{"worker_id": {wanted}, "limit": {"5"}}
+		if cursor != "" {
+			qs.Set("cursor", cursor)
+		}
+		code, page := getReservationsPage(t, srv, adminToken, qs.Encode())
+		require.Equal(t, http.StatusOK, code)
+		pages++
+		totals = append(totals, page.Total)
+		for _, it := range page.Items {
+			id, _ := it["id"].(string)
+			require.False(t, seen[id], "duplicate reservation id across pages: %s", id)
+			seen[id] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+		require.Less(t, pages, 20, "runaway pagination: cursor never terminated")
+	}
+
+	require.Greater(t, pages, 1, "the fixture must force more than one page")
+	assert.Len(t, seen, matching, "the walk must return every matching reservation and no other")
+	for id := range wantIDs {
+		assert.True(t, seen[id], "matching reservation %s missing from the walk", id)
+	}
+	for _, tot := range totals {
+		assert.EqualValues(t, matching, tot, "total must equal the walked count on every page")
+	}
 }

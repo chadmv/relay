@@ -182,3 +182,26 @@ func TestAuthLogin_RefusalsCarryNoUser(t *testing.T) {
 	assert.Equal(t, unknown, wrong,
 		"an unknown address and a wrong password must be indistinguishable")
 }
+
+// An archived user is refused at login, so the user object cannot describe an
+// archived account. The refusal carries neither a token nor a user, which is
+// what keeps archived_at always null on this endpoint's user object.
+func TestAuthLogin_ArchivedUserIsRefusedWithNoUser(t *testing.T) {
+	pool := newTestPool(t)
+	q := store.New(pool)
+	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
+
+	user := createTestUser(t, q, "Archived", "archived@authbody.test", false)
+	_, err := pool.Exec(t.Context(), `UPDATE users SET archived_at = NOW() WHERE id = $1::uuid`,
+		uuidString(user.ID))
+	require.NoError(t, err)
+
+	code, m := postAuthJSON(t, srv, "/v1/auth/login", map[string]string{
+		"email":    "archived@authbody.test",
+		"password": "testpassword1",
+	})
+	require.Equal(t, http.StatusUnauthorized, code)
+	assert.Contains(t, m, "error")
+	assert.NotContains(t, m, "token", "a refused login must not mint a session token")
+	assert.NotContains(t, m, "user", "a refused login must not describe the account")
+}
