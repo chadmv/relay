@@ -3,7 +3,9 @@ id: idea-2026-05-06-list-endpoint-filters
 title: Advanced filter params for list endpoints
 type: idea
 priority: low
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-05-06
 ---
 
@@ -32,3 +34,6 @@ Deferred from the cursor-pagination feature (2026-05-06). The pagination envelop
 ## Dependency note
 
 Filters that change sort order (e.g., relevance-ranked `?q=` search) need a different cursor scheme than `(created_at DESC, id DESC)`. Address that before implementing ranked search.
+
+## Resolution
+Closed at the fan-in of the 2026-09-02 web-frontend batch. Shipped: GET /v1/jobs ?q=, ?mine= (the caller's own jobs, in place of an arbitrary submitted_by), ?since= and ?until= (PR #178); GET /v1/scheduled-jobs ?enabled= and ?q=, and GET /v1/reservations ?worker_id= (PR #180); each with its frontend consumer (PRs #182, #183, #184). Not shipped and re-filed as one narrower item, [[idea-2026-09-03-list-filters-remainder-status-labels-users-q]]: multi-value ?status= on jobs and workers, ?label.<key>= on jobs and workers, and ?q= on users. The dependency note stands: ranked search needs a different cursor scheme than (created_at DESC, id DESC), and the substring ?q= shipped unranked for that reason.
