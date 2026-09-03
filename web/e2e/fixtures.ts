@@ -3,6 +3,12 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// The three task names seedAll's job below creates (beta and gamma depend on
+// alpha). Exported so specs that need to enumerate or validate against the
+// seeded set - e.g. checking a marked task is actually one of them - share one
+// array instead of retyping the literal.
+export const TASK_NAMES = ['alpha', 'beta', 'gamma'] as const
+
 export interface Seed {
   runId: string
   adminEmail: string

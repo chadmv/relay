@@ -1,5 +1,5 @@
 import { expect, type Locator, test } from '@playwright/test'
-import { readSeed, type Seed } from './fixtures'
+import { readSeed, TASK_NAMES, type Seed } from './fixtures'
 
 // WHY THESE TWO TABLES. EnrollmentsTable and InvitesTable have ZERO focusable
 // elements in any row (web/src/admin/enrollments/EnrollmentsTable.tsx:49-76,
@@ -140,9 +140,8 @@ test.describe('scroll-wrapper keyboard reachability @webkit', () => {
 
 // WHY A BROWSER FOR THIS. The jsdom tests next to TasksTable prove the attributes
 // are in the DOM and prove nothing about whether a real Tab press reaches the
-// control or whether a real Enter activates it. Removing the row's element-type
-// override changed exactly that: only a real key press can say the per-row tab
-// stop survived.
+// control or whether a real Enter activates it. Only a real key press can say
+// the per-row tab stop survived.
 //
 // THE TAG IS LOAD-BEARING. playwright.config.ts gives the webkit project
 // grep: /@webkit/, so an untagged describe runs in chromium only. WebKit's
@@ -172,11 +171,11 @@ test.describe('job-detail task selection @webkit', () => {
     // returns a truthy value for ANY input string unless it equals all three
     // seeded names at once - impossible for a single string - so it cannot
     // report seed drift on its own; this is the check that can.
-    expect(['alpha', 'beta', 'gamma'], `the marked task was ${JSON.stringify(startingName)}, which is not one of the seeded tasks`).toContain(startingName)
+    expect(TASK_NAMES, `the marked task was ${JSON.stringify(startingName)}, which is not one of the seeded tasks`).toContain(startingName)
 
     // Target a task that is NOT already marked. A test that re-selects the default
     // selection passes against a mark hardcoded onto the first row.
-    const target = ['alpha', 'beta', 'gamma'].find((n) => n !== startingName)
+    const target = TASK_NAMES.find((n) => n !== startingName)
     const targetButton = table.getByRole('button', { name: target as string, exact: true })
     await expect(targetButton).toHaveCount(1)
 
@@ -201,24 +200,53 @@ test.describe('job-detail task selection @webkit', () => {
   // real layout engine (jsdom does none) - it discriminates the two states
   // that matter here directly: a positive-or-default outline-offset (painted
   // outside the border box, where the ancestor's `truncate` clip removes it)
-  // from a negative one (painted inside, where the clip cannot reach it). A
-  // screenshot diff would also catch a change here, but could not name WHICH
-  // CSS property moved; this can.
+  // from a negative one (painted inside, where the clip cannot reach it).
   test('the focused task control gets a negative-offset outline, not the (clipped) browser default', async ({ page }) => {
     const seed = readSeed()
     await page.goto(`/jobs/${seed.jobId}`)
     await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
 
     const table = page.getByRole('table', { name: 'Tasks' })
-    const anyTaskButton = table.getByRole('button').first()
-    await anyTaskButton.focus()
-    await expect(anyTaskButton).toBeFocused()
+    const target = TASK_NAMES[0]
+    const targetButton = table.getByRole('button', { name: target, exact: true })
+    await expect(targetButton).toHaveCount(1)
 
-    const outline = await anyTaskButton.evaluate((el) => {
+    // A REAL Tab press, not .focus(): a programmatic focus() is not guaranteed
+    // to put an element into :focus-visible in every engine, and
+    // :focus-visible is exactly what the focus-visible: Tailwind variant gates
+    // on. Same loop as the sibling test above.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    let reached = false
+    for (let i = 0; i < 80 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await targetButton.evaluate((el) => el === document.activeElement)
+    }
+    expect(reached, `Tab never reached the "${target}" task control within 80 presses`).toBe(true)
+
+    const outline = await targetButton.evaluate((el) => {
       const s = getComputedStyle(el)
-      return { style: s.outlineStyle, offset: s.outlineOffset }
+      return {
+        style: s.outlineStyle,
+        offset: s.outlineOffset,
+        width: s.outlineWidth,
+        color: s.outlineColor,
+        focusVisible: el.matches(':focus-visible'),
+      }
     })
+    // Both an offset check AND a width/colour check: stripping outline-2 or
+    // focus-visible:outline-accent alone left the offset check green before -
+    // the offset survives even at the browser's own default width and colour.
+    expect(outline.focusVisible, 'element is focused but not :focus-visible').toBe(true)
     expect(outline.style, 'outline-style is none while focused - no ring at all').not.toBe('none')
     expect(parseFloat(outline.offset), `outline-offset was "${outline.offset}", not negative`).toBeLessThan(0)
+    expect(outline.width, `outline-width was "${outline.width}", not 2px`).toBe('2px')
+    // The exact accent RGB, not merely "not transparent": with no explicit
+    // outline-color the two engines disagree on the fallback (chromium:
+    // rgb(16, 16, 16); webkit: rgb(237, 233, 254), the page's own fg colour) -
+    // both are opaque, so a "not transparent" check would pass against either
+    // fallback and miss the missing focus-visible:outline-accent. --color-accent
+    // (#3dd0f7) resolves to rgb(61, 208, 247) in both engines when the class is
+    // present.
+    expect(outline.color, `outline-color was "${outline.color}", not the accent colour`).toBe('rgb(61, 208, 247)')
   })
 })

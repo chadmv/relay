@@ -94,9 +94,11 @@ platform integration. Do not cite this harness as Safari coverage.
 
 `keyboard.spec.ts`'s `job-detail task selection @webkit` describe covers the
 populated `job-detail` surface: a real Tab press reaching a task's name-cell
-button, Enter moving the sole `aria-current` mark, and the focused control's
-computed `outline-offset` being negative (proving its focus ring is not
-clipped by the cell's own `truncate`).
+button, Enter moving the sole `aria-current` mark, and a second Tab press
+whose focused control is read back with `getComputedStyle` (style, offset,
+width, colour, and `:focus-visible`) to prove the focus ring paints inside
+the cell's own `truncate` clip rather than outside it, where the clip would
+remove it.
 
 The **rate limiter is not exercised**: the test server runs
 `RELAY_LOGIN_RATE_LIMIT=1000:1m`. Register/self-registration flows are out too -
