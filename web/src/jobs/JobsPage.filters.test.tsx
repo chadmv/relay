@@ -160,6 +160,34 @@ test('a click inside the debounce window cannot mint a cursor the landing search
   }
 })
 
+test('a trailing space in the raw input does not leave the pager disabled forever', async () => {
+  // JobsPage debounces qInput and then TRIMS it into q; the guard must compare
+  // like for like. Comparing the raw, untrimmed qInput against the trimmed q
+  // means a trailing space never resolves to equal, even after the debounce
+  // has long since settled - the pager would stay disabled until the user
+  // deleted the space themselves.
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const p = new URL(request.url).searchParams
+      seen.push(p)
+      if (p.get('q') === 'etl') {
+        return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: 'CUR1', total: 2 })
+      }
+      return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: '', total: 1 })
+    }),
+  )
+  renderPage()
+  await screen.findByText('job-A')
+
+  await userEvent.type(screen.getByRole('searchbox'), 'etl ')
+  await waitFor(() => expect(seen.some((p) => p.get('q') === 'etl')).toBe(true))
+
+  // The debounce has landed (q='etl' went out) and there IS a next page, so
+  // the pager must be usable - not stuck disabled by a raw/trimmed mismatch
+  // that never resolves.
+  await waitFor(() => expect(screen.getByRole('button', { name: /next/i })).toBeEnabled())
+})
+
 test('My jobs sends mine=true and drops the cursor', async () => {
   server.use(twoPages())
   renderPage()

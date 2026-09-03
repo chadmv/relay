@@ -67,8 +67,11 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
   // keystroke and the debounced q landing are two separate moments, and a
   // click on next/prev IN BETWEEN can still mint a cursor the about-to-land q
   // then carries into a request for filters it was never issued under. See
-  // web/src/lib/useDebouncedPagingGuard.ts.
-  const pagingUnsettled = useDebouncedPagingGuard(qInput, q, pager)
+  // web/src/lib/useDebouncedPagingGuard.ts. Compared trimmed against trimmed:
+  // q is itself trimmed above, and comparing it against the untrimmed qInput
+  // would leave a trailing space unsettled forever, since the debounce
+  // landing can never make an untrimmed and a trimmed side equal.
+  const pagingUnsettled = useDebouncedPagingGuard(qInput.trim(), q, pager)
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
   const statusFiltered = filter !== 'all'
