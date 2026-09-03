@@ -5,6 +5,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { expect, test, vi } from 'vitest'
 import { SchedulesTable } from './SchedulesTable'
 import type { Schedule } from './api'
+import { JOB_STATUSES } from '../jobs/api'
+import { statusColor } from '../jobs/status'
 
 function renderTable(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>)
@@ -24,6 +26,7 @@ function sched(over: Partial<Schedule> = {}): Schedule {
     next_run_at: '2099-01-01T00:00:00Z',
     last_run_at: '2026-06-05T11:00:00Z',
     last_job_id: 'abcdef12-3456-7890-abcd-ef1234567890',
+    last_job_status: 'done',
     created_at: '2026-06-01T00:00:00Z',
     updated_at: '2026-06-05T11:00:00Z',
     ...over,
@@ -67,7 +70,7 @@ test('pending row disables its action buttons', () => {
 })
 
 test('missing last_job_id renders a dash', () => {
-  renderTable(<SchedulesTable schedules={[sched({ last_job_id: undefined })]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />)
+  renderTable(<SchedulesTable schedules={[sched({ last_job_id: undefined, last_job_status: undefined })]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />)
   // last run cell and last job cell both could be '-'; assert the LAST JOB short id is absent
   expect(screen.queryByText('abcdef12')).not.toBeInTheDocument()
 })
@@ -205,8 +208,8 @@ test('the ACTIONS cell still holds exactly nine cells per row after the Edit lin
 })
 
 // A CHIP IN THE NAME CELL, NOT A TENTH COLUMN. COLS already has nine tracks and
-// 580px of fixed width before any fr gets a pixel - the worst case in the app -
-// so a tenth would push the 1040px floor up again. The NAME cell is already a
+// 620px of fixed width before any fr gets a pixel - the worst case in the app -
+// so a tenth would push the 1080px floor up again. The NAME cell is already a
 // flex row with a gap and already holds the status dot, so a chip fits without
 // touching the grid template at all.
 //
@@ -331,4 +334,121 @@ test('the empty state uses the supplied message, and keeps its own when none is 
     <SchedulesTable schedules={[]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />,
   )
   expect(screen.getByText('No schedules yet.')).toBeInTheDocument()
+})
+
+// A <Link>, not a span with an onClick as the hi-fi draws it, and for the reason
+// this file already records on the Edit control: middle-click and open-in-new-tab.
+//
+// THE WORD IS NOT OPTIONAL. A dot colour is the hi-fi's only carrier, and this
+// table's FAILING chip already rejected that reasoning once, in this file, for
+// this row - and it is worse here, because the row already has a dot four columns
+// to the left that means `enabled`. A second dot with a different vocabulary and
+// no label is not merely inaccessible, it is ambiguous to a sighted reader too.
+test('the LAST JOB cell links to the job and names its status in text', () => {
+  renderTable(
+    <SchedulesTable schedules={[sched()]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />,
+  )
+  const link = screen.getByRole('link', { name: 'abcdef12 done' })
+  expect(link).toHaveAttribute('href', '/jobs/abcdef12-3456-7890-abcd-ef1234567890')
+  // A useNavigate handler on a button would satisfy a naive "clicking it opens the
+  // job" test while silently breaking both affordances.
+  expect(screen.queryByRole('button', { name: /abcdef12/ })).toBeNull()
+})
+
+// EVERY MEMBER OF THE VOCABULARY, including `cancelled`, whose colour falls to
+// statusColor's default branch. Without the default-branch member the word could
+// be a side effect of the colour switch's known cases rather than the carrier it
+// is meant to be.
+//
+// The dot's colour is read off its data attribute and off statusColor itself, not
+// off a hand-typed class name: a class-shaped literal in a test file is compiled
+// input to Tailwind.
+test('every job status reaches the cell as a word', () => {
+  for (const status of JOB_STATUSES) {
+    const { unmount } = renderTable(
+      <SchedulesTable
+        schedules={[sched({ last_job_status: status })]}
+        pendingId={null}
+        onRunNow={() => {}}
+        onToggleEnabled={() => {}}
+      />,
+    )
+    const link = screen.getByRole('link', { name: `abcdef12 ${status}` })
+    const dot = link.querySelector('[data-status]')
+    expect(dot).not.toBeNull()
+    expect(dot).toHaveAttribute('data-status', status)
+    expect(dot).toHaveClass(statusColor(status).dot)
+    unmount()
+  }
+})
+
+test('an absent last_job_id renders a dash and no job link', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_job_id: undefined, last_job_status: undefined })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.queryByText('abcdef12')).toBeNull()
+  expect(screen.queryByRole('link', { name: /abcdef12/ })).toBeNull()
+  // The schedule link and the Edit link remain; nothing points at /jobs.
+  expect(screen.queryAllByRole('link').filter((a) => a.getAttribute('href')?.startsWith('/jobs'))).toHaveLength(0)
+})
+
+// UNREACHABLE IN PRODUCTION - the pairing is a server invariant - and the renderer
+// must still not invent a neutral dot or the word "unknown" for it. A grey dot is
+// a fact-shaped object, and drawing one from an absent key is exactly the defect
+// fillLastJobStatuses refuses to commit server-side, where it fails the request
+// rather than dropping the key. Rendering the bare link is a fail-quiet.
+test('an unpaired last_job_id draws no status dot and no word', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_job_status: undefined })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  const link = screen.getByRole('link', { name: 'abcdef12' })
+  expect(link).toHaveAttribute('href', '/jobs/abcdef12-3456-7890-abcd-ef1234567890')
+  expect(link.querySelector('[data-status]')).toBeNull()
+  expect(link).toHaveTextContent('abcdef12')
+})
+
+// TWO INDEPENDENT AXES. last_error records a fire that produced NO job;
+// last_job_status describes the last fire that DID. A schedule can carry
+// last_job_status "done" and a last_error at once and that is not a contradiction -
+// the last job it produced finished successfully, and the most recent attempt
+// produced no job. Neither mark may suppress the other.
+//
+// The nine-cell assertion rides along because this combination is the one no
+// existing arity test covers.
+test('a failing schedule can still have a healthy last job, and the row still holds nine cells', () => {
+  renderTable(
+    <SchedulesTable
+      schedules={[sched({ last_error: 'task render: retries must be between 0 and 10' })]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+    />,
+  )
+  expect(screen.getByText('FAILING')).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'abcdef12 done' })).toBeInTheDocument()
+  const dataRow = screen.getAllByRole('row')[1]
+  expect(within(dataRow).getAllByRole('cell')).toHaveLength(9)
+  expect(screen.getAllByRole('columnheader')).toHaveLength(9)
+})
+
+// THE DOT IS aria-hidden BECAUSE THE WORD BESIDE IT SAYS THE SAME THING. Leaving
+// it exposed would put an empty element inside the link's accessible name for no
+// gain. This is what makes the exact accessible name 'abcdef12 done' above a
+// property rather than an accident.
+test('the status dot is hidden from the accessible name', () => {
+  renderTable(
+    <SchedulesTable schedules={[sched()]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />,
+  )
+  const dot = screen.getByRole('link', { name: 'abcdef12 done' }).querySelector('[data-status]')
+  expect(dot).toHaveAttribute('aria-hidden', 'true')
 })

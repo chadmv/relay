@@ -11,11 +11,18 @@ import {
 } from '../components/holo'
 import type { Schedule } from './api'
 import { formatRelativeTime, nextRunDisplay, shortId } from './format'
+import { statusColor } from '../jobs/status'
 
-const COLS = 'grid-cols-[1.4fr_120px_110px_90px_1fr_1fr_110px_1.3fr_150px]'
-// Nine columns, 580px of fixed track before any fr gets a pixel - the worst case in
-// the app. 1040 gives the 4.7fr of flexible tracks about 100px each.
-const MIN_W = 'min-w-[1040px]'
+const COLS = 'grid-cols-[1.4fr_120px_110px_90px_1fr_1fr_150px_1.3fr_150px]'
+// Nine columns, 620px of fixed track before any fr gets a pixel - the worst case in
+// the app. 1080 gives the 4.7fr of flexible tracks about 100px each.
+//
+// The LAST JOB track carries a dot, eight monospace characters and a status word,
+// which does not fit in the 110px it held while the cell was an id alone. THE E2E
+// LAYOUT GATE CANNOT SEE THIS CHANGE: Table wraps the whole grid in a horizontal
+// scroller, so anything that widens the grid scrolls inside that wrapper instead of
+// widening the document. The screenshots are the artifact.
+const MIN_W = 'min-w-[1080px]'
 
 const HEADERS: TableColumn[] = [
   { label: 'NAME' },
@@ -77,7 +84,7 @@ export function SchedulesTable({
                   {s.name}
                 </Link>
                 {/* THE FAILURE MARKER LIVES INSIDE THE NAME CELL RATHER THAN IN A
-                    TENTH COLUMN. COLS above is already nine tracks with 580px of
+                    TENTH COLUMN. COLS above is already nine tracks with 620px of
                     fixed width, the worst case in the app; a tenth would push
                     MIN_W up again and this table is already the app's widest.
                     This cell is already a flex row with a gap, so the chip costs
@@ -124,7 +131,48 @@ export function SchedulesTable({
                 {s.enabled ? <span className="text-accent-b">&#9658;</span> : null} {nextRunDisplay(s.next_run_at)}
               </TableCell>
               <TableCell className="text-fg-mute">{s.last_run_at ? formatRelativeTime(s.last_run_at) : '-'}</TableCell>
-              <TableCell className="text-[10.5px] text-fg-mute">{shortId(s.last_job_id)}</TableCell>
+              {/* THE STATUS IS A WORD, not only the dot's colour. The row already
+                  carries a dot four columns to the left meaning `enabled`, so a
+                  second dot with a different vocabulary and no label is ambiguous
+                  to a sighted reader as well as inaccessible - the same judgement
+                  the FAILING chip above records.
+
+                  statusColor is reused from the jobs status helper exactly as
+                  ScheduleRunsPanel reuses it in this same feature area; there is
+                  no second mapping here. A status outside the union takes that
+                  helper's default branch and renders muted, with the verbatim word
+                  still carrying the fact.
+
+                  NO DOT AND NO WORD WHEN last_job_status IS ABSENT. The server
+                  emits the two keys together or not at all, so this state cannot
+                  occur - and drawing a neutral dot from an absent key would forge
+                  a fact, which is the defect fillLastJobStatuses refuses to commit
+                  by failing the request. The bare link is a fail-quiet.
+
+                  RUN NOW DOES NOT ADVANCE THIS. POST /run-now creates a job but
+                  updates neither last_job_id nor last_run_at, so immediately after
+                  an operator clicks Run now this cell still describes the previous
+                  SCHEDULED fire. See the README's Scheduled Jobs section. */}
+              <TableCell className="text-[10.5px] text-fg-mute">
+                {s.last_job_id ? (
+                  <Link
+                    to={`/jobs/${s.last_job_id}`}
+                    className="inline-flex items-center gap-1.5 hover:text-accent"
+                  >
+                    {s.last_job_status ? (
+                      <span
+                        aria-hidden="true"
+                        data-status={s.last_job_status}
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor(s.last_job_status).dot}`}
+                      />
+                    ) : null}
+                    <span>{shortId(s.last_job_id)}</span>
+                    {s.last_job_status ? <>{' '}<span>{s.last_job_status}</span></> : null}
+                  </Link>
+                ) : (
+                  '-'
+                )}
+              </TableCell>
               <TableCell className="truncate text-[10.5px] text-fg-mute">{s.owner_email}</TableCell>
               <TableCell className="flex justify-end gap-1.5">
                 <button
