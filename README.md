@@ -1486,44 +1486,6 @@ GET /v1/jobs?q=etl&status=failed                         # composes with the sta
 
 **`?q=` cost.** Substring containment cannot be index-served, so a `?q=` request walks every candidate row of the active sort's index and, for the count, joins `users` to reach the submitter email. A needle that matches nothing is the worst case: it pays the full walk and returns an empty page. The server applies no rate limit and no statement timeout to this today, so the cost is bounded only by the table size and by how often clients ask. Debouncing at 250 ms or more client-side reduces how many of these a typing user generates; it does not bound what a caller can request.
 
-#### Filtering the schedules list
-
-`GET /v1/scheduled-jobs` accepts two optional filters. They AND together and compose with
-`?limit=`, `?cursor=` and `?sort=`.
-
-| Parameter | Format | Absent means |
-|-----------|--------|--------------|
-| `enabled` | `true` / `false` (Go `strconv.ParseBool` spellings). A genuine tri-state: **`enabled=false` means "only paused schedules"**, not the same as absent, which is where it differs from `?mine=` on the jobs list. An empty value (`?enabled=`) is treated as absent. | No enabled filter |
-| `q` | Exactly the rules in [Filtering the jobs list](#filtering-the-jobs-list) - case-insensitive substring, `%` and `_` literal, maximum 200 characters, empty or whitespace-only treated as absent - matched against three axes here: the schedule `name`, the owner's `email`, and the `cron_expr`. | No text filter |
-
-The cron axis matches the stored text verbatim, so `@daily` is found by `daily` and
-`0 4 * * *` is found by `0 4`. For a non-admin the email axis can only ever match
-all-or-nothing, because every schedule in scope has the same owner.
-
-`total` counts every row matching every active filter, so the page footer's denominator
-always belongs to the same set as the rows. It is **not** the same number as
-`stats.total`, which is the unfiltered census.
-
-**Errors.** These are `400` with the body `{"error": "<message>"}`. The query-string rules
-that apply to every paginated endpoint - malformed input, repeated parameters and NUL
-bytes - are under [Query-string validation](#query-string-validation).
-
-| Condition | Message |
-|-----------|---------|
-| `enabled` is not a boolean | `invalid enabled; expected true or false` |
-| `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
-| `q` is not valid UTF-8 | `q is not valid UTF-8` |
-
-The two `q` bodies are byte-identical to the jobs list's, and a test asserts that.
-
-**Drop the cursor when a filter changes**, exactly as on the jobs list. A cursor carries
-no record of the filters that were active and the server does not reject a mismatched
-one; filter correctness is nevertheless cursor-independent, so a stale cursor can start a
-page at a surprising position but can never return a row that fails the current filters.
-
-`?q=` here is a sequential scan and is not index-served, the same as on the jobs list;
-debounce it client-side at 250 ms or more.
-
 ### Public
 
 | Method | Path | Description |
@@ -1800,7 +1762,9 @@ with `total: 0`, not a 404**. `reservations.worker_ids` is a bare `UUID[]` with 
 foreign key, so a worker id can legitimately outlive its row and this endpoint cannot
 authoritatively distinguish "never existed" from "deleted". `?worker_id=` with an empty
 value is treated as absent, and a value that is not a UUID returns
-`400 invalid worker_id; expected a UUID`.
+`400 invalid worker_id; expected a UUID`. Like `?q=`, the array-containment test is
+a scan and is not index-served; `reservations` is an admin-managed table of tens of
+rows, so no index is added for it.
 
 ### Agent Enrollments
 
@@ -1950,7 +1914,7 @@ for admins and scoped to `owner_id` for everyone else. It requires authenticatio
 | `enabled` | Schedules in scope with `enabled = true`. |
 | `paused` | Schedules in scope with `enabled = false`. `paused` is exactly `NOT enabled`; there is no third state and no `paused` column. |
 | `total` | `enabled + paused`, computed from the two buckets so the identity always holds. |
-| `failed_runs_24h` | Jobs a schedule in scope produced that have `status = failed` and were last updated within 24 hours. |
+| `failed_runs_24h` | Jobs a schedule in scope produced that have `status = failed` and were last updated within 24 hours, **including jobs created by `run-now`** - the count is over jobs carrying a `scheduled_job_id`, however they were started. |
 | `failing` | Schedules in scope carrying a `last_error`. **Not windowed.** |
 
 All five keys are always present and all five are non-negative integers; there is no
@@ -1971,6 +1935,44 @@ times contributes one.
 **`/stats` accepts no filters.** It is always the whole in-scope census, unaffected by
 `?enabled=` and `?q=`, so `stats.total` equals the list's `total` only when no filter is
 active. Read `total` off the list for "N matching" and off `/stats` for the strip.
+
+#### Filtering the schedules list
+
+`GET /v1/scheduled-jobs` accepts two optional filters. They AND together and compose with
+`?limit=`, `?cursor=` and `?sort=`.
+
+| Parameter | Format | Absent means |
+|-----------|--------|--------------|
+| `enabled` | `true` / `false` (Go `strconv.ParseBool` spellings). A genuine tri-state: **`enabled=false` means "only paused schedules"**, not the same as absent, which is where it differs from `?mine=` on the jobs list. An empty value (`?enabled=`) is treated as absent. | No enabled filter |
+| `q` | Exactly the rules in [Filtering the jobs list](#filtering-the-jobs-list) - case-insensitive substring, `%` and `_` literal, maximum 200 characters, empty or whitespace-only treated as absent - matched against three axes here: the schedule `name`, the owner's `email`, and the `cron_expr`. | No text filter |
+
+The cron axis matches the stored text verbatim, so `@daily` is found by `daily` and
+`0 4 * * *` is found by `0 4`. For a non-admin the email axis can only ever match
+all-or-nothing, because every schedule in scope has the same owner.
+
+`total` counts every row matching every active filter, so the page footer's denominator
+always belongs to the same set as the rows. It is **not** the same number as
+`stats.total`, which is the unfiltered census.
+
+**Errors.** These are `400` with the body `{"error": "<message>"}`. The query-string rules
+that apply to every paginated endpoint - malformed input, repeated parameters and NUL
+bytes - are under [Query-string validation](#query-string-validation).
+
+| Condition | Message |
+|-----------|---------|
+| `enabled` is not a boolean | `invalid enabled; expected true or false` |
+| `q` is longer than 200 characters | `q is too long; maximum 200 characters` |
+| `q` is not valid UTF-8 | `q is not valid UTF-8` |
+
+The two `q` bodies are byte-identical to the jobs list's, and a test asserts that.
+
+**Drop the cursor when a filter changes**, exactly as on the jobs list. A cursor carries
+no record of the filters that were active and the server does not reject a mismatched
+one; filter correctness is nevertheless cursor-independent, so a stale cursor can start a
+page at a surprising position but can never return a row that fails the current filters.
+
+`?q=` costs what it costs on the jobs list, for the same reason and with the same
+advice: see [`?q=` cost](#filtering-the-jobs-list).
 
 ### Events (Server-Sent Events)
 
