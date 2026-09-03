@@ -27,6 +27,54 @@
   --radius-input: 8px;
 }
 
+/* LAYERING SCALE - begin
+   How overlays stack in this app. --color-popover above is the other half of
+   "how do I build an overlay here": this block is where it sits, that token is
+   what fills it.
+
+   Written in CSS property terms and never as utility class names, deliberately.
+   The class scanner reads this file as source, so a class-shaped name here would
+   emit a rule that outlives the component supposed to own it.
+
+   Each ENTRY line is: the z-index value, the file that owns it, the symbol or
+   element carrying it, and the stacking context it lives in.
+
+   ENTRY  z-index 50  components/dialog/DialogShell.tsx  SCRIM  root, the portal layer is appended to the body
+   ENTRY  z-index 10  shell/HoloShell.tsx  the header element  root
+   ENTRY  z-index 0  shell/HoloShell.tsx  the main element  root
+   ENTRY  z-index 50  shell/UserMenu.tsx  the dropdown panel  inside the header
+   ENTRY  z-index 50  shell/HoloShell.tsx  navPanelClass, below the md breakpoint  inside the header
+
+   RULES
+
+   1. A backdrop filter on an ancestor establishes a stacking context, so a
+      z-index declared inside it cannot compete with anything outside it. A glass
+      surface carries one; so does the header. The measurement behind this sits
+      in shell/HoloShell.tsx, in the comment above the header element - search for
+      "275 hit-test points".
+   2. The main element is positioned and carries a zero z-index on purpose, so
+      page-level stacking is contained and cannot climb over the header. A new
+      page-level overlay stays inside that context rather than raising itself past
+      it. Same measurement.
+   3. A value is comparable only to another value in the same stacking context.
+      Repeated values on this scale do not compete unless the context column says
+      they share one, and that is what a reader cannot infer from the numbers.
+   4. Paint order is only half of it. A new overlay must also decide whether it
+      stays reachable and announced while a modal is open. The header note in
+      components/dialog/dialogStack.ts is the other half.
+
+   THE DIALOG SCRIM ENTRY DESCRIBES TODAY'S MECHANISM. The scrim is a painted
+   element, which is why it is on this scale at all. The alternative is the
+   browser's top layer via a native dialog element, which would take dialogs off
+   the scale entirely; the argument and the conditions for revisiting it are in
+   the closed backlog item
+   idea-2026-08-09-native-dialog-element-reconsideration. Adopting it later edits
+   this entry rather than invalidating the block.
+
+   Completeness of the ENTRY lines is enforced by
+   components/dialog/dialogShellIsSole.guard.test.ts.
+   LAYERING SCALE - end */
+
 body {
   margin: 0;
   background: var(--color-bg);

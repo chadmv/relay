@@ -80,6 +80,8 @@ import {
 // a panel whose innerHTML is swept by both the reservations honesty test and the
 // enrollment secrecy suite).
 //
+// The stacking value inside SCRIM is on the LAYERING SCALE block in
+// theme/tokens.css, together with the rule that decides what it competes with.
 const SCRIM = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4'
 const PANEL_BASE = 'w-full rounded-card border border-border bg-bg p-5 shadow-xl'
 
