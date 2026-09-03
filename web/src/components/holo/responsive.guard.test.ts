@@ -1,60 +1,13 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
-// Explicit node:url URL, not the global: the test environment is jsdom, which
-// shadows the global URL constructor with its own (whatwg-url) implementation.
-// That implementation cannot resolve a relative path against a file:// base that
-// carries a Windows drive letter - it silently falls back to jsdom's default
-// document location (http://localhost:3000/) instead of throwing, so the bug
-// surfaces one line later as "The URL must be of scheme file" out of
-// fileURLToPath. Node's own URL has no such bug.
-import { fileURLToPath, URL as NodeURL } from 'node:url'
+import { readFileSync } from 'node:fs'
+import { relative } from 'node:path'
 import { expect, test } from 'vitest'
+import { SRC_ROOT, shippedSources, toPosix, withoutComments } from '../../test/sourceTree'
 
-// web/src/ - this file lives at web/src/components/holo/.
-const SRC = fileURLToPath(new NodeURL('../../', import.meta.url))
-
-function sourceFiles(dir: string): string[] {
-  const out: string[] = []
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry)
-    if (statSync(full).isDirectory()) {
-      out.push(...sourceFiles(full))
-      continue
-    }
-    // Shipped JSX only. Test files render deliberately unrealistic markup.
-    if (!entry.endsWith('.tsx') || entry.endsWith('.test.tsx')) continue
-    out.push(full)
-  }
-  return out
-}
-
-const FILES = sourceFiles(SRC)
-
-// web/src uses relative imports (Windows path separators), never a POSIX-style
-// alias, so this is the one place that needs normalizing for a path to read the
-// same in a received-array diff on Windows and Linux.
-function toPosix(path: string): string {
-  return path.replace(/\\/g, '/')
-}
-
-// Strips comments before scanning, both kinds this repo writes. A previous
-// version of this scan only stripped `//` line comments, and a real review lane
-// broke it: inserting `/* This <Table> renders jobs. */` into a fully compliant
-// consumer made the call-site guard below report it as missing minWidth, because
-// the tag-matching regex stopped at the first `>` inside the comment's own prose.
-// `{/* ... */}` JSX comments are `/* ... */` blocks underneath, and this repo
-// writes them constantly - six landed in this diff alone - so a scan blind to
-// them will eventually fire on someone documenting intent near a <Table> call or
-// a grid class, and the fix people reach for under that pressure is to weaken the
-// guard rather than the scan. Block comments are stripped first (they can span
-// multiple lines), then `//` line comments on what remains.
-function withoutComments(src: string): string {
-  const noBlocks = src.replace(/\/\*[\s\S]*?\*\//g, '')
-  return noBlocks
-    .split('\n')
-    .map((line) => (line.trim().startsWith('//') ? '' : line))
-    .join('\n')
-}
+// The walk, the comment stripper and the path normalizer are shared with the
+// dialog module's guard; sourceTree.ts carries the reason each one has the shape
+// it has. The set this file rules over is JSX only.
+const SRC = SRC_ROOT
+const FILES = shippedSources(['.tsx'])
 
 // Matches a bare numeric Tailwind utility suffix from 2 up to 12 - the full range
 // Tailwind ships for both grid-cols-N and col-span-N. `\b` alone after a

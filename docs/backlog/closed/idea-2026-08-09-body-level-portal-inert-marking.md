@@ -1,7 +1,9 @@
 ---
 title: "A body-level portal opened while a dialog is open is never marked inert"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: deferred review finding from the dialog-hardening work (2026-08-09)
@@ -48,3 +50,6 @@ be the one to decide, since they will know whether their layer wants to sit abov
 ## Related
 - `web/src/components/dialog/dialogStack.ts` (the `apply()` background marking)
 - Shipped the stack this constrains: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]]
+
+## Resolution
+Route 1 taken in lane DL of the 2026-09-02 web-frontend batch: the constraint is written in dialogStack.ts where the next portal author reads it, and enforced by the sweep guard's portal assertion, which refuses a portal or body insertion outside the dialog module unless an allowlist entry with a reason is added. The shape search confirmed no body-level producer exists outside components/dialog/. That guard going red is route 2's trigger: whoever adds the first body-level portal decides whether a MutationObserver marks late-appended nodes.

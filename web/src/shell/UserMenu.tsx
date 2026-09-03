@@ -65,9 +65,11 @@ interface UserMenuProps {
 //
 // WHY THE PANEL IS NOT PORTALLED and does not register with dialogStack. Two
 // reasons: the disclosure pattern needs the panel to FOLLOW the toggle in DOM order
-// so Tab reaches it, and the dropdown's paint order is already solved by
-// `relative z-10` on the header (HoloShell.tsx:29-49, measured over 275 hit-test
-// points), which moving the panel to <body> would invalidate. Nothing here is modal:
+// so Tab reaches it, and the dropdown's paint order is already solved by a
+// stacking order declared directly on the header element itself, at the root
+// level rather than confined inside the header's own backdrop-filter context
+// (the comment above HoloShell.tsx's header element has the reasoning), which
+// moving the panel to <body> would invalidate. Nothing here is modal:
 // no scrim, no scroll lock, no inert, no aria-hidden on the background, and no Tab
 // trap - for a disclosure, Tab out is a dismiss route.
 export function UserMenu({ email, onLogout }: UserMenuProps) {
@@ -85,17 +87,18 @@ export function UserMenu({ email, onLogout }: UserMenuProps) {
   // after a real unmount does. It doesn't: React 18.3.1 batches this update, so the
   // panel is still mounted and document.activeElement is unchanged for the rest of
   // this handler, and reading the check AFTER setOpen would observe the identical
-  // value (measured directly). DialogShell.tsx:227-240 is the real instance of that
-  // detachment shape - its read runs in an effect CLEANUP, which React defers past
-  // the point the node is actually gone, so ordering there is load-bearing, not
-  // merely tidy.
+  // value (measured directly). DialogShell.tsx's registration cleanup, where
+  // focusWasInside is read, is the real instance of that detachment shape - its
+  // read runs in an effect CLEANUP, which React defers past the point the node
+  // is actually gone, so ordering there is load-bearing, not merely tidy.
   //
   // What the guard actually buys here is preventing focus theft: a mouse user in
   // Safari (which does not focus a <button> on click, so the menu can legitimately
   // be open with activeElement === <body>) must not have focus yanked onto a toggle
-  // it was never on. Same REASONING as DialogShell.tsx:234-239,276-282 - none of its
-  // modal machinery applies to a dropdown, and unlike that file's use of the
-  // pattern, nothing here depends on beating a synchronous teardown.
+  // it was never on. Same REASONING as DialogShell.tsx's focusWasInside read and
+  // its isEmpty() trigger-restore branch - none of its modal machinery applies
+  // to a dropdown, and unlike that file's use of the pattern, nothing here
+  // depends on beating a synchronous teardown.
   function closeAndRestoreFocus() {
     const focusWasInside = !!ref.current && ref.current.contains(document.activeElement)
     setOpen(false)

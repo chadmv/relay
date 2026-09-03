@@ -1,7 +1,9 @@
 ---
 title: "A sweep test that fails if dialog semantics appear outside DialogShell"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: spec follow-up from the dialog-hardening work (2026-08-09)
@@ -65,3 +67,6 @@ for any future sweep of the same shape.
 - Shipped the shell this protects: [[idea-2026-07-01-confirmdialog-focus-trap-hardening]]
 - **A second sweep of the identical shape**, and the place to settle the Vitest-versus-ESLint
   question once for both: [[idea-2026-08-13-field-error-wiring-audit]]
+
+## Resolution
+Shipped in lane DL of the 2026-09-02 web-frontend batch as web/src/components/dialog/dialogShellIsSole.guard.test.ts: a Vitest guard walking web/src through the walker shared with the responsive guard (ESLint does not exist in this repo, which settled the mechanism question for the field-error audit too). Six assertions with positive controls: the modal role, aria-modal, the scrim string derived from DialogShell's own constant at run time (never spelled, since Tailwind v4 scans prose), document or window keydown listeners behind a three-entry allowlist with reasons (HoloShell's collapsed nav was a legitimate third the item did not know about), portals and body insertions outside the dialog module behind an allowlist with a staleness control, and the layering block's completeness. Each assertion was proven red on its own mutation. The comment stripper went through three implementations under review: a regex, a hand-rolled lexer, and finally TypeScript's own parser, after the first two each opened a hole the next re-verify reproduced.

@@ -1,7 +1,9 @@
 ---
 title: The app has no documented z-index layering scale
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-12
 priority: low
 source: filed from the 2026-08-12 profile-dropdown stacking fix, which hit the trap this item describes before finding the real cause
@@ -84,3 +86,6 @@ utility layer. Nothing is broken right now; this is about the next author, not t
   it is confined to the header's stacking context, and dialogs portal to `<body>` outside
   it. That the two identical numbers are unrelated is exactly the sort of thing a reader
   cannot infer from the values alone, and is the strongest argument for writing it down.
+
+## Resolution
+Shipped in lane DL of the 2026-09-02 web-frontend batch as a comment block in web/src/theme/tokens.css, the one home that emits nothing under Tailwind's prose scan: five stacking values (the item tabulated four; the collapsed header nav added a fifth after filing), the two rules that govern them stated as CSS constraints, cross-links from GlassPanel.tsx and DialogShell.tsx, and a guard assertion that derives the stacking-utility set from the tree (negative and arbitrary values included) and fails when a (file, value) pair has no entry. The block states that the scrim value is not permanent while the native-dialog decision stands, and names its own gaps: the symbol and context columns are not machine-checked, stylesheet-declared values are not scanned, and a class-shaped literal in prose still emits a rule the guard cannot see.

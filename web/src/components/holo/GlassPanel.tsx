@@ -5,6 +5,9 @@ import type { ElementType, ReactNode } from 'react'
 // app's tokens. The gradient + shadow are the fidelity upgrade over the old flat
 // `bg-white/5`. Pass `className` to override (e.g. a subtler nested surface).
 // Class strings are literals so Tailwind v4 includes them.
+// This surface's backdrop filter establishes a stacking context, so a z-index
+// declared inside it cannot compete with anything outside. The scale and the
+// rules for reading it are the LAYERING SCALE block in theme/tokens.css.
 const BASE =
   'rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] ' +
   'backdrop-blur-[8px] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_32px_rgba(0,0,0,0.4)]'
