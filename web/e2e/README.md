@@ -39,6 +39,20 @@ pass them that way:
       OS="$OS" TEMP="$TEMP" TMP="$TMP" \
       GOPATH="$(go env GOPATH)" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
 
+**Only one `make test-e2e` at a time on a machine.** The recipe drops and recreates
+`relay_e2e` and binds ports 8091 and 9091, so two runs from two worktrees answer
+each other's specs and both report connection refusals. When more than one
+worktree may run the suite (parallel lanes), serialize under a mkdir-atomic lock:
+
+    LOCK="$LOCALAPPDATA/Temp/claude/e2e-lock.d"
+    until mkdir "$LOCK" 2>/dev/null; do sleep 20; done
+    trap 'rmdir "$LOCK"' EXIT
+    /c/msys64/usr/bin/make.exe test-e2e OS="$OS" ...   # the invocation above
+
+`mkdir` either creates the directory or fails, with no window between, which is
+what makes it a lock; the `trap` releases it on any exit. A stale lock after a
+killed shell is removed by hand with `rmdir`.
+
 To iterate on one spec:
 
     cd web && npm run test:e2e -- layout.spec.ts --project=chromium
