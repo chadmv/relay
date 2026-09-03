@@ -45,6 +45,23 @@ function stripped(file: string): string {
 // C0. Shared by every assertion below, and the reason they are not vacuous. A
 // silent zero, or a walk that quietly started including test files, would make
 // every absence assertion in this file pass forever while proving nothing.
+// One representative path per top-level directory under web/src that ships
+// sources, anchored the same way shell/HoloShell.tsx already was. A floor on
+// the total count alone would tolerate an entire directory silently dropping
+// out of the walk as long as the survivors still cleared it.
+const TOP_LEVEL_ANCHORS = [
+  SHELL,
+  'admin/invites/inviteStatus.ts',
+  'app/router.tsx',
+  'auth/LoginScreen.tsx',
+  'jobs/JobsPage.tsx',
+  'lib/api.ts',
+  'profile/SessionsTab.tsx',
+  'schedules/ScheduleDetailPage.tsx',
+  'shell/HoloShell.tsx',
+  'workers/WorkerDetailPage.tsx',
+]
+
 test('the source walk reaches shipped sources and nothing else', () => {
   expect(TSX.length).toBeGreaterThan(50)
   expect(SOURCES.length).toBeGreaterThan(TSX.length)
@@ -52,7 +69,10 @@ test('the source walk reaches shipped sources and nothing else', () => {
   const paths = SOURCES.map(rel)
   expect(paths).toContain(SHELL)
   expect(paths).toContain(STACK)
-  expect(paths).toContain('shell/HoloShell.tsx')
+  expect(
+    TOP_LEVEL_ANCHORS.filter((p) => !paths.includes(p)),
+    'the walk no longer reaches one of these top-level directories',
+  ).toEqual([])
   expect(paths.filter((p) => p.startsWith('test/')), 'the walk reached a test harness module').toEqual([])
   expect(paths.filter((p) => /\.test\.tsx?$/.test(p)), 'the walk reached a test file').toEqual([])
 })
