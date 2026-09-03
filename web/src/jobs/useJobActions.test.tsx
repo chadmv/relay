@@ -152,3 +152,30 @@ test('a cancel invalidates the decoupled lanes key', async () => {
   // A cancel is exactly the mutation that moves a job between two lanes.
   await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-lanes'] }))
 })
+
+test('a cancel invalidates the decoupled timeline key', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(http.delete(`/v1/jobs/${ID}`, () => HttpResponse.json({ id: ID, status: 'cancelled' })))
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.cancel.mutateAsync(false)
+
+  // Same reasoning as the lanes key: ['job-timeline'] sits outside the 'jobs'
+  // prefix, so a cancelled job's row in the timeline would keep its old
+  // status until the next 15s tick without this.
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-timeline'] }))
+})
+
+test('a retry invalidates the decoupled timeline key', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(
+    http.post(`/v1/jobs/${ID}/retry`, () =>
+      HttpResponse.json({ id: ID, status: 'running', tasks_retried: 1 }),
+    ),
+  )
+  const { result } = renderHook(() => useJobActions(ID), { wrapper: makeWrapper(client) })
+  await result.current.retry.mutateAsync('failed')
+
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-timeline'] }))
+})

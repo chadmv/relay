@@ -80,6 +80,22 @@ test('the create refetches an ACTIVE ["job-stats"] observer', async () => {
   await waitFor(() => expect(statsCalls).toBeGreaterThanOrEqual(2))
 })
 
+test('onSuccess invalidates the decoupled timeline key', async () => {
+  const client = newClient()
+  const spy = vi.spyOn(client, 'invalidateQueries')
+  server.use(
+    http.post('/v1/jobs', () =>
+      HttpResponse.json({ id: 'job-1', name: 'my-job', status: 'pending' }, { status: 201 }),
+    ),
+  )
+  const { result } = renderHook(() => useCreateJob(), { wrapper: makeWrapper(client) })
+  await result.current.mutateAsync({ name: 'my-job', tasks: [{ name: 't' }] })
+
+  // ['job-timeline'] sits outside the 'jobs' prefix, so a job created inside
+  // the current window would not appear there until the next poll.
+  await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['job-timeline'] }))
+})
+
 test('a failed create rejects and does not invalidate', async () => {
   const client = newClient()
   const spy = vi.spyOn(client, 'invalidateQueries')

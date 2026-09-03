@@ -6,10 +6,11 @@ import { cancelJob, retryJob, type RetryMode } from './api'
 //  - ONE mutation per action; the mode is its variable (cancel.mutate(false|true),
 //    retry.mutate('failed'|'all')). The only observable difference is the query
 //    param the request carries.
-//  - onSuccess invalidates ['job', id], ['jobs'], ['job-stats'] and
-//    ['job-lanes']. The last two are decoupled from ['jobs'] (see
-//    queryKeyDecoupling.test.tsx), so the bare ['jobs'] invalidation alone would
-//    leave the KPI strip stale and the lanes showing a cancelled job as running.
+//  - onSuccess invalidates ['job', id], ['jobs'], ['job-stats'], ['job-lanes']
+//    and ['job-timeline']. The last three sit outside the 'jobs' prefix (see
+//    queryKeyDecoupling.test.tsx), so the bare ['jobs'] invalidation alone
+//    leaves the KPI strip stale, the lanes showing a moved job in its old
+//    lane, and the timeline showing it under its old status.
 //  - ['job', id] IS invalidated (a cancelled job is still viewable); the caller
 //    stays on the detail page. This is the opposite of worker revoke.
 //  - No optimistic update; useJob polls ['job', id] every 3s and the invalidate
@@ -30,6 +31,7 @@ export function useJobActions(id: string) {
     qc.invalidateQueries({ queryKey: ['jobs'] })
     qc.invalidateQueries({ queryKey: ['job-stats'] })
     qc.invalidateQueries({ queryKey: ['job-lanes'] })
+    qc.invalidateQueries({ queryKey: ['job-timeline'] })
   }
 
   const cancel = useMutation({
