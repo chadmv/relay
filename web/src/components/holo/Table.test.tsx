@@ -266,9 +266,8 @@ test('TableRow rendered outside a Table throws, naming both components', () => {
 })
 
 // Cause 2 of docs/backlog/bug-2026-08-12-web-narrow-viewport-horizontal-overflow.md.
-// Every consumer's template has fixed px tracks that sum past a narrow viewport
-// (SchedulesTable's nine columns total 580px of fixed track before any `fr` gets a
-// pixel), and nothing wrapped them in a scroll region.
+// Every consumer's template has fixed px tracks that sum past a narrow viewport,
+// and nothing wrapped them in a scroll region.
 //
 // The min-width is NOT decoration and it is not a substitute for the wrapper. With
 // negative free space an `fr` track falls back to its CONTENT minimum, and the

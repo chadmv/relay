@@ -191,6 +191,13 @@ export function surfaces(): Surface[] {
       name: 'schedules',
       path: () => '/schedules',
       population: 'populated',
+      // COVERAGE LIMIT, DECLARED. The seeded schedule has never fired, so its
+      // last_job_id is absent and the LAST JOB cell renders the hyphen at every
+      // width. The POPULATED cell - link, dot and status word, the widest thing
+      // that column can hold - is covered by NO browser test, and cannot be in
+      // slice 1: producing it needs a scheduler fire, which needs an agent, the
+      // same blocker this file already records for /workers. Do not read a pass
+      // here as a populated-cell pass.
       ready: async (p, seed) => {
         // exact:true, unlike jobs' equivalent locator above: SchedulesTable.tsx
         // ALSO renders an `aria-label="Edit ${name}"` link per row
@@ -198,14 +205,19 @@ export function surfaces(): Surface[] {
         // substring-matching default resolves two elements here. Measured, not
         // assumed - the ambiguous form threw a strict-mode violation.
         await expect(p.getByRole('link', { name: seed.scheduleName, exact: true })).toBeVisible()
+        // THE STRIP HAS TWO POPULATIONS AND THE WIDTH DIFFERS BETWEEN THEM. Four
+        // hyphens until the stats response lands, then four numbers - so a
+        // measurement taken on the link alone can be taken against the placeholder
+        // strip and report a width the shipped page never has. A digit is the
+        // discriminator and works for a zero count too.
+        await expect(p.getByTestId('schedules-stat-enabled')).toHaveText(/\d/)
       },
     },
     {
       // THE SAME PATH as `schedules` above, deliberately. The question is what
-      // the FAILING chip does to a nine-column grid at a 1040px floor - the
-      // widest table in the app, 580px of fixed track before any fr gets a
-      // pixel. The healthy surface above is the CONTROL: if both overflow, the
-      // chip is not the cause.
+      // the FAILING chip does to a nine-column grid at a 1080px floor, 620px of
+      // fixed track before any fr gets a pixel. The healthy surface above is the
+      // CONTROL: if both overflow, the chip is not the cause.
       //
       // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH. Widening SchedulesTable's own
       // MIN_W to 2400px changes NOTHING here. That is not a hole in this
@@ -248,6 +260,9 @@ export function surfaces(): Surface[] {
           .getByRole('row')
           .filter({ has: p.getByRole('link', { name: seed.scheduleName, exact: true }) })
         await expect(row.getByText('FAILING')).toBeVisible()
+        // Same reason as the sibling surface above: the strip is measured
+        // populated, not in its placeholder state.
+        await expect(p.getByTestId('schedules-stat-enabled')).toHaveText(/\d/)
       },
     },
     {

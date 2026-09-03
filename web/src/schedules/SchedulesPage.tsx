@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Button } from '../components/Button'
-import type { Schedule, ScheduleSort } from './api'
+import type { ScheduleSort } from './api'
 import { useSchedules } from './useSchedules'
 import { useScheduleActions } from './useScheduleActions'
 import { SchedulesTable } from './SchedulesTable'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
 import { Eyebrow, GlassPanel } from '../components/holo'
+import { ENABLED_FILTERS, type EnabledFilterKey } from './scheduleFilters'
+import { useDebouncedValue } from '../lib/useDebouncedValue'
+import { SchedulesSummary } from './SchedulesSummary'
+import { useScheduleStats } from './useScheduleStats'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-created_at', label: 'Newest' },
@@ -19,18 +23,33 @@ const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: 'updated_at', label: 'Least recently run' },
 ]
 
-function countEnabled(schedules: Schedule[]): { enabled: number; paused: number } {
-  let enabled = 0
-  for (const s of schedules) if (s.enabled) enabled++
-  return { enabled, paused: schedules.length - enabled }
-}
-
-export function SchedulesPage() {
+// debounceMs is a prop only so tests can shrink the search debounce; production
+// always uses the 300ms default. Same shape as UsersTab's.
+export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const [sort, setSort] = useState<ScheduleSort>('-created_at')
+  const [enabledKey, setEnabledKey] = useState<EnabledFilterKey>('all')
+  const [qInput, setQInput] = useState('')
+  const q = useDebouncedValue(qInput, debounceMs).trim()
+  // CLOSES THE ACQUISITION WINDOW, not a catch-up. While a keystroke has outrun
+  // the debounce, `data` still answers the OLD query key - so a next/prev click in
+  // this window would mint a cursor from a page the pending filter never produced,
+  // and that cursor rides along into the request that finally carries the new q.
+  // pickSearch's resetPaging() only closes the window that opened at TYPE time; it
+  // cannot see a click that lands before the debounce settles.
+  const searchPending = qInput.trim() !== q
   const pager = useCursorPager()
   const [pendingId, setPendingId] = useState<string | null>(null)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, pager.cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(
+    sort,
+    pager.cursor,
+    undefined,
+    { enabledKey, q },
+  )
+  // Its own error surface. A stats failure degrades the strip to placeholders plus
+  // one sentence and leaves the table untouched; a list failure keeps the existing
+  // whole-page Retry card. Neither can blank the other.
+  const { data: stats, isError: statsFailed } = useScheduleStats()
   const { runNow, setEnabled } = useScheduleActions()
 
   // Tick once a second so relative "next run"/"last run" strings stay fresh
@@ -44,6 +63,30 @@ export function SchedulesPage() {
   function chooseSort(next: ScheduleSort) {
     setSort(next)
     pager.resetPaging() // restart paging when the sort changes
+  }
+
+  // THE RESET LIVES IN THE CLICK HANDLER, not in an effect keyed on the filter.
+  // React batches both updates into one render, so the next render issues exactly
+  // one request under a key carrying the new filter and an empty cursor. An effect
+  // would run AFTER the render that already issued a query, so exactly one request
+  // would escape carrying the new filter and a cursor minted under the old one.
+  function pickEnabled(next: EnabledFilterKey) {
+    setEnabledKey(next)
+    pager.resetPaging()
+  }
+
+  // Same reason as pickEnabled: the reset must happen on the RAW keystroke, not in
+  // an effect keyed on the debounced value. An effect runs after the render that
+  // already issued a query, so one request escapes carrying the new q and the old
+  // cursor.
+  //
+  // The debounce reduces how many scans one person's typing generates and BOUNDS
+  // NOTHING. GET /v1/scheduled-jobs has no rate limit, and a caller that is not a
+  // typing human is unaffected by a client-side timer; do not describe it as a
+  // control anywhere.
+  function pickSearch(v: string) {
+    setQInput(v)
+    pager.resetPaging()
   }
 
   async function onRunNow(id: string) {
@@ -87,38 +130,30 @@ export function SchedulesPage() {
 
   const schedules = data?.items ?? []
 
-  const counts = countEnabled(schedules)
+  // ONE boolean feeds both the footer's word and (from Task 10) the strip's total
+  // caption, so the two marks cannot disagree about whether the page is filtered.
+  const filterActive = enabledKey !== 'all' || q !== ''
+
   const total = data?.total ?? schedules.length
   const { x, y } = computePageRange(pager.startOffset, schedules.length)
+  // The word appears at the exact moment the list's total and the strip's total can
+  // disagree, and it answers the question where it is asked. Both numbers still go
+  // through the same thousands-separated formatting.
+  const matching = filterActive ? ' MATCHING' : ''
   const rangeText =
     schedules.length === 0
-      ? `0 of ${total.toLocaleString()}`
-      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}`
+      ? `0 of ${total.toLocaleString()}${matching}`
+      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}${matching}`
   const actionError = (runNow.error ?? setEnabled.error) as Error | null
 
   return (
     <div className="flex flex-col gap-4">
-      {/*
-        The hi-fi HoloSchedules also shows filter chips (All/Enabled/Disabled), a
-        free-text search input, and a FAILED-24H summary stat. All three are
-        backend-blocked and deliberately omitted here (a dead list control or a
-        fabricated stat reads as broken):
-          - filter chips + search: docs/backlog/idea-2026-06-05-schedules-filter-search.md
-          - FAILED-24H stat:       docs/backlog/idea-2026-06-05-failed-24h-stat.md
-        The ENABLED/PAUSED summary strip below is page-scoped (counts only the
-        loaded page) until the stats endpoint lands:
-          - fleet-wide counts:     docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md
-      */}
       <div className="flex flex-wrap items-end gap-6">
         <div>
           <Eyebrow>RECURRING</Eyebrow>
           <h1 className="text-[32px] font-normal tracking-tight">Schedules</h1>
         </div>
-        <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
-          <span><b className="text-ok">{counts.enabled}</b> ENABLED</span>
-          <span><b className="text-fg">{counts.paused}</b> PAUSED</span>
-          <span className="text-fg-dim">· <span>{`${total} schedules`}</span></span>
-        </div>
+        <SchedulesSummary stats={stats} statsFailed={statsFailed} filterActive={filterActive} />
         <label className="ml-auto flex items-center gap-2 font-mono text-[10px] text-fg-mute">
           <span>Sort</span>
           <select
@@ -136,6 +171,42 @@ export function SchedulesPage() {
         </label>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        <div role="group" aria-label="Schedule status filter" className="flex flex-wrap gap-2">
+          {ENABLED_FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              aria-pressed={enabledKey === f.key}
+              onClick={() => pickEnabled(f.key)}
+              className={`rounded-full border px-3.5 py-1.5 text-[12px] ${
+                enabledKey === f.key
+                  ? 'border-accent/60 bg-accent/15 text-fg'
+                  : 'border-border bg-white/5 text-fg-mute'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {/* NO MINIMUM WIDTH, deliberately, and unlike the admin Users tab's copy of
+            this control. This toolbar also carries three chips, so the simplest
+            thing that cannot overflow at a 320-pixel viewport is a flex item with a
+            zero shrink floor and a basis small enough to wrap to its own line when
+            there is no room. Measured by web/e2e/layout.spec.ts across both
+            schedules surfaces; jsdom performs no layout and can say nothing about
+            it. */}
+        <input
+          type="search"
+          aria-label="Search schedules"
+          placeholder="Filter by name, owner, cron..."
+          maxLength={200}
+          value={qInput}
+          onChange={(e) => pickSearch(e.target.value)}
+          className="min-w-0 grow basis-48 rounded-full border border-border bg-black/25 px-3.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-accent"
+        />
+      </div>
+
       {actionError ? (
         <div className="rounded-card border border-err/40 bg-err/10 px-4 py-2 text-[12px] text-err">
           {actionError.message}
@@ -144,6 +215,7 @@ export function SchedulesPage() {
 
       <SchedulesTable
         schedules={schedules}
+        emptyMessage={filterActive ? 'No schedules match these filters.' : 'No schedules yet.'}
         pendingId={pendingId}
         onRunNow={onRunNow}
         onToggleEnabled={onToggleEnabled}
@@ -156,7 +228,7 @@ export function SchedulesPage() {
             <div className="flex gap-1.5">
               <button
                 type="button"
-                disabled={!pager.canPrev || isPlaceholderData}
+                disabled={!pager.canPrev || isPlaceholderData || searchPending}
                 onClick={pager.prev}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
@@ -164,7 +236,7 @@ export function SchedulesPage() {
               </button>
               <button
                 type="button"
-                disabled={!data?.next_cursor || isPlaceholderData}
+                disabled={!data?.next_cursor || isPlaceholderData || searchPending}
                 onClick={() => pager.next(data)}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >

@@ -1,4 +1,6 @@
+import type { JobStatus } from '../jobs/api'
 import { apiFetch } from '../lib/api'
+import { enabledParam, type EnabledFilterKey } from './scheduleFilters'
 
 // Matches the Go scheduledJobResponse field-for-field. job_spec is raw JSON and
 // is not rendered in the list, so it stays `unknown`.
@@ -15,6 +17,25 @@ export interface Schedule {
   next_run_at: string
   last_run_at?: string
   last_job_id?: string
+  // The status of the job last_job_id names, verbatim from the jobs vocabulary.
+  // NOT the pending -> queued rename GET /v1/jobs/stats performs; this value
+  // agrees with `status` on GET /v1/jobs/{id}, which is the page the cell links
+  // to.
+  //
+  // PRESENT EXACTLY WHEN last_job_id IS PRESENT. The two keys appear together or
+  // neither appears, because fillLastJobStatuses fails the request rather than
+  // dropping the key. An absent key therefore means one thing - no scheduled fire
+  // has produced a job - and never "unknown" and never "healthy", so a renderer
+  // must not draw a neutral dot from its absence.
+  //
+  // Independent of last_error, which records a fire that produced NO job. Both may
+  // be present at once and that is not a contradiction.
+  //
+  // Typed as the five-value union for the call sites that switch on it, but the
+  // wire value is whatever the server's own status column holds; statusColor's
+  // default branch is what keeps an unrecognised value rendering muted rather than
+  // blank, and the word beside the dot is rendered verbatim either way.
+  last_job_status?: JobStatus
   // Why the last SCHEDULER fire failed, and when. ABSENT MEANS HEALTHY - the
   // server omits both keys entirely (scheduledJobResponse carries `omitempty` on
   // each), never "" and never null, so `schedule.last_error ? ... : null` is the
@@ -56,11 +77,51 @@ export type ScheduleSort =
   | 'updated_at'
   | '-updated_at'
 
-// One page (limit=50). cursor advances to the next page when present.
-export function listSchedules(sort: ScheduleSort, cursor?: string): Promise<SchedulesPage> {
-  const q = new URLSearchParams({ sort, limit: '50' })
-  if (cursor) q.set('cursor', cursor)
-  return apiFetch<SchedulesPage>(`/scheduled-jobs?${q}`)
+// The two optional list predicates, carried as one object so a call site cannot
+// transpose them: both are strings, and a positional pair of same-typed arguments
+// transposes silently.
+export interface ScheduleListFilters {
+  enabledKey: EnabledFilterKey
+  q: string
+}
+
+const NO_FILTERS: ScheduleListFilters = { enabledKey: 'all', q: '' }
+
+// One page (limit=50). cursor advances to the next page when present. `filters` is
+// trailing and defaulted so every existing call site compiles unchanged.
+//
+// Each parameter goes through URLSearchParams.set, which cannot repeat a key - a
+// repeated `enabled` or `q` is a 400 server-side.
+export function listSchedules(
+  sort: ScheduleSort,
+  cursor?: string,
+  filters: ScheduleListFilters = NO_FILTERS,
+): Promise<SchedulesPage> {
+  const params = new URLSearchParams({ sort, limit: '50' })
+  if (cursor) params.set('cursor', cursor)
+  const enabled = enabledParam(filters.enabledKey)
+  if (enabled !== undefined) params.set('enabled', enabled)
+  if (filters.q !== '') params.set('q', filters.q)
+  return apiFetch<SchedulesPage>(`/scheduled-jobs?${params}`)
+}
+
+// The summary strip's census. Fleet-wide for an admin, owner-scoped otherwise -
+// the client sends no scope and cannot influence it.
+//
+// IT ACCEPTS NO FILTERS. stats.total equals the list's total only when no filter
+// is active, which is why the strip's caption says so when one is.
+export interface ScheduleStats {
+  enabled: number
+  paused: number
+  total: number
+  failed_runs_24h: number
+  failing: number
+}
+
+// All five keys are always present and non-negative; the response carries no
+// omitempty, so a zero is a zero and never an absence.
+export function getScheduleStats(): Promise<ScheduleStats> {
+  return apiFetch<ScheduleStats>('/scheduled-jobs/stats')
 }
 
 // Submits a fresh job from the stored job_spec. Allowed for the owner or an admin.
