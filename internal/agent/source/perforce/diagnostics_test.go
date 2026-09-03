@@ -59,9 +59,13 @@ func TestClassifyP4Error(t *testing.T) {
 				return
 			}
 			if tc.wantSub == "" {
-				// Passthrough: implementation must return err unchanged (same pointer).
-				if !errors.Is(got, tc.in) {
-					t.Errorf("expected passthrough (errors.Is failed); got=%v in=%v", got, tc.in)
+				// IDENTITY, not errors.Is. errors.Is unwraps, so it holds for a
+				// rewrapped error too and cannot see a misclassification at all -
+				// which is the only thing the negative cases exist to catch. The
+				// default arm returns its argument, so the interface values
+				// compare equal.
+				if got != tc.in {
+					t.Errorf("expected the error back unchanged; got=%v (%T) in=%v (%T)", got, got, tc.in, tc.in)
 				}
 				return
 			}
