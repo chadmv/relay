@@ -22,3 +22,6 @@ to the surface list and measure at 320, 375 and 1280.
 
 ## Related
 - web/src/workers/WorkerTasksPanel.tsx, web/e2e/surfaces.ts
+
+## Notes
+Evidence from lane MF's human layout pass (PR #183): a populated worker detail page (three reservations, one enrolled agent) at 1280x900 has a document about 19 px taller than the viewport (scrollHeight 919), so the last panel's footer needs a scroll on a common monitor; at 320 the reservations table scrolls horizontally without clipping the name column.
