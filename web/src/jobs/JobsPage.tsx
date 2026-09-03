@@ -10,6 +10,7 @@ import { LANE_CHIP_KEY } from './lanes'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
+import { usePersistedChoice } from '../lib/usePersistedChoice'
 import type { JobSort, JobStatus } from './api'
 import { Eyebrow, GlassPanel } from '../components/holo'
 
@@ -24,25 +25,18 @@ export const FILTERS: { key: string; label: string; status: string }[] = [
 
 const DEFAULT_SORT: JobSort = '-created_at'
 
-type View = 'table' | 'lanes'
+// The runtime list and the type derive from one tuple, so a view added to one
+// cannot be missing from the other. usePersistedChoice validates a stored value
+// against this list, so a value outside it reads as the fallback.
+const VIEWS = ['table', 'lanes'] as const
+type View = (typeof VIEWS)[number]
 
 const VIEW_KEY = 'relay.jobs.view'
-
-// Anything but the literal 'lanes' means the table, so a missing key, a value
-// written by a future version, and a storage read that throws all land on the
-// shipped default.
-function loadView(): View {
-  try {
-    return localStorage.getItem(VIEW_KEY) === 'lanes' ? 'lanes' : 'table'
-  } catch {
-    return 'table'
-  }
-}
 
 export function JobsPage() {
   const [sort, setSort] = useState<JobSort>(DEFAULT_SORT)
   const [filter, setFilter] = useState('all')
-  const [view, setView] = useState<View>(loadView)
+  const [view, chooseView] = usePersistedChoice<View>(VIEW_KEY, VIEWS, 'table')
   const pager = useCursorPager()
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
@@ -68,16 +62,6 @@ export function JobsPage() {
   function pickSort(s: JobSort) {
     setSort(s)
     pager.resetPaging()
-  }
-
-  function chooseView(v: View) {
-    setView(v)
-    try {
-      localStorage.setItem(VIEW_KEY, v)
-    } catch {
-      // A storage failure must not take the click with it: the view still changes
-      // for this session, it just does not survive a reload.
-    }
   }
 
   function showAll(s: JobStatus) {
