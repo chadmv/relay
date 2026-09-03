@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
@@ -186,6 +188,42 @@ func remoteAddr(ctx context.Context) string {
 // small enough that "forever" is genuinely closed. Override with
 // RELAY_TASKLOG_TRAILING_WINDOW.
 const DefaultTrailingLogWindow = 15 * time.Minute
+
+// MaxAgentErrorMessageBytes bounds how much of an agent-supplied
+// TaskStatusUpdate.ErrorMessage the coordinator stores as a task-log line. The
+// field is a proto3 string: agent-controlled, and bounded on the wire only by
+// gRPC's receive limit.
+const MaxAgentErrorMessageBytes = 4096
+
+// errorMessageLogStream is the task_logs.stream value the coordinator's
+// synthesized prepare-failure line lands on. task_logs_stream_check (migration
+// 000019) admits only 'stdout' and 'stderr', so anything outside that pair fails
+// at the database rather than here.
+const errorMessageLogStream = "stderr"
+
+// sanitizeAgentErrorMessage makes an agent-supplied message storable in a
+// Postgres TEXT column. All three transforms are load-bearing: a NUL is legal in
+// a proto3 string and illegal in TEXT (SQLSTATE 22021), invalid UTF-8 is
+// rejected at Bind, and a cut at a byte offset can halve a multi-byte rune and
+// so manufacture the second failure out of the bound. Both are REAL errors
+// rather than pgx.ErrNoRows, which is what lets the caller's error arm stay
+// silent. Pinned by TestSanitizeAgentErrorMessage_BoundsAndValidity.
+func sanitizeAgentErrorMessage(msg string) string {
+	if strings.IndexByte(msg, 0) >= 0 {
+		msg = strings.ReplaceAll(msg, "\x00", "")
+	}
+	if !utf8.ValidString(msg) {
+		msg = strings.ToValidUTF8(msg, "")
+	}
+	if len(msg) <= MaxAgentErrorMessageBytes {
+		return msg
+	}
+	cut := MaxAgentErrorMessageBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut]
+}
 
 // DefaultRegistrationTimeout bounds how long a peer that has opened a stream may
 // go without sending its RegisterRequest before the server closes the stream.
