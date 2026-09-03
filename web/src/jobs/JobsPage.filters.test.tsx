@@ -80,17 +80,35 @@ test('the search box sends q on the table request', async () => {
 })
 
 test('a burst of keystrokes issues one request', async () => {
-  renderPage()
-  await screen.findByText('job-A')
-  await userEvent.type(screen.getByRole('searchbox'), 'etl')
-  await waitFor(() => expect(seen.some((p) => p.get('q') === 'etl')).toBe(true))
+  // Fake timers rather than a real 10ms debounce: a real clock under load
+  // makes the coalescing this test asserts jitter-sensitive, since userEvent's
+  // own per-keystroke delay and the debounce timer are then racing against
+  // whatever the test runner happens to be doing at that instant. Matches the
+  // debounce-window test below.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    const typist = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    renderWithQuery(
+      <MemoryRouter>
+        <JobsPage debounceMs={300} />
+      </MemoryRouter>,
+    )
+    await screen.findByText('job-A')
+    await typist.type(screen.getByRole('searchbox'), 'etl')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+    await waitFor(() => expect(seen.some((p) => p.get('q') === 'etl')).toBe(true))
 
-  // Asserted as the SET of non-empty q values rather than a request count: the
-  // table polls on its own interval, so a repeat of the same value is expected
-  // and a raw count would be timing-dependent. An identity-function debounce
-  // puts 'e' and 'et' on the wire, which this set cannot contain.
-  const values = new Set(seen.map((p) => p.get('q') ?? '').filter((v) => v !== ''))
-  expect([...values]).toEqual(['etl'])
+    // Asserted as the SET of non-empty q values rather than a request count: the
+    // table polls on its own interval, so a repeat of the same value is expected
+    // and a raw count would be timing-dependent. An identity-function debounce
+    // puts 'e' and 'et' on the wire, which this set cannot contain.
+    const values = new Set(seen.map((p) => p.get('q') ?? '').filter((v) => v !== ''))
+    expect([...values]).toEqual(['etl'])
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('searching after paging forward drops the cursor', async () => {
