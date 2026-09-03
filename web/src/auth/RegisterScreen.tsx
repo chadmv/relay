@@ -1,15 +1,19 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { ApiError, apiFetch } from '../lib/api'
+import { ApiError } from '../lib/api'
 import { GlassPanel, Eyebrow, PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
-import type { ConfigResponse } from '../lib/types'
+import { useServerConfig } from '../admin/server/useServerConfig'
 import { useAuth } from './AuthProvider'
 
 export function RegisterScreen() {
   const { register } = useAuth()
-  const [selfRegister, setSelfRegister] = useState<boolean | null>(null)
+  const config = useServerConfig()
+  // FAIL CLOSED on error: the invite field appears. The admin server tab reads
+  // the same query and renders the failure instead, which is why useServerConfig
+  // returns the raw query state and fabricates no default of its own.
+  const selfRegister = config.isError ? false : (config.data?.allow_self_register ?? null)
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [invite, setInvite] = useState('')
@@ -17,12 +21,6 @@ export function RegisterScreen() {
   const [error, setError] = useState<string | null>(null)
   const [emailExists, setEmailExists] = useState(false)
   const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    apiFetch<ConfigResponse>('/config')
-      .then((c) => setSelfRegister(c.allow_self_register))
-      .catch(() => setSelfRegister(false))
-  }, [])
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()

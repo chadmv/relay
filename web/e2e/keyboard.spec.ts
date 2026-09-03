@@ -251,3 +251,169 @@ test.describe('job-detail task selection @webkit', () => {
     expect(outline.color, `outline-color was "${outline.color}", not the accent colour`).toBe('rgb(61, 208, 247)')
   })
 })
+
+// WHY A BROWSER FOR THIS. jsdom performs no layout: every getBoundingClientRect
+// is zero and no stylesheet is loaded, so it can say the ARIA value moved and can
+// say nothing about whether a column moved with it, or whether a focus outline
+// resolves to real pixels rather than a Tailwind class string.
+//
+// THE TAG IS LOAD-BEARING, as in the describes above: playwright.config.ts gives
+// the webkit project grep: /@webkit/, so an untagged describe runs in chromium
+// only.
+test.describe('job-detail split resizer @webkit', () => {
+  const SEPARATOR = 'Resize the pipeline and task detail panes'
+  // The left pane's own scroll wrapper. Its accessible name is DERIVED from the
+  // table's label, so this locator also pins that the name has not drifted.
+  const LEFT_GROUP = 'Tasks, scrolls horizontally'
+
+  test('a key press moves a real column', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const sep = page.getByRole('separator', { name: SEPARATOR })
+    await expect(sep).toHaveCount(1)
+    const left = page.getByRole('group', { name: LEFT_GROUP })
+    await expect(left).toHaveCount(1)
+    const before = await left.evaluate((el) => el.getBoundingClientRect().width)
+
+    // A REAL Tab press, not .focus(), matching this file's convention: only a
+    // real press can say the tab stop is reachable.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    let reached = false
+    for (let i = 0; i < 120 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await sep.evaluate((el) => el === document.activeElement)
+    }
+    expect(reached, `Tab never reached the split separator within 120 presses`).toBe(true)
+
+    for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowRight')
+
+    // BOTH halves. Updating the ARIA value without applying the width, or the
+    // reverse, passes exactly one of these.
+    await expect(sep).toHaveAttribute('aria-valuenow', '65')
+    await expect
+      .poll(() => left.evaluate((el) => el.getBoundingClientRect().width), {
+        message: 'aria-valuenow moved but the tasks column did not',
+      })
+      .toBeGreaterThan(before + 20)
+  })
+
+  // COMPUTED STYLE, NOT A SCREENSHOT DIFF. Same shape as the task-selection
+  // describe's own outline test: getComputedStyle reads what the cascade
+  // actually resolved on THIS element in a real layout engine, discriminating
+  // a positive-or-default outline (the browser's own, often clipped by an
+  // ancestor) from the app's accent one painted inside the box.
+  test('the focused separator gets the accent outline, not the browser default', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const sep = page.getByRole('separator', { name: SEPARATOR })
+    await expect(sep).toHaveCount(1)
+
+    // A REAL Tab press, not .focus(): a programmatic focus() is not guaranteed
+    // to put an element into :focus-visible in every engine, and
+    // :focus-visible is exactly what the focus-visible: variant gates on.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    let reached = false
+    for (let i = 0; i < 120 && !reached; i++) {
+      await page.keyboard.press('Tab')
+      reached = await sep.evaluate((el) => el === document.activeElement)
+    }
+    expect(reached, `Tab never reached the split separator within 120 presses`).toBe(true)
+
+    const outline = await sep.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return {
+        style: s.outlineStyle,
+        offset: s.outlineOffset,
+        width: s.outlineWidth,
+        color: s.outlineColor,
+        focusVisible: el.matches(':focus-visible'),
+      }
+    })
+    expect(outline.focusVisible, 'element is focused but not :focus-visible').toBe(true)
+    expect(outline.style, 'outline-style is none while focused - no ring at all').not.toBe('none')
+    expect(parseFloat(outline.offset), `outline-offset was "${outline.offset}", not negative`).toBeLessThan(0)
+    expect(outline.width, `outline-width was "${outline.width}", not 2px`).toBe('2px')
+    // The exact accent RGB, not merely "not transparent" - see the sibling
+    // outline test above for why a not-transparent check would pass on either
+    // engine's own unstyled fallback and miss a dropped colour variant.
+    expect(outline.color, `outline-color was "${outline.color}", not the accent colour`).toBe('rgb(61, 208, 247)')
+  })
+
+  test('a real drag moves and clamps the split', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const sep = page.getByRole('separator', { name: SEPARATOR })
+    const left = page.getByRole('group', { name: LEFT_GROUP })
+    const before = await left.evaluate((el) => el.getBoundingClientRect().width)
+
+    const box = await sep.boundingBox()
+    expect(box, 'the separator has no box - is it hidden at this viewport?').not.toBeNull()
+    const cx = box!.x + box!.width / 2
+    const cy = box!.y + box!.height / 2
+
+    await page.mouse.move(cx, cy)
+    await page.mouse.down()
+    await page.mouse.move(cx + 120, cy, { steps: 10 })
+    await page.mouse.up()
+
+    await expect
+      .poll(() => left.evaluate((el) => el.getBoundingClientRect().width), {
+        message: 'a rightward drag did not grow the left pane',
+      })
+      .toBeGreaterThan(before + 20)
+
+    // Far past the edge: the clamp holds on the POINTER path, which is a
+    // different code path from the key path above.
+    const box2 = await sep.boundingBox()
+    await page.mouse.move(box2!.x + box2!.width / 2, box2!.y + box2!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(-500, box2!.y + box2!.height / 2, { steps: 10 })
+    await page.mouse.up()
+
+    await expect(sep).toHaveAttribute('aria-valuenow', '30')
+    const clamped = await left.evaluate((el) => el.getBoundingClientRect().width)
+    expect(clamped).toBeLessThan(before)
+  })
+
+  test('the split survives a reload', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+
+    const sep = page.getByRole('separator', { name: SEPARATOR })
+    await sep.focus()
+    for (let i = 0; i < 5; i++) await page.keyboard.press('ArrowLeft')
+    await expect(sep).toHaveAttribute('aria-valuenow', '45')
+
+    await page.reload()
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+    await expect(page.getByRole('separator', { name: SEPARATOR })).toHaveAttribute(
+      'aria-valuenow',
+      '45',
+    )
+  })
+})
+
+// A SEPARATE DESCRIBE because test.use is per describe. Below the breakpoint the
+// panes stack, so a separator would resize nothing and would be a dead tab stop.
+// No jsdom test can see this: no stylesheet is loaded there, so the element is in
+// the accessibility tree at every width.
+test.describe('job-detail split at a narrow viewport @webkit', () => {
+  test.use({ viewport: { width: 375, height: 900 } })
+
+  test('no separator where there is no split', async ({ page }) => {
+    const seed = readSeed()
+    await page.goto(`/jobs/${seed.jobId}`)
+    // Positive controls: the page rendered, and it rendered its own data. A bare
+    // count-of-zero passes equally on a page that failed to load.
+    await expect(page.getByRole('heading', { name: seed.jobName, level: 1 })).toBeVisible()
+    await expect(page.getByRole('table', { name: 'Tasks' })).toHaveCount(1)
+    await expect(page.getByRole('separator')).toHaveCount(0)
+  })
+})

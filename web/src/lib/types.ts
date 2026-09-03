@@ -21,6 +21,13 @@ export interface User {
 export interface LoginResponse {
   token: string
   expires_at: string
+  // authResponse.User has no omitempty (internal/api/auth.go), so a current
+  // server always sends it, and it is exactly the GET /v1/users/me body. Optional
+  // here because the SPA must still sign in against a server that does not send
+  // it: the binary serving this bundle is not necessarily the binary answering
+  // it, and the failure mode of assuming otherwise is a signed-in session with a
+  // null user.
+  user?: User
 }
 
 export interface ConfigResponse {

@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import type { CSSProperties, KeyboardEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../lib/api'
 import { Button } from '../components/Button'
@@ -13,6 +14,8 @@ import { JobActions } from './JobActions'
 import { useJob } from './useJob'
 import { useTaskLogStream } from './useTaskLogStream'
 import { isTerminalTask } from './taskStatus'
+import { SPLIT_MAX, SPLIT_MIN, SPLIT_STEP } from './splitWidth'
+import { useSplitWidth } from './useSplitWidth'
 import type { TaskDetail } from './api'
 
 type Tab = 'spec' | 'log'
@@ -30,6 +33,8 @@ export function JobDetailPage() {
   const { data: job, error, isLoading, refetch } = useJob(id)
   const [tab, setTab] = useState<Tab>('spec')
   const [pickedTaskId, setPickedTaskId] = useState<string>('')
+  const splitRef = useRef<HTMLDivElement>(null)
+  const split = useSplitWidth(splitRef)
 
   const tasks = job?.tasks ?? []
 
@@ -93,6 +98,23 @@ export function JobDetailPage() {
   const queued = tasks.filter((t) => t.status === 'pending').length
   const chips = Object.entries(job.labels ?? {}).map(([k, v]) => (v ? `${k}=${v}` : k))
 
+  // Left and Right only. Up and Down are deliberately unbound: this separator is
+  // vertical and announces that, so a cross-axis binding would make the announced
+  // orientation a lie. preventDefault runs only for a key this handles, so an
+  // unhandled key still scrolls the page normally.
+  function onSeparatorKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    let next: number | null = null
+    if (e.key === 'ArrowLeft') next = split.width - SPLIT_STEP
+    else if (e.key === 'ArrowRight') next = split.width + SPLIT_STEP
+    else if (e.key === 'Home') next = SPLIT_MIN
+    else if (e.key === 'End') next = SPLIT_MAX
+    if (next === null) return
+    e.preventDefault()
+    split.setWidth(next)
+    // One press is one gesture, so it commits.
+    split.persist()
+  }
+
   return (
     <div className="flex flex-col gap-5">
       {/* Breadcrumb + header row: back link, id, name, inline status; the reserved
@@ -132,10 +154,21 @@ export function JobDetailPage() {
         )}
       </div>
 
-      {/* Body: fixed 55/45 split. The accessible drag-resizer is a filed follow-up:
-          docs/backlog/idea-2026-07-01-job-detail-resizable-split.md. */}
-      <div className="flex flex-col gap-5 lg:flex-row">
-        <div className="flex flex-col gap-4 lg:w-[55%]">
+      {/* The split's percentage reaches CSS as a custom property on this
+          container, consumed by breakpoint-prefixed arbitrary-value width
+          utilities written as literals on the two panes below. Two consequences,
+          both deliberate: the utilities are literals so Tailwind v4's static scan
+          emits them, and the value applies only at and above the breakpoint,
+          which an inline width could not express. Both panes are sized off the
+          one property - the right one as the complement - so the pair sums to the
+          same 100 percent basis the fixed pair did, and a reader with nothing
+          persisted sees the same layout as before. */}
+      <div
+        ref={splitRef}
+        className="flex flex-col gap-5 lg:flex-row"
+        style={{ '--relay-split': `${split.width}%` } as CSSProperties}
+      >
+        <div className="flex flex-col gap-4 lg:w-[var(--relay-split)]">
           {/* Derived progress strip: done/total + active, status-toned bar. Kept as
               an inline per-status bar (ProgressBar has only accent/muted tones). */}
           <div className="flex flex-col gap-2">
@@ -164,7 +197,27 @@ export function JobDetailPage() {
           <TasksTable tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setPickedTaskId} />
         </div>
 
-        <div className="flex flex-col lg:w-[45%]">
+        {/* Hidden below the breakpoint, where the panes stack and there is
+            nothing to resize: a separator that resizes nothing is a dead control
+            and a dead tab stop. */}
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-orientation="vertical"
+          aria-label="Resize the pipeline and task detail panes"
+          aria-valuenow={split.width}
+          aria-valuemin={SPLIT_MIN}
+          aria-valuemax={SPLIT_MAX}
+          aria-valuetext={`pipeline ${split.width}%, task detail ${100 - split.width}%`}
+          title="Drag to resize"
+          onPointerDown={split.onPointerDown}
+          onKeyDown={onSeparatorKeyDown}
+          className="relative hidden w-1.5 shrink-0 cursor-col-resize self-stretch focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent lg:block"
+        >
+          <span className="absolute left-1/2 top-1/2 h-9 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded bg-accent/30" />
+        </div>
+
+        <div className="flex flex-col lg:w-[calc(100%_-_var(--relay-split))]">
           {/* The name carries the selected task, so a user moving to Spec or Log hears
               whose spec and log they are about to read. React escapes attribute
               values and an aria-label is not parsed as markup, so a hostile task

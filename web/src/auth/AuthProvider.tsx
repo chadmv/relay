@@ -59,6 +59,31 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
+// The body's user is used only when it is an object whose id and created_at are
+// non-empty strings and whose is_admin and email carry their real wire types.
+// id is what every downstream identity comparison uses; created_at is what the
+// profile header renders - an absent one becomes an invalid date rendered as
+// text, a silently wrong page rather than an error; is_admin gates privileged UI
+// by truthiness across the app - an absent value is undefined, which is falsy,
+// so it silently demotes an admin for the session rather than erroring; email
+// is rendered as identity in the same places created_at is.
+//
+// The guard's shape is the defect's shape. The failure it exists for is an ABSENT
+// or mistyped field, so it tests for that; it does not test for a network error
+// or a non-2xx, both of which apiFetch has already thrown before this runs.
+// Anything else falls back to /users/me, whose worst case is the round trip we
+// have today.
+function usableUser(u: unknown): u is User {
+  if (typeof u !== 'object' || u === null) return false
+  const r = u as Record<string, unknown>
+  return (
+    typeof r.id === 'string' && r.id !== '' &&
+    typeof r.created_at === 'string' && r.created_at !== '' &&
+    typeof r.is_admin === 'boolean' &&
+    typeof r.email === 'string' && r.email !== ''
+  )
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<Status>('loading')
   const [user, setUser] = useState<User | null>(null)
@@ -140,8 +165,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function applyAuth(res: LoginResponse) {
     setToken(res.token)
-    const me = await apiFetch<User>('/users/me')
-    setUser(me)
+    const me = usableUser(res.user) ? res.user : await apiFetch<User>('/users/me')
+    applyUser(me)
     setStatus('authenticated')
   }
 

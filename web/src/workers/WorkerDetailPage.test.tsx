@@ -43,6 +43,7 @@ function metrics(over: Record<string, unknown> = {}) {
 // Counts the requests the page makes to the tasks route. renderDetail owns the
 // only handler for it, so a test can assert the poll never started.
 let taskRequests = 0
+let reservationRequests = 0
 
 
 // Every test needs a handler for /v1/workers/:id/tasks: the page mounts
@@ -65,6 +66,7 @@ function renderDetail(
   isAdmin: boolean,
   tasks: Record<string, unknown> = { items: [], next_cursor: '', total: 0 },
   tasksStatus = 200,
+  reservations: Record<string, unknown> = { items: [], next_cursor: '', total: 0 },
 ) {
   setToken('test-token')
   server.use(
@@ -74,6 +76,13 @@ function renderDetail(
     http.get(`/v1/workers/${ID}/tasks`, () => {
       taskRequests++
       return HttpResponse.json(tasks, { status: tasksStatus })
+    }),
+    // Registered here rather than per test: the panel mounts on every admin
+    // render and setup.ts errors on an unhandled request. Counting names the
+    // route, so "never fetched" is an assertion rather than an inference.
+    http.get('/v1/reservations', () => {
+      reservationRequests++
+      return HttpResponse.json(reservations)
     }),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -94,6 +103,7 @@ function renderDetail(
 afterEach(() => {
   clearToken()
   taskRequests = 0
+  reservationRequests = 0
 })
 
 test('renders the breadcrumb, worker name, and identity sub-line', async () => {
@@ -178,6 +188,24 @@ test('a 404 worker stops the tasks and metrics polls', async () => {
   expect(metricCalls).toBe(0)
 })
 
+test('a 404 worker mounts no reservations query', async () => {
+  // The reservations hook sits BELOW the not-found early return and inside the
+  // admin branch. Hoisting it up to the page's other hooks would query a worker
+  // the page has already given up on.
+  server.use(
+    http.get(`/v1/workers/${ID}`, () =>
+      HttpResponse.json({ error: 'worker not found' }, { status: 404 }),
+    ),
+  )
+  server.use(
+    http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics({ samples: [] }))),
+  )
+  renderDetail(true)
+  expect(await screen.findByText('Worker not found.')).toBeInTheDocument()
+  await new Promise((r) => setTimeout(r, 50))
+  expect(reservationRequests).toBe(0)
+})
+
 test('the Slots progress bar clamps when used exceeds max_slots', async () => {
   // max_slots is a dispatcher input, not a database constraint: lowering it via
   // PATCH requeues nothing, so used > max is a reachable state and the fill must
@@ -209,22 +237,22 @@ test('the GPU KPI card renders no fabricated telemetry sub-string', async () => 
   expect(screen.queryByText(/nvidia-smi/i)).not.toBeInTheDocument()
 })
 
-test('the reservations panel contains no fabricated reservation rows', async () => {
+test('an empty reservations page renders a third table and no fabricated row', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
   renderDetail(true)
-  expect(await screen.findByText('no per-worker reservation lookup yet')).toBeInTheDocument()
-  // Identified by accessible name rather than asserted absent. Both real tables
-  // on an admin's page are empty here, so each contributes only its header row.
-  // A fabricated reservations table would show up as a third table or as an
-  // extra row.
+  expect(await screen.findByText('No reservation targets this worker.')).toBeInTheDocument()
+  // Identified by accessible name rather than asserted absent. All three tables
+  // on an admin's page are empty here, so each contributes only its header row;
+  // a fabricated row shows up as a fourth.
   const tables = screen.getAllByRole('table')
   expect(tables.map((el) => el.getAttribute('aria-label')).sort()).toEqual([
     'Current tasks',
+    'Reservations',
     'Source workspaces',
   ])
-  expect(screen.getAllByRole('row')).toHaveLength(2)
+  expect(screen.getAllByRole('row')).toHaveLength(3)
 })
 
 test('renders CPU/memory telemetry charts', async () => {
@@ -310,7 +338,7 @@ test('shows a generic error with a Retry button for a non-404 failure', async ()
   expect(await screen.findByRole('button', { name: /retry/i })).toBeInTheDocument()
 })
 
-test('admins see the action bar, the Source workspaces panel, and the reservations placeholder', async () => {
+test('admins see the action bar, the Source workspaces panel, and the reservations panel', async () => {
   server.use(http.get(`/v1/workers/${ID}`, () => HttpResponse.json(WORKER)))
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   server.use(
@@ -325,7 +353,7 @@ test('admins see the action bar, the Source workspaces panel, and the reservatio
   expect(screen.getByRole('button', { name: 'Disable' })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Revoke' })).toBeInTheDocument()
   expect(await screen.findByText('ws-a4f2')).toBeInTheDocument()
-  expect(screen.getByText('no per-worker reservation lookup yet')).toBeInTheDocument()
+  expect(await screen.findByRole('table', { name: 'Reservations' })).toBeInTheDocument()
 })
 
 test('every table on the page is named by its own panel title', async () => {
@@ -333,14 +361,14 @@ test('every table on the page is named by its own panel title', async () => {
   server.use(http.get(`/v1/workers/${ID}/metrics`, () => HttpResponse.json(metrics())))
   server.use(http.get(`/v1/workers/${ID}/workspaces`, () => HttpResponse.json([])))
   renderDetail(true)
-  await screen.findByText('no per-worker reservation lookup yet')
+  await screen.findByText('No reservation targets this worker.')
 
   const tables = screen.getAllByRole('table')
   // The count assertion is not decoration. Without it the loop below passes
   // vacuously the moment a panel stops rendering, or the moment Panel stops
   // publishing the attribute - which is the same failure the Panel unit test
   // catches from the other side, deliberately.
-  expect(tables).toHaveLength(2)
+  expect(tables).toHaveLength(3)
   for (const table of tables) {
     const panel = table.closest('[data-panel-title]')
     expect(panel).not.toBeNull()
@@ -368,6 +396,7 @@ test('non-admins see none of the action controls and never fetch workspaces', as
   expect(screen.queryByRole('button', { name: 'Revoke' })).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: /evict/i })).not.toBeInTheDocument()
   // Admin-only right-column pieces are hidden.
-  expect(screen.queryByText('no per-worker reservation lookup yet')).not.toBeInTheDocument()
+  expect(screen.queryByRole('table', { name: 'Reservations' })).not.toBeInTheDocument()
+  expect(reservationRequests).toBe(0)
   expect(screen.queryByText(/Long-lived agent token/)).not.toBeInTheDocument()
 })

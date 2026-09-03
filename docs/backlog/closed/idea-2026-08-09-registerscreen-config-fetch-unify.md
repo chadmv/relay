@@ -1,7 +1,9 @@
 ---
 title: "Move RegisterScreen onto useServerConfig and give its config fetch a cancellation guard"
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: deferred review finding from the admin Server/overview tab (2026-08-09)
@@ -71,3 +73,6 @@ Two issues:
 - Retro: `docs/retros/2026-08-09-admin-server-overview-tab.md` (Deferred Findings #1)
 - Spec that deliberately deferred it:
   `docs/superpowers/specs/2026-08-09-admin-server-overview-tab.md`
+
+## Resolution
+Shipped in lane MF of the 2026-09-02 web-frontend batch: RegisterScreen reads /v1/config through useServerConfig; the inline effect and its unguarded post-await state write are gone. The two consumers keep their own policies (fail-closed false at sign-up, a visible error in the admin tab) and the fail-closed arm got the test the acceptance criterion assumed already existed; a pending config fetch renders neither the form nor a premature guess.

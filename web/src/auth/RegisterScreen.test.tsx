@@ -13,7 +13,10 @@ afterEach(() => clearToken())
 
 function renderRegister() {
   return render(
-    <QueryClientProvider client={new QueryClient()}>
+    // retry: false. The added test answers /config with a 500, and a bare
+    // QueryClient retries three times with backoff, which would make it slow and
+    // timing-sensitive. Inert for the tests that answer /config successfully.
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <MemoryRouter>
         <AuthProvider>
           <RegisterScreen />
@@ -81,4 +84,31 @@ test('the display name field takes focus once the register form renders', async 
     screen.getByRole('heading', { name: 'Create your relay account', level: 1 }),
   ).toBeInTheDocument()
   expect(document.activeElement).toBe(name)
+})
+
+// The fail-closed policy: a /config failure must show the INVITE field, because
+// the server enforces the invite requirement regardless, so a wrong client hint
+// is a nuisance and never a bypass. Discriminating because the opposite policy
+// (deriving true on error) and a query that never leaves pending both render a
+// page with no invite field on exactly this input.
+test('a failed config fetch shows the invite field', async () => {
+  server.use(
+    http.get('/v1/config', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+  )
+  renderRegister()
+  expect(await screen.findByLabelText(/invite token/i)).toBeInTheDocument()
+})
+
+// Mutation-proven gap: `config.data?.allow_self_register ?? null` mutated to
+// `?? true` survives on the invite-token assertion alone, because a true guess
+// ALSO hides the invite field - just for the wrong reason (self-register looks
+// enabled) rather than the right one (nothing has rendered yet). The heading is
+// the real discriminator: the correct code renders the blank placeholder while
+// /config is in flight, so neither the form nor its invite field exists; the
+// mutant renders the full form immediately, guessing open registration.
+test('a pending config fetch renders neither the form nor a premature guess', async () => {
+  server.use(http.get('/v1/config', () => new Promise(() => {})))
+  renderRegister()
+  expect(screen.queryByRole('heading', { name: 'Create your relay account' })).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/invite token/i)).not.toBeInTheDocument()
 })

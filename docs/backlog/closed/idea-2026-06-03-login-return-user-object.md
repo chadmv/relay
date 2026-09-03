@@ -1,7 +1,9 @@
 ---
 title: Return the user object from login/register to skip the /users/me round-trip
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-06-03
 priority: low
 source: web front end auth slice
@@ -28,3 +30,6 @@ fresh login. `AuthProvider` also gained an `applyUser(u: User)` method for exact
 - Touches the same `applyAuth` path, and must not be done blind to it:
   [[bug-2026-08-13-cross-generation-401-clears-a-new-session]] - a stale 401 landing right after
   this path stores a new token is what clears it
+
+## Resolution
+Shipped in lane MF of the 2026-09-02 web-frontend batch: applyAuth applies the login body's user behind a shape guard (non-empty id, created_at and email; boolean is_admin) and falls back to /v1/users/me when the body lacks it or it is malformed, so an older server still works; /users/me stays the identity source on reload. The discriminating test counts zero identity requests on a good body. The item's five-key user shape was refuted: the wire carries archived_at.
