@@ -70,7 +70,20 @@
    backlog item idea-2026-08-09-native-dialog-element-reconsideration. Adopting
    it later edits this entry rather than invalidating the block.
 
-   Completeness of the ENTRY lines is enforced by
+   THE CHECK IS OVER (FILE, VALUE) PAIRS, NOT FULL COMPLETENESS. Every
+   stacking-order value found in a shipped file must have an ENTRY line naming
+   that file for that value, and every ENTRY line must name a value still
+   present in the tree. The symbol and context columns are prose for the
+   reader and are not machine-checked - an ENTRY line with the right file and
+   value but the wrong symbol or context still satisfies the check. A new
+   overlay at a value the same file already carries an ENTRY for also passes
+   unnoticed.
+
+   KNOWN GAP: a stacking order set through an inline style, or declared
+   directly in a stylesheet rule rather than a Tailwind utility class, is
+   neither scanned nor documentable by this mechanism today.
+
+   The pair check is enforced by
    components/dialog/dialogShellIsSole.guard.test.ts.
    LAYERING SCALE - end */
 
