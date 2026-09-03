@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"relay/internal/schedrunner"
@@ -271,6 +273,55 @@ func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, 
 	for i := range items {
 		items[i].OwnerEmail = emailByID[items[i].OwnerID]
 	}
+}
+
+// scheduleFilters carries the two optional GET /v1/scheduled-jobs predicates in
+// the exact types the generated sqlc Params fields use, so a call site spreads
+// them without conversion. The zero value means "no filter active": a nil Q and
+// a nil Enabled each send SQL NULL, which the predicates read as "match
+// everything".
+type scheduleFilters struct {
+	Enabled *bool
+	Q       *string
+}
+
+// scheduleFilterParams are the two query parameters parseScheduleFilters reads.
+// handleListScheduledJobs passes them to rejectRepeatedParams before calling in.
+var scheduleFilterParams = []string{"enabled", "q"}
+
+// parseScheduleFilters produces the two optional GET /v1/scheduled-jobs
+// predicates. On invalid input it writes the response itself and returns
+// ok=false. The caller spreads the result into every list and count Params
+// struct on its path; a call site that omits a field disables that filter for
+// its arm alone, with no error, which is what
+// TestListScheduledJobs_FilterArms_FirstPage enumerates.
+//
+// qs is the query string parsePage already parsed and arity-checked. Taking it
+// as an argument rather than re-reading r.URL.Query() keeps one parse per
+// request: r.URL.Query() discards percent-decoding errors, so a second parse
+// can disagree with the one that was validated.
+func parseScheduleFilters(w http.ResponseWriter, qs url.Values) (scheduleFilters, bool) {
+	var f scheduleFilters
+
+	q, ok := parseFilterQ(w, qs)
+	if !ok {
+		return scheduleFilters{}, false
+	}
+	f.Q = q
+
+	// A tri-state, unlike the jobs list's ?mine=: enabled=false is the real
+	// request "only paused schedules", so it must produce a pointer to false and
+	// never be folded into absent.
+	if raw := qs.Get("enabled"); raw != "" {
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid enabled; expected true or false")
+			return scheduleFilters{}, false
+		}
+		f.Enabled = &b
+	}
+
+	return f, true
 }
 
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
