@@ -1018,3 +1018,66 @@ Calls a human might reasonably make the other way.
 8. **An options object instead of appended parameters** (Decision 16), accepting
    the edit to two tests this lane's gate protects. Cleaner code now, a weaker
    claim that the hooks' existing behaviour is unchanged.
+
+## Amended after review
+
+A combined review of the implemented lane reproduced structural defects in
+jsdom that this spec's design did not anticipate. Three Decisions above are
+superseded by the fix; each is stated here rather than edited in place, so the
+original reasoning stays legible next to what replaced it.
+
+**Decision 8 (the time anchor and the refresh cadence) is superseded.** The
+chosen design - no `refetchInterval`, a `useNow`-driven render tick whose
+advance changed the query key - had a liveness bug the spec did not predict:
+every tick minted a new key, so a walk slower than one `ANCHOR_STEP_MS` never
+completed. The tick abandoned the in-flight query, its consumed signal
+aborted, and the next tick restarted the walk at page 1 - forever, for any
+walk slower than a tick. The key is now STABLE per window and filters; the
+anchor is computed once, inside the queryFn, at the moment each fetch starts,
+and travels back out on the walk's own result so the caption always describes
+the rows it looks at. The refresh is now `refetchInterval: ANCHOR_STEP_MS`,
+which TanStack does not fire while a fetch is already in flight for the same
+key - the mechanism this spec reached for (a ticking key) is exactly the one
+that could not deliver the property the spec wanted (a live, un-abandoned
+walk). The staleness budget itself is unchanged: `ANCHOR_STEP_MS` is still the
+whole number, now stated as one interval plus however long the refresh's walk
+takes, rather than as "how often the query key moves."
+
+**Decision 15 (one error for the whole Timeline) is narrowed.** The design
+was right that a partial walk under the window's own label is a chart that
+lies, and that stays true. What the design did not distinguish is a REFRESH
+failing versus a FIRST fetch failing: `error: query.data ? null : ...`
+suppressed the error field whenever any data - including a `keepPreviousData`
+placeholder - was present, so a failed background refresh was invisible: the
+caption kept describing bounds as though the fetch had succeeded. The error
+is no longer suppressed by data's presence. When rows exist alongside an
+error, the view now shows both - the rows, plus a "Refresh failed, showing
+results as of `<untilIso>`" line and Retry - rather than either the full rows
+with no failure indicator or the full error block with no rows. The full
+error block (no rows, one message, one Retry) is unchanged for the case the
+original Decision was written for: a first fetch, or every attempt so far,
+failing. Getting the stale rows to actually stay on screen needed an
+additional mechanism the review did not ask for by name: `keepPreviousData`
+turned out to fill `query.data` only while the new key's fetch is PENDING, not
+once it definitively resolves to an error, so the hook now also keeps its own
+`lastSuccess` reference to the last walk that returned data, independent of
+TanStack's placeholder lifecycle.
+
+**Decision 5 (cursor reset on the raw keystroke) is extended, not reversed.**
+The spec's choice - reset in the change handler, on the raw value, never in an
+effect on the debounced value - is unchanged and still correct for the reason
+given: an effect on the debounced value fires after the render that already
+issued a query pairing the new filter with the old cursor. What the spec did
+not consider is the window BETWEEN a keystroke and the debounce landing: the
+per-keystroke reset already drops the cursor immediately, but the QUERY still
+reads the old debounced value until the timer fires, so a click on next/prev
+inside that window can mint a new cursor - one belonging to whatever filters
+were active a moment ago - and the debounced value then carries it into a
+request for the filters that are about to become current. The fix adds a
+second, narrower mechanism on top of the original one rather than replacing
+it: next/prev are now disabled for the width of that window, and a debounced-
+value-change effect resets the pager as a second line of defence. Extracted to
+`web/src/lib/useDebouncedPagingGuard.ts` as a shared shape, since the same
+race applies wherever a page owns both a debounced filter and a cursor pager -
+the Schedules page's own search box, when it lands, is expected to reuse it
+rather than reintroduce the race independently.
