@@ -29,12 +29,18 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
   const focusAfterUpdate = useFocusAfterUpdate()
 
   // Precomputed once per render and cached across renders that leave every
-  // task's id, position and name untouched - the only three inputs taskLabel
-  // reads. An edit to timeout, retries, env, requires or commands changes
-  // none of them, so this key (and so depOptions itself) stays the SAME
-  // reference, which is what lets MemoTaskRowFields bail out for every row
-  // but the one actually edited. A rename does change it, on purpose: every
-  // row's dependency picker can be showing the renamed task as an option.
+  // task's id, position and name untouched. An edit to timeout, retries, env,
+  // requires or commands changes none of them, so this key (and so
+  // depOptions itself) stays the SAME reference, which is what lets
+  // MemoTaskRowFields bail out for every row but the one actually edited. A
+  // rename does change it, on purpose: every row's dependency picker can be
+  // showing the renamed task as an option.
+  //
+  // id is in the key for a reason position and name alone do not cover: a
+  // remove followed by an add at the same position can leave position and
+  // name unchanged (both blank), while the row underneath is a different one
+  // entirely. Without id, depOptions would keep the removed row's id at that
+  // position instead of picking up the new row's.
   const depKey = state.tasks.map((t, i) => `${t.id}:${i}:${t.name}`).join('|')
   const depOptions = useMemo<DepOption[]>(
     () => state.tasks.map((t, i) => ({ id: t.id, label: taskLabel(t, i) })),
