@@ -233,9 +233,10 @@ test.describe('job-detail task selection @webkit', () => {
         focusVisible: el.matches(':focus-visible'),
       }
     })
-    // Both an offset check AND a width/colour check: stripping outline-2 or
-    // focus-visible:outline-accent alone left the offset check green before -
-    // the offset survives even at the browser's own default width and colour.
+    // Both an offset check AND a width/colour check: stripping either the
+    // width utility or the colour utility alone left the offset check green
+    // before - the offset survives even at the browser's own default width
+    // and colour.
     expect(outline.focusVisible, 'element is focused but not :focus-visible').toBe(true)
     expect(outline.style, 'outline-style is none while focused - no ring at all').not.toBe('none')
     expect(parseFloat(outline.offset), `outline-offset was "${outline.offset}", not negative`).toBeLessThan(0)
@@ -244,9 +245,9 @@ test.describe('job-detail task selection @webkit', () => {
     // outline-color the two engines disagree on the fallback (chromium:
     // rgb(16, 16, 16); webkit: rgb(237, 233, 254), the page's own fg colour) -
     // both are opaque, so a "not transparent" check would pass against either
-    // fallback and miss the missing focus-visible:outline-accent. --color-accent
-    // (#3dd0f7) resolves to rgb(61, 208, 247) in both engines when the class is
-    // present.
+    // fallback and miss the missing focus-visible variant that sets the ring's
+    // colour. --color-accent (#3dd0f7) resolves to rgb(61, 208, 247) in both
+    // engines when that variant is present.
     expect(outline.color, `outline-color was "${outline.color}", not the accent colour`).toBe('rgb(61, 208, 247)')
   })
 })
