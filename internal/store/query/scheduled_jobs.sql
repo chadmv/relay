@@ -9,25 +9,69 @@ RETURNING *;
 SELECT * FROM scheduled_jobs WHERE id = $1;
 
 -- name: ListScheduledJobsPage :many
-SELECT * FROM scheduled_jobs
+-- The two optional predicates below are sqlc.narg: a NULL argument means "no
+-- filter". A Params field left at its zero value therefore disables that filter
+-- for this statement while the other list arms keep filtering, silently and with
+-- no error, which is what parseScheduleFilters plus a single spread in
+-- handleListScheduledJobs exists to prevent.
+--
+-- The users join can neither drop nor duplicate a row: scheduled_jobs.owner_id
+-- is NOT NULL REFERENCES users(id) and users.id is the primary key. Only sj.* is
+-- selected, so sqlc still emits []ScheduledJob and the response mapper, the
+-- row-key functions and the arity test are all untouched.
+--
+-- strpos, not ILIKE: an ILIKE pattern built by concatenating percent signs
+-- around the needle makes user input a pattern, so a user typing % matches every
+-- row. strpos has no metacharacters and nothing to escape. The cost is that a
+-- pg_trgm index can never serve it; adopting one means rewriting this predicate
+-- as escaped ILIKE everywhere, which the arm-enumerating tests cover.
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
 WHERE (sqlc.arg(cursor_set)::bool = FALSE
-       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
-ORDER BY created_at DESC, id DESC
+       OR (sj.created_at, sj.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.created_at DESC, sj.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountScheduledJobs :one
-SELECT COUNT(*) FROM scheduled_jobs;
+-- total is the count of every row matching every active predicate, independent
+-- of the cursor. A count that ignored q would label a three-hit search page
+-- "1 - 50 of 312".
+SELECT COUNT(*) FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0);
 
 -- name: ListScheduledJobsByOwnerPage :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = sqlc.arg(owner_id)::uuid
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = sqlc.arg(owner_id)::uuid
   AND (sqlc.arg(cursor_set)::bool = FALSE
-       OR (created_at, id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
-ORDER BY created_at DESC, id DESC
+       OR (sj.created_at, sj.id) < (sqlc.arg(cursor_ts)::timestamptz, sqlc.arg(cursor_id)::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.created_at DESC, sj.id DESC
 LIMIT sqlc.arg(page_limit)::int + 1;
 
 -- name: CountScheduledJobsByOwner :one
-SELECT COUNT(*) FROM scheduled_jobs WHERE owner_id = $1;
+SELECT COUNT(*) FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = sqlc.arg(owner_id)::uuid
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0);
 
 -- name: UpdateScheduledJob :one
 -- handlePatchScheduledJob's write. It rewrites every mutable column, which is
@@ -233,94 +277,186 @@ SELECT COUNT(*) FROM jobs
    AND status IN ('pending','queued','running','dispatched');
 
 -- name: ListScheduledJobsPageByCreatedAsc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
-ORDER BY created_at ASC, id ASC
+-- THE OUTER PARENTHESES AROUND THE CURSOR DISJUNCTION ARE LOAD-BEARING, here and
+-- in the six sibling arms below. Without them,
+-- `NOT cursor_set OR keyset AND filter` binds as
+-- `NOT cursor_set OR (keyset AND filter)`, so on the FIRST page - where
+-- cursor_set is false - the whole WHERE is satisfied before any filter is
+-- reached and every row comes back unfiltered. A cursor-bearing request behaves
+-- correctly against that bug, so only a no-cursor request discriminates, which
+-- is why TestListScheduledJobs_FilterArms_FirstPage sends no cursor.
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.created_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.created_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByNameDesc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid)
-ORDER BY name DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.name, sj.id) < (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.name DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByNameAsc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid)
-ORDER BY name ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.name, sj.id) > (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.name ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByNextRunDesc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (next_run_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
-ORDER BY next_run_at DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.next_run_at, sj.id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.next_run_at DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByNextRunAsc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (next_run_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
-ORDER BY next_run_at ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.next_run_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.next_run_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByUpdatedDesc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (updated_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid)
-ORDER BY updated_at DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.updated_at, sj.id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.updated_at DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsPageByUpdatedAsc :many
-SELECT * FROM scheduled_jobs
-WHERE NOT @cursor_set::bool OR (updated_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid)
-ORDER BY updated_at ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE (NOT @cursor_set::bool OR (sj.updated_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.updated_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByCreatedAsc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (created_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
-ORDER BY created_at ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.created_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.created_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByNameDesc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (name, id) < (@cursor_v::text, @cursor_id::uuid))
-ORDER BY name DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.name, sj.id) < (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.name DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByNameAsc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (name, id) > (@cursor_v::text, @cursor_id::uuid))
-ORDER BY name ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.name, sj.id) > (@cursor_v::text, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.name ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByNextRunDesc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (next_run_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
-ORDER BY next_run_at DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.next_run_at, sj.id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.next_run_at DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByNextRunAsc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (next_run_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
-ORDER BY next_run_at ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.next_run_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.next_run_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByUpdatedDesc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (updated_at, id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
-ORDER BY updated_at DESC, id DESC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.updated_at, sj.id) < (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.updated_at DESC, sj.id DESC
 LIMIT @page_limit + 1;
 
 -- name: ListScheduledJobsByOwnerPageByUpdatedAsc :many
-SELECT * FROM scheduled_jobs
-WHERE owner_id = @owner_id::uuid
-  AND (NOT @cursor_set::bool OR (updated_at, id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
-ORDER BY updated_at ASC, id ASC
+SELECT sj.* FROM scheduled_jobs sj
+JOIN users u ON u.id = sj.owner_id
+WHERE sj.owner_id = @owner_id::uuid
+  AND (NOT @cursor_set::bool OR (sj.updated_at, sj.id) > (@cursor_ts::timestamptz, @cursor_id::uuid))
+  AND (sqlc.narg(enabled)::bool IS NULL OR sj.enabled = sqlc.narg(enabled)::bool)
+  AND (sqlc.narg(q)::text IS NULL
+       OR strpos(lower(sj.name), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(u.email), lower(sqlc.narg(q)::text)) > 0
+       OR strpos(lower(sj.cron_expr), lower(sqlc.narg(q)::text)) > 0)
+ORDER BY sj.updated_at ASC, sj.id ASC
 LIMIT @page_limit + 1;
 
 -- name: DisableScheduledJobsByOwner :execrows
