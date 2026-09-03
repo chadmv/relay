@@ -56,3 +56,21 @@ test('the source walk reaches shipped sources and nothing else', () => {
   expect(paths.filter((p) => p.startsWith('test/')), 'the walk reached a test harness module').toEqual([])
   expect(paths.filter((p) => /\.test\.tsx?$/.test(p)), 'the walk reached a test file').toEqual([])
 })
+
+// A1. The probe accepts the string form and the braced form, so a role written
+// as an expression is caught too. A role assembled from a variable is not - see
+// the header's known gaps.
+const ROLE_PROBE = /role=\{?['"`]dialog['"`]/
+
+const HAND_ROLLED_MODAL =
+  'compose DialogShell instead of declaring modal semantics on a div. The shell owns the portal, ' +
+  'the focus trap, the scoped Escape and registration in the dialog stack, and a hand-rolled modal ' +
+  'gets none of them.'
+
+test('the modal role is declared in the dialog shell only', () => {
+  const found = TSX.filter((f) => ROLE_PROBE.test(stripped(f))).map(rel)
+  // C1: the probe matches the one file that is supposed to carry it. Without
+  // this, a probe that matches nothing satisfies the rule below vacuously.
+  expect(found, 'the role probe no longer matches DialogShell').toContain(SHELL)
+  expect(found.filter((p) => p !== SHELL), HAND_ROLLED_MODAL).toEqual([])
+})
