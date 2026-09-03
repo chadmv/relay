@@ -64,11 +64,9 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 // id is what every downstream identity comparison uses; created_at is what the
 // profile header renders - an absent one becomes an invalid date rendered as
 // text, a silently wrong page rather than an error; is_admin gates privileged UI
-// by truthiness in seven consumers (AdminRoute, HoloShell's nav filter,
-// WorkerDetailPage, WorkerLabels, JobDetailPage's canManage, and both profile
-// displays) - an absent is_admin is undefined, which is falsy, so it silently
-// demotes an admin for the session rather than erroring; email is rendered as
-// identity in the same places created_at is.
+// by truthiness across the app - an absent value is undefined, which is falsy,
+// so it silently demotes an admin for the session rather than erroring; email
+// is rendered as identity in the same places created_at is.
 //
 // The guard's shape is the defect's shape. The failure it exists for is an ABSENT
 // or mistyped field, so it tests for that; it does not test for a network error
