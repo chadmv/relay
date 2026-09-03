@@ -224,6 +224,27 @@ test('a user with an empty created_at falls back to /users/me', async () => {
   expect(meCalls).toBe(1)
 })
 
+// Symmetric with the empty-id and empty-created_at cases above: an empty string
+// passes typeof === 'string' but is not a real email, and email is rendered as
+// identity in the same places created_at is.
+test('a user with an empty email falls back to /users/me', async () => {
+  withMe()
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({
+        token: 'tok_9',
+        expires_at: '',
+        user: { id: 'u-partial', email: '', name: 'P', is_admin: false, created_at: '2026-01-02T03:04:05Z' },
+      }),
+    ),
+  )
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(screen.getByTestId('email')).toHaveTextContent('endpoint@studio.dev'))
+  expect(meCalls).toBe(1)
+})
+
 // Kills: applying the change to login only. The client cannot distinguish the two
 // server register arms - both are one POST /v1/auth/register from this method -
 // so this is the whole of what the client can get wrong about register.

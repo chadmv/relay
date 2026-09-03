@@ -82,7 +82,7 @@ function usableUser(u: unknown): u is User {
     typeof r.id === 'string' && r.id !== '' &&
     typeof r.created_at === 'string' && r.created_at !== '' &&
     typeof r.is_admin === 'boolean' &&
-    typeof r.email === 'string'
+    typeof r.email === 'string' && r.email !== ''
   )
 }
 
