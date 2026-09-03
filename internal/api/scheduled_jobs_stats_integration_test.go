@@ -231,8 +231,16 @@ func TestScheduledJobStats_RunNowFailureCountsAgainstTheScheduleOwner(t *testing
 	adminToken := createTestToken(t, q, admin.ID)
 	bystander := createTestUser(t, q, "Bystander", "sjrunnow-bystander@test.com", false)
 	bystanderToken := createTestToken(t, q, bystander.ID)
+	stranger := createTestUser(t, q, "Stranger", "sjrunnow-stranger@test.com", false)
 
 	schedID := seedFilterSchedule(t, pool, "runnow-target", uuidString(owner.ID), "@daily", true)
+
+	// A second failure under a schedule NOBODY in the table below owns, so the
+	// admin expectation differs from the owner one: with a single failure the
+	// fleet-wide count equals the owner-scoped count and the admin case cannot
+	// tell the two apart.
+	strangerSched := seedFilterSchedule(t, pool, "runnow-stranger", uuidString(stranger.ID), "@daily", true)
+	seedSpawnedJob(t, pool, uuidString(stranger.ID), strangerSched, "failed", time.Now().Add(-time.Hour))
 
 	req := httptest.NewRequest("POST", "/v1/scheduled-jobs/"+schedID+"/run-now", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
@@ -254,7 +262,7 @@ func TestScheduledJobStats_RunNowFailureCountsAgainstTheScheduleOwner(t *testing
 		want  float64
 	}{
 		{"schedule owner", ownerToken, 1},
-		{"admin", adminToken, 1},
+		{"admin", adminToken, 2},
 		{"uninvolved non-admin", bystanderToken, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

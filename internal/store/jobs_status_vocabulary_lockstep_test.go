@@ -55,7 +55,8 @@ import (
 //     'done' and 'failed'. 'cancelled' and 'pending' are written elsewhere, so
 //     the set of statuses a job can HOLD is strictly larger than the set this
 //     statement can PRODUCE. Do not read a new status into it by symmetry.
-//   - CountFailedScheduledRuns24h (query/scheduled_jobs.sql) - `status = 'failed'`
+//   - ScheduledJobCounts' failed_runs_24h subquery (query/scheduled_jobs.sql) -
+//     `status = 'failed'`
 //     alone, windowed on updated_at, behind the schedules summary strip's
 //     failed_runs_24h. It deliberately EXCLUDES 'cancelled', which is why the
 //     field is not spelled failed_24h like the one above. A new FAILURE-LIKE
@@ -93,14 +94,14 @@ func TestJobsStatusVocabularyIsExactly(t *testing.T) {
 		"jobs.status vocabulary changed - read this test's comment before updating it. These sites slice this "+
 			"set: jobIsTerminal (internal/cli/logs.go), terminalStatuses (internal/mcp/wait.go), "+
 			"handleCancelJob's gate and handleRetryJob's switch (internal/api/jobs.go), and RecomputeJobStatus "+
-			"and GetJobStats (internal/store/query/jobs.sql), CountFailedScheduledRuns24h "+
+			"and GetJobStats (internal/store/query/jobs.sql), ScheduledJobCounts "+
 			"(internal/store/query/scheduled_jobs.sql), and JOB_STATUSES (web/src/jobs/api.ts), from "+
 			"which the SPA's JobStatus, LANE_LABELS and LANE_CHIP_KEY all derive. Revisit ALL OF THEM. "+
 			"THESE FAIL OPEN: a new TERMINAL status omitted from jobIsTerminal makes relay logs hang on a "+
 			"finished job until the connection drops and then report 'connection lost'; omitted from "+
 			"terminalStatuses it makes the MCP wait_for_job tool poll a finished job until its timeout; "+
 			"omitted from handleCancelJob's DENY-list it lets an operator cancel an already-finished job and "+
-			"run CancelJobTasks over its tasks; omitted from CountFailedScheduledRuns24h the schedules strip "+
+			"run CancelJobTasks over its tasks; omitted from ScheduledJobCounts the schedules strip "+
 			"under-reports broken schedules while still looking authoritative; omitted from JOB_STATUSES the "+
 			"SPA gives it no lane and no chip, so its jobs vanish from a view that looks complete. "+
 			"handleRetryJob fails closed into its 409 default. RecomputeJobStatus emits only running/done/"+

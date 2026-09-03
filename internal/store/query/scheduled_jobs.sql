@@ -470,9 +470,10 @@ WHERE owner_id = $1
   AND enabled = TRUE;
 
 -- name: ScheduledJobCounts :one
--- The schedules summary strip's census. owner_id is sqlc.narg: NULL means
--- fleet-wide, a value scopes to that owner. The handler is what decides which,
--- and a caller who is not an admin must never reach the NULL.
+-- The schedules summary strip's census, in ONE statement so every field it
+-- returns describes the same snapshot. owner_id is sqlc.narg: NULL means
+-- fleet-wide, a value scopes to that owner. The handler decides which, and a
+-- caller who is not an admin must never reach the NULL.
 --
 -- paused is exactly NOT enabled; there is no third state and no paused column.
 -- failing is CURRENT STATE and is deliberately NOT windowed: last_error records
@@ -480,18 +481,11 @@ WHERE owner_id = $1
 -- one, and it is counted in schedules while failed_runs_24h is counted in jobs.
 -- Summing the two would produce a number whose loss is invisible where it is
 -- read, which is why they are two fields.
-SELECT
-  COUNT(*) FILTER (WHERE enabled)                AS enabled,
-  COUNT(*) FILTER (WHERE NOT enabled)            AS paused,
-  COUNT(*) FILTER (WHERE last_error IS NOT NULL) AS failing
-FROM scheduled_jobs
-WHERE sqlc.narg(owner_id)::uuid IS NULL
-   OR owner_id = sqlc.narg(owner_id)::uuid;
-
--- name: CountFailedScheduledRuns24h :one
--- Jobs a schedule produced that failed in the window. The inner join to
--- scheduled_jobs is what restricts to schedule-spawned jobs AND what supplies
--- the owner scope; a standalone job has a NULL scheduled_job_id and cannot join.
+--
+-- failed_runs_24h is a scalar subquery rather than a sibling statement so it
+-- shares this one's snapshot. Its join to scheduled_jobs is what restricts to
+-- schedule-spawned jobs AND what supplies the owner scope; a standalone job has
+-- a NULL scheduled_job_id and cannot join.
 --
 -- WINDOWED ON jobs.updated_at, matching JobStatusCounts exactly, so the two
 -- "in the last 24 hours" numbers on this product's two summary strips mean the
@@ -500,13 +494,21 @@ WHERE sqlc.narg(owner_id)::uuid IS NULL
 -- window - and would count a job that started 23 hours ago and is still running
 -- as neither failed nor not.
 --
--- EXCLUDES cancelled, unlike jobStatsResponse.failed_24h, which is why the
+-- IT EXCLUDES cancelled, unlike jobStatsResponse.failed_24h, which is why the
 -- response field is named failed_runs_24h rather than failed_24h. A cancelled
 -- job is an operator action, not a schedule fault, and a strip that flags one
 -- teaches the operator to ignore the strip.
-SELECT COUNT(*)
-FROM jobs j
-JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
-WHERE j.status = 'failed'
-  AND j.updated_at >= NOW() - INTERVAL '24 hours'
-  AND (sqlc.narg(owner_id)::uuid IS NULL OR sj.owner_id = sqlc.narg(owner_id)::uuid);
+SELECT
+  COUNT(*) FILTER (WHERE enabled)                AS enabled,
+  COUNT(*) FILTER (WHERE NOT enabled)            AS paused,
+  COUNT(*) FILTER (WHERE last_error IS NOT NULL) AS failing,
+  (SELECT COUNT(*)
+     FROM jobs j
+     JOIN scheduled_jobs sj ON sj.id = j.scheduled_job_id
+    WHERE j.status = 'failed'
+      AND j.updated_at >= NOW() - INTERVAL '24 hours'
+      AND (sqlc.narg(owner_id)::uuid IS NULL
+           OR sj.owner_id = sqlc.narg(owner_id)::uuid)) AS failed_runs_24h
+FROM scheduled_jobs
+WHERE sqlc.narg(owner_id)::uuid IS NULL
+   OR owner_id = sqlc.narg(owner_id)::uuid;

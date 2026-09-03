@@ -459,11 +459,6 @@ func (s *Server) handleScheduledJobStats(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "scheduled job stats failed")
 		return
 	}
-	failed, err := s.q.CountFailedScheduledRuns24h(ctx, scope)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "scheduled job stats failed")
-		return
-	}
 
 	writeJSON(w, http.StatusOK, scheduledJobStatsResponse{
 		Enabled: counts.Enabled,
@@ -471,7 +466,7 @@ func (s *Server) handleScheduledJobStats(w http.ResponseWriter, r *http.Request)
 		// Computed from the two buckets rather than counted separately, so the
 		// identity holds by construction.
 		Total:         counts.Enabled + counts.Paused,
-		FailedRuns24h: failed,
+		FailedRuns24h: counts.FailedRuns24h,
 		Failing:       counts.Failing,
 	})
 }

@@ -1763,8 +1763,7 @@ foreign key, so a worker id can legitimately outlive its row and this endpoint c
 authoritatively distinguish "never existed" from "deleted". `?worker_id=` with an empty
 value is treated as absent, and a value that is not a UUID returns
 `400 invalid worker_id; expected a UUID`. Like `?q=`, the array-containment test is
-a scan and is not index-served; `reservations` is an admin-managed table of tens of
-rows, so no index is added for it.
+a scan and is not index-served; add a GIN index on `worker_ids` if the table grows.
 
 ### Agent Enrollments
 
