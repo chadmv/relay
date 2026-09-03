@@ -116,3 +116,5 @@ the messages themselves: **a shared primitive shipped missing an accessibility b
 green across eight consumers indefinitely.** The consumers could not catch it - they assert the error
 *text* is present, which is true either way. Only a test at the primitive, or a sweep across the
 surfaces that bypass it, can.
+
+The sweep mechanism is settled: lane DL (PR #181) built a Vitest tree walker over TypeScript source (web/src/test/sourceTree.ts, comments stripped through the parser's own comment ranges) for the dialog-shell guard, and the field-error audit should run on the same walker rather than a second scanner.

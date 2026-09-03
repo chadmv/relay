@@ -28,3 +28,6 @@ the root CLAUDE.md separately forbids.
 ## Related
 - [[bug-2026-08-14-stale-citations-in-gate-frozen-test-files]] (closed)
 - web/CLAUDE.md, web/src/components/holo/responsive.guard.test.ts
+
+## Notes
+Lane JB's second re-verify (PR #178) counted 43 cross-file line-range citations from web/src and internal/store into internal/api/pagination.go, users.go and jobs.go, several already stale after that PR moved the query parsing into parsePage; those three files are the first targets for the retrofit.

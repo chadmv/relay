@@ -110,3 +110,5 @@ different risk profiles (a cap that is too tight truncates one task's output; a 
 destroys history irreversibly), and different owners in a spec. The last slice in this family found
 that combining two items on the strength of "same file" produced a scheduling recommendation that was
 wrong on both halves; same file is not the same mechanism.
+
+Note for any production caller of store.DeleteJob that this or a sibling item adds: fillLastJobStatuses (PR #180) resolves a schedule page's last_job_status through GetJobStatusesByIDs after the page is read, and a job deleted between the two reads fails the whole page with a 500; a delete path must either tolerate a missing id there or delete under the same snapshot.
