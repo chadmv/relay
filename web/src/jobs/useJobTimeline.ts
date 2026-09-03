@@ -1,5 +1,5 @@
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { useRef } from 'react'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useRef } from 'react'
 import { listJobsInWindow, type Job } from './api'
 import {
   ANCHOR_STEP_MS,
@@ -131,8 +131,10 @@ export function useJobTimeline(
   q: string,
   mine: boolean,
 ): TimelineState {
+  const queryKey = ['job-timeline', w, q, mine]
+  const queryClient = useQueryClient()
   const query = useQuery({
-    queryKey: ['job-timeline', w, q, mine],
+    queryKey,
     queryFn: ({ signal }) => {
       const { sinceIso, untilIso } = windowBounds(w, Date.now())
       return walkJobWindow({ sinceIso, untilIso, q, mine }, signal)
@@ -141,6 +143,23 @@ export function useJobTimeline(
     refetchInterval: ANCHOR_STEP_MS,
     placeholderData: keepPreviousData,
   })
+
+  // The mirror image of the ACQUIRE side above: a query registered with
+  // `enabled` still true does not end its own generation just because the
+  // caller stops rendering it. Cancelling here consumes the signal the walk
+  // is already checking (walkJobWindow), so an in-flight page's fetch aborts
+  // rather than completing in the background and asking for the next page
+  // anyway. Fires when `enabled` flips false (view switched away, still
+  // mounted) and on unmount (the cleanup runs either way); a window or filter
+  // change also cancels the OLD key here, ahead of - and redundant with -
+  // walkJobWindow's own consumed-signal/loop-guard mechanism for that case.
+  useEffect(() => {
+    if (!enabled) return
+    return () => {
+      void queryClient.cancelQueries({ queryKey })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, w, q, mine, queryClient])
 
   const lastSuccess = useRef<TimelineWalk | null>(null)
   const lastSuccessWindow = useRef<TimelineWindow | null>(null)

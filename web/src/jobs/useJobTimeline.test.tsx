@@ -267,6 +267,43 @@ test('a window change that fails keeps state.window at the window the stale rows
   expect(result.current.window).toBe('24h')
 })
 
+test('flipping enabled off mid-walk stops it', async () => {
+  const seen: URLSearchParams[] = []
+  let releasePage1!: () => void
+  const gate = new Promise<void>((r) => {
+    releasePage1 = r
+  })
+  server.use(
+    http.get('/v1/jobs', async ({ request }) => {
+      const p = new URL(request.url).searchParams
+      seen.push(p)
+      const cursor = p.get('cursor') ?? ''
+      // Only page 1 is gated. Releasing it AFTER disabling proves the fetch
+      // itself was aborted client-side - a walk that merely raced the loop
+      // guard would still have processed this response and asked for page 2.
+      if (cursor === '') await gate
+      return HttpResponse.json({
+        items: [jobRow(`ID${seen.length}`, `job-${seen.length}`)],
+        next_cursor: cursor === '' ? 'CUR1' : '',
+        total: 2,
+      })
+    }),
+  )
+  const { rerender } = renderHook<ReturnType<typeof useJobTimeline>, { on: boolean }>(
+    ({ on }) => useJobTimeline(on, '24h', '', false),
+    { wrapper: makeWrapper(newClient()), initialProps: { on: true } },
+  )
+  await waitFor(() => expect(seen).toHaveLength(1))
+
+  rerender({ on: false })
+  releasePage1()
+  // Give the released response a chance to be processed and, if the walk were
+  // not actually cancelled, to ask for page 2.
+  await new Promise((r) => setTimeout(r, 80))
+
+  expect(seen).toHaveLength(1)
+})
+
 test('the walk issues no request while disabled', async () => {
   let calls = 0
   server.use(
