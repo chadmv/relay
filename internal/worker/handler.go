@@ -1489,6 +1489,55 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 
 	terminal := statusStr == "failed" || statusStr == "timed_out"
 
+	// Store the agent's own account of WHY, where an operator already looks. It
+	// has to be here and nowhere lower.
+	//
+	// ABOVE THE RETRY BRANCH, BECAUSE THAT BRANCH RETURNS AND ENDS THE
+	// GENERATION. IncrementTaskRetryCount bumps assignment_epoch, so an append
+	// placed below the branch never runs on the retry path and could not pass the
+	// fence after the bump at all - and a failure that is about to be retried is
+	// exactly the case where the cause of this attempt has to survive.
+	//
+	// PUBLISH BEFORE THE STATUS EVENT. The CLI's log follower stops at the
+	// terminal frame and the SPA's tail stops on a terminal status, so a line
+	// published after the status event is one the live view never shows; it
+	// appears only on a refresh. A2 and A5 in
+	// handler_taskstatus_errormessage_integration_test.go redden if either half
+	// moves.
+	//
+	// TERMINAL ONLY, and that is a bound rather than a taste. A terminal report
+	// ends the generation one way or the other, so the assignee cannot repeat it
+	// at this epoch and keep getting rows. A non-terminal one leaves status,
+	// worker_id and assignment_epoch untouched and nothing rate-limits status
+	// messages, so admitting RUNNING here would be an unbudgeted insert at one
+	// gRPC message per row.
+	//
+	// A pgx.ErrNoRows is the fence refusing: drop it, publish nothing, count
+	// nothing, log nothing. AppendTaskLog's fence is strictly weaker than the
+	// fence of the write below - identical id, identity and currency predicates,
+	// and a status allow-list relaxed by a recency disjunct - so a refusal here is
+	// refused there too and lands in task_status_fence with a reason. That
+	// argument holds only while no production caller writes a status on the epoch
+	// alone; internal/store/updatetaskstatusepoch_guard_test.go is what keeps that
+	// true, and is named by FILE because spelling its identifier turns that guard
+	// RED. Any other error is dropped for the same reason: sanitizeAgentErrorMessage
+	// removes the only caller-reachable cause, and a genuine fault on this
+	// connection is logged one statement below under the connection's budget.
+	if terminal && upd.ErrorMessage != "" {
+		content := "[" + statusStr + "] " + sanitizeAgentErrorMessage(upd.ErrorMessage) + "\n"
+		row, appendErr := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+			TaskID:          taskID,
+			Stream:          errorMessageLogStream,
+			Content:         content,
+			AssignmentEpoch: int32(upd.Epoch),
+			WorkerID:        workerID,
+			MinFinishedAt:   h.trailingLogCutoff(),
+		})
+		if appendErr == nil {
+			h.publishTaskLog(uuidStr(taskID), errorMessageLogStream, content, row)
+		}
+	}
+
 	// Retry if applicable. The branch decision is made from the T0 row read by
 	// GetTask above, so the statement re-checks that row: AssignmentEpoch is the
 	// generation the currency gate already proved current (int32 is safe for the
