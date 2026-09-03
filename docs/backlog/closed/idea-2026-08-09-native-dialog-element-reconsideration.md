@@ -1,7 +1,9 @@
 ---
 title: "Reconsider native <dialog> + showModal() for DialogShell, once jsdom or an e2e harness allows it"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: wontfix
 created: 2026-08-09
 priority: low
 source: spec follow-up from the dialog-hardening work (2026-08-09)
@@ -90,3 +92,6 @@ So the honest status is: the blocker on *evaluating* `<dialog>` is gone, and the
 *regression-proofing* it is not. Anyone picking this up should decide which of the two they need before
 scoping, and should read `web/e2e/README.md` rather than this paragraph, since that file is maintained
 with the harness.
+
+## Resolution
+Re-evaluated in lane DL of the 2026-09-02 web-frontend batch, on the item's own terms, and closed without migrating. Trigger 1 has not fired: jsdom 29.1.1 still ships HTMLDialogElement as an empty subclass. Trigger 2 fired in part: the Playwright harness exists, but it carries no dialog spec, has no visual assertions, and WebKit is not Safari, so the platform route can be evaluated in a browser and regression-proofed in neither lane. The four questions were re-run against the tree: the backdrop route breaks the backdrop handle three test files depend on; showModal does not lock document scroll, so the scroll lock stays ours and partial adoption pays the full test cost for half the benefit. Replacement trigger, conjunctive: jsdom implements the element AND web/e2e carries a dialog spec asserting trap, focus restore and Escape scoping in both engines. dialogStack.ts records the constraint and cites this item by slug.
