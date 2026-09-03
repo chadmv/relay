@@ -5,6 +5,7 @@ import { ApiError } from '../lib/api'
 import {
   deleteSchedule,
   getSchedule,
+  getScheduleStats,
   listSchedules,
   runScheduleNow,
   setScheduleEnabled,
@@ -285,4 +286,89 @@ test('setScheduleEnabled still sends EXACTLY { enabled } after the re-expression
   // cron_expr or timezone here would recompute next_run_at on every single
   // Enable/Disable click (internal/api/scheduled_jobs.go:585).
   expect(body).toEqual({ enabled: false })
+})
+
+// Hand-written, with no type annotation naming ScheduleStats. A fixture
+// marshalled through the response interface agrees with the decoder by
+// construction and can never detect drift in either direction. All five keys are
+// present because the server response carries no omitempty on any of them, so a
+// body that drops one is a response the server cannot send.
+const STATS_BODY = { enabled: 12, paused: 5, total: 17, failed_runs_24h: 3, failing: 2 }
+
+test('listSchedules sends enabled=true for the enabled chip', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listSchedules('-created_at', undefined, { enabledKey: 'enabled', q: '' })
+  expect(captured?.get('enabled')).toBe('true')
+})
+
+// The silent-failure case: 'disabled' collapsing to an omitted parameter makes
+// the Disabled chip behave as All, and the list envelope looks entirely normal.
+test('listSchedules sends enabled=false for the disabled chip', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listSchedules('-created_at', undefined, { enabledKey: 'disabled', q: '' })
+  expect(captured?.get('enabled')).toBe('false')
+})
+
+test('listSchedules omits enabled and q entirely when neither filter is active', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listSchedules('-created_at', undefined, { enabledKey: 'all', q: '' })
+  expect(captured?.has('enabled')).toBe(false)
+  expect(captured?.has('q')).toBe(false)
+  // Positive control on the same instrument, so the two absence assertions are
+  // about the omission and not about a URLSearchParams that never got built.
+  expect(captured?.get('sort')).toBe('-created_at')
+})
+
+test('listSchedules sends q when it is non-empty', async () => {
+  let captured: URLSearchParams | undefined
+  server.use(
+    http.get('/v1/scheduled-jobs', ({ request }) => {
+      captured = new URL(request.url).searchParams
+      return HttpResponse.json(emptyPage)
+    }),
+  )
+  await listSchedules('-created_at', undefined, { enabledKey: 'all', q: 'nightly' })
+  expect(captured?.get('q')).toBe('nightly')
+})
+
+test('getScheduleStats GETs the stats path and decodes all five keys', async () => {
+  let path: string | undefined
+  server.use(
+    http.get('/v1/scheduled-jobs/stats', ({ request }) => {
+      path = new URL(request.url).pathname
+      return HttpResponse.json(STATS_BODY)
+    }),
+  )
+  const s = await getScheduleStats()
+  expect(path).toBe('/v1/scheduled-jobs/stats')
+  expect(s).toEqual({ enabled: 12, paused: 5, total: 17, failed_runs_24h: 3, failing: 2 })
+})
+
+test('getScheduleStats throws ApiError on the error envelope', async () => {
+  server.use(
+    http.get('/v1/scheduled-jobs/stats', () =>
+      HttpResponse.json({ error: 'scheduled job stats failed' }, { status: 500 }),
+    ),
+  )
+  const err = await getScheduleStats().catch((e) => e)
+  expect(err).toBeInstanceOf(ApiError)
+  expect(err.status).toBe(500)
 })
