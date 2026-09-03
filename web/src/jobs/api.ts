@@ -51,12 +51,25 @@ export type JobSort =
 // First page is 50 (server default), passed explicitly. When a status filter is
 // active the server rejects ?sort= combined with ?status=, so sort is omitted in
 // that case; the unfiltered branch sends sort.
-export function listJobs(sort: JobSort, status = '', cursor = ''): Promise<JobsPage> {
-  const q = new URLSearchParams({ limit: '50' })
-  if (status) q.set('status', status)
-  else q.set('sort', sort)
-  if (cursor) q.set('cursor', cursor)
-  return apiFetch<JobsPage>(`/jobs?${q}`)
+//
+// q and mine are appended trailing parameters with defaults so every existing
+// caller compiles unchanged. Both are omitted when empty or false rather than
+// sent blank: the server treats an empty value as absent, so a blank parameter
+// would be a second spelling of the same request.
+export function listJobs(
+  sort: JobSort,
+  status = '',
+  cursor = '',
+  q = '',
+  mine = false,
+): Promise<JobsPage> {
+  const p = new URLSearchParams({ limit: '50' })
+  if (status) p.set('status', status)
+  else p.set('sort', sort)
+  if (cursor) p.set('cursor', cursor)
+  if (q) p.set('q', q)
+  if (mine) p.set('mine', 'true')
+  return apiFetch<JobsPage>(`/jobs?${p}`)
 }
 
 // Fleet-wide KPI counts for the summary strip.
@@ -91,9 +104,16 @@ export function listJobsBySchedule(scheduledJobId: string, limit: number): Promi
 // unfiltered branch, and sort combined with a filter is a hard 400. Do not unify
 // them. A limit outside [1, 200] is REJECTED with a 400, not clamped
 // (internal/api/pagination.go, parsePage), so a caller's cap is a hard ceiling.
-export function listJobsByStatus(status: JobStatus, limit: number): Promise<JobsPage> {
-  const q = new URLSearchParams({ status, limit: String(limit) })
-  return apiFetch<JobsPage>(`/jobs?${q}`)
+export function listJobsByStatus(
+  status: JobStatus,
+  limit: number,
+  q = '',
+  mine = false,
+): Promise<JobsPage> {
+  const p = new URLSearchParams({ status, limit: String(limit) })
+  if (q) p.set('q', q)
+  if (mine) p.set('mine', 'true')
+  return apiFetch<JobsPage>(`/jobs?${p}`)
 }
 
 // Task-status vocabulary (migration 000019). Distinct from JobStatus: tasks add
