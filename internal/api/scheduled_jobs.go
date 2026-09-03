@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -31,6 +32,22 @@ type scheduledJobResponse struct {
 	NextRunAt     time.Time       `json:"next_run_at"`
 	LastRunAt     *time.Time      `json:"last_run_at,omitempty"`
 	LastJobID     string          `json:"last_job_id,omitempty"`
+	// The status of the job last_job_id names, verbatim from jobs.status: one of
+	// pending, running, done, failed, cancelled. NOT the pending -> queued rename
+	// jobStatsResponse performs; this field must agree with jobResponse.status,
+	// which is what the cell linking to it shows.
+	//
+	// PRESENT EXACTLY WHEN last_job_id IS PRESENT. The pairing is what makes an
+	// absent key mean one thing - "no scheduled fire has produced a job" - and
+	// never "unknown" or "healthy". It holds because the FK on last_job_id is
+	// ON DELETE SET NULL, so a non-NULL id names a row that exists, and because
+	// fillLastJobStatuses fails the request rather than dropping the key.
+	// TestToScheduledJobResponse_LastJobStatusIsPairedToLastJobID pins both
+	// states.
+	//
+	// Independent of last_error below, which records a fire that produced NO job.
+	// Both may be present at once and that is not a contradiction.
+	LastJobStatus string `json:"last_job_status,omitempty"`
 	// The last time the SCHEDULER failed to produce a job from this schedule,
 	// and why. ABSENT MEANS HEALTHY - not "" and not null - which is what makes
 	// `omitempty` on a string safe here: the write site
@@ -275,6 +292,59 @@ func (s *Server) fillOwnerEmails(r *http.Request, items []scheduledJobResponse, 
 	}
 }
 
+// fillLastJobStatuses resolves last_job_status for a set of items, mutating them
+// in place, from one batched lookup on the job ids the items already carry.
+//
+// IT FAILS THE REQUEST RATHER THAN DEGRADING, which is a deliberate divergence
+// from fillOwnerEmails immediately above. owner_email is a key that is always
+// present, so an empty value is visibly unknown and the list is still usable.
+// last_job_status signals through key PRESENCE, so degrading would forge the
+// signal "this schedule has never produced a job" out of a database fault, and a
+// renderer would draw a missing dot as a fact.
+func (s *Server) fillLastJobStatuses(r *http.Request, items []scheduledJobResponse) error {
+	ids := make([]pgtype.UUID, 0, len(items))
+	seen := map[string]struct{}{}
+	for _, it := range items {
+		if it.LastJobID == "" {
+			continue
+		}
+		if _, ok := seen[it.LastJobID]; ok {
+			continue
+		}
+		seen[it.LastJobID] = struct{}{}
+		id, err := parseUUID(it.LastJobID)
+		if err != nil {
+			return fmt.Errorf("last_job_id is not a uuid: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := s.q.GetJobStatusesByIDs(r.Context(), ids)
+	if err != nil {
+		return fmt.Errorf("get job statuses (%d id(s)): %w", len(ids), err)
+	}
+	statusByID := make(map[string]string, len(rows))
+	for _, row := range rows {
+		statusByID[uuidStr(row.ID)] = row.Status
+	}
+	for i := range items {
+		if items[i].LastJobID == "" {
+			continue
+		}
+		st, ok := statusByID[items[i].LastJobID]
+		if !ok {
+			// The FK guarantees the row exists, so a miss means the pairing
+			// invariant cannot be honoured for this item. Emitting a last_job_id
+			// with no status would break the contract silently.
+			return fmt.Errorf("job %s has no status row", items[i].LastJobID)
+		}
+		items[i].LastJobStatus = st
+	}
+	return nil
+}
+
 // scheduleFilters carries the two optional GET /v1/scheduled-jobs predicates in
 // the exact types the generated sqlc Params fields use, so a call site spreads
 // them without conversion. The zero value means "no filter active": a nil Q and
@@ -486,6 +556,11 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		s.fillOwnerEmails(r, items, "")
+		if err := s.fillLastJobStatuses(r, items); err != nil {
+			log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			return
+		}
 		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 		return
 	}
@@ -639,6 +714,11 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.fillOwnerEmails(r, items, u.Email)
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
 }
 
@@ -663,6 +743,11 @@ func (s *Server) handleGetScheduledJob(w http.ResponseWriter, r *http.Request) {
 	}
 	items := []scheduledJobResponse{toScheduledJobResponse(row)}
 	s.fillOwnerEmails(r, items, selfEmail)
+	if err := s.fillLastJobStatuses(r, items); err != nil {
+		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
+		writeError(w, http.StatusInternalServerError, "get scheduled job failed")
+		return
+	}
 	writeJSON(w, http.StatusOK, items[0])
 }
 

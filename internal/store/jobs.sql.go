@@ -404,6 +404,45 @@ func (q *Queries) GetJobNamesByIDs(ctx context.Context, dollar_1 []pgtype.UUID) 
 	return items, nil
 }
 
+const getJobStatusesByIDs = `-- name: GetJobStatusesByIDs :many
+SELECT id, status FROM jobs WHERE id = ANY($1::uuid[])
+`
+
+type GetJobStatusesByIDsRow struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+// Batch enrichment for the schedules list's last_job_status, mirroring
+// GetUserEmailsByIDs. One primary-key = ANY lookup per request, O(1) in the page
+// size.
+//
+// A join or a scalar subquery would read better and would change the sqlc row
+// type for every schedules list statement from ScheduledJob to a per-statement
+// Row struct, cascading into the response mapper, the row-key functions and the
+// premise of TestScheduledJobResponse_ArityMatchesTheRow.
+//
+//	SELECT id, status FROM jobs WHERE id = ANY($1::uuid[])
+func (q *Queries) GetJobStatusesByIDs(ctx context.Context, ids []pgtype.UUID) ([]GetJobStatusesByIDsRow, error) {
+	rows, err := q.db.Query(ctx, getJobStatusesByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetJobStatusesByIDsRow
+	for rows.Next() {
+		var i GetJobStatusesByIDsRow
+		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getJobWithEmail = `-- name: GetJobWithEmail :one
 SELECT j.id, j.name, j.priority, j.status, j.submitted_by, j.labels, j.created_at, j.updated_at, j.scheduled_job_id, u.email AS submitted_by_email
 FROM jobs j
