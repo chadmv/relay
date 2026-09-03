@@ -67,7 +67,7 @@ export function toPosix(path: string): string {
 // inside a plain string is. And the line-comment pass itself is not
 // string-aware: a line whose ENTIRE trimmed content is literal text starting
 // with `//` inside a multi-line template literal would still be incorrectly
-// stripped - no shipped source does this today.
+// stripped.
 function blankStringLiterals(src: string): string {
   return src.replace(
     /'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g,

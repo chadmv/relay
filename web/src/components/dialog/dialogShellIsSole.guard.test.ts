@@ -6,10 +6,10 @@ import { SRC_ROOT, shippedSources, toPosix, withoutComments } from '../../test/s
 // THE MODAL SHELL IS THE ONLY MODAL. Every rule here says the same thing from a
 // different angle: modal semantics, the scrim, a document-level Escape, and a
 // body-level portal all belong to this module, because each of them is a global
-// side effect that two independent owners cannot both get right. The app reached
-// three hand-rolled dialogs before DialogShell existed, and it reached them
-// because each author had no reason to open the others' files - so the rule has
-// to arrive on the commit that breaks it, not in a header note.
+// side effect that two independent owners cannot both get right. A hand-rolled
+// dialog happens because its author had no reason to open another author's
+// files - so the rule has to arrive on the commit that breaks it, not in a
+// header note.
 //
 // Every assertion strips comments first and rules over shipped source only. Both
 // exclusions are load-bearing and for different reasons: role and aria-modal are
@@ -89,7 +89,7 @@ test('the modal role is declared in the dialog shell only', () => {
 })
 
 // A2. The test-file exclusion, not any argument about query helpers, is what
-// makes this work: four test files spell this attribute literally in
+// makes this work: test files spell this attribute literally in
 // toHaveAttribute assertions. It is also spelled a second time inside
 // DialogShell.tsx's own header comment, which is why comments are stripped even
 // for the file that legitimately carries it.
@@ -177,8 +177,8 @@ test('the near-miss probe also catches a scrim split across a concatenation', ()
 
 // A4. Anchored on document. or window. so a listener registered on some other
 // receiver (an AbortSignal, for instance) is not a false positive. Widened to
-// plain modules as well as JSX: a fence for a future hook, not a fix for
-// anything present, since a JSX-only walk would otherwise miss one.
+// plain modules as well as JSX, and to window as well as document: a hook
+// registering on either would otherwise be invisible to a narrower probe.
 const DOC_KEYDOWN_PROBE = /(?:document|window)\s*\.\s*addEventListener\s*\(\s*['"`]keydown['"`]/
 
 // THE ALLOWLIST is per FILE, not per listener: an allowlisted file may
