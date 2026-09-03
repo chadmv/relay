@@ -142,3 +142,46 @@ test('the modal scrim is painted by the dialog shell only', () => {
     .map(rel)
   expect(near, HAND_ROLLED_SCRIM).toEqual([])
 })
+
+// A4. Anchored on `document.` so a listener registered on an AbortSignal is not
+// a false positive - lib/api.ts and the SSE test helper each register one.
+// Widened to plain modules as well as JSX: no shipped module adds a document
+// listener today, and that is a fence, not a fix - a future hook that did would
+// otherwise be invisible to a JSX-only walk.
+const DOC_KEYDOWN_PROBE = /document\s*\.\s*addEventListener\s*\(\s*['"`]keydown['"`]/
+
+// THE ALLOWLIST. An entry may only be added with the reason that surface is not
+// a modal, because the reason is the actual control - a bare count would grow
+// silently.
+//
+//  components/dialog/DialogShell.tsx - the modal shell itself. Escape must fire
+//    when focus has left the panel, which a panel-scoped handler cannot see.
+//  shell/UserMenu.tsx - a disclosure, not a modal: no scrim, no scroll lock, no
+//    inert background, no focus trap, and Tab out is a dismiss route.
+//  shell/HoloShell.tsx - the collapsed navigation panel, the sibling disclosure
+//    of the above, sharing its handler set.
+const DOC_KEYDOWN_ALLOWED = [SHELL, 'shell/UserMenu.tsx', 'shell/HoloShell.tsx']
+
+const UNLISTED_KEYDOWN =
+  'a document-level Escape handler. For a modal, compose DialogShell, which already owns a scoped ' +
+  'document Escape gated on being topmost. For a non-modal disclosure, follow the two existing ' +
+  'ones and add an allowlist entry stating why this surface is not a modal.'
+
+test('every document keydown listener is allowlisted with a reason', () => {
+  const found = SOURCES.filter((f) => DOC_KEYDOWN_PROBE.test(stripped(f))).map(rel)
+
+  // C4, and the strongest control in this file: every allowlisted file is
+  // matched by the probe. If the probe drifts, an entry stops matching and this
+  // goes red - which a count-shaped control could never detect.
+  expect(
+    DOC_KEYDOWN_ALLOWED.filter((p) => !found.includes(p)),
+    'the keydown probe no longer matches a file the allowlist says registers one',
+  ).toEqual([])
+
+  expect(found.filter((p) => !DOC_KEYDOWN_ALLOWED.includes(p)), UNLISTED_KEYDOWN).toEqual([])
+})
+
+// CONSIDERED AND DELIBERATELY NOT ASSERTED: both disclosures also register a
+// document mousedown listener. A fourth of those is not the hazard this file is
+// about, and asserting it would make the allowlist grow for a reason unrelated
+// to modal semantics.
