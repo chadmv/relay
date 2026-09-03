@@ -24,7 +24,6 @@ export function JobsLanes({
 }: {
   lanes: LaneState[]
   onShowAll: (status: JobStatus) => void
-  // Defaulted so every existing call site and test compiles unchanged.
   filtering?: boolean
 }) {
   return (

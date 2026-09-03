@@ -85,6 +85,19 @@ test('each row links to its job and states its status in text', () => {
   expect(container.querySelector('[data-live-dot]')).not.toBeNull()
 })
 
+test('the tick row and each bar track are aria-hidden decoration', () => {
+  const { container } = renderTimeline({ jobs: [job()], total: 1 })
+  const hidden = [...container.querySelectorAll('[aria-hidden="true"]')]
+  // The tick row (holds the relative offsets) and the bar's own track (holds
+  // the percentage-positioned marker) are both decoration: every fact either
+  // one draws is already in the row's own text, which is what a screen reader
+  // gets instead.
+  const tickRow = hidden.find((n) => n.textContent?.includes('NOW'))
+  const barTrack = hidden.find((n) => n.querySelector('[data-instant]'))
+  expect(tickRow).not.toBeUndefined()
+  expect(barTrack).not.toBeUndefined()
+})
+
 test('a job that never started says so rather than drawing a short one', () => {
   const { container } = renderTimeline({
     jobs: [job({ status: 'pending', started_at: undefined, name: 'frames teaser' })],

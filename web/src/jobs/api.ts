@@ -53,10 +53,10 @@ export type JobSort =
 // active the server rejects ?sort= combined with ?status=, so sort is omitted in
 // that case; the unfiltered branch sends sort.
 //
-// q and mine are appended trailing parameters with defaults so every existing
-// caller compiles unchanged. Both are omitted when empty or false rather than
-// sent blank: the server treats an empty value as absent, so a blank parameter
-// would be a second spelling of the same request.
+// q and mine are appended trailing parameters with defaults. Both are omitted
+// when empty or false rather than sent blank: the server treats an empty
+// value as absent, so a blank parameter would be a second spelling of the
+// same request.
 export function listJobs(
   sort: JobSort,
   status = '',

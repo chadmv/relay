@@ -188,8 +188,7 @@ export function surfaces(): Surface[] {
         //
         // The seeded job is created at seed time and never leaves `pending`, so
         // it falls inside the default 24-hour window and draws as the instant
-        // marker - which makes this the only automated check that the
-        // never-started case renders at all.
+        // marker.
         //
         // TIMEOUT WIDER THAN THE DEFAULT, ON PURPOSE, KEPT ACROSS THE LIVENESS
         // FIX. useJobTimeline now computes its anchor fresh at each fetch's

@@ -41,9 +41,8 @@ export function useJobLanes(
       queryFn: () => listJobsByStatus(status, limit, q, mine),
       enabled,
       refetchInterval: intervalMs,
-      // The key was constant before the filters entered it, which made this
-      // inert. It is not inert now: without it every keystroke that lands blanks
-      // all five lanes to their skeletons before the new rows arrive.
+      // Without this, every keystroke that lands blanks all five lanes to
+      // their skeletons before the new rows arrive.
       placeholderData: keepPreviousData,
     })),
   })

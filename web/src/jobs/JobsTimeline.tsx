@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { Button } from '../components/Button'
 import { GlassPanel } from '../components/holo'
@@ -32,6 +33,13 @@ export function JobsTimeline({
   const sinceMs = new Date(state.sinceIso).getTime()
   const untilMs = new Date(state.untilIso).getTime()
   const shorter = NEXT_SHORTER[w]
+  // Recomputed only when the rows or the axis actually change, not on every
+  // render this component takes for an unrelated reason (a sibling toolbar
+  // control, the picker highlighting a different button).
+  const geometry = useMemo(
+    () => state.jobs.map((j) => barGeometry(j, sinceMs, untilMs)),
+    [state.jobs, sinceMs, untilMs],
+  )
 
   return (
     <GlassPanel as="section" aria-label="Jobs timeline" className="flex flex-col overflow-hidden">
@@ -126,8 +134,8 @@ export function JobsTimeline({
           </div>
 
           <ul className="px-5 pb-4">
-            {state.jobs.map((j) => {
-              const g = barGeometry(j, sinceMs, untilMs)
+            {state.jobs.map((j, i) => {
+              const g = geometry[i]
               const c = statusColor(j.status)
               const pct = progressPct(j.done_tasks, j.total_tasks)
               return (
@@ -145,7 +153,6 @@ export function JobsTimeline({
                       {/* The now rule, pinned to the right edge of every track. */}
                       <span className="absolute inset-y-0 right-0 w-px bg-accent/50" />
                       <span
-                        data-bar-status={j.status}
                         data-instant={g.instant ? 'true' : 'false'}
                         style={{ left: `${g.leftPct}%`, width: `${g.widthPct}%` }}
                         className={`absolute inset-y-0 min-w-[3px] rounded-[4px] border ${c.text} ${c.dot}`}

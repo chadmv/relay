@@ -37,15 +37,13 @@ test('every window has a label, ticks and a narrowing answer', () => {
   for (const w of TIMELINE_WINDOWS) {
     expect(WINDOW_LABEL[w]).toBeTruthy()
     expect(WINDOW_MS[w]).toBeGreaterThan(0)
-    // Three ticks at every window and every width. Five mono labels collide in
-    // the roughly 140 pixels this layout leaves the track at a 320 viewport, and
-    // one tick set correct everywhere beats a breakpoint that makes the measured
-    // widths differ from the shipped ones.
-    expect(TICKS[w]).toHaveLength(3)
+    // TICKS[w] having length 3, and `w in NEXT_SHORTER`, are both guaranteed by
+    // the Record types over TimelineWindow (a [string,string,string] tuple and
+    // an exhaustive key set respectively) rather than by anything runtime here
+    // - tsc rejects a shorter/longer tuple or a missing key at the declaration
+    // site, which is what the type-level probe below this test proves. The
+    // genuine runtime fact left to check is the VALUE at the last tick.
     expect(TICKS[w][2]).toBe('NOW')
-    // `in`, not a truthiness check: an explicit null is the answer for the
-    // shortest window and must be distinguishable from a missing key.
-    expect(w in NEXT_SHORTER).toBe(true)
   }
 })
 

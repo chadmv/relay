@@ -34,9 +34,9 @@ export function JobsTable({
 }: {
   jobs: Job[]
   footer?: ReactNode
-  // Defaulted to the unfiltered sentence so this component's own tests are
-  // unaffected. Under a search that sentence is false - there are jobs, none
-  // match - so the page passes a filter-aware one.
+  // Defaults to the unfiltered sentence. Under a search that sentence is
+  // false - there are jobs, none match - so the page passes a filter-aware
+  // one.
   emptyMessage?: string
 }) {
   if (jobs.length === 0) {

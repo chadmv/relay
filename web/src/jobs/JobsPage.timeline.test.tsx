@@ -92,9 +92,10 @@ test('the timeline view issues no table or lane request', async () => {
   renderPage()
   await screen.findByRole('region', { name: 'Jobs timeline' })
   await waitFor(() => expect(seen.length).toBeGreaterThan(0))
-  // A bounded wait for an absence, longer than the table query's own 3000ms
-  // interval would need to fire once - that interval is what would produce a
-  // request if the enabled gate leaked.
+  // A bounded wait for an absence. A leaked enabled gate produces its request
+  // on MOUNT, not on the poll interval - useJobs and useJobLanes both fetch
+  // immediately once enabled, so this only needs to outlast that immediate
+  // fetch, not a full 3000ms interval tick.
   await new Promise((r) => setTimeout(r, 120))
 
   // limit=50 is the table's enriched page and limit=10 is a lane's. Nobody is

@@ -83,9 +83,7 @@ test('the view switch persists the choice to localStorage and a remount restores
 })
 
 test('a stored value outside the view allow-list falls back to the table view', async () => {
-  // Not the literal 'timeline' any more: that is a real view now, so storing it
-  // would assert the opposite of what this test's name claims. A value no
-  // version has ever written is what pins the allow-list.
+  // A value no version has ever written is what pins the allow-list.
   localStorage.setItem('relay.jobs.view', 'gantt')
   renderPage()
   expect(await screen.findByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
