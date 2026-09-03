@@ -20,15 +20,18 @@ const CARD = 'block rounded-[8px] border border-border bg-white/[0.04] p-2.5 hov
 export function JobsLanes({
   lanes,
   onShowAll,
+  filtering = false,
 }: {
   lanes: LaneState[]
   onShowAll: (status: JobStatus) => void
+  // Defaulted so every existing call site and test compiles unchanged.
+  filtering?: boolean
 }) {
   return (
     <div className={SCROLLER} tabIndex={0} role="group" aria-label="Job lanes, scrolls horizontally">
       <div className={ROW}>
         {lanes.map((lane) => (
-          <JobLane key={lane.status} lane={lane} onShowAll={onShowAll} />
+          <JobLane key={lane.status} lane={lane} onShowAll={onShowAll} filtering={filtering} />
         ))}
       </div>
     </div>
@@ -38,9 +41,11 @@ export function JobsLanes({
 function JobLane({
   lane,
   onShowAll,
+  filtering,
 }: {
   lane: LaneState
   onShowAll: (status: JobStatus) => void
+  filtering: boolean
 }) {
   const headingId = `lane-${lane.status}`
   const c = statusColor(lane.status)
@@ -56,9 +61,13 @@ function JobLane({
             {LANE_LABELS[lane.status]}
           </h2>
         </div>
-        {/* All-time, not the 24-hour scope the KPI strip uses. */}
+        {/* All-time while unfiltered. With a filter active the number belongs to
+            the filtered set instead, and saying "total" would be a wrong answer
+            rather than a missing one. */}
         <span className={`flex-none font-mono text-[11px] ${c.text}`}>
-          {lane.total === null ? '-' : `${lane.total.toLocaleString()} total`}
+          {lane.total === null
+            ? '-'
+            : `${lane.total.toLocaleString()} ${filtering ? 'matching' : 'total'}`}
         </span>
       </div>
 
@@ -76,7 +85,9 @@ function JobLane({
           </Button>
         </div>
       ) : lane.items.length === 0 ? (
-        <div className="px-1 py-4 text-[12px] text-fg-mute">No jobs</div>
+        <div className="px-1 py-4 text-[12px] text-fg-mute">
+          {filtering ? 'No matches' : 'No jobs'}
+        </div>
       ) : (
         <ul className={LANE_BODY}>
           {lane.items.map((j) => {

@@ -27,12 +27,23 @@ const HEADERS: TableColumn[] = [
   { label: 'OWNER' },
 ]
 
-export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode }) {
+export function JobsTable({
+  jobs,
+  footer,
+  emptyMessage = 'No jobs yet.',
+}: {
+  jobs: Job[]
+  footer?: ReactNode
+  // Defaulted to the unfiltered sentence so this component's own tests are
+  // unaffected. Under a search that sentence is false - there are jobs, none
+  // match - so the page passes a filter-aware one.
+  emptyMessage?: string
+}) {
   if (jobs.length === 0) {
     return (
       <div className="flex flex-col gap-4">
         <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
-          No jobs yet.
+          {emptyMessage}
         </GlassPanel>
         {footer && <div className="px-1">{footer}</div>}
       </div>
