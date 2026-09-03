@@ -1678,6 +1678,56 @@ type taskLogEvent struct {
 // Production code never reads it.
 var taskLogPublishes atomic.Int64
 
+// trailingLogCutoff resolves the effective trailing window and returns it as the
+// absolute cutoff AppendTaskLog's recency arm compares against.
+//
+// Resolved PER CALL and never cached:
+// TestHandleTaskLog_TheWindowIsReadFromTheHandlerFieldAtEveryCall moves the
+// field between two calls on one handler and requires them to differ.
+// Non-positive means the default rather than a zero-length window, which is what
+// keeps every existing NewHandler call site correct with no edit;
+// TestHandleTaskLog_AZeroWindowMeansTheDefaultNotAZeroLengthWindow is that leg.
+func (h *Handler) trailingLogCutoff() pgtype.Timestamptz {
+	window := h.TrailingLogWindow
+	if window <= 0 {
+		window = DefaultTrailingLogWindow
+	}
+	return pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true}
+}
+
+// publishTaskLog fans a STORED task-log row out to anyone tailing that task.
+//
+// It takes the inserted row rather than a flag, so it cannot be reached without
+// the insert having happened - the "never publish an unstored chunk" rule made
+// structural instead of remembered at each call site. Pinned by
+// TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished.
+func (h *Handler) publishTaskLog(taskIDStr, stream, content string, row store.AppendTaskLogRow) {
+	if !h.broker.HasLogSubscriber(taskIDStr) {
+		return // steady state: one map lookup, no marshal, no allocation
+	}
+
+	taskLogPublishes.Add(1)
+	data, err := json.Marshal(taskLogEvent{
+		TaskID:    taskIDStr,
+		JobID:     uuidStr(row.JobID),
+		Seq:       row.ID,
+		Stream:    stream,
+		Content:   content,
+		CreatedAt: row.CreatedAt.Time,
+	})
+	if err != nil {
+		log.Printf("worker: task log publish marshal %s: %v", taskIDStr, err)
+		return
+	}
+
+	h.broker.Publish(events.Event{
+		Type:   events.TypeTaskLog,
+		JobID:  uuidStr(row.JobID),
+		TaskID: taskIDStr,
+		Data:   data,
+	})
+}
+
 // handleTaskLog appends a log chunk from an agent and, if anyone is tailing that
 // task, publishes it to the SSE broker.
 //
@@ -1731,22 +1781,13 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 		stream = "stderr"
 	}
 
-	// Resolved per call, never cached: a test moves the field between two calls
-	// on the same handler to prove this call site actually reads it. Non-positive
-	// means the default, which is what keeps every existing NewHandler call site
-	// correct with no edit.
-	window := h.TrailingLogWindow
-	if window <= 0 {
-		window = DefaultTrailingLogWindow
-	}
-
 	row, err := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID:          taskID,
 		Stream:          stream,
 		Content:         string(chunk.Content),
 		AssignmentEpoch: int32(chunk.Epoch),
 		WorkerID:        workerID,
-		MinFinishedAt:   pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true},
+		MinFinishedAt:   h.trailingLogCutoff(),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1860,31 +1901,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 
 	// Persistence is unconditional and strictly precedes any publish; the publish
 	// is derived from the stored row, so no line is ever published unstored.
-	taskIDStr := uuidStr(taskID)
-	if !h.broker.HasLogSubscriber(taskIDStr) {
-		return // steady state: one map lookup, no marshal, no allocation
-	}
-
-	taskLogPublishes.Add(1)
-	data, err := json.Marshal(taskLogEvent{
-		TaskID:    taskIDStr,
-		JobID:     uuidStr(row.JobID),
-		Seq:       row.ID,
-		Stream:    stream,
-		Content:   string(chunk.Content),
-		CreatedAt: row.CreatedAt.Time,
-	})
-	if err != nil {
-		log.Printf("worker: handleTaskLog marshal %s: %v", taskIDStr, err)
-		return
-	}
-
-	h.broker.Publish(events.Event{
-		Type:   events.TypeTaskLog,
-		JobID:  uuidStr(row.JobID),
-		TaskID: taskIDStr,
-		Data:   data,
-	})
+	h.publishTaskLog(uuidStr(taskID), stream, string(chunk.Content), row)
 }
 
 // handleTelemetry records a host-utilization sample from an agent, stamped
