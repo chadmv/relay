@@ -1,8 +1,10 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { http, HttpResponse, delay } from 'msw'
 import { expect, test } from 'vitest'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { server } from '../test/setup-helpers'
 import { NewJobPage } from './NewJobPage'
 
 function DetailStub() {
@@ -336,4 +338,71 @@ test('the page has exactly one polite live region', () => {
   const regions = screen.getAllByRole('status')
   expect(regions).toHaveLength(1)
   expect(regions[0]).toHaveAttribute('aria-live', 'polite')
+})
+
+test('a 400 body no jobspec rule produces is rendered verbatim and marks no control invalid', async () => {
+  // THE DISCRIMINATING INPUT FIRST: a string that matches no Go format string in
+  // jobspec. A message-to-field mapping would either swallow it or attach it to
+  // an arbitrary control.
+  server.use(
+    http.post('/v1/jobs', () =>
+      HttpResponse.json({ error: 'the flux capacitor is misaligned' }, { status: 400 }),
+    ),
+  )
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('the flux capacitor is misaligned')
+  expect(screen.getAllByRole('alert')).toHaveLength(1)
+  expect(document.querySelectorAll('[aria-invalid]')).toHaveLength(0)
+})
+
+test('the alert carries the server string verbatim, whatever its status', async () => {
+  server.use(http.post('/v1/jobs', () => HttpResponse.json({ error: 'request body too large' }, { status: 413 })))
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('request body too large')
+})
+
+test('one click issues exactly one POST and the submit control is disabled while pending', async () => {
+  let posted = 0
+  server.use(
+    http.post('/v1/jobs', async () => {
+      posted++
+      await delay(50)
+      return HttpResponse.json({ id: 'job-1' }, { status: 201 })
+    }),
+  )
+  renderBuilder()
+  const btn = screen.getByRole('button', { name: 'Create job' })
+  await userEvent.click(btn)
+  await waitFor(() => expect(btn).toBeDisabled())
+  await userEvent.click(btn)
+  expect(posted).toBe(1)
+})
+
+test('navigation happens only after a 201', async () => {
+  server.use(http.post('/v1/jobs', () => HttpResponse.json({ error: 'name is required' }, { status: 400 })))
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('name is required')
+  expect(screen.queryByText(/^detail for/)).not.toBeInTheDocument()
+})
+
+test('a stale server error is cleared on the next submit', async () => {
+  let call = 0
+  server.use(
+    http.post('/v1/jobs', () => {
+      call++
+      if (call === 1) return HttpResponse.json({ error: 'name is required' }, { status: 400 })
+      return HttpResponse.json({ id: 'job-9' }, { status: 201 })
+    }),
+  )
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('name is required')
+  await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
+  expect(await screen.findByText('detail for job-9')).toBeInTheDocument()
+  expect(screen.queryByText(/name is required/)).not.toBeInTheDocument()
 })
