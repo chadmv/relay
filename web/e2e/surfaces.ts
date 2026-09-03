@@ -163,6 +163,49 @@ export function surfaces(): Surface[] {
       },
     },
     {
+      // THE SAME PATH as `jobs` above, in the third view. `prepare` sets the same
+      // preference key the shipped view switch writes, so no state is fabricated
+      // that production cannot produce; addInitScript is required because the SPA
+      // reads the key during its first render, before any test code could run.
+      //
+      // WHAT THIS SURFACE ESTABLISHES: the timeline does not widen the document,
+      // <header> or <main> at three widths. WHAT IT CANNOT: whether a bar is
+      // legible, or whether the name column has truncated a job name to nothing.
+      // This view is not a horizontal scroller, so the gate's usual blind spot
+      // does not apply the way it does to jobs-lanes - but the bar track has
+      // hidden overflow, which is a clip of the same kind one level down. The
+      // screenshots are the artifact and someone has to open them.
+      name: 'jobs-timeline',
+      path: () => '/jobs',
+      population: 'populated',
+      prepare: async (p) => {
+        await p.addInitScript(() => window.localStorage.setItem('relay.jobs.view', 'timeline'))
+      },
+      ready: async (p, seed) => {
+        // Scoped to the timeline region, not a bare link: a run where the seeded
+        // job is not drawn must fail loudly rather than measure an empty timeline
+        // under a populated name.
+        //
+        // The seeded job is created at seed time and never leaves `pending`, so
+        // it falls inside the default 24-hour window and draws as the instant
+        // marker - which makes this the only automated check that the
+        // never-started case renders at all.
+        //
+        // TIMEOUT WIDER THAN THE DEFAULT, ON PURPOSE. windowBounds' anchor is
+        // quantized to timelineWindow.ts's ANCHOR_STEP_MS (15s), so a job created
+        // within that same 15s window as this test's first fetch can fall just
+        // past the quantized `until` and draw zero rows until the anchor ticks
+        // forward and the query re-fires with a wider window. Measured: the
+        // seeded job's created_at sits close enough to suite start that the
+        // default 10s expect timeout missed this by one tick on a real run.
+        // Reproducible for a real user too - a job submitted seconds ago is
+        // documented as "not yet in the window" - so the fix here is patience,
+        // not a shorter anchor.
+        const region = p.getByRole('region', { name: 'Jobs timeline' })
+        await expect(region.getByRole('link', { name: seed.jobName })).toBeVisible({ timeout: 20_000 })
+      },
+    },
+    {
       name: 'job-detail',
       path: (seed) => `/jobs/${seed.jobId}`,
       population: 'populated',
