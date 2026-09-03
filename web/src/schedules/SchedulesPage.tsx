@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button } from '../components/Button'
-import type { Schedule, ScheduleSort } from './api'
+import type { ScheduleSort } from './api'
 import { useSchedules } from './useSchedules'
 import { useScheduleActions } from './useScheduleActions'
 import { SchedulesTable } from './SchedulesTable'
@@ -9,6 +9,8 @@ import { useCursorPager } from '../lib/useCursorPager'
 import { Eyebrow, GlassPanel } from '../components/holo'
 import { ENABLED_FILTERS, type EnabledFilterKey } from './scheduleFilters'
 import { useDebouncedValue } from '../lib/useDebouncedValue'
+import { SchedulesSummary } from './SchedulesSummary'
+import { useScheduleStats } from './useScheduleStats'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-created_at', label: 'Newest' },
@@ -20,12 +22,6 @@ const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-updated_at', label: 'Recently run' },
   { value: 'updated_at', label: 'Least recently run' },
 ]
-
-function countEnabled(schedules: Schedule[]): { enabled: number; paused: number } {
-  let enabled = 0
-  for (const s of schedules) if (s.enabled) enabled++
-  return { enabled, paused: schedules.length - enabled }
-}
 
 // debounceMs is a prop only so tests can shrink the search debounce; production
 // always uses the 300ms default. Same shape as UsersTab's.
@@ -43,6 +39,10 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
     undefined,
     { enabledKey, q },
   )
+  // Its own error surface. A stats failure degrades the strip to placeholders plus
+  // one sentence and leaves the table untouched; a list failure keeps the existing
+  // whole-page Retry card. Neither can blank the other.
+  const { data: stats, isError: statsFailed } = useScheduleStats()
   const { runNow, setEnabled } = useScheduleActions()
 
   // Tick once a second so relative "next run"/"last run" strings stay fresh
@@ -127,7 +127,6 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
   // caption, so the two marks cannot disagree about whether the page is filtered.
   const filterActive = enabledKey !== 'all' || q !== ''
 
-  const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
   const { x, y } = computePageRange(pager.startOffset, schedules.length)
   // The word appears at the exact moment the list's total and the strip's total can
@@ -142,27 +141,12 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
 
   return (
     <div className="flex flex-col gap-4">
-      {/*
-        The hi-fi HoloSchedules also shows filter chips (All/Enabled/Disabled), a
-        free-text search input, and a FAILED-24H summary stat. All three are
-        backend-blocked and deliberately omitted here (a dead list control or a
-        fabricated stat reads as broken):
-          - filter chips + search: docs/backlog/idea-2026-06-05-schedules-filter-search.md
-          - FAILED-24H stat:       docs/backlog/idea-2026-06-05-failed-24h-stat.md
-        The ENABLED/PAUSED summary strip below is page-scoped (counts only the
-        loaded page) until the stats endpoint lands:
-          - fleet-wide counts:     docs/backlog/idea-2026-06-05-schedules-stats-endpoint.md
-      */}
       <div className="flex flex-wrap items-end gap-6">
         <div>
           <Eyebrow>RECURRING</Eyebrow>
           <h1 className="text-[32px] font-normal tracking-tight">Schedules</h1>
         </div>
-        <div className="flex gap-4 font-mono text-[11px] text-fg-mute">
-          <span><b className="text-ok">{counts.enabled}</b> ENABLED</span>
-          <span><b className="text-fg">{counts.paused}</b> PAUSED</span>
-          <span className="text-fg-dim">· <span>{`${total} schedules`}</span></span>
-        </div>
+        <SchedulesSummary stats={stats} statsFailed={statsFailed} filterActive={filterActive} />
         <label className="ml-auto flex items-center gap-2 font-mono text-[10px] text-fg-mute">
           <span>Sort</span>
           <select

@@ -46,7 +46,7 @@ beforeEach(() => {
   )
 })
 
-test('renders schedules and the page-scoped summary', async () => {
+test('renders schedules and the fleet-wide summary caption', async () => {
   server.use(http.get('/v1/scheduled-jobs', () => HttpResponse.json(page)))
   renderWithQuery(
     <MemoryRouter>
@@ -55,7 +55,11 @@ test('renders schedules and the page-scoped summary', async () => {
   )
   expect(await screen.findByText('nightly-build')).toBeInTheDocument()
   expect(screen.getByText('weekly-clean')).toBeInTheDocument()
-  expect(screen.getByText('2 schedules')).toBeInTheDocument()
+  // 9, from the stats fixture, not 2 from the list envelope: the caption is
+  // fleet-wide and the loaded page is not. The old name described behaviour this
+  // commit deliberately removes, and a correct-looking test under a false name is
+  // the durable form of the wrong-prose defect.
+  expect(screen.getByTestId('schedules-stat-total')).toHaveTextContent('9 SCHEDULES TOTAL')
 })
 
 test('shows the empty state when there are no schedules', async () => {
