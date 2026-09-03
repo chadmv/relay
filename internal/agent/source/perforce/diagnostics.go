@@ -24,6 +24,15 @@ func classifyP4Error(err error) error {
 		// A || (B && C): comma = case-OR, && binds tighter
 		strings.Contains(msg, "tcp connect to") && strings.Contains(msg, "failed"):
 		return fmt.Errorf("cannot reach Perforce server from this agent — check P4PORT and network connectivity: %w", err)
+	// Match the PHRASE, never the words: `workspace` contains `space`, so an
+	// independent `space` substring reports a permissions problem as a full disk.
+	// TestClassifyP4Error's "insufficient permissions on workspace" case is what
+	// goes RED on that mistake.
+	case strings.Contains(msg, "no space left on device"),
+		strings.Contains(msg, "not enough space"),
+		strings.Contains(msg, "disk full"),
+		strings.Contains(msg, "insufficient disk space"):
+		return fmt.Errorf("out of disk space on this agent's workspace volume - free space, raise RELAY_WORKSPACE_MIN_FREE_GB so the sweeper evicts idle workspaces sooner, or reduce the sync paths: %w", err)
 	default:
 		return err
 	}

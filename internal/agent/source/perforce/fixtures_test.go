@@ -61,6 +61,12 @@ func (f *fakeRunner) setStream(key, out string) {
 	f.streamOut[key] = out
 }
 
+// setStreamErr makes Stream return err for the given args key without invoking
+// onLine, which is how a test drives a p4 sync FAILURE.
+func (f *fakeRunner) setStreamErr(key string, err error) {
+	f.streamErr[key] = err
+}
+
 func (f *fakeRunner) argHistory() [][]string {
 	result := make([][]string, len(f.calls))
 	for i, c := range f.calls {

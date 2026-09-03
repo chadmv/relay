@@ -248,10 +248,19 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	if needsSync {
+		// Brackets around the p4 output, and the failure line carries NO cause.
+		// The error returned below becomes ErrorMessage on the agent's
+		// PREPARE_FAILED and the coordinator stores that - classified and wrapped -
+		// as the task's last log line. Repeating it here would put the cause in the
+		// log twice in two spellings with nothing saying which is authoritative.
+		// TestProvider_ASyncFailureProgressLineDoesNotRepeatTheCause is the guard.
+		progress(fmt.Sprintf("[sync] starting: %d path(s)", len(syncSpecs)))
 		if err := p.cfg.Client.SyncStream(ctx, wsRoot, clientName, syncSpecs, progress); err != nil {
+			progress("[sync] failed; the cause is reported on the task's final status")
 			handle.Release()
 			return nil, classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 		}
+		progress("[sync] complete")
 		if curOK {
 			_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
 				e.BaselineHash = baseline
