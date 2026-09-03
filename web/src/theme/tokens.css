@@ -84,11 +84,9 @@
 
    A SECOND KNOWN GAP: a class-shaped literal in PROSE - a comment, not a
    real class attribute - still emits a rule, because the scanner reads
-   source text and this guard strips comments before scanning it. The
-   shipped stylesheet already carries rules this way from a stacking-order
-   value spelled out in shell/HoloShell.tsx's own commentary, and again in
-   its test file's. Out of scope for this lane; a class-shaped value in
-   prose should describe the value in words instead of spelling it.
+   source text and this guard strips comments before scanning it. A
+   class-shaped value in prose should describe the value in words instead
+   of spelling it.
 
    The pair check is enforced by
    components/dialog/dialogShellIsSole.guard.test.ts.
