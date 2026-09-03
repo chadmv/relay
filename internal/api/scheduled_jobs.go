@@ -32,10 +32,11 @@ type scheduledJobResponse struct {
 	NextRunAt     time.Time       `json:"next_run_at"`
 	LastRunAt     *time.Time      `json:"last_run_at,omitempty"`
 	LastJobID     string          `json:"last_job_id,omitempty"`
-	// The status of the job last_job_id names, verbatim from jobs.status: one of
-	// pending, running, done, failed, cancelled. NOT the pending -> queued rename
-	// jobStatsResponse performs; this field must agree with jobResponse.status,
-	// which is what the cell linking to it shows.
+	// The status of the job last_job_id names, verbatim from jobs.status: the
+	// vocabulary migration 000019 constrains and TestJobsStatusVocabularyIsExactly
+	// pins. NOT the pending -> queued rename jobStatsResponse performs; this field
+	// must agree with jobResponse.status, which is what the cell linking to it
+	// shows.
 	//
 	// PRESENT EXACTLY WHEN last_job_id IS PRESENT. The pairing is what makes an
 	// absent key mean one thing - "no scheduled fire has produced a job" - and

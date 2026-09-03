@@ -1886,10 +1886,10 @@ expired invites are what the admin view exists to show. Items:
 | `POST` | `/v1/scheduled-jobs/{id}/run-now` | Fire the schedule immediately (owner or admin) |
 
 **`last_job_status`.** Both `GET /v1/scheduled-jobs` and `GET /v1/scheduled-jobs/{id}`
-carry `last_job_status`, the status of the job `last_job_id` names, verbatim from the
-job's own vocabulary: `pending`, `running`, `done`, `failed` or `cancelled`. It agrees
-with `status` on `GET /v1/jobs/{id}` and is deliberately not the `pending` to `queued`
-rename that `GET /v1/jobs/stats` performs.
+carry `last_job_status`, the status of the job `last_job_id` names, taken verbatim from
+the job's own vocabulary rather than restated here. It agrees with `status` on
+`GET /v1/jobs/{id}` and is deliberately not the `pending` to `queued` rename that
+`GET /v1/jobs/stats` performs.
 
 It is **present exactly when `last_job_id` is present** - the two keys appear together
 or neither appears. Absent means the schedule has never had a fire that produced a job.
