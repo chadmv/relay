@@ -10,6 +10,7 @@ import { LANE_CHIP_KEY } from './lanes'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
+import { useDebouncedValue } from '../lib/useDebouncedValue'
 import { usePersistedChoice } from '../lib/usePersistedChoice'
 import type { JobSort, JobStatus } from './api'
 import { Eyebrow, GlassPanel } from '../components/holo'
@@ -33,10 +34,21 @@ type View = (typeof VIEWS)[number]
 
 const VIEW_KEY = 'relay.jobs.view'
 
-export function JobsPage() {
+// debounceMs is a prop only so tests can shrink it and stay on real timers;
+// production always uses the 300ms default, matching UsersTab's convention
+// rather than introducing a second constant for two boxes to drift apart on.
+//
+// THE DEBOUNCE IS NOT A BOUND. GET /v1/jobs carries no rate limit and ?q= is an
+// unindexed scan by design, so a caller that is not a typing user is unaffected
+// by a client-side timer. It reduces how many scans one person's typing costs
+// and bounds nothing else.
+export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const [sort, setSort] = useState<JobSort>(DEFAULT_SORT)
   const [filter, setFilter] = useState('all')
   const [view, chooseView] = usePersistedChoice<View>(VIEW_KEY, VIEWS, 'table')
+  const [qInput, setQInput] = useState('')
+  const q = useDebouncedValue(qInput, debounceMs).trim()
+  const [mine, setMine] = useState(false)
   const pager = useCursorPager()
 
   const status = FILTERS.find((f) => f.key === filter)?.status ?? ''
@@ -47,11 +59,13 @@ export function JobsPage() {
     pager.cursor,
     undefined,
     view === 'table',
+    q,
+    mine,
   )
   const { data: stats } = useJobStats()
   // Called unconditionally and gated by `enabled`, so the lanes stop polling the
   // moment the page returns to the table rather than running behind it.
-  const lanes = useJobLanes(view === 'lanes')
+  const lanes = useJobLanes(view === 'lanes', undefined, undefined, q, mine)
 
   function pickFilter(key: string) {
     setFilter(key)
@@ -61,6 +75,20 @@ export function JobsPage() {
 
   function pickSort(s: JobSort) {
     setSort(s)
+    pager.resetPaging()
+  }
+
+  function pickQ(v: string) {
+    setQInput(v)
+    // Reset here rather than in an effect on the debounced value: an effect runs
+    // after the render that already issued a query carrying the new q and the old
+    // cursor, so exactly one request goes out under a cursor minted for different
+    // filters. Matches UsersTab's pickEmail.
+    pager.resetPaging()
+  }
+
+  function pickMine(v: boolean) {
+    setMine(v)
     pager.resetPaging()
   }
 
@@ -74,6 +102,7 @@ export function JobsPage() {
   // The table query is disabled in lanes view, so its isFetching would leave the
   // dot permanently dark beside text claiming the page is auto-refreshing.
   const polling = view === 'lanes' ? lanes.some((l) => l.isFetching) : isFetching
+  const filtering = q !== '' || mine
 
   const pageHeader = (
       <div className="flex flex-wrap items-end gap-6">
@@ -114,6 +143,56 @@ export function JobsPage() {
       </div>
   )
 
+  const toolbar = (
+    <div className="flex flex-wrap items-center gap-2">
+      {view === 'table' &&
+        FILTERS.map((f) => (
+          <button
+            key={f.key}
+            type="button"
+            aria-pressed={filter === f.key}
+            onClick={() => pickFilter(f.key)}
+            className={`rounded-full border px-3.5 py-1.5 text-[12px] ${
+              filter === f.key ? 'border-accent/60 bg-accent/15 text-fg' : 'border-border bg-white/5 text-fg-mute'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      {/* No fixed minimum width, unlike UsersTab's copy of this control: this
+          toolbar is more crowded, and a flex item with a zero minimum takes the
+          space that is left and wraps to its own line when there is none, which
+          is the simplest thing that cannot widen the document at 320. */}
+      <input
+        type="search"
+        aria-label="Search jobs"
+        placeholder="Filter by job name or owner email"
+        maxLength={200}
+        value={qInput}
+        onChange={(e) => pickQ(e.target.value)}
+        className="ml-auto min-w-0 flex-1 rounded-full border border-border bg-black/25 px-3.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-accent"
+      />
+      <button
+        type="button"
+        aria-pressed={mine}
+        onClick={() => pickMine(!mine)}
+        className={`flex-none rounded-full border px-3.5 py-1.5 text-[12px] ${
+          mine ? 'border-accent bg-accent/25 text-fg' : 'border-accent/40 bg-white/5 text-accent'
+        }`}
+      >
+        My jobs
+      </button>
+      {view === 'table' && (
+        <SortControl
+          value={sort}
+          onChange={pickSort}
+          disabled={statusFiltered}
+          disabledHint="Sorting is unavailable while a status filter is active - the server rejects sort + status together. Switch to All to sort."
+        />
+      )}
+    </div>
+  )
+
   // Before the table's loading and error early returns, which belong to the table
   // query: in lanes view that query is disabled, and a lane owns its own loading,
   // empty and error states so one lane's 500 cannot blank the page.
@@ -121,7 +200,8 @@ export function JobsPage() {
     return (
       <div className="flex flex-col gap-4">
         {pageHeader}
-        <JobsLanes lanes={lanes} onShowAll={showAll} />
+        {toolbar}
+        <JobsLanes lanes={lanes} onShowAll={showAll} filtering={filtering} />
       </div>
     )
   }
@@ -158,41 +238,11 @@ export function JobsPage() {
   return (
     <div className="flex flex-col gap-4">
       {pageHeader}
-
-      {/*
-        The hi-fi HoloJobsList also shows a Timeline view, a "My jobs" pill, and a
-        free-text search input. All three are backend-blocked and deliberately
-        omitted here (a dead list control reads as broken):
-          - Timeline view: docs/backlog/idea-2026-06-05-jobs-timeline-view.md
-          - My jobs + search: docs/backlog/idea-2026-06-05-my-jobs-toggle-mine-filter.md
-        When those land, the remaining controls re-appear with real backing.
-      */}
-      <div className="flex flex-wrap items-center gap-2">
-        {FILTERS.map((f) => (
-          <button
-            key={f.key}
-            type="button"
-            aria-pressed={filter === f.key}
-            onClick={() => pickFilter(f.key)}
-            className={`rounded-full border px-3.5 py-1.5 text-[12px] ${
-              filter === f.key ? 'border-accent/60 bg-accent/15 text-fg' : 'border-border bg-white/5 text-fg-mute'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-        <div className="ml-auto">
-          <SortControl
-            value={sort}
-            onChange={pickSort}
-            disabled={statusFiltered}
-            disabledHint="Sorting is unavailable while a status filter is active - the server rejects sort + status together. Switch to All to sort."
-          />
-        </div>
-      </div>
+      {toolbar}
 
       <JobsTable
         jobs={jobs}
+        emptyMessage={filtering ? 'No jobs match those filters.' : undefined}
         footer={
           <div className="flex items-center justify-between font-mono text-[10.5px] tracking-wider text-fg-mute">
             <span>
