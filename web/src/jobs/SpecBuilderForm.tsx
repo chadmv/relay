@@ -118,10 +118,22 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
     [onChange],
   )
 
+  // Adds dispatched within the CURRENT batch, before state.tasks.length has
+  // had a chance to recompute against them. Two adds dispatched in one
+  // batching window both read the same pre-commit length, so the second
+  // one's announced ordinal would repeat the first's rather than counting
+  // past it. Cleared once depOptions actually reflects a real commit, so a
+  // later, separate add starts fresh.
+  const addedThisTick = useRef(0)
+  useEffect(() => {
+    addedThisTick.current = 0
+  }, [depOptions])
+
   function addTask() {
     const task = newTaskRow()
     onChange((prev) => ({ ...prev, tasks: [...prev.tasks, task] }))
-    announce(`Task ${state.tasks.length + 1} added`)
+    addedThisTick.current += 1
+    announce(`Task ${state.tasks.length + addedThisTick.current} added`)
     focusAfterUpdate(`task-${task.id}-name`)
   }
 
