@@ -49,22 +49,49 @@ export function toPosix(path: string): string {
   return path.replace(/\\/g, '/')
 }
 
-// Strips comments before scanning, both kinds this repo writes. A previous
-// version of this scan only stripped `//` line comments, and a real review lane
-// broke it: inserting a prose comment into a fully compliant consumer made a
-// tag-matching guard report it as a violation, because the regex stopped at the
-// first `>` inside the comment's own prose. `{/* ... */}` JSX comments are
-// `/* ... */` blocks underneath, and this repo writes them constantly, so a scan
-// blind to them will eventually fire on someone documenting intent near the code
-// a guard matches, and the fix people reach for under that pressure is to weaken
-// the guard rather than the scan. Block comments are stripped first (they can
-// span multiple lines), then `//` line comments on what remains.
+// Strips comments before scanning, both kinds this repo writes: `{/* ... */}`
+// JSX comments are `/* ... */` blocks underneath. Block comments are stripped
+// first (they can span multiple lines), then `//` line comments on what
+// remains.
 //
-// KNOWN LIMIT: a `//` comment that TRAILS code on the same line is not stripped,
-// only a line whose first non-space characters are the slashes. No consumer
-// writes one next to a class string today.
+// String literals are blanked before the block-comment pass runs, keeping
+// their quotes and any embedded newlines: a `/*` inside a string (an
+// accept-attribute value like 'image/*' is the shape that surfaced this)
+// otherwise reads as an unterminated block comment and swallows every
+// producer between it and the next real `*/`, or to EOF if there is none.
+//
+// KNOWN LIMITS. A `//` comment that TRAILS code on the same line is not
+// stripped, only a line whose first non-space characters are the slashes. A
+// template literal's `${...}` interpolation is not tokenised, so a stray `/*`
+// or backtick inside an interpolated expression is not protected the way one
+// inside a plain string is. And the line-comment pass itself is not
+// string-aware: a line whose ENTIRE trimmed content is literal text starting
+// with `//` inside a multi-line template literal would still be incorrectly
+// stripped - no shipped source does this today.
+function blankStringLiterals(src: string): string {
+  return src.replace(
+    /'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g,
+    (m) => m[0] + m.slice(1, -1).replace(/[^\n]/g, ' ') + m[m.length - 1],
+  )
+}
+
 export function withoutComments(src: string): string {
-  const noBlocks = src.replace(/\/\*[\s\S]*?\*\//g, '')
+  // Block-comment boundaries are located on the string-blanked copy (same
+  // length and newline positions as src, so match indices line up), and the
+  // matched ranges are then removed from the REAL src - so a comment inside a
+  // string is never mistaken for a delimiter, and the returned text still
+  // holds real string content, not blanks.
+  const blanked = blankStringLiterals(src)
+  const blockComment = /\/\*[\s\S]*?\*\//g
+  let noBlocks = ''
+  let cursor = 0
+  let match: RegExpExecArray | null
+  while ((match = blockComment.exec(blanked))) {
+    noBlocks += src.slice(cursor, match.index)
+    cursor = match.index + match[0].length
+  }
+  noBlocks += src.slice(cursor)
+
   return noBlocks
     .split('\n')
     .map((line) => (line.trim().startsWith('//') ? '' : line))

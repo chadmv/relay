@@ -57,6 +57,19 @@ test('the source walk reaches shipped sources and nothing else', () => {
   expect(paths.filter((p) => /\.test\.tsx?$/.test(p)), 'the walk reached a test file').toEqual([])
 })
 
+// PERMANENT KILL for withoutComments itself, not for any assertion above it.
+// The block-comment stripper is not string-aware, so a slash-star run inside a
+// string literal (an accept-attribute value like 'image/*' is the shape that
+// surfaced this) reads as an unterminated block comment and swallows every
+// producer between it and the next real */, or to EOF if there is none -
+// silently hiding a hand-rolled violation from every assertion in this file.
+// Reproduced directly against the shared helper, because the defect is in
+// sourceTree.ts, not in any one consumer.
+test('a slash-star inside a string literal does not swallow the producer after it', () => {
+  const src = "const ACCEPT = 'image/*'\nconst x = <div role=\"dialog\" />\n/* trailing note */\n"
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
 // A1. The probe accepts the string form and the braced form, so a role written
 // as an expression is caught too. A role assembled from a variable is not - see
 // the header's known gaps.
