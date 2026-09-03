@@ -132,8 +132,8 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   -> **What changes:** when a finding names a shape (a stale read beside a functional update, a guard on
   one parameter, a comparison of unlike values), the fix brief and the re-verify brief both say "find
   every site with this shape in the file", and a re-verify's opening question is what the NEW code still
-  mishandles, never whether the named site is fixed. Promotion: extend
-  [[reference_backstop_recreates_the_defect]] with this trigger.
+  mishandles, never whether the named site is fixed. (promoted: extended
+  [[reference_backstop_recreates_the_defect]])
 
 - **A fix round's comment cleanup wrote fresh policy violations, three times.** JF deleted a uniqueness
   claim from a surfaces comment and replaced it with a re-measurement narrative; MF's DOM-direct drag
@@ -141,9 +141,8 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   20" while editing it. Each was written while fixing prose the policy had just flagged.
   -> **What changes:** a fix round's rewritten comments are authored prose and get the Comments policy
   pass on their added lines before commit, the same as new code; the re-verify brief lists the policy
-  explicitly for the comments the round touched. Promotion: extend
-  [[reference_correcting_a_uniqueness_claim]] (its "rewriting prose regenerates claims" is the same
-  mechanism; the trigger here is a review-driven cleanup).
+  explicitly for the comments the round touched. (promoted: extended
+  [[reference_correcting_a_uniqueness_claim]])
 
 - **Two commits claimed to fix an escape and neither did.** Writing the six-character escape for an e with an acute accent into a doc: perl
   consumed the backslash, sed changed nothing, the Edit tool decoded the escape into a raw rune, and
@@ -152,8 +151,8 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   clean throughout.
   -> **What changes:** when an edit must land a backslash escape or a specific non-ASCII byte, verify
   the bytes with `od -c` on the written line before the commit message claims anything, and prefer a
-  byte-level write over any tool that interprets escapes. Promotion: extend
-  [[feedback_assert_encoding_after_a_programmatic_edit]] with the escape-bearing trigger.
+  byte-level write over any tool that interprets escapes. (promoted: extended
+  [[feedback_assert_encoding_after_a_programmatic_edit]])
 
 - **An engineer's "green" was measured under an invocation the reviewer's default did not reproduce.**
   FB reported 166 files green; the re-verify's three default `npx vitest run` invocations each timed out
@@ -161,7 +160,7 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   refutation were both true of different invocations.
   -> **What changes:** a suite-green claim in a report names its invocation (command, pool, isolation,
   repeat count), and a reviewer who cannot reproduce green under the default invocation reports that as
-  a finding, not as a flake. Promotion: extend [[feedback_relay_the_input_not_just_the_number]].
+  a finding, not as a flake. (promoted: extended [[feedback_relay_the_input_not_just_the_number]])
 
 - **Two of the conductor's resolution notes described the item's proposal, not the shipped code.** The
   My jobs toggle was written up as persisted (it is page state) and the extracted hook was named from
@@ -169,7 +168,7 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   page). Both were caught by reading the code a minute later and corrected in a follow-up commit.
   -> **What changes:** a resolution note is written from the diff (grep the symbol, read the state
   declaration), never from the item's title or proposal, and the close commit is not made until the
-  note's every noun has been seen in the tree. Promotion: extend [[feedback_backlog_housekeeping]].
+  note's every noun has been seen in the tree. (promoted: extended [[feedback_backlog_housekeeping]])
 
 - **Two engineers acted on shared local state outside their worktrees.** The TB engineer dropped and
   recreated the local `relay` dev database while setting up a populated page; the MF engineer killed a
@@ -178,7 +177,7 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   -> **What changes:** engineer briefs state that anything outside the worktree (databases other than
   the lane's own e2e database, processes the agent did not start, global npm or Go caches) is
   off-limits without asking, and that any such action is reported in the first line of the report.
-  Promotion: `docs/agent-team/README.md`, engineer dispatch checklist.
+  (promoted to `docs/agent-team/README.md`)
 
 - **Two lanes fixed the same defect independently on the same day.** SF's and JF's finder passes each
   named the debounce-window cursor race; SF fixed it inline on SchedulesPage and merged, JF extracted a
@@ -187,21 +186,21 @@ the FB item's dialog framing refuted); [[reference_correcting_a_uniqueness_claim
   -> **What changes:** when two parallel lanes' reviews name the same finding, assign the fix to one
   lane before either fix round is dispatched, and brief the other to adopt it after that lane merges;
   the fan-in notes are where the overlap is spotted, so read them before dispatching fix rounds, not
-  after. Promotion: new feedback memory.
+  after. (promoted to [[feedback_same_finding_across_parallel_lanes]])
 
 - **Concurrent e2e runs corrupted the shared harness.** Two lanes' `make test-e2e` runs overlapped;
   both drop and recreate `relay_e2e` and bind ports 8091 and 9091, so one run's server answered the
   other's specs and both reported connection refusals.
   -> **What changes:** every engineer brief that may run the browser suite carries the mkdir-atomic
-  lock protocol, and `web/e2e/README.md` documents it beside the recipe. Promotion: `web/e2e/README.md`
-  (project-specific; already applied to the briefs this session).
+  lock protocol, and `web/e2e/README.md` documents it beside the recipe. (promoted to
+  `web/e2e/README.md`)
 
 - **The default model was overloaded for half an hour and the pipeline stalled on review.** Re-dispatching
   the read-only review agents on sonnet kept the lanes moving; their re-verifies held up, and the
   engineers stayed on the default model.
   -> **What changes:** when review agents die on repeated 529s for more than a few minutes, re-dispatch
   the read-only lenses on sonnet with the same brief rather than waiting; keep engineers on the default
-  model unless they are also blocked. Promotion: new feedback memory.
+  model unless they are also blocked. (promoted to [[feedback_review_lenses_on_sonnet_under_529]])
 
 - **The e2e recipe failed twice before running.** Exporting `TEMP` and the Go variables into the
   invoking shell does nothing for the MSYS make's recipe subshells; the README already prescribes

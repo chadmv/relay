@@ -61,6 +61,15 @@ plan").
 - **Phase 3 parallelism** depends on the planner's independence declaration.
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
+- **Phase 3 briefs put everything outside the worktree off-limits.** Databases other
+  than the lane's own e2e database, processes the agent did not start, and global
+  npm or Go caches are not touched without asking, and any such action is reported
+  in the first line of the engineer's report. On 2026-09-03 one engineer dropped and
+  recreated the local `relay` dev database to populate a page and another killed a
+  `relay-server.exe` left by an earlier session; neither brief had said anything
+  about shared state, and the conductor learned of both from the reports. When
+  several lanes may run the browser suite, the brief also carries the e2e lock
+  protocol from `web/e2e/README.md`.
 - **Phase 4** is a conductor-run `/code-review` followed by a **parallel fan-out of
   four agents in a single message**. There is no Workflow and no opt-in to obtain.
 
