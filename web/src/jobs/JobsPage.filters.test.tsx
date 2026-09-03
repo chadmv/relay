@@ -152,6 +152,17 @@ test('every view request carries the active filters', async () => {
     expect(p.get('q')).toBe('etl')
     expect(p.get('mine')).toBe('true')
   }
+
+  seen = []
+  await userEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+  // limit=200 discriminates a timeline page from the table's 50 and a lane's 10.
+  await waitFor(() => expect(seen.some((p) => p.get('limit') === '200')).toBe(true))
+  for (const p of seen.filter((x) => x.get('limit') === '200')) {
+    expect(p.get('q')).toBe('etl')
+    expect(p.get('mine')).toBe('true')
+    expect(p.has('since')).toBe(true)
+    expect(p.has('until')).toBe(true)
+  }
 })
 
 test('an empty filtered table says no jobs match', async () => {

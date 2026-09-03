@@ -6,6 +6,9 @@ import { useJobStats } from './useJobStats'
 import { JobsTable } from './JobsTable'
 import { JobsLanes } from './JobsLanes'
 import { useJobLanes } from './useJobLanes'
+import { JobsTimeline } from './JobsTimeline'
+import { useJobTimeline } from './useJobTimeline'
+import { TIMELINE_WINDOWS, type TimelineWindow } from './timelineWindow'
 import { LANE_CHIP_KEY } from './lanes'
 import { SortControl } from './SortControl'
 import { computePageRange } from '../lib/pageRange'
@@ -29,10 +32,17 @@ const DEFAULT_SORT: JobSort = '-created_at'
 // The runtime list and the type derive from one tuple, so a view added to one
 // cannot be missing from the other. usePersistedChoice validates a stored value
 // against this list, so a value outside it reads as the fallback.
-const VIEWS = ['table', 'lanes'] as const
+const VIEWS = ['table', 'lanes', 'timeline'] as const
 type View = (typeof VIEWS)[number]
 
 const VIEW_KEY = 'relay.jobs.view'
+const WINDOW_KEY = 'relay.jobs.timeline.window'
+
+const VIEW_LABEL: Record<View, string> = {
+  table: 'Table',
+  lanes: 'Lanes',
+  timeline: 'Timeline',
+}
 
 // debounceMs is a prop only so tests can shrink it and stay on real timers;
 // production always uses the 300ms default, matching UsersTab's convention
@@ -46,6 +56,7 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const [sort, setSort] = useState<JobSort>(DEFAULT_SORT)
   const [filter, setFilter] = useState('all')
   const [view, chooseView] = usePersistedChoice<View>(VIEW_KEY, VIEWS, 'table')
+  const [tWindow, chooseWindow] = usePersistedChoice<TimelineWindow>(WINDOW_KEY, TIMELINE_WINDOWS, '24h')
   const [qInput, setQInput] = useState('')
   const q = useDebouncedValue(qInput, debounceMs).trim()
   const [mine, setMine] = useState(false)
@@ -66,6 +77,9 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
   // Called unconditionally and gated by `enabled`, so the lanes stop polling the
   // moment the page returns to the table rather than running behind it.
   const lanes = useJobLanes(view === 'lanes', undefined, undefined, q, mine)
+  // Exactly one of the three data sources is enabled at a time. Without this the
+  // timeline view polls a 50-row enriched page nobody is looking at.
+  const timeline = useJobTimeline(view === 'timeline', tWindow, q, mine)
 
   function pickFilter(key: string) {
     setFilter(key)
@@ -99,9 +113,14 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
     chooseView('table')
   }
 
-  // The table query is disabled in lanes view, so its isFetching would leave the
-  // dot permanently dark beside text claiming the page is auto-refreshing.
-  const polling = view === 'lanes' ? lanes.some((l) => l.isFetching) : isFetching
+  // Three-way. A missing branch leaves the dot permanently dark beside text
+  // claiming the page auto-refreshes.
+  const polling =
+    view === 'lanes'
+      ? lanes.some((l) => l.isFetching)
+      : view === 'timeline'
+        ? timeline.isFetching
+        : isFetching
   const filtering = q !== '' || mine
 
   const pageHeader = (
@@ -118,10 +137,17 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-3">
           <span className="font-mono text-[10px] text-fg-mute">
-            <span className={polling ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
+            <span
+              data-testid="live-dot"
+              data-live={polling ? 'on' : 'off'}
+              className={polling ? 'text-ok' : 'text-fg-dim'}
+            >
+              &#9679;
+            </span>{' '}
+            live &middot; auto-refreshing
           </span>
           <div role="group" aria-label="Jobs view" className="flex rounded-full border border-border p-0.5">
-            {(['table', 'lanes'] as View[]).map((v) => (
+            {VIEWS.map((v) => (
               <button
                 key={v}
                 type="button"
@@ -129,7 +155,7 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
                 onClick={() => chooseView(v)}
                 className={`rounded-full px-3 py-1 text-[12px] ${view === v ? 'bg-accent text-bg' : 'text-fg-mute'}`}
               >
-                {v === 'table' ? 'Table' : 'Lanes'}
+                {VIEW_LABEL[v]}
               </button>
             ))}
           </div>
@@ -159,6 +185,27 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
             {f.label}
           </button>
         ))}
+      {view === 'timeline' && (
+        <div
+          role="group"
+          aria-label="Timeline window"
+          className="flex rounded-full border border-border p-0.5"
+        >
+          {TIMELINE_WINDOWS.map((tw) => (
+            <button
+              key={tw}
+              type="button"
+              aria-pressed={tWindow === tw}
+              onClick={() => chooseWindow(tw)}
+              className={`rounded-full px-3 py-1 font-mono text-[11px] ${
+                tWindow === tw ? 'bg-accent/20 text-fg' : 'text-fg-mute'
+              }`}
+            >
+              {tw}
+            </button>
+          ))}
+        </div>
+      )}
       {/* No fixed minimum width, unlike UsersTab's copy of this control: this
           toolbar is more crowded, and a flex item with a zero minimum takes the
           space that is left and wraps to its own line when there is none, which
@@ -202,6 +249,22 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
         {pageHeader}
         {toolbar}
         <JobsLanes lanes={lanes} onShowAll={showAll} filtering={filtering} />
+      </div>
+    )
+  }
+
+  if (view === 'timeline') {
+    return (
+      <div className="flex flex-col gap-4">
+        {pageHeader}
+        {toolbar}
+        <JobsTimeline
+          state={timeline}
+          window={tWindow}
+          filtering={filtering}
+          onChooseWindow={chooseWindow}
+          onOpenTable={() => chooseView('table')}
+        />
       </div>
     )
   }
