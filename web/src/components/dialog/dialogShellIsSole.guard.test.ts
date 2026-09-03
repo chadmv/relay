@@ -80,16 +80,56 @@ test('the source walk reaches shipped sources and nothing else', () => {
   expect(paths.filter((p) => /\.test\.tsx?$/.test(p)), 'the walk reached a test file').toEqual([])
 })
 
-// PERMANENT KILL for withoutComments itself, not for any assertion above it.
-// The block-comment stripper is not string-aware, so a slash-star run inside a
-// string literal (an accept-attribute value like 'image/*' is the shape that
-// surfaced this) reads as an unterminated block comment and swallows every
-// producer between it and the next real */, or to EOF if there is none -
-// silently hiding a hand-rolled violation from every assertion in this file.
-// Reproduced directly against the shared helper, because the defect is in
-// sourceTree.ts, not in any one consumer.
+// PERMANENT KILLS for withoutComments itself, not for any assertion above it:
+// the defect lives in sourceTree.ts, so each is pinned directly against the
+// shared helper rather than through a consumer. Each shape below relies on a
+// stray quote-like character being mistaken for a real string or comment
+// boundary, silently deleting a real producer between it and the next
+// matching delimiter elsewhere in the file.
 test('a slash-star inside a string literal does not swallow the producer after it', () => {
   const src = "const ACCEPT = 'image/*'\nconst x = <div role=\"dialog\" />\n/* trailing note */\n"
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+test('an apostrophe inside a comment does not pair with an unrelated string', () => {
+  const src =
+    "{/* the header's own stacking context */} <b title='x' />\n" +
+    '<div role="dialog" aria-modal="true" />\n' +
+    '/* trailing note */\n'
+  const stripped = withoutComments(src)
+  expect(stripped).toContain('role="dialog"')
+  expect(stripped).toContain('aria-modal="true"')
+})
+
+test('a backtick inside a comment does not pair with an unrelated template literal', () => {
+  const src =
+    '/* see the ` SCRIM identifier */ <b>x</b>\n' +
+    'const tpl = `y`\n' +
+    '<div role="dialog" aria-modal="true" />\n' +
+    '/* trailing note */\n'
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+// A regex literal is recognised heuristically, not parsed. These two pin the
+// two forms this repo actually writes, producer on the SAME line right after
+// the regex - what a per-line scan actually reads.
+//
+// The character-class form (this file's own ROLE_PROBE shape) turns out to
+// be safe even without the heuristic: a quote inside it opens a string
+// state, but string CONTENT is never blanked here, only comment content is -
+// so a misclassified string cannot itself delete anything. This is a
+// property of the design, not a coincidence, and this test pins it staying
+// true.
+test('a regex literal holding a quote inside a character class is not mistaken for a string', () => {
+  const src = "const P = /role=\\{?['\"`]dialog['\"`]/; const x = <div role=\"dialog\" />\n"
+  expect(withoutComments(src)).toContain('role="dialog"')
+})
+
+// The escaped-slash-star form (this file's own PORTAL_PROBE-adjacent shape)
+// is the real kill: without the heuristic, its own trailing `//g` reads as a
+// line comment and swallows everything after it on the same line.
+test('a regex literal spelling an escaped slash-star is not mistaken for a comment', () => {
+  const src = "const P = /\\/\\*[\\s\\S]*?\\*\\//g; const x = <div role=\"dialog\" />\n"
   expect(withoutComments(src)).toContain('role="dialog"')
 })
 
