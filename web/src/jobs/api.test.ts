@@ -14,6 +14,7 @@ import {
   listJobs,
   listJobsBySchedule,
   listJobsByStatus,
+  listJobsInWindow,
   retryJob,
   streamTaskLog,
   type JobsPage,
@@ -304,6 +305,30 @@ test('listJobsByStatus sends status and limit and NEVER sends sort or cursor', a
 
 test('JOB_STATUSES is the jobs.status vocabulary and JobStatus derives from it', () => {
   expect([...JOB_STATUSES]).toEqual(['pending', 'running', 'done', 'failed', 'cancelled'])
+})
+
+test('listJobsInWindow sends the window at the server cap and no sort', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      seen.push(new URL(request.url).searchParams)
+      return HttpResponse.json({ items: [], next_cursor: '', total: 0 })
+    }),
+  )
+
+  await listJobsInWindow('2026-09-01T00:00:00.000Z', '2026-09-02T00:00:00.000Z', 'CUR1', 'etl', true)
+  const p = seen[0]
+  expect(p.get('since')).toBe('2026-09-01T00:00:00.000Z')
+  expect(p.get('until')).toBe('2026-09-02T00:00:00.000Z')
+  expect(p.get('limit')).toBe('200')
+  expect(p.get('cursor')).toBe('CUR1')
+  expect(p.get('q')).toBe('etl')
+  expect(p.get('mine')).toBe('true')
+  // No sort and no status. The timeline relies on the server's default
+  // -created_at, so that adding a status filter to this view later cannot
+  // silently turn into the sort-versus-filter 400.
+  expect(p.has('sort')).toBe(false)
+  expect(p.has('status')).toBe(false)
 })
 
 test('listJobs sends q and mine, and omits them when absent', async () => {
