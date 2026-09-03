@@ -185,3 +185,27 @@ test('every document keydown listener is allowlisted with a reason', () => {
 // document mousedown listener. A fourth of those is not the hazard this file is
 // about, and asserting it would make the allowlist grow for a reason unrelated
 // to modal semantics.
+
+// A5. Route 1 of the body-level portal question is a constraint written in
+// dialogStack.ts's header; this is what delivers it to the person who needs it,
+// on the commit that needs it. KNOWN GAP: a body reference obtained some other
+// way is not caught.
+const BODY_INSERTIONS = ['appendChild', 'append', 'prepend', 'insertBefore']
+const PORTAL_PROBE = new RegExp(
+  `createPortal|document\\s*\\.\\s*body\\s*\\.\\s*(?:${BODY_INSERTIONS.join('|')})\\b`,
+)
+
+const BODY_PORTAL =
+  'a node appended to the body after a dialog opens is never marked inert or aria-hidden: the ' +
+  'dialog stack marks the background on register and unregister only. It stays keyboard-reachable ' +
+  'from behind a modal, is announced as though the modal were not there, and paints above the ' +
+  'scrim as a later sibling. Portal into a container this component owns, or add the entry here ' +
+  'and decide at the same time whether the new layer sits above or below a modal.'
+
+test('body-level portals belong to the dialog module', () => {
+  const found = SOURCES.filter((f) => PORTAL_PROBE.test(stripped(f))).map(rel)
+  // C5.
+  expect(found, 'the portal probe no longer matches the shell').toContain(SHELL)
+  expect(found, 'the portal probe no longer matches the stack').toContain(STACK)
+  expect(found.filter((p) => !p.startsWith(DIALOG_DIR)), BODY_PORTAL).toEqual([])
+})
