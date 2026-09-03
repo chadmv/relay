@@ -202,3 +202,97 @@ test('every imported row carries a distinct identity', () => {
   const state = imported(README_JOB)
   expect(new Set(state.tasks.map((t) => t.id)).size).toBe(2)
 })
+
+// The README `source` example, wrapped in the smallest job that carries it.
+const README_SOURCE_JOB = {
+  name: 'j',
+  tasks: [
+    {
+      name: 'render-shot-001',
+      command: ['blender', '-b', 'scene.blend', '-f', '1'],
+      source: {
+        type: 'perforce',
+        stream: '//depot/film-x/main',
+        sync: [{ path: '//depot/film-x/main/...', rev: '#head' }],
+        unshelves: [12345],
+        workspace_exclusive: false,
+      },
+    },
+  ],
+}
+
+function refusal(spec: unknown): string {
+  const result = fromSpec(spec)
+  if (result.ok) throw new Error('expected a refusal, got an accepted import')
+  return result.error
+}
+
+test('the README source example is refused, naming its path', () => {
+  expect(refusal(README_SOURCE_JOB)).toContain('tasks[0].source')
+})
+
+test('an unknown task-level key is refused, naming its path', () => {
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'], widget: 1 }] })).toContain('tasks[0].widget')
+})
+
+test('an unknown key on a later task is refused, naming that index', () => {
+  const spec = {
+    name: 'j',
+    tasks: [{ name: 'a', command: ['a'] }, { name: 'b', command: ['b'] }, { name: 'c', command: ['c'], widget: 1 }],
+  }
+  expect(refusal(spec)).toContain('tasks[2].widget')
+})
+
+test('an unknown job-level key is refused, naming it', () => {
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'] }], widget: 1 })).toContain('widget')
+})
+
+test('a task setting both command and commands is refused', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', command: ['a'], commands: [['b']] }] }
+  expect(refusal(spec)).toContain('tasks[0]')
+  expect(refusal(spec)).toContain('both command and commands')
+})
+
+test('a spec that is not an object is refused', () => {
+  expect(refusal([{ name: 'j' }])).toContain('not a JSON object')
+  expect(refusal('a string')).toContain('not a JSON object')
+  expect(refusal(null)).toContain('not a JSON object')
+})
+
+test('a tasks value that is not an array is refused', () => {
+  expect(refusal({ name: 'j', tasks: { a: 1 } })).toContain('tasks is not an array')
+  expect(refusal({ name: 'j' })).toContain('tasks is not an array')
+})
+
+test('a task that is not an object is refused, naming its index', () => {
+  expect(refusal({ name: 'j', tasks: ['echo'] })).toContain('tasks[0] is not an object')
+})
+
+test('a known key whose value the form cannot hold is refused, naming its path', () => {
+  // The string-where-an-array-belongs case FIRST: it is the one a coercing
+  // implementation is most likely to accept and then re-emit as a split argv.
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: 'echo hello' }] })).toContain('tasks[0].command')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: [1, 2] }] })).toContain('tasks[0].command')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'], retries: '2' }] })).toContain('tasks[0].retries')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'], timeout_seconds: '60' }] })).toContain(
+    'tasks[0].timeout_seconds',
+  )
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'], env: null }] })).toContain('tasks[0].env')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'], env: { A: 1 } }] })).toContain('tasks[0].env')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'] }], labels: { a: 1 } })).toContain('labels')
+  expect(refusal({ name: 'j', tasks: [{ name: 't', command: ['a'] }], priority: 'urgent' })).toContain('priority')
+})
+
+test('a depends_on naming no task in the spec is refused, naming its path', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', command: ['a'], depends_on: ['nope'] }] }
+  expect(refusal(spec)).toContain('tasks[0].depends_on[0]')
+})
+
+test('a depends_on naming its own task is refused', () => {
+  const spec = { name: 'j', tasks: [{ name: 't', command: ['a'], depends_on: ['t'] }] }
+  expect(refusal(spec)).toContain('names its own task')
+})
+
+test('a refusal message tells the reader where the spec still lives', () => {
+  expect(refusal(README_SOURCE_JOB)).toContain('JSON')
+})
