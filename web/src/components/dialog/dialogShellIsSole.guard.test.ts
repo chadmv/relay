@@ -261,18 +261,32 @@ test('any portal outside the dialog module needs an entry', () => {
 // inline style rather than a utility is invisible to this.
 const Z = 'z' + '-'
 const Z_INDEX = Z + 'index'
-const Z_NUMERIC = new RegExp(`(?<![\\w-])${Z}(\\d+)(?![\\w-])`, 'g')
-const Z_ARBITRARY = new RegExp(`(?<![\\w-])${Z}\\[`)
+// The leading minus is captured, not excluded by the lookbehind: the
+// lookbehind still checks the character BEFORE the optional sign, so
+// max-md:z-50 keeps matching (preceded by the variant colon) while -z-10 also
+// matches (preceded by nothing, or by whitespace/a quote) and foo-z-10 still
+// does not (preceded by a word character). The sign is folded into the
+// recorded value so it lines up with ENTRY_LINE's own signed capture.
+const Z_NUMERIC = new RegExp(`(?<![\\w-])(-?)${Z}(\\d+)(?![\\w-])`, 'g')
+const Z_ARBITRARY = new RegExp(`(?<![\\w-])-?${Z}\\[`)
 const TOKENS_CSS = join(SRC_ROOT, 'theme', 'tokens.css')
 const ENTRY_LINE = new RegExp(`^\\s*ENTRY\\s+${Z_INDEX}\\s+(-?\\d+)\\s+(\\S+\\.tsx?)\\b`)
 
 function scannedPairs(): string[] {
   const out = new Set<string>()
   for (const file of SOURCES) {
-    for (const m of stripped(file).matchAll(Z_NUMERIC)) out.add(`${rel(file)} ${m[1]}`)
+    for (const m of stripped(file).matchAll(Z_NUMERIC)) out.add(`${rel(file)} ${m[1]}${m[2]}`)
   }
   return [...out].sort()
 }
+
+test('the stacking-order scan reads a negative value with its sign', () => {
+  // Permanent kill: -z-10 and -z-[100] both survived before this fix round,
+  // because the lookbehind treated the sign's own hyphen as disqualifying.
+  const numeric = [...'-z-10'.matchAll(Z_NUMERIC)]
+  expect(numeric.map((m) => m[1] + m[2])).toEqual(['-10'])
+  expect(Z_ARBITRARY.test('-z-[100]')).toBe(true)
+})
 
 function documentedPairs(): string[] {
   const css = readFileSync(TOKENS_CSS, 'utf8')
