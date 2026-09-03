@@ -212,7 +212,7 @@ test('changing the window ends the previous walk', async () => {
   expect(seen.filter((p) => p.get('since') === oldSince)).toHaveLength(2)
 })
 
-test('a failed refresh keeps the previous rows and reports no error', async () => {
+test('a failed refresh keeps the previous rows and surfaces the error', async () => {
   let fail = false
   server.use(
     http.get('/v1/jobs', () => {
@@ -231,10 +231,40 @@ test('a failed refresh keeps the previous rows and reports no error', async () =
   await act(async () => {
     await client.refetchQueries({ queryKey: ['job-timeline'] })
   })
-  // Mirrors the table view's error && !data rule: a failed refresh over existing
-  // data keeps the data visible rather than blanking the chart.
+  // The rows stay visible - a failed refresh must not blank the chart - but
+  // unlike the earlier design, the error is no longer suppressed just because
+  // rows exist. query.error can be populated even while query.data still holds
+  // the last successful fetch (TanStack does not clear it on a background
+  // refetch failure), and hiding it whenever data is present is exactly the
+  // bug the review found: the caption kept describing a bound the last
+  // SUCCESSFUL fetch drew while a failed refresh was silently swallowed.
+  await waitFor(() => expect(result.current.error).not.toBeNull())
   expect(result.current.jobs).toHaveLength(1)
-  expect(result.current.error).toBeNull()
+  expect(result.current.error?.message).toBe('500 boom')
+})
+
+test('a window change that fails keeps state.window at the window the stale rows belong to', async () => {
+  let firstSince: string | null = null
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const since = new URL(request.url).searchParams.get('since')
+      if (firstSince === null) firstSince = since
+      if (since !== firstSince) return HttpResponse.json({ error: 'boom' }, { status: 500 })
+      return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: '', total: 1 })
+    }),
+  )
+  const { rerender, result } = renderHook<ReturnType<typeof useJobTimeline>, { w: '24h' | '6h' }>(
+    ({ w }) => useJobTimeline(true, w, '', false),
+    { wrapper: makeWrapper(newClient()), initialProps: { w: '24h' } },
+  )
+  await waitFor(() => expect(result.current.jobs).toHaveLength(1))
+
+  rerender({ w: '6h' })
+  await waitFor(() => expect(result.current.error).not.toBeNull())
+  // The rows and bounds are still 24h's - the 6h fetch never landed - so the
+  // window a caption would label them with must stay 24h too, or the caption
+  // and the axis dates it prints would describe two different windows at once.
+  expect(result.current.window).toBe('24h')
 })
 
 test('the walk issues no request while disabled', async () => {

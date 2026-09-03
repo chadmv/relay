@@ -13,17 +13,22 @@ const ROW = 'grid grid-cols-[9rem_1fr] items-center gap-3 border-b border-accent
 
 export function JobsTimeline({
   state,
-  window: w,
   filtering,
   onChooseWindow,
   onOpenTable,
 }: {
   state: TimelineState
-  window: TimelineWindow
   filtering: boolean
   onChooseWindow: (w: TimelineWindow) => void
   onOpenTable: () => void
 }) {
+  // state.window, NEVER a separate caller-supplied prop: it is the window the
+  // DRAWN rows and bounds actually belong to, which during a failed refresh
+  // under a newly chosen window is the OLD window, not the caller's live
+  // picker selection. A prop sourced from the picker would relabel stale rows
+  // the instant the picker moved, before the new selection's own fetch had
+  // resolved either way - see useJobTimeline.ts's TimelineState.window.
+  const w = state.window
   const sinceMs = new Date(state.sinceIso).getTime()
   const untilMs = new Date(state.untilIso).getTime()
   const shorter = NEXT_SHORTER[w]
@@ -60,7 +65,7 @@ export function JobsTimeline({
         </div>
       )}
 
-      {state.error ? (
+      {state.error && state.jobs.length === 0 ? (
         <div className="flex flex-col items-start gap-2 px-5 py-6 text-[12px] text-err">
           {state.error.message}
           <Button className="w-auto px-3" onClick={state.refetch}>
@@ -81,6 +86,18 @@ export function JobsTimeline({
         </div>
       ) : (
         <>
+          {state.error && (
+            // A refresh failed but the last successful fetch's rows are still
+            // shown below, so this is never suppressed the way the error field
+            // itself used to be: a reader must be told the caption's bounds are
+            // now stale rather than left to trust a fetch that did not happen.
+            <div className="flex flex-wrap items-center gap-3 border-b border-border px-5 py-3 text-[12px] text-err">
+              <span>Refresh failed, showing results as of {formatDateTime(state.untilIso)}.</span>
+              <Button className="w-auto px-3" onClick={state.refetch}>
+                Retry
+              </Button>
+            </div>
+          )}
           {/* A bare sequence of relative offsets read aloud is noise, and the same
               information is in the paragraph above. */}
           <div aria-hidden="true" className={`${ROW} border-none px-5 pt-2.5`}>

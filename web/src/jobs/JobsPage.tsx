@@ -260,7 +260,6 @@ export function JobsPage({ debounceMs = 300 }: { debounceMs?: number }) {
         {toolbar}
         <JobsTimeline
           state={timeline}
-          window={tWindow}
           filtering={filtering}
           onChooseWindow={chooseWindow}
           onOpenTable={() => chooseView('table')}

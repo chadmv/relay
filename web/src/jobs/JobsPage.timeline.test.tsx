@@ -104,6 +104,53 @@ test('the timeline view issues no table or lane request', async () => {
   expect(seen.every((p) => p.get('limit') === '200')).toBe(true)
 })
 
+test('a window change whose new key fails keeps the old rows and surfaces the failure', async () => {
+  localStorage.setItem('relay.jobs.view', 'timeline')
+  localStorage.setItem('relay.jobs.timeline.window', '7d')
+  let firstSince: string | null = null
+  server.use(
+    http.get('/v1/jobs', ({ request }) => {
+      const p = new URL(request.url).searchParams
+      const since = p.get('since') ?? ''
+      if (firstSince === null) firstSince = since
+      seen.push(p)
+      // The FIRST window's requests (7d) succeed; a later, DIFFERENT since -
+      // the 6h switch - fails. keepPreviousData means the 6h key never blanks
+      // the view: it renders the 7d placeholder until its own fetch resolves.
+      if (since !== firstSince) {
+        return HttpResponse.json({ error: 'boom' }, { status: 500 })
+      }
+      return HttpResponse.json({ items: [jobRow('AAAAAA', 'job-A')], next_cursor: '', total: 1 })
+    }),
+  )
+  renderPage()
+  const region = await screen.findByRole('region', { name: 'Jobs timeline' })
+  await within(region).findByRole('link', { name: 'job-A' })
+
+  const before = region.textContent ?? ''
+  expect(before).toMatch(/created in the last 7 days/)
+  expect(before).not.toContain('Refresh failed')
+
+  await userEvent.click(screen.getByRole('button', { name: '6h' }))
+
+  // The failed 6h fetch must not blank the view: job-A (the 7d walk's own row,
+  // carried forward by keepPreviousData) stays visible, and a failure banner
+  // appears rather than the caption silently continuing to claim a completed
+  // fetch under a window whose own request never returned data.
+  await waitFor(() =>
+    expect(screen.getByText(/Refresh failed, showing results as of/)).toBeInTheDocument(),
+  )
+  expect(within(region).getByRole('link', { name: 'job-A' })).toBeInTheDocument()
+
+  const after = region.textContent ?? ''
+  // The caption's OWN wording is unchanged from before the failed switch:
+  // state.untilIso still belongs to the successful 7d fetch (a failed refresh
+  // never overwrites query.data), so "created in the last 7 days" is what the
+  // drawn rows actually mean - only the failure banner is new.
+  expect(after).toMatch(/created in the last 7 days/)
+  expect(after).toContain('Refresh failed, showing results as of')
+})
+
 test('the live indicator tracks the timeline query', async () => {
   localStorage.setItem('relay.jobs.view', 'timeline')
   let release!: () => void

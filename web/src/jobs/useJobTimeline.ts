@@ -1,4 +1,5 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { useRef } from 'react'
 import { listJobsInWindow, type Job } from './api'
 import {
   ANCHOR_STEP_MS,
@@ -17,6 +18,16 @@ export interface TimelineState {
   truncated: boolean
   sinceIso: string
   untilIso: string
+  /**
+   * The window sinceIso/untilIso and jobs actually belong to. This is the
+   * caller's live picker selection whenever a fetch under it has landed, but
+   * during a failed refresh under a NEWLY chosen window it stays at whichever
+   * window the still-displayed stale rows came from - the caller's own
+   * picker selection has already moved on, and labelling stale rows with the
+   * new selection would print a caption and a set of axis dates that describe
+   * two different windows at once.
+   */
+  window: TimelineWindow
   isLoading: boolean
   isFetching: boolean
   error: Error | null
@@ -103,9 +114,16 @@ export async function walkJobWindow(
  * useJobTimeline.test.tsx's 'a walk slower than one anchor tick still completes'
  * is the regression guard.
  *
- * keepPreviousData now matters only across a window or filter change (a
- * genuinely different key): the tick refetches the SAME key, and TanStack
- * already keeps the previous successful `data` visible through that on its own.
+ * keepPreviousData covers a window or filter change WHILE its new key's fetch
+ * is still pending: TanStack fills query.data from the previous key so the view
+ * does not blank while waiting. It does NOT cover the fetch then FAILING - once
+ * a query definitively resolves to an error, TanStack drops the placeholder and
+ * query.data goes back to undefined (measured: JobsPage.timeline.test.tsx's
+ * 'a window change whose new key fails' went red with only keepPreviousData in
+ * place, rows and bounds both gone, before this ref was added). lastSuccess is
+ * this hook's own memory of the last walk that actually returned data, kept
+ * across both the pending gap and any number of failed refreshes after it, so a
+ * failed fetch degrades to stale rows rather than to nothing.
  */
 export function useJobTimeline(
   enabled: boolean,
@@ -124,17 +142,39 @@ export function useJobTimeline(
     placeholderData: keepPreviousData,
   })
 
+  const lastSuccess = useRef<TimelineWalk | null>(null)
+  const lastSuccessWindow = useRef<TimelineWindow | null>(null)
+  // isPlaceholderData excludes the keepPreviousData borrow: while a NEW key is
+  // pending, query.data is truthy but belongs to the OLD key, so recording `w`
+  // (the NEW key's own window) here would mislabel it the instant the window
+  // changes, before the new key's own fetch has resolved either way.
+  if (query.data && !query.isPlaceholderData) {
+    lastSuccess.current = query.data
+    lastSuccessWindow.current = w
+  }
+  const data = query.data ?? lastSuccess.current
+  // Falls back to the live picker selection only when nothing has EVER
+  // succeeded yet (a fresh mount still pending) - there is no stale window to
+  // preserve in that case.
+  const dataWindow = query.data && !query.isPlaceholderData ? w : (lastSuccessWindow.current ?? w)
+
   return {
-    jobs: query.data?.jobs ?? [],
-    total: query.data?.total ?? 0,
-    truncated: query.data?.truncated ?? false,
-    sinceIso: query.data?.sinceIso ?? '',
-    untilIso: query.data?.untilIso ?? '',
+    jobs: data?.jobs ?? [],
+    total: data?.total ?? 0,
+    truncated: data?.truncated ?? false,
+    sinceIso: data?.sinceIso ?? '',
+    untilIso: data?.untilIso ?? '',
+    window: dataWindow,
     isLoading: query.isLoading,
     isFetching: query.isFetching,
-    // A failed refresh that still has rows keeps showing them; the error surfaces
-    // only when there is nothing else to render, matching the table view's rule.
-    error: query.data ? null : ((query.error as Error | null) ?? null),
+    // NEVER suppressed by the presence of data. query.error can be populated
+    // even while query.data still holds the last successful fetch - a background
+    // refetch failure, or a placeholderData fallback across a window/filter
+    // change whose own fetch then fails - and hiding it in either case leaves
+    // the caption describing a bound the failed fetch never confirmed, with no
+    // sign anything went wrong. The view decides what to draw from jobs.length
+    // and error together; it does not receive a pre-collapsed either/or.
+    error: (query.error as Error | null) ?? null,
     refetch: () => {
       void query.refetch()
     },

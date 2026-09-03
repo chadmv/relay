@@ -34,6 +34,7 @@ function state(over: Partial<TimelineState> = {}): TimelineState {
     truncated: false,
     sinceIso: SINCE,
     untilIso: UNTIL,
+    window: '24h',
     isLoading: false,
     isFetching: false,
     error: null,
@@ -45,7 +46,6 @@ function state(over: Partial<TimelineState> = {}): TimelineState {
 function renderTimeline(
   over: Partial<TimelineState> = {},
   props: {
-    window?: TimelineWindow
     filtering?: boolean
     onChooseWindow?: (w: TimelineWindow) => void
     onOpenTable?: () => void
@@ -55,7 +55,6 @@ function renderTimeline(
     <MemoryRouter>
       <JobsTimeline
         state={state(over)}
-        window={props.window ?? '24h'}
         filtering={props.filtering ?? false}
         onChooseWindow={props.onChooseWindow ?? (() => {})}
         onOpenTable={props.onOpenTable ?? (() => {})}
@@ -115,8 +114,8 @@ test('the timeline describes its axis in text', () => {
 test('a truncated window offers the next shorter one', async () => {
   const chosen: TimelineWindow[] = []
   renderTimeline(
-    { jobs: [job()], total: 4210, truncated: true },
-    { window: '7d', onChooseWindow: (w) => chosen.push(w) },
+    { jobs: [job()], total: 4210, truncated: true, window: '7d' },
+    { onChooseWindow: (w) => chosen.push(w) },
   )
   expect(screen.getByText(/most recent of 4,210/)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Show last 24 hours' }))
@@ -126,9 +125,8 @@ test('a truncated window offers the next shorter one', async () => {
 test('a truncated shortest window offers the table instead', async () => {
   let opened = 0
   renderTimeline(
-    { jobs: [job()], total: 4210, truncated: true },
+    { jobs: [job()], total: 4210, truncated: true, window: '6h' },
     {
-      window: '6h',
       onOpenTable: () => {
         opened++
       },
@@ -152,7 +150,7 @@ test('an empty filtered window says nothing matched instead', () => {
   expect(screen.getByText('No jobs match those filters in the last 24 hours.')).toBeInTheDocument()
 })
 
-test('a failed walk shows one error with retry', async () => {
+test('a failed walk with no prior rows shows one error with retry', async () => {
   let retried = 0
   renderTimeline({
     jobs: [],
@@ -165,6 +163,29 @@ test('a failed walk shows one error with retry', async () => {
   // ONE error for the whole view, unlike a lane. A partial walk drawn under the
   // window's own label is a chart that lies.
   expect(screen.queryAllByRole('listitem')).toHaveLength(0)
+  await userEvent.click(screen.getByRole('button', { name: /retry/i }))
+  expect(retried).toBe(1)
+})
+
+test('a failed refresh over existing rows keeps the rows and surfaces the failure', async () => {
+  let retried = 0
+  renderTimeline({
+    jobs: [job()],
+    total: 1,
+    error: new Error('list jobs failed'),
+    untilIso: UNTIL,
+    refetch: () => {
+      retried++
+    },
+  })
+  // The rows from the last successful fetch stay on screen - this is the whole
+  // point of a stale-but-visible refresh failure - so this is NOT the full
+  // error block from the no-rows case above.
+  expect(screen.getAllByRole('listitem')).toHaveLength(1)
+  // The bounds are the STALE ones the rows actually describe (state.untilIso
+  // is unchanged by a failed refresh), stated in the SAME failure line so a
+  // reader never has to guess which fetch the caption is now describing.
+  expect(screen.getByText(`Refresh failed, showing results as of ${formatDateTime(UNTIL)}.`)).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: /retry/i }))
   expect(retried).toBe(1)
 })
