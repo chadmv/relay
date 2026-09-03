@@ -10,16 +10,14 @@ import { RevokedWorkersTable } from './RevokedWorkersTable'
 import { computePageRange } from '../lib/pageRange'
 import { toggleSort } from '../lib/toggleSort'
 import { useCursorPager } from '../lib/useCursorPager'
+import { usePersistedChoice } from '../lib/usePersistedChoice'
 import type { Worker, WorkerSort, WorkerStats, WorkerStatus } from './api'
 
-type View = 'grid' | 'table'
+const VIEWS = ['grid', 'table'] as const
+type View = (typeof VIEWS)[number]
 type Section = 'active' | 'decommissioned'
 
 const VIEW_KEY = 'relay.workers.view'
-
-function loadView(): View {
-  return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'grid'
-}
 
 function countByStatus(workers: Worker[]): Record<WorkerStatus, number> {
   const counts: Record<WorkerStatus, number> = { online: 0, stale: 0, offline: 0, disabled: 0, revoked: 0 }
@@ -29,7 +27,7 @@ function countByStatus(workers: Worker[]): Record<WorkerStatus, number> {
 
 export function WorkersPage() {
   const [sort, setSort] = useState<WorkerSort>('-created_at')
-  const [view, setView] = useState<View>(loadView)
+  const [view, chooseView] = usePersistedChoice<View>(VIEW_KEY, VIEWS, 'grid')
   const [section, setSection] = useState<Section>('active')
 
   const revokedPager = useCursorPager()
@@ -37,11 +35,6 @@ export function WorkersPage() {
   const { data, error, isLoading, isFetching, refetch } = useWorkers(sort)
   const { data: stats } = useWorkerStats()
   const revoked = useRevokedWorkers(section === 'decommissioned', revokedPager.cursor)
-
-  function chooseView(v: View) {
-    setView(v)
-    localStorage.setItem(VIEW_KEY, v)
-  }
 
   const sectionTabs = (
     <div className="flex rounded-full border border-border p-0.5">
@@ -192,8 +185,8 @@ export function WorkersPage() {
           <span className="font-mono text-[10px] text-fg-mute">
             <span className={isFetching ? 'text-ok' : 'text-fg-dim'}>●</span> live · auto-refreshing
           </span>
-          <div className="flex rounded-full border border-border p-0.5">
-            {(['grid', 'table'] as View[]).map((v) => (
+          <div role="group" aria-label="Workers view" className="flex rounded-full border border-border p-0.5">
+            {VIEWS.map((v) => (
               <button
                 key={v}
                 type="button"
