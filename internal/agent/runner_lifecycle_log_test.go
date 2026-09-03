@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"runtime"
 	"testing"
@@ -62,4 +63,52 @@ func TestRunner_AStepLineNamesTheProgramAndNotItsArguments(t *testing.T) {
 	require.Contains(t, out, "secret-task", "every lifecycle line carries the task id")
 	assert.NotContains(t, out, "SUPER-SECRET-TOKEN",
 		"nothing beyond argv[0] may reach the host log; arguments are unsanitised")
+}
+
+// The prepare cause on the host log is the record that survives when the
+// PREPARE_FAILED send does not, which is the case this line exists for: a
+// coordinator that never received the message has no other trace of the cause.
+func TestRunner_APrepareFailureIsOnTheHostLogWithItsCause(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+
+	const cause = "p4 sync failed: PREPARE-CAUSE-SENTINEL"
+	r, runCtx := newRunner("prep-task", 0, sendCh, context.Background(), 0)
+	r.SetProviderForTest(&fakeProvider{prepareErr: errors.New(cause)})
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "prep-task",
+		Commands: singleCmd(echoTaskCmd()),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	})
+
+	out := logged()
+	assert.Contains(t, out, "preparing workspace", "the prepare phase must announce itself")
+	assert.Contains(t, out, "PREPARE-CAUSE-SENTINEL", "the cause must reach the host log")
+	assert.Contains(t, out, "prep-task", "every lifecycle line carries the task id")
+}
+
+// A source-bearing task on a worker with no provider returns before the prepare
+// line's position, so without a line of its own it leaves no host record at all -
+// and the operator who fixes it is standing at this host.
+func TestRunner_ASourceTaskWithNoProviderLogsWhyOnTheHost(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+
+	// No SetProviderForTest call: r.provider is nil.
+	r, runCtx := newRunner("noprov-task", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "noprov-task",
+		Commands: singleCmd(echoTaskCmd()),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	})
+
+	out := logged()
+	assert.Contains(t, out, "no workspace provider")
+	assert.Contains(t, out, "RELAY_WORKSPACE_ROOT", "the line must name what the operator has to fix")
+	assert.Contains(t, out, "noprov-task")
+	assert.NotContains(t, out, "exec step", "the command must not run when the provider is nil")
 }

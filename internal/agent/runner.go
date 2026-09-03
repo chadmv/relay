@@ -143,6 +143,12 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	// workspace. Dispatch does not filter on provider capability, so this is the
 	// agent's last line of defense.
 	if task.Source != nil && r.provider == nil {
+		// The one prepare failure whose remedy is a change to THIS host, so it
+		// gets a host line as well as the coordinator-side one the server stores
+		// from ErrorMessage. It returns before the prepare line below, so without
+		// this it leaves no host record.
+		// TestRunner_ASourceTaskWithNoProviderLogsWhyOnTheHost.
+		log.Printf("runner: no workspace provider for %s; refusing its source spec (check p4 preflight / RELAY_WORKSPACE_ROOT)", r.taskID)
 		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 			TaskStatus: &relayv1.TaskStatusUpdate{
 				TaskId:       r.taskID,
@@ -162,9 +168,14 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			},
 		}})
 		progress, flushProgress := r.makePrepareProgressFn()
+		log.Printf("runner: preparing workspace for %s", r.taskID)
 		handle, err := r.provider.Prepare(ctx, r.taskID, task.Source, progress)
 		flushProgress() // drain any buffered tail lines whether Prepare succeeded or failed
 		if err != nil {
+			// The record that survives when the send does not: on a lost
+			// connection this is the only trace of the cause on the worker host.
+			// TestRunner_APrepareFailureIsOnTheHostLogWithItsCause.
+			log.Printf("runner: prepare failed for %s: %v", r.taskID, err)
 			r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 				TaskStatus: &relayv1.TaskStatusUpdate{
 					TaskId:       r.taskID,
