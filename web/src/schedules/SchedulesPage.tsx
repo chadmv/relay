@@ -7,6 +7,8 @@ import { SchedulesTable } from './SchedulesTable'
 import { computePageRange } from '../lib/pageRange'
 import { useCursorPager } from '../lib/useCursorPager'
 import { Eyebrow, GlassPanel } from '../components/holo'
+import { ENABLED_FILTERS, type EnabledFilterKey } from './scheduleFilters'
+import { useDebouncedValue } from '../lib/useDebouncedValue'
 
 const SORT_OPTIONS: { value: ScheduleSort; label: string }[] = [
   { value: '-created_at', label: 'Newest' },
@@ -25,12 +27,22 @@ function countEnabled(schedules: Schedule[]): { enabled: number; paused: number 
   return { enabled, paused: schedules.length - enabled }
 }
 
-export function SchedulesPage() {
+// debounceMs is a prop only so tests can shrink the search debounce; production
+// always uses the 300ms default. Same shape as UsersTab's.
+export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const [sort, setSort] = useState<ScheduleSort>('-created_at')
+  const [enabledKey, setEnabledKey] = useState<EnabledFilterKey>('all')
+  const [qInput, setQInput] = useState('')
+  const q = useDebouncedValue(qInput, debounceMs).trim()
   const pager = useCursorPager()
   const [pendingId, setPendingId] = useState<string | null>(null)
 
-  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(sort, pager.cursor)
+  const { data, error, isLoading, isPlaceholderData, refetch } = useSchedules(
+    sort,
+    pager.cursor,
+    undefined,
+    { enabledKey, q },
+  )
   const { runNow, setEnabled } = useScheduleActions()
 
   // Tick once a second so relative "next run"/"last run" strings stay fresh
@@ -44,6 +56,30 @@ export function SchedulesPage() {
   function chooseSort(next: ScheduleSort) {
     setSort(next)
     pager.resetPaging() // restart paging when the sort changes
+  }
+
+  // THE RESET LIVES IN THE CLICK HANDLER, not in an effect keyed on the filter.
+  // React batches both updates into one render, so the next render issues exactly
+  // one request under a key carrying the new filter and an empty cursor. An effect
+  // would run AFTER the render that already issued a query, so exactly one request
+  // would escape carrying the new filter and a cursor minted under the old one.
+  function pickEnabled(next: EnabledFilterKey) {
+    setEnabledKey(next)
+    pager.resetPaging()
+  }
+
+  // Same reason as pickEnabled: the reset must happen on the RAW keystroke, not in
+  // an effect keyed on the debounced value. An effect runs after the render that
+  // already issued a query, so one request escapes carrying the new q and the old
+  // cursor.
+  //
+  // The debounce reduces how many scans one person's typing generates and BOUNDS
+  // NOTHING. GET /v1/scheduled-jobs has no rate limit, and a caller that is not a
+  // typing human is unaffected by a client-side timer; do not describe it as a
+  // control anywhere.
+  function pickSearch(v: string) {
+    setQInput(v)
+    pager.resetPaging()
   }
 
   async function onRunNow(id: string) {
@@ -134,6 +170,42 @@ export function SchedulesPage() {
             ))}
           </select>
         </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <div role="group" aria-label="Schedule status filter" className="flex flex-wrap gap-2">
+          {ENABLED_FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              aria-pressed={enabledKey === f.key}
+              onClick={() => pickEnabled(f.key)}
+              className={`rounded-full border px-3.5 py-1.5 text-[12px] ${
+                enabledKey === f.key
+                  ? 'border-accent/60 bg-accent/15 text-fg'
+                  : 'border-border bg-white/5 text-fg-mute'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {/* NO MINIMUM WIDTH, deliberately, and unlike the admin Users tab's copy of
+            this control. This toolbar also carries three chips, so the simplest
+            thing that cannot overflow at a 320-pixel viewport is a flex item with a
+            zero shrink floor and a basis small enough to wrap to its own line when
+            there is no room. Measured by web/e2e/layout.spec.ts across both
+            schedules surfaces; jsdom performs no layout and can say nothing about
+            it. */}
+        <input
+          type="search"
+          aria-label="Search schedules"
+          placeholder="Filter by name, owner, cron..."
+          maxLength={200}
+          value={qInput}
+          onChange={(e) => pickSearch(e.target.value)}
+          className="min-w-0 grow basis-48 rounded-full border border-border bg-black/25 px-3.5 py-1.5 text-[12px] text-fg outline-none placeholder:text-fg-dim focus:border-accent"
+        />
       </div>
 
       {actionError ? (
