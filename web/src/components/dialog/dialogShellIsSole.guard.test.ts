@@ -201,21 +201,43 @@ test('every document keydown listener is allowlisted with a reason', () => {
 
 // A5. Route 1 of the body-level portal question is a constraint written in
 // dialogStack.ts's header; this is what delivers it to the person who needs it,
-// on the commit that needs it. KNOWN GAP: a body reference obtained some other
-// way is not caught.
-const BODY_INSERTIONS = ['appendChild', 'append', 'prepend', 'insertBefore']
+// on the commit that needs it. The probe stays broad on purpose: createPortal
+// matches regardless of target, because DialogShell.tsx's own call passes the
+// layer element, not the literal document.body expression - narrowing the
+// probe to a body-targeted createPortal call would stop matching the shell
+// itself and silently break C5 below. KNOWN GAP: a body reference obtained
+// some other way is not caught.
+const BODY_INSERTIONS = [
+  'appendChild',
+  'append',
+  'prepend',
+  'insertBefore',
+  'insertAdjacentElement',
+  'insertAdjacentHTML',
+  'replaceChildren',
+]
 const PORTAL_PROBE = new RegExp(
   `createPortal|document\\s*\\.\\s*body\\s*\\.\\s*(?:${BODY_INSERTIONS.join('|')})\\b`,
 )
 
 const BODY_PORTAL =
-  'a node appended to the body after a dialog opens is never marked inert or aria-hidden: the ' +
-  'dialog stack marks the background on register and unregister only. It stays keyboard-reachable ' +
-  'from behind a modal, is announced as though the modal were not there, and paints above the ' +
-  'scrim as a later sibling. Portal into a container this component owns, or add the entry here ' +
-  'and decide at the same time whether the new layer sits above or below a modal.'
+  'a portal or a document.body insertion outside the dialog module. If it lands on the body while a ' +
+  'dialog is open, the dialog stack marks background children on register and unregister only, so ' +
+  'the new node is never marked inert or aria-hidden and paints above the scrim as a later sibling. ' +
+  'Portal into a container this component owns, or add the entry here and decide at the same time ' +
+  'whether the new layer sits above or below a modal.'
 
-test('body-level portals belong to the dialog module', () => {
+test('the portal probe catches every enumerated body-insertion method', () => {
+  // Permanent kill for the three methods missing before this fix round:
+  // insertAdjacentElement, insertAdjacentHTML and replaceChildren are all
+  // routes onto document.body that the earlier enumeration did not cover.
+  for (const method of ['insertAdjacentElement', 'insertAdjacentHTML', 'replaceChildren']) {
+    expect(BODY_INSERTIONS, `${method} is missing from BODY_INSERTIONS`).toContain(method)
+    expect(PORTAL_PROBE.test(`document.body.${method}(x)`), `probe does not match ${method}`).toBe(true)
+  }
+})
+
+test('any portal outside the dialog module needs an entry', () => {
   const found = SOURCES.filter((f) => PORTAL_PROBE.test(stripped(f))).map(rel)
   // C5.
   expect(found, 'the portal probe no longer matches the shell').toContain(SHELL)
