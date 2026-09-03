@@ -40,7 +40,12 @@ test('an absent stats response renders placeholders, not zeros', () => {
 // turns on: a zero is a zero and never an absence. Without this, a `stats?.enabled
 // || '-'` implementation passes the placeholder test and silently renders a real
 // zero as a hyphen.
-test('a real zero renders as a zero, not as a placeholder', () => {
+//
+// ALL FOUR KEYS, not just two: checking only enabled and failing let a
+// special-case for failed_runs_24h (a `key === 'failed_runs_24h' ? '-' :
+// stats[key]`-shaped bug, falling back to the placeholder even with real data)
+// survive, because neither of the checked keys would ever exercise that branch.
+test('a real zero renders as a zero, not as a placeholder, for every tile', () => {
   render(
     <SchedulesSummary
       stats={{ enabled: 0, paused: 0, total: 0, failed_runs_24h: 0, failing: 0 }}
@@ -49,7 +54,24 @@ test('a real zero renders as a zero, not as a placeholder', () => {
     />,
   )
   expect(screen.getByTestId('schedules-stat-enabled')).toHaveTextContent('0 ENABLED')
+  expect(screen.getByTestId('schedules-stat-paused')).toHaveTextContent('0 PAUSED')
+  expect(screen.getByTestId('schedules-stat-failed_runs_24h')).toHaveTextContent('0 FAILED RUNS 24H')
   expect(screen.getByTestId('schedules-stat-failing')).toHaveTextContent('0 FAILING SCHEDULES')
+})
+
+// THE TWO FAILURE TILES MUST NOT SHARE A TONE. Collapsing failed_runs_24h's tone
+// to failing's token left every other test in this file green - none of them
+// compares the two elements' own rendered classes, only their text. Read live off
+// the DOM rather than spelling either utility class as a literal here: a
+// class-shaped substring in a test file is compiled input to Tailwind, and a
+// hand-typed class also duplicates the source of truth instead of pinning it.
+test('the two failure tiles carry distinct tone tokens, not the same one', () => {
+  render(<SchedulesSummary stats={STATS} statsFailed={false} filterActive={false} />)
+  const failedRunsMark = screen.getByTestId('schedules-stat-failed_runs_24h').querySelector('b')
+  const failingMark = screen.getByTestId('schedules-stat-failing').querySelector('b')
+  expect(failedRunsMark).not.toBeNull()
+  expect(failingMark).not.toBeNull()
+  expect(failedRunsMark?.className).not.toBe(failingMark?.className)
 })
 
 // TEXT, NOT A COLOUR, and no Retry: the query polls, so a retry button would be a
