@@ -32,8 +32,30 @@ function readStored(): number {
 // added is a no-op, so arming early is free.
 //
 // PERSISTENCE IS ONCE PER GESTURE. A pointer move fires at the display refresh
-// rate. State updates on every move; storage is written on pointerup, on
-// pointercancel, and on each key press, since one press is one gesture.
+// rate; storage is written on pointerup, on pointercancel, and on each key
+// press, since one press is one gesture.
+//
+// A MOVE WRITES THE DOM DIRECTLY AND COMMITS REACT STATE ONCE, ON RELEASE. A
+// 30-move drag through JobDetailPage's tree measured 22 full-page re-renders
+// when every move called setWidth: the split's percentage lived in React
+// state, and JobDetailPage (everything from the tab panel to the task table)
+// re-rendered on every commit. The move handler instead writes the container's
+// --relay-split custom property and the separator's aria-valuenow attribute
+// straight onto the DOM nodes it already has references to, and only calls
+// setWidth once, from the SAME finish() that already persists - one commit per
+// gesture, matching persistence's own cadence. aria-valuetext is NOT kept live
+// this way; it lags to the release commit. That is deliberate, not an
+// oversight: a screen reader user operates this control by keyboard, which
+// still commits (and announces) on every press, so the live gap is a mouse-only
+// gap on a control a mouse user is already watching resize.
+//
+// THE RECT IS CAPTURED ONCE, AT POINTERDOWN, AND REUSED FOR EVERY MOVE IN THE
+// GESTURE - inherited from the hi-fi's own onDragStart, which reads
+// containerRef.current.clientWidth once per drag rather than per move. A
+// container that resizes mid-drag (a window resize while a mouse button is
+// down) maps against a stale rect until the drag ends; accepted rather than
+// re-measured on every move, which would add a layout read to the same hot
+// path this change exists to lighten.
 export function useSplitWidth(containerRef: RefObject<HTMLElement>) {
   const [width, setWidth] = useState(readStored)
 
@@ -65,8 +87,17 @@ export function useSplitWidth(containerRef: RefObject<HTMLElement>) {
       // Without this a drag selects the text of both panes.
       e.preventDefault()
       const rect = el.getBoundingClientRect()
+      // The separator itself: React's currentTarget follows native semantics
+      // and is only guaranteed during the synchronous handler, so it is read
+      // into a plain DOM reference here rather than off the event later.
+      const sep = e.currentTarget as HTMLElement
 
-      const move = (ev: PointerEvent) => applyWidth(splitFromPointer(ev.clientX, rect))
+      const move = (ev: PointerEvent) => {
+        const v = splitFromPointer(ev.clientX, rect)
+        widthRef.current = v
+        el.style.setProperty('--relay-split', `${v}%`)
+        sep.setAttribute('aria-valuenow', String(v))
+      }
 
       const release = () => {
         window.removeEventListener('pointermove', move)
@@ -81,6 +112,10 @@ export function useSplitWidth(containerRef: RefObject<HTMLElement>) {
         if (armed === null) return
         cleanupRef.current = null
         armed()
+        // The ONE React commit for the whole gesture. applyWidth re-clamps
+        // widthRef.current, which is already clamped by every move - a
+        // harmless no-op re-clamp, not a second source of truth.
+        applyWidth(widthRef.current)
         persist()
       }
 

@@ -12,9 +12,18 @@ afterEach(() => {
 // A harness rather than renderHook: the drag needs a real container element whose
 // rect the hook reads, and jsdom returns a zero rect for every element, so the
 // rect is stubbed on THIS element only.
+//
+// The grip carries aria-valuenow bound to split.width, mirroring how
+// JobDetailPage binds it on the real separator, and a render counter mirrors
+// how many times React actually committed. Mid-drag the hook writes
+// aria-valuenow on the grip DIRECTLY (bypassing React), and React only
+// reconciles it back to the same number when state commits at release - so
+// reading the grip's attribute is correct in both phases, live and committed.
 function Harness() {
   const ref = useRef<HTMLDivElement>(null)
   const split = useSplitWidth(ref)
+  const renderCount = useRef(0)
+  renderCount.current += 1
   return createElement(
     'div',
     {
@@ -22,7 +31,12 @@ function Harness() {
       'data-testid': 'container',
     },
     createElement('span', { 'data-testid': 'value' }, String(split.width)),
-    createElement('button', { 'data-testid': 'grip', onPointerDown: split.onPointerDown }),
+    createElement('span', { 'data-testid': 'renders' }, String(renderCount.current)),
+    createElement('button', {
+      'data-testid': 'grip',
+      'aria-valuenow': split.width,
+      onPointerDown: split.onPointerDown,
+    }),
   )
 }
 
@@ -35,31 +49,46 @@ function renderHarness() {
   return view
 }
 
+// State-bound: the committed React value. Correct at rest and immediately
+// after release, but stale mid-drag now that moves no longer commit state.
 const value = (view: ReturnType<typeof renderHarness>) => view.getByTestId('value').textContent
 
+// DOM-bound: the grip's aria-valuenow, written directly on every move and
+// reconciled by React (to the same number) once state commits. Correct at
+// every point in a gesture, live or at rest - the one to read mid-drag.
+const liveValue = (view: ReturnType<typeof renderHarness>) =>
+  view.getByTestId('grip').getAttribute('aria-valuenow')
+
+const renders = (view: ReturnType<typeof renderHarness>) =>
+  Number(view.getByTestId('renders').textContent)
+
 // Kills: inverting the sign in the move handler; not wiring the move handler at
-// all.
+// all. Reads liveValue: moves no longer commit React state (see "persists
+// exactly one React state commit per drag" below), so the state-bound span
+// would not move until release.
 test('a pointer drag moves the split in the direction of travel', () => {
   const view = renderHarness()
-  expect(value(view)).toBe(String(SPLIT_DEFAULT))
+  expect(liveValue(view)).toBe(String(SPLIT_DEFAULT))
   fireEvent.pointerDown(view.getByTestId('grip'), { clientX: 550 })
   fireEvent.pointerMove(window, { clientX: 650 })
-  expect(value(view)).toBe('65')
+  expect(liveValue(view)).toBe('65')
   fireEvent.pointerMove(window, { clientX: 350 })
-  expect(value(view)).toBe('35')
+  expect(liveValue(view)).toBe('35')
 })
 
 // Kills: handling pointerup only. A cancelled drag - a context menu, a browser
 // gesture - would otherwise leave the listeners armed, and the next pointer move
-// keeps resizing with no button held.
+// keeps resizing with no button held. Reads liveValue for the same reason as
+// above; the post-cancel read stays liveValue too since cancel is also a
+// gesture end and commits state (see the persistence tests), so the two agree.
 test('a cancelled drag disarms', () => {
   const view = renderHarness()
   fireEvent.pointerDown(view.getByTestId('grip'), { clientX: 550 })
   fireEvent.pointerMove(window, { clientX: 400 })
-  expect(value(view)).toBe('40')
+  expect(liveValue(view)).toBe('40')
   fireEvent.pointerCancel(window)
   fireEvent.pointerMove(window, { clientX: 650 })
-  expect(value(view)).toBe('40')
+  expect(liveValue(view)).toBe('40')
 })
 
 // Kills: dropping the unmount cleanup. THE OBSERVATION IS THE STALE WRITE, not a
@@ -130,13 +159,38 @@ test('a throwing storage write does not lose the drag', () => {
   expect(value(view)).toBe('40')
 })
 
-// Kills: dropping the clamp from the hook's own setter, which the key handler
-// uses.
-test('setWidth clamps at both ends', () => {
+// Kills: dropping the clamp from the pointer path (splitFromPointer, run on
+// every move) or from setWidth (applyWidth, which the key handler and the
+// end-of-drag commit both use). Reads liveValue since these are mid-drag.
+test('the pointer path clamps at both ends', () => {
   const view = renderHarness()
   fireEvent.pointerDown(view.getByTestId('grip'), { clientX: 550 })
   fireEvent.pointerMove(window, { clientX: 5000 })
-  expect(value(view)).toBe(String(SPLIT_MAX))
+  expect(liveValue(view)).toBe(String(SPLIT_MAX))
   fireEvent.pointerMove(window, { clientX: -5000 })
-  expect(value(view)).toBe(String(SPLIT_MIN))
+  expect(liveValue(view)).toBe(String(SPLIT_MIN))
+})
+
+// Kills: committing React state (setWidth) on every move instead of once at
+// the end of the gesture. THE OBSERVATION IS THE RENDER COUNT, not the value -
+// a 30-move drag through the JobDetailPage tree measured 22 full-page
+// re-renders before this change, one per move, because the split's percentage
+// lived in React state and every move committed it. The value itself is
+// covered by the tests above (liveValue, DOM-driven throughout); this test is
+// what pins that the component tree only re-renders once per gesture.
+test('persists exactly one React state commit per drag, not one per move', () => {
+  const view = renderHarness()
+  const before = renders(view)
+  fireEvent.pointerDown(view.getByTestId('grip'), { clientX: 550 })
+  for (const x of [560, 570, 580, 590, 600, 610, 620]) fireEvent.pointerMove(window, { clientX: x })
+  // No commit yet: the render count and the state-bound span are both exactly
+  // what they were before the drag started, even though liveValue has moved.
+  expect(renders(view)).toBe(before)
+  expect(value(view)).toBe(String(SPLIT_DEFAULT))
+  expect(liveValue(view)).toBe('62')
+  fireEvent.pointerUp(window)
+  // Exactly one more render for the whole gesture, and the state-bound span
+  // now agrees with what was live throughout the drag.
+  expect(renders(view)).toBe(before + 1)
+  expect(value(view)).toBe('62')
 })
