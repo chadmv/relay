@@ -39,6 +39,46 @@ func TestClassifyP4Error(t *testing.T) {
 			wantSub: "cannot reach Perforce server",
 		},
 		{
+			name:    "disk full linux enospc",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: write //s/x/big.bin: no space left on device)")),
+			wantSub: "out of disk space on this agent's workspace volume",
+		},
+		{
+			name:    "disk full windows full sentence",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: There is not enough space on the disk.)")),
+			wantSub: "out of disk space on this agent's workspace volume",
+		},
+		{
+			name:    "disk full p4d phrasing",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: Disk full; cannot write to depot.)")),
+			wantSub: "out of disk space on this agent's workspace volume",
+		},
+		{
+			name:    "disk full p4 client-side check",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: Insufficient disk space to complete sync.)")),
+			wantSub: "out of disk space on this agent's workspace volume",
+		},
+		// The two negatives below are what the disk cases are for. All four
+		// positives pass under a classifier that matches `insufficient` and
+		// `space` as independent words, and `workspace` contains `space` - so
+		// that classifier reports a permissions problem as a full disk and sends
+		// an operator to free space on a machine whose disk is fine.
+		{
+			name:    "workspace not found is not a disk problem",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: Client 'relay_h_ab12' unknown - workspace not found.)")),
+			wantSub: "",
+		},
+		{
+			name:    "insufficient permissions on workspace is not a disk problem",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: insufficient permissions on workspace //s/x)")),
+			wantSub: "",
+		},
+		{
+			name:    "an unrelated sync failure still passes through",
+			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: no such file or directory)")),
+			wantSub: "",
+		},
+		{
 			name:    "passthrough",
 			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: File(s) not in client view.)")),
 			wantSub: "",
