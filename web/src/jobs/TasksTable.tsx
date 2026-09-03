@@ -11,9 +11,11 @@ import type { TaskDetail } from './api'
 import { taskStatusColor } from './taskStatus'
 
 const COLS = 'grid-cols-[1fr_110px_80px_120px_1fr]'
-// Fixed tracks total 310px; lives in JobDetailPage's lg:w-[55%] column (~682px at
-// 1280). The row keeps its own onClick, so the whole scrolled width stays a mouse
-// target even though only the name cell is keyboard-focusable.
+// Fixed tracks total 310px. The pane this lives in is the resizable left pane of
+// JobDetailPage, whose share of the container is a reader preference with a
+// floor, so this min-width has to hold at the narrowest share rather than at one
+// fixed width. The row keeps its own onClick, so the whole scrolled width stays a
+// mouse target even though only the name cell is keyboard-focusable.
 const MIN_W = 'min-w-[560px]'
 
 const HEADERS: TableColumn[] = [
