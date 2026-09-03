@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test } from 'vitest'
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
@@ -98,4 +98,45 @@ test('a full mode cycle preserves a spec the form can model', async () => {
 
   expect(screen.getByRole('button', { name: 'Form' })).toHaveAttribute('aria-pressed', 'true')
   expect(preview()).toEqual({ name: 'round', tasks: [{ name: 't', commands: [['echo', 'hi there']] }] })
+})
+
+test('priority is a segmented group preselecting normal', () => {
+  renderBuilder()
+  const group = within(screen.getByRole('group', { name: 'Priority' }))
+  expect(group.getByRole('button', { name: 'normal' })).toHaveAttribute('aria-pressed', 'true')
+  expect(group.getByRole('button', { name: 'low' })).toHaveAttribute('aria-pressed', 'false')
+})
+
+test('clicking the pressed priority clears it and emits no priority key', async () => {
+  renderBuilder()
+  const group = within(screen.getByRole('group', { name: 'Priority' }))
+  await userEvent.click(group.getByRole('button', { name: 'normal' }))
+  expect(group.getByRole('button', { name: 'normal' })).toHaveAttribute('aria-pressed', 'false')
+  expect(preview()).not.toHaveProperty('priority')
+})
+
+test('choosing another priority emits it', async () => {
+  renderBuilder()
+  await userEvent.click(within(screen.getByRole('group', { name: 'Priority' })).getByRole('button', { name: 'high' }))
+  expect(preview()).toHaveProperty('priority', 'high')
+})
+
+test('a label row is emitted under labels', async () => {
+  renderBuilder()
+  const labels = within(screen.getByRole('group', { name: 'Labels' }))
+  await userEvent.click(labels.getByRole('button', { name: 'Add label' }))
+  await userEvent.type(labels.getByRole('textbox', { name: 'Key 1' }), 'project')
+  await userEvent.type(labels.getByRole('textbox', { name: 'Value 1' }), 'film-x')
+  expect(preview()).toHaveProperty('labels', { project: 'film-x' })
+})
+
+test('two rows sharing a key render the last-one-wins note', async () => {
+  renderBuilder()
+  const labels = within(screen.getByRole('group', { name: 'Labels' }))
+  await userEvent.click(labels.getByRole('button', { name: 'Add label' }))
+  await userEvent.click(labels.getByRole('button', { name: 'Add label' }))
+  await userEvent.type(labels.getByRole('textbox', { name: 'Key 1' }), 'dup')
+  expect(labels.queryByText(/last row wins/i)).not.toBeInTheDocument()
+  await userEvent.type(labels.getByRole('textbox', { name: 'Key 2' }), 'dup')
+  expect(labels.getByText(/last row wins/i)).toBeInTheDocument()
 })
