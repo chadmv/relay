@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { MemoryRouter } from 'react-router-dom'
@@ -213,6 +213,56 @@ test('no request carries a new q with an old cursor', async () => {
   await userEvent.type(screen.getByRole('searchbox', { name: 'Search schedules' }), 'nightly')
   await waitFor(() => expect(seen.some((p) => p.get('q') === 'nightly')).toBe(true))
   expect(seen.filter((p) => p.has('q') && p.has('cursor'))).toHaveLength(0)
+})
+
+// THE REVERSE ORDER of the test above, and the one resetPaging() in the raw
+// keystroke handler does NOT cover. Typing resets the cursor at keystroke time,
+// but a click on next INSIDE the still-open debounce window reads `data` from the
+// query that is still keyed on the OLD q - so it mints a cursor from a page the
+// new filter never produced. That cursor then rides along into the request that
+// finally carries the new q, once the debounce settles.
+//
+// The fix closes the ACQUISITION window rather than catching a stale cursor up
+// after the fact: next and prev are disabled for as long as qInput has outrun q,
+// so there is no click for the stale `data` to answer.
+// shouldAdvanceTime keeps MSW's own async resolution and Testing Library's
+// polling alive (both need real ticks), but the keystroke and the click are
+// still fireEvent, not userEvent: userEvent's built-in per-action delays are
+// real time and could let the 10ms debounce settle on its own between the two -
+// a different, legitimate case this test must not credit as a pass. Two
+// synchronous fireEvent calls back to back, with no await between them, spend no
+// measurable real time.
+test('the pager cannot mint a cursor while a debounced search is still pending', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    const seen: URLSearchParams[] = []
+    server.use(
+      listHandler(seen, (p) => ({
+        items: [row()],
+        next_cursor: p.get('cursor') ? '' : 'CUR2',
+        total: 2,
+      })),
+    )
+    renderPage()
+    await screen.findByText('nightly-build')
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search schedules' }), {
+      target: { value: 'n' },
+    })
+    // STILL inside the debounce window: qInput ('n') has outrun q ('').
+    expect(screen.getByRole('button', { name: /next 50/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /next 50/ }))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    await waitFor(() => expect(seen.some((p) => p.get('q') === 'n')).toBe(true))
+    // No request may ever carry BOTH the new q and a cursor: with next() unable to
+    // fire while q was pending, no cursor was ever minted from the stale page.
+    expect(seen.filter((p) => p.has('q') && p.has('cursor'))).toHaveLength(0)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 // A STRUCTURAL PIN ON THE ATTRIBUTE, not a claim about what a browser does with

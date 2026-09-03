@@ -30,6 +30,13 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
   const [enabledKey, setEnabledKey] = useState<EnabledFilterKey>('all')
   const [qInput, setQInput] = useState('')
   const q = useDebouncedValue(qInput, debounceMs).trim()
+  // CLOSES THE ACQUISITION WINDOW, not a catch-up. While a keystroke has outrun
+  // the debounce, `data` still answers the OLD query key - so a next/prev click in
+  // this window would mint a cursor from a page the pending filter never produced,
+  // and that cursor rides along into the request that finally carries the new q.
+  // pickSearch's resetPaging() only closes the window that opened at TYPE time; it
+  // cannot see a click that lands before the debounce settles.
+  const searchPending = qInput.trim() !== q
   const pager = useCursorPager()
   const [pendingId, setPendingId] = useState<string | null>(null)
 
@@ -221,7 +228,7 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
             <div className="flex gap-1.5">
               <button
                 type="button"
-                disabled={!pager.canPrev || isPlaceholderData}
+                disabled={!pager.canPrev || isPlaceholderData || searchPending}
                 onClick={pager.prev}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
@@ -229,7 +236,7 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
               </button>
               <button
                 type="button"
-                disabled={!data?.next_cursor || isPlaceholderData}
+                disabled={!data?.next_cursor || isPlaceholderData || searchPending}
                 onClick={() => pager.next(data)}
                 className="rounded-full border border-border px-3 py-1 text-[11px] text-fg-mute disabled:opacity-40"
               >
