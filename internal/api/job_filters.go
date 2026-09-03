@@ -1,13 +1,10 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -24,11 +21,12 @@ type jobFilters struct {
 	Until   pgtype.Timestamptz
 }
 
-// maxJobFilterQRunes bounds the substring needle in runes, not bytes.
-const maxJobFilterQRunes = 200
+// The jobs list's ?q= cap and its over-length body are the shared ones
+// parseFilterQ enforces; these are the names
+// TestParseJobFilters_QLengthCapIsInRunes reads.
+const maxJobFilterQRunes = maxFilterQRunes
 
-// maxJobFilterQMessage is derived from the constant so the two cannot drift.
-var maxJobFilterQMessage = fmt.Sprintf("q is too long; maximum %d characters", maxJobFilterQRunes)
+var maxJobFilterQMessage = maxFilterQMessage
 
 // jobFilterParams are the four query parameters parseJobFilters reads.
 // handleListJobs passes them to rejectRepeatedParams before calling in.
@@ -47,27 +45,11 @@ var jobFilterParams = []string{"q", "mine", "since", "until"}
 func parseJobFilters(w http.ResponseWriter, qs url.Values, u AuthUser) (jobFilters, bool) {
 	var f jobFilters
 
-	if raw := qs.Get("q"); raw != "" {
-		// Go's query parser percent-decodes without validating UTF-8, so an
-		// invalid byte sequence would otherwise reach Postgres as a text
-		// parameter. NUL is handled at the chokepoint, not here.
-		if !utf8.ValidString(raw) {
-			writeError(w, http.StatusBadRequest, "q is not valid UTF-8")
-			return jobFilters{}, false
-		}
-		needle := strings.TrimSpace(raw)
-		if utf8.RuneCountInString(needle) > maxJobFilterQRunes {
-			writeError(w, http.StatusBadRequest, maxJobFilterQMessage)
-			return jobFilters{}, false
-		}
-		// A cleared search box sends q=; empty after trimming means absent,
-		// matching how status="" is already treated. It also keeps an empty
-		// needle away from strpos, which returns 1 for one and would match
-		// every row.
-		if needle != "" {
-			f.Q = &needle
-		}
+	q, ok := parseFilterQ(w, qs)
+	if !ok {
+		return jobFilters{}, false
 	}
+	f.Q = q
 
 	if raw := qs.Get("mine"); raw != "" {
 		b, err := strconv.ParseBool(raw)
