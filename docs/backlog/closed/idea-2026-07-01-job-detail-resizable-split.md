@@ -1,7 +1,9 @@
 ---
 title: "Job detail page: accessible resizable tasks/detail split"
 type: idea
-status: open
+status: closed
+closed: 2026-09-03
+resolution: fixed
 created: 2026-07-01
 priority: low
 source: job-detail-page slice (2026-07-01 job-detail-page)
@@ -51,3 +53,6 @@ Add an accessible drag-resizer between the tasks and detail columns:
 Frontend-only, small. The resizer is presentational and reusable; consider building it as part of
 the shared-holo-design-primitives extraction so schedule detail and other future split layouts
 get it for free.
+
+## Resolution
+Shipped in lane MF of the 2026-09-02 web-frontend batch: a resizable, keyboard-operable split on the job detail page (separator role and value attributes; Left, Right, Home, End; pointer drag through window listeners with pointercancel and unmount teardown). Moves write the container's custom property and aria-valuenow directly and commit React state once per gesture from finish(), the same place that persists. Both panes size off one custom property with a default of 55 so the unpersisted render is unchanged; hidden below the large breakpoint. Browser cases press real keys and drag in both engines.
