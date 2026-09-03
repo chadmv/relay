@@ -27,4 +27,4 @@ byte-identical-test refactor gate. Add the group role and name both switches sho
 - web/src/jobs/JobsPage.tsx, web/src/workers/WorkersPage.tsx
 
 ## Resolution
-Shipped in lane JF of the 2026-09-02 web-frontend batch: the persisted view choice is one hook shared by the Jobs page's table, lanes and timeline views, allow-listed and defaulting to the table on an unknown stored value.
+Shipped in lane JF of the 2026-09-02 web-frontend batch: usePersistedChoice, extracted from the two inline persisted-view switches on the Jobs and Workers pages under a byte-identical gate on the Jobs page tests and a zero-deletion gate on the Workers test, then given the timeline as its third Jobs value; an unknown stored value falls back to the default.

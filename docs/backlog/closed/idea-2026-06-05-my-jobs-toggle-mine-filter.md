@@ -22,4 +22,4 @@ Deferred from the first jobs-list slice. Implementing `?mine=` means adding an o
 - `docs/retros/2026-06-05-web-jobs-list.md`
 
 ## Resolution
-Shipped in lane JF of the 2026-09-02 web-frontend batch on the server-side ?mine= from PR #178: a persisted Mine toggle on the Jobs page that travels with q, the timeline and the lanes views, invalidated together with the list on cancel, retry and create.
+Shipped in lane JF of the 2026-09-02 web-frontend batch on the server-side ?mine= from PR #178: a My jobs toggle on the Jobs page, page-level state applied to the table, lanes and timeline views alongside q, so every view and its invalidation on cancel, retry and create see the same filter.
