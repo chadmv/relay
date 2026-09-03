@@ -215,10 +215,9 @@ export function surfaces(): Surface[] {
     },
     {
       // THE SAME PATH as `schedules` above, deliberately. The question is what
-      // the FAILING chip does to a nine-column grid at a 1080px floor - the
-      // widest table in the app, 620px of fixed track before any fr gets a
-      // pixel. The healthy surface above is the CONTROL: if both overflow, the
-      // chip is not the cause.
+      // the FAILING chip does to a nine-column grid at a 1080px floor, 620px of
+      // fixed track before any fr gets a pixel. The healthy surface above is the
+      // CONTROL: if both overflow, the chip is not the cause.
       //
       // WHAT THIS SURFACE CAN AND CANNOT ESTABLISH. Widening SchedulesTable's own
       // MIN_W to 2400px changes NOTHING here. That is not a hole in this

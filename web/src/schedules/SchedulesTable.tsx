@@ -14,8 +14,8 @@ import { formatRelativeTime, nextRunDisplay, shortId } from './format'
 import { statusColor } from '../jobs/status'
 
 const COLS = 'grid-cols-[1.4fr_120px_110px_90px_1fr_1fr_150px_1.3fr_150px]'
-// Nine columns, 620px of fixed track before any fr gets a pixel - the worst case in
-// the app. 1080 gives the 4.7fr of flexible tracks about 100px each.
+// Nine columns, 620px of fixed track before any fr gets a pixel. 1080 gives the
+// 4.7fr of flexible tracks about 100px each.
 //
 // The LAST JOB track carries a dot, eight monospace characters and a status word,
 // which does not fit in the 110px it held while the cell was an id alone. THE E2E
@@ -85,10 +85,9 @@ export function SchedulesTable({
                 </Link>
                 {/* THE FAILURE MARKER LIVES INSIDE THE NAME CELL RATHER THAN IN A
                     TENTH COLUMN. COLS above is already nine tracks with 620px of
-                    fixed width, the worst case in the app; a tenth would push
-                    MIN_W up again and this table is already the app's widest.
-                    This cell is already a flex row with a gap, so the chip costs
-                    no grid change at all.
+                    fixed width; a tenth would push MIN_W up again. This cell is
+                    already a flex row with a gap, so the chip costs no grid
+                    change at all.
 
                     TEXT, NOT A COLOUR. A bare colour is not accessible, and the
                     dot's two states are already spoken for by `enabled`. A

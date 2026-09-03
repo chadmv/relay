@@ -30,10 +30,12 @@ const page = {
 // /v1/scheduled-jobs handler each test registers does not answer
 // /v1/scheduled-jobs/stats, and setup.ts runs with onUnhandledRequest: 'error'.
 //
-// Per file rather than in the shared msw.ts, so the unhandled-request signal stays
-// live for every other suite. server.use inside beforeEach works because setup.ts
-// resets handlers in afterEach, and a per-test server.use still wins, since runtime
-// handlers are prepended.
+// Per file rather than in the shared msw.ts: a default handler registered there
+// would answer this endpoint for any test regardless of whether the page under
+// test ever requests it, silently removing the unhandled-request check for it.
+// server.use inside beforeEach works because setup.ts resets handlers in
+// afterEach, and a per-test server.use still wins, since runtime handlers are
+// prepended.
 //
 // Hand-written, with no type annotation naming ScheduleStats: a fixture marshalled
 // through the response interface agrees with the decoder by construction. All five

@@ -1,10 +1,11 @@
 import type { ScheduleStats } from './api'
 
 // FOUR TILES, and the fourth is the deviation from the hi-fi worth defending.
-// `failing` is the only fleet-wide answer to "is anything broken right now" - the
-// row-level FAILING chip is page-scoped, so on page 3 of a filtered list it cannot
-// answer that - and it counts a failure class that is invisible to
-// failed_runs_24h by construction, because a spawn failure never becomes a job.
+// `failing` answers "is anything broken right now" fleet-wide, independent of the
+// loaded page or the active filter - unlike the row-level FAILING chip, which is
+// page-scoped and cannot see rows outside the current page. It counts a failure
+// class invisible to failed_runs_24h by construction, because a spawn failure
+// never becomes a job.
 //
 // THE LABELS NAME THEIR UNITS. failed_runs_24h is over jobs, windowed, and
 // includes run-now jobs; failing is over schedules and is not windowed. Two
