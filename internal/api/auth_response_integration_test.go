@@ -49,12 +49,15 @@ func assertAuthBody(t *testing.T, m map[string]any) map[string]any {
 		require.True(t, present, "key %q is missing", k)
 	}
 
-	// expires_at is unchanged on the wire: still one RFC3339 string, as it was
-	// when the three handlers wrote a map[string]any.
+	// expires_at names a real future expiry, not merely a parseable string: a
+	// zero time.Time also round-trips as RFC3339, so parsing alone would accept a
+	// field the struct never populated.
 	at, ok := m["expires_at"].(string)
 	require.True(t, ok, "expires_at must be a JSON string, got %T", m["expires_at"])
-	_, err := time.Parse(time.RFC3339, at)
+	expires, err := time.Parse(time.RFC3339, at)
 	require.NoError(t, err, "expires_at must be RFC3339, got %q", at)
+	assert.True(t, expires.After(time.Now()),
+		"expires_at must be in the future, got %s", at)
 
 	user, ok := m["user"].(map[string]any)
 	require.True(t, ok, "user must be a JSON object, got %T", m["user"])

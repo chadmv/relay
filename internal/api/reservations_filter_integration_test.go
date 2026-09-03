@@ -103,6 +103,8 @@ func TestListReservations_StaleCursorNeverReturnsAFailingRow(t *testing.T) {
 	code, p = getReservationsPage(t, srv, adminToken,
 		"worker_id="+wantedWorker+"&limit=2&cursor="+p.NextCursor)
 	require.Equal(t, http.StatusOK, code)
+	require.NotEmpty(t, p.Items,
+		"the fixture must leave rows after the cursor, or the loop below asserts nothing")
 	for _, it := range p.Items {
 		ids, _ := it["worker_ids"].([]any)
 		assert.Contains(t, ids, wantedWorker,

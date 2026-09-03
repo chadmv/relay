@@ -194,3 +194,50 @@ func TestListScheduledJobs_LastJobStatusPairingOnTheWire(t *testing.T) {
 		assert.NotContains(t, m, "last_job_status")
 	})
 }
+
+// The other arm of the same failure: the lookup SUCCEEDS but returns no row for
+// an id the schedule still names. fillLastJobStatuses must refuse rather than
+// emit last_job_id with no last_job_status, which is the one shape the pairing
+// invariant forbids.
+//
+// The FK is dropped first because it is what normally makes this unreachable -
+// ON DELETE SET NULL clears last_job_id before a job row can vanish - so the
+// branch exists to survive that guarantee being lost, and can only be reached
+// by removing it. Each test owns its container, so the DDL is confined here.
+func TestListScheduledJobs_LastJobIDWithNoJobRowIsA500(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	owner := createTestUser(t, q, "Owner", "sjnorow-owner@test.com", false)
+	ownerToken := createTestToken(t, q, owner.ID)
+
+	schedID := seedFilterSchedule(t, pool, "dangling", uuidString(owner.ID), "@daily", true)
+	jobID := seedLastJob(t, pool, uuidString(owner.ID), schedID, "done")
+
+	// Control: the pairing holds while the job row exists.
+	code, p := getScheduledJobsPage(t, srv, ownerToken, "")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, p.Items, 1)
+	require.Contains(t, p.Items[0], "last_job_status")
+
+	_, err := pool.Exec(t.Context(),
+		`ALTER TABLE scheduled_jobs DROP CONSTRAINT scheduled_jobs_last_job_id_fkey`)
+	require.NoError(t, err, "the FK must exist to be dropped; its name is migration 000006's")
+	_, err = pool.Exec(t.Context(), `DELETE FROM jobs WHERE id = $1::uuid`, jobID)
+	require.NoError(t, err)
+
+	var stillSet bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT last_job_id IS NOT NULL FROM scheduled_jobs WHERE id = $1::uuid`, schedID).Scan(&stillSet))
+	require.True(t, stillSet, "fixture: last_job_id must survive the delete, or nothing is dangling")
+
+	req := httptest.NewRequest("GET", "/v1/scheduled-jobs", nil)
+	req.Header.Set("Authorization", "Bearer "+ownerToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a last_job_id naming no job row must fail the request, not drop the key")
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.NotContains(t, body, "items",
+		"the response must not be a page, so no row can carry last_job_id without its status")
+}
