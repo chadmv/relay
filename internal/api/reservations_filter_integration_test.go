@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"testing"
 
 	"relay/internal/api"
@@ -15,24 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// reservationFilterArms is DERIVED FROM api.ReservationsSortSpec.Keys, not
-// written out. A sort key added without its filter arm turns this test RED
-// instead of shipping one silently unfiltered ordering.
-func reservationFilterArms(t *testing.T) []string {
-	t.Helper()
-	keys := make([]string, 0, len(api.ReservationsSortSpec.Keys))
-	for k := range api.ReservationsSortSpec.Keys {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	arms := make([]string, 0, 2*len(keys))
-	for _, k := range keys {
-		arms = append(arms, k, "-"+k)
-	}
-	require.Len(t, arms, 2*len(api.ReservationsSortSpec.Keys))
-	return arms
-}
 
 // seedReservationForWorkers inserts a reservation naming an explicit worker_ids
 // array, which seedReservation does not expose.
@@ -66,12 +47,12 @@ func TestListReservations_WorkerFilterArms_FirstPage(t *testing.T) {
 	keepID := seedReservationForWorkers(t, pool, "keeper", []string{otherWorker, wantedWorker})
 	seedReservationForWorkers(t, pool, "other", []string{otherWorker})
 
-	for _, arm := range reservationFilterArms(t) {
+	for _, arm := range sortArms(api.ReservationsSortSpec) {
 		t.Run(arm, func(t *testing.T) {
-			code, p := getReservationsPage(t, srv, adminToken, "sort="+arm+"&worker_id="+wantedWorker)
+			code, p := getReservationsPage(t, srv, adminToken, arm+"&worker_id="+wantedWorker)
 			require.Equal(t, http.StatusOK, code)
 			require.Len(t, p.Items, 1,
-				"sort=%s on the FIRST PAGE must return exactly the reservation naming the "+
+				"%s on the FIRST PAGE must return exactly the reservation naming the "+
 					"worker; two rows means the filter was dropped", arm)
 			assert.Equal(t, keepID, p.Items[0]["id"])
 			assert.Equal(t, int64(1), p.Total,

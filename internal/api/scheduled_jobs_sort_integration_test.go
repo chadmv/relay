@@ -27,17 +27,7 @@ var scheduledJobsSortKeys = []string{
 // control name, owner_id, next_run_at, and updated_at precisely.
 func seedScheduledJob(t *testing.T, pool *pgxpool.Pool, name, ownerID string, nextRunAt, updatedAt time.Time) string {
 	t.Helper()
-	jobSpec := `{"name":"` + name + `-job","tasks":[{"name":"t","command":["echo","x"]}]}`
-	var id string
-	err := pool.QueryRow(t.Context(),
-		`INSERT INTO scheduled_jobs
-		   (name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, updated_at)
-		 VALUES ($1, $2::uuid, '@hourly', 'UTC', $3::jsonb, 'skip', true, $4, $5)
-		 RETURNING id`,
-		name, ownerID, jobSpec, nextRunAt, updatedAt,
-	).Scan(&id)
-	require.NoError(t, err, "seedScheduledJob %s", name)
-	return id
+	return seedScheduledJobFull(t, pool, name, ownerID, "@hourly", true, nextRunAt, updatedAt)
 }
 
 func getScheduledJobsPage(t *testing.T, srv interface {

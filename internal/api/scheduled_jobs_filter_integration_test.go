@@ -4,7 +4,6 @@ package api_test
 
 import (
 	"net/http"
-	"sort"
 	"testing"
 	"time"
 
@@ -15,40 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// scheduleFilterArms is DERIVED FROM api.ScheduledJobsSortSpec.Keys, not written
-// out. A sort key added without its filter arms turns this test RED instead of
-// shipping one silently unfiltered ordering.
-func scheduleFilterArms(t *testing.T) []string {
-	t.Helper()
-	keys := make([]string, 0, len(api.ScheduledJobsSortSpec.Keys))
-	for k := range api.ScheduledJobsSortSpec.Keys {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // deterministic subtest order
-	arms := make([]string, 0, 2*len(keys))
-	for _, k := range keys {
-		arms = append(arms, k, "-"+k)
-	}
-	require.Len(t, arms, 2*len(api.ScheduledJobsSortSpec.Keys))
-	return arms
-}
-
 // seedFilterSchedule inserts one schedule with an explicit enabled flag and cron
 // expression, neither of which seedScheduledJob exposes.
 func seedFilterSchedule(t *testing.T, pool *pgxpool.Pool, name, ownerID, cronExpr string, enabled bool) string {
 	t.Helper()
-	jobSpec := `{"name":"` + name + `-job","tasks":[{"name":"t","command":["echo","x"]}]}`
 	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	var id string
-	err := pool.QueryRow(t.Context(),
-		`INSERT INTO scheduled_jobs
-		   (name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, updated_at)
-		 VALUES ($1, $2::uuid, $3, 'UTC', $4::jsonb, 'skip', $5, $6, $7)
-		 RETURNING id`,
-		name, ownerID, cronExpr, jobSpec, enabled, base, base,
-	).Scan(&id)
-	require.NoError(t, err, "seedFilterSchedule %s", name)
-	return id
+	return seedScheduledJobFull(t, pool, name, ownerID, cronExpr, enabled, base, base)
 }
 
 // TestListScheduledJobs_FilterArms_FirstPage is the anti-drift guard.
@@ -58,45 +29,59 @@ func seedFilterSchedule(t *testing.T, pool *pgxpool.Pool, name, ownerID, cronExp
 // unparenthesised `NOT cursor_set OR keyset AND filter` behaves correctly, so a
 // test that walks to page two passes against the bug.
 //
-// Two schedules, distinguishable on BOTH filter axes at once. Admin and owner
-// scope are separate subtests because they run separate statements.
+// The two rows differ on EVERY filter axis and each filter case names which row
+// it expects, so no case can be satisfied by an accident on a different axis:
+// dropping the cron arm from the q disjunction, or folding enabled=false into
+// enabled=true, each reddens exactly one case on the arm that carries the
+// mutation. Admin and owner scope are separate subtests because they run
+// separate statements.
 func TestListScheduledJobs_FilterArms_FirstPage(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
 	admin := createTestUser(t, q, "Admin", "sjfilter-admin@test.com", true)
 	adminToken := createTestToken(t, q, admin.ID)
-	owner := createTestUser(t, q, "Owner", "sjfilter-owner@test.com", false)
-	ownerToken := createTestToken(t, q, owner.ID)
+	keepOwner := createTestUser(t, q, "Keeper", "aardvark@sjfilter.test", false)
+	keepToken := createTestToken(t, q, keepOwner.ID)
+	otherOwner := createTestUser(t, q, "Other", "zebra@sjfilter.test", false)
 
-	keepID := seedFilterSchedule(t, pool, "keeper-nightly", uuidString(owner.ID), "@daily", true)
-	seedFilterSchedule(t, pool, "other-weekly", uuidString(owner.ID), "0 4 * * 1", false)
+	keepID := seedFilterSchedule(t, pool, "keeper-nightly", uuidString(keepOwner.ID), "17 3 * * *", true)
+	otherID := seedFilterSchedule(t, pool, "other-weekly", uuidString(otherOwner.ID), "@daily", false)
 
 	scopes := []struct {
 		name  string
 		token string
 	}{
 		{"admin", adminToken},
-		{"owner", ownerToken},
+		{"owner", keepToken},
 	}
 	filters := []struct {
-		name  string
-		query string
+		name   string
+		query  string
+		wantID string
 	}{
-		{"enabled", "enabled=true"},
-		{"q_name", "q=keeper"},
-		{"both", "enabled=true&q=keeper"},
+		{"enabled_true", "enabled=true", keepID},
+		{"enabled_false", "enabled=false", otherID},
+		{"q_name", "q=keeper", keepID},
+		{"q_email", "q=aardvark", keepID},
+		{"q_cron", "q=17+3", keepID},
+		{"both", "enabled=true&q=keeper", keepID},
 	}
 
 	for _, sc := range scopes {
-		for _, arm := range scheduleFilterArms(t) {
+		for _, arm := range sortArms(api.ScheduledJobsSortSpec) {
 			for _, f := range filters {
 				t.Run(sc.name+"/"+arm+"/"+f.name, func(t *testing.T) {
-					code, p := getScheduledJobsPage(t, srv, sc.token, "sort="+arm+"&"+f.query)
+					// The owner arm only ever holds the keeper row, so a case
+					// expecting the other owner's row has nothing to assert there.
+					if sc.name == "owner" && f.wantID != keepID {
+						t.Skip("the other row belongs to a different owner and is out of this scope")
+					}
+					code, p := getScheduledJobsPage(t, srv, sc.token, arm+"&"+f.query)
 					require.Equal(t, http.StatusOK, code)
 					require.Len(t, p.Items, 1,
-						"sort=%s %s on the FIRST PAGE must return exactly the matching row; "+
+						"%s %s on the FIRST PAGE must return exactly the matching row; "+
 							"two rows means the filter was dropped, which is the unparenthesised "+
 							"cursor disjunction", arm, f.query)
-					assert.Equal(t, keepID, p.Items[0]["id"])
+					assert.Equal(t, f.wantID, p.Items[0]["id"])
 					assert.Equal(t, int64(1), p.Total,
 						"total must count the filtered set, not the table")
 				})
