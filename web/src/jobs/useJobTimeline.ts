@@ -125,12 +125,12 @@ export async function walkJobWindow(
  * is still pending: TanStack fills query.data from the previous key so the view
  * does not blank while waiting. It does NOT cover the fetch then FAILING - once
  * a query definitively resolves to an error, TanStack drops the placeholder and
- * query.data goes back to undefined (measured: JobsPage.timeline.test.tsx's
- * 'a window change whose new key fails' went red with only keepPreviousData in
- * place, rows and bounds both gone, before this ref was added). lastSuccess is
- * this hook's own memory of the last walk that actually returned data, kept
- * across both the pending gap and any number of failed refreshes after it, so a
- * failed fetch degrades to stale rows rather than to nothing.
+ * query.data goes back to undefined. lastSuccess is this hook's own memory of
+ * the last walk that actually returned data, kept across both the pending gap
+ * and any number of failed refreshes after it, so a failed fetch degrades to
+ * stale rows rather than to nothing. Removing it turns
+ * JobsPage.timeline.test.tsx's 'a window change whose new key fails keeps
+ * the old rows and surfaces the failure' red.
  */
 export function useJobTimeline(
   enabled: boolean,

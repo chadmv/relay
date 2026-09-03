@@ -76,12 +76,10 @@ test('the walk repeats its filters on every page', async () => {
 })
 
 test('a walk slower than one anchor tick still completes, and the tick does not restart it', async () => {
-  // Reproduces the liveness bug: the old design derived the query key from a
-  // ticking clock (useNow), so every ANCHOR_STEP_MS the key changed, the
-  // in-flight walk's query went inactive, and the walk restarted from page 1 -
-  // forever, for any walk slower than one tick. The fix makes the key STABLE
-  // per window and filters and lets TanStack's own refetchInterval drive the
-  // refresh, which dedupes against a fetch already in flight.
+  // The query key must stay stable across an anchor tick, and TanStack must
+  // not fire a second fetch while the first is still in flight for that key -
+  // four ticks is long enough that either gap would show up as more than one
+  // request before the gate below ever releases.
   vi.useFakeTimers({ shouldAdvanceTime: true })
   let requests = 0
   let release!: () => void
@@ -101,9 +99,7 @@ test('a walk slower than one anchor tick still completes, and the tick does not 
   await waitFor(() => expect(requests).toBe(1))
   expect(result.current.isLoading).toBe(true)
 
-  // Four ticks pass while the single request is still pending. Under the old
-  // design this is where four abandoned requests would appear and isLoading
-  // would still read true with nothing ever completing.
+  // Four ticks pass while the single request is still pending.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ANCHOR_STEP_MS * 4)
   })
@@ -231,13 +227,11 @@ test('a failed refresh keeps the previous rows and surfaces the error', async ()
   await act(async () => {
     await client.refetchQueries({ queryKey: ['job-timeline'] })
   })
-  // The rows stay visible - a failed refresh must not blank the chart - but
-  // unlike the earlier design, the error is no longer suppressed just because
-  // rows exist. query.error can be populated even while query.data still holds
-  // the last successful fetch (TanStack does not clear it on a background
-  // refetch failure), and hiding it whenever data is present is exactly the
-  // bug the review found: the caption kept describing a bound the last
-  // SUCCESSFUL fetch drew while a failed refresh was silently swallowed.
+  // The rows stay visible - a failed refresh must not blank the chart - and
+  // the error is surfaced at the same time, never suppressed by data's
+  // presence: query.error can be populated even while query.data still holds
+  // the last successful fetch, and the view needs both signals independently
+  // to show stale rows alongside a visible failure.
   await waitFor(() => expect(result.current.error).not.toBeNull())
   expect(result.current.jobs).toHaveLength(1)
   expect(result.current.error?.message).toBe('500 boom')

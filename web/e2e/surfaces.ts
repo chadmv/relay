@@ -190,22 +190,16 @@ export function surfaces(): Surface[] {
         // it falls inside the default 24-hour window and draws as the instant
         // marker.
         //
-        // TIMEOUT WIDER THAN THE DEFAULT, ON PURPOSE, KEPT ACROSS THE LIVENESS
-        // FIX. useJobTimeline now computes its anchor fresh at each fetch's
-        // start (windowBounds(w, Date.now())) rather than from a ticking
-        // render, but that anchor is still quantized to ANCHOR_STEP_MS (15s),
-        // so a job created within that same window as this test's first fetch
-        // can still fall just past the quantized `until` on that first fetch.
-        // The refresh that would then pick it up is bounded at one
-        // ANCHOR_STEP_MS interval plus however long that refresh's walk takes -
-        // this is the same number useJobTimeline.ts documents as the view's
-        // whole staleness budget. Re-measured under this fix round (72/72,
-        // this surface resolving in under half a second at all three widths)
-        // and left the timeout as-is: that run not hitting the race does not
-        // retire it, since the underlying quantization this comment describes
-        // is unchanged. Reproducible for a real user too - a job submitted
-        // seconds ago is documented as "not yet in the window" - so the fix
-        // here is patience, not a shorter anchor.
+        // TIMEOUT WIDER THAN THE DEFAULT, ON PURPOSE. useJobTimeline's anchor
+        // is quantized to ANCHOR_STEP_MS (15s), so a job created within that
+        // same window as this test's first fetch can fall just past the
+        // quantized `until` on that first fetch. The refresh that then picks
+        // it up is bounded at one ANCHOR_STEP_MS interval plus however long
+        // that refresh's walk takes - useJobTimeline.ts documents the same
+        // number as the view's whole staleness budget - so the timeout here
+        // must survive one full refresh cycle. Reproducible for a real user
+        // too - a job submitted seconds ago is documented as "not yet in the
+        // window" - so the fix here is patience, not a shorter anchor.
         const region = p.getByRole('region', { name: 'Jobs timeline' })
         await expect(region.getByRole('link', { name: seed.jobName })).toBeVisible({ timeout: 20_000 })
       },
