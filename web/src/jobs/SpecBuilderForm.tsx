@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, type Dispatch, type SetStateAction } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
 import { PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
@@ -71,15 +71,31 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
     [onChange],
   )
 
+  // Ids removed within the CURRENT batch, before depOptions has had a chance
+  // to recompute against them. Two removals dispatched in one batching window
+  // both read the same pre-commit depOptions; without this, the second one's
+  // fallback focus target is picked from a list that still names the row the
+  // first one just removed, landing focus on the document body when nothing
+  // else in that list survives either. Cleared once depOptions actually
+  // reflects a real commit, so a later, separate removal starts fresh.
+  const removedThisTick = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    removedThisTick.current = new Set()
+  }, [depOptions])
+
   const removeTaskById = useCallback(
     (id: string) => {
       // depOptions, not the state prop: it is what the row asking for its own
       // removal was rendered against, and it holds everything the side
       // effects below need (the removed row's label, its neighbor's id) with
-      // no separate snapshot of state to keep in sync.
-      const i = depOptions.findIndex((o) => o.id === id)
+      // no separate snapshot of state to keep in sync. Filtered against
+      // removedThisTick so a second removal in the same batch does not name a
+      // neighbor the first one already took out.
+      const remaining = depOptions.filter((o) => !removedThisTick.current.has(o.id))
+      const i = remaining.findIndex((o) => o.id === id)
       if (i === -1) return
-      const label = depOptions[i].label
+      const label = remaining[i].label
+      removedThisTick.current.add(id)
       onChange((prev) => ({
         ...prev,
         // Every dependent's selection is pruned with the row, so no reference
@@ -89,7 +105,7 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
           .map((t) => ({ ...t, dependsOn: t.dependsOn.filter((d) => d !== id) })),
       }))
       announce(`${label} removed`)
-      const next = depOptions[i + 1] ?? depOptions[i - 1]
+      const next = remaining[i + 1] ?? remaining[i - 1]
       focusAfterUpdate(next === undefined ? 'add-task' : `task-${next.id}-remove`)
     },
     [depOptions, onChange, announce, focusAfterUpdate],
