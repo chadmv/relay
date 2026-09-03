@@ -3,6 +3,7 @@ package perforce
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -77,6 +78,54 @@ func TestClassifyP4Error(t *testing.T) {
 			name:    "an unrelated sync failure still passes through",
 			in:      fmt.Errorf("p4 sync: %w", errors.New("exit status 1 (stderr: no such file or directory)")),
 			wantSub: "",
+		},
+		// EVERY CASE BELOW IS BUILT BY THE PRODUCTION CONSTRUCTOR, not by a
+		// hand-written "(stderr: ...)" string. A fixture that models only the
+		// stderr half cannot see the args half, which is where the caller's own
+		// depot paths land: jobspec.validateSourceSpec constrains a stream to a
+		// `//` prefix and nothing else, so `//depot/disk full` is a legal spec.
+		{
+			name: "a disk phrase planted in the ARGS is not a disk problem",
+			in: newP4CommandError(
+				[]string{"-c", "relay_h_ab12", "sync", "//depot/disk full/...#head"},
+				errors.New("exit status 1"),
+				// Deliberately a stderr that does NOT echo the path back. p4 echoes
+				// the offending path in some error classes, and when it does, the
+				// phrase is caller-controlled again by a route this exclusion does
+				// not cover; that residual is not closed here.
+				"Access for user 'relay' has not been enabled by 'p4 protect'."),
+			wantSub: "",
+		},
+		{
+			name: "a server phrase planted in the ARGS is not a connectivity problem",
+			in: newP4CommandError(
+				[]string{"-c", "relay_h_ab12", "sync", "//depot/connect to server failed/...#head"},
+				errors.New("exit status 1"),
+				"no such file or directory"),
+			wantSub: "",
+		},
+		{
+			name: "a disk phrase planted in a path the CALLER put in an outer wrapper",
+			in: fmt.Errorf("resolve head for %s: %w", "//depot/disk full/...",
+				newP4CommandError([]string{"changes", "-m1", "//depot/disk full/...#head"},
+					errors.New("exit status 1"), "no such file or directory")),
+			wantSub: "",
+		},
+		{
+			name: "a real disk failure through the producer's own shape",
+			in: newP4CommandError(
+				[]string{"-c", "relay_h_ab12", "sync", "//s/x/...@12345"},
+				errors.New("exit status 1"),
+				"write //s/x/big.bin: no space left on device"),
+			wantSub: "out of disk space on this agent's workspace volume",
+		},
+		{
+			name: "a missing binary arrives in the UNDERLYING error, never in stderr",
+			in: newP4CommandError(
+				[]string{"sync", "//s/x/..."},
+				fmt.Errorf(`exec: "p4": %w`, exec.ErrNotFound),
+				""),
+			wantSub: "p4 binary not found on PATH",
 		},
 		{
 			name:    "passthrough",
