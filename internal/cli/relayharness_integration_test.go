@@ -133,11 +133,17 @@ func startRelayServer(t *testing.T) *relayServer {
 	return s
 }
 
+// cliLanePassword is the plaintext behind every seeded user's stored hash. It is
+// a const rather than a literal inside seedUserWithToken because
+// TestIntegration_LoginAgainstTheRealEndpoint drives a real POST /v1/auth/login
+// with it, and a second copy could drift from the hash this harness writes.
+const cliLanePassword = "cli-lane-password"
+
 // seedUserWithToken creates a user and an API token for it using only exported
 // production symbols, and returns the raw hex token the client presents.
 func seedUserWithToken(t *testing.T, q *store.Queries, email string, isAdmin bool) string {
 	t.Helper()
-	hash, err := bcrypt.GenerateFromPassword([]byte("cli-lane-password"), bcrypt.MinCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(cliLanePassword), bcrypt.MinCost)
 	require.NoError(t, err)
 	u, err := q.CreateUserWithPassword(t.Context(), store.CreateUserWithPasswordParams{
 		Name:         email,
