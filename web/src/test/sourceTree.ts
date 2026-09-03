@@ -1,5 +1,6 @@
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import ts from 'typescript'
 // Explicit node:url URL, not the global: the test environment is jsdom, which
 // shadows the global URL constructor with its own (whatwg-url) implementation.
 // That implementation cannot resolve a relative path against a file:// base that
@@ -49,233 +50,58 @@ export function toPosix(path: string): string {
   return path.replace(/\\/g, '/')
 }
 
-// Strips comments before scanning, both kinds this repo writes: `{/* ... */}`
-// JSX comments are `/* ... */` blocks underneath. A single-pass scanner over
-// explicit lexical states - CODE, a line comment, a block comment, a
-// single-quoted string, a double-quoted string, and a template literal (with
-// its own nested CODE state for each `${...}` interpolation) - rather than
-// two passes over the whole file, because a two-pass blank-then-strip design
-// cannot tell a quote INSIDE a comment from a real string boundary: an
-// apostrophe in a comment can pair with an unrelated real string later in the
-// file, or a comment's own closing `*/` gets blanked away as if it were
-// inside that fabricated string, and either way the block-comment scan then
-// runs past the comment's real end looking for the next `*/`, silently
-// deleting real code up to it. A regex literal is recognised heuristically
-// (a `/` immediately after certain operator-shaped characters, or at the
-// start of a line) and its content is scanned to an unescaped closing `/`
-// outside a character class, so a pattern that itself contains a quote or a
-// slash-star is not mistaken for a string or a comment.
+// Strips comments before scanning, both from .ts files and from JSX
+// `{/* ... */}` comments in .tsx files, by parsing the source with
+// TypeScript's own parser rather than re-deriving comment and string
+// boundaries by hand: a regex literal, JSX text as its own lexical run, and
+// a `/` after a closing brace are each a real lexical state a hand-rolled
+// scanner has to model correctly, and the parser already does. Every
+// comment range TypeScript itself reports (leading or trailing, on every
+// node including tokens, so a dangling comment inside an empty JSX
+// expression container like `{/* ... */}` is still reached - pinned by a
+// dedicated test) is blanked in place, non-newline characters replaced with
+// spaces, keeping newlines so line numbers in the returned text still match
+// the source.
 //
-// Comment bodies are blanked (their content removed) but their newlines are
-// kept, so line numbers in the returned text match the source - a per-line
-// scan downstream sees the same line count whether or not a match happens to
-// sit next to a multi-line comment.
-//
-// KNOWN LIMITS. The regex heuristic is conservative, not a parser: it bails
-// to treating `/` as division the moment it would otherwise run past a
-// newline, so a genuine division immediately followed by a quote on the same
-// line could still mis-tokenise the rest of that line - pinned by the regex
-// kills below, which cover the two forms this repo actually writes.
-type Mode = 'code' | 'line-comment' | 'block-comment' | 'single' | 'double' | 'template'
-
-interface Frame {
-  mode: Mode
-  // Set only on the CODE frame pushed for a template literal's `${...}`
-  // interpolation, so the matching `}` that closes it (as opposed to any
-  // `{`/`}` pair nested inside the expression) can be told apart.
-  braceDepth?: number
+// KNOWN LIMIT: a file that fails to parse throws, naming the file, rather
+// than silently stripping nothing - a broken producer should fail this
+// guard loud, not pass it by accident.
+function collectCommentRanges(sourceFile: ts.SourceFile, fullText: string): Array<{ pos: number; end: number }> {
+  const seen = new Set<number>()
+  const ranges: Array<{ pos: number; end: number }> = []
+  function addRanges(rs: ts.CommentRange[] | undefined) {
+    if (!rs) return
+    for (const r of rs) {
+      if (seen.has(r.pos)) continue
+      seen.add(r.pos)
+      ranges.push({ pos: r.pos, end: r.end })
+    }
+  }
+  function visit(node: ts.Node) {
+    addRanges(ts.getLeadingCommentRanges(fullText, node.getFullStart()))
+    addRanges(ts.getTrailingCommentRanges(fullText, node.getEnd()))
+    node.getChildren(sourceFile).forEach(visit)
+  }
+  visit(sourceFile)
+  return ranges
 }
 
-// A `/` immediately after one of these is treated as a possible regex start
-// rather than division; `''` covers the very start of the scan.
-const REGEX_PRECEDING = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '\n', ''])
-
-// `start` points at the opening `/`. Returns the index just past the closing
-// `/` (outside a character class, unescaped) plus any trailing flag letters.
-// Bails at a newline - a regex literal cannot span lines in real JS - by
-// returning `start + 1` unchanged, so a false-positive `/` cannot run away
-// through the rest of the file; the caller then treats it as ordinary code.
-function scanRegexLiteral(src: string, start: number): number {
-  let i = start + 1
-  let inClass = false
-  while (i < src.length) {
-    const c = src[i]
-    if (c === '\n') return start + 1
-    if (c === '\\') {
-      i += 2
-      continue
-    }
-    if (c === '[') {
-      inClass = true
-      i++
-      continue
-    }
-    if (c === ']') {
-      inClass = false
-      i++
-      continue
-    }
-    if (c === '/' && !inClass) {
-      i++
-      while (i < src.length && /[a-z]/i.test(src[i])) i++
-      return i
-    }
-    i++
+export function withoutComments(src: string, fileName = '<anonymous>.tsx'): string {
+  const sourceFile = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  // parseDiagnostics is not part of the public API surface in the .d.ts, but
+  // is present at runtime; it is what distinguishes a genuine syntax error
+  // from a clean parse that simply has no comments.
+  const diagnostics = (sourceFile as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics
+  if (diagnostics && diagnostics.length > 0) {
+    const message = ts.flattenDiagnosticMessageText(diagnostics[0].messageText, ' ')
+    throw new Error(`withoutComments: ${fileName} failed to parse: ${message}`)
   }
-  return start + 1
-}
-
-export function withoutComments(src: string): string {
-  let out = ''
-  const stack: Frame[] = [{ mode: 'code' }]
-  let i = 0
-  let lastSignificant = ''
-
-  while (i < src.length) {
-    const frame = stack[stack.length - 1]
-    const ch = src[i]
-
-    if (frame.mode === 'code') {
-      if (ch === '/' && src[i + 1] === '/') {
-        // A line whose only content before the comment is whitespace has
-        // that whitespace dropped too, so a comment-only line reads as
-        // fully blank rather than leaving a bare indent behind.
-        const lastNL = out.lastIndexOf('\n')
-        const linePrefix = out.slice(lastNL + 1)
-        if (/^\s*$/.test(linePrefix)) out = out.slice(0, lastNL + 1)
-        stack.push({ mode: 'line-comment' })
-        i += 2
-        continue
-      }
-      if (ch === '/' && src[i + 1] === '*') {
-        stack.push({ mode: 'block-comment' })
-        i += 2
-        continue
-      }
-      if (ch === '/' && REGEX_PRECEDING.has(lastSignificant)) {
-        const end = scanRegexLiteral(src, i)
-        out += src.slice(i, end)
-        lastSignificant = src[end - 1]
-        i = end
-        continue
-      }
-      if (ch === "'") {
-        stack.push({ mode: 'single' })
-        out += ch
-        i++
-        continue
-      }
-      if (ch === '"') {
-        stack.push({ mode: 'double' })
-        out += ch
-        i++
-        continue
-      }
-      if (ch === '`') {
-        stack.push({ mode: 'template' })
-        out += ch
-        i++
-        continue
-      }
-      if (ch === '{' && frame.braceDepth !== undefined) {
-        frame.braceDepth++
-        out += ch
-        lastSignificant = ch
-        i++
-        continue
-      }
-      if (ch === '}' && frame.braceDepth !== undefined) {
-        frame.braceDepth--
-        out += ch
-        i++
-        if (frame.braceDepth === 0) stack.pop()
-        lastSignificant = '}'
-        continue
-      }
-      out += ch
-      if (ch === '\n') lastSignificant = '\n'
-      else if (!/\s/.test(ch)) lastSignificant = ch
-      i++
-      continue
+  const ranges = collectCommentRanges(sourceFile, src)
+  const chars = src.split('')
+  for (const { pos, end } of ranges) {
+    for (let i = pos; i < end; i++) {
+      if (chars[i] !== '\n') chars[i] = ' '
     }
-
-    if (frame.mode === 'line-comment') {
-      if (ch === '\n') {
-        out += '\n'
-        stack.pop()
-        lastSignificant = '\n'
-        i++
-        continue
-      }
-      i++
-      continue
-    }
-
-    if (frame.mode === 'block-comment') {
-      if (ch === '*' && src[i + 1] === '/') {
-        stack.pop()
-        i += 2
-        continue
-      }
-      if (ch === '\n') out += '\n'
-      i++
-      continue
-    }
-
-    if (frame.mode === 'single' || frame.mode === 'double') {
-      const quote = frame.mode === 'single' ? "'" : '"'
-      if (ch === '\\') {
-        out += ch
-        if (i + 1 < src.length) out += src[i + 1]
-        i += 2
-        continue
-      }
-      if (ch === quote) {
-        stack.pop()
-        out += ch
-        lastSignificant = quote
-        i++
-        continue
-      }
-      if (ch === '\n') {
-        // A raw, unescaped newline ends a single/double-quoted string in
-        // real JS; falling back to CODE here matches that, so a runaway
-        // string cannot swallow the rest of the file.
-        stack.pop()
-        out += ch
-        lastSignificant = '\n'
-        i++
-        continue
-      }
-      out += ch
-      i++
-      continue
-    }
-
-    // frame.mode === 'template'
-    if (ch === '\\') {
-      out += ch
-      if (i + 1 < src.length) out += src[i + 1]
-      i += 2
-      continue
-    }
-    if (ch === '`') {
-      stack.pop()
-      out += ch
-      lastSignificant = '`'
-      i++
-      continue
-    }
-    if (ch === '$' && src[i + 1] === '{') {
-      out += '${'
-      stack.push({ mode: 'code', braceDepth: 1 })
-      lastSignificant = '{'
-      i += 2
-      continue
-    }
-    out += ch
-    i++
   }
-
-  return out
+  return chars.join('')
 }
