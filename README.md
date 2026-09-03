@@ -582,6 +582,8 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
 | `unshelves` | No | List of pending changelist numbers to unshelve into the workspace before running. Reverted automatically after the task. |
 | `workspace_exclusive` | No | If `true`, take an exclusive lock on the workspace (other tasks for the same stream queue). Default `false`. |
 
+**Prepare failures.** When a task's prepare phase fails - a sync error, a bad stream, a missing ticket, or a worker with no workspace provider at all - the provider's error is stored as the last line of that task's log, on the **stderr** stream, prefixed `[failed] `. It is readable through `GET /v1/tasks/{id}/logs`, `relay logs` and the SPA's task log view, live and on refresh. Before this, a failed prepare left the task `failed` with an empty log and the cause only in the agent process's own stdout.
+
 **Workspace arbitration.** Multiple tasks targeting the same stream on the same worker share the workspace under a three-rule policy: tasks with the *same baseline* run concurrently; tasks needing additional but disjoint sync paths join additively; everything else serializes. Tasks with `workspace_exclusive: true` always serialize.
 
 **Warm-workspace preference.** The dispatcher prefers workers that already have a synced workspace for the task's stream — even if a colder worker has more free slots. The preference is a soft bias, not a hard pin: if no warm worker is free, a cold worker is used.
@@ -1645,6 +1647,12 @@ one. This is `?order=desc&limit=1` against a 94312-entry log:
   with `prev_seq` `0`: stop on a `0` cursor, never on a short page.
 - `total` counts the task's log ENTRIES, not lines. An entry is an arbitrary
   chunk of output; one line can straddle two entries.
+- **Not every line comes from the subprocess.** The coordinator synthesizes one:
+  a task whose prepare failed carries the provider's error as a `stderr` entry
+  prefixed `[failed] `. An agent that repeats its terminal status message can
+  produce that line more than once - the duplicate status write is refused and
+  recorded in `task_status_fence.counts.duplicate_total`, but the log line is
+  written each time inside `RELAY_TASKLOG_TRAILING_WINDOW`.
 
 Stop when the cursor for your direction is `0`. Do not feed a `0` cursor back:
 `before_seq=0` is a 400, not an empty page.
