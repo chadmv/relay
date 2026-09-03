@@ -74,3 +74,17 @@ test('the modal role is declared in the dialog shell only', () => {
   expect(found, 'the role probe no longer matches DialogShell').toContain(SHELL)
   expect(found.filter((p) => p !== SHELL), HAND_ROLLED_MODAL).toEqual([])
 })
+
+// A2. The test-file exclusion, not any argument about query helpers, is what
+// makes this work: four test files spell this attribute literally in
+// toHaveAttribute assertions. It is also spelled a second time inside
+// DialogShell.tsx's own header comment, which is why comments are stripped even
+// for the file that legitimately carries it.
+const MODAL_ATTR_PROBE = /aria-modal\s*=/
+
+test('the modal attribute is declared in the dialog shell only', () => {
+  const found = TSX.filter((f) => MODAL_ATTR_PROBE.test(stripped(f))).map(rel)
+  // C2.
+  expect(found, 'the aria-modal probe no longer matches DialogShell').toContain(SHELL)
+  expect(found.filter((p) => p !== SHELL), HAND_ROLLED_MODAL).toEqual([])
+})
