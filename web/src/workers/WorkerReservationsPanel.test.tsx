@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { expect, test } from 'vitest'
 import { server } from '../test/setup-helpers'
 import { renderWithQuery } from '../test/renderWithQuery'
+import { formatDateTime } from '../lib/time'
 import { WorkerReservationsPanel } from './WorkerReservationsPanel'
 
 // Fixed, injected, and inside the ACTIVE row's window: a clock read from the
@@ -73,6 +74,21 @@ test('renders a row per reservation', async () => {
   expect(screen.getByText('film-x')).toBeInTheDocument()
   // Both rows are inside their window, so both derive ACTIVE.
   expect(screen.getAllByText('ACTIVE')).toHaveLength(2)
+})
+
+// Kills: swapping ends_at for starts_at in the ENDS cell. ACTIVE_ROW carries
+// both, formatted through the same formatDateTime the cell itself uses (never a
+// hardcoded string, since the cell renders in the runner's local time and a
+// literal would drift with the runner's timezone) - and the two are asserted as
+// DISTINCT strings first, or a row where they happened to format identically
+// would pass on either source.
+test('the ENDS cell renders ends_at, not starts_at', async () => {
+  const endsText = formatDateTime(ACTIVE_ROW.ends_at)
+  const startsText = formatDateTime(ACTIVE_ROW.starts_at)
+  expect(endsText).not.toBe(startsText)
+  renderPanel(page([ACTIVE_ROW]))
+  expect(await screen.findByText(endsText)).toBeInTheDocument()
+  expect(screen.queryByText(startsText)).not.toBeInTheDocument()
 })
 
 // Kills: rendering the admin table's absent-value hyphen. The absence IS the
