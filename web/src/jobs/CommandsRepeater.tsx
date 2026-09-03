@@ -22,8 +22,7 @@ function isEmptyCommand(cmd: TaskRow['commands'][number]): boolean {
 // on whitespace is a correctness bug the first time anyone types a path with a
 // space in it, and a silent one: the spec serializes, dispatches and fails on the
 // agent. A quoting grammar would make this module the owner of a rule relay's Go
-// has nowhere - nothing from jobspec through the dispatcher to Runner splits or
-// unquotes anything - with no server-side counterpart to pin it.
+// has nowhere, with no server-side counterpart to pin it.
 //
 // Memoized: a task's own `task` prop is referentially stable across an edit
 // to an UNRELATED task (SpecBuilderForm's array map only replaces the edited
