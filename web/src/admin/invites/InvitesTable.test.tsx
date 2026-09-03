@@ -32,14 +32,13 @@ function renderTable(over: Partial<Parameters<typeof InvitesTable>[0]> = {}) {
 
 test('renders all six headers', () => {
   renderTable()
-  // CREATED is checked separately and anchored: the default sort is
-  // -created_at, so its rendered text is "CREATED ▼" (the caret), and an
-  // unanchored /CREATED/ also matches the "CREATED BY" columnheader - the two
-  // must be told apart, not merely found.
+  // CREATED is checked separately and ANCHORED-EXACT: "CREATED BY" is a second,
+  // non-sortable columnheader that also begins with "CREATED", so an unanchored
+  // /CREATED/ resolves two elements.
   for (const label of ['BINDS TO', 'EXPIRES', 'CREATED BY', 'STATUS', 'NOTE']) {
     expect(screen.getByRole('columnheader', { name: new RegExp(label) })).toBeInTheDocument()
   }
-  expect(screen.getByRole('columnheader', { name: /^CREATED ▼$/ })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: /^CREATED$/ })).toBeInTheDocument()
 })
 
 test('only CREATED and EXPIRES are sortable; the other four carry no aria-sort', () => {
@@ -48,24 +47,24 @@ test('only CREATED and EXPIRES are sortable; the other four carry no aria-sort',
   expect(screen.getByRole('columnheader', { name: /BINDS TO/ })).not.toHaveAttribute('aria-sort')
   expect(screen.getByRole('columnheader', { name: /STATUS/ })).not.toHaveAttribute('aria-sort')
   expect(screen.getByRole('columnheader', { name: /NOTE/ })).not.toHaveAttribute('aria-sort')
-  // Anchored and exact: "CREATED BY" is a separate, non-sortable columnheader
-  // that also starts with "CREATED ", so an unanchored /^CREATED / would match
-  // both and throw on multiple elements found.
-  expect(screen.getByRole('columnheader', { name: /^CREATED ▼$/ })).toHaveAttribute(
+  // Anchored and exact: "CREATED BY" is a separate, non-sortable columnheader that
+  // also starts with "CREATED", so an unanchored regex matches both and throws on
+  // multiple elements found.
+  expect(screen.getByRole('columnheader', { name: /^CREATED$/ })).toHaveAttribute(
     'aria-sort',
     'descending',
   )
   expect(screen.getByRole('columnheader', { name: /EXPIRES/ })).toHaveAttribute('aria-sort', 'none')
-  expect(screen.getByRole('button', { name: 'CREATED ▼' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'CREATED' })).toBeInTheDocument()
 })
 
-test('ascending sort shows an ascending caret', () => {
+test('an ascending sort leaves the button named by its label alone', () => {
   renderTable({ sort: 'expires_at' })
   expect(screen.getByRole('columnheader', { name: /EXPIRES/ })).toHaveAttribute(
     'aria-sort',
     'ascending',
   )
-  expect(screen.getByRole('button', { name: 'EXPIRES ▲' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'EXPIRES' })).toBeInTheDocument()
 })
 
 test('clicking a sortable header calls onSort with that field', async () => {

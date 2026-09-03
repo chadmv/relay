@@ -27,9 +27,11 @@ test('renders a row and calls onSort when a sortable header is clicked', async (
   expect(onSort).toHaveBeenCalledWith('name')
 })
 
-test('shows a descending caret on the active sort column', () => {
+test('the active sort column button is named by its label alone', () => {
   renderTable(<WorkersTable workers={[worker({})]} sort="-name" onSort={() => {}} />)
-  expect(screen.getByRole('button', { name: /name ▼/i })).toBeInTheDocument()
+  // Exact, not a substring: with the caret still in the name this resolves nothing.
+  // Direction is asserted by `exposes aria-sort on the active sortable header`.
+  expect(screen.getByRole('button', { name: 'NAME' })).toBeInTheDocument()
 })
 
 test('exposes aria-sort on the active sortable header and "none" on the rest', () => {

@@ -1,4 +1,13 @@
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../../components/holo'
+import {
+  Chip,
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../../components/holo'
 import { deriveStatus, formatExpiryLabel, statusTone } from './enrollmentStatus'
 import type { AgentEnrollment, EnrollmentSort, EnrollmentSortField } from './api'
 
@@ -36,7 +45,7 @@ interface EnrollmentsTableProps {
 
 export function EnrollmentsTable({ enrollments, sort, onSort, now }: EnrollmentsTableProps) {
   return (
-    <div className="rounded-card border border-border bg-gradient-to-b from-white/[0.06] to-white/[0.02] backdrop-blur-[8px]">
+    <GlassPanel>
       <Table
         label="Agent enrollments"
         columns={COLS}
@@ -44,14 +53,14 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
         headers={HEADERS}
         sort={sort}
         onSort={onSort}
-        headerClassName="px-[18px] py-3 tracking-[0.16em]"
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
       >
         {enrollments.map((e) => {
           const status = deriveStatus(e.expires_at, now)
           return (
             <TableRow
               key={e.id}
-              className={`border-b border-accent/[0.06] px-[18px] py-2.5 font-mono text-[11.5px] ${
+              className={`border-b border-accent/[0.06] ${TOP_LEVEL_ROW_PX} py-2.5 font-mono text-[11.5px] ${
                 status === 'EXPIRED' ? 'opacity-[0.55]' : ''
               }`}
             >
@@ -75,6 +84,6 @@ export function EnrollmentsTable({ enrollments, sort, onSort, now }: Enrollments
           )
         })}
       </Table>
-    </div>
+    </GlassPanel>
   )
 }

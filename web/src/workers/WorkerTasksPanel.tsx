@@ -1,5 +1,12 @@
 import { Link } from 'react-router-dom'
-import { Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import { taskStatusColor } from '../jobs/taskStatus'
 import { formatRelativeTime } from './liveness'
 import { useWorkerTasks } from './useWorkerTasks'
@@ -10,6 +17,10 @@ const COLS = 'grid-cols-[1fr_1fr_100px_90px_60px]'
 // budget to hold - a flexible cell without it would need its own content
 // minimum added to the sum.
 const MIN_W = 'min-w-[560px]'
+
+// One literal, shared with WorkerDetailPage's Panel title. Same reasoning as
+// WORKSPACES_PANEL_TITLE.
+export const WORKER_TASKS_PANEL_TITLE = 'Current tasks'
 
 const HEADERS: TableColumn[] = [
   { label: 'TASK' },
@@ -30,20 +41,19 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      {/* aria-label matches the visible title on the page Panel that wraps this. */}
       <Table
-        label="Current tasks"
+        label={WORKER_TASKS_PANEL_TITLE}
         columns={COLS}
         minWidth={MIN_W}
         headers={HEADERS}
-        headerClassName="px-4 py-2 tracking-wider"
+        headerClassName={NESTED_HEADER_CLASS}
       >
         {rows.map((t) => {
           const c = taskStatusColor(t.status)
           return (
             <TableRow
               key={t.id}
-              className="border-b border-border/40 px-4 py-2 font-mono text-[11px]"
+              className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}
             >
               <TableCell className="truncate">
                 <Link

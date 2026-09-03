@@ -25,20 +25,57 @@ test('renders each task name and status', () => {
   expect(screen.getByText('running')).toBeInTheDocument()
 })
 
-test('marks the selected row with aria-selected', () => {
-  render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
-  const rows = screen.getAllByRole('row')
-  const selected = rows.filter((r) => r.getAttribute('aria-selected') === 'true')
-  expect(selected).toHaveLength(1)
-  expect(selected[0]).toHaveTextContent('denoise')
+test("the selected task's control is marked aria-current and no row carries aria-selected", () => {
+  const { container } = render(<TasksTable tasks={tasks} selectedTaskId="t2" onSelect={() => {}} />)
+  // See TasksTable.tsx for why: no aria-selected, no interactive row.
+  // aria-current is valid on any element and is not conditional on the
+  // container role.
+  const current = container.querySelectorAll('[aria-current="true"]')
+  expect(current).toHaveLength(1)
+  expect(current[0]).toHaveAccessibleName('denoise')
+  expect(container.querySelectorAll('[aria-selected]')).toHaveLength(0)
 })
 
-test('clicking a row calls onSelect with its id (selection, not navigation)', async () => {
+test('the name-cell button carries a negative-offset focus ring, not the browser default', () => {
+  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={() => {}} />)
+  const button = screen.getByRole('button', { name: 'frame-001' })
+  // The button fills its TableCell exactly (w-full) and both carry `truncate`
+  // (overflow: hidden), so a ring drawn OUTSIDE the border box is clipped by the
+  // ancestor to zero visible pixels. A negative outline offset draws it INSIDE
+  // instead, which that clip cannot reach - proved in a real browser (not jsdom,
+  // which does no layout) by the job-detail keyboard describe in
+  // web/e2e/keyboard.spec.ts, reading getComputedStyle on the focused element.
+  //
+  // The value is interpolated INSIDE the brackets rather than spelled as a
+  // literal class-shaped substring: Tailwind v4 scans this file too, and a
+  // literal match here would keep the CSS rule alive even if the component
+  // stopped emitting the class.
+  const OFFSET = '-2px'
+  expect(button).toHaveClass(`focus-visible:outline-offset-[${OFFSET}]`)
+})
+
+test('each task row exposes a button named for the task, and one activation selects once', async () => {
   const onSelect = vi.fn()
   render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
-  await userEvent.click(screen.getByText('denoise'))
+  expect(screen.getByRole('button', { name: 'frame-001' })).toBeInTheDocument()
+  const denoise = screen.getByRole('button', { name: 'denoise' })
+  await userEvent.click(denoise)
+  // ONE handler. The row owns onClick; the button owns none, and the button's click
+  // bubbles to it. Giving the button its own handler makes this two.
+  expect(onSelect).toHaveBeenCalledTimes(1)
   expect(onSelect).toHaveBeenCalledWith('t2')
-  // Rows are buttons/selectable, never anchors.
+})
+
+test('clicking a non-button cell in a row calls onSelect with its id (row-level handler, not just the button)', async () => {
+  const onSelect = vi.fn()
+  render(<TasksTable tasks={tasks} selectedTaskId="t1" onSelect={onSelect} />)
+  // 'running' is denoise's STATUS cell, a plain text node with no button
+  // ancestor - unlike 'denoise' itself, which resolves inside the name-cell
+  // button and so cannot tell a row handler apart from a button-only one.
+  await userEvent.click(screen.getByText('running'))
+  expect(onSelect).toHaveBeenCalledWith('t2')
+  // The table has no anchors: task selection is a click or key action, never
+  // navigation.
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
 })
 

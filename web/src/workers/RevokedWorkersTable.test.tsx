@@ -28,3 +28,10 @@ test('renders an empty state when there are no revoked workers', () => {
   render(<RevokedWorkersTable workers={[]} />)
   expect(screen.getByText('No revoked workers.')).toBeInTheDocument()
 })
+
+test('the table has the accessible name "Revoked workers"', () => {
+  render(<RevokedWorkersTable workers={[revoked]} />)
+  // Named invisibly rather than with a caption: the page already shows an h1
+  // and a pressed section tab saying the same thing.
+  expect(screen.getByRole('table', { name: 'Revoked workers' })).toBeInTheDocument()
+})

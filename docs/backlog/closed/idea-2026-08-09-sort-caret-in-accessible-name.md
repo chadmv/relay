@@ -1,7 +1,9 @@
 ---
 title: "The sort caret is part of the column header's accessible name, so direction is announced twice"
 type: idea
-status: open
+status: closed
+closed: 2026-09-02
+resolution: fixed
 created: 2026-08-09
 priority: low
 source: deferred review finding from the shared accessible-table primitive (2026-08-09); the fix was attempted and reverted
@@ -56,3 +58,6 @@ gated on neutrality.
 - Sibling a11y follow-ups from the same review:
   [[idea-2026-08-09-tasks-table-grid-role-selection]],
   [[idea-2026-08-09-table-accessible-name-consistency]]
+
+## Resolution
+Shipped in lane TB of the 2026-09-02 web-frontend batch: the caret is wrapped aria-hidden in the shared Table primitive and aria-sort is the sole carrier of direction. Five test files, not the three the item named (InvitesTable.test and Table.test also asserted the glyph), now query by the plain label and assert direction through aria-sort; ReservationsTable.test asserted through textContent and survived untouched, which doubles as the proof the caret still renders.

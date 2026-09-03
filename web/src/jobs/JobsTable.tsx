@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { GlassPanel, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  GlassPanel,
+  Table,
+  TableCell,
+  TableRow,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  type TableColumn,
+} from '../components/holo'
 import type { Job } from './api'
 import { statusColor, progressPct, formatDuration, formatStarted } from './status'
 
@@ -32,7 +40,14 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
   }
   return (
     <GlassPanel data-testid="jobs-table">
-      <Table label="Jobs" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-3 tracking-wider">
+      <Table
+        label="Jobs"
+        columns={COLS}
+        minWidth={MIN_W}
+        headers={HEADERS}
+        /* The hi-fi's top-level list header treatment. */
+        headerClassName={TOP_LEVEL_HEADER_CLASS}
+      >
         {jobs.map((j) => {
           const c = statusColor(j.status)
           const pct = progressPct(j.done_tasks, j.total_tasks)
@@ -40,7 +55,11 @@ export function JobsTable({ jobs, footer }: { jobs: Job[]; footer?: ReactNode })
             <TableRow
               key={j.id}
               data-testid={`job-row-${j.id}`}
-              className={`border-b border-border/40 px-4 py-2 font-mono text-[11.5px] ${
+              /* Horizontal padding tracks the header's, and must: the header row and
+                 the body rows are sibling grid containers sharing one template, so a
+                 disagreement puts every column label off its own data. The vertical
+                 component is deliberately unchanged. */
+              className={`border-b border-border/40 ${TOP_LEVEL_ROW_PX} py-2 font-mono text-[11.5px] ${
                 j.status === 'running' ? 'bg-accent/[0.04]' : ''
               }`}
             >

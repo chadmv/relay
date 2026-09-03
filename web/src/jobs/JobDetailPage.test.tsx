@@ -146,17 +146,16 @@ test('switching to the Log tab subscribes once, backfills once, and renders line
   expect(streamUrl).not.toMatch(/token|access_token/)
 })
 
-test('selecting a task updates aria-selected and drives the spec pane', async () => {
+test('selecting a task drives the spec pane and names the tabs', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(JOB)))
   renderDetail()
   await screen.findByText('shot-042 render')
-  // 'frame-001' appears twice (task row name + denoise's deps cell); click the
-  // row's name cell specifically to select the frame-001 task.
-  const rows = screen.getAllByRole('row')
-  const frameRow = rows.find((r) => r.getAttribute('role') === 'row' && r.textContent?.startsWith('frame-001'))!
-  await userEvent.click(frameRow)
-  const selectedAfter = screen.getAllByRole('row').filter((r) => r.getAttribute('aria-selected') === 'true')
-  expect(selectedAfter[0]).toHaveTextContent('frame-001')
+  // denoise is the default selection (defaultTaskId picks the first running task),
+  // so clicking frame-001 is a real change of selection rather than a reassertion
+  // of the initial state - the discriminating input for a fixed tablist label.
+  expect(screen.getByRole('tablist')).toHaveAccessibleName('Task detail: denoise')
+  await userEvent.click(screen.getByRole('button', { name: 'frame-001' }))
+  expect(screen.getByRole('tablist')).toHaveAccessibleName('Task detail: frame-001')
   expect(screen.getByText(/blender -b/)).toBeInTheDocument()
 })
 

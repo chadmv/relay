@@ -1,6 +1,14 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { Chip, Table, TableCell, TableRow, type TableColumn } from '../components/holo'
+import {
+  Chip,
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+  Table,
+  TableCell,
+  TableRow,
+  type TableColumn,
+} from '../components/holo'
 import { formatRelativeTime } from './liveness'
 import { useWorkerActions } from './useWorkerActions'
 import { useWorkerWorkspaces } from './useWorkerWorkspaces'
@@ -10,6 +18,12 @@ const COLS = 'grid-cols-[120px_90px_1fr_120px_90px_90px]'
 // 1280, so 600 is deliberately tight: it is the largest value that does not put a
 // scrollbar on a maximized desktop window. Task 7 measures this one specifically.
 const MIN_W = 'min-w-[600px]'
+
+// ONE literal for the panel title and the table's accessible name. The
+// structural test on WorkerDetailPage (`every table on the page is named by
+// its own panel title`) pins the RENDERED pair, since a test comparing two
+// references to this constant could not fail.
+export const WORKSPACES_PANEL_TITLE = 'Source workspaces'
 
 const HEADERS: TableColumn[] = [
   { label: 'SHORT ID' },
@@ -39,10 +53,14 @@ export function WorkspacesPanel({ workerId }: { workerId: string }) {
 
   return (
     <div className="flex flex-col">
-      {/* aria-label matches the visible title on the page Panel that wraps this. */}
-      <Table label="Source workspaces" columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName="px-4 py-2 tracking-wider">
+      {/* The hi-fi's NESTED table header treatment, transcribed: 10px/16px padding
+          with 0.14em letter-spacing, from its own worker-detail source-workspaces
+          header. A second value exists because the hi-fi has a second value, for
+          tables that sit inside a panel or a detail-page column rather than being
+          the page's own list. */}
+      <Table label={WORKSPACES_PANEL_TITLE} columns={COLS} minWidth={MIN_W} headers={HEADERS} headerClassName={NESTED_HEADER_CLASS}>
         {rows.map((ws) => (
-          <TableRow key={ws.short_id} className="border-b border-border/40 px-4 py-2 font-mono text-[11px]">
+          <TableRow key={ws.short_id} className={`border-b border-border/40 ${NESTED_ROW_PX} py-2 font-mono text-[11px]`}>
             <TableCell className="text-fg">{ws.short_id}</TableCell>
             <TableCell className="text-fg-mute">{ws.source_type}</TableCell>
             <TableCell className="truncate text-fg-mute">{ws.source_key}</TableCell>

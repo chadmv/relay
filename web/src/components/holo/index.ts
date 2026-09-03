@@ -8,5 +8,15 @@ export { PillButton } from './PillButton'
 export { KpiStat } from './KpiStat'
 export { Panel } from './Panel'
 export { StatusDot } from './StatusDot'
-export { Table, TableRow, TableCell, ariaSort, sortCaret } from './Table'
+export {
+  Table,
+  TableRow,
+  TableCell,
+  ariaSort,
+  sortCaret,
+  TOP_LEVEL_HEADER_CLASS,
+  TOP_LEVEL_ROW_PX,
+  NESTED_HEADER_CLASS,
+  NESTED_ROW_PX,
+} from './Table'
 export type { TableColumn, SortDirection } from './Table'

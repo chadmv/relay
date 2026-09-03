@@ -103,16 +103,33 @@ test('emits aria-sort only on sortable headers, and follows the active sort', ()
   expect(screen.getByRole('columnheader', { name: /^CREATED/ })).toHaveAttribute('aria-sort', 'ascending')
 })
 
-test('the caret follows the active sort direction', () => {
+test("the sort caret is hidden from the header's accessible name", () => {
+  // The glyph announces as "black down-pointing triangle" and is not a name. Direction
+  // travels on aria-sort, which `emits aria-sort only on sortable headers` pins.
+  // Both queries are EXACT: with the glyph still in the name they resolve nothing.
+  const headers = [{ label: 'NAME', field: 'name' as const }]
+  render(
+    <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
+  )
+  expect(screen.getByRole('button', { name: 'NAME' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'NAME' })).toBeInTheDocument()
+})
+
+test('the caret is still rendered for sighted users', () => {
+  // The partner of the test above, and neither alone distinguishes "hidden from the
+  // name" from "deleted". Located by position, NOT by accessible name, so this test
+  // stays red only for a missing caret and cannot also fail for a missing aria-hidden.
+  // Escapes, not raw characters: a raw non-ASCII literal in source is unverifiable by
+  // eye.
   const headers = [{ label: 'NAME', field: 'name' as const }]
   const { rerender } = render(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="-name" onSort={() => {}} />,
   )
-  expect(screen.getByRole('button', { name: 'NAME ▼' })).toBeInTheDocument()
+  expect(screen.getAllByRole('columnheader')[0].textContent).toContain('\u25BC')
   rerender(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={headers} sort="name" onSort={() => {}} />,
   )
-  expect(screen.getByRole('button', { name: 'NAME ▲' })).toBeInTheDocument()
+  expect(screen.getAllByRole('columnheader')[0].textContent).toContain('\u25B2')
 })
 
 test('clicking a sortable header calls onSort with that column field', async () => {
@@ -146,23 +163,28 @@ test('a right-aligned header carries text-right, and a plain one carries no clas
   expect(screen.getByRole('columnheader', { name: 'A' })).not.toHaveAttribute('class')
 })
 
-test('TableRow renders as the element named by `as` and forwards arbitrary props', async () => {
+test('TableRow always renders a div and cannot have its role overridden', async () => {
   const onClick = vi.fn()
   render(
     <Table label="W" columns="grid-cols-[1fr]" minWidth={PLACEHOLDER_MIN_W} headers={[{ label: 'A' }]}>
-      <TableRow as="button" type="button" aria-selected data-testid="row-btn" onClick={onClick}>
+      <TableRow data-testid="row-div" onClick={onClick}>
         <TableCell>x</TableCell>
       </TableRow>
     </Table>,
   )
-  const row = screen.getByTestId('row-btn')
-  expect(row.tagName).toBe('BUTTON')
+  const row = screen.getByTestId('row-div')
+  expect(row.tagName).toBe('DIV')
   expect(row).toHaveAttribute('role', 'row')
-  expect(row).toHaveAttribute('aria-selected', 'true')
-  expect(row).toHaveAttribute('type', 'button')
   await userEvent.click(row)
   expect(onClick).toHaveBeenCalledTimes(1)
 })
+
+// A TYPE-LEVEL PIN, checked by `tsc -b` and not by vitest. TableRow no longer
+// accepts an element-type escape hatch. Restore the prop and this directive has
+// no error to suppress, so tsc fails it as unused - the pin goes red when the
+// guard is lost. Precedent: the SortFieldOf pin in web/src/lib/toggleSort.ts.
+// @ts-expect-error `as` is not a prop of TableRow
+void (<TableRow as="button">x</TableRow>)
 
 test('TableCell exposes role=cell and merges its className', () => {
   render(

@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
+import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 
 // Semantic wrapper set for the app's CSS-grid pseudo-tables. It owns the ARIA
 // roles, the aria-label, aria-sort, the sort button and its caret, and the grid
@@ -56,6 +56,16 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from 'react'
 // web/src/workers/RevokedWorkersTable.tsx for the in-repo precedent).
 const HEADER_BASE = 'border-b border-border font-mono text-[10px] text-fg-mute'
 const ROW_BASE = 'items-center'
+
+// The hi-fi's two header treatments, exported so header and row sites can
+// reference one symbol each instead of typing the pair by hand. A row's
+// horizontal padding must equal its header's, or the two sibling grids'
+// columns desynchronize. A literal here still satisfies Tailwind v4's
+// static scan.
+export const TOP_LEVEL_HEADER_CLASS = 'px-[18px] py-3 tracking-[0.16em]'
+export const TOP_LEVEL_ROW_PX = 'px-[18px]'
+export const NESTED_HEADER_CLASS = 'px-4 py-2.5 tracking-[0.14em]'
+export const NESTED_ROW_PX = 'px-4'
 
 export type SortDirection = 'ascending' | 'descending' | 'none'
 
@@ -160,7 +170,12 @@ export function Table<F extends string = string>({
               >
                 <button type="button" className="text-left" onClick={() => onSort(field)}>
                   {h.label}
-                  {sortCaret(field, sort)}
+                  {/* aria-hidden, so the button's accessible name is the label alone and
+                      aria-sort is the sole machine-readable carrier of direction. The
+                      leading space stays INSIDE the span. `the sort caret is hidden from
+                      the header's accessible name` and `the caret is still rendered for
+                      sighted users` are the pair that pins both halves. */}
+                  <span aria-hidden="true">{sortCaret(field, sort)}</span>
                 </button>
               </div>
             )
@@ -193,23 +208,23 @@ export function Table<F extends string = string>({
   )
 }
 
-type TableRowProps = Omit<ComponentPropsWithoutRef<'div'>, 'role' | 'dangerouslySetInnerHTML'> & {
-  as?: ElementType
-  // Not part of HTMLAttributes<HTMLDivElement> (it belongs to button/input), but
-  // TasksTable renders its selectable rows as `as="button" type="button"`.
-  type?: 'button' | 'submit'
-}
+// No element-type escape hatch and no `type`. A caller that renders a row AS a
+// button produces a <button role="row">, which is what made aria-selected look
+// like supported API on a table row; aria-selected is not surfaced under
+// role="table" at all. An interactive control belongs INSIDE a cell instead.
+// `TableRow always renders a div and cannot have its role overridden` plus the
+// type-level pin beside it (@ts-expect-error, in Table.test.tsx) are the guards.
+type TableRowProps = Omit<ComponentPropsWithoutRef<'div'>, 'role' | 'dangerouslySetInnerHTML'>
 
-export function TableRow({ as, ...rest }: TableRowProps) {
+export function TableRow({ ...rest }: TableRowProps) {
   const columns = useContext(ColumnsContext)
   // A silent fallback would ship as a mangled layout in production. A throw is
   // unconditional, so it surfaces in the first test render instead.
   if (columns === null) throw new Error('TableRow must be rendered inside a Table')
-  const Tag = as ?? 'div'
   const className = `grid ${columns} ${ROW_BASE} ${rest.className ?? ''}`
   // `rest` spreads BEFORE `role`: a caller-supplied `role` (accidental or via a
   // loosely-typed prop bag) must never win over the role this primitive owns.
-  return <Tag {...rest} className={className} role="row" />
+  return <div {...rest} className={className} role="row" />
 }
 
 type TableCellProps = Omit<ComponentPropsWithoutRef<'span'>, 'role' | 'dangerouslySetInnerHTML'>
