@@ -394,6 +394,65 @@ func parseScheduleFilters(w http.ResponseWriter, qs url.Values) (scheduleFilters
 	return f, true
 }
 
+// scheduledJobStatsResponse is the schedules summary strip. Every key is always
+// present; there is no omitempty anywhere in it, so a zero is a zero and never
+// an absence.
+type scheduledJobStatsResponse struct {
+	Enabled       int64 `json:"enabled"`
+	Paused        int64 `json:"paused"`
+	Total         int64 `json:"total"`
+	FailedRuns24h int64 `json:"failed_runs_24h"`
+	Failing       int64 `json:"failing"`
+}
+
+// handleScheduledJobStats serves the fleet-wide census for an admin and the
+// owner-scoped one for everyone else, by exactly the predicate the owner list
+// arm uses, so the strip cannot disagree with the page beneath it.
+//
+// AUTH-ONLY, not admin-only, and deliberately unlike /v1/server/counters: those
+// are process-lifetime in-memory numbers describing adversary activity, while
+// this is a database census of rows the caller may already page through one
+// screen at a time. An admin-only version would leave every non-admin with a
+// page-scoped strip.
+//
+// It accepts NO filters. The strip's purpose is a fleet-accurate count, and the
+// list's own total already answers the filtered question.
+func (s *Server) handleScheduledJobStats(w http.ResponseWriter, r *http.Request) {
+	u, ok := UserFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// SQL NULL for an admin: no owner predicate, so the census is fleet-wide.
+	var scope pgtype.UUID
+	if !u.IsAdmin {
+		scope = u.ID
+	}
+
+	ctx := r.Context()
+	counts, err := s.q.ScheduledJobCounts(ctx, scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scheduled job stats failed")
+		return
+	}
+	failed, err := s.q.CountFailedScheduledRuns24h(ctx, scope)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "scheduled job stats failed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, scheduledJobStatsResponse{
+		Enabled: counts.Enabled,
+		Paused:  counts.Paused,
+		// Computed from the two buckets rather than counted separately, so the
+		// identity holds by construction.
+		Total:         counts.Enabled + counts.Paused,
+		FailedRuns24h: failed,
+		Failing:       counts.Failing,
+	})
+}
+
 func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request) {
 	u, ok := UserFromCtx(r.Context())
 	if !ok {
