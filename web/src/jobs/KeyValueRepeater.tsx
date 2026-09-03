@@ -81,7 +81,10 @@ export function KeyValueRepeater({
           />
           <PillButton
             id={`${idPrefix}-${row.id}-remove`}
-            aria-label={`Remove ${itemNoun} ${row.key === '' ? i + 1 : row.key}`}
+            // The index is folded into the named form too - two rows can share
+            // a key (the last-one-wins note exists for exactly that case), and
+            // a bare key alone would give both remove controls the same name.
+            aria-label={`Remove ${itemNoun} ${row.key === '' ? i + 1 : `${i + 1}: ${row.key}`}`}
             onClick={() => remove(i)}
           >
             Remove

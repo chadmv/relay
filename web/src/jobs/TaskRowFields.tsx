@@ -18,14 +18,20 @@ interface TaskRowFieldsProps {
 
 // The row's accessible name, and the noun its remove control is named with. A
 // bare glyph makes a button list unnavigable, and a positional fallback keeps two
-// unnamed rows distinguishable.
+// unnamed rows distinguishable. The index is folded into the NAMED form too,
+// not only the blank one: two tasks can share a name (the duplicate-name
+// battery's own fixture does exactly this), and the server - not this form -
+// is what decides whether that is allowed. N is the row's current position,
+// recomputed on every render from the array index; it is never stored on the
+// row and never appears in a DOM id, both of which would go stale across an
+// add or a remove elsewhere in the list.
 export function taskLabel(task: TaskRow, index: number): string {
-  return task.name === '' ? `Task ${index + 1}` : task.name
+  return task.name === '' ? `Task ${index + 1}` : `Task ${index + 1}: ${task.name}`
 }
 
 export function TaskRowFields({ task, index, allTasks, onChange, onRemove, announce }: TaskRowFieldsProps) {
   const label = taskLabel(task, index)
-  const removeName = task.name === '' ? `Remove task ${index + 1}` : `Remove task ${task.name}`
+  const removeName = task.name === '' ? `Remove task ${index + 1}` : `Remove task ${index + 1}: ${task.name}`
   const others = allTasks.filter((t) => t.id !== task.id)
 
   function toggleDep(id: string) {

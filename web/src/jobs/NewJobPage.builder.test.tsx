@@ -143,13 +143,29 @@ test('two rows sharing a key render the last-one-wins note', async () => {
   expect(labels.getByText(/last row wins/i)).toBeInTheDocument()
 })
 
+// A task's accessible name is "Task N: name" once named, or the positional
+// "Task N" fallback while blank; a remove control's follows the same shape
+// with a "Remove task " prefix. A caller here either already knows the exact
+// positional form (a freshly added, still-blank row) or only knows the name
+// (a row this test named earlier) - recomputing N itself would duplicate the
+// production label, so a named lookup matches the ": name" suffix instead.
+function taskGroupName(nameOrPosition: string): RegExp | string {
+  return /^Task \d+$/.test(nameOrPosition) ? nameOrPosition : new RegExp(`: ${nameOrPosition}$`)
+}
+
+function removeTaskName(nameOrPosition: string): RegExp | string {
+  return /^\d+$/.test(nameOrPosition)
+    ? `Remove task ${nameOrPosition}`
+    : new RegExp(`^Remove task \\d+: ${nameOrPosition}$`)
+}
+
 function taskRow(name: string) {
-  return within(screen.getByRole('group', { name }))
+  return within(screen.getByRole('group', { name: taskGroupName(name) }))
 }
 
 test('a task row group is named by its task name and falls back to its position', async () => {
   renderBuilder()
-  expect(screen.getByRole('group', { name: 'hello' })).toBeInTheDocument()
+  expect(screen.getByRole('group', { name: taskGroupName('hello') })).toBeInTheDocument()
   await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
   expect(screen.getByRole('group', { name: 'Task 2' })).toBeInTheDocument()
 })
@@ -174,7 +190,7 @@ test('the remove control is named for its task once the task has a name', async 
   renderBuilder()
   await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
   await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'build')
-  expect(screen.getByRole('button', { name: 'Remove task build' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: removeTaskName('build') })).toBeInTheDocument()
 })
 
 test('timeout and retries carry no range, no step and no number type', () => {
@@ -273,8 +289,8 @@ test('toggling a dependency emits the other task name, and no task is offered to
   await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
   await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'second')
   const deps = within(taskRow('second').getByRole('group', { name: 'Depends on' }))
-  expect(deps.queryByRole('button', { name: 'second' })).not.toBeInTheDocument()
-  await userEvent.click(deps.getByRole('button', { name: 'hello' }))
+  expect(deps.queryByRole('button', { name: taskGroupName('second') })).not.toBeInTheDocument()
+  await userEvent.click(deps.getByRole('button', { name: taskGroupName('hello') }))
   expect(preview()).toHaveProperty('tasks', [
     { name: 'hello', command: ['echo', 'hello world'] },
     { name: 'second', depends_on: ['hello'] },
@@ -295,10 +311,10 @@ test('removing the middle of three rows moves focus to the next remove control a
   await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
   await userEvent.type(taskRow('Task 3').getByRole('textbox', { name: 'Task name' }), 'last')
 
-  await userEvent.click(screen.getByRole('button', { name: 'Remove task middle' }))
+  await userEvent.click(screen.getByRole('button', { name: removeTaskName('middle') }))
 
-  expect(screen.getByRole('button', { name: 'Remove task last' })).toHaveFocus()
-  expect(screen.queryByRole('group', { name: 'middle' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: removeTaskName('last') })).toHaveFocus()
+  expect(screen.queryByRole('group', { name: taskGroupName('middle') })).not.toBeInTheDocument()
   expect(screen.getByRole('status')).toHaveTextContent('middle removed')
   // The surviving rows are still reachable BY THEIR OWN LABEL, scoped to their
   // own group. Index-keyed control ids survive an add and a remove-the-last but
@@ -310,7 +326,7 @@ test('removing the middle of three rows moves focus to the next remove control a
 
 test('removing the last remaining row moves focus to the Add task control', async () => {
   renderBuilder()
-  await userEvent.click(screen.getByRole('button', { name: 'Remove task hello' }))
+  await userEvent.click(screen.getByRole('button', { name: removeTaskName('hello') }))
   expect(screen.getByRole('button', { name: 'Add task' })).toHaveFocus()
   expect(preview()).toHaveProperty('tasks', [])
 })
@@ -322,7 +338,7 @@ test('adding and removing an environment row moves focus and announces', async (
   expect(env.getByRole('textbox', { name: 'Key 1' })).toHaveFocus()
   await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
   await userEvent.type(env.getByRole('textbox', { name: 'Key 1' }), 'A')
-  await userEvent.click(env.getByRole('button', { name: 'Remove environment variable A' }))
+  await userEvent.click(env.getByRole('button', { name: 'Remove environment variable 1: A' }))
   expect(env.getByRole('button', { name: 'Remove environment variable 1' })).toHaveFocus()
 })
 
@@ -424,10 +440,14 @@ test('a dependency cycle is posted, and the server names the tasks', async () =>
   await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
   await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'second')
   await userEvent.click(
-    within(taskRow('second').getByRole('group', { name: 'Depends on' })).getByRole('button', { name: 'hello' }),
+    within(taskRow('second').getByRole('group', { name: 'Depends on' })).getByRole('button', {
+      name: taskGroupName('hello'),
+    }),
   )
   await userEvent.click(
-    within(taskRow('hello').getByRole('group', { name: 'Depends on' })).getByRole('button', { name: 'second' }),
+    within(taskRow('hello').getByRole('group', { name: 'Depends on' })).getByRole('button', {
+      name: taskGroupName('second'),
+    }),
   )
 
   await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
@@ -521,4 +541,38 @@ test('an argument with an internal space reaches the POST body as one element', 
   await userEvent.click(screen.getByRole('button', { name: 'Create job' }))
   await waitFor(() => expect(body).not.toBeNull())
   expect(body).toHaveProperty('tasks', [{ name: 'hello', command: ['echo', 'hello world'] }])
+})
+
+test('two tasks sharing a name get distinct group, remove-control and dependency-toggle names', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 2').getByRole('textbox', { name: 'Task name' }), 'hello')
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.type(taskRow('Task 3').getByRole('textbox', { name: 'Task name' }), 'third')
+
+  const groups = screen.getAllByRole('group', { name: /^Task \d+: hello$/ })
+  expect(groups).toHaveLength(2)
+  expect(new Set(groups.map((g) => g.getAttribute('aria-label'))).size).toBe(2)
+
+  const removeButtons = screen.getAllByRole('button', { name: /^Remove task \d+: hello$/ })
+  expect(removeButtons).toHaveLength(2)
+  expect(new Set(removeButtons.map((b) => b.getAttribute('aria-label'))).size).toBe(2)
+
+  const deps = within(taskRow('third').getByRole('group', { name: 'Depends on' }))
+  const depButtons = deps.getAllByRole('button', { name: /^Task \d+: hello$/ })
+  expect(depButtons).toHaveLength(2)
+  expect(new Set(depButtons.map((b) => b.textContent))).toEqual(new Set(['Task 1: hello', 'Task 2: hello']))
+})
+
+test('two key-value rows sharing a key get distinct remove-control names', async () => {
+  renderBuilder()
+  const env = within(taskRow('hello').getByRole('group', { name: 'Environment variables' }))
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 1' }), 'dup')
+  await userEvent.type(env.getByRole('textbox', { name: 'Key 2' }), 'dup')
+
+  const removeButtons = env.getAllByRole('button', { name: /^Remove environment variable \d+: dup$/ })
+  expect(removeButtons).toHaveLength(2)
+  expect(new Set(removeButtons.map((b) => b.getAttribute('aria-label'))).size).toBe(2)
 })
