@@ -184,8 +184,3 @@ func SetAgentTokenGeneratorForTest(t *testing.T, fn func() (raw string, hash str
 	agentTokenGenerator = fn
 	t.Cleanup(func() { agentTokenGenerator = prev })
 }
-
-// SanitizeAgentErrorMessageForTest exposes the unexported sanitiser so package
-// worker_test can assert the three storability properties directly, rather than
-// inferring them from a write the database dropped.
-func SanitizeAgentErrorMessageForTest(msg string) string { return sanitizeAgentErrorMessage(msg) }
