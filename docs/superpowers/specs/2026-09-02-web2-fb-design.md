@@ -751,7 +751,15 @@ default, and budget the re-homing.
 server expects one fails in the JSON decoder, so `readJSON` answers `invalid request body` before
 `jobspec.Validate` runs and no message can name the field. The builder narrows this class almost to
 nothing by owning the encoding, and the residual is not fixable client-side without adding the
-client-side range and type checks this design refuses. The principled fix is a server-side typed
+client-side range and type checks this design refuses. `numberOf` recognizes an integer-shaped
+string ahead of `JSON.parse`, so a leading zero like `"07"` - not valid JSON, since JSON forbids a
+leading zero before more digits - no longer falls into this class; it parses to the plain integer
+and reaches `jobspec.Validate` like any other value. The residual that remains, by design, is a
+decimal typed into an integer-only field: `"2.5"` for `retries` still emits the JSON number `2.5`,
+and Go's own decode of a fractional number into an `int32` field fails in the JSON decoder exactly
+like any other shape mismatch - the builder does not distinguish "this field wants an integer" from
+"this field wants any JSON number," and teaching it that distinction is the same client-side range
+and type check this design refuses everywhere else. The principled fix is a server-side typed
 decode error; it is out of this lane, and it is raised here rather than filed because it is a
 design question about the API's error contract, not a defect.
 
