@@ -52,6 +52,27 @@ func (s *Server) issueToken(ctx context.Context, q *store.Queries, userID pgtype
 	return rawHex, expires, nil
 }
 
+// authResponse is the body POST /v1/auth/login and both arms of
+// POST /v1/auth/register return.
+//
+// ONE STRUCT RATHER THAN THREE map[string]any LITERALS: three literals that must
+// agree is the drift hazard reusing toUserResponse already exists to avoid, and
+// a typed response makes the key set pinnable by a test. token and expires_at
+// are unchanged on the wire - a time.Time marshals identically as a map value
+// and as a struct field.
+//
+// User is built by toUserResponse and is EXACTLY the GET /v1/users/me body,
+// including archived_at, which is always null here because an archived user is
+// refused at login and a newly created one is never archived. A hand-built
+// literal that dropped it would be the parallel builder this reuse prevents.
+// userResponse cannot carry a password hash: it is a private struct with no such
+// field.
+type authResponse struct {
+	Token     string       `json:"token"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	User      userResponse `json:"user"`
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email       string `json:"email"`
@@ -168,9 +189,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
+	writeJSON(w, http.StatusCreated, authResponse{
+		Token:     token,
+		ExpiresAt: expires,
+		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
 	})
 }
 
@@ -222,9 +244,10 @@ func (s *Server) registerSelfServe(ctx context.Context, w http.ResponseWriter, e
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
+	writeJSON(w, http.StatusCreated, authResponse{
+		Token:     token,
+		ExpiresAt: expires,
+		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
 	})
 }
 
@@ -267,9 +290,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":      token,
-		"expires_at": expires,
+	writeJSON(w, http.StatusCreated, authResponse{
+		Token:     token,
+		ExpiresAt: expires,
+		User:      toUserResponse(user.ID, user.Email, user.Name, user.IsAdmin, user.CreatedAt, user.ArchivedAt),
 	})
 }
 
