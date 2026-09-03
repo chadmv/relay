@@ -262,11 +262,12 @@ test('any portal outside the dialog module needs an entry', () => {
 const Z = 'z' + '-'
 const Z_INDEX = Z + 'index'
 // The leading minus is captured, not excluded by the lookbehind: the
-// lookbehind still checks the character BEFORE the optional sign, so
-// max-md:z-50 keeps matching (preceded by the variant colon) while -z-10 also
-// matches (preceded by nothing, or by whitespace/a quote) and foo-z-10 still
-// does not (preceded by a word character). The sign is folded into the
-// recorded value so it lines up with ENTRY_LINE's own signed capture.
+// lookbehind still checks the character BEFORE the optional sign, so a
+// variant-prefixed positive value keeps matching (preceded by the variant's
+// own colon) while a bare negative value also matches (preceded by nothing,
+// whitespace or a quote), and a value glued onto a preceding word still does
+// not (preceded by a word character). The sign is folded into the recorded
+// value so it lines up with ENTRY_LINE's own signed capture.
 const Z_NUMERIC = new RegExp(`(?<![\\w-])(-?)${Z}(\\d+)(?![\\w-])`, 'g')
 const Z_ARBITRARY = new RegExp(`(?<![\\w-])-?${Z}\\[`)
 const TOKENS_CSS = join(SRC_ROOT, 'theme', 'tokens.css')
@@ -281,11 +282,15 @@ function scannedPairs(): string[] {
 }
 
 test('the stacking-order scan reads a negative value with its sign', () => {
-  // Permanent kill: -z-10 and -z-[100] both survived before this fix round,
-  // because the lookbehind treated the sign's own hyphen as disqualifying.
-  const numeric = [...'-z-10'.matchAll(Z_NUMERIC)]
+  // Permanent kill: a bare negative numeric value and a bare negative
+  // arbitrary value both survived before this fix round, because the
+  // lookbehind treated the sign's own hyphen as disqualifying. Built from
+  // fragments, never spelled as one contiguous class-shaped literal.
+  const negativeNumeric = '-' + Z + '10'
+  const negativeArbitrary = '-' + Z + '[100]'
+  const numeric = [...negativeNumeric.matchAll(Z_NUMERIC)]
   expect(numeric.map((m) => m[1] + m[2])).toEqual(['-10'])
-  expect(Z_ARBITRARY.test('-z-[100]')).toBe(true)
+  expect(Z_ARBITRARY.test(negativeArbitrary)).toBe(true)
 })
 
 function documentedPairs(): string[] {
