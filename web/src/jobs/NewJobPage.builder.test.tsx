@@ -576,3 +576,18 @@ test('two key-value rows sharing a key get distinct remove-control names', async
   expect(removeButtons).toHaveLength(2)
   expect(new Set(removeButtons.map((b) => b.getAttribute('aria-label'))).size).toBe(2)
 })
+
+test('removing a still-unnamed task announces its positional fallback', async () => {
+  renderBuilder()
+  await userEvent.click(screen.getByRole('button', { name: 'Add task' }))
+  await userEvent.click(screen.getByRole('button', { name: removeTaskName('2') }))
+  expect(screen.getByRole('status')).toHaveTextContent('Task 2 removed')
+})
+
+test('removing a blank-key row announces its position', async () => {
+  renderBuilder()
+  const env = within(taskRow('hello').getByRole('group', { name: 'Environment variables' }))
+  await userEvent.click(env.getByRole('button', { name: 'Add environment variable' }))
+  await userEvent.click(env.getByRole('button', { name: 'Remove environment variable 1' }))
+  expect(screen.getByRole('status')).toHaveTextContent('environment variable 1 removed')
+})
