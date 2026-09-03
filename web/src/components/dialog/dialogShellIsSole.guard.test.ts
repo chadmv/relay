@@ -126,6 +126,22 @@ const HAND_ROLLED_SCRIM =
   'modal and the stack that owns the scroll lock, the inert background and the Escape scoping is ' +
   'the other half.'
 
+// Multi-line string concatenations (this repo's own convention for a long
+// class string - see GlassPanel.tsx's BASE) split a class across physical
+// lines, so a per-line-only pass cannot see all three distinctive tokens on
+// any ONE line. This second pass joins a trailing plus-then-newline run back
+// into the line before it and re-checks, so a scrim rebuilt that way is still
+// caught.
+function joinConcatenatedLines(text: string): string {
+  return text.replace(/\s*\+\s*\n\s*/g, ' ')
+}
+
+function hasDistinctiveLine(text: string): boolean {
+  const perLine = (t: string) =>
+    t.split('\n').some((line) => SCRIM_DISTINCTIVE.every((tok) => line.includes(tok)))
+  return perLine(text) || perLine(joinConcatenatedLines(text))
+}
+
 test('the modal scrim is painted by the dialog shell only', () => {
   // C3: the extraction actually produced a value with enough tokens to be
   // discriminating, and both sub-probes match the file that owns it.
@@ -133,9 +149,7 @@ test('the modal scrim is painted by the dialog shell only', () => {
   expect(SCRIM_DISTINCTIVE.every(Boolean), 'no stacking-order token in the scrim value').toBe(true)
   const shellStripped = stripped(join(SRC_ROOT, 'components', 'dialog', 'DialogShell.tsx'))
   expect(shellStripped).toContain(SCRIM_VALUE)
-  expect(
-    shellStripped.split('\n').some((line) => SCRIM_DISTINCTIVE.every((t) => line.includes(t))),
-  ).toBe(true)
+  expect(hasDistinctiveLine(shellStripped)).toBe(true)
 
   const others = SOURCES.filter((f) => rel(f) !== SHELL)
 
@@ -143,17 +157,22 @@ test('the modal scrim is painted by the dialog shell only', () => {
   const exact = others.filter((f) => stripped(f).includes(SCRIM_VALUE)).map(rel)
   expect(exact, HAND_ROLLED_SCRIM).toEqual([])
 
-  // Near miss: nobody else has a line carrying all three distinctive tokens.
-  // This is what catches a scrim rebuilt with the tokens reordered or with one
-  // added, which the exact probe cannot see.
-  const near = others
-    .filter((f) =>
-      stripped(f)
-        .split('\n')
-        .some((line) => SCRIM_DISTINCTIVE.every((t) => line.includes(t))),
-    )
-    .map(rel)
+  // Near miss: nobody else has a line (or a concatenation-joined line)
+  // carrying all three distinctive tokens. This is what catches a scrim
+  // rebuilt with the tokens reordered, with one added, or split across a
+  // multi-line concatenation, none of which the exact probe can see.
+  const near = others.filter((f) => hasDistinctiveLine(stripped(f))).map(rel)
   expect(near, HAND_ROLLED_SCRIM).toEqual([])
+})
+
+test('the near-miss probe also catches a scrim split across a concatenation', () => {
+  // Permanent kill: a scrim rebuilt as a multi-line string concatenation put
+  // the distinctive tokens on separate physical lines, which the per-line-only
+  // pass could not see. Tokens come from the real extraction above, never
+  // spelled.
+  const [first, second, third] = SCRIM_DISTINCTIVE
+  const split = `const x = '${first} filler ' +\n  'more ${second} filler ${third} end'`
+  expect(hasDistinctiveLine(split)).toBe(true)
 })
 
 // A4. Anchored on document. or window. so a listener registered on some other
