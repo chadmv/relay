@@ -123,13 +123,21 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
 
   const schedules = data?.items ?? []
 
+  // ONE boolean feeds both the footer's word and (from Task 10) the strip's total
+  // caption, so the two marks cannot disagree about whether the page is filtered.
+  const filterActive = enabledKey !== 'all' || q !== ''
+
   const counts = countEnabled(schedules)
   const total = data?.total ?? schedules.length
   const { x, y } = computePageRange(pager.startOffset, schedules.length)
+  // The word appears at the exact moment the list's total and the strip's total can
+  // disagree, and it answers the question where it is asked. Both numbers still go
+  // through the same thousands-separated formatting.
+  const matching = filterActive ? ' MATCHING' : ''
   const rangeText =
     schedules.length === 0
-      ? `0 of ${total.toLocaleString()}`
-      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}`
+      ? `0 of ${total.toLocaleString()}${matching}`
+      : `${x.toLocaleString()}-${y.toLocaleString()} of ${total.toLocaleString()}${matching}`
   const actionError = (runNow.error ?? setEnabled.error) as Error | null
 
   return (
@@ -216,6 +224,7 @@ export function SchedulesPage({ debounceMs = 300 }: { debounceMs?: number }) {
 
       <SchedulesTable
         schedules={schedules}
+        emptyMessage={filterActive ? 'No schedules match these filters.' : 'No schedules yet.'}
         pendingId={pendingId}
         onRunNow={onRunNow}
         onToggleEnabled={onToggleEnabled}

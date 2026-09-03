@@ -235,3 +235,42 @@ test('the search box is named, is a searchbox, and is length-capped', async () =
   expect(placeholder).toMatch(/owner/i)
   expect(placeholder).toMatch(/cron/i)
 })
+
+// Two totals will appear on one screen once the strip lands - one fleet-wide, one
+// filtered. Unlabelled they read as a bug the first time a filter is active. This
+// pins the footer half; the strip's caption is pinned in SchedulesPage.stats.test.tsx,
+// and both are driven by one derived boolean so they cannot disagree.
+test('the footer says MATCHING exactly when a filter is active', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(listHandler(seen, () => ({ items: [row()], next_cursor: '', total: 7 })))
+  renderPage()
+  await screen.findByText('nightly-build')
+  expect(await screen.findByText('1-1 of 7')).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Enabled' }))
+  expect(await screen.findByText('1-1 of 7 MATCHING')).toBeInTheDocument()
+})
+
+// The zero-row branch gets the same treatment, and the empty card's sentence
+// changes with it: "No schedules yet." is false while a filter is narrowing the
+// set, and a user who cannot tell "none" from "none matching" files a bug.
+test('an empty filtered table says no schedules match, and an unfiltered one says none exist', async () => {
+  const seen: URLSearchParams[] = []
+  server.use(
+    listHandler(seen, (p) =>
+      p.has('enabled')
+        ? { items: [], next_cursor: '', total: 0 }
+        : { items: [row()], next_cursor: '', total: 1 },
+    ),
+  )
+  renderPage()
+  await screen.findByText('nightly-build')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Disabled' }))
+  expect(await screen.findByText('No schedules match these filters.')).toBeInTheDocument()
+  expect(screen.queryByText('No schedules yet.')).toBeNull()
+  expect(await screen.findByText('0 of 0 MATCHING')).toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'All' }))
+  expect(await screen.findByText('nightly-build')).toBeInTheDocument()
+})
