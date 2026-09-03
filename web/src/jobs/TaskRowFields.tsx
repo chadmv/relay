@@ -1,9 +1,10 @@
+import { memo, useCallback } from 'react'
 import { GlassPanel, PillButton } from '../components/holo'
 import { Field } from '../components/Field'
 import { Input } from '../components/Input'
 import { CommandsRepeater } from './CommandsRepeater'
 import { KeyValueRepeater } from './KeyValueRepeater'
-import type { TaskRow } from './specBuilder'
+import type { KvRow, TaskRow } from './specBuilder'
 
 // One entry per task, precomputed once by the caller from the whole list, so
 // that a row unrelated to an edit gets the SAME array back across renders
@@ -15,13 +16,22 @@ export interface DepOption {
   label: string
 }
 
+// Wrapped here rather than inside their own modules, so each stays a plain
+// function its own tests can call or spy on directly.
+const MemoCommandsRepeater = memo(CommandsRepeater)
+const MemoKeyValueRepeater = memo(KeyValueRepeater)
+
 interface TaskRowFieldsProps {
   task: TaskRow
   index: number
   depOptions: DepOption[]
   // Dispatched WITH the row's id, so one stable function serves every row -
   // see the identical note on SpecBuilderForm's updateTask/removeTaskById.
-  onChange: (id: string, next: TaskRow) => void
+  // The updater form lets a field's own stable callback below build on the
+  // task React is about to commit rather than closing over this render's
+  // `task`, which is what keeps THAT callback stable across every render of
+  // this row, not only across other rows.
+  onChange: (id: string, next: TaskRow | ((prev: TaskRow) => TaskRow)) => void
   onRemove: (id: string) => void
   announce: (message: string) => void
 }
@@ -43,6 +53,23 @@ export function TaskRowFields({ task, index, depOptions, onChange, onRemove, ann
   const label = taskLabel(task, index)
   const removeName = task.name === '' ? `Remove task ${index + 1}` : `Remove task ${index + 1}: ${task.name}`
   const others = depOptions.filter((o) => o.id !== task.id)
+
+  // Stable across every render of THIS row, not only across other rows:
+  // each depends on task.id (fixed for the row's lifetime) and onChange
+  // (stable from SpecBuilderForm), never on the task object itself. That is
+  // the precondition for MemoCommandsRepeater and MemoKeyValueRepeater to
+  // bail out when an edit to a sibling field on this same row leaves theirs
+  // untouched - depending on `task` directly would recreate all three on
+  // every keystroke to any field, commands and env and requires included.
+  const onCommandsChange = useCallback((next: TaskRow) => onChange(task.id, next), [task.id, onChange])
+  const onEnvChange = useCallback(
+    (env: KvRow[]) => onChange(task.id, (prev) => ({ ...prev, env })),
+    [task.id, onChange],
+  )
+  const onRequiresChange = useCallback(
+    (requires: KvRow[]) => onChange(task.id, (prev) => ({ ...prev, requires })),
+    [task.id, onChange],
+  )
 
   function toggleDep(id: string) {
     const next = task.dependsOn.includes(id)
@@ -69,7 +96,7 @@ export function TaskRowFields({ task, index, depOptions, onChange, onRemove, ann
         </PillButton>
       </div>
 
-      <CommandsRepeater task={task} onChange={(next) => onChange(task.id, next)} announce={announce} />
+      <MemoCommandsRepeater task={task} onChange={onCommandsChange} announce={announce} />
 
       <div className="flex flex-wrap gap-2">
         {/* Plain text inputs. No min, no max, no step, no maxlength and no number
@@ -99,21 +126,21 @@ export function TaskRowFields({ task, index, depOptions, onChange, onRemove, ann
         </div>
       </div>
 
-      <KeyValueRepeater
+      <MemoKeyValueRepeater
         idPrefix={`task-${task.id}-env`}
         groupLabel="Environment variables"
         itemNoun="environment variable"
         rows={task.env}
-        onChange={(env) => onChange(task.id, { ...task, env })}
+        onChange={onEnvChange}
         announce={announce}
       />
 
-      <KeyValueRepeater
+      <MemoKeyValueRepeater
         idPrefix={`task-${task.id}-requires`}
         groupLabel="Requires"
         itemNoun="requirement"
         rows={task.requires}
-        onChange={(requires) => onChange(task.id, { ...task, requires })}
+        onChange={onRequiresChange}
         announce={announce}
       />
 

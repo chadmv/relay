@@ -22,6 +22,10 @@ interface SpecBuilderFormProps {
 // depOptions for why a rename is the one edit that still fans out.
 const MemoTaskRowFields = memo(TaskRowFields)
 
+// Wrapped here for the labels row: rows, onChange and announce below are all
+// stable already, so this bails out on any edit that leaves labels untouched.
+const MemoKeyValueRepeater = memo(KeyValueRepeater)
+
 // No Field in this subtree is ever given an `error` prop. The server answers
 // with one top-level string and no field map, so binding a message to a control
 // would mean matching its text - a coupling whose failure mode is silent.
@@ -58,8 +62,11 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
   // batching window both apply instead of the second silently overwriting
   // the first.
   const updateTask = useCallback(
-    (id: string, next: TaskRow) => {
-      onChange((prev) => ({ ...prev, tasks: prev.tasks.map((t) => (t.id === id ? next : t)) }))
+    (id: string, next: TaskRow | ((prev: TaskRow) => TaskRow)) => {
+      onChange((prev) => ({
+        ...prev,
+        tasks: prev.tasks.map((t) => (t.id === id ? (typeof next === 'function' ? next(t) : next) : t)),
+      }))
     },
     [onChange],
   )
@@ -137,7 +144,7 @@ export function SpecBuilderForm({ state, onChange, announce }: SpecBuilderFormPr
         </div>
       </div>
 
-      <KeyValueRepeater
+      <MemoKeyValueRepeater
         idPrefix="job-labels"
         groupLabel="Labels"
         itemNoun="label"

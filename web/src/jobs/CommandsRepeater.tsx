@@ -1,4 +1,3 @@
-import { memo } from 'react'
 import { PillButton } from '../components/holo'
 import { Input } from '../components/Input'
 import { newCommandRow, newTokenRow, type TaskRow } from './specBuilder'
@@ -24,10 +23,9 @@ function isEmptyCommand(cmd: TaskRow['commands'][number]): boolean {
 // agent. A quoting grammar would make this module the owner of a rule relay's Go
 // has nowhere, with no server-side counterpart to pin it.
 //
-// Memoized: a task's own `task` prop is referentially stable across an edit
-// to an UNRELATED task (SpecBuilderForm's array map only replaces the edited
-// row), so this only re-renders for the row that actually changed.
-export const CommandsRepeater = memo(function CommandsRepeater({ task, onChange, announce }: CommandsRepeaterProps) {
+// Wrapped in memo() at each import site, not here, so this stays a plain
+// function a test can call or spy on directly.
+export function CommandsRepeater({ task, onChange, announce }: CommandsRepeaterProps) {
   const focusAfterUpdate = useFocusAfterUpdate()
   const addCommandId = `task-${task.id}-add-command`
 
@@ -145,4 +143,4 @@ export const CommandsRepeater = memo(function CommandsRepeater({ task, onChange,
       </div>
     </div>
   )
-})
+}
