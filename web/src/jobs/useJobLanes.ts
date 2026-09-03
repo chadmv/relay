@@ -1,4 +1,4 @@
-import { useQueries } from '@tanstack/react-query'
+import { keepPreviousData, useQueries } from '@tanstack/react-query'
 import { listJobsByStatus, type Job, type JobStatus } from './api'
 import { LANE_LIMIT, LANE_ORDER } from './lanes'
 
@@ -28,13 +28,23 @@ export interface LaneState {
 // invalidateQueries(['jobs']) must not fan out into five more requests. The guard
 // is useJobLanes.test.tsx's 'invalidating the jobs list does not refetch the
 // lanes'; mutations that move a job between lanes name the key explicitly.
-export function useJobLanes(enabled: boolean, limit = LANE_LIMIT, intervalMs = 3000): LaneState[] {
+export function useJobLanes(
+  enabled: boolean,
+  limit = LANE_LIMIT,
+  intervalMs = 3000,
+  q = '',
+  mine = false,
+): LaneState[] {
   const results = useQueries({
     queries: LANE_ORDER.map((status) => ({
-      queryKey: ['job-lanes', status, limit],
-      queryFn: () => listJobsByStatus(status, limit),
+      queryKey: ['job-lanes', status, limit, q, mine],
+      queryFn: () => listJobsByStatus(status, limit, q, mine),
       enabled,
       refetchInterval: intervalMs,
+      // The key was constant before the filters entered it, which made this
+      // inert. It is not inert now: without it every keystroke that lands blanks
+      // all five lanes to their skeletons before the new rows arrive.
+      placeholderData: keepPreviousData,
     })),
   })
 
