@@ -265,6 +265,13 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		stepTotal := int32(total)
 		r.sendStepMarker(step, stepTotal, argv)
 
+		// argv[0] ONLY. Nothing in relay sanitises command arguments, so a token
+		// passed as one would land here verbatim.
+		// TestRunner_AStepLineNamesTheProgramAndNotItsArguments is the guard. It
+		// bounds THIS surface and closes nothing: sendStepMarker above already
+		// writes the whole vector into task_logs.
+		log.Printf("runner: exec step %d/%d for %s: %s", step, stepTotal, r.taskID, argv[0])
+
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process exit/kill
 		assignProcTree, cleanupProcTree := setupProcTree(cmd)
