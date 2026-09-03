@@ -66,8 +66,6 @@ test(
     expect(renderCalls).not.toHaveBeenCalled()
 
     // A keystroke in one row renders only that row, not the other nineteen.
-    // Before the fix (no memo, a fresh onChange/onRemove closure and a fresh
-    // `allTasks` array handed to every row on every keystroke) this was 20.
     const row20 = screen.getByRole('group', { name: 'Task 20: t20' })
     renderCalls.mockClear()
     await userEvent.type(within(row20).getByRole('textbox', { name: 'Retries' }), '1')
