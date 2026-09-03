@@ -308,3 +308,27 @@ test('a failing row still holds exactly nine cells', () => {
   expect(within(dataRow).getAllByRole('cell')).toHaveLength(9)
   expect(screen.getAllByRole('columnheader')).toHaveLength(9)
 })
+
+// THE DEFAULT IS PART OF THE CONTRACT, not a convenience. Under an active filter
+// "No schedules yet." is a false sentence, but with no filter it is the true one -
+// so the prop must be optional and must default to the existing string, or every
+// caller that has no filters starts lying instead.
+test('the empty state uses the supplied message, and keeps its own when none is given', () => {
+  const { unmount } = renderTable(
+    <SchedulesTable
+      schedules={[]}
+      pendingId={null}
+      onRunNow={() => {}}
+      onToggleEnabled={() => {}}
+      emptyMessage="No schedules match these filters."
+    />,
+  )
+  expect(screen.getByText('No schedules match these filters.')).toBeInTheDocument()
+  expect(screen.queryByText('No schedules yet.')).toBeNull()
+  unmount()
+
+  renderTable(
+    <SchedulesTable schedules={[]} pendingId={null} onRunNow={() => {}} onToggleEnabled={() => {}} />,
+  )
+  expect(screen.getByText('No schedules yet.')).toBeInTheDocument()
+})

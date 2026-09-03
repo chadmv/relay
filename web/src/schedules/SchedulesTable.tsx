@@ -35,18 +35,24 @@ export function SchedulesTable({
   onRunNow,
   onToggleEnabled,
   footer,
+  // Defaulted to the unfiltered sentence so a caller with no filters keeps saying
+  // the true thing without opting in. A caller that IS filtering must pass the
+  // filtered sentence, because "No schedules yet." is false the moment a filter
+  // is narrowing the set.
+  emptyMessage = 'No schedules yet.',
 }: {
   schedules: Schedule[]
   pendingId: string | null
   onRunNow: (id: string) => void
   onToggleEnabled: (id: string, nextEnabled: boolean) => void
   footer?: ReactNode
+  emptyMessage?: string
 }) {
   if (schedules.length === 0) {
     return (
       <div className="flex flex-col gap-4">
         <GlassPanel className="mx-auto mt-10 max-w-md p-6 text-center text-[13px] text-fg-mute">
-          No schedules yet.
+          {emptyMessage}
         </GlassPanel>
         {footer && <div className="px-1">{footer}</div>}
       </div>
