@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"runtime"
+	"strings"
 	"testing"
 
 	relayv1 "relay/internal/proto/relayv1"
@@ -111,4 +112,29 @@ func TestRunner_ASourceTaskWithNoProviderLogsWhyOnTheHost(t *testing.T) {
 	assert.Contains(t, out, "RELAY_WORKSPACE_ROOT", "the line must name what the operator has to fix")
 	assert.Contains(t, out, "noprov-task")
 	assert.NotContains(t, out, "exec step", "the command must not run when the provider is nil")
+}
+
+// Without an exit line an operator watching a wedged agent cannot tell "still
+// running step 2" from "step 2 finished and nothing happened next". The two
+// steps differ in outcome so a line emitted on only one path fails the count.
+func TestRunner_EveryStepLogsItsStartAndItsExit(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+
+	r, runCtx := newRunner("steps-task", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId: "steps-task",
+		Commands: []*relayv1.CommandLine{
+			{Argv: echoArgv("alpha")},
+			{Argv: failArgv()},
+		},
+	})
+
+	out := logged()
+	assert.Contains(t, out, "exec step 1/2")
+	assert.Contains(t, out, "exec step 2/2")
+	assert.Contains(t, out, "step 1/2 for steps-task exited (exit=0")
+	assert.Contains(t, out, "step 2/2 for steps-task exited (exit=7")
+	assert.Equal(t, 2, strings.Count(out, "exited ("),
+		"one exit line per step that ran, no more: %s", out)
 }

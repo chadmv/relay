@@ -352,6 +352,15 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			}
 		}
 
+		// After lastExitCode is computed and before either way out of the step, so
+		// every path logs exactly once.
+		// TestRunner_EveryStepLogsItsStartAndItsExit.
+		exit := "unknown"
+		if lastExitCode != nil {
+			exit = strconv.Itoa(int(*lastExitCode))
+		}
+		log.Printf("runner: step %d/%d for %s exited (exit=%s, err=%v)", step, stepTotal, r.taskID, exit, waitErr)
+
 		if waitErr == nil {
 			continue
 		}
