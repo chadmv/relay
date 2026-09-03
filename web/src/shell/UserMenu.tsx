@@ -65,9 +65,10 @@ interface UserMenuProps {
 //
 // WHY THE PANEL IS NOT PORTALLED and does not register with dialogStack. Two
 // reasons: the disclosure pattern needs the panel to FOLLOW the toggle in DOM order
-// so Tab reaches it, and the dropdown's paint order is already solved by
-// `relative z-10` on the header (the comment above HoloShell.tsx's header element,
-// "275 hit-test points"), which moving the panel to <body> would invalidate. Nothing here is modal:
+// so Tab reaches it, and the dropdown's paint order is already solved by the
+// header's own positioned stacking context (the comment above HoloShell.tsx's
+// header element has the reasoning), which moving the panel to <body> would
+// invalidate. Nothing here is modal:
 // no scrim, no scroll lock, no inert, no aria-hidden on the background, and no Tab
 // trap - for a disclosure, Tab out is a dismiss route.
 export function UserMenu({ email, onLogout }: UserMenuProps) {

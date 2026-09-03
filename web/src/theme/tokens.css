@@ -49,13 +49,12 @@
 
    1. A backdrop filter on an ancestor establishes a stacking context, so a
       z-index declared inside it cannot compete with anything outside it. A glass
-      surface carries one; so does the header. The measurement behind this sits
-      in shell/HoloShell.tsx, in the comment above the header element - search for
-      "275 hit-test points".
+      surface carries one; so does the header. The comment above the header
+      element in shell/HoloShell.tsx has the reasoning.
    2. The main element is positioned and carries a zero z-index on purpose, so
       page-level stacking is contained and cannot climb over the header. A new
       page-level overlay stays inside that context rather than raising itself past
-      it. Same measurement.
+      it. Same comment.
    3. A value is comparable only to another value in the same stacking context.
       Repeated values on this scale do not compete unless the context column says
       they share one, and that is what a reader cannot infer from the numbers.
