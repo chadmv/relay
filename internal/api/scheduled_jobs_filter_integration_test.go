@@ -29,12 +29,13 @@ func seedFilterSchedule(t *testing.T, pool *pgxpool.Pool, name, ownerID, cronExp
 // unparenthesised `NOT cursor_set OR keyset AND filter` behaves correctly, so a
 // test that walks to page two passes against the bug.
 //
-// The two rows differ on EVERY filter axis and each filter case names which row
-// it expects, so no case can be satisfied by an accident on a different axis:
-// dropping the cron arm from the q disjunction, or folding enabled=false into
-// enabled=true, each reddens exactly one case on the arm that carries the
-// mutation. Admin and owner scope are separate subtests because they run
-// separate statements.
+// EACH SCOPE MUST HOLD MORE ROWS THAN ANY CASE SELECTS, or a count assertion is
+// satisfied by the scope rather than by the filter. keepOwner therefore owns two
+// schedules, one of which matches no needle and is paused; otherOwner's row
+// carries the only other owner email, which is what makes the q-on-email axis
+// separable from q-on-name. Every case names the id SET it expects and asserts
+// Total against its size, because enabled=false selects more than one row
+// fleet-wide.
 func TestListScheduledJobs_FilterArms_FirstPage(t *testing.T) {
 	srv, q, pool := newTestServerWithPool(t)
 	admin := createTestUser(t, q, "Admin", "sjfilter-admin@test.com", true)
@@ -44,6 +45,9 @@ func TestListScheduledJobs_FilterArms_FirstPage(t *testing.T) {
 	otherOwner := createTestUser(t, q, "Other", "zebra@sjfilter.test", false)
 
 	keepID := seedFilterSchedule(t, pool, "keeper-nightly", uuidString(keepOwner.ID), "17 3 * * *", true)
+	// Same owner as keepID, so the owner scope holds two rows; matches no needle
+	// on name or cron, and is paused.
+	fillerID := seedFilterSchedule(t, pool, "quiet-filler", uuidString(keepOwner.ID), "@monthly", false)
 	otherID := seedFilterSchedule(t, pool, "other-weekly", uuidString(otherOwner.ID), "@daily", false)
 
 	scopes := []struct {
@@ -54,35 +58,40 @@ func TestListScheduledJobs_FilterArms_FirstPage(t *testing.T) {
 		{"owner", keepToken},
 	}
 	filters := []struct {
-		name   string
-		query  string
-		wantID string
+		name      string
+		query     string
+		wantAdmin []string
+		wantOwner []string
 	}{
-		{"enabled_true", "enabled=true", keepID},
-		{"enabled_false", "enabled=false", otherID},
-		{"q_name", "q=keeper", keepID},
-		{"q_email", "q=aardvark", keepID},
-		{"q_cron", "q=17+3", keepID},
-		{"both", "enabled=true&q=keeper", keepID},
+		{"enabled_true", "enabled=true", []string{keepID}, []string{keepID}},
+		{"enabled_false", "enabled=false", []string{fillerID, otherID}, []string{fillerID}},
+		{"q_name", "q=keeper", []string{keepID}, []string{keepID}},
+		{"q_email", "q=aardvark", []string{keepID, fillerID}, []string{keepID, fillerID}},
+		{"q_cron", "q=17+3", []string{keepID}, []string{keepID}},
+		{"both", "enabled=true&q=keeper", []string{keepID}, []string{keepID}},
 	}
 
 	for _, sc := range scopes {
 		for _, arm := range sortArms(api.ScheduledJobsSortSpec) {
 			for _, f := range filters {
 				t.Run(sc.name+"/"+arm+"/"+f.name, func(t *testing.T) {
-					// The owner arm only ever holds the keeper row, so a case
-					// expecting the other owner's row has nothing to assert there.
-					if sc.name == "owner" && f.wantID != keepID {
-						t.Skip("the other row belongs to a different owner and is out of this scope")
+					want := f.wantAdmin
+					if sc.name == "owner" {
+						want = f.wantOwner
 					}
 					code, p := getScheduledJobsPage(t, srv, sc.token, arm+"&"+f.query)
 					require.Equal(t, http.StatusOK, code)
-					require.Len(t, p.Items, 1,
-						"%s %s on the FIRST PAGE must return exactly the matching row; "+
-							"two rows means the filter was dropped, which is the unparenthesised "+
-							"cursor disjunction", arm, f.query)
-					assert.Equal(t, f.wantID, p.Items[0]["id"])
-					assert.Equal(t, int64(1), p.Total,
+
+					got := make([]string, 0, len(p.Items))
+					for _, it := range p.Items {
+						id, _ := it["id"].(string)
+						got = append(got, id)
+					}
+					assert.ElementsMatch(t, want, got,
+						"%s %s on the FIRST PAGE must return exactly the matching rows; a row too "+
+							"many means the filter was dropped, which is the unparenthesised cursor "+
+							"disjunction", arm, f.query)
+					assert.EqualValues(t, len(want), p.Total,
 						"total must count the filtered set, not the table")
 				})
 			}
