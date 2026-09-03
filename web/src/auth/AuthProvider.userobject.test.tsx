@@ -130,6 +130,100 @@ test('a malformed user object falls back', async () => {
   expect(meCalls).toBe(1)
 })
 
+// Kills: dropping the is_admin type check from the guard. Seven consumers gate
+// privileged UI on user.is_admin truthiness (AdminRoute, HoloShell's nav filter,
+// WorkerDetailPage, WorkerLabels, JobDetailPage's canManage, and the two profile
+// displays); an absent is_admin key reads as undefined, which is falsy and
+// silently demotes an admin for the session rather than erroring.
+test('a user missing is_admin falls back to /users/me', async () => {
+  withMe()
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({
+        token: 'tok_5',
+        expires_at: '',
+        user: {
+          id: 'u-partial',
+          email: 'partial@studio.dev',
+          name: 'P',
+          created_at: '2026-01-02T03:04:05Z',
+        },
+      }),
+    ),
+  )
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(screen.getByTestId('email')).toHaveTextContent('endpoint@studio.dev'))
+  expect(meCalls).toBe(1)
+})
+
+// Kills: dropping the email type check from the guard. Symmetric with the
+// is_admin case above - email is a rendered identity field on the same footing.
+test('a user missing email falls back to /users/me', async () => {
+  withMe()
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({
+        token: 'tok_6',
+        expires_at: '',
+        user: {
+          id: 'u-partial',
+          name: 'P',
+          is_admin: false,
+          created_at: '2026-01-02T03:04:05Z',
+        },
+      }),
+    ),
+  )
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(screen.getByTestId('email')).toHaveTextContent('endpoint@studio.dev'))
+  expect(meCalls).toBe(1)
+})
+
+// Mutation-proven gap: dropping the two non-empty-string checks in usableUser
+// (id !== '' and created_at !== '') left all 31 auth tests green at review time,
+// because no fixture used an empty string - every malformed case used an absent
+// key instead. An empty string passes typeof === 'string' but must still fall
+// back, since a real row's id and created_at are never empty.
+test('a user with an empty id falls back to /users/me', async () => {
+  withMe()
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({
+        token: 'tok_7',
+        expires_at: '',
+        user: { id: '', email: 'partial@studio.dev', name: 'P', is_admin: false, created_at: '2026-01-02T03:04:05Z' },
+      }),
+    ),
+  )
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(screen.getByTestId('email')).toHaveTextContent('endpoint@studio.dev'))
+  expect(meCalls).toBe(1)
+})
+
+test('a user with an empty created_at falls back to /users/me', async () => {
+  withMe()
+  server.use(
+    http.post('/v1/auth/login', () =>
+      HttpResponse.json({
+        token: 'tok_8',
+        expires_at: '',
+        user: { id: 'u-partial', email: 'partial@studio.dev', name: 'P', is_admin: false, created_at: '' },
+      }),
+    ),
+  )
+  renderProbe()
+  await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('anonymous'))
+  await userEvent.click(screen.getByText('login'))
+  await waitFor(() => expect(screen.getByTestId('email')).toHaveTextContent('endpoint@studio.dev'))
+  expect(meCalls).toBe(1)
+})
+
 // Kills: applying the change to login only. The client cannot distinguish the two
 // server register arms - both are one POST /v1/auth/register from this method -
 // so this is the whole of what the client can get wrong about register.
