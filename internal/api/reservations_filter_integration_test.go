@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"relay/internal/api"
@@ -140,4 +141,56 @@ func TestListReservations_FilterErrorsAreReachedThroughTheHandler(t *testing.T) 
 			assert.Equal(t, tc.want, body.Error)
 		})
 	}
+}
+
+// Every reservation endpoint is admin-only, including the filtered read the
+// worker-detail panel is built on. A non-admin must be refused BEFORE the
+// filter is parsed, so ?worker_id= cannot become a probe for which workers a
+// reservation names.
+func TestReservations_NonAdminIsForbidden(t *testing.T) {
+	srv, q, pool := newTestServerWithPool(t)
+	user := createTestUser(t, q, "Plain", "resadmin-user@test.com", false)
+	userToken := createTestToken(t, q, user.ID)
+	resID := seedReservationForWorkers(t, pool, "existing",
+		[]string{"11111111-2222-4333-8444-555555555555"})
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"list", "GET", "/v1/reservations", ""},
+		{"list filtered", "GET", "/v1/reservations?worker_id=11111111-2222-4333-8444-555555555555", ""},
+		{"create", "POST", "/v1/reservations", `{"name":"nope","selector":{}}`},
+		{"delete", "DELETE", "/v1/reservations/" + resID, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req *http.Request
+			if tc.body == "" {
+				req = httptest.NewRequest(tc.method, tc.path, nil)
+			} else {
+				req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", "Bearer "+userToken)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			var body struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+			assert.Equal(t, "admin access required", body.Error)
+		})
+	}
+
+	// Control: the reservation the delete case named still exists, so the
+	// refusals above were refusals and not silent successes.
+	var count int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT COUNT(*) FROM reservations WHERE id = $1::uuid`, resID).Scan(&count))
+	assert.Equal(t, 1, count, "a forbidden DELETE must not have deleted the row")
 }
