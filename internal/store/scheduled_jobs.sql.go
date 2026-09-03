@@ -1962,9 +1962,8 @@ type ScheduledJobCountsRow struct {
 }
 
 // The schedules summary strip's census. owner_id is sqlc.narg: NULL means
-// fleet-wide (admin), a value scopes to exactly the predicate
-// ListScheduledJobsByOwnerPage uses, so the strip can never disagree with the
-// page beneath it.
+// fleet-wide, a value scopes to that owner. The handler is what decides which,
+// and a caller who is not an admin must never reach the NULL.
 //
 // paused is exactly NOT enabled; there is no third state and no paused column.
 // failing is CURRENT STATE and is deliberately NOT windowed: last_error records

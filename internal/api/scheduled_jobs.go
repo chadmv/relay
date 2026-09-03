@@ -419,8 +419,12 @@ type scheduledJobStatsResponse struct {
 }
 
 // handleScheduledJobStats serves the fleet-wide census for an admin and the
-// owner-scoped one for everyone else, by exactly the predicate the owner list
-// arm uses, so the strip cannot disagree with the page beneath it.
+// owner-scoped census for a non-admin.
+//
+// An absent identity is refused before the scope is built, because a zero
+// pgtype.UUID is the same SQL NULL that means "fleet-wide" to the census
+// statements: without this a non-admin whose id failed to resolve would be
+// answered with the whole farm's numbers.
 //
 // AUTH-ONLY, not admin-only, and deliberately unlike /v1/server/counters: those
 // are process-lifetime in-memory numbers describing adversary activity, while
@@ -438,8 +442,14 @@ func (s *Server) handleScheduledJobStats(w http.ResponseWriter, r *http.Request)
 	}
 
 	// SQL NULL for an admin: no owner predicate, so the census is fleet-wide.
+	// The guard above it is what keeps that sentinel out of reach of a caller
+	// who is not an admin.
 	var scope pgtype.UUID
 	if !u.IsAdmin {
+		if !u.ID.Valid {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		scope = u.ID
 	}
 

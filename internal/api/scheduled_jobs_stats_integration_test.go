@@ -135,18 +135,27 @@ func TestScheduledJobStats_OwnerScoped(t *testing.T) {
 	aToken := createTestToken(t, q, a.ID)
 	bToken := createTestToken(t, q, b.ID)
 
-	seedFilterSchedule(t, pool, "a-1", uuidString(a.ID), "@daily", true)
+	a1 := seedFilterSchedule(t, pool, "a-1", uuidString(a.ID), "@daily", true)
 	seedFilterSchedule(t, pool, "a-2", uuidString(a.ID), "@daily", false)
-	seedFilterSchedule(t, pool, "b-1", uuidString(b.ID), "@daily", true)
+	b1 := seedFilterSchedule(t, pool, "b-1", uuidString(b.ID), "@daily", true)
+
+	// Unequal failure counts, so an owner predicate dropped from
+	// CountFailedScheduledRuns24h shows up as each owner seeing the fleet total
+	// rather than as a number that happens to match.
+	inWindow := time.Now().Add(-2 * time.Hour)
+	seedSpawnedJob(t, pool, uuidString(a.ID), a1, "failed", inWindow)
+	seedSpawnedJob(t, pool, uuidString(b.ID), b1, "failed", inWindow)
+	seedSpawnedJob(t, pool, uuidString(b.ID), b1, "failed", inWindow)
 
 	for _, tc := range []struct {
-		name      string
-		token     string
-		wantTotal float64
+		name       string
+		token      string
+		wantTotal  float64
+		wantFailed float64
 	}{
-		{"a", aToken, 2},
-		{"b", bToken, 1},
-		{"admin", adminToken, 3},
+		{"a", aToken, 2, 1},
+		{"b", bToken, 1, 2},
+		{"admin", adminToken, 3, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, m := getScheduledJobStats(t, srv, tc.token)
@@ -154,6 +163,9 @@ func TestScheduledJobStats_OwnerScoped(t *testing.T) {
 			assert.Equal(t, tc.wantTotal, m["total"])
 			assert.Equal(t, m["total"], m["enabled"].(float64)+m["paused"].(float64),
 				"total must equal enabled + paused exactly")
+			assert.Equal(t, tc.wantFailed, m["failed_runs_24h"],
+				"failed_runs_24h is scoped through scheduled_jobs.owner_id, so each owner "+
+					"sees only their own schedules' failures and an admin sees every one")
 
 			listCode, p := getScheduledJobsPage(t, srv, tc.token, "limit=50")
 			require.Equal(t, http.StatusOK, listCode)

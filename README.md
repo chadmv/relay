@@ -1932,8 +1932,8 @@ after an interactive run `last_job_status` still describes the previous schedule
 ```
 
 **GET `/v1/scheduled-jobs/stats`** returns a census of the caller's schedules, fleet-wide
-for admins and scoped to `owner_id` for everyone else, by exactly the predicate the list
-endpoint uses. It requires authentication but **not** admin.
+for admins and scoped to `owner_id` for everyone else. It requires authentication but
+**not** admin.
 
 ```json
 {
