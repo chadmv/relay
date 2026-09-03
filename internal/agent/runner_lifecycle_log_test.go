@@ -138,3 +138,101 @@ func TestRunner_EveryStepLogsItsStartAndItsExit(t *testing.T) {
 	assert.Equal(t, 2, strings.Count(out, "exited ("),
 		"one exit line per step that ran, no more: %s", out)
 }
+
+// forgedProgram carries a real newline, written as a raw literal rather than an
+// escape so no shell or editor layer can quietly turn it into something else.
+const forgedProgram = `nope
+runner: step 9/9 for victim-task exited (exit=0, err=<nil>)`
+
+// forgedTail is the second line of forgedProgram with its leading newline.
+const forgedTail = `
+runner: step 9/9 for victim-task`
+
+// argv is validated nowhere: normalizeTaskCommands checks only that it is
+// non-empty, so argv[0] may contain a newline. runner.go designates the host log
+// the record that survives when the send does not, which is what makes a forged
+// entry in it worth something to a submitter.
+// TestRunner_AStepLineNamesTheProgramAndNotItsArguments cannot see this: its
+// token lives in argv[1:].
+func TestRunner_AStepLineQuotesTheProgramSoItCannotForgeALogLine(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+
+	r, runCtx := newRunner("forge-task", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "forge-task",
+		Commands: singleCmd([]string{forgedProgram}),
+	})
+
+	out := logged()
+	require.Contains(t, out, "exec step 1/1", "the step line must still be emitted")
+	assert.NotContains(t, out, forgedTail,
+		"a newline in argv[0] must not be able to start a new host-log line")
+}
+
+// The volume half of the pair. An unbounded argv[0] writes an unbounded line per
+// step, and the same string reaches the log a second time inside the exec error.
+func TestRunner_AStepLineBoundsAnOverlongProgramName(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+
+	r, runCtx := newRunner("huge-task", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "huge-task",
+		Commands: singleCmd([]string{strings.Repeat("A", 100_000)}),
+	})
+
+	out := logged()
+	require.Contains(t, out, "exec step 1/1", "the step line must still be emitted")
+	assert.Less(t, len(out), 10_000,
+		"one over-long argv[0] must not write an unbounded host-log line")
+}
+
+// A step whose binary is missing breaks out of the loop BEFORE the exit line, so
+// without a line of its own it announces its start and then falls silent - the
+// exact ambiguity the exit line exists to remove. sendFinalStatus carries no
+// ErrorMessage on this path either, so the coordinator has no cause to store.
+func TestRunner_AStepThatCannotStartSaysSoInsteadOfGoingSilent(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 64)
+
+	r, runCtx := newRunner("nostart-task", 0, sendCh, context.Background(), 0)
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "nostart-task",
+		Commands: singleCmd([]string{"relay-no-such-binary-xyz"}),
+	})
+
+	out := logged()
+	require.Contains(t, out, "exec step 1/1", "the step still announces itself")
+	assert.Contains(t, out, "failed to start",
+		"a step that never ran must say so rather than leaving the log ambiguous")
+	assert.Contains(t, out, "executable file not found", "and it must carry the cause")
+}
+
+// The prepare cause is caller-controlled by the same route as argv[0] and by a
+// longer one: validateSourceSpec constrains a stream to a `//` prefix and no
+// character set, so a newline in a depot path reaches p4's args, the error the
+// provider returns, and this line. It is unbounded for the same reason - the
+// error carries p4 output.
+func TestRunner_APrepareFailureQuotesAndBoundsItsCause(t *testing.T) {
+	logged := captureAgentLog(t)
+	sendCh := make(chan *relayv1.AgentMessage, 16)
+
+	r, runCtx := newRunner("prep-forge", 0, sendCh, context.Background(), 0)
+	r.SetProviderForTest(&fakeProvider{
+		prepareErr: errors.New(forgedProgram + strings.Repeat("B", 100_000)),
+	})
+	r.Run(runCtx, &relayv1.DispatchTask{
+		TaskId:   "prep-forge",
+		Commands: singleCmd(echoTaskCmd()),
+		Source: &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//s/x"},
+		}},
+	})
+
+	out := logged()
+	require.Contains(t, out, "prepare failed for prep-forge", "the line must still be emitted")
+	assert.NotContains(t, out, forgedTail,
+		"a newline in the prepare cause must not start a new host-log line")
+	assert.Less(t, len(out), 10_000, "and the cause must be bounded")
+}
