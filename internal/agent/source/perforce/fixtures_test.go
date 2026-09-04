@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // tHelper is the subset of testing.TB that fakeRunner needs to report fixture
@@ -27,6 +29,14 @@ type fakeRunner struct {
 	block     map[string]bool
 	streamOut map[string]string
 	streamErr map[string]error
+
+	streamBlock map[string]<-chan struct{}
+
+	// streamDone is incremented as Stream's LAST statement on every return path,
+	// so a test may read it from another goroutine. fakeRunner.calls is NOT
+	// synchronised: no test may read it or call argHistory() while Prepare is
+	// still running.
+	streamDone atomic.Int32
 }
 
 type runCall struct {
@@ -43,6 +53,8 @@ func newFakeP4Fixture(t tHelper) *fakeRunner {
 		block:     map[string]bool{},
 		streamOut: map[string]string{},
 		streamErr: map[string]error{},
+
+		streamBlock: map[string]<-chan struct{}{},
 	}
 }
 
@@ -69,6 +81,16 @@ func (f *fakeRunner) setStream(key, out string) {
 // onLine, which is how a test drives a p4 sync FAILURE.
 func (f *fakeRunner) setStreamErr(key string, err error) {
 	f.streamErr[key] = err
+}
+
+// setStreamBlock makes Stream park on the given args key until release is
+// closed or ctx is cancelled, modelling a long-running p4 sync. The cancel path
+// sleeps before it increments streamDone, modelling a p4 child that takes a
+// moment to die: a guard asserting Prepare waited for the sync goroutine is
+// decorative unless both the after-the-block increment and that delay hold.
+// TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished.
+func (f *fakeRunner) setStreamBlock(key string, release <-chan struct{}) {
+	f.streamBlock[key] = release
 }
 
 func (f *fakeRunner) argHistory() [][]string {
@@ -104,12 +126,25 @@ func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 
 func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
 	key := strings.Join(args, " ")
+	if rel, ok := f.streamBlock[key]; ok {
+		select {
+		case <-rel:
+		case <-ctx.Done():
+			time.Sleep(50 * time.Millisecond)
+			f.streamDone.Add(1)
+			return ctx.Err()
+		}
+		f.streamDone.Add(1)
+		return nil
+	}
 	if e, ok := f.streamErr[key]; ok && e != nil {
+		f.streamDone.Add(1)
 		return newP4CommandError(args, e, "")
 	}
 	if _, ok := f.streamOut[key]; !ok {
 		f.t.Helper()
 		f.t.Errorf("fakeRunner.Stream: no fixture for args %q (cwd=%q)", key, cwd)
+		f.streamDone.Add(1)
 		return fmt.Errorf("fakeRunner: no fixture for %q", key)
 	}
 	for _, line := range strings.Split(f.streamOut[key], "\n") {
@@ -118,6 +153,7 @@ func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 		}
 	}
 	f.calls = append(f.calls, runCall{cwd: cwd, args: append([]string{}, args...)})
+	f.streamDone.Add(1)
 	return nil
 }
 
