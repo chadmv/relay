@@ -99,8 +99,10 @@ func TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs(t *testing.T) {
 	require.NotNil(t, syncCall(fr), "a workspace whose directory was missing must be re-synced, not trusted")
 }
 
-// The control for the test above: the same warm entry with its directory intact
-// must NOT re-sync. Without this, forcing a sync unconditionally would pass.
+// The control for the two tests around it: the same warm entry with a populated
+// directory must NOT re-sync. Without this, forcing a sync unconditionally would
+// pass. The synced file is what makes the directory intact rather than merely
+// present.
 func TestProvider_AWarmEntryWithItsDirectoryIntactDoesNotResync(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
@@ -121,6 +123,7 @@ func TestProvider_AWarmEntryWithItsDirectoryIntactDoesNotResync(t *testing.T) {
 	})
 	require.NoError(t, reg.Save())
 	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, shortID, "synced.txt"), []byte("x"), 0o644))
 
 	h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
 	require.NoError(t, err)
@@ -266,4 +269,38 @@ func TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace(t *testing.T) {
 		require.True(t, hasArgs(fr, "client", "-o", "-S", "//s/x", client),
 			"the spec is still re-read and re-written, which is what repairs a half-built workspace")
 	})
+}
+
+// os.RemoveAll deletes a directory's children before the directory itself, so a
+// failure on the final rmdir leaves the row intact and the directory EMPTY.
+// sweeper.evict takes that branch: it marks DirtyDelete and returns before
+// reg.Remove. The stat-based check cannot see it - the directory exists - so the
+// baseline would still match and the task would run in an empty tree.
+func TestProvider_AWarmEntryWhoseDirectoryIsEmptyStillSyncs(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	client := expectedClientName("h", "//s/x")
+	warmFixtures(fr, client)
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+	spec := warmStreamSpec()
+	shortID := allocateShortID("//s/x", &Registry{})
+	reg.Upsert(WorkspaceEntry{
+		ShortID:      shortID,
+		SourceKey:    "//s/x",
+		ClientName:   client,
+		BaselineHash: BaselineHash(spec.GetPerforce(), nil),
+		LastUsedAt:   time.Now(),
+		DirtyDelete:  true,
+	})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+
+	h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+	require.NotNil(t, syncCall(fr), "an emptied workspace must be re-synced, not trusted")
 }

@@ -13,25 +13,73 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 )
 
-// assertCwdContract pins the cwd half of the client-selection contract introduced
-// by the p4client-explicit-flag fix: every workspace-scoped invocation (argv
-// begins with `-c <client>`) must run from wsRoot, while every global invocation
-// - `client -o`, `client -i` and `client -d`, which are the ones that address no
-// client - must run with an empty cwd. The `-c <client>` argv assertions already
-// pin the client half; this locks the cwd half, previously only covered
-// implicitly by the integration test.
+// assertCwdContract pins the cwd half of the client-selection contract: a p4
+// invocation runs from wsRoot only while Prepare holds the workspace handle for
+// it. The client-selection half is the `-c <client>` argv, pinned separately.
+//
+// Head resolution is the exception because it runs BEFORE ws.Acquire, when the
+// workspace has no holders and a sweep can be deleting it; it runs with an empty
+// cwd like the client -o/-i/-d spec operations.
+// TestProvider_HeadResolutionRunsWithNoWorkspaceCwd is its own guard.
 func assertCwdContract(t *testing.T, fr *fakeRunner, wsRoot string) {
 	t.Helper()
 	sawWorkspaceCall := false
 	for _, c := range fr.calls {
-		if len(c.args) > 0 && c.args[0] == "-c" {
+		if len(c.args) > 0 && c.args[0] == "-c" && !isHeadResolution(c.args) {
 			sawWorkspaceCall = true
-			require.Equalf(t, wsRoot, c.cwd, "workspace-scoped call %q must run from wsRoot", c.args)
+			require.Equalf(t, wsRoot, c.cwd, "call %q runs under the handle and must run from wsRoot", c.args)
 		} else {
-			require.Equalf(t, "", c.cwd, "global call %q must run with empty cwd", c.args)
+			require.Equalf(t, "", c.cwd, "call %q holds no workspace handle and must run with empty cwd", c.args)
 		}
 	}
-	require.True(t, sawWorkspaceCall, "expected at least one workspace-scoped (-c) invocation")
+	require.True(t, sawWorkspaceCall, "expected at least one invocation made under the workspace handle")
+}
+
+// isHeadResolution matches the `-c <client> changes -m1 <path>#head` argv.
+// PendingChangesByDescPrefix also issues a `changes` subcommand, from wsRoot
+// under the handle, so the -m1 is what discriminates.
+func isHeadResolution(args []string) bool {
+	return len(args) >= 4 && args[0] == "-c" && args[2] == "changes" && args[3] == "-m1"
+}
+
+// Head resolution runs before ws.Acquire, so the workspace has no holders,
+// LockedShortIDs does not report it, and a sweep can select it and call
+// os.RemoveAll on it. A live subprocess cwd inside that directory makes the
+// RemoveAll fail on Windows, which sets the one-way DirtyDelete and returns
+// before reg.Remove - leaving a row whose baseline no longer describes what is
+// on disk. The cwd also decides which .p4config p4 picks up, and a previous
+// task's own build script can have written one into the workspace root.
+//
+// The -c <client> flag is what selects the client; the cwd is not required.
+func TestProvider_HeadResolutionRunsWithNoWorkspaceCwd(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	client := expectedClientName("h", "//s/x")
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -m1 //"+client+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -q --parallel=4 //"+client+"/...@12345", "1 of 1 files\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+		Perforce: &relayv1.PerforceSource{
+			Stream: "//s/x",
+			Sync:   []*relayv1.SyncEntry{{Path: "//s/x/...", Rev: "#head"}},
+		},
+	}}
+	h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.NoError(t, err)
+	defer h.Finalize(context.Background())
+
+	var found bool
+	for _, c := range fr.calls {
+		if len(c.args) >= 4 && c.args[0] == "-c" && c.args[2] == "changes" && c.args[3] == "-m1" {
+			found = true
+			require.Equal(t, "", c.cwd, "head resolution must not hold a cwd on an unheld workspace")
+		}
+	}
+	require.True(t, found, "expected a head-resolution invocation")
 }
 
 func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {

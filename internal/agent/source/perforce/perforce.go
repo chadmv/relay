@@ -171,13 +171,14 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// ws.Acquire holds no workspace handle and must not try to release one.
 	// TestProvider_AResolveHeadFailureOnFirstUseLeavesAReclaimableWorkspace and
 	// TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory.
-	// A registry row can outlive its directory - a crash between sweeper.evict's
-	// os.RemoveAll and its reg.Remove, or an operator reclaiming disk by hand -
-	// and the MkdirAll below silently recreates it EMPTY. Read the state before
-	// destroying the evidence.
-	// TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs.
-	_, statErr := os.Stat(wsRoot)
-	wsRootMissing := errors.Is(statErr, os.ErrNotExist)
+	// A registry row can outlive its content - a crash between sweeper.evict's
+	// os.RemoveAll and its reg.Remove, an os.RemoveAll that emptied the directory
+	// and then failed on the rmdir itself, or an operator reclaiming disk by hand
+	// - and the MkdirAll below silently recreates a missing directory EMPTY. Read
+	// the state before destroying the evidence.
+	// TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs and
+	// TestProvider_AWarmEntryWhoseDirectoryIsEmptyStillSyncs.
+	wsRootEmpty := isMissingOrEmptyDir(wsRoot)
 	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 		return nil, err
 	}
@@ -220,7 +221,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 			// DirtyDelete means the p4 client is already gone and sweeper.evict
 			// must skip client -d. The create above put it back.
 			e.DirtyDelete = false
-			if wsRootMissing {
+			if wsRootEmpty {
 				// Clearing the baseline rather than setting a local flag: it is
 				// persisted, so a crash mid-sync still re-syncs, and a second
 				// task admitted in ModeShared reads the same "" and syncs too
@@ -248,7 +249,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		}
 		rev := e.Rev
 		if rev == "#head" {
-			cl, err := p.cfg.Client.ResolveHead(ctx, wsRoot, clientName, cp)
+			cl, err := p.cfg.Client.ResolveHead(ctx, clientName, cp)
 			if err != nil {
 				// The wrap names the DEPOT path: it is what the operator wrote and
 				// can act on, and it is now the only place the job's own path
@@ -609,6 +610,20 @@ func toClientPath(clientName, stream, depotPath string) (string, error) {
 		return "//" + clientName + depotPath[len(stream):], nil
 	}
 	return "", fmt.Errorf("sync path %q is not under stream %q; this spec did not come through jobspec validation", depotPath, stream)
+}
+
+// isMissingOrEmptyDir reports whether path does not exist or holds no entries.
+// An unreadable directory reports false: the caller uses this to decide whether
+// to force a sync, and a read failure is not evidence that the tree is gone.
+func isMissingOrEmptyDir(path string) bool {
+	entries, err := os.ReadDir(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return len(entries) == 0
 }
 
 // allocateShortID returns a short unique ID for a new workspace.

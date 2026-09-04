@@ -141,13 +141,15 @@ func (c *Client) DeleteClient(ctx context.Context, name string) error {
 var changeFirstLine = regexp.MustCompile(`^Change (\d+) `)
 
 // ResolveHead resolves a path to its head CL number via `p4 -c <client> changes
-// -m1`, run from cwd. The path is client syntax and the -c flag is what makes it
-// resolvable: a virtual or import+ remap stream has no depot storage under the
-// stream name, so only the client's view can address it. The cwd is not required
-// by p4 and is passed for the package's cwd contract and for .p4config
-// predictability; TestClient_ResolveHead pins it.
-func (c *Client) ResolveHead(ctx context.Context, cwd, client, path string) (int64, error) {
-	out, err := c.r.Run(ctx, cwd, []string{"-c", client, "changes", "-m1", path + "#head"}, nil)
+// -m1`. The path is client syntax and the -c flag is what makes it resolvable: a
+// virtual or import+ remap stream has no depot storage under the stream name, so
+// only the client's view can address it. It takes no cwd because it runs before
+// the workspace is acquired: a subprocess cwd on an unheld workspace blocks the
+// sweeper's os.RemoveAll on Windows, and it exposes p4 to any .p4config a
+// previous task's build script wrote into the workspace root.
+// TestProvider_HeadResolutionRunsWithNoWorkspaceCwd.
+func (c *Client) ResolveHead(ctx context.Context, client, path string) (int64, error) {
+	out, err := c.r.Run(ctx, "", []string{"-c", client, "changes", "-m1", path + "#head"}, nil)
 	if err != nil {
 		return 0, err
 	}
