@@ -243,3 +243,115 @@ func TestUserRateLimit_ARequestWithNoRenderablePrincipalIsRefused(t *testing.T) 
 		})
 	}
 }
+
+// TestUserRateLimit_TheSameUserFromTwoAddressesSharesOneBucket is the headline
+// discriminator: the executable form of the doc comment's claim, and RED against
+// the single most likely wrong implementation, which is reusing clientIP.
+func TestUserRateLimit_TheSameUserFromTwoAddressesSharesOneBucket(t *testing.T) {
+	// StatusAccepted, not StatusOK: 200 is httptest.NewRecorder's DEFAULT, so an
+	// assertion of 200 is also satisfied by a middleware that writes nothing and
+	// never calls next.
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	h := UserRateLimit(1, time.Minute)(next)
+
+	u := AuthUser{ID: pgtype.UUID{Bytes: [16]byte{7}, Valid: true}}
+
+	first := httptest.NewRequest("POST", "/v1/jobs", nil)
+	first.RemoteAddr = "10.0.0.1:1111"
+	first = first.WithContext(ctxWithUser(first.Context(), u))
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, first)
+	if rec1.Code != http.StatusAccepted {
+		t.Fatalf("first request: got %d want 202, the wrapped handler's own code", rec1.Code)
+	}
+
+	// A DIFFERENT source address, the same principal. A studio artist moving
+	// from a workstation to a laptop, or onto a VPN, must not get a fresh
+	// budget: an IPv6 /64 makes that escape unlimited.
+	second := httptest.NewRequest("POST", "/v1/jobs", nil)
+	second.RemoteAddr = "203.0.113.9:2222"
+	second = second.WithContext(ctxWithUser(second.Context(), u))
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, second)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request from a different address: got %d want 429 - the bucket is keyed on "+
+			"the address, not on the principal", rec2.Code)
+	}
+	if rec2.Header().Get("Retry-After") == "" {
+		t.Fatal("a refusal must carry Retry-After")
+	}
+}
+
+// TestUserRateLimit_TwoUsersFromOneAddressDoNotShareABucket is the mirror
+// property and the one an operator feels: a studio behind one office egress is
+// not collapsed into a single budget.
+//
+// THE THIRD REQUEST IS NOT OPTIONAL. Two 200s at a limit of 1 are also what a
+// middleware that does nothing produces, so without the third assertion this
+// test is vacuous against exactly the implementation it is supposed to describe.
+func TestUserRateLimit_TwoUsersFromOneAddressDoNotShareABucket(t *testing.T) {
+	// StatusAccepted, not StatusOK: 200 is httptest.NewRecorder's DEFAULT, so an
+	// assertion of 200 is also satisfied by a middleware that writes nothing and
+	// never calls next.
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	h := UserRateLimit(1, time.Minute)(next)
+
+	const sharedAddr = "10.0.0.1:1111"
+	alice := AuthUser{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}
+	bob := AuthUser{ID: pgtype.UUID{Bytes: [16]byte{2}, Valid: true}}
+
+	send := func(u AuthUser) int {
+		req := httptest.NewRequest("POST", "/v1/jobs", nil)
+		req.RemoteAddr = sharedAddr
+		req = req.WithContext(ctxWithUser(req.Context(), u))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := send(alice); got != http.StatusAccepted {
+		t.Fatalf("alice first: got %d want 202", got)
+	}
+	if got := send(bob); got != http.StatusAccepted {
+		t.Fatalf("bob first, from alice's address: got %d want 202 - one egress must not collapse "+
+			"unrelated callers into one bucket", got)
+	}
+	// The control: the limiter IS running and IS full for alice.
+	if got := send(alice); got != http.StatusTooManyRequests {
+		t.Fatalf("alice second: got %d want 429 - without this the two 200s above are also what a "+
+			"middleware that does nothing produces", got)
+	}
+}
+
+// TestUserRateLimit_ASustainableRateIsNotRefused is the "a normal submission
+// rate is not refused" half of the acceptance criterion, in the only
+// non-vacuous form: two requests under a limit of three would be green against a
+// limiter that does nothing, while six at this spacing require the window to
+// actually slide.
+//
+// THE TIMING IS SAFE IN ONE DIRECTION ONLY, AND IT IS THE RIGHT ONE. 30ms
+// spacing under a 50ms window at limit 2 leaves one hit in the window per
+// request. time.Sleep is guaranteed to sleep AT LEAST its duration, so a slow or
+// coarse-grained scheduler only widens the gaps, which prunes more and admits
+// more. It cannot make this test flaky-red.
+func TestUserRateLimit_ASustainableRateIsNotRefused(t *testing.T) {
+	// StatusAccepted, not StatusOK: 200 is httptest.NewRecorder's DEFAULT, so an
+	// assertion of 200 is also satisfied by a middleware that writes nothing and
+	// never calls next.
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	h := UserRateLimit(2, 50*time.Millisecond)(next)
+
+	u := AuthUser{ID: pgtype.UUID{Bytes: [16]byte{3}, Valid: true}}
+	for i := 1; i <= 6; i++ {
+		if i > 1 {
+			time.Sleep(30 * time.Millisecond)
+		}
+		req := httptest.NewRequest("POST", "/v1/jobs", nil)
+		req = req.WithContext(ctxWithUser(req.Context(), u))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("request %d at a sustainable rate: got %d want 202", i, rec.Code)
+		}
+	}
+}
