@@ -405,9 +405,8 @@ func clientInputSpec(t *testing.T, fr *fakeRunner) string {
 // pins the env-to-value hop, and the single assignment between them is
 // deliberately unpinned.
 //
-// warmFixtures' own `client -o` fixture is empty, which would make both rows
-// assert the missing-line no-op instead of the transform, so it is replaced
-// here with one carrying an Options: line.
+// The `client -o` fixture is overridden here with one carrying an Options:
+// line, so both rows exercise the transform rather than the missing-line no-op.
 func TestProvider_TheClobberConfigReachesTheWrittenSpec(t *testing.T) {
 	const fetchedOptions = "Options:\tnoallwrite noclobber nocompress unlocked nomodtime normdir"
 	rows := []struct {

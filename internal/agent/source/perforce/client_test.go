@@ -111,9 +111,16 @@ Options: clobber
 // noallwrite sits in position 0 for the second discriminator: an implementation
 // that strips a "no" prefix rather than comparing whole tokens flips it to
 // allwrite, a different p4 option, and only a whole-slice comparison sees that.
+//
+// The leading comment line is p4's own spec header, which carries a line
+// beginning "#  Options:" BEFORE the field. It is the third discriminator and
+// the one real p4 output supplies unprompted: an unanchored reader takes that
+// comment, its tokens fail the alphabetic check, and the knob silently no-ops
+// on every workspace.
 func TestClient_CreateStreamClient_ClobberEditsOnlyTheOptionsToken(t *testing.T) {
 	fr := newFakeP4Fixture(t)
-	fr.set("client -o -S //streams/X/main relay_h_abc", `Client: relay_h_abc
+	fr.set("client -o -S //streams/X/main relay_h_abc", `#  Options:     Client options:
+Client: relay_h_abc
 Description:
 `+"\tbuild farm template - do not set noclobber here\n"+
 		`Root: D:\somewhere\else
@@ -201,6 +208,8 @@ View: //streams/X/main/... //relay_h_abc/...
 	require.Contains(t, spec, "Stream: //streams/X/main\n")
 	require.Contains(t, spec, "View: //streams/X/main/... //relay_h_abc/...\n")
 	require.Contains(t, buf.String(), "relay_h_abc", "the warning must name the client")
+	require.Contains(t, buf.String(), "RELAY_WORKSPACE_CLOBBER",
+		"and the variable an operator unsets to stop asking for it")
 }
 
 // The property: when the fetched Options: line carries neither token, clobber is
@@ -286,6 +295,8 @@ View: //streams/X/main/... //relay_h_abc/...
 
 			require.Equal(t, []string{row.optionsLine}, optionsLinesOf(fr.calls[1].stdin))
 			require.Contains(t, buf.String(), "relay_h_abc", "the warning must name the client")
+			require.Contains(t, buf.String(), "RELAY_WORKSPACE_CLOBBER",
+				"and the variable an operator unsets to stop asking for it")
 		})
 	}
 }

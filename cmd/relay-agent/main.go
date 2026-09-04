@@ -192,7 +192,7 @@ func resolveSyncHeartbeatInterval(v string) time.Duration {
 // misspelling is indistinguishable from a deliberate setting.
 //
 // Warn-and-fall-back rather than a fatal: this is an unattended daemon on a
-// render node, and the fallback a caller passes is its non-destructive default.
+// render node.
 // TestParseBoolEnv.
 func parseBoolEnv(name, v string, fallback bool) bool {
 	if v == "" {

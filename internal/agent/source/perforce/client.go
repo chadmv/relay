@@ -290,10 +290,8 @@ var optionsLineRe = regexp.MustCompile(`(?m)^Options:.*$`)
 
 // withClobberOption turns the Options: token noclobber into clobber, leaving
 // every other line untouched. It edits whatever tokens are present and asserts
-// nothing about their count or order: p4's default option set is an assumption
-// here, not something any fixture in this package observes.
-// The two warnings are the only way an operator can tell an inert knob from a
-// working one, so both name the client.
+// nothing about their count or order. Both warnings name the client and the
+// env variable, so an inert knob is actionable from the log alone.
 func withClobberOption(spec []byte, clientName string) []byte {
 	line := optionsLineRe.Find(spec)
 	if line == nil {
