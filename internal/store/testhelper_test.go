@@ -8,46 +8,27 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/crypto/bcrypt"
 	"relay/internal/store"
+	"relay/internal/testsupport/pgdsn"
 )
 
-// newTestPool spins up a fresh Postgres container, runs migrations, and returns
-// a *pgxpool.Pool ready for use. The container and pool are cleaned up when t ends.
+// newTestPool returns a *pgxpool.Pool over a fresh, migrated database that
+// belongs to this test alone. The pool is cleaned up when t ends;
+// pgdsn.NewIntegrationDSN owns the database's own teardown.
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
+	dsn := pgdsn.NewIntegrationDSN(t)
 
-	pg, err := tcpostgres.Run(ctx,
-		"postgres:16",
-		tcpostgres.WithDatabase("relay_test"),
-		tcpostgres.WithUsername("relay"),
-		tcpostgres.WithPassword("relay"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-		),
-	)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
-	require.NoError(t, store.Migrate(migrateDSN))
-
-	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "pool.Close", pool.Close) })
 
 	return pool
 }
 
-// newTestQueries spins up a fresh Postgres container, runs migrations,
-// and returns a *store.Queries ready for use. The container is terminated when t ends.
+// newTestQueries returns a *store.Queries over a fresh, migrated database
+// that belongs to this test alone.
 func newTestQueries(t *testing.T) *store.Queries {
 	t.Helper()
 	return store.New(newTestPool(t))
