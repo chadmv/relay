@@ -1309,7 +1309,7 @@ func TestHandleTaskStatus_AWriteFailureFloodIsBoundedAndCountedPerSite(t *testin
 // send (a well-formed uuid naming no task) SPENDS a token and claims a dedupe
 // slot on every call, and so does every SUCCESSFUL dependency cascade. The
 // budget is 16 tokens refilling at 6/min for the whole connection, shared across
-// all eight kinds, so draining it there silences the diagnostics that matter -
+// every kind, so draining it there silences the diagnostics that matter -
 // which is the exact failure mode the limiter exists to prevent, reintroduced by
 // an operand swap.
 //
@@ -1337,7 +1337,7 @@ func TestHandleTaskStatus_TheSilentArmsSpendNoBudget(t *testing.T) {
 	}
 	require.Equal(t, ingestLogBurst, lim.tokens,
 		"a silently-dropped message must not spend a token. The whole bucket is 16 for the connection "+
-			"across all eight kinds, so a peer that can drain it by naming tasks that do not exist has "+
+			"across every kind, so a peer that can drain it by naming tasks that do not exist has "+
 			"silenced every other diagnostic on that stream.")
 	require.Empty(t, lim.seen,
 		"nor may it claim a dedupe slot: a key recorded for a line that was never emitted suppresses "+
