@@ -58,7 +58,7 @@ func TestProvider_HeadResolutionRunsWithNoWorkspaceCwd(t *testing.T) {
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+client+" changes -m1 //"+client+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
-	fr.setStream("-c "+client+" sync -q --parallel=4 //"+client+"/...@12345", "1 of 1 files\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@12345", "1 of 1 files\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -92,7 +92,7 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	// recoverOrphanedCLs: no pending CLs on a fresh workspace.
 	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
 	// SyncStream: now invoked with global -c <client>.
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
+	fr.setStream("-c "+expectedClient+" sync --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -115,7 +115,8 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	require.True(t, filepath.IsAbs(h.WorkingDir()))
 	require.Contains(t, h.WorkingDir(), inv.ShortID)
 	require.Contains(t, h.Env()["P4CLIENT"], inv.ShortID)
-	require.NotEmpty(t, lines, "sync stream should have produced progress lines")
+	require.NotEmpty(t, lines, "the bracket lines are what make the sync observable at all: "+
+		"p4's own per-file output is counted, never forwarded")
 
 	// Pin the contract: the sync invocation MUST start with `-c <client>`.
 	// This guards against a future refactor silently dropping the global flag.
@@ -141,7 +142,7 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
+	fr.setStream("-c "+expectedClient+" sync --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
 	fr.set("-c "+expectedClient+" change -o", "Change: new\nDescription:\t<enter description here>\n")
 	fr.set("-c "+expectedClient+" change -i", "Change 91244 created.\n")
 	fr.set("-c "+expectedClient+" unshelve -s 12346 -c 91244", "//s/x/foo - unshelved\n")
@@ -218,7 +219,7 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 		"Change 91244 on 2026-04-24 by relay@h *pending*\n\trelay-task-old\n\nChange 99999 on 2026-04-24 by other@h *pending*\n\thuman work\n")
 	fr.set("-c "+clientName+" revert -c 91244 //...", "//... - reverted\n")
 	fr.set("-c "+clientName+" change -d 91244", "Change 91244 deleted.\n")
-	fr.setStream("-c "+clientName+" sync -q --parallel=4 //"+clientName+"/...@12345", "ok\n")
+	fr.setStream("-c "+clientName+" sync --parallel=4 //"+clientName+"/...@12345", "ok\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -305,7 +306,7 @@ func TestProvider_Prepare_ClassifiesRecoverError(t *testing.T) {
 	fr.setErr("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l",
 		fmt.Errorf("p4 changes ...: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
 	// Sync proceeds after recovery error (which only goes to progress, not task failure).
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "")
+	fr.setStream("-c "+expectedClient+" sync --parallel=4 //"+expectedClient+"/...@12345", "")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{

@@ -30,7 +30,7 @@ func warmFixtures(fr *fakeRunner, client string) {
 	fr.set("client -o -S //s/x "+client, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
-	fr.setStream("-c "+client+" sync -q --parallel=4 //"+client+"/...@7", "1 of 1 files\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@7", "1 of 1 files\n")
 }
 
 // syncCall returns the p4 sync invocation from the runner's history, or nil.

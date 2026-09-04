@@ -161,10 +161,16 @@ func (c *Client) ResolveHead(ctx context.Context, client, path string) (int64, e
 	return strconv.ParseInt(m[1], 10, 64)
 }
 
-// SyncStream runs `p4 -c <client> sync -q --parallel=4 <specs...>` from cwd,
+// SyncStream runs `p4 -c <client> sync --parallel=4 <specs...>` from cwd,
 // streaming lines to onLine.
+//
+// NOT -q: the per-file lines are the only evidence a multi-hour sync is moving.
+// The hazard that creates is that they must be COUNTED and never forwarded to
+// the task log - a multi-terabyte sync is millions of lines and task_logs has
+// no per-task cap (docs/backlog/bug-2026-08-14-task-logs-have-no-per-task-volume-cap.md).
+// TestProvider_PerFileSyncOutputIsCountedAndNeverForwarded.
 func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []string, onLine func(string)) error {
-	args := append([]string{"-c", client, "sync", "-q", "--parallel=4"}, specs...)
+	args := append([]string{"-c", client, "sync", "--parallel=4"}, specs...)
 	return c.r.Stream(ctx, cwd, args, onLine)
 }
 

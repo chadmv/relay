@@ -35,6 +35,57 @@ var lookPath = exec.LookPath
 // lookPath above.
 var prepareAcquireHook func(shortID string)
 
+// syncNow and newSyncTicker are the heartbeat's clock seams, following the
+// package-level var pattern lookPath and prepareAcquireHook already use. The
+// package has no t.Parallel() anywhere, so cross-test interference is not
+// reachable; tests restore both in t.Cleanup.
+var syncNow = time.Now
+
+var newSyncTicker = func(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// runSyncWithHeartbeat runs the sync on its own goroutine and stays on the
+// CALLER's goroutine emitting periodic summaries, so progress keeps exactly one
+// caller. A heartbeat goroutine calling progress instead would deadlock
+// Prepare: progress holds a mutex across a send bounded only by the agent
+// context (internal/agent/runner.go, makePrepareProgressFn and send), so a
+// parked heartbeat would block Prepare's own completion line, the runner's
+// flushProgress, and any join - with the workspace handle still held.
+// TestProvider_TheHeartbeatNeverCallsProgressConcurrentlyWithPrepare.
+//
+// The select has EXACTLY TWO cases and must never gain a ctx.Done() arm:
+// exec.CommandContext already kills p4 on cancellation and the errCh arm
+// reports it, whereas returning on ctx.Done() would let Prepare release the
+// workspace while a live p4 child was still writing into it.
+// TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished.
+//
+// errCh is buffered at 1 so a sync that finishes while the caller is parked in
+// progress still completes its send and exits.
+func (p *Provider) runSyncWithHeartbeat(
+	ctx context.Context, wsRoot, clientName string, specs []string,
+	sp *syncProgress, progress func(string),
+) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.cfg.Client.SyncStream(ctx, wsRoot, clientName, specs, sp.onLine) }()
+
+	if p.cfg.SyncHeartbeatInterval <= 0 {
+		return <-errCh
+	}
+	start := syncNow()
+	tick, stopTick := newSyncTicker(p.cfg.SyncHeartbeatInterval)
+	defer stopTick()
+	for {
+		select {
+		case err := <-errCh:
+			return err
+		case <-tick:
+			progress(p.syncSummary("[sync]", sp, syncNow().Sub(start)))
+		}
+	}
+}
+
 // Config holds constructor parameters for the Perforce provider.
 type Config struct {
 	Root     string  // RELAY_WORKSPACE_ROOT — directory for all workspaces
@@ -377,17 +428,22 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		// authoritative.
 		// TestProvider_ASyncFailureProgressLineDoesNotRepeatTheCause is the guard.
 		progress(fmt.Sprintf("[sync] starting: %d path(s)", len(syncSpecs)))
-		if err := p.cfg.Client.SyncStream(ctx, wsRoot, clientName, syncSpecs, progress); err != nil {
+		sp := &syncProgress{}
+		start := syncNow()
+		if err := p.runSyncWithHeartbeat(ctx, wsRoot, clientName, syncSpecs, sp, progress); err != nil {
 			// RELEASE FIRST. progress can park until agent shutdown (its flush
 			// reaches Runner.send, which only selects on sendCh and the agent
 			// context), and anything held across it strands every later task for
-			// this stream in Workspace.Acquire.
+			// this stream in Workspace.Acquire. The summary is rendered AFTER the
+			// release for the same reason: rendering reads free disk, and a statfs
+			// on a wedged network volume is an uninterruptible block.
 			// TestProvider_ASyncFailureReleasesTheWorkspaceBeforeItReportsAnything.
 			handle.Release()
-			progress("[sync] failed; the cause is reported on the task's final status")
+			progress(p.syncSummary("[sync] failed:", sp, syncNow().Sub(start)) +
+				"; the cause is reported on the task's final status")
 			return nil, classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 		}
-		progress("[sync] complete")
+		progress(p.syncSummary("[sync] complete:", sp, syncNow().Sub(start)))
 		if curOK {
 			_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
 				e.BaselineHash = baseline

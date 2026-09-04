@@ -1,9 +1,14 @@
 package perforce
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"relay/internal/agent/source"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,4 +95,141 @@ func TestProvider_SyncSummaryRendersFiveFixedFields(t *testing.T) {
 		p.syncSummary("[sync]", threeSyncedFiles(), time.Second)
 		require.Equal(t, root, got)
 	})
+}
+
+// progressRecorder is mutex-guarded because these tests run Prepare on its own
+// goroutine and read the lines from the test goroutine while it is still
+// writing. snapshot copies under the lock so no caller holds the slice header
+// the writer is appending to.
+type progressRecorder struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *progressRecorder) add(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, s)
+}
+
+func (r *progressRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.lines...)
+}
+
+func (r *progressRecorder) count(sub string) int {
+	return countLinesContaining(r.snapshot(), sub)
+}
+
+// waitFor polls until a line containing sub appears, or fails the test at the
+// deadline. Bounded rather than an open loop: a regression here is a hang, and
+// a hung test reports nothing.
+func (r *progressRecorder) waitFor(t *testing.T, sub string, within time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if lines := r.snapshot(); countLinesContaining(lines, sub) > 0 {
+			return lines
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no progress line containing %q within %v, got: %v", sub, within, r.snapshot())
+	return nil
+}
+
+// useTestTicker swaps the heartbeat's ticker seam for an UNBUFFERED channel the
+// test drives. Unbuffered is load-bearing for the concurrency guard: with the
+// production single-caller loop each send blocks until the previous progress
+// call returns, so ticks cannot overlap on their own.
+func useTestTicker(t *testing.T) chan time.Time {
+	t.Helper()
+	ch := make(chan time.Time)
+	prev := newSyncTicker
+	newSyncTicker = func(time.Duration) (<-chan time.Time, func()) { return ch, func() {} }
+	t.Cleanup(func() { newSyncTicker = prev })
+	return ch
+}
+
+// useSteppingClock makes syncNow advance by step on every call, so an elapsed
+// field is deterministic rather than wall-clock.
+func useSteppingClock(t *testing.T, step time.Duration) {
+	t.Helper()
+	var mu sync.Mutex
+	n := 0
+	prev := syncNow
+	syncNow = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		return time.Unix(0, 0).Add(time.Duration(n) * step)
+	}
+	t.Cleanup(func() { syncNow = prev })
+}
+
+type prepResult struct {
+	h   source.Handle
+	err error
+}
+
+// The heartbeat must be driven by the TIMER, not by p4's output: the whole
+// point is telling a live multi-hour transfer from a wedged one, and a wedged
+// one writes nothing. The stream fixture therefore blocks and emits ZERO lines,
+// and the first assertion - no summary before any tick - is what refuses an
+// implementation that emits at the top of its loop and only then waits.
+func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	release := make(chan struct{})
+	fr.setStreamBlock(syncKey, release)
+
+	tick := useTestTicker(t)
+	useSteppingClock(t, time.Second)
+
+	p := New(Config{
+		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
+		SyncHeartbeatInterval: 30 * time.Second,
+		FreeDiskGB:            func(string) (int64, error) { return 811, nil },
+	})
+	rec := &progressRecorder{}
+	res := make(chan prepResult, 1)
+	go func() {
+		h, err := p.Prepare(context.Background(), "task-1", spec, rec.add)
+		res <- prepResult{h, err}
+	}()
+
+	// Wait until the sync is actually in flight, so "no summary yet" cannot be
+	// satisfied by Prepare simply not having reached the sync.
+	rec.waitFor(t, "[sync] starting", 5*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, 0, rec.count("0 files"),
+		"no tick has been delivered, so no heartbeat may have been emitted, got: %v", rec.snapshot())
+
+	tick <- time.Now()
+	rec.waitFor(t, "0 files", 5*time.Second)
+	var heartbeat string
+	for _, l := range rec.snapshot() {
+		if strings.Contains(l, "0 files") {
+			heartbeat = l
+		}
+	}
+	assert.Contains(t, heartbeat, "0 other lines")
+	assert.Contains(t, heartbeat, "811 GB free")
+	assert.Contains(t, heartbeat, "last -")
+
+	close(release)
+	r := <-res
+	require.NoError(t, r.err)
+	defer r.h.Finalize(context.Background())
+
+	lines := rec.snapshot()
+	require.Equal(t, 1, countLinesContaining(lines, "[sync] complete:"),
+		"got: %v", lines)
+	for _, l := range lines {
+		if strings.Contains(l, "[sync] complete:") {
+			assert.Contains(t, l, "0 files")
+			assert.Contains(t, l, "0 other lines")
+			assert.Contains(t, l, "811 GB free")
+			assert.Contains(t, l, "last -")
+		}
+	}
 }
