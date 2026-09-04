@@ -30,7 +30,7 @@ func sourceSpecToProto(s *api.SourceSpec) *relayv1.SourceSpec {
 		WorkspaceExclusive: s.WorkspaceExclusive,
 	}
 	for _, e := range s.Sync {
-		p.Sync = append(p.Sync, &relayv1.SyncEntry{Path: e.Path, Rev: e.Rev})
+		p.Sync = append(p.Sync, &relayv1.SyncEntry{Path: e.Path, Rev: e.Rev, Exclude: e.Exclude})
 	}
 	if s.ClientTemplate != nil {
 		ct := *s.ClientTemplate

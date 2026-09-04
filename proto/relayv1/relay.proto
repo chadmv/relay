@@ -168,6 +168,14 @@ message PerforceSource {
 message SyncEntry {
   string path = 1;
   string rev  = 2;
+  // An excluded path is have-marked (p4 sync -k) before the real sync, so p4
+  // never transfers it. It carries no rev: the agent preempts at the resolved
+  // revision of the include that covers it, and jobspec.validateSourceSpec
+  // refuses a rev here.
+  //
+  // A plain bool, not optional: an agent that drops the field syncs everything,
+  // which is version skew to be closed on the dispatch side rather than here.
+  bool   exclude = 3;
 }
 
 message WorkspaceInventoryUpdate {
