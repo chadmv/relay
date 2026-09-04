@@ -122,13 +122,19 @@ test-integration:
 test-cli-integration:
 	go test -tags integration -count=1 ./internal/cli/... -timeout 480s
 
-# Run the store and schedrunner integration lanes, plus internal/testsupport/pgdsn's
-# own database-touching self-test - the Postgres-only packages that
-# .github/workflows/go-ci.yml's pg-integration job runs. All three take their
-# database from internal/testsupport/pgdsn, the same harness test-cli-integration
-# uses, so the same two modes (unset: one testcontainer per test;
-# RELAY_TEST_DATABASE_URL set: one CREATEd database per test on a shared
-# server) apply here too.
+# Run the Postgres-only integration lanes: internal/store, internal/schedrunner,
+# internal/testsupport/pgdsn's own database-touching self-test, and
+# cmd/relay-server - the packages .github/workflows/go-ci.yml's pg-integration
+# job runs. All four take their database from internal/testsupport/pgdsn, the
+# same harness test-cli-integration uses, so the same two modes (unset: one
+# testcontainer per test; RELAY_TEST_DATABASE_URL set: one CREATEd database per
+# test on a shared server) apply here too.
+#
+# cmd/relay-server is here because its integration lane, like the other three,
+# takes its database from internal/testsupport/pgdsn. Its gRPC servers listen
+# on 127.0.0.1:0 in-process, its agent (agent_subprocess_e2e_integration_test.go)
+# is an in-process agent.Agent rather than a built binary, and the subprocess
+# it runs is the test binary itself.
 #
 # -count=1 for the same reason test-cli-integration's comment gives: the test
 # cache says nothing about whether a live TCP connection to Postgres
@@ -142,7 +148,7 @@ test-cli-integration:
 # churn their own testcontainers concurrently; that hazard is
 # make test-integration's -p 1 to address, not this target's.
 test-pg-integration:
-	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... ./internal/testsupport/... -timeout 600s
+	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... ./internal/testsupport/... ./cmd/relay-server/... -timeout 600s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`

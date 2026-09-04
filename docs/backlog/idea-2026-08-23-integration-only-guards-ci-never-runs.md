@@ -288,5 +288,13 @@ What this closes: the ninth and tenth instances recorded above
 (`increment_task_retry_count_budget_integration_test.go`, `retry_job_tasks_integration_test.go`,
 `stored_spec_bounds_test.go`, `startup_validation_integration_test.go`) now run on every push.
 
-What this does NOT close: guards that need p4d (`internal/agent/source/perforce`) or a real gRPC
-agent are still not covered by this mechanism. The item stays open for those.
+What this does NOT close: guards that need p4d (`internal/agent/source/perforce`) are still not
+covered by this mechanism. The item stays open.
+
+## Appended 2026-09-04 - the "or a real gRPC agent" clause above was wrong
+
+`agent.NewAgent`/`Agent.Run` dial any address, so a real `agent.Agent` needs no built binary and no
+Docker to run under this mechanism - `cmd/relay-server/agent_subprocess_e2e_integration_test.go`
+(`TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire`) is now in the `pg-integration` job
+this item added, and it drives one against the real listener `grpcServerOptions`/`netlimit.Wrap`
+build. The p4d clause above stands.

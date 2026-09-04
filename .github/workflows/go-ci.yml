@@ -126,7 +126,7 @@ jobs:
         run: make test-cli-integration
 
   pg-integration:
-    name: pg integration (store, schedrunner)
+    name: pg integration (store, schedrunner, relay-server, pgdsn)
     # Platform: linux. Compiles and runs the linux arm only.
     runs-on: ubuntu-latest
     # DELIBERATELY NOT 15, for the reason cli-integration's comment gives: the
@@ -134,7 +134,7 @@ jobs:
     # panic and a GitHub job kill indistinguishable in the log. 12 here
     # against the target's -timeout 600s means the two failures name
     # themselves - but -timeout 600s is PER TEST BINARY and this target names
-    # three packages, so 12 minutes is coupled to those packages running
+    # four packages, so 12 minutes is coupled to those packages running
     # concurrently (no -p 1 in test-pg-integration): a change that serializes
     # them (adding -p 1, or a CI runner with GOMAXPROCS=1) can multiply the
     # worst case past this job's limit.
@@ -178,5 +178,5 @@ jobs:
       # carries no branch protection and no rulesets, so no check anywhere
       # blocks a merge - a red result reports and nothing more. Do not
       # describe this job, or any other, as a "merge gate".
-      - name: Postgres integration lanes (internal/store, internal/schedrunner)
+      - name: Postgres integration lanes (internal/store, internal/schedrunner, cmd/relay-server, internal/testsupport/pgdsn)
         run: make test-pg-integration

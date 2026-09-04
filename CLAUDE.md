@@ -20,9 +20,12 @@ make test-integration
 # running Postgres for one fresh database per test instead of one container per test.
 make test-cli-integration
 
-# internal/store and internal/schedrunner's integration lanes, plus
-# internal/testsupport/pgdsn's own database-touching self-test - the packages
-# this lane covers. Same two modes as test-cli-integration above.
+# The Postgres-only integration lanes: internal/store, internal/schedrunner,
+# cmd/relay-server, and internal/testsupport/pgdsn's own database-touching
+# self-test. Same two modes as test-cli-integration above. cmd/relay-server
+# qualifies because, like the other three, it takes its database from
+# internal/testsupport/pgdsn: its gRPC servers and its agent both run
+# in-process and its task subprocess is the test binary itself.
 make test-pg-integration
 
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files

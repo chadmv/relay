@@ -37,39 +37,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// newTestPoolAndQueries is newTestQueries (bootstrap_test.go) plus the
-// *pgxpool.Pool it discards. worker.Handler needs the pool itself, not just the
-// *store.Queries wrapping it: applyInventory opens its own transaction via
-// pgx.BeginTxFunc(ctx, h.pool, ...) even for an empty inventory update, on
-// every finishRegister call including the reconnect path this file exercises.
+// newTestPoolAndQueries takes a fresh migrated database from the shared harness
+// and returns the pool alongside the *store.Queries wrapping it. worker.Handler
+// needs the pool itself, not just the Queries: applyInventory opens its own
+// transaction via pgx.BeginTxFunc(ctx, h.pool, ...) even for an empty inventory
+// update, on every finishRegister call including the reconnect path this file
+// exercises.
 func newTestPoolAndQueries(t *testing.T) (*pgxpool.Pool, *store.Queries) {
 	t.Helper()
-	ctx := context.Background()
-	pg, err := tcpostgres.Run(ctx, "postgres:16",
-		tcpostgres.WithDatabase("relay_test"),
-		tcpostgres.WithUsername("relay"),
-		tcpostgres.WithPassword("relay"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-		),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
-	require.NoError(t, store.Migrate(migrateDSN))
-	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-	return pool, store.New(pool)
+	return newPgdsnPoolAndQueries(t)
 }
 
 // seedE2EWorker creates a real worker row with a known agent token, the
