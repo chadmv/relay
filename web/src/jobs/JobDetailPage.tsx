@@ -20,10 +20,15 @@ import type { TaskDetail } from './api'
 
 type Tab = 'spec' | 'log'
 
-// Picks the most useful default task: the first running/failed one if present,
-// else the first task. Returns '' for an empty job.
+// Picks the most useful default task: the first one actively syncing or
+// running, or already failed, if present, else the first task. preparing is
+// included because it is the one currently streaming logs the operator wants
+// to see, not because it counts as an error state like failed/timed_out.
+// Returns '' for an empty job.
 function defaultTaskId(tasks: TaskDetail[]): string {
-  const active = tasks.find((t) => t.status === 'running' || t.status === 'failed' || t.status === 'timed_out')
+  const active = tasks.find(
+    (t) => t.status === 'running' || t.status === 'preparing' || t.status === 'failed' || t.status === 'timed_out',
+  )
   return active?.id ?? tasks[0]?.id ?? ''
 }
 
@@ -93,7 +98,11 @@ export function JobDetailPage() {
   // wire): docs/backlog/feature-2026-07-01-job-detail-timing-enrichment.md.
   const done = tasks.filter((t) => t.status === 'done').length
   const total = tasks.length
-  const active = tasks.filter((t) => t.status === 'running' || t.status === 'dispatched').length
+  // preparing counts as active: it is the mid-sync state that used to sit at
+  // dispatched, and a job whose tasks are all syncing must not read as idle.
+  const active = tasks.filter(
+    (t) => t.status === 'running' || t.status === 'dispatched' || t.status === 'preparing',
+  ).length
   const pct = progressPct(done, total)
   const queued = tasks.filter((t) => t.status === 'pending').length
   const chips = Object.entries(job.labels ?? {}).map(([k, v]) => (v ? `${k}=${v}` : k))

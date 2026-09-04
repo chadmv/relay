@@ -24,10 +24,8 @@ test('isTerminalTask covers exactly done, failed and timed_out', () => {
   expect(isTerminalTask('pending')).toBe(false)
   expect(isTerminalTask('dispatched')).toBe(false)
   expect(isTerminalTask('running')).toBe(false)
-  // Green before the switch case is added and always will be: a regression guard
-  // against a future edit that puts `preparing` in TERMINAL, not a red-first
-  // criterion. Adding it there would make useJob stop tailing a task's log the
-  // moment its workspace sync begins.
+  // Regression guard: putting `preparing` in TERMINAL would make useJob stop
+  // tailing a task's log the moment its workspace sync begins.
   expect(isTerminalTask('preparing')).toBe(false)
   expect(isTerminalTask(undefined)).toBe(false)
 })

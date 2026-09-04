@@ -197,6 +197,55 @@ test('derives progress from the tasks array (1 of 2 done)', async () => {
   expect(await screen.findByText(/1\s*\/\s*2 tasks done/i)).toBeInTheDocument()
 })
 
+test('counts a preparing task as active, not queued nor done', async () => {
+  const job = {
+    ...JOB,
+    tasks: [
+      {
+        id: 't1', name: 'sync-workspace', status: 'preparing',
+        commands: [['p4', 'sync']], env: {}, requires: {},
+        timeout_seconds: null, retries: 0, retry_count: 0,
+      },
+      {
+        id: 't2', name: 'render', status: 'pending',
+        commands: [['blender', '-b']], env: {}, requires: {},
+        timeout_seconds: null, retries: 0, retry_count: 0,
+      },
+    ],
+  }
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(job)))
+  renderDetail()
+  await screen.findByText('shot-042 render')
+  // A syncing task used to sit at `dispatched` and count as active; it must
+  // still count, or a job mid-sync reads as 0 active while every agent works.
+  expect(await screen.findByText(/^1 active$/)).toBeInTheDocument()
+  expect(screen.getByText(/^1 ACTIVE · 1 QUEUED$/)).toBeInTheDocument()
+})
+
+test('defaults task selection to a preparing task over an earlier pending one', async () => {
+  const job = {
+    ...JOB,
+    tasks: [
+      {
+        id: 't1', name: 'queued-task', status: 'pending',
+        commands: [['blender', '-b']], env: {}, requires: {},
+        timeout_seconds: null, retries: 0, retry_count: 0,
+      },
+      {
+        id: 't2', name: 'sync-workspace', status: 'preparing',
+        commands: [['p4', 'sync']], env: {}, requires: {},
+        timeout_seconds: null, retries: 0, retry_count: 0,
+      },
+    ],
+  }
+  server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(job)))
+  renderDetail()
+  await screen.findByText('shot-042 render')
+  // t1 is first in the array and would win the tasks[0] fallback; the preparing
+  // task is the one actively streaming logs and must be preferred over it.
+  expect(screen.getByRole('tablist')).toHaveAccessibleName('Task detail: sync-workspace')
+})
+
 test('an owner sees the retry pills in the reserved slot for a done job', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json({ ...JOB, status: 'done' })))
   renderDetail()
