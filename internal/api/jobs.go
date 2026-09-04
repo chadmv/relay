@@ -485,12 +485,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			Until:          filters.Until,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			listQueryError(w, r, err, "list jobs failed")
 			return
 		}
 		total, err := s.countJobsByScheduledJob(ctx, schedID, filters)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "count jobs failed")
+			listQueryError(w, r, err, "count jobs failed")
 			return
 		}
 		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByScheduled, jobsRowKeyByScheduled)
@@ -512,12 +512,12 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			Until:     filters.Until,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list jobs failed")
+			listQueryError(w, r, err, "list jobs failed")
 			return
 		}
 		total, err := s.countJobsByStatus(ctx, status, filters)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "count jobs failed")
+			listQueryError(w, r, err, "count jobs failed")
 			return
 		}
 		items, next := buildPage(rows, pp.Limit, pp.Sort, jobRowToResponseByStatus, jobsRowKeyByStatus)
@@ -528,7 +528,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Default branch: no filter — dispatch on pp.Sort.
 	items, next, total, err := s.listJobsBySort(ctx, pp, filters)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list jobs failed")
+		listQueryError(w, r, err, "list jobs failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, page[jobResponse]{Items: items, NextCursor: next, Total: total})

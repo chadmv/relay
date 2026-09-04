@@ -521,7 +521,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
@@ -536,7 +536,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
@@ -551,7 +551,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
@@ -566,7 +566,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
@@ -581,7 +581,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
@@ -596,7 +596,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
@@ -611,7 +611,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
@@ -626,7 +626,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 				PageLimit: pp.Limit,
 			})
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+				listQueryError(w, r, err, "list scheduled jobs failed")
 				return
 			}
 			items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
@@ -640,13 +640,12 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			Q:       filters.Q,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+			listQueryError(w, r, err, "count scheduled jobs failed")
 			return
 		}
 		s.fillOwnerEmails(r, items, "")
 		if err := s.fillLastJobStatuses(r, items); err != nil {
-			log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, fmt.Errorf("fillLastJobStatuses: %w", err), "list scheduled jobs failed")
 			return
 		}
 		writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
@@ -671,7 +670,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
@@ -687,7 +686,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKey)
@@ -703,7 +702,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
@@ -719,7 +718,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByName)
@@ -735,7 +734,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
@@ -751,7 +750,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByNextRun)
@@ -767,7 +766,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
@@ -783,7 +782,7 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 			PageLimit: pp.Limit,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+			listQueryError(w, r, err, "list scheduled jobs failed")
 			return
 		}
 		items, next = buildPage(rows, pp.Limit, pp.Sort, toScheduledJobResponse, scheduledJobsRowKeyByUpdated)
@@ -798,13 +797,12 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		Q:       filters.Q,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "count scheduled jobs failed")
+		listQueryError(w, r, err, "count scheduled jobs failed")
 		return
 	}
 	s.fillOwnerEmails(r, items, u.Email)
 	if err := s.fillLastJobStatuses(r, items); err != nil {
-		log.Printf("scheduled_jobs: fillLastJobStatuses: %v", err)
-		writeError(w, http.StatusInternalServerError, "list scheduled jobs failed")
+		listQueryError(w, r, fmt.Errorf("fillLastJobStatuses: %w", err), "list scheduled jobs failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, page[scheduledJobResponse]{Items: items, NextCursor: next, Total: total})
