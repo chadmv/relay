@@ -1,8 +1,10 @@
 ---
 title: classifyP4Error does not recognise an out-of-disk failure, so a full workspace volume reads as a raw p4 error
 type: feature
-status: open
+status: closed
 created: 2026-09-03
+closed: 2026-09-03
+resolution: fixed
 priority: low
 source: SDNM fork divergence analysis (relay_updates.md, PR-4), evaluated 2026-09-03
 ---
@@ -47,3 +49,29 @@ item ports it with the studio-specific text removed.
 - [[idea-2026-09-03-sync-spec-exclusion-paths-design]] - the remedy clause this message may gain later
 - [[feature-2026-09-03-p4-sync-progress-heartbeat]] - reports free space during the sync, before
   this error fires
+
+## Resolution
+
+Fixed on `claude/top-3-roadmap-items-65856f`. `classifyP4Error` gained the out-of-disk case,
+matching the phrase and not the words, with `workspace not found` and `insufficient permissions on
+workspace` as negative cases. The fork's two-substring form was run as a mutation and the
+permissions negative kills it.
+
+**The slice shipped two things this item did not ask for, and both are load-bearing.**
+
+First, the remedy text. The item prescribed a message naming `RELAY_WORKSPACE_MIN_FREE_GB`; that
+was dropped, because raising it evicts other tenants' warm workspaces and, on a deployment where
+it is unset, turns the sweeper on for the first time - a remedy in the forger's favour for a
+signal a job author can drive.
+
+Second, classification no longer sees caller-supplied command args at all. `execRunner` returns a
+`p4CommandError` keeping args, underlying error and stderr in separate fields, and
+`classifiableText` returns `""` when no such error is in the chain, so an error that did not come
+from a p4 invocation is never classified. This was necessary rather than opportunistic: without
+it, a job spec naming a stream `//depot/disk full` had its own task diagnosed as a full volume.
+
+**A residual remains and is filed separately.** p4 echoes the failing path into its own stderr in
+some error classes, and stderr is classified by design - see
+[[bug-2026-09-03-classify-p4-error-matches-p4-echoed-path-in-stderr]]. Note also that every
+pre-existing fixture in `TestClassifyP4Error` modelled a producer shape production never emits;
+`fakeRunner` now returns the production type, so all cases exercise the args exclusion.
