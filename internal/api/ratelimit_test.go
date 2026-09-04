@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestParseRateLimit(t *testing.T) {
@@ -154,4 +156,41 @@ func TestRateLimit_ConcurrentHitsDontRace(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestUserRateLimitKey pins three properties of the bucket key, and the two
+// fail-closed rows go first because they are the security half.
+//
+// THE LAST ROW IS THE TRANSPOSITION GUARD. AuthUser.ID and AuthUser.TokenID are
+// adjacent fields of the same type, so uuidStr(u.TokenID) compiles and is
+// per-token rather than per-user - and a fresh token per login would then be a
+// fresh full bucket per login. Giving the two fields different values is what
+// makes the assertion positional rather than a type coincidence.
+func TestUserRateLimitKey(t *testing.T) {
+	userID := pgtype.UUID{Bytes: [16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, Valid: true}
+	const userIDStr = "01020304-0506-0708-090a-0b0c0d0e0f10"
+	tokenID := pgtype.UUID{Bytes: [16]byte{0xaa, 0xbb, 0xcc, 0xdd}, Valid: true}
+
+	tests := []struct {
+		name   string
+		u      AuthUser
+		want   string
+		wantOK bool
+	}{
+		{"zero AuthUser", AuthUser{}, "", false},
+		// Bytes are non-zero and Valid is false: a key function that read Bytes
+		// without consulting Valid would render a plausible uuid here.
+		{"id present but not Valid", AuthUser{ID: pgtype.UUID{Bytes: [16]byte{1}, Valid: false}}, "", false},
+		{"valid id", AuthUser{ID: userID}, userIDStr, true},
+		{"key is the user id, not the token id", AuthUser{ID: userID, TokenID: tokenID}, userIDStr, true},
+	}
+	for _, tt := range tests {
+		// t.Run, not a bare loop: a t.Fatalf in one row must not skip the rest.
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := userRateLimitKey(tt.u)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
 }

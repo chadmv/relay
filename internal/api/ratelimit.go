@@ -71,6 +71,23 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// userRateLimitKey renders the bucket key for an authenticated principal.
+//
+// It is a package-level function rather than an expression inside UserRateLimit
+// because a per-request read bucket has to call rl.allow with this same value
+// from INSIDE its handler, at the point a needle has already been parsed. A
+// middleware deciding that question for itself would be a second implementation
+// of the handler's own decision, and the two only have to disagree once for the
+// expensive path to go unbudgeted.
+//
+// ok is false when the principal has no renderable id, and the second return
+// value is the point: rl.allow(userRateLimitKey(u)) does not compile, so a
+// caller cannot bucket an unidentified principal under "" by omission.
+func userRateLimitKey(u AuthUser) (string, bool) {
+	key := uuidStr(u.ID)
+	return key, key != ""
+}
+
 // allow returns (retryAfter, true) if the hit is allowed or (retryAfter, false)
 // if the key is over-limit. retryAfter is only meaningful when false.
 func (rl *rateLimiter) allow(key string) (time.Duration, bool) {
