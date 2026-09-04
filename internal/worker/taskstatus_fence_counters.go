@@ -230,7 +230,7 @@ func (c *statusFenceCounters) snapshot() TaskStatusFenceCounts {
 // exists for, and it fails with a message saying so.
 func taskStatusIsWritable(status string) bool {
 	switch status {
-	case "pending", "dispatched", "running":
+	case "pending", "dispatched", "preparing", "running":
 		return true
 	}
 	return false

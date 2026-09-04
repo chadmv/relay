@@ -133,7 +133,7 @@ SET status = sqlc.arg(status),
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
 RETURNING *;
 
 -- name: IncrementTaskRetryCount :one
@@ -227,7 +227,7 @@ SET retry_count = retry_count + 1,
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
   AND retry_count < retries
 RETURNING *;
 

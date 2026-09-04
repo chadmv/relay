@@ -899,7 +899,7 @@ SET retry_count = retry_count + 1,
 WHERE id = $1
   AND assignment_epoch = $2
   AND worker_id = $3
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
   AND retry_count < retries
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
@@ -1003,7 +1003,7 @@ type IncrementTaskRetryCountParams struct {
 //	WHERE id = $1
 //	  AND assignment_epoch = $2
 //	  AND worker_id = $3
-//	  AND status IN ('pending', 'dispatched', 'running')
+//	  AND status IN ('pending', 'dispatched', 'preparing', 'running')
 //	  AND retry_count < retries
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTaskRetryCountParams) (Task, error) {
@@ -1981,7 +1981,7 @@ SET status = $1,
 WHERE id = $4
   AND assignment_epoch = $5
   AND worker_id = $6
-  AND status IN ('pending', 'dispatched', 'running')
+  AND status IN ('pending', 'dispatched', 'preparing', 'running')
 RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 `
 
@@ -2120,7 +2120,7 @@ type UpdateTaskStatusParams struct {
 //	WHERE id = $4
 //	  AND assignment_epoch = $5
 //	  AND worker_id = $6
-//	  AND status IN ('pending', 'dispatched', 'running')
+//	  AND status IN ('pending', 'dispatched', 'preparing', 'running')
 //	RETURNING id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at
 func (q *Queries) UpdateTaskStatus(ctx context.Context, arg UpdateTaskStatusParams) (Task, error) {
 	row := q.db.QueryRow(ctx, updateTaskStatus,
