@@ -44,8 +44,7 @@ project.
 Every other read of `job_spec` in the tree is bounded: `handleListScheduledJobs` is paged,
 `ListEligibleScheduledJobs` has `LIMIT $1` at `BatchLimit = 100`, and
 `ListOverdueScheduledJobsForCatchup` is unbounded but filtered by `next_run_at < NOW()`, which
-newly created schedules do not satisfy. `ListEnabledScheduledJobs` is the first statement that
-materializes the whole enabled set with specs attached.
+newly created schedules do not satisfy.
 
 Note the amplification: the pass issues one sequential `UPDATE` per BROKEN row, and "most rows
 broken" is precisely the scenario the sweep exists for - the release that lands a new validation
