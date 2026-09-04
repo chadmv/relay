@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -127,7 +128,10 @@ func NewClient() *Client { return &Client{r: newExecRunner()} }
 
 // CreateStreamClient creates (or recreates) a stream-bound p4 client.
 // If template is non-empty, uses -t <template> to inherit non-View fields.
-func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, template string) error {
+// clobber, when true, rewrites the fetched spec's Options: token list so a
+// writable unopened file cannot wedge every later sync on this workspace;
+// when false nothing is written to Options: at all.
+func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, template string, clobber bool) error {
 	args := []string{"client", "-o", "-S", stream}
 	if template != "" {
 		args = append(args, "-t", template)
@@ -147,6 +151,9 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 	// inherited from a template can move the workspace out from under the Root
 	// set above. TestClient_CreateStreamClient_DropsAltRoots.
 	spec = removeSpecBlock(spec, "AltRoots")
+	if clobber {
+		spec = withClobberOption(spec, name)
+	}
 
 	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err
@@ -274,6 +281,60 @@ func (c *Client) PendingChangesByDescPrefix(ctx context.Context, cwd, client, pr
 		}
 	}
 	return cls, nil
+}
+
+// optionsLineRe is anchored at line start for the same reason setSpecField's
+// own pattern is: a client spec carries SubmitOptions: as well as Options:, and
+// an unanchored match rewrites the wrong field.
+var optionsLineRe = regexp.MustCompile(`(?m)^Options:.*$`)
+
+// withClobberOption turns the Options: token noclobber into clobber, leaving
+// every other line untouched. It edits whatever tokens are present and asserts
+// nothing about their count or order. Both warnings name the client and the
+// env variable, so an inert knob is actionable from the log alone.
+func withClobberOption(spec []byte, clientName string) []byte {
+	line := optionsLineRe.Find(spec)
+	if line == nil {
+		log.Printf("warning: RELAY_WORKSPACE_CLOBBER is set but client %q has no Options: line; leaving the spec unchanged", clientName)
+		return spec
+	}
+	toks := strings.Fields(strings.TrimPrefix(string(line), "Options:"))
+	// Zero tokens is malformed, not an empty set to append to: synthesising a
+	// one-token Options: line hands p4 an option set whose effect on the options
+	// nobody named is unverified, the same hazard as inserting the line where
+	// none exists. The alphabetic check additionally keeps a $-bearing token out
+	// of setSpecField's regexp.ReplaceAll, which expands it rather than writing
+	// it literally.
+	if len(toks) == 0 || !allAlphabetic(toks) {
+		log.Printf("warning: RELAY_WORKSPACE_CLOBBER is set but client %q has a malformed Options: line %q; leaving the spec unchanged", clientName, string(line))
+		return spec
+	}
+	found := false
+	for i, t := range toks {
+		// Token equality only. Stripping a "no" prefix would flip noallwrite to
+		// allwrite, a different p4 option entirely.
+		if t == "noclobber" {
+			toks[i] = "clobber"
+			found = true
+		} else if t == "clobber" {
+			found = true
+		}
+	}
+	if !found {
+		toks = append(toks, "clobber")
+	}
+	return setSpecField(spec, "Options", strings.Join(toks, " "))
+}
+
+func allAlphabetic(toks []string) bool {
+	for _, t := range toks {
+		for _, r := range t {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // setSpecField updates or inserts a "Field:\tvalue\n" line in a p4 spec form.

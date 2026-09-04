@@ -1,7 +1,9 @@
 ---
 title: An agent-level option to create workspace clients with `clobber`, so a stray writable file cannot wedge every later sync
 type: feature
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-03
 priority: low
 source: SDNM fork divergence analysis (relay_updates.md, PR-5), evaluated 2026-09-03
@@ -49,3 +51,35 @@ cases. The second is the test that carries the field-edit requirement and is wri
 
 - `internal/agent/source/perforce/client.go` - `CreateStreamClient`, `setSpecField`
 - `cmd/relay-agent/main.go` - the workspace knobs
+
+## Resolution
+
+`RELAY_WORKSPACE_CLOBBER` (bool, default off) rewrites the `noclobber` token in a p4
+client spec's `Options:` line. Off is a byte-identical no-op, including for an operator
+template that already carries `Options: clobber` - the item asked for `noclobber` to be
+forced when the knob is off, which contradicts its own first acceptance criterion and
+would override a deliberate template.
+
+**What p4 r25.2 actually emits, recorded rather than predicted**, since no fixture in the
+repo showed a real `Options:` line: seven tokens, not the six every document assumed -
+`noallwrite noclobber nocompress unlocked nomodtime normdir noaltsync`. Nothing had to
+change, because the transform edits whatever is present and no test hard-codes a default
+set. The same observation found the load-bearing hazard: a real spec carries a comment
+header `#  Options:     Client options:` BEFORE the field, so an unanchored reader takes
+the comment, fails the token check, and silently no-ops the knob on every workspace in
+the fleet. That header is now in a fixture and the anchor is pinned against it.
+
+The prescribed wiring guard does not exist for `cmd/relay-agent` - every guard the cited
+idea describes is in `cmd/relay-server` - so the slice pushed coverage to executed checks
+(env to value, `Config` to spec bytes) and states the one residual unpinned assignment
+rather than papering over it.
+
+The `classifyP4Error` case is **deferred**, not forgotten. Its message is a live channel
+in the open misclassification bug, and a remedy string naming this option would advertise
+turning fleet-wide silent overwriting ON to whoever can forge the message - the
+"an option that disables the control belongs outside the remedy ladder" invariant.
+
+Review found one false claim: README said no job spec could request clobber, and
+`client_template` is job-spec-supplied while `p4 -t` copies the template's `Options:`
+field, so a cold workspace named by a job spec can obtain one. The branch's own fixture
+demonstrated it. The sentence now names that route.

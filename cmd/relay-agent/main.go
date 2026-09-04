@@ -78,6 +78,7 @@ func main() {
 			// free-disk check below, or the logged figure stops being comparable
 			// with RELAY_WORKSPACE_MIN_FREE_GB.
 			FreeDiskGB: freeDiskGB,
+			Clobber:    parseBoolEnv("RELAY_WORKSPACE_CLOBBER", os.Getenv("RELAY_WORKSPACE_CLOBBER"), false),
 		})
 		if err := pp.Preflight(ctx); err != nil {
 			// Non-fatal: log loudly and run without the workspace provider.
@@ -183,6 +184,26 @@ func resolveSyncHeartbeatInterval(v string) time.Duration {
 		return defaultSyncHeartbeat
 	}
 	return d
+}
+
+// parseBoolEnv parses a strconv.ParseBool spelling. Empty takes the fallback
+// silently, because an unset variable is not a typo; a non-empty unparseable
+// value takes the fallback and warns naming the variable, because otherwise a
+// misspelling is indistinguishable from a deliberate setting.
+//
+// Warn-and-fall-back rather than a fatal: this is an unattended daemon on a
+// render node.
+// TestParseBoolEnv.
+func parseBoolEnv(name, v string, fallback bool) bool {
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("warning: %s=%q is not a boolean; using %v", name, v, fallback)
+		return fallback
+	}
+	return b
 }
 
 var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)

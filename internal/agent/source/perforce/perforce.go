@@ -102,6 +102,16 @@ type Config struct {
 	// platform-gated helper to both; nil renders the field as "-" rather than
 	// adding a second platform pair inside this package.
 	FreeDiskGB func(root string) (int64, error)
+
+	// Clobber makes every created or repaired client spec carry the p4 option
+	// clobber instead of noclobber, so a sync overwrites a writable unopened
+	// file rather than aborting. Agent-level and never per-task: the client is
+	// shared by every task on the stream and CreateStreamClient runs on every
+	// Prepare, so a per-task value would let two concurrently admitted tasks
+	// flip one shared spec against each other, one of them possibly mid-sync.
+	// RELAY_WORKSPACE_CLOBBER.
+	// TestProvider_TheClobberConfigReachesTheWrittenSpec.
+	Clobber bool
 }
 
 // Provider implements source.Provider for Perforce.
@@ -337,7 +347,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if !found && pf.ClientTemplate != nil {
 		tmpl = *pf.ClientTemplate
 	}
-	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
+	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl, p.cfg.Clobber); err != nil {
 		return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
 	}
 	// Upsert replaces the whole struct, so it runs only on the cold path: on a
