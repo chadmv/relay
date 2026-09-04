@@ -61,7 +61,8 @@ plan").
 - **Phase 3 parallelism** depends on the planner's independence declaration.
   Independent slices run concurrently; if the frontend needs a new backend
   endpoint, they sequence.
-- **Phase 3 briefs put everything outside the worktree off-limits.** Databases other
+- **EVERY brief that carries tool access puts everything outside the worktree
+  off-limits - this is a property of the agent's TOOLS, not of its phase.** Databases other
   than the lane's own e2e database, processes the agent did not start, and global
   npm or Go caches are not touched without asking, and any such action is reported
   in the first line of the engineer's report. On 2026-09-03 one engineer dropped and
@@ -70,6 +71,16 @@ plan").
   about shared state, and the conductor learned of both from the reports. When
   several lanes may run the browser suite, the brief also carries the e2e lock
   protocol from `web/e2e/README.md`.
+  This was first written as a Phase 3 note about engineers, and on 2026-09-03 a Phase 4
+  REVIEW LENS ran `DROP TABLE IF EXISTS task_logs` against the live `relay` dev database
+  instead of a throwaway, destroying its rows; the schema was restored from the migrations.
+  A read-only lens is read-only with respect to the REPOSITORY and not with respect to the
+  machine, so the paragraph belongs in the review briefs, the integration brief and any
+  re-verify brief, not only in the engineers'. Two further clauses earn their place beside
+  it: give each agent a lane-private scratchpad filename prefix (two engineers collided on
+  `mut.py` the same day, and one ran the other's script three times against the wrong
+  package), and say which agent owns any lane that WRITES to the tree, so a mutation battery
+  and a reader are never dispatched over one worktree.
 - **Phase 4** is a conductor-run `/code-review` followed by a **parallel fan-out of
   four agents in a single message**. There is no Workflow and no opt-in to obtain.
 
