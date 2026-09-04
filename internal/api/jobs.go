@@ -442,6 +442,26 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HERE, and not as middleware. filters.Q != nil is the established in-handler
+	// expression of "this request is the expensive kind" - countJobs,
+	// countJobsByStatus and countJobsByScheduledJob each open with exactly this
+	// test - so the counted set and the expensive set are the same set. A
+	// middleware predicate would re-read r.URL.Query() and count ?q= and
+	// ?q=%20%20, which parseFilterQ has already normalized to absent;
+	// TestListJobs_WhitespaceOnlyQIsNotCounted is that input.
+	//
+	// AFTER the filters parse, so every 400 on this route outranks the 429:
+	// parsePage, the sort-versus-filter guard, rejectRepeatedParams and every 400
+	// inside parseJobFilters have all run. A malformed needle never reaches a
+	// statement, so it must not spend budget either.
+	//
+	// The identity is read above with the ok discarded, which is unchanged.
+	// allowSearch is what re-imposes it, and only for a q-carrying request: its
+	// key fails closed, so there is no bucket to charge without a principal.
+	if filters.Q != nil && !s.allowSearch(w, u) {
+		return
+	}
+
 	// Branch 1: ?scheduled_job_id=<uuid>
 	if schedIDStr := pp.Query.Get("scheduled_job_id"); schedIDStr != "" {
 		schedID, err := parseUUID(schedIDStr)

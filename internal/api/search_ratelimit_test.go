@@ -1,10 +1,18 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,4 +106,182 @@ func TestAllowSearch_UnarmedBucketAllowsEverything(t *testing.T) {
 		assert.True(t, s.allowSearch(rec, u))
 		assert.Equal(t, 200, rec.Code)
 	}
+}
+
+// countingDB is a store.DBTX that records every statement and refuses all of
+// them, so a request that reaches the database answers 500 and a request that
+// does not reaches nothing. Refusing rather than returning plausible zeros is
+// deliberate: 500 and 429 are then distinguishable at the recorder, with no
+// Postgres and no fixture rows.
+type countingDB struct{ calls int }
+
+var errRefusedByStub = errors.New("countingDB refuses every statement")
+
+func (d *countingDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	d.calls++
+	return pgconn.CommandTag{}, errRefusedByStub
+}
+
+func (d *countingDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	d.calls++
+	return nil, errRefusedByStub
+}
+
+func (d *countingDB) QueryRow(context.Context, string, ...any) pgx.Row {
+	d.calls++
+	return refusingRow{}
+}
+
+type refusingRow struct{}
+
+func (refusingRow) Scan(...any) error { return errRefusedByStub }
+
+// listJobsAs drives handleListJobs directly with an injected identity. Direct
+// rather than through Handler(), because BearerAuth would need a token row and
+// because the 401 this slice introduces is only reachable this way.
+func listJobsAs(t *testing.T, s *Server, u AuthUser, rawQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/jobs?"+rawQuery, nil)
+	req = req.WithContext(ctxWithUser(req.Context(), u))
+	rec := httptest.NewRecorder()
+	s.handleListJobs(rec, req)
+	return rec
+}
+
+func newSearchTestServer(t *testing.T, n int, win time.Duration) (*Server, *countingDB) {
+	t.Helper()
+	db := &countingDB{}
+	return &Server{q: store.New(db), SearchLimitN: n, SearchLimitWin: win}, db
+}
+
+// THE TEST THAT PROVES THE PLACEMENT, and the whitespace rows go FIRST because a
+// discriminating input placed last misses an early-exit mutation.
+//
+// ?q=%20%20 is PRESENT to r.URL.Query().Get("q") and ABSENT to parseFilterQ,
+// which trims it. The ceiling here is 1, so if the bucket were charged by a
+// middleware predicate testing Get("q") != "", the whitespace requests would
+// exhaust it and the FIRST real needle would be refused. Charged where the
+// needle is known to be non-nil, they cost nothing and the first needle is
+// allowed.
+//
+// It kills the middleware form of this control outright: not "the middleware is
+// less tidy" but "the middleware counts a set that is not the expensive set".
+func TestListJobs_WhitespaceOnlyQIsNotCounted(t *testing.T) {
+	s, _ := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+
+	for _, q := range []string{"q=%20%20", "q=%20%09%20", "q="} {
+		rec := listJobsAs(t, s, u, q)
+		require.NotEqual(t, http.StatusTooManyRequests, rec.Code,
+			"%s trims to absent and must not be charged: this is the exact input a middleware "+
+				"predicate would count and the in-handler placement cannot", q)
+	}
+
+	first := listJobsAs(t, s, u, "q=needle")
+	require.NotEqual(t, http.StatusTooManyRequests, first.Code,
+		"the whole budget must still be here; if this is 429 the check is counting absent needles")
+
+	second := listJobsAs(t, s, u, "q=needle")
+	assert.Equal(t, http.StatusTooManyRequests, second.Code,
+		"and the budget must be real: a check that counts nothing would let this through too")
+}
+
+// Unfiltered polling is UNAFFECTED, proven rather than asserted. Same handler,
+// same user, same limiter instance, so the needle is the only discriminator.
+func TestListJobs_UnfilteredPollingIsNotCounted(t *testing.T) {
+	s, _ := newSearchTestServer(t, 2, time.Minute)
+	u := searchTestUser(1)
+
+	for i := 0; i < 7; i++ {
+		rec := listJobsAs(t, s, u, "limit=10")
+		require.NotEqual(t, http.StatusTooManyRequests, rec.Code,
+			"unfiltered request %d was refused; the 3 s SPA poll must never reach this bucket", i)
+	}
+
+	for i := 0; i < 2; i++ {
+		rec := listJobsAs(t, s, u, "q=needle")
+		require.NotEqual(t, http.StatusTooManyRequests, rec.Code, "needle request %d", i)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+}
+
+// A REFUSED NEEDLE COSTS NO BUDGET, and the two 400 rows go first. An over-long
+// or non-UTF-8 q never reaches a statement, so charging for it would let a
+// caller spend budget on requests that cost the database nothing.
+func TestListJobs_RejectedNeedleCostsNoBudget(t *testing.T) {
+	s, _ := newSearchTestServer(t, 2, time.Minute)
+	u := searchTestUser(1)
+
+	tooLong := listJobsAs(t, s, u, "q="+strings.Repeat("a", maxFilterQRunes+1))
+	require.Equal(t, http.StatusBadRequest, tooLong.Code)
+	assert.JSONEq(t, `{"error":"`+maxFilterQMessage+`"}`, tooLong.Body.String())
+
+	badUTF8 := listJobsAs(t, s, u, "q=%FF%FE")
+	require.Equal(t, http.StatusBadRequest, badUTF8.Code)
+	assert.JSONEq(t, `{"error":"q is not valid UTF-8"}`, badUTF8.Body.String())
+
+	for i := 0; i < 2; i++ {
+		rec := listJobsAs(t, s, u, "q=needle")
+		require.NotEqual(t, http.StatusTooManyRequests, rec.Code,
+			"needle request %d: the two 400s above must have left the budget untouched", i)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+}
+
+// A 400 OUTRANKS THE 429. The input carries BOTH conditions: the budget is
+// already spent AND the needle is malformed. README documents the precedence
+// direction for this endpoint's 400s; this extends the same rule to the new
+// refusal.
+func TestListJobs_MalformedQOutranksTheRateLimit(t *testing.T) {
+	s, _ := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+
+	require.NotEqual(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+	require.Equal(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code,
+		"fixture: the budget must be exhausted, or the assertion below proves nothing")
+
+	rec := listJobsAs(t, s, u, "q="+strings.Repeat("a", maxFilterQRunes+1))
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"a malformed needle answers 400 even with the budget gone: a 429 here would tell a caller "+
+			"to slow down about a request that will never be valid")
+}
+
+// A 401 OUTRANKS THE 429 TOO, on the same input, and by construction: the key is
+// computed before the bucket is consulted.
+func TestListJobs_MissingIdentityIs401NotA429(t *testing.T) {
+	s, db := newSearchTestServer(t, 1, time.Minute)
+
+	rec := listJobsAs(t, s, AuthUser{}, "q=needle")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.JSONEq(t, `{"error":"unauthorized"}`, rec.Body.String())
+
+	// DECLARED BEHAVIOUR CHANGE. handleListJobs reads the identity as
+	// `u, _ := UserFromCtx(ctx)` and discards the ok, so this request would
+	// previously have listed the whole farm. It is unreachable through the mux,
+	// where the route is auth(http.HandlerFunc(s.handleListJobs)), and it aligns
+	// the jobs list with handleListScheduledJobs and with mine=true.
+	//
+	// It must NOT reach the database, which is the half a status code alone does
+	// not say: a 401 that still ran the count would be a refusal that costs
+	// exactly what it refused.
+	assert.Zero(t, db.calls, "a refusal must make no statement")
+}
+
+// The refusal touches NO DATABASE STATEMENT, asserted structurally rather than
+// by timing. store.Queries accepts any DBTX, so a recording stub is the seam.
+func TestListJobs_RefusalMakesNoDatabaseCall(t *testing.T) {
+	s, db := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+
+	require.NotEqual(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+	require.Positive(t, db.calls,
+		"fixture: an ALLOWED search must reach the database, or 'the refusal made no call' is "+
+			"vacuously true of every request")
+	spent := db.calls
+
+	rec := listJobsAs(t, s, u, "q=needle")
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, spent, db.calls,
+		"a refused search must make zero statements: the bucket exists to stop pool occupancy, and a "+
+			"refusal that still occupied a connection would bound nothing")
 }
