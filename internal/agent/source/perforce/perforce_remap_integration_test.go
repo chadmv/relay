@@ -15,11 +15,10 @@ import (
 )
 
 // A stream whose client view remaps its parent's storage has no depot storage
-// under its own name: `p4 files //test/virt/...` reports no such file(s), so
-// addressing p4 by the stream-name depot path resolves nothing. The remapped
-// on-disk path below is reachable only through the client view, which is why it
-// is the assertion - a fake runner echoes whatever it is told and can say
-// nothing about this.
+// under its own name, so addressing p4 by the stream-name depot path resolves
+// nothing. The remapped on-disk path below is reachable only through the client
+// view, which is why it is the assertion - a fake runner echoes whatever it is
+// told and can say nothing about this.
 //
 // The content is compared after trimming: the depot file is text, so a p4
 // client with LineEnd local translates it on sync and the bytes on disk differ

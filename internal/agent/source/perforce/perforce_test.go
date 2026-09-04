@@ -18,8 +18,7 @@ import (
 // it. The client-selection half is the `-c <client>` argv, pinned separately.
 //
 // Head resolution is the exception because it runs BEFORE ws.Acquire, when the
-// workspace has no holders and a sweep can be deleting it; it runs with an empty
-// cwd like the client -o/-i/-d spec operations.
+// workspace has no holders and a sweep can be deleting it.
 // TestProvider_HeadResolutionRunsWithNoWorkspaceCwd is its own guard.
 func assertCwdContract(t *testing.T, fr *fakeRunner, wsRoot string) {
 	t.Helper()

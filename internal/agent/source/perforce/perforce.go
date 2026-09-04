@@ -148,8 +148,8 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// been told is going away costs no p4 work and its client -i cannot race the
 	// evictor's client -d. Correctness does not depend on that ordering - the
 	// post-Acquire re-check is what partitions the destructive window - but
-	// TestEvictWorkspace_PrepareRefusedWhileReserved registers no p4 fixtures at
-	// all, so it goes red the moment any p4 call moves ahead of this.
+	// TestEvictWorkspace_PrepareRefusedWhileReserved goes red the moment any p4
+	// call moves ahead of this.
 	p.mu.Lock()
 	if p.evicting[shortID] {
 		p.mu.Unlock()
@@ -163,14 +163,17 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	p.mu.Unlock()
 
 	// The p4 client must exist before any client-scoped call, and head resolution
-	// becomes one: a virtual or import+ remap stream has no depot storage under
-	// the stream name. So creation moves above the resolve loop and runs on every
-	// Prepare, which is also what repairs a half-built workspace on a later
-	// attempt. Registration goes with creation because nothing else records that
-	// the directory and client spec exist; a Prepare that fails between here and
+	// is one: a virtual or import+ remap stream has no depot storage under the
+	// stream name, so only the client's view can address it. The create runs on
+	// every Prepare, not only the first, which is also what repairs a workspace
+	// whose client spec was deleted while its registry row survived;
+	// TestProvider_AWarmPrepareStillRewritesTheClientSpec is that guard.
+	// Registration goes with creation because nothing else records that the
+	// directory and client spec exist; a Prepare that fails between here and
 	// ws.Acquire holds no workspace handle and must not try to release one.
 	// TestProvider_AResolveHeadFailureOnFirstUseLeavesAReclaimableWorkspace and
 	// TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory.
+
 	// A registry row can outlive its content - a crash between sweeper.evict's
 	// os.RemoveAll and its reg.Remove, an os.RemoveAll that emptied the directory
 	// and then failed on the rmdir itself, or an operator reclaiming disk by hand
@@ -198,11 +201,11 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
 		return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
 	}
-	// The !found guard stays. An unconditional Upsert replaces the whole struct,
-	// dropping another task's OpenTaskChangelists and resetting BaselineHash to
-	// "". Registry.Mutate is the sanctioned way to edit an entry in place, and
-	// the warm branch below uses it to reconcile the row with what the create
-	// above actually did.
+	// Upsert replaces the whole struct, so it runs only on the cold path: on a
+	// warm one it would drop another task's OpenTaskChangelists and reset
+	// BaselineHash to "". Registry.Mutate edits in place, and the warm branch
+	// uses it to reconcile the row with what the create above actually did.
+	// TestProvider_AWarmPrepareKeepsAnotherTasksOpenChangelist.
 	if !found {
 		reg.Upsert(WorkspaceEntry{
 			ShortID:      shortID,
@@ -601,9 +604,7 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 func toClientPath(clientName, stream, depotPath string) (string, error) {
 	if depotPath == stream {
 		// //<client> with no wildcard names nothing, so an empty remainder maps
-		// to the whole client. This is a behaviour change for a spec whose path
-		// equals its stream: p4 read the old //s/x@12345 as a single file and
-		// synced nothing.
+		// to the whole client.
 		return "//" + clientName + "/...", nil
 	}
 	if strings.HasPrefix(depotPath, stream+"/") {
