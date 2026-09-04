@@ -115,3 +115,54 @@ func TestBuildHTTPServer_AHumansRetryRunIsNotRefused(t *testing.T) {
 		"the sixth attempt must be refused: without this the five 400s above are also what an "+
 			"unwrapped route produces. body: %s", over.Body.String())
 }
+
+// TestBuildHTTPServer_ThePasswordBucketIsSeparateFromTheSubmitBucket makes the
+// two-buckets decision executable rather than prose, in the lane CI runs.
+//
+// THE MIDDLE ASSERTION IN EACH DIRECTION IS THE CONTROL. Without proving the
+// first bucket is FULL, the final 400 is also what a fixture whose limiter never
+// ran produces, and the test would be green for the wrong reason.
+//
+// Both buckets are set to 1 so a single spend fills either one.
+func TestBuildHTTPServer_ThePasswordBucketIsSeparateFromTheSubmitBucket(t *testing.T) {
+	build := func() *http.Server {
+		return buildHTTPServer(httpServerDeps{
+			addr:                   "127.0.0.1:0",
+			q:                      store.New(stubAdminDB{}),
+			jobSubmitLimitN:        1,
+			jobSubmitLimitWin:      time.Minute,
+			passwordChangeLimitN:   1,
+			passwordChangeLimitWin: time.Minute,
+		})
+	}
+
+	t.Run("a spent submit budget does not refuse a password change", func(t *testing.T) {
+		srv := build()
+
+		spend := postAsUser(t, srv, "/v1/jobs", `{}`)
+		require.Equal(t, http.StatusBadRequest, spend.Code, "body: %s", spend.Body.String())
+		over := postAsUser(t, srv, "/v1/jobs", `{}`)
+		require.Equal(t, http.StatusTooManyRequests, over.Code,
+			"control: the submit bucket must be provably full before the assertion below means anything")
+
+		rec := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"a spent submit budget must not refuse a password change: the two buckets bound "+
+				"different quantities and sharing one would trade the wrong direction. body: %s",
+			rec.Body.String())
+	})
+
+	t.Run("a spent password budget does not refuse a job submission", func(t *testing.T) {
+		srv := build()
+
+		spend := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+		require.Equal(t, http.StatusBadRequest, spend.Code, "body: %s", spend.Body.String())
+		over := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+		require.Equal(t, http.StatusTooManyRequests, over.Code,
+			"control: the password bucket must be provably full before the assertion below means anything")
+
+		rec := postAsUser(t, srv, "/v1/jobs", `{}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"a spent password budget must not refuse a job submission. body: %s", rec.Body.String())
+	})
+}
