@@ -71,6 +71,7 @@ class TaskStatus(str, Enum):
     QUEUED = "queued"
     BLOCKED = "blocked"
     DISPATCHED = "dispatched"
+    PREPARING = "preparing"
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"

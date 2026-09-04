@@ -730,3 +730,18 @@ def test_scheduled_job_empty_last_error_is_not_coerced_to_none() -> None:
     sj = ScheduledJob.model_validate(_scheduled_job_wire(last_error=""))
     assert sj.last_error == ""
     assert sj.last_error is not None
+
+
+def test_task_status_accepts_an_unknown_server_value() -> None:
+    """Task.status is Optional[str], not Optional[TaskStatus].
+
+    GREEN BEFORE AND AFTER the server gained `preparing`, deliberately. It is not
+    a red-first criterion; it pins the typing choice against a future "tightening"
+    to the enum type, which is the only way this SDK can break on a new server
+    status - it would turn every unknown value into a parse error at every
+    consumer at once. An old SDK against a new server is NOT the compatibility
+    case here.
+    """
+    assert Task(name="t", status="preparing").status == "preparing"
+    assert Task(name="t", status="a-status-from-the-future").status == "a-status-from-the-future"
+    assert TaskStatus.PREPARING == "preparing"
