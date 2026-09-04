@@ -257,16 +257,53 @@ WHERE id = sqlc.arg(id)
   AND timezone = sqlc.arg(timezone)
   AND last_error IS DISTINCT FROM sqlc.arg(last_error);
 
--- name: ListEnabledScheduledJobs :many
+-- name: ListEnabledScheduledJobsPage :many
+-- ONE PAGE of enabled schedules for schedrunner.ValidateStoredSpecsOnStartup,
+-- keyset-paged on the primary key.
+--
 -- EVERY enabled schedule, not just the overdue ones. The startup sweep's whole
 -- point is the schedules NEITHER existing loop sees: ListEligibleScheduledJobs
 -- and ListOverdueScheduledJobsForCatchup both require next_run_at to have
 -- passed, so a healthy-looking @monthly schedule broken by a retroactive
 -- validation change stays invisible for up to a month after the fix deploys.
--- Ordered by id purely for a deterministic sweep order in tests.
+--
+-- ORDER BY id IS THE CURSOR'S TOTAL ORDER, not a sweep-determinism convenience.
+-- Postgres compares uuid bytewise, so `id > cursor_id` is a well-defined range
+-- served by the primary key index. Keyset paging is skip-free and duplicate-free
+-- only while the cursor key is immutable, and id is the primary key.
+--
+-- THE LIMIT IS EXACT: at most page_limit rows, and the caller detects the end by
+-- a SHORT page. Do not add the `+ 1` a client-facing page needs to compute a
+-- NextCursor - it makes the last full page indistinguishable from a short one,
+-- so the sweep would stop one page early.
+--
+-- cursor_set, NOT A ZERO-UUID SEED. A pgtype.UUID zero value has Valid: false,
+-- which encodes as SQL NULL, and `id > NULL` is NULL, so the first page would
+-- return no rows and the sweep would silently do nothing at all: no error, no
+-- log line. Same failure shape as an epoch-fenced query called with a zero-value
+-- epoch.
+--
+-- WHAT A CONCURRENT WRITER DOES TO A SWEEP IN PROGRESS:
+--   DELETE - safe. A keyset cursor is a value in the key space, not a row
+--     offset, so removing a row before the cursor cannot shift a later row into
+--     or out of a page. With OFFSET n it would, silently. That is why OFFSET is
+--     rejected here.
+--   INSERT - id defaults to gen_random_uuid(), which is random rather than
+--     monotonic, so a new row lands uniformly at random relative to the cursor
+--     and is seen or missed in proportion to how much of the key space is left.
+--     Nothing here is "stable for appends"; there are no appends. Missing one is
+--     harmless: it arrived through a route that ran jobspec.Validate from the
+--     same binary generation the sweep is applying, so this binary's retroactive
+--     rule cannot have broken it.
+--   enabled flipped - a row disabled after being read is still processed, as it
+--     was under a single unpaged read. A row enabled mid-sweep is seen if its id
+--     sorts above the cursor and missed otherwise; unpaged it was always missed.
+--     Paging can only see MORE rows, never fewer.
 SELECT * FROM scheduled_jobs
  WHERE enabled
- ORDER BY id;
+   AND (NOT @cursor_set::bool OR id > @cursor_id::uuid)
+ ORDER BY id
+ LIMIT @page_limit::int;
 
 -- name: AdvanceScheduledJobNextRun :exec
 UPDATE scheduled_jobs

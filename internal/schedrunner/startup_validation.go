@@ -8,7 +8,31 @@ import (
 
 	"relay/internal/jobspec"
 	"relay/internal/store"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// sweepPageSize is how many rows ValidateStoredSpecsOnStartup holds at once.
+//
+// IT IS NOT BatchLimit AND MUST NOT BE ALIASED TO IT. BatchLimit governs how
+// many rows one tick holds LOCKED, since ListEligibleScheduledJobs is FOR UPDATE
+// SKIP LOCKED inside a transaction. This sweep takes no locks and runs once; its
+// limit governs peak resident bytes. Two independent policies behind one number
+// makes one of the two comments false the first time either moves.
+//
+// THE PAGE SIZE IS THE LEVER FOR PEAK BYTES, NOT THE COLUMN LIST. job_spec
+// dominates a row - it is bounded only by maxBodyBytes, 1 MiB - and it is
+// load-bearing twice, since validateStoredRow reads it and
+// RecordScheduledJobFailure's fence sends it back, so it cannot be dropped. At
+// 100 the sweep's peak resident row set is one tick's batch, which the runner
+// already sustains every TickInterval for the life of the process. That is the
+// argument for the number, not a claim that 100 MiB is comfortable.
+//
+// A CONSTANT, NOT AN ENV VAR. The configurable-timeout convention is about waits
+// whose right value depends on the operator's data. No operator has information
+// the code lacks about how many rows to hold at once; if the ceiling moves it
+// should move for everyone, in a commit that says why.
+const sweepPageSize = 100
 
 // ValidateStoredSpecsOnStartup re-validates every ENABLED schedule's stored spec
 // once at boot and records a failure for each one that no longer passes. Call
@@ -60,59 +84,78 @@ import (
 // operator-visible schedule problem into a server that will not start would be
 // strictly worse than the invisibility this sweep exists to fix.
 //
-// THAT IS NARROWER THAN "THIS SWEEP CANNOT STOP THE BOOT", which is what this
-// comment used to claim, and the difference is the unbounded read in FRONT of
-// the loop rather than anything inside it. ListEnabledScheduledJobs has no
-// LIMIT, this function consumes it into one slice synchronously, and the caller
-// runs it before srv.ListenAndServe() - so a large enough scheduled_jobs table
-// delays or exhausts the boot, and the HTTP API an operator would use to delete
-// the offending rows is exactly what never comes up. There is no per-user
-// schedule quota and no rate limit on POST /v1/scheduled-jobs, so growing it is
-// an ordinary authenticated user's privilege. Paging this sweep and the quota
-// policy are the scope of
-// docs/backlog/bug-2026-08-28-boot-sweep-lists-every-schedule-ahead-of-the-listener.md,
-// not of this comment; what is fixed here is the claim.
+// THAT IS NARROWER THAN "THIS SWEEP CANNOT STOP THE BOOT", and the gap is in
+// FRONT of the loop rather than inside it. The read is paged, so peak memory and
+// per-statement work are bounded by sweepPageSize. THE SWEEP'S TOTAL WALL CLOCK
+// IS STILL PROPORTIONAL TO THE NUMBER OF ENABLED SCHEDULES, and nothing here
+// bounds that number: paging converted an unbounded allocation into an unbounded
+// duration. The caller runs this before srv.ListenAndServe(), so a large enough
+// scheduled_jobs table still delays the boot, and the HTTP API an operator would
+// use to delete the offending rows is exactly what never comes up. Growing that
+// table is an ordinary authenticated user's privilege. What bounds the number is
+// a per-owner schedule cap, which does not exist:
+// docs/backlog/feature-2026-09-04-per-owner-schedule-cap.md.
 //
-// Cost: one pass over N enabled schedules at boot, with no I/O per row beyond
-// the read that lists them and one UPDATE per BROKEN row.
+// Cost: for N enabled schedules that do not change during the pass,
+// floor(N/sweepPageSize)+1 SELECTs and one UPDATE per BROKEN row, with peak
+// resident rows of one page rather than N.
 func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
-	rows, err := q.ListEnabledScheduledJobs(ctx)
-	if err != nil {
-		return err
-	}
-	for _, row := range rows {
-		text, ok := recordableFailure(validateStoredRow(row))
-		if !ok {
-			continue
-		}
-		// THE THREE COLUMNS PASSED BACK ARE THE FENCE, and they are exactly the
-		// three validateStoredRow read. The write lands only if the row is still
-		// the generation this verdict is about; see RecordScheduledJobFailure's
-		// own header for why the fence is the content rather than updated_at.
-		n, err := q.RecordScheduledJobFailure(ctx, store.RecordScheduledJobFailureParams{
-			ID:        row.ID,
-			LastError: &text,
-			JobSpec:   row.JobSpec,
-			CronExpr:  row.CronExpr,
-			Timezone:  row.Timezone,
+	var (
+		cursor    pgtype.UUID
+		cursorSet bool
+	)
+	for {
+		rows, err := q.ListEnabledScheduledJobsPage(ctx, store.ListEnabledScheduledJobsPageParams{
+			CursorSet: cursorSet,
+			CursorID:  cursor,
+			PageLimit: sweepPageSize,
 		})
 		if err != nil {
-			log.Printf("schedrunner: startup validation record for %s: %v", row.Name, err)
-			continue
+			return err
 		}
-		if n == 0 {
-			// EITHER the row changed between the LIST and this UPDATE - another
-			// replica, or an operator repairing it through one - OR the identical
-			// message is already recorded. Neither is news, and the second is the
-			// steady state for the entire life of a broken schedule, so logging
-			// here would put a line in every boot's output forever.
-			//
-			// THIS IS THE WHOLE REASON THE QUERY IS :execrows. With :exec a fence
-			// that said no and a database fault are the same nil, and the branch
-			// below could not exist.
-			continue
+		for _, row := range rows {
+			text, ok := recordableFailure(validateStoredRow(row))
+			if !ok {
+				continue
+			}
+			// THE THREE COLUMNS PASSED BACK ARE THE FENCE, and they are exactly the
+			// three validateStoredRow read. The write lands only if the row is still
+			// the generation this verdict is about; see RecordScheduledJobFailure's
+			// own header for why the fence is the content rather than updated_at.
+			n, err := q.RecordScheduledJobFailure(ctx, store.RecordScheduledJobFailureParams{
+				ID:        row.ID,
+				LastError: &text,
+				JobSpec:   row.JobSpec,
+				CronExpr:  row.CronExpr,
+				Timezone:  row.Timezone,
+			})
+			if err != nil {
+				log.Printf("schedrunner: startup validation record for %s: %v", row.Name, err)
+				continue
+			}
+			if n == 0 {
+				// EITHER the row changed between the LIST and this UPDATE - another
+				// replica, or an operator repairing it through one - OR the identical
+				// message is already recorded. Neither is news, and the second is the
+				// steady state for the entire life of a broken schedule, so logging
+				// here would put a line in every boot's output forever.
+				//
+				// THIS IS THE WHOLE REASON THE QUERY IS :execrows. With :exec a fence
+				// that said no and a database fault are the same nil, and the branch
+				// below could not exist.
+				continue
+			}
+			log.Printf("schedrunner: startup validation recorded a new failure for schedule %s: %s", row.Name, text)
 		}
-		log.Printf("schedrunner: startup validation recorded a new failure for schedule %s: %s", row.Name, text)
+		// A SHORT PAGE IS THE END, not an empty one. On a table whose enabled
+		// count is an exact multiple of sweepPageSize this costs one empty round
+		// trip; breaking on an empty page costs the same trip on every table and
+		// reads as if a full page could be the last one.
+		if len(rows) < sweepPageSize {
+			break
+		}
+		cursor = rows[len(rows)-1].ID
+		cursorSet = true
 	}
 	return nil
 }
