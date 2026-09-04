@@ -23,10 +23,7 @@ import (
 // THE PAGE SIZE IS THE LEVER FOR PEAK BYTES, NOT THE COLUMN LIST. job_spec
 // dominates a row - it is bounded only by maxBodyBytes, 1 MiB - and it is
 // load-bearing twice, since validateStoredRow reads it and
-// RecordScheduledJobFailure's fence sends it back, so it cannot be dropped. At
-// 100 the sweep's peak resident row set is one tick's batch, which the runner
-// already sustains every TickInterval for the life of the process. That is the
-// argument for the number, not a claim that 100 MiB is comfortable.
+// RecordScheduledJobFailure's fence sends it back, so it cannot be dropped.
 //
 // A CONSTANT, NOT AN ENV VAR. The configurable-timeout convention is about waits
 // whose right value depends on the operator's data. No operator has information
@@ -93,9 +90,15 @@ const sweepPageSize = 100
 // duration. The caller runs this before srv.ListenAndServe(), so a large enough
 // scheduled_jobs table still delays the boot, and the HTTP API an operator would
 // use to delete the offending rows is exactly what never comes up. Growing that
-// table is an ordinary authenticated user's privilege. What bounds the number is
-// a per-owner schedule cap, which does not exist:
-// docs/backlog/feature-2026-09-04-per-owner-schedule-cap.md.
+// table is an ordinary authenticated user's privilege. A per-owner schedule cap
+// would bound the STARTING work set and not the pass, because every page is a
+// fresh snapshot: a row inserted mid-sweep joins the work set whenever its
+// gen_random_uuid() id sorts above the cursor, so an owner sitting at a cap can
+// delete and re-POST to keep feeding one. The pass still converges, since the
+// unswept fraction of the key space only shrinks, so that residual is duration
+// amplification rather than non-termination - and bounding the duration itself
+// wants a deadline or a page ceiling on the sweep. The cap and that open
+// question: docs/backlog/feature-2026-09-04-per-owner-schedule-cap.md.
 //
 // Cost: for N enabled schedules that do not change during the pass,
 // floor(N/sweepPageSize)+1 SELECTs and one UPDATE per BROKEN row, with peak

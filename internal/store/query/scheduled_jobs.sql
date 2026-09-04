@@ -298,7 +298,14 @@ WHERE id = sqlc.arg(id)
 --   enabled flipped - a row disabled after being read is still processed, as it
 --     was under a single unpaged read. A row enabled mid-sweep is seen if its id
 --     sorts above the cursor and missed otherwise; unpaged it was always missed.
---     Paging can only see MORE rows, never fewer.
+--     A row disabled before its OWN page is read is missed, where one unpaged
+--     read at t0 would have recorded its failure. Every page is a fresh
+--     snapshot, so that direction is a paging effect and it loses a row.
+--   UPDATE of the three fenced columns - a row already read is not revisited, so
+--     a spec broken after its own page was read records nothing this pass, and a
+--     spec repaired after it was read cannot have the stale verdict stamped back
+--     (RecordScheduledJobFailure fences on exactly those columns). Not a paging
+--     effect: one unpaged read at t0 missed the first case too.
 SELECT * FROM scheduled_jobs
  WHERE enabled
    AND (NOT @cursor_set::bool OR id > @cursor_id::uuid)

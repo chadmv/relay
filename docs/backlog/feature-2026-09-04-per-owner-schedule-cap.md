@@ -30,9 +30,21 @@ line if a reason appears.
 `docs/superpowers/specs/2026-09-04-boot-sweep-keyset-paging.md` keyset-pages
 `ValidateStoredSpecsOnStartup`, which bounds the sweep's peak MEMORY to one page. It does not
 bound its DURATION: an actor with a million schedules still delays `ListenAndServe` by O(N)
-round trips. Only a cap on N closes that, so the paging slice's doc comment cites this item by
-filename. A decision conditioned on "the cap is coming" is unfalsifiable until the cap is a
-findable item.
+round trips. A cap bounds the sweep's STARTING work set, which is what the paging slice's doc
+comment cites this item for. A decision conditioned on "the cap is coming" is unfalsifiable
+until the cap is a findable item.
+
+**A cap does not bound the sweep's duration on its own, and that is an OPEN QUESTION on this
+item rather than a consequence of it.** HEAD's single unpaged statement read one MVCC snapshot,
+so the work set was fixed at N0 the instant the sweep started. The paged sweep takes a fresh
+snapshot per page, so a row INSERTed mid-sweep joins the work set whenever its
+`gen_random_uuid()` id sorts above the cursor - with probability equal to the unswept fraction
+of the key space. An owner sitting at the cap can `DELETE` one schedule and `POST` another
+indefinitely, and a count cap bounds N0 alone. The pass still converges, since the unswept
+fraction only shrinks, so this is duration amplification and not non-termination - but it is
+amplification the cap does not close, and it exists only because the read is paged. What would
+actually bound the duration is a wall-clock deadline on the sweep, or a ceiling on total pages.
+Decide which, here or in its own item, before this item's acceptance claims a duration bound.
 
 Note the same hazard applies to `handleRunScheduledJobNow`, which is an HTTP route that creates
 a job from a stored spec. It is bucketed by the submit rate limit, but that bounds job creation,
@@ -53,8 +65,9 @@ Sketch only; the number is the work.
 ## Acceptance / Done When
 
 - A per-owner schedule count is bounded, and the bound is configurable.
-- The boot sweep's DURATION is bounded as a consequence, and the boot-sweep item's first
-  acceptance criterion can be restated to say so.
+- The boot sweep's STARTING work set is bounded as a consequence. Its DURATION is not, until the
+  open question above is settled - do not restate the boot-sweep item's first acceptance
+  criterion as a duration bound on the strength of this item alone.
 - README documents the cap and its configuration.
 
 ## Related

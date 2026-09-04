@@ -10,12 +10,23 @@ source: Phase 4 security, invariants and correctness lenses of the unfireable-sc
 # The startup validation sweep lists every enabled schedule unbounded, ahead of the HTTP listener
 
 ## Summary
-`ListEnabledScheduledJobs` is `SELECT * FROM scheduled_jobs WHERE enabled ORDER BY id` with no
-LIMIT, and `ValidateStoredSpecsOnStartup` consumes it into one slice synchronously during boot,
-before `srv.ListenAndServe()`. `SELECT *` carries every row's `job_spec`. Because there is no
-per-user cap on schedule creation and no rate limit on `POST /v1/scheduled-jobs`, an ordinary
-authenticated user can grow that table until the server cannot finish booting - and the HTTP API
-an operator would use to delete the offending schedules is exactly what never comes up.
+`ValidateStoredSpecsOnStartup` re-validates every ENABLED schedule synchronously during boot,
+before `srv.ListenAndServe()`. Its read is keyset-paged through
+`ListEnabledScheduledJobsPage`, so peak memory and per-statement work are one page: the
+ALLOCATION half of this item is closed. **What survives is the DURATION.** The sweep issues
+O(N) sequential round trips ahead of the listener - one page read per `sweepPageSize` enabled
+rows plus one `UPDATE` per BROKEN row - and nothing bounds N. There is no per-user cap on
+schedule creation, so an ordinary authenticated user can grow `scheduled_jobs` until the boot
+takes long enough to matter, and the HTTP API an operator would use to delete the offending
+schedules is exactly what never comes up.
+
+**Paging added a second term to the same exposure.** The unpaged statement read ONE MVCC
+snapshot, so its work set was fixed at N0 the instant the sweep started and no concurrent writer
+could grow it. Every page is now its own snapshot, so a row INSERTed mid-sweep joins the work
+set whenever its `gen_random_uuid()` id sorts above the cursor - with probability equal to the
+unswept fraction of the key space. A per-owner count cap bounds N0 and not this: an owner at the
+cap can `DELETE` one schedule and `POST` another indefinitely. The pass still converges, since
+the unswept fraction only shrinks, so this is duration amplification and not non-termination.
 
 ## Context
 Found independently by three Phase 4 review lenses on the slice that added the sweep
@@ -43,9 +54,13 @@ rule. So the worst case for latency coincides with the case it was built to serv
 ## Repro / Symptoms
 - Authenticated non-admin creates many schedules with large `job_spec` bodies (each bounded only
   by `maxBodyBytes`, 1 MiB).
-- Restart the server. Boot allocates one `store.ScheduledJob` per enabled row, all at once,
-  before the listener starts.
-- Under a readiness probe the outcome is a crash loop, with no HTTP surface to repair it from.
+- Restart the server. Boot holds one page of `store.ScheduledJob` at a time, but issues one
+  round trip per page and one `UPDATE` per broken row before the listener starts, so total wall
+  clock is proportional to the enabled count.
+- Keep creating schedules WHILE the sweep runs. Each page is a fresh snapshot, so rows landing
+  above the cursor extend the same pass.
+- Under a readiness probe the outcome is a probe timeout and a restart loop, with no HTTP
+  surface to repair it from.
 
 ## Proposal
 Two independent halves, either shippable alone:
@@ -85,8 +100,10 @@ locks. Neither is a correctness objection; both are behaviour changes wanting th
   **Met.** Its DURATION is not, and this item must not read as if the exposure is closed: paging
   converted an unbounded ALLOCATION into an unbounded DURATION. An actor with a million enabled
   schedules still delays the boot by O(N) round trips before `ListenAndServe`, and the HTTP API an
-  operator would use to delete them still comes up last. What bounds N is the per-owner cap, which
-  is not here.
+  operator would use to delete them still comes up last. The per-owner cap, which is not here,
+  bounds the STARTING work set; bounding the DURATION additionally needs a deadline or a
+  total-pages ceiling on the sweep, recorded as an open question on
+  [[feature-2026-09-04-per-owner-schedule-cap]].
 - The sweep's doc comment states the property it actually has. **Already met at the time this
   slice was scoped** - the `THAT IS NARROWER THAN` paragraph was accurate before any of this
   landed. A criterion green before the change pins nothing, so the slice did not treat it as work.
