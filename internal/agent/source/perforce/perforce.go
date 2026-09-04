@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,26 +133,6 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		return nil, err
 	}
 
-	// Resolve #head to a specific CL number.
-	resolved := make(map[string]string, len(pf.Sync))
-	syncSpecs := make([]string, 0, len(pf.Sync))
-	syncPaths := make([]string, 0, len(pf.Sync))
-	for _, e := range pf.Sync {
-		rev := e.Rev
-		if rev == "#head" {
-			cl, err := p.cfg.Client.ResolveHead(ctx, e.Path)
-			if err != nil {
-				return nil, classifyP4Error(fmt.Errorf("resolve head for %s: %w", e.Path, err))
-			}
-			rev = fmt.Sprintf("@%d", cl)
-			resolved[e.Path] = rev
-		}
-		syncSpecs = append(syncSpecs, e.Path+rev)
-		syncPaths = append(syncPaths, e.Path)
-	}
-
-	baseline := BaselineHash(pf, resolved)
-
 	// Find or allocate a workspace short_id for this stream.
 	existing, found := reg.GetBySourceKey(pf.Stream)
 	var shortID string
@@ -164,6 +145,12 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	clientName := fmt.Sprintf("relay_%s_%s", p.cfg.Hostname, shortID)
 
 	// Get or create the in-memory Workspace arbitrator.
+	// This check runs ahead of the creation below so a workspace we have already
+	// been told is going away costs no p4 work and its client -i cannot race the
+	// evictor's client -d. Correctness does not depend on that ordering - the
+	// post-Acquire re-check is what partitions the destructive window - but
+	// TestEvictWorkspace_PrepareRefusedWhileReserved goes red the moment any p4
+	// call moves ahead of this.
 	p.mu.Lock()
 	if p.evicting[shortID] {
 		p.mu.Unlock()
@@ -175,6 +162,110 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		p.workspaces[shortID] = ws
 	}
 	p.mu.Unlock()
+
+	// The p4 client must exist before any client-scoped call, and head resolution
+	// is one: a virtual or import+ remap stream has no depot storage under the
+	// stream name, so only the client's view can address it. The create runs on
+	// every Prepare, not only the first, which is also what repairs a workspace
+	// whose client spec was deleted while its registry row survived;
+	// TestProvider_AWarmPrepareStillRewritesTheClientSpec is that guard.
+	// Registration goes with creation because nothing else records that the
+	// directory and client spec exist; a Prepare that fails between here and
+	// ws.Acquire holds no workspace handle and must not try to release one.
+	// TestProvider_AResolveHeadFailureOnFirstUseLeavesAReclaimableWorkspace and
+	// TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory.
+
+	// A registry row can outlive its content - a crash between sweeper.evict's
+	// os.RemoveAll and its reg.Remove, an os.RemoveAll that emptied the directory
+	// and then failed on the rmdir itself, or an operator reclaiming disk by hand
+	// - and the MkdirAll below silently recreates a missing directory EMPTY. Read
+	// the state before destroying the evidence.
+	// TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs and
+	// TestProvider_AWarmEntryWhoseDirectoryIsEmptyStillSyncs.
+	wsRootEmpty := isMissingOrEmptyDir(wsRoot)
+	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+		return nil, err
+	}
+	// The caller-supplied template is applied only when the workspace is cold.
+	// Workspaces are keyed on the stream alone and ClientTemplate is in neither
+	// that key nor BaselineHash, so two tasks carrying different templates hash
+	// identically, are admitted together in ModeShared, and re-applying -t here
+	// would let them flip one shared client spec against each other outside the
+	// workspace lock - one of them possibly mid-sync.
+	// TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace.
+	tmpl := ""
+	if !found && pf.ClientTemplate != nil {
+		tmpl = *pf.ClientTemplate
+	}
+	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
+		return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
+	}
+	// Upsert replaces the whole struct, so it runs only on the cold path: on a
+	// warm one it would drop another task's OpenTaskChangelists and reset
+	// BaselineHash to "". Registry.Mutate edits in place, and the warm branch
+	// uses it to reconcile the row with what the create above actually did.
+	// TestProvider_AWarmPrepareKeepsAnotherTasksOpenChangelist.
+	if !found {
+		reg.Upsert(WorkspaceEntry{
+			ShortID:      shortID,
+			SourceKey:    pf.Stream,
+			ClientName:   clientName,
+			BaselineHash: "",
+			LastUsedAt:   time.Now(),
+		})
+		_ = reg.Save()
+	} else {
+		_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
+			// clientName is recomputed from the hostname every call; the row
+			// records what an earlier Prepare created. The sweeper deletes the
+			// recorded name, so a disagreement orphans the client that exists.
+			e.ClientName = clientName
+			// DirtyDelete means the p4 client is already gone and sweeper.evict
+			// must skip client -d. The create above put it back.
+			e.DirtyDelete = false
+			if wsRootEmpty {
+				// Clearing the baseline rather than setting a local flag: it is
+				// persisted, so a crash mid-sync still re-syncs, and a second
+				// task admitted in ModeShared reads the same "" and syncs too
+				// instead of running in the empty tree this one is filling.
+				e.BaselineHash = ""
+			}
+		})
+		_ = reg.Save()
+	}
+
+	// Resolve #head to a specific CL number.
+	//
+	// resolved and syncPaths are keyed on the DEPOT path. BaselineHash is a
+	// cross-process contract: scheduler.BaselineHashFromAPISpec computes the same
+	// function server-side to score warm-workspace affinity, and the coordinator
+	// cannot know this agent's hostname or allocated short id, both of which feed
+	// clientName. Only syncSpecs - the p4 argv - becomes client-form.
+	resolved := make(map[string]string, len(pf.Sync))
+	syncSpecs := make([]string, 0, len(pf.Sync))
+	syncPaths := make([]string, 0, len(pf.Sync))
+	for _, e := range pf.Sync {
+		cp, err := toClientPath(clientName, pf.Stream, e.Path)
+		if err != nil {
+			return nil, err
+		}
+		rev := e.Rev
+		if rev == "#head" {
+			cl, err := p.cfg.Client.ResolveHead(ctx, clientName, cp)
+			if err != nil {
+				// The wrap names the DEPOT path: it is what the operator wrote and
+				// can act on, where the argv carries the client path.
+				// TestProvider_ANonP4CommandErrorCarryingASpecPathIsNotClassified.
+				return nil, classifyP4Error(fmt.Errorf("resolve head for %s: %w", e.Path, err))
+			}
+			rev = fmt.Sprintf("@%d", cl)
+			resolved[e.Path] = rev
+		}
+		syncSpecs = append(syncSpecs, cp+rev)
+		syncPaths = append(syncPaths, e.Path)
+	}
+
+	baseline := BaselineHash(pf, resolved)
 
 	if prepareAcquireHook != nil {
 		prepareAcquireHook(shortID)
@@ -199,6 +290,10 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// releasing the handle so we never sync into a workspace being deleted. If
 	// instead our Acquire landed first, EvictWorkspace sees holders > 0 and
 	// refuses; exactly one of the two proceeds.
+	//
+	// It does not follow that the registry entry survived: a sweep that completed
+	// entirely inside the window leaves p.evicting clear here. The registry check
+	// below is what catches that case.
 	p.mu.Lock()
 	evicting := p.evicting[shortID]
 	p.mu.Unlock()
@@ -207,28 +302,17 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
 	}
 
-	// First time: create on-disk dir and p4 client spec.
-	if !found {
-		if err := os.MkdirAll(wsRoot, 0o755); err != nil {
-			handle.Release()
-			return nil, err
-		}
-		tmpl := ""
-		if pf.ClientTemplate != nil {
-			tmpl = *pf.ClientTemplate
-		}
-		if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
-			handle.Release()
-			return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
-		}
-		reg.Upsert(WorkspaceEntry{
-			ShortID:      shortID,
-			SourceKey:    pf.Stream,
-			ClientName:   clientName,
-			BaselineHash: "",
-			LastUsedAt:   time.Now(),
-		})
-		_ = reg.Save()
+	// A sweep that reserved this short id in the window between the registration
+	// above and ws.Acquire can have run to completion and released before the
+	// re-check read p.evicting, so the re-check passes and the entry is gone.
+	// sweeper.evict reaches its reg.Remove only after client -d and os.RemoveAll
+	// have both succeeded, so repairing the entry alone would hand the task a
+	// WorkingDir that does not exist; refuse instead and let the retry rebuild
+	// through the normal path.
+	// TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused.
+	if _, ok := reg.Get(shortID); !ok {
+		handle.Release()
+		return nil, fmt.Errorf("perforce: workspace %s was evicted during prepare", shortID)
 	}
 
 	// Trigger recovery and sync when we hold exclusive access OR when the
@@ -504,6 +588,50 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 		return classifyP4Error(fmt.Errorf("delete CL %d: %w", h.pendingCL, delErr))
 	}
 	return nil
+}
+
+// toClientPath rewrites a depot-form sync path into client syntax so p4 resolves
+// it through the client's view. A virtual or import+ remap stream has no depot
+// storage under the stream name, so the depot form addresses nothing. The spec
+// this receives has passed jobspec.validateSourceSpec, which requires the path
+// to equal the stream or sit under it; a path that does not is refused rather
+// than rewritten, because emitting it unchanged is the defect this exists to
+// fix and synthesizing a tail the operator never wrote is worse.
+// TestToClientPath's sharesATextualPrefixButIsNotUnder row is why the prefix
+// test is stream+"/".
+func toClientPath(clientName, stream, depotPath string) (string, error) {
+	if depotPath == stream {
+		// //<client> with no wildcard names nothing, so an empty remainder maps
+		// to the whole client.
+		return "//" + clientName + "/...", nil
+	}
+	if strings.HasPrefix(depotPath, stream+"/") {
+		return "//" + clientName + depotPath[len(stream):], nil
+	}
+	return "", fmt.Errorf("sync path %q is not under stream %q; this spec did not come through jobspec validation", depotPath, stream)
+}
+
+// isMissingOrEmptyDir reports whether path does not exist or holds no entries.
+// An unreadable directory reports false: the caller uses this to decide whether
+// to force a sync, and a read failure is not evidence that the tree is gone.
+//
+// Readdirnames(1) rather than os.ReadDir: this runs on every Prepare and a
+// populated workspace root is the common case, so reading the whole listing to
+// learn it is non-empty scales with the workspace.
+func isMissingOrEmptyDir(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	return len(names) == 0
 }
 
 // allocateShortID returns a short unique ID for a new workspace.

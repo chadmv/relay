@@ -120,6 +120,11 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 	spec = setSpecField(spec, "Root", root)
 	spec = setSpecField(spec, "Host", "")  // blank Host: portable across renames
 	spec = setSpecField(spec, "Owner", "") // let p4 default to the caller
+	// p4 prefers an AltRoot over Root when the cwd matches one, and relay runs
+	// its workspace-scoped calls from the workspace root, so an AltRoots block
+	// inherited from a template can move the workspace out from under the Root
+	// set above. TestClient_CreateStreamClient_DropsAltRoots.
+	spec = removeSpecBlock(spec, "AltRoots")
 
 	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err
@@ -135,9 +140,16 @@ func (c *Client) DeleteClient(ctx context.Context, name string) error {
 
 var changeFirstLine = regexp.MustCompile(`^Change (\d+) `)
 
-// ResolveHead resolves a depot path to its head CL number via `p4 changes -m1`.
-func (c *Client) ResolveHead(ctx context.Context, path string) (int64, error) {
-	out, err := c.r.Run(ctx, "", []string{"changes", "-m1", path + "#head"}, nil)
+// ResolveHead resolves a path to its head CL number via `p4 -c <client> changes
+// -m1`. The path is client syntax and the -c flag is what makes it resolvable: a
+// virtual or import+ remap stream has no depot storage under the stream name, so
+// only the client's view can address it. It takes no cwd because it runs before
+// the workspace is acquired: a subprocess cwd on an unheld workspace blocks the
+// sweeper's os.RemoveAll on Windows, and it exposes p4 to any .p4config a
+// previous task's build script wrote into the workspace root.
+// TestProvider_HeadResolutionRunsWithNoWorkspaceCwd.
+func (c *Client) ResolveHead(ctx context.Context, client, path string) (int64, error) {
+	out, err := c.r.Run(ctx, "", []string{"-c", client, "changes", "-m1", path + "#head"}, nil)
 	if err != nil {
 		return 0, err
 	}

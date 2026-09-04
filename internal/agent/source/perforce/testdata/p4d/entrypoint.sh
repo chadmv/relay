@@ -58,6 +58,21 @@ ParentView:  noinherit
 Paths:       share ...
 EOF
 
+echo "[entrypoint] creating virtual stream //test/virt (remaps parent storage under sub/) ..."
+# A virtual stream has no depot storage of its own: its client view resolves
+# through the parent, and Remapped moves that view under sub/. That is what the
+# fixture is for - //test/virt/... addresses nothing, //<client>/... does.
+p4 stream -i <<'EOF'
+Stream:      //test/virt
+Owner:       perforce
+Name:        virt
+Parent:      //test/main
+Type:        virtual
+ParentView:  inherit
+Paths:       share ...
+Remapped:    ... sub/...
+EOF
+
 WORKDIR=$(mktemp -d)
 echo "[entrypoint] creating setup client rooted at ${WORKDIR} ..."
 p4 client -i <<EOF

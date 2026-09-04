@@ -12,6 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// waitEntered blocks until the gated sweeper reaches its client -d, and FAILS
+// if it does not. It calls t.Fatal, so call it only from the test goroutine.
+//
+// The bound is the point. Anything that stops the sweeper's age pass from
+// selecting the entry - refreshing LastUsedAt, for one - means the gate never
+// opens, and a bare receive turns that into a full-timeout hang with a
+// goroutine dump instead of a named failure.
+func waitEntered(t *testing.T, gate *gatingRunner) {
+	t.Helper()
+	select {
+	case <-gate.entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the sweep never reached its gated client -d: it did not select the seeded stale entry")
+	}
+}
+
 // TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire is the
 // background-sweeper analogue of
 // TestEvictWorkspace_PrepareBacksOutWhenEvictReservesDuringAcquire. The
@@ -40,6 +56,8 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 	require.NoError(t, err)
 	shortID := allocateShortID("//depot/main", reg)
 	clientName := "relay_host_" + shortID
+	fr.set("client -o -S //depot/main "+clientName, "")
+	fr.set("client -i", "Client saved.\n")
 	fr.set("client -d "+clientName, "Client deleted.\n")
 	gate.gateKey = "client -d " + clientName
 	// Seed the entry as STALE so the sweeper's age pass selects it.
@@ -82,7 +100,7 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 			ev, err := sw.SweepOnce(context.Background())
 			sweepDone <- sweepResult{ev, err}
 		}()
-		<-gate.entered // sweeper has reserved and is paused in client -d
+		waitEntered(t, gate)
 	}
 	t.Cleanup(func() { prepareAcquireHook = nil })
 
@@ -124,5 +142,115 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 		n := len(ws.holders)
 		ws.mu.Unlock()
 		require.Zero(t, n, "losing Prepare must release the workspace handle it acquired")
+	}
+}
+
+// The registration happens above ws.Acquire, and between them the workspace has
+// no holders, so a sweep can reserve, evict and release entirely inside that gap.
+// The post-Acquire re-check then reads p.evicting and finds it clear, so Prepare
+// would otherwise proceed with its client spec deleted, its directory removed
+// and its registry entry gone. Prepare must refuse and let the retry rebuild
+// all three.
+//
+// The NoDirExists assertion is what keeps the premise honest. Without it the
+// test passes against a tree that repairs only the registry row and hands the
+// task a handle whose WorkingDir does not exist.
+func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	gate := &gatingRunner{
+		inner:   fr,
+		entered: make(chan struct{}),
+		proceed: make(chan struct{}),
+	}
+	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: gate}})
+
+	reg, err := p.Registry()
+	require.NoError(t, err)
+	shortID := allocateShortID("//depot/main", reg)
+	clientName := "relay_host_" + shortID
+
+	fr.set("client -o -S //depot/main "+clientName, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("client -d "+clientName, "Client deleted.\n")
+	// No recoverOrphanedCLs or sync fixture is registered. Prepare must back out
+	// before either; a tree that carries on syncs into the deleted workspace and
+	// fakeRunner fails the test on the missing fixture.
+	gate.gateKey = "client -d " + clientName
+
+	reg.Upsert(WorkspaceEntry{
+		ShortID:    shortID,
+		SourceKey:  "//depot/main",
+		ClientName: clientName,
+		LastUsedAt: time.Now().Add(-30 * 24 * time.Hour),
+	})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+
+	sw := &Sweeper{
+		Root:        root,
+		Reg:         reg,
+		MaxAge:      14 * 24 * time.Hour,
+		Client:      p.Client(),
+		ListLocked:  p.LockedShortIDs,
+		Claim:       p.ReserveForEvict,
+		OnEvictedCB: p.InvalidateWorkspace,
+	}
+
+	type sweepOutcome struct {
+		evicted []string
+		err     error
+	}
+	sweepDone := make(chan sweepOutcome, 1)
+	var once bool
+	prepareAcquireHook = func(string) {
+		if once {
+			return
+		}
+		once = true
+		go func() {
+			ev, sweepErr := sw.SweepOnce(context.Background())
+			sweepDone <- sweepOutcome{ev, sweepErr}
+		}()
+		waitEntered(t, gate)
+		close(gate.proceed)
+		// Wait for the sweep to FINISH, not just to reserve: the reservation must
+		// be released before Prepare's post-Acquire re-check reads it, or this
+		// test measures the existing back-out path instead of the new one.
+		res := <-sweepDone
+		require.NoError(t, res.err)
+		require.Equal(t, []string{shortID}, res.evicted)
+	}
+	t.Cleanup(func() { prepareAcquireHook = nil })
+
+	spec := &relayv1.SourceSpec{
+		Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{
+				Stream: "//depot/main",
+				Sync:   []*relayv1.SyncEntry{{Path: "//depot/main/...", Rev: "@1"}},
+			},
+		},
+	}
+
+	h, prepErr := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.Error(t, prepErr, "the sweep destroyed the workspace, so Prepare must not hand out a handle to it")
+	require.ErrorContains(t, prepErr, "was evicted during prepare")
+	require.Nil(t, h)
+
+	// The sweep destroys three things, not one. Repairing only the registry row
+	// leaves these two red.
+	require.NoDirExists(t, filepath.Join(root, shortID),
+		"the sweep removed the workspace directory")
+	_, ok := reg.Get(shortID)
+	require.False(t, ok, "and its registry entry; the retry rebuilds all three")
+
+	p.mu.Lock()
+	ws := p.workspaces[shortID]
+	p.mu.Unlock()
+	if ws != nil {
+		ws.mu.Lock()
+		n := len(ws.holders)
+		ws.mu.Unlock()
+		require.Zero(t, n, "the refusing Prepare must release the handle it acquired")
 	}
 }

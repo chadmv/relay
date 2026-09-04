@@ -51,6 +51,17 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 			tmpl := "has space"
 			s.Tasks[0].Source.ClientTemplate = &tmpl
 		}, "invalid client_template"},
+		// CreateStreamClient places this value immediately after -t, so a
+		// leading hyphen makes it read as a flag rather than as the flag's
+		// value. relay owns that argument shape, so relay is what refuses it.
+		{"client_template leading hyphen", func(s *JobSpec) {
+			tmpl := "-x"
+			s.Tasks[0].Source.ClientTemplate = &tmpl
+		}, "invalid client_template"},
+		{"client_template with an interior hyphen", func(s *JobSpec) {
+			tmpl := "base-template"
+			s.Tasks[0].Source.ClientTemplate = &tmpl
+		}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
