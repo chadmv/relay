@@ -249,3 +249,35 @@ func TestHandleTaskStatus_ARealAppendFailureIsLoggedAndAFenceRejectionIsNot(t *t
 			"the message is agent-supplied and can carry whatever a job's script echoed; never log it")
 	})
 }
+
+// The status path's persist line must not be silenceable by the LOG path.
+//
+// This is the shape the two bad-task-id kinds were split for, and it is NOT
+// multiplication: it is one site consuming the other's dedupe entry. The log
+// path's persist arm fires on a chunk whose CONTENT Postgres refuses at Bind,
+// which happens before the fence's WHERE is evaluated - so a sender that owns
+// neither the task nor the generation can arm the entry for any (task, epoch)
+// it names. Sharing one kind then costs the status-path line exactly when a
+// concurrent real fault makes it the only record that the cause was lost.
+func TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine(t *testing.T) {
+	ctx := context.Background()
+	h, db := newStatusStubHandler(
+		errors.New("ERROR: canceling statement due to statement timeout (SQLSTATE 57014)"))
+	lim := newIngestLogLimiter(&h.ingestDrops)
+	logged := captureUnitLog(t)
+
+	// Arm the key from the log path at the SAME (task, epoch) the report below
+	// carries. One connection, one budget, exactly as Connect allocates it.
+	h.handleTaskLog(ctx, statusStubWorkerID(), lim, &relayv1.TaskLogChunk{
+		TaskId: statusStubTaskID, Content: []byte("x"), Epoch: 7,
+	})
+	require.Contains(t, logged(), "handleTaskLog AppendTaskLog",
+		"fixture: the log path must have logged, which is what arms its dedupe entry")
+
+	h.handleTaskStatus(ctx, statusStubWorkerID(), lim, statusStubUpdate("boom"))
+
+	require.Equal(t, int64(2), db.appendCalls.Load(),
+		"fixture: both sites must have attempted their append, so the absence below is the dedupe key")
+	assert.Contains(t, logged(), "handleTaskStatus AppendTaskLog",
+		"a different incident at a different site must not be deduped away by the log path's entry")
+}
