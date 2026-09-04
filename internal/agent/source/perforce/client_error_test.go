@@ -70,6 +70,9 @@ func TestProvider_ANonP4CommandErrorCarryingASpecPathIsNotClassified(t *testing.
 	// Output that does not match changeFirstLine, so ResolveHead returns
 	// fmt.Errorf("could not parse %q", line).
 	fr.set("changes -m1 //depot/disk full/...#head", "no changes.\n")
+	client := expectedClientName("h", "//depot/disk full")
+	fr.set("client -o -S //depot/disk full "+client, "")
+	fr.set("client -i", "Client saved.\n")
 
 	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{

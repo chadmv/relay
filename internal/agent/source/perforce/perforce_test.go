@@ -166,6 +166,8 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
 
 	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("client -o -S //s/x "+clientName, "")
+	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+clientName+" changes -c "+clientName+" -s pending -l",
 		"Change 91244 on 2026-04-24 by relay@h *pending*\n\trelay-task-old\n\nChange 99999 on 2026-04-24 by other@h *pending*\n\thuman work\n")
 	fr.set("-c "+clientName+" revert -c 91244 //...", "//... - reverted\n")
@@ -223,8 +225,13 @@ func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
 func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
-	// ResolveHead is the first p4 call inside Prepare. Inject the canonical
-	// "ticket invalid" stderr that execRunner would surface in production.
+	// Head resolution is the first p4 call carrying a job-supplied path, which is
+	// what makes it the realistic place for a ticket failure to surface. Inject
+	// the canonical "ticket invalid" stderr that execRunner would surface in
+	// production.
+	expectedClient := expectedClientName("h", "//s/x")
+	fr.set("client -o -S //s/x "+expectedClient, "")
+	fr.set("client -i", "Client saved.\n")
 	fr.setErr("changes -m1 //s/x/...#head",
 		fmt.Errorf("p4 changes -m1 //s/x/...#head: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
 

@@ -132,6 +132,70 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		return nil, err
 	}
 
+	// Find or allocate a workspace short_id for this stream.
+	existing, found := reg.GetBySourceKey(pf.Stream)
+	var shortID string
+	if found {
+		shortID = existing.ShortID
+	} else {
+		shortID = allocateShortID(pf.Stream, reg)
+	}
+	wsRoot := filepath.Join(p.cfg.Root, shortID)
+	clientName := fmt.Sprintf("relay_%s_%s", p.cfg.Hostname, shortID)
+
+	// Get or create the in-memory Workspace arbitrator.
+	// This check runs ahead of the creation below so a workspace we have already
+	// been told is going away costs no p4 work and its client -i cannot race the
+	// evictor's client -d. Correctness does not depend on that ordering - the
+	// post-Acquire re-check is what partitions the destructive window - but
+	// TestEvictWorkspace_PrepareRefusedWhileReserved registers no p4 fixtures at
+	// all, so it goes red the moment any p4 call moves ahead of this.
+	p.mu.Lock()
+	if p.evicting[shortID] {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
+	}
+	ws, ok := p.workspaces[shortID]
+	if !ok {
+		ws = NewWorkspace(shortID)
+		p.workspaces[shortID] = ws
+	}
+	p.mu.Unlock()
+
+	// The p4 client must exist before any client-scoped call, and head resolution
+	// becomes one: a virtual or import+ remap stream has no depot storage under
+	// the stream name. So creation moves above the resolve loop and runs on every
+	// Prepare, which is also what repairs a half-built workspace on a later
+	// attempt. Registration goes with creation because nothing else records that
+	// the directory and client spec exist; a Prepare that fails between here and
+	// ws.Acquire holds no workspace handle and must not try to release one.
+	// TestProvider_AResolveHeadFailureOnFirstUseLeavesAReclaimableWorkspace and
+	// TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory.
+	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
+		return nil, err
+	}
+	tmpl := ""
+	if pf.ClientTemplate != nil {
+		tmpl = *pf.ClientTemplate
+	}
+	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
+		return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
+	}
+	// The !found guard stays. An unconditional Upsert replaces the whole struct,
+	// dropping another task's OpenTaskChangelists and resetting BaselineHash to
+	// "", which re-syncs every warm workspace on upgrade. Registry.Mutate is the
+	// sanctioned way to edit an entry in place.
+	if !found {
+		reg.Upsert(WorkspaceEntry{
+			ShortID:      shortID,
+			SourceKey:    pf.Stream,
+			ClientName:   clientName,
+			BaselineHash: "",
+			LastUsedAt:   time.Now(),
+		})
+		_ = reg.Save()
+	}
+
 	// Resolve #head to a specific CL number.
 	resolved := make(map[string]string, len(pf.Sync))
 	syncSpecs := make([]string, 0, len(pf.Sync))
@@ -151,30 +215,6 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	baseline := BaselineHash(pf, resolved)
-
-	// Find or allocate a workspace short_id for this stream.
-	existing, found := reg.GetBySourceKey(pf.Stream)
-	var shortID string
-	if found {
-		shortID = existing.ShortID
-	} else {
-		shortID = allocateShortID(pf.Stream, reg)
-	}
-	wsRoot := filepath.Join(p.cfg.Root, shortID)
-	clientName := fmt.Sprintf("relay_%s_%s", p.cfg.Hostname, shortID)
-
-	// Get or create the in-memory Workspace arbitrator.
-	p.mu.Lock()
-	if p.evicting[shortID] {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
-	}
-	ws, ok := p.workspaces[shortID]
-	if !ok {
-		ws = NewWorkspace(shortID)
-		p.workspaces[shortID] = ws
-	}
-	p.mu.Unlock()
 
 	if prepareAcquireHook != nil {
 		prepareAcquireHook(shortID)
@@ -205,30 +245,6 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if evicting {
 		handle.Release()
 		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
-	}
-
-	// First time: create on-disk dir and p4 client spec.
-	if !found {
-		if err := os.MkdirAll(wsRoot, 0o755); err != nil {
-			handle.Release()
-			return nil, err
-		}
-		tmpl := ""
-		if pf.ClientTemplate != nil {
-			tmpl = *pf.ClientTemplate
-		}
-		if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
-			handle.Release()
-			return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
-		}
-		reg.Upsert(WorkspaceEntry{
-			ShortID:      shortID,
-			SourceKey:    pf.Stream,
-			ClientName:   clientName,
-			BaselineHash: "",
-			LastUsedAt:   time.Now(),
-		})
-		_ = reg.Save()
 	}
 
 	// Trigger recovery and sync when we hold exclusive access OR when the

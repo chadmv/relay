@@ -78,6 +78,8 @@ func TestEvictWorkspace_PrepareBacksOutWhenEvictReservesDuringAcquire(t *testing
 	require.NoError(t, err)
 	shortID := allocateShortID("//depot/main", reg)
 	clientName := "relay_host_" + shortID
+	fr.set("client -o -S //depot/main "+clientName, "")
+	fr.set("client -i", "Client saved.\n")
 	fr.set("client -d "+clientName, "Client deleted.\n")
 	gate.gateKey = "client -d " + clientName
 	reg.Upsert(WorkspaceEntry{
