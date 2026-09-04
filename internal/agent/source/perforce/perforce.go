@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,17 @@ type Config struct {
 	Root     string  // RELAY_WORKSPACE_ROOT — directory for all workspaces
 	Hostname string  // worker hostname, used in client name; sanitized on New()
 	Client   *Client // override for tests; nil → exec real p4
+
+	// SyncHeartbeatInterval is how often a running p4 sync emits a progress
+	// summary. Zero or negative builds no ticker at all; the bracket lines still
+	// carry a summary. RELAY_SYNC_HEARTBEAT_INTERVAL.
+	SyncHeartbeatInterval time.Duration
+
+	// FreeDiskGB reports free GIGABYTES on the volume holding root. Same
+	// signature as Sweeper.FreeDiskGB so cmd/relay-agent passes the same
+	// platform-gated helper to both; nil renders the field as "-" rather than
+	// adding a second platform pair inside this package.
+	FreeDiskGB func(root string) (int64, error)
 }
 
 // Provider implements source.Provider for Perforce.
@@ -60,6 +72,33 @@ func New(cfg Config) *Provider {
 }
 
 func (p *Provider) Type() string { return "perforce" }
+
+// syncSummary renders the operator-facing summary the heartbeat and both sync
+// brackets carry: five fields, fixed order, none ever omitted, "-" for a value
+// that could not be read. An omitted field is indistinguishable from a
+// truncated line or a knob that was never wired. The only input-derived field
+// is the depot path, and it is LAST so its clip truncates nothing structural.
+// The free-disk probe is read on the provider root, not a workspace
+// subdirectory, so the number matches what the sweeper and
+// RELAY_WORKSPACE_MIN_FREE_GB act on, and one error disables it for the rest of
+// the sync. TestProvider_SyncSummaryRendersFiveFixedFields.
+func (p *Provider) syncSummary(prefix string, sp *syncProgress, elapsed time.Duration) string {
+	files, other, lastPath := sp.snapshot()
+	free := "-"
+	if p.cfg.FreeDiskGB != nil && !sp.freeDiskIsDisabled() {
+		gb, err := p.cfg.FreeDiskGB(p.cfg.Root)
+		if err != nil {
+			sp.disableFreeDisk()
+		} else {
+			free = strconv.FormatInt(gb, 10)
+		}
+	}
+	if lastPath == "" {
+		lastPath = "-"
+	}
+	return fmt.Sprintf("%s %s; %d files; %d other lines; %s GB free; last %s",
+		prefix, elapsed.Round(time.Second), files, other, free, lastPath)
+}
 
 // Preflight verifies the agent host is configured for Perforce work.
 // Currently checks only that the p4 binary exists on PATH. Does not contact
