@@ -88,3 +88,30 @@ func TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit(t *testi
 	require.NotEmpty(t, rec.Header().Get("Retry-After"),
 		"a refusal must tell the caller when to come back")
 }
+
+// TestBuildHTTPServer_AHumansRetryRunIsNotRefused is the executable form of "a
+// normal password change is unaffected" for the case that actually produces a
+// burst: a user who mistypes their current password and retries. Five attempts
+// inside one minute is more than the two shipped clients can produce by hand -
+// the SPA disables its button while the mutation is pending and the CLI asks
+// three masked prompts per attempt - so the default ceiling is above anything a
+// person reaches.
+//
+// THE SIXTH REQUEST IS NOT OPTIONAL. Five 400s under a limit of five are also
+// what a limiter that does nothing produces, so without it this test is vacuous
+// against exactly the implementation it describes.
+func TestBuildHTTPServer_AHumansRetryRunIsNotRefused(t *testing.T) {
+	srv := passwordBucketServer(5, time.Minute)
+
+	for i := 1; i <= 5; i++ {
+		rec := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"attempt %d of a five-attempt retry run must reach the handler. body: %s",
+			i, rec.Body.String())
+	}
+
+	over := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+	require.Equal(t, http.StatusTooManyRequests, over.Code,
+		"the sixth attempt must be refused: without this the five 400s above are also what an "+
+			"unwrapped route produces. body: %s", over.Body.String())
+}
