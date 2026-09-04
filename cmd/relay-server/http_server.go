@@ -177,14 +177,20 @@ type httpServerDeps struct {
 //     through TestBuildHTTPServer_SearchLimitRefusesAQCarryingRequestPastThe-
 //     Ceiling, which drives a real q-carrying request past the ceiling on the
 //     real route and asserts 429.
+//     The PasswordChangeLimit pair is guarded the same way, through
+//     TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit, which
+//     drives three real requests through this function's output at a ceiling of
+//     two and asserts 400, 400, 429.
 //
 // THAT LAST CLAIM STOPS AT THIS FUNCTION'S OWN ASSIGNMENTS. The test supplies
 // jobSubmitLimitN itself, so it says nothing about what main puts in the
 // httpServerDeps literal: zeroing the value there, or trading it for another of
 // main's same-typed locals, leaves this package green. The named fields removed
 // the transposition hazard at the api.New boundary, not at the literal that
-// feeds this one. Closing it needs a wiring guard general enough to cover an
-// env-to-field pair, which is
+// feeds this one. It remains true of the jobSubmitLimit and searchLimit pairs.
+// It is NOT true of the passwordChangeLimit pair, whose literal is covered by
+// TestMain_PassesThePasswordChangeLimitItParsed until a guard general enough to
+// cover any env-to-field pair subsumes it -
 // docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md.
 func buildHTTPServer(d httpServerDeps) *http.Server {
 	s := api.New(d.pool, d.q, d.broker, d.registry, d.corsOrigins,
