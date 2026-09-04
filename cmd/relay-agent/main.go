@@ -191,15 +191,13 @@ var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 // s (seconds), m (minutes), h (hours), or d (days). Returns fallback on empty or invalid input.
 // If v is non-empty but unparseable, a warning is logged naming the env var.
 //
-// SYNTACTICALLY VALID IS NOT REPRESENTABLE, and the range check below is the
-// only thing standing between the two. durRe admits an arbitrarily long digit
-// run, so the product can leave int64 nanoseconds - and the wrapped result is
-// not reliably negative, so no check on the PRODUCT can see it: 1000000000000d
-// wraps to a plausible-looking positive 225 years. Every caller reads a wrapped
-// value as its own kind of "off" and silently turns something off - a
-// non-positive RELAY_SYNC_HEARTBEAT_INTERVAL disables the heartbeat, a
-// non-positive RELAY_WORKSPACE_MAX_AGE declines to build the sweeper - with no
-// warning, which is the opposite of what an operator setting the knob asked for.
+// SYNTACTICALLY VALID IS NOT REPRESENTABLE, and the range check below is what
+// separates them. durRe admits an arbitrarily long digit run, so the product can
+// leave int64 nanoseconds - and the wrapped result is not reliably negative, so
+// no check on the PRODUCT can see it: 1000000000000d wraps to a plausible-looking
+// positive 225 years. An unrepresentable value therefore takes the fallback and
+// warns, rather than returning a wrapped duration the caller cannot tell from a
+// deliberate one.
 // TestParseDurationEnv_AnOverflowingValueIsRefusedRatherThanWrappedNegative.
 func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 	if v == "" {

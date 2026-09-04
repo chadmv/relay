@@ -106,9 +106,8 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	// The scan error is reported IN PREFERENCE to the exit status. A scan that
 	// ended on an error, not on EOF, means the caller saw only part of p4's
 	// output while p4 itself exited zero, and the sync summary's file count is
-	// built from those lines - so the truncation is both the more specific fact
-	// and, on the common path, the only one there is.
-	// TestExecRunner_AStdoutScanFailureFailsTheStream.
+	// built from those lines - so the truncation is the more specific fact.
+	// TestExecRunner_AStdoutScanFailureOutranksANonZeroExitStatus.
 	if scanErr != nil {
 		return newP4CommandError(args, scanErr, stderr.String())
 	}

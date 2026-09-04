@@ -170,9 +170,9 @@ var freeDiskProbeTimeout = 2 * time.Second
 // returns one - so a timeout latches too, and the abandoned goroutine is the
 // only one there will be.
 //
-// The bound lives HERE rather than as a third case in runSyncWithHeartbeat's
-// select: that loop keeps exactly two arms and progress keeps exactly one
-// caller. TestProvider_SyncSummaryRendersFiveFixedFields.
+// The bound lives here rather than in runSyncWithHeartbeat's select, so nothing
+// about that loop's shape depends on it.
+// TestProvider_SyncSummaryRendersFiveFixedFields.
 func (p *Provider) probeFreeDiskGB(sp *syncProgress) (int64, bool) {
 	if p.cfg.FreeDiskGB == nil || sp.freeDiskIsDisabled() {
 		return 0, false

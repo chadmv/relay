@@ -68,6 +68,16 @@ func TestSyncLineDepotPath(t *testing.T) {
 		assert.Equal(t, "//depot/q.ma", got)
 	})
 
+	// Pure ASCII, so every rune is one byte and the bound is reachable exactly.
+	// The row beneath this one can only bracket the result to within a rune, and
+	// on its own leaves the constant free to move by one. 200 is written as a
+	// literal on purpose: spelling it syncLineDepotPathMax would move the
+	// expectation with the thing under test and pin nothing.
+	t.Run("clip_at_200_exactly_when_every_rune_is_one_byte", func(t *testing.T) {
+		got := syncLineDepotPath("//depot/" + strings.Repeat("z", 400) + "#1 - added as /ws/z")
+		assert.Equal(t, 200, len(got))
+	})
+
 	// The bound is a BYTE bound over text that need not be ASCII. The input puts
 	// a two-byte rune astride byte 200, which is the position a raw slice halves.
 	t.Run("clip_at_200", func(t *testing.T) {

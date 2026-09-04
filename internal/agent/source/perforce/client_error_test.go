@@ -170,11 +170,59 @@ func TestExecRunner_AStdoutScanFailureFailsTheStream(t *testing.T) {
 	assert.Contains(t, err.Error(), "token too long",
 		"and the scan failure must be the reported cause, not an exit status; got %v", err)
 	// The third property: every completed token is HANDED to onLine, which is
-	// the only thing feeding the sync summary's counters. Nothing else in the
-	// default lane observes it - the fakeRunner echoes lines Stream never read.
+	// what feeds the sync summary's counters. The fakeRunner cannot stand in for
+	// this - it echoes lines Stream never read.
 	assert.Equal(t, []string{
 		"//depot/x/a.ma#3 - added as /ws/a.ma",
 		"//depot/x/b.ma#1 - updating /ws/b.ma",
 		"//depot/x/c.ma#2 - refreshing /ws/c.ma",
 	}, lines, "the lines that DID scan must reach onLine, in order")
+}
+
+// TestExecRunnerStreamHelperProcessNonZeroExit is not a test. It is the child
+// half of TestExecRunner_AStdoutScanFailureOutranksANonZeroExitStatus. It
+// overflows the parent's scanner AND exits non-zero, which is the shape in which
+// the preference between the two errors is observable at all: a child that exits
+// zero leaves waitErr nil, so either ordering returns the same value.
+func TestExecRunnerStreamHelperProcessNonZeroExit(t *testing.T) {
+	if os.Getenv("RELAY_TEST_STREAM_HELPER_NONZERO") != "1" {
+		return
+	}
+	_, _ = os.Stdout.WriteString("//depot/x/a.ma#3 - added as /ws/a.ma\n")
+	// Past the scanner's 1 MB cap, and the remainder left once it gives up is
+	// many times the OS pipe buffer - so this write cannot finish until the
+	// parent drains, and cmd.Wait cannot return until this write does.
+	_, _ = os.Stdout.Write(append(bytes.Repeat([]byte("x"), 2*1024*1024), '\n'))
+	os.Exit(3)
+}
+
+// The ordering execRunner.Stream claims: a scan failure is reported IN
+// PREFERENCE to the exit status. The child's exit code is asserted first,
+// because that precondition is the whole discriminating power of this test - a
+// fixture that exited zero would pass under either ordering.
+func TestExecRunner_AStdoutScanFailureOutranksANonZeroExitStatus(t *testing.T) {
+	t.Setenv("RELAY_TEST_STREAM_HELPER_NONZERO", "1")
+	helperArgs := []string{"-test.run=TestExecRunnerStreamHelperProcessNonZeroExit"}
+
+	probe := exec.Command(os.Args[0], helperArgs...)
+	_ = probe.Run()
+	require.Equal(t, 3, probe.ProcessState.ExitCode(),
+		"the child must exit non-zero, or waitErr is nil and the ordering is unobservable")
+
+	e := &execRunner{binary: os.Args[0]}
+	done := make(chan error, 1)
+	go func() { done <- e.Stream(context.Background(), "", helperArgs, func(string) {}) }()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stream did not return: the failed scanner left the pipe undrained")
+	}
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token too long",
+		"the scan failure must be the reported cause; got %v", err)
+	assert.NotContains(t, err.Error(), "exit status",
+		"and the exit status must not displace it; got %v", err)
 }

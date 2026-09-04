@@ -30,13 +30,10 @@ func TestParseDurationEnv_LogsWarningOnInvalidNonEmptyInput(t *testing.T) {
 	require.Contains(t, buf.String(), "7days", "warning should echo the bad value")
 }
 
-// The regex admits an arbitrarily long digit run, and the parse behind it is an
-// Atoi whose error was discarded followed by an unchecked multiply - so a value
-// well inside the syntax lands OUTSIDE int64 nanoseconds and wraps NEGATIVE.
-// Every caller of this parser then reads that as its own kind of "off": the
-// heartbeat's `<= 0` disables the timer, and RELAY_WORKSPACE_MAX_AGE's
-// `maxAge > 0` silently declines to build a sweeper. A knob whose observability
-// control switches itself off is the failure this refuses.
+// The property: a value inside the regex but outside int64 nanoseconds takes the
+// fallback and warns. The rows discriminate because each wraps DIFFERENTLY - one
+// to a negative, one to a plausible-looking positive - so no check on the
+// returned product could separate them from a deliberate setting.
 func TestParseDurationEnv_AnOverflowingValueIsRefusedRatherThanWrappedNegative(t *testing.T) {
 	rows := []struct{ name, in string }{
 		// 1e10 seconds is ~1.0e19 ns against an int64 ceiling of ~9.22e18.

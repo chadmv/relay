@@ -214,9 +214,9 @@ func (r *progressRecorder) waitFor(t *testing.T, sub string, within time.Duratio
 // cannot overlap on their own.
 //
 // requested records the duration the seam was asked for. A seam that discards
-// that parameter observes only THAT a ticker was built, so every assertion in
-// this file survives a hard-coded interval at the call site and the configured
-// value can stop reaching the ticker with nothing going red.
+// that parameter observes only THAT a ticker was built, not with what, which
+// leaves a hard-coded interval at the call site indistinguishable from the
+// configured one.
 // TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output.
 type testTicker struct {
 	ch chan time.Time
@@ -414,15 +414,15 @@ func TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished(t *testin
 	}
 }
 
-// REGRESSION GUARD for the ONE claim errCh's capacity makes. Everything else in
-// this file is blind to it: a Prepare parked inside progress returns nothing
-// whether the send completed or not, and the loop drains errCh correctly either
-// way once progress comes back. What changes is whether the sync goroutine is
-// still ALIVE while progress is parked - and progress can park until agent
-// shutdown, so on an unbuffered channel it is parked for just as long. The
-// goroutine itself is therefore the observable, and the assertion is a DROP from
-// a baseline rather than an absolute count, so unrelated runtime goroutines do
-// not have to be enumerated.
+// The property: errCh is buffered, so the sync goroutine's send completes with
+// no reader. The GOROUTINE is the observable, because the error value is not: a
+// Prepare parked inside progress returns nothing whether the send completed or
+// not, and the loop drains errCh correctly either way once progress comes back.
+// What differs is whether the sync goroutine is still ALIVE while progress is
+// parked - and progress can park until agent shutdown, so on an unbuffered
+// channel it is parked for just as long. The assertion is a DROP from a baseline
+// rather than an absolute count, so unrelated runtime goroutines do not have to
+// be enumerated.
 //
 // FreeDiskGB is left nil deliberately: a probe goroutine inside the measurement
 // window would move the count for a reason this test is not asking about.
