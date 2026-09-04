@@ -88,6 +88,12 @@ echo "baseline" > "${WORKDIR}/readme.txt"
 p4 add "${WORKDIR}/readme.txt"
 p4 submit -d "init"
 
+echo "[entrypoint] populating //test/main/heavy/ so an exclusion has a subtree to exclude ..."
+mkdir -p "${WORKDIR}/heavy"
+echo "heavy" > "${WORKDIR}/heavy/asset.txt"
+p4 add "${WORKDIR}/heavy/asset.txt"
+p4 submit -d "heavy subtree"
+
 echo "[entrypoint] creating shelved CL ..."
 SHELVED_CL=$(p4 --field "Description=relay-test-shelf" change -o | p4 change -i | awk '{print $2}')
 p4 edit -c "$SHELVED_CL" "${WORKDIR}/readme.txt"
