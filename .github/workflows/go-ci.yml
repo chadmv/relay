@@ -12,9 +12,16 @@ concurrency:
   group: go-ci-${{ github.ref }}
   cancel-in-progress: true
 
+# PLATFORM COVERAGE. A linux runner executes the linux arm of a runtime.GOOS
+# branch and compiles the files a linux build constraint admits. The `test`
+# job's cross-compile step type-checks the windows arm and runs nothing of it,
+# so a platform-conditional branch written for Windows gets compilation from
+# this file, not behaviour.
 jobs:
   test:
     name: race + integration-build
+    # Platform: linux. Compiles and runs the linux arm; cross-compiles, and
+    # does not run, the windows arm.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -34,9 +41,31 @@ jobs:
         # fixed (docs/backlog/closed/bug-2026-06-20-agent-proctree-windows-race.md,
         # closed 2026-06-20) and the comment was not. Corrected 2026-08-25.
         run: go test -race ./... -timeout 180s
+      - name: Windows cross-compile check
+        # This runner is linux, so a linux build cannot see a //go:build
+        # windows file: a type error or an unused import in one is invisible
+        # to a step that builds for linux. Cross-compiling type-checks it, and
+        # runs nothing, so it says nothing about behaviour.
+        #
+        # No line below is redundant with another. `go build` does not read
+        # _test.go files, so the plain vet line is what reaches the
+        # windows-constrained test files. Neither untagged line compiles a
+        # `//go:build windows && integration` file, and `make vet-integration`
+        # builds for linux, so the tagged vet line is what reaches that
+        # combination. TestWindowsCrossCompileStepCommandsArePresent goes RED
+        # if any of them is deleted.
+        #
+        # Ordered after the race step deliberately: `run: |` executes under
+        # `bash -e`, so a windows type error here aborts the job, and running
+        # this first leaves the race step unrun.
+        run: |
+          GOOS=windows go build ./...
+          GOOS=windows go vet ./...
+          GOOS=windows go vet -tags integration ./...
 
   cli-integration:
     name: cli integration (real server)
+    # Platform: linux. Compiles and runs the linux arm only.
     runs-on: ubuntu-latest
     # DELIBERATELY NOT 15. The `test` job above uses timeout-minutes: 15 and
     # `make test-integration` uses -timeout 900s - the same number - so today a
@@ -98,6 +127,7 @@ jobs:
 
   pg-integration:
     name: pg integration (store, schedrunner)
+    # Platform: linux. Compiles and runs the linux arm only.
     runs-on: ubuntu-latest
     # DELIBERATELY NOT 15, for the reason cli-integration's comment gives: the
     # `test` job above uses timeout-minutes: 15, so equal numbers make a Go
