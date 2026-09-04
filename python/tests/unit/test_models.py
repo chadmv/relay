@@ -45,6 +45,56 @@ def test_sync_rejects_invalid_revs(rev: str) -> None:
         Sync(path="//depot/main/...", rev=rev)
 
 
+def test_sync_accepts_an_exclusion_with_no_rev() -> None:
+    s = Sync(path="//depot/main/heavy/...", exclude=True)
+    assert s.exclude is True
+    assert s.rev == ""
+
+
+def test_sync_exclusion_rejects_a_revision() -> None:
+    # The revision an exclusion is preempted at comes from the include that
+    # covers it. The server refuses a rev here for the same reason.
+    #
+    # match= pins WHICH rule refused. Before the exclude field existed this
+    # raised too, on extra_forbidden, so a bare pytest.raises passes against a
+    # model that does not implement the rule at all.
+    with pytest.raises(PydanticValidationError, match="carries no revision"):
+        Sync(path="//depot/main/heavy/...", rev="#head", exclude=True)
+
+
+def test_sync_include_still_requires_a_recognized_rev() -> None:
+    # Making rev optional for exclusions must not make it optional for includes.
+    with pytest.raises(PydanticValidationError):
+        Sync(path="//depot/main/...")
+
+
+def test_sync_defaults_to_not_excluded() -> None:
+    assert Sync(path="//depot/main/...", rev="#head").exclude is False
+
+
+def test_an_excluded_sync_serializes_a_payload_the_server_accepts() -> None:
+    # to_spec_dict uses model_dump(exclude_none=True), so rev is emitted as the
+    # empty string rather than omitted - which is exactly what the Go validator
+    # accepts: it refuses a NON-EMPTY rev on an excluded entry, and "" passes.
+    # Emitting "#head" here would produce a spec the server refuses with no
+    # SDK-side signal at all.
+    t = Task(
+        name="t",
+        commands=[["true"]],
+        source=Source(
+            stream="//depot/main",
+            sync=[
+                Sync(path="//depot/main/...", rev="#head"),
+                Sync(path="//depot/main/heavy/...", exclude=True),
+            ],
+        ),
+    )
+    assert t.to_spec_dict()["source"]["sync"] == [
+        {"path": "//depot/main/...", "rev": "#head", "exclude": False},
+        {"path": "//depot/main/heavy/...", "rev": "", "exclude": True},
+    ]
+
+
 def test_source_requires_perforce_type() -> None:
     with pytest.raises(PydanticValidationError):
         Source(type="git", stream="//x", sync=[Sync(path="//x", rev="#head")])

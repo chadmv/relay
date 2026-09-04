@@ -123,12 +123,13 @@ _CLIENT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class Sync(BaseModel):
-    """A single depot path + revision to sync."""
+    """A single depot path + revision to sync, or a path to leave out."""
 
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    rev: str
+    rev: str = ""
+    exclude: bool = False
 
     @field_validator("path")
     @classmethod
@@ -137,12 +138,22 @@ class Sync(BaseModel):
             raise ValueError("path must start with //")
         return v
 
-    @field_validator("rev")
-    @classmethod
-    def _rev_recognized(cls, v: str) -> str:
-        if not any(p.match(v) for p in _REV_PATTERNS):
-            raise ValueError(f"invalid rev {v!r} (expected #head, #N, @CL, or @label)")
-        return v
+    @model_validator(mode="after")
+    def _rev_matches_exclude(self) -> Sync:
+        # A model validator, not a field validator on `rev`: the rule depends on
+        # `exclude`, and a field validator cannot see a field declared after it.
+        if self.exclude:
+            if self.rev:
+                raise ValueError(
+                    "an excluded path carries no revision; it is preempted at the "
+                    "revision of the include that covers it"
+                )
+            return self
+        if not any(p.match(self.rev) for p in _REV_PATTERNS):
+            raise ValueError(
+                f"invalid rev {self.rev!r} (expected #head, #N, @CL, or @label)"
+            )
+        return self
 
 
 class Source(BaseModel):
