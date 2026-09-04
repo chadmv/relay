@@ -1,7 +1,9 @@
 ---
 title: No test drives a real agent subprocess through gRPC into a task_logs row
 type: idea
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-08-25
 priority: medium
 source: 2026-08-25 windows-crlf-log-lines slice - the integration lane surveyed the harness and found the wire between the two proof points is assumed, never exercised
@@ -65,3 +67,27 @@ That widens this item rather than adding a second one: the harness proposed abov
 directions, since a dispatch has to reach the runner before any log can come back. If it is built,
 assert both: bytes written by the subprocess arrive in `task_logs`, AND the four identity variables
 the coordinator rendered are the ones the subprocess observes.
+
+## Resolution
+
+Closed by PR #201 (`dca0035`). `cmd/relay-server/agent_subprocess_e2e_integration_test.go`
+drives a real `agent.Agent` against a real `grpc.NewServer` on `127.0.0.1:0`, over a real
+`worker.Handler` and real Postgres, running a real subprocess, and asserts BOTH directions the
+item asks for: the subprocess's bytes arrive in a real `task_logs` row, and the identity env vars
+the coordinator rendered are the ones the subprocess observed. The CRLF case is one of the inputs,
+so `bug-2026-08-25-windows-crlf-log-lines-render-blank`'s closing criterion is now observed rather
+than argued.
+
+Two corrections to this item, both recorded in the PR. Its Proposal was not executable as written:
+`newRunner` is unexported and `provider` is settable only from inside `package agent`, so the
+harness routes through the exported `agent.Agent`, whose `handleDispatch` builds a real `Runner`
+per `DispatchTask` - no new seam, and the RED survives against HEAD. And this item's own note that
+the harness would need no CI lane was wrong in the other direction: because a real agent is a
+library object rather than a process, `cmd/relay-server` joined the existing `pg-integration` job,
+so the guard runs on every push.
+
+Eight mutations kill it, control green either side. The load-bearing one is
+`newRunner(task.TaskId, 0, ...)` in `handleDispatch`: nothing else in the repo reddens on it, since
+`dispatch_test.go` stops at a `fakeSender` and every `Runner` test supplies its own epoch. It dies
+on a bounded 62s named timeout rather than a hang. 24 lane runs green, including six under
+concurrent contention, with no leaked databases or connections.
