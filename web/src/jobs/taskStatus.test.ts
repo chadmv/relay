@@ -1,17 +1,19 @@
 import { expect, test } from 'vitest'
 import { isTerminalTask, taskStatusColor } from './taskStatus'
 
-test('maps each of the six task statuses to a dot class', () => {
+test('maps every task status to a dot class', () => {
   expect(taskStatusColor('done').dot).toBe('bg-ok')
   expect(taskStatusColor('running').dot).toBe('bg-accent')
   expect(taskStatusColor('dispatched').dot).toBe('bg-accent')
+  expect(taskStatusColor('preparing').dot).toBe('bg-accent')
   expect(taskStatusColor('pending').dot).toBe('bg-warn')
   expect(taskStatusColor('failed').dot).toBe('bg-err')
   expect(taskStatusColor('timed_out').dot).toBe('bg-err')
 })
 
-test('covers dispatched and timed_out (the statuses status.ts lacks)', () => {
+test('covers dispatched, preparing and timed_out (the statuses status.ts lacks)', () => {
   expect(taskStatusColor('dispatched').text).toBe('text-accent')
+  expect(taskStatusColor('preparing').text).toBe('text-accent')
   expect(taskStatusColor('timed_out').text).toBe('text-err')
 })
 
@@ -22,5 +24,10 @@ test('isTerminalTask covers exactly done, failed and timed_out', () => {
   expect(isTerminalTask('pending')).toBe(false)
   expect(isTerminalTask('dispatched')).toBe(false)
   expect(isTerminalTask('running')).toBe(false)
+  // Green before the switch case is added and always will be: a regression guard
+  // against a future edit that puts `preparing` in TERMINAL, not a red-first
+  // criterion. Adding it there would make useJob stop tailing a task's log the
+  // moment its workspace sync begins.
+  expect(isTerminalTask('preparing')).toBe(false)
   expect(isTerminalTask(undefined)).toBe(false)
 })
