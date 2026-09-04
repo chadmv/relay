@@ -272,6 +272,15 @@ func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
 // documented as defence in depth "independent of how the guard is (or isn't)
 // wired in", and this is what makes that claim true again.
 func TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN(t *testing.T) {
+	// Pin the ambient environment for the same reason
+	// TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone/no_userinfo does: an
+	// ordinary PGUSER in the shell (root, say) makes pgx.ParseConfig return
+	// that value instead of the OS default, and this test's own "must not
+	// equal root" assertion goes red for a reason unrelated to the guard.
+	t.Setenv("PGUSER", "")
+	t.Setenv("PGSERVICE", "")
+	t.Setenv("PGSERVICEFILE", "")
+
 	const dsn = "postgres://example.invalid:5432/wanted?user=root"
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
@@ -307,4 +316,21 @@ func TestBoundedCleanup_RecoversPanicAndAttributesToNamedTest(t *testing.T) {
 	require.True(t, ft.failed,
 		"a panic inside fn must be reported via Errorf on the named step, not left to crash "+
 			"the process with no test name attached")
+}
+
+// TestMigrateDSN_PanicsOnNonPostgresPrefix pins that a DSN without the
+// postgres:// prefix MigrateDSN's doc comment requires cannot silently
+// produce a wrong-but-plausible pgx5 DSN. strings.TrimPrefix is a no-op when
+// the prefix is absent, so "mysql://x" would otherwise become "pgx5mysql://x"
+// - a value that looks like a driver rewrite but names a database that was
+// never intended.
+func TestMigrateDSN_PanicsOnNonPostgresPrefix(t *testing.T) {
+	require.Panics(t, func() { MigrateDSN("mysql://u:p@host/db") })
+}
+
+// TestMigrateDSN_RewritesPostgresPrefix pins the documented behavior on a
+// well-formed input, so the panic guard above cannot be satisfied by making
+// MigrateDSN reject everything.
+func TestMigrateDSN_RewritesPostgresPrefix(t *testing.T) {
+	require.Equal(t, "pgx5://u:p@host/db", MigrateDSN("postgres://u:p@host/db"))
 }

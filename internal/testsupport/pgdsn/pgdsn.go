@@ -12,9 +12,12 @@
 // lane and under -race. Its one database-touching test carries the tag on
 // its own file. Because it is untagged, go build and go vet compile
 // testcontainers-go and the testing package into it on every default run -
-// both are already go.mod requirements, so this adds no new dependency, but
-// it is a shape this repo has not had elsewhere: a non-test package that
-// imports "testing".
+// both are already go.mod requirements, so this adds no new dependency.
+//
+// NewEmptyDSN and NewIntegrationDSN must only be called from an
+// //go:build integration file: make test is documented as needing no
+// Docker, and a caller reached from an untagged test would start pulling
+// postgres:16 to satisfy it.
 //
 // IMPORT-CYCLE CONSTRAINT, PERMANENT: this package imports relay/internal/store
 // to run migrations. A future relay/internal/store test file that wants a
@@ -30,6 +33,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"regexp"
@@ -48,8 +52,7 @@ import (
 )
 
 // dsnEnvVar selects the harness mode. Unset: one Postgres testcontainer per
-// call, which is what every other integration package in this repo does and
-// what a developer with Docker gets for free. Set: one freshly CREATEd
+// call, what a developer with Docker gets for free. Set: one freshly CREATEd
 // database per call on the supplied server, which is what
 // .github/workflows/go-ci.yml's Postgres-service jobs use - no Docker API, no
 // image pull, no Ryuk reaper. The name follows the existing
@@ -102,14 +105,28 @@ func NewEmptyDSN(t *testing.T) string {
 func NewIntegrationDSN(t *testing.T) string {
 	t.Helper()
 	dsn := NewEmptyDSN(t)
+	// golang-migrate takes pg_advisory_lock keyed on the database name being
+	// migrated (database.GenerateAdvisoryLockId), and each call here migrates
+	// a freshly random-named database, so concurrent calls do not serialize.
+	// Advisory locks are also database-scoped (the locktag includes the
+	// database OID), so even a colliding key would not conflict across two
+	// distinct databases. Both properties break only if a future change
+	// makes multiple calls migrate the SAME physical database, e.g. a shared,
+	// pre-migrated template reused as a CREATE DATABASE ... TEMPLATE source -
+	// do not add one without re-checking this.
 	require.NoError(t, store.Migrate(MigrateDSN(dsn)))
 	return dsn
 }
 
 // MigrateDSN rewrites a postgres:// DSN into the pgx5:// form store.Migrate
-// requires (see its doc comment in internal/store/migrate.go). Callers must
-// have already established the postgres:// prefix.
+// requires (see its doc comment in internal/store/migrate.go). Panics if dsn
+// does not start with postgres:// - strings.TrimPrefix is a silent no-op on a
+// mismatched prefix, so without this check a non-postgres dsn would produce a
+// wrong-but-plausible-looking pgx5 DSN instead of a loud failure.
 func MigrateDSN(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") {
+		panic(fmt.Sprintf("pgdsn: MigrateDSN requires a postgres:// dsn, got %q", dsn))
+	}
 	return "pgx5" + strings.TrimPrefix(dsn, "postgres")
 }
 
@@ -124,7 +141,7 @@ func newContainerDSN(t *testing.T) string {
 		testcontainers.WithWaitStrategy(
 			// WithOccurrence(2) IS LOAD-BEARING. postgres:16 emits this line once
 			// during its own init pass, before the real listener is up. Copy it
-			// verbatim; the three existing copies in this repo all do.
+			// verbatim.
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 		),
 	)
@@ -298,11 +315,14 @@ var pgConnectionTargetQueryKeys = map[string]bool{
 // while that check still reported "postgres, as intended".
 //
 // Called only from newSharedServiceDSN, i.e. only when RELAY_TEST_DATABASE_URL
-// is set. newContainerDSN (the unset/testcontainer path) never calls this: its
-// DSN comes from tcpostgres.Run/pg.ConnectionString, not from the environment,
-// so there is nothing here for an operator's env var to redirect. That
-// exemption is deliberate, not an oversight - do not add a call on the
-// container path.
+// is set. newContainerDSN (the unset/testcontainer path) never calls this -
+// not because its DSN is immune to redirection (tcpostgres.ConnectionString
+// builds from DockerProvider.DaemonHost, which does honour
+// TESTCONTAINERS_HOST_OVERRIDE/DOCKER_HOST/tc.host), but because that path
+// never issues a CREATE or DROP DATABASE - both live only in
+// newSharedServiceDSN below - so there is nothing here for a redirected
+// target to put at risk. That exemption is deliberate, not an oversight - do
+// not add a call on the container path.
 //
 // This narrows the set of DSNs RELAY_TEST_DATABASE_URL may legitimately use:
 // a unix-socket DSN such as postgres:///wanted?host=/var/run/postgresql is a
@@ -509,28 +529,15 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	// between CREATE and t.Cleanup: a successful CREATE followed by a FailNow
 	// (Goexit, so nothing after it runs) previously leaked a relaytest_
 	// database on the shared server permanently.
-	// created is a LOWER BOUND on whether the CREATE below actually
-	// succeeded, not a certainty: execErr == nil proves the server REPORTED
-	// success, not merely that a response arrived, and that is not the gap -
-	// the gap is the converse, execErr != nil does not prove the CREATE did
-	// not commit: CREATE DATABASE can commit server-side while its response
-	// is lost (a deadline firing, or the connection resetting, in the window
-	// after the server commits but before the client reads the reply). In
-	// that window created is false even though the database now exists, which
-	// downgrades the cleanup's connect failure below from t.Errorf to
-	// t.Logf - silently leaking a relaytest_ database exactly the class the
-	// arm-before-CREATE ordering above exists to prevent. The DROP itself is
-	// still attempted whenever the cleanup's connect succeeds regardless of
-	// created; only the SEVERITY of a connect failure depends on it. Accepted
-	// as a lower bound rather than closed, because closing it would mean
-	// treating every CREATE as having possibly succeeded, which reintroduces
-	// the "flaky server buries the real error" problem this variable exists
-	// to solve: a connect failure in the cleanup is only a real problem when a
-	// database might exist to drop. Without created, a Postgres that is down
-	// or unreachable at CREATE time makes the cleanup connect again, fail
-	// again, and t.Errorf a database that was never created - a second,
-	// misleading error on top of the real one that buries it under a flaky
-	// server.
+	// created marks that CREATE was ISSUED, not that it succeeded: CREATE
+	// DATABASE can commit server-side while the client's response is lost (a
+	// deadline firing, or the connection resetting, between the server's
+	// commit and the client's read of the reply), so execErr != nil does not
+	// prove nothing was created. Set it immediately before the Exec call, not
+	// after checking execErr - checking execErr first hid that lost-response
+	// window behind a silent t.Logf instead of a leaked-database t.Errorf -
+	// and not before the admin Connect succeeds, which would report a leak
+	// for a CREATE that was never attempted (Postgres down or unreachable).
 	var created bool
 	t.Cleanup(func() {
 		// Fail closed rather than widen: see dbNamePattern.
@@ -563,13 +570,19 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	defer cancel()
 	adminConn, err := pgx.Connect(tctx, adminDSN)
 	require.NoError(t, err)
-	_, execErr := adminConn.Exec(tctx, `CREATE DATABASE "`+dbName+`"`)
-	created = execErr == nil
+	created = true
+	// TEMPLATE template0, not the default template1: template1 allows
+	// connections, so a session merely connected to it at this instant makes
+	// Postgres refuse the copy with "source database ... is being accessed by
+	// other users" (SQLSTATE 55006) - observed directly, intermittently,
+	// against a shared server. template0 has datallowconn=false, so nothing
+	// can ever be connected to it and the failure class cannot occur.
+	_, execErr := adminConn.Exec(tctx, `CREATE DATABASE "`+dbName+`" TEMPLATE template0`)
 	closeErr := adminConn.Close(tctx)
 	// execErr checked before closeErr: a genuine CREATE failure (out of disk,
 	// permission, name collision) must be reported as what it is, not
 	// misattributed to Close.
-	require.NoError(t, execErr)
+	require.NoError(t, execErr, "pgdsn: CREATE DATABASE %s", dbName)
 	require.NoError(t, closeErr)
 
 	testURL := *parsedBase

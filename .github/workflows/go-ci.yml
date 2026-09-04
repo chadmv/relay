@@ -65,8 +65,8 @@ jobs:
       # Setting this selects the harness's shared-service mode: one freshly
       # CREATEd database per test on the service above. No Docker API, no image
       # pull, no Ryuk reaper. The path names `postgres` because
-      # newIntegrationDSN connects there only to issue CREATE/DROP DATABASE; no
-      # test ever uses that database.
+      # pgdsn.newSharedServiceDSN connects there only to issue CREATE/DROP
+      # DATABASE; no test ever uses that database.
       #
       # 127.0.0.1, never localhost: localhost can resolve to ::1 first and a
       # published Docker port may not answer there. web/e2e/ensure-db.mjs
@@ -103,7 +103,11 @@ jobs:
     # `test` job above uses timeout-minutes: 15, so equal numbers make a Go
     # panic and a GitHub job kill indistinguishable in the log. 12 here
     # against the target's -timeout 600s means the two failures name
-    # themselves.
+    # themselves - but -timeout 600s is PER TEST BINARY and this target names
+    # three packages, so 12 minutes is coupled to those packages running
+    # concurrently (no -p 1 in test-pg-integration): a change that serializes
+    # them (adding -p 1, or a CI runner with GOMAXPROCS=1) can multiply the
+    # worst case past this job's limit.
     timeout-minutes: 12
     services:
       # Same image, user, password and port as cli-integration's service, so

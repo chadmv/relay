@@ -17,13 +17,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     running relay-server reachable via RELAY_URL and a valid RELAY_TOKEN,
     plus at least one online agent able to run the submitted task.
 
-    This lane is accepted as manual, not automated: standing up relay-server
-    plus a live relay-agent running real subprocesses is a different, wider
-    lane than the services:postgres jobs in .github/workflows/go-ci.yml, and
-    .github/workflows/python.yml's paths: python/** filter would not fire on
-    the Go commits most likely to break what this lane actually proves. An
-    assertion whose only home is here is not CI evidence; give it a Go-side
-    home instead where the property allows one.
+    This lane is accepted as manual, not automated. An assertion whose only
+    home is here is not CI evidence; give it a Go-side home instead where the
+    property allows one.
     """
     if os.environ.get("RELAY_INTEGRATION") == "1":
         return

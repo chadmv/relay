@@ -340,10 +340,13 @@ Each element, with its reason:
   connection to Postgres succeeded. Without it, a PR that edits only the `services.postgres` block
   can report `ok (cached)` having contacted no database.
 - **No `-p 1`.** Every test gets its own freshly created database, so cross-package parallelism has
-  no shared mutable state to corrupt, and the two server-wide catalog queries in these packages are
-  already scoped (section 6.3 names them). `make test-integration`'s `-p 1` exists for parallel
-  *container* conflicts, which this mode does not create. If the first local run shows interference,
-  fall back to `-p 1` and record the observed symptom as the reason.
+  no PER-DATABASE state to corrupt in shared-service mode, and the two server-wide catalog queries in
+  these packages are already scoped (section 6.3 names them). `make test-integration`'s `-p 1` exists
+  for parallel *container* conflicts, which this mode does not create; in default (container) mode
+  this target's packages churn their own containers concurrently, which IS that same hazard, covered
+  by `make test-integration` instead. `-p 1` is not the remedy for a shared-server interference
+  symptom either - it changes CREATE DATABASE's rate, not the condition that triggers a failure, so it
+  masks a real defect rather than fixing one; diagnose and fix the actual cause instead.
 - `-timeout 600s` against a derived worst case of about 190 seconds, and deliberately not equal to
   the job's own limit; see below.
 

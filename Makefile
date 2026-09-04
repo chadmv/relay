@@ -65,7 +65,7 @@ test:
 # real Postgres container, so internal/api alone runs ~320-340s.
 #
 # Deliberately NOT -count=1: Go's test cache DOES key on env vars a test
-# actually reads via os.Getenv during that run (newIntegrationDSN reads
+# actually reads via os.Getenv during that run (pgdsn.NewEmptyDSN reads
 # RELAY_TEST_DATABASE_URL), so a real mode change here is not a
 # cache-invalidation gap. Measured directly: with a shared GOCACHE, changing
 # RELAY_TEST_DATABASE_URL between two runs of TestIntegration_HarnessDSNIsMigratedAndEmpty
@@ -84,7 +84,7 @@ test:
 # Residual axis, not addressed by the reasoning above: test-cli-integration's
 # own justification for -count=1 ("the cache key says nothing about whether a
 # live TCP connection succeeded") applies verbatim to THIS target too when run
-# in shared-service mode (RELAY_TEST_DATABASE_URL set) - newIntegrationDSN
+# in shared-service mode (RELAY_TEST_DATABASE_URL set) - pgdsn.NewEmptyDSN
 # reads that env var, so a value CHANGE busts the cache as this comment
 # measured, but a change to the SHARED SERVER ITSELF (its Postgres version,
 # its health check, its container config) with RELAY_TEST_DATABASE_URL left
@@ -122,24 +122,27 @@ test-integration:
 test-cli-integration:
 	go test -tags integration -count=1 ./internal/cli/... -timeout 480s
 
-# Run the store and schedrunner integration lanes, the two Postgres-only
-# packages that .github/workflows/go-ci.yml's pg-integration job runs. Both
-# take their database from internal/testsupport/pgdsn, the same harness
-# test-cli-integration uses, so the same two modes (unset: one testcontainer
-# per test; RELAY_TEST_DATABASE_URL set: one CREATEd database per test on a
-# shared server) apply here too.
+# Run the store and schedrunner integration lanes, plus internal/testsupport/pgdsn's
+# own database-touching self-test - the Postgres-only packages that
+# .github/workflows/go-ci.yml's pg-integration job runs. All three take their
+# database from internal/testsupport/pgdsn, the same harness test-cli-integration
+# uses, so the same two modes (unset: one testcontainer per test;
+# RELAY_TEST_DATABASE_URL set: one CREATEd database per test on a shared
+# server) apply here too.
 #
 # -count=1 for the same reason test-cli-integration's comment gives: the test
 # cache says nothing about whether a live TCP connection to Postgres
 # succeeded.
 #
-# No -p 1. Every test gets its own freshly created database under the
-# shared-service mode this job uses, so cross-package parallelism has no
-# shared mutable state to corrupt - unlike make test-integration's -p 1,
-# which exists for parallel CONTAINER conflicts, a hazard this mode does not
-# create.
+# No -p 1, in shared-service mode: every test gets its own freshly created
+# database, so cross-package parallelism has no PER-DATABASE state to
+# corrupt - unlike make test-integration's -p 1, which exists for parallel
+# CONTAINER conflicts, a hazard this mode does not create. This reasoning
+# does NOT cover the default (container) mode, where this target's packages
+# churn their own testcontainers concurrently; that hazard is
+# make test-integration's -p 1 to address, not this target's.
 test-pg-integration:
-	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... -timeout 600s
+	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... ./internal/testsupport/... -timeout 600s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`
