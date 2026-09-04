@@ -100,3 +100,58 @@ func TestBuildHTTPServer_RetryAndRunNowDrawOnTheSubmitBucket(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildHTTPServer_ScheduleCreationIsNotInTheSubmitBucket makes the OUT
+// verdict executable rather than prose.
+//
+// The verdict's reason: the hazard that asked for this limit is the SIZE of
+// scheduled_jobs at boot, and a creation-rate limit bounds how fast the table
+// fills, not how full it gets. And a schedule's own firing runs on the
+// schedrunner goroutine and never touches an HTTP route, so no HTTP rate limit
+// anywhere can bound it. The control that bounds the table is a per-owner count
+// cap, which is a quota and is not this.
+//
+// THE MIDDLE ASSERTION IS THE CONTROL. Without proving the bucket is FULL, the
+// final 400 is also what a fixture whose limiter never ran produces, and the
+// test would be green for the wrong reason.
+func TestBuildHTTPServer_ScheduleCreationIsNotInTheSubmitBucket(t *testing.T) {
+	srv := submitBucketServer(1, time.Minute)
+
+	spend := postAsUser(t, srv, "/v1/jobs", `{}`)
+	require.Equal(t, http.StatusBadRequest, spend.Code, "body: %s", spend.Body.String())
+
+	over := postAsUser(t, srv, "/v1/jobs", `{}`)
+	require.Equal(t, http.StatusTooManyRequests, over.Code,
+		"control: the bucket must be provably full before the assertion below means anything")
+
+	// 400 exactly, not merely "not 429": handleCreateScheduledJob answers
+	// `name is required` after readJSON and before any pool use, so the code is
+	// determinate and a loosened assertion would lose coverage for nothing.
+	rec := postAsUser(t, srv, "/v1/scheduled-jobs", `{}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"POST /v1/scheduled-jobs is deliberately OUT of this bucket and must reach its own "+
+			"validation even when the submit budget is spent. body: %s", rec.Body.String())
+}
+
+// TestBuildHTTPServer_AZeroLimitLeavesTheBucketOff pins the guard in
+// Server.Handler, which is NOT cosmetic. rateLimiter.allow indexes hits[0]
+// whenever len(hits) >= limit, so constructing a limiter with a zero count
+// panics on the first request rather than admitting it. The Go-constructed off
+// state is what internal/api's own test server and the CLI harness both rely on;
+// the environment cannot reach it, because ParseRateLimit refuses a zero count
+// and main fatals on the error.
+func TestBuildHTTPServer_AZeroLimitLeavesTheBucketOff(t *testing.T) {
+	srv := buildHTTPServer(httpServerDeps{
+		addr: "127.0.0.1:0",
+		q:    store.New(stubAdminDB{}),
+		// jobSubmitLimitN and jobSubmitLimitWin deliberately unset.
+	})
+
+	for i := 1; i <= 3; i++ {
+		rec := postAsUser(t, srv, "/v1/jobs", `{}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"request %d: with no configured limit every request must reach the handler. A 429 means "+
+				"a zero-count limiter was constructed; a panic means it was constructed AND allow "+
+				"indexed an empty window. body: %s", i, rec.Body.String())
+	}
+}
