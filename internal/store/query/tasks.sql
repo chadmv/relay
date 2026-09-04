@@ -350,7 +350,7 @@ WITH fence AS (
     WHERE t.id = sqlc.arg(task_id)
       AND t.assignment_epoch = sqlc.arg(assignment_epoch)
       AND t.worker_id = sqlc.arg(worker_id)
-      AND (t.status IN ('pending', 'dispatched', 'running')
+      AND (t.status IN ('pending', 'dispatched', 'preparing', 'running')
            OR t.finished_at > sqlc.arg(min_finished_at)::timestamptz)
 ), ins AS (
     INSERT INTO task_logs (task_id, stream, content)
@@ -502,7 +502,7 @@ WHERE id = sqlc.arg(id)
 -- running_tasks report.
 SELECT id, assignment_epoch
 FROM tasks
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 ORDER BY id;
 
 -- name: ListGraceCandidates :many
@@ -512,7 +512,7 @@ ORDER BY id;
 SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 FROM workers w
 JOIN tasks t ON t.worker_id = w.id
-WHERE t.status IN ('dispatched', 'running');
+WHERE t.status IN ('dispatched', 'preparing', 'running');
 
 -- name: RequeueTaskByID :execrows
 -- Revert a single ASSIGNED task back to 'pending', on FOUR predicates. Each
@@ -598,7 +598,7 @@ SET status = 'pending',
 WHERE id = sqlc.arg(id)
   AND assignment_epoch = sqlc.arg(assignment_epoch)
   AND worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running');
+  AND status IN ('dispatched', 'preparing', 'running');
 
 -- name: NotifyTaskSubmitted :exec
 -- Wakes any LISTENers on relay_task_submitted. Payload is empty; listeners
@@ -615,7 +615,7 @@ SELECT pg_notify('relay_task_completed', '');
 SELECT worker_id, count(*)::bigint AS active
 FROM tasks
 WHERE worker_id IS NOT NULL
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
 GROUP BY worker_id;
 
 -- name: ListOverdueAssignedTasks :many
@@ -686,7 +686,7 @@ GROUP BY worker_id;
 -- which is what the ORDER BY is for. The caller logs when a sweep comes back
 -- full, so a truncated sweep is never mistaken for a complete one.
 SELECT * FROM tasks
-WHERE status IN ('dispatched', 'running')
+WHERE status IN ('dispatched', 'preparing', 'running')
   AND worker_id IS NOT NULL
   AND (
         ( sqlc.arg(absolute_enabled)::bool
@@ -771,7 +771,7 @@ SET status = 'failed',
     assigned_at = NULL,
     finished_at = NOW(),
     assignment_epoch = assignment_epoch + 1
-WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched');
+WHERE job_id = $1 AND status IN ('pending', 'queued', 'preparing', 'running', 'dispatched');
 
 -- name: RequeueWorkerTasks :many
 -- Re-queue dispatched/running tasks for a worker that has disconnected or is
@@ -785,7 +785,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 RETURNING id;
 
 -- name: RequeueWorkerTasksIfEpoch :many
@@ -799,7 +799,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
   AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
 RETURNING id;
 
@@ -993,7 +993,7 @@ WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 -- the NULLS LAST branch stays.
 SELECT * FROM tasks
 WHERE worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
   AND (
        NOT sqlc.arg(cursor_set)::bool
     OR (
@@ -1017,4 +1017,4 @@ LIMIT sqlc.arg(page_limit)::int + 1;
 -- filter and aggregates the whole table on every poll.
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = sqlc.arg(worker_id)
-  AND status IN ('dispatched', 'running');
+  AND status IN ('dispatched', 'preparing', 'running');

@@ -17,7 +17,7 @@ WITH fence AS (
     WHERE t.id = $1
       AND t.assignment_epoch = $2
       AND t.worker_id = $3
-      AND (t.status IN ('pending', 'dispatched', 'running')
+      AND (t.status IN ('pending', 'dispatched', 'preparing', 'running')
            OR t.finished_at > $4::timestamptz)
 ), ins AS (
     INSERT INTO task_logs (task_id, stream, content)
@@ -146,7 +146,7 @@ type AppendTaskLogRow struct {
 //     WHERE t.id = $1
 //     AND t.assignment_epoch = $2
 //     AND t.worker_id = $3
-//     AND (t.status IN ('pending', 'dispatched', 'running')
+//     AND (t.status IN ('pending', 'dispatched', 'preparing', 'running')
 //     OR t.finished_at > $4::timestamptz)
 //     ), ins AS (
 //     INSERT INTO task_logs (task_id, stream, content)
@@ -175,7 +175,7 @@ SET status = 'failed',
     assigned_at = NULL,
     finished_at = NOW(),
     assignment_epoch = assignment_epoch + 1
-WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
+WHERE job_id = $1 AND status IN ('pending', 'queued', 'preparing', 'running', 'dispatched')
 `
 
 // Mark every non-terminal task of a job as failed when the job is cancelled.
@@ -190,7 +190,7 @@ WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
 //	    assigned_at = NULL,
 //	    finished_at = NOW(),
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE job_id = $1 AND status IN ('pending', 'queued', 'running', 'dispatched')
+//	WHERE job_id = $1 AND status IN ('pending', 'queued', 'preparing', 'running', 'dispatched')
 func (q *Queries) CancelJobTasks(ctx context.Context, jobID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, cancelJobTasks, jobID)
 	return err
@@ -262,7 +262,7 @@ const countActiveTasksByAllWorkers = `-- name: CountActiveTasksByAllWorkers :man
 SELECT worker_id, count(*)::bigint AS active
 FROM tasks
 WHERE worker_id IS NOT NULL
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
 GROUP BY worker_id
 `
 
@@ -277,7 +277,7 @@ type CountActiveTasksByAllWorkersRow struct {
 //	SELECT worker_id, count(*)::bigint AS active
 //	FROM tasks
 //	WHERE worker_id IS NOT NULL
-//	  AND status IN ('dispatched', 'running')
+//	  AND status IN ('dispatched', 'preparing', 'running')
 //	GROUP BY worker_id
 func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActiveTasksByAllWorkersRow, error) {
 	rows, err := q.db.Query(ctx, countActiveTasksByAllWorkers)
@@ -302,7 +302,7 @@ func (q *Queries) CountActiveTasksByAllWorkers(ctx context.Context) ([]CountActi
 const countActiveTasksForWorker = `-- name: CountActiveTasksForWorker :one
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
 `
 
 // `total` for the page above, and the number the Slots KPI renders as used
@@ -314,7 +314,7 @@ WHERE worker_id = $1
 //
 //	SELECT COUNT(*) FROM tasks
 //	WHERE worker_id = $1
-//	  AND status IN ('dispatched', 'running')
+//	  AND status IN ('dispatched', 'preparing', 'running')
 func (q *Queries) CountActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countActiveTasksForWorker, workerID)
 	var count int64
@@ -536,7 +536,7 @@ func (q *Queries) FailDependentTasks(ctx context.Context, failedTaskID pgtype.UU
 const getActiveTasksForWorker = `-- name: GetActiveTasksForWorker :many
 SELECT id, assignment_epoch
 FROM tasks
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 ORDER BY id
 `
 
@@ -551,7 +551,7 @@ type GetActiveTasksForWorkerRow struct {
 //
 //	SELECT id, assignment_epoch
 //	FROM tasks
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 //	ORDER BY id
 func (q *Queries) GetActiveTasksForWorker(ctx context.Context, workerID pgtype.UUID) ([]GetActiveTasksForWorkerRow, error) {
 	rows, err := q.db.Query(ctx, getActiveTasksForWorker, workerID)
@@ -1034,7 +1034,7 @@ func (q *Queries) IncrementTaskRetryCount(ctx context.Context, arg IncrementTask
 const listActiveTasksForWorkerPage = `-- name: ListActiveTasksForWorkerPage :many
 SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
 WHERE worker_id = $1
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
   AND (
        NOT $2::bool
     OR (
@@ -1081,7 +1081,7 @@ type ListActiveTasksForWorkerPageParams struct {
 //
 //	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
 //	WHERE worker_id = $1
-//	  AND status IN ('dispatched', 'running')
+//	  AND status IN ('dispatched', 'preparing', 'running')
 //	  AND (
 //	       NOT $2::bool
 //	    OR (
@@ -1144,7 +1144,7 @@ const listGraceCandidates = `-- name: ListGraceCandidates :many
 SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 FROM workers w
 JOIN tasks t ON t.worker_id = w.id
-WHERE t.status IN ('dispatched', 'running')
+WHERE t.status IN ('dispatched', 'preparing', 'running')
 `
 
 type ListGraceCandidatesRow struct {
@@ -1160,7 +1160,7 @@ type ListGraceCandidatesRow struct {
 //	SELECT DISTINCT w.id, w.disconnected_at, w.connection_epoch
 //	FROM workers w
 //	JOIN tasks t ON t.worker_id = w.id
-//	WHERE t.status IN ('dispatched', 'running')
+//	WHERE t.status IN ('dispatched', 'preparing', 'running')
 func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidatesRow, error) {
 	rows, err := q.db.Query(ctx, listGraceCandidates)
 	if err != nil {
@@ -1183,7 +1183,7 @@ func (q *Queries) ListGraceCandidates(ctx context.Context) ([]ListGraceCandidate
 
 const listOverdueAssignedTasks = `-- name: ListOverdueAssignedTasks :many
 SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
-WHERE status IN ('dispatched', 'running')
+WHERE status IN ('dispatched', 'preparing', 'running')
   AND worker_id IS NOT NULL
   AND (
         ( $1::bool
@@ -1276,7 +1276,7 @@ type ListOverdueAssignedTasksParams struct {
 // full, so a truncated sweep is never mistaken for a complete one.
 //
 //	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
-//	WHERE status IN ('dispatched', 'running')
+//	WHERE status IN ('dispatched', 'preparing', 'running')
 //	  AND worker_id IS NOT NULL
 //	  AND (
 //	        ( $1::bool
@@ -1537,7 +1537,7 @@ SET status = 'pending',
 WHERE id = $1
   AND assignment_epoch = $2
   AND worker_id = $3
-  AND status IN ('dispatched', 'running')
+  AND status IN ('dispatched', 'preparing', 'running')
 `
 
 type RequeueTaskByIDParams struct {
@@ -1631,7 +1631,7 @@ type RequeueTaskByIDParams struct {
 //	WHERE id = $1
 //	  AND assignment_epoch = $2
 //	  AND worker_id = $3
-//	  AND status IN ('dispatched', 'running')
+//	  AND status IN ('dispatched', 'preparing', 'running')
 func (q *Queries) RequeueTaskByID(ctx context.Context, arg RequeueTaskByIDParams) (int64, error) {
 	result, err := q.db.Exec(ctx, requeueTaskByID, arg.ID, arg.AssignmentEpoch, arg.WorkerID)
 	if err != nil {
@@ -1647,7 +1647,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 RETURNING id
 `
 
@@ -1663,7 +1663,7 @@ RETURNING id
 //	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 //	RETURNING id
 func (q *Queries) RequeueWorkerTasks(ctx context.Context, workerID pgtype.UUID) ([]pgtype.UUID, error) {
 	rows, err := q.db.Query(ctx, requeueWorkerTasks, workerID)
@@ -1692,7 +1692,7 @@ SET status = 'pending',
     assigned_at = NULL,
     started_at = NULL,
     assignment_epoch = assignment_epoch + 1
-WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
   AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
 RETURNING id
 `
@@ -1713,7 +1713,7 @@ type RequeueWorkerTasksIfEpochParams struct {
 //	    assigned_at = NULL,
 //	    started_at = NULL,
 //	    assignment_epoch = assignment_epoch + 1
-//	WHERE worker_id = $1 AND status IN ('dispatched', 'running')
+//	WHERE worker_id = $1 AND status IN ('dispatched', 'preparing', 'running')
 //	  AND EXISTS (SELECT 1 FROM workers w WHERE w.id = $1 AND w.connection_epoch = $2)
 //	RETURNING id
 func (q *Queries) RequeueWorkerTasksIfEpoch(ctx context.Context, arg RequeueWorkerTasksIfEpochParams) ([]pgtype.UUID, error) {

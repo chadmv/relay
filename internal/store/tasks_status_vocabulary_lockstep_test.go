@@ -147,7 +147,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     halving that IN list to ('dispatched') left the store, worker, scheduler
 //     and api suites ALL GREEN while silently stranding reconcile's dominant
 //     case, and
-//     TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses is the same
+//     TestListActiveTasksForWorkerPage_ReturnsEveryAssignedStatus is the same
 //     guard for the panel statement.
 //   - RequeueTask (query/tasks.sql) - `status = 'dispatched'`, and the one
 //     member of the requeue family that is DELIBERATELY NARROWER than the group

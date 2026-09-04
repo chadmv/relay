@@ -40,23 +40,25 @@ func listPage(t *testing.T, f *assignedFixture, limit int32) []store.Task {
 	return rows
 }
 
-// TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses is the positive
-// arm of the status allow-list. Halving the IN list to one member must go RED:
+// TestListActiveTasksForWorkerPage_ReturnsEveryAssignedStatus is the positive arm
+// of the status allow-list. Dropping any member from the IN list must go RED:
 // that exact mutation stayed green across four suites for RequeueTaskByID.
-func TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses(t *testing.T) {
+func TestListActiveTasksForWorkerPage_ReturnsEveryAssignedStatus(t *testing.T) {
 	f := newAssignedFixture(t)
 	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
 
-	dispatched := f.claimedAt(t, "syncing", base)
-	running := runningAt(t, f, "rendering", base.Add(time.Minute))
+	dispatched := f.claimedAt(t, "queued-to-rig", base)
+	preparing := preparingAt(t, f, "syncing", base.Add(time.Minute))
+	running := runningAt(t, f, "rendering", base.Add(2*time.Minute))
 
 	rows := listPage(t, f, 50)
-	require.Len(t, rows, 2, "both dispatched and running are 'currently assigned'")
+	require.Len(t, rows, 3, "dispatched, preparing and running are all 'currently assigned'")
 	got := map[string]string{}
 	for _, r := range rows {
 		got[r.Name] = r.Status
 	}
 	assert.Equal(t, "dispatched", got[dispatched.Name])
+	assert.Equal(t, "preparing", got[preparing.Name])
 	assert.Equal(t, "running", got[running.Name])
 }
 
@@ -106,6 +108,7 @@ func TestCountActiveTasksForWorker_MatchesTheListStatement(t *testing.T) {
 
 	f.claimedAt(t, "a", base)
 	runningAt(t, f, "b", base.Add(time.Minute))
+	preparingAt(t, f, "d", base.Add(90*time.Second))
 	done := f.claimedAt(t, "c", base.Add(2*time.Minute))
 	_, err := f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
 		ID:              done.ID,
@@ -120,7 +123,7 @@ func TestCountActiveTasksForWorker_MatchesTheListStatement(t *testing.T) {
 	require.NoError(t, err)
 	rows := listPage(t, f, 50)
 	assert.EqualValues(t, len(rows), n, "count and list must slice the same partition")
-	assert.EqualValues(t, 2, n)
+	assert.EqualValues(t, 3, n)
 }
 
 // The job-name lookup the handler uses instead of a JOIN, so no hand-written
