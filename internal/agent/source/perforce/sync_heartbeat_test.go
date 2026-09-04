@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,4 +233,150 @@ func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T)
 			assert.Contains(t, l, "last -")
 		}
 	}
+}
+
+// A disabled heartbeat must build NO ticker, not build one and discard its
+// ticks: the seam fatals on construction, which a test merely asserting that no
+// heartbeat line appeared could not distinguish. t.Fatal is legal here only
+// because newSyncTicker is called on Prepare's goroutine and this test runs
+// Prepare on the test goroutine - do not move Prepare onto a goroutine here.
+func TestProvider_ADisabledHeartbeatBuildsNoTickerAndStillSummarises(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	fr.setStream(syncKey, "//depot/x/a.ma#3 - added as /ws/a.ma\n")
+
+	prev := newSyncTicker
+	newSyncTicker = func(time.Duration) (<-chan time.Time, func()) {
+		t.Fatal("a disabled heartbeat must not construct a ticker at all")
+		return nil, func() {}
+	}
+	t.Cleanup(func() { newSyncTicker = prev })
+
+	p := New(Config{
+		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
+		SyncHeartbeatInterval: 0,
+		FreeDiskGB:            func(string) (int64, error) { return 811, nil },
+	})
+	var lines []string
+	h, err := p.Prepare(context.Background(), "task-1", spec, func(s string) { lines = append(lines, s) })
+	require.NoError(t, err)
+	defer h.Finalize(context.Background())
+
+	require.Equal(t, 1, countLinesContaining(lines, "[sync] complete:"), "got: %v", lines)
+	for _, l := range lines {
+		if strings.Contains(l, "[sync] complete:") {
+			assert.Contains(t, l, "1 files")
+			assert.Contains(t, l, "0 other lines")
+			assert.Contains(t, l, "811 GB free")
+			assert.Contains(t, l, "last //depot/x/a.ma")
+		}
+	}
+}
+
+// REGRESSION GUARD, not a red-first criterion: at HEAD before this slice the
+// sync was not on a goroutine at all, so this is vacuously green there. Its RED
+// is the mutation that adds a ctx.Done() arm to runSyncWithHeartbeat's select -
+// that arm would let Prepare return, release the workspace and let a sweep
+// begin os.RemoveAll while a live p4 child was still writing into the tree.
+//
+// The heartbeat interval is positive and the ticker never ticks, so the select
+// is genuinely entered: with a zero interval the early return bypasses it and
+// the mutation would be invisible.
+func TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	release := make(chan struct{})
+	fr.setStreamBlock(syncKey, release)
+	useTestTicker(t)
+
+	p := New(Config{
+		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
+		SyncHeartbeatInterval: 30 * time.Second,
+	})
+	rec := &progressRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	res := make(chan prepResult, 1)
+	go func() {
+		h, err := p.Prepare(ctx, "task-1", spec, rec.add)
+		res <- prepResult{h, err}
+	}()
+
+	rec.waitFor(t, "[sync] starting", 5*time.Second)
+	cancel()
+
+	select {
+	case r := <-res:
+		require.Error(t, r.err, "a cancelled sync must fail the prepare")
+		// Read the instant Prepare returns. The fake sleeps before it increments,
+		// so a Prepare that returned early cannot have observed this by luck.
+		require.Equal(t, int32(1), fr.streamDone.Load(),
+			"Prepare returned while the sync goroutine was still running")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Prepare did not return after ctx cancellation")
+	}
+}
+
+// REGRESSION GUARD, not a red-first criterion. Its RED is the mutation a future
+// reader will "simplify" the design back into: spawning the emit with
+// go progress(...). progress holds a mutex across a send bounded only by the
+// agent context, so a second caller is not merely slow - it is a
+// mutual-exclusion point that makes Prepare never return.
+//
+// The in-flight counter is an atomic rather than a reliance on -race because
+// this property must redden in the default lane, which is the one that runs
+// everywhere.
+func TestProvider_TheHeartbeatNeverCallsProgressConcurrentlyWithPrepare(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	release := make(chan struct{})
+	fr.setStreamBlock(syncKey, release)
+	tick := useTestTicker(t)
+
+	p := New(Config{
+		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
+		SyncHeartbeatInterval: 30 * time.Second,
+		FreeDiskGB:            func(string) (int64, error) { return 811, nil },
+	})
+
+	rec := &progressRecorder{}
+	var inFlight atomic.Int32
+	record := func(s string) {
+		if inFlight.Add(1) != 1 {
+			// t.Error, never t.Fatal: this runs on a non-test goroutine.
+			t.Error("progress called concurrently; it must have exactly one caller goroutine")
+		}
+		time.Sleep(2 * time.Millisecond)
+		inFlight.Add(-1)
+		rec.add(s)
+	}
+
+	res := make(chan prepResult, 1)
+	go func() {
+		h, err := p.Prepare(context.Background(), "task-1", spec, record)
+		res <- prepResult{h, err}
+	}()
+	rec.waitFor(t, "[sync] starting", 5*time.Second)
+
+	// Ticks back to back on an unbuffered channel: with one caller each send
+	// blocks until the previous progress returns, so overlap is unreachable.
+	// The sender keeps running across the release so a spawned emit can also
+	// overlap Prepare's own [sync] complete: line.
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case tick <- time.Now():
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	r := <-res
+	close(stop)
+	require.NoError(t, r.err)
+	defer r.h.Finalize(context.Background())
+
+	require.Equal(t, 1, rec.count("[sync] complete:"), "got: %v", rec.snapshot())
 }
