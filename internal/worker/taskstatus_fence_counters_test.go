@@ -592,18 +592,23 @@ func taskStatusUniverse(t *testing.T, sqlAllowList []string) []string {
 }
 
 // tasksStatusVocabulary reads the literal set of tasks_status_check out of the
-// migration that adds it - the same constraint
+// LAST up-migration that adds it - the same constraint
 // internal/store/tasks_status_vocabulary_lockstep_test.go reads back off a live
 // Postgres. This lane cannot reach a database (it is the no-tag CI lane), so it
 // reads the source the constraint is built from instead.
 //
-// IT SCANS EVERY up-MIGRATION AND REQUIRES EXACTLY ONE DEFINITION rather than
-// opening 000019 by name. A hard-coded path goes stale silently the day a later
-// migration drops and re-adds the constraint with a wider set: this parse would
-// keep returning the old vocabulary and the guard would keep passing. With the
-// scan, that edit makes the count 2 and this fails with a message that says
-// which files. The down-migrations are excluded because 000019's drops the
-// constraint by name and would otherwise be a second hit.
+// IT SCANS EVERY up-MIGRATION, TAKES THE LEXICALLY GREATEST MATCH, AND ASSERTS
+// THAT IT DID. A hard-coded path goes stale silently the day a later migration
+// drops and re-adds the constraint with a wider set. So does taking the FIRST
+// match, or taking any match without checking it is the greatest: either reads a
+// superseded vocabulary forever while passing, which is a fail-open, because the
+// universe it feeds would no longer contain every status a row can hold.
+//
+// `--` COMMENT LINES ARE STRIPPED BEFORE MATCHING. A migration's own doc block
+// may legitimately quote a prior vocabulary, and a quoted definition in prose is
+// exactly the thing this parse must not mistake for a real one. The
+// down-migrations are excluded because they drop or re-add the constraint by
+// name and would otherwise be extra hits.
 func tasksStatusVocabulary(t *testing.T) []string {
 	t.Helper()
 	dir := filepath.Join("..", "store", "migrations")
@@ -615,28 +620,54 @@ func tasksStatusVocabulary(t *testing.T) []string {
 	def := regexp.MustCompile(`ADD CONSTRAINT tasks_status_check\s+CHECK \(status IN \(([^)]*)\)`)
 	quoted := regexp.MustCompile(`'([a-z_]+)'`)
 
-	var out, from []string
+	type hit struct {
+		file     string
+		statuses []string
+	}
+	var hits []hit
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
 		}
 		src, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		require.NoError(t, err)
-		for _, m := range def.FindAllStringSubmatch(string(src), -1) {
-			from = append(from, e.Name())
-			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
-				out = append(out, q[1])
+
+		// Executable text only. See the comment-strip paragraph above.
+		var stripped []string
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				continue
 			}
+			stripped = append(stripped, line)
+		}
+		body := strings.Join(stripped, "\n")
+
+		for _, m := range def.FindAllStringSubmatch(body, -1) {
+			var statuses []string
+			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
+				statuses = append(statuses, q[1])
+			}
+			hits = append(hits, hit{file: e.Name(), statuses: statuses})
 		}
 	}
 
-	require.Len(t, from, 1,
-		"expected exactly one up-migration to ADD CONSTRAINT tasks_status_check, found %d (%v). If the "+
-			"constraint is now dropped and re-added, this parse is reading a stale vocabulary and the "+
-			"universe it feeds no longer contains every status a row can hold. Re-derive it.", len(from), from)
-	require.NotEmpty(t, out,
-		"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code", from[0])
-	return out
+	require.NotEmpty(t, hits,
+		"no up-migration ADDs CONSTRAINT tasks_status_check. Either the constraint moved, or this "+
+			"parse no longer matches the migration's formatting - which is a FAIL-OPEN, because a "+
+			"parse that silently returns nothing makes every comparison it feeds vacuous. Re-derive it.")
+
+	last := hits[len(hits)-1]
+	for _, h := range hits {
+		require.LessOrEqual(t, h.file, last.file,
+			"this parse takes the LAST match in os.ReadDir order and got %s, but %s sorts after it. "+
+				"os.ReadDir returns entries sorted by filename and migration filenames are "+
+				"zero-padded, so the last match is the newest definition. If that stopped being "+
+				"true, this helper is reading a STALE vocabulary and the universe it feeds no "+
+				"longer contains every status a row can hold.", last.file, h.file)
+	}
+	require.NotEmpty(t, last.statuses,
+		"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code", last.file)
+	return last.statuses
 }
 
 // TestClassifyStatusFenceRejection is the classifier's own truth table, with the

@@ -20,10 +20,10 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 
 // TestTasksStatusVocabularyIsExactly is a LOCKSTEP GUARD, not a behavior test.
 // It reads the live tasks_status_check constraint and fails if the vocabulary is
-// anything other than the six values migration 000019 pinned.
+// anything other than the set `want` below names.
 //
 // It exists because the statements listed below hard-code a slice of that
-// vocabulary, and adding a seventh status silently desynchronizes all of them at
+// vocabulary, and adding a status silently desynchronizes all of them at
 // once. A task-level `cancelled` is the concrete near-term candidate:
 // CancelJobTasks squashes cancellation onto `failed` today, so somebody will
 // eventually want the real thing.
@@ -87,6 +87,18 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     must stay OUT and is then bounded by finished_at like done/failed/
 //     timed_out. Never conjoin this arm with the rest of the fence: that closes
 //     the trailing flush.
+//   - CancelJobTasks (query/tasks.sql) - `status IN ('pending','queued',
+//     'running','dispatched')`, the non-terminal set a job cancel fails. It
+//     WRITES: it stamps `failed`, nulls worker_id and assigned_at and bumps the
+//     epoch. A new NON-TERMINAL status omitted here means a cancelled job leaves
+//     that task live, with its agent still executing, while the job reads
+//     `cancelled` - and internal/cli/logs.go's emitSnapshot documents that exact
+//     reachability. A new TERMINAL status must stay OUT: it would restamp a
+//     finished task's finished_at and bump an epoch the trailing-log flush still
+//     needs. The `queued` literal in this list is DEAD - jobs_status_check admits
+//     `queued`, tasks_status_check never has - and removing it belongs to
+//     idea-2026-07-01-dead-status-vocabulary, not to whoever next widens this
+//     set.
 //   - ListOverdueAssignedTasks (query/tasks.sql) - `status IN ('dispatched',
 //     'running')`, the "currently assigned" partition the coordinator's
 //     stale-task watchdog scans. READ THIS SITE BACKWARDS TOO: it is the SECOND
@@ -226,17 +238,18 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{"dispatched", "done", "failed", "pending", "running", "timed_out"}
+	want := []string{"dispatched", "done", "failed", "pending", "preparing", "running", "timed_out"}
 	require.Equal(t, want, got,
 		"tasks.status vocabulary changed - read this test's comment before updating it. These statements slice "+
 			"this set: UpdateTaskStatus, IncrementTaskRetryCount, RecomputeJobStatus, RetryJobTasks, "+
-			"SelectRetryableTaskIDs, AppendTaskLog, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
+			"SelectRetryableTaskIDs, AppendTaskLog, CancelJobTasks, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
 			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
 			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker, "+
 			"and the partial index idx_tasks_worker_active (migration 000018). Revisit ALL OF THEM. "+
 			"AppendTaskLog and every statement carrying the 'currently assigned' partition "+
 			"fail OPEN in the damaging direction. A new NON-TERMINAL status omitted from AppendTaskLog's first "+
-			"arm silently discards 100% of that state's log output. One omitted from the nine that carry the "+
+			"arm silently discards 100% of that state's log output. One omitted from CancelJobTasks leaves that "+
+			"task live, with its agent still executing, while the job reads cancelled. One omitted from the nine that carry the "+
 			"'currently assigned' partition - ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
 			"ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
 			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker - means a "+
