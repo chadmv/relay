@@ -26,7 +26,7 @@ func prepareFailingAtHeadResolution(t *testing.T) (*Provider, *Registry, string,
 	fr.set("client -o -S //s/x "+client, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("client -d "+client, "Client deleted.\n")
-	fr.setErr("changes -m1 //s/x/...#head", errors.New("no such file(s)."))
+	fr.setErr("-c "+client+" changes -m1 //"+client+"/...#head", errors.New("no such file(s)."))
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{

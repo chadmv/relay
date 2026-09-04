@@ -16,8 +16,8 @@ import (
 // assertCwdContract pins the cwd half of the client-selection contract introduced
 // by the p4client-explicit-flag fix: every workspace-scoped invocation (argv
 // begins with `-c <client>`) must run from wsRoot, while every global invocation
-// (no `-c` prefix - ResolveHead's `changes -m1`, the `client` create/delete
-// calls) must run with an empty cwd. The `-c <client>` argv assertions already
+// - `client -o`, `client -i` and `client -d`, which are the ones that address no
+// client - must run with an empty cwd. The `-c <client>` argv assertions already
 // pin the client half; this locks the cwd half, previously only covered
 // implicitly by the integration test.
 func assertCwdContract(t *testing.T, fr *fakeRunner, wsRoot string) {
@@ -38,15 +38,14 @@ func TestProvider_PrepareCreatesClientAndSyncs(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
 	expectedClient := expectedClientName("h", "//s/x")
-	// ResolveHead: "changes -m1 //s/x/...#head" → CL 12345
-	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+expectedClient+" changes -m1 //"+expectedClient+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	// CreateStreamClient: fetch existing spec (empty = new client), then write it back.
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
 	// recoverOrphanedCLs: no pending CLs on a fresh workspace.
 	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
 	// SyncStream: now invoked with global -c <client>.
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
+	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -91,11 +90,11 @@ func TestProvider_UnshelveAndFinalizeRevert(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
 	expectedClient := expectedClientName("h", "//s/x")
-	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+expectedClient+" changes -m1 //"+expectedClient+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l", "")
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "1 of 1 files\n")
+	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "1 of 1 files\n")
 	fr.set("-c "+expectedClient+" change -o", "Change: new\nDescription:\t<enter description here>\n")
 	fr.set("-c "+expectedClient+" change -i", "Change 91244 created.\n")
 	fr.set("-c "+expectedClient+" unshelve -s 12346 -c 91244", "//s/x/foo - unshelved\n")
@@ -165,14 +164,14 @@ func TestProvider_CrashRecovery_DeletesOrphanedPendingCLs(t *testing.T) {
 	require.NoError(t, reg.Save())
 	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
 
-	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+clientName+" changes -m1 //"+clientName+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	fr.set("client -o -S //s/x "+clientName, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+clientName+" changes -c "+clientName+" -s pending -l",
 		"Change 91244 on 2026-04-24 by relay@h *pending*\n\trelay-task-old\n\nChange 99999 on 2026-04-24 by other@h *pending*\n\thuman work\n")
 	fr.set("-c "+clientName+" revert -c 91244 //...", "//... - reverted\n")
 	fr.set("-c "+clientName+" change -d 91244", "Change 91244 deleted.\n")
-	fr.setStream("-c "+clientName+" sync -q --parallel=4 //s/x/...@12345", "ok\n")
+	fr.setStream("-c "+clientName+" sync -q --parallel=4 //"+clientName+"/...@12345", "ok\n")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
@@ -232,7 +231,7 @@ func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 	expectedClient := expectedClientName("h", "//s/x")
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
-	fr.setErr("changes -m1 //s/x/...#head",
+	fr.setErr("-c "+expectedClient+" changes -m1 //"+expectedClient+"/...#head",
 		fmt.Errorf("p4 changes -m1 //s/x/...#head: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
@@ -254,14 +253,14 @@ func TestProvider_Prepare_ClassifiesRecoverError(t *testing.T) {
 	expectedClient := expectedClientName("h", "//s/x")
 
 	// Set up a dirty workspace so needsSync=true and recoverOrphanedCLs is called.
-	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+expectedClient+" changes -m1 //"+expectedClient+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")
 	// recoverOrphanedCLs: inject auth error so it surfaces in progress output.
 	fr.setErr("-c "+expectedClient+" changes -c "+expectedClient+" -s pending -l",
 		fmt.Errorf("p4 changes ...: exit status 1 (stderr: Perforce password (P4PASSWD) invalid or unset.)"))
 	// Sync proceeds after recovery error (which only goes to progress, not task failure).
-	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //s/x/...@12345", "")
+	fr.setStream("-c "+expectedClient+" sync -q --parallel=4 //"+expectedClient+"/...@12345", "")
 
 	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
 	spec := &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{

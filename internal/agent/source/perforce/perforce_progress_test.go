@@ -28,7 +28,7 @@ func syncFixture(t *testing.T) (*fakeRunner, string, *relayv1.SourceSpec) {
 	t.Helper()
 	fr := newFakeP4Fixture(t)
 	client := expectedClientName("h", "//s/x")
-	fr.set("changes -m1 //s/x/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c "+client+" changes -m1 //"+client+"/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	fr.set("client -o -S //s/x "+client, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
@@ -38,7 +38,7 @@ func syncFixture(t *testing.T) (*fakeRunner, string, *relayv1.SourceSpec) {
 			Sync:   []*relayv1.SyncEntry{{Path: "//s/x/...", Rev: "#head"}},
 		},
 	}}
-	return fr, "-c " + client + " sync -q --parallel=4 //s/x/...@12345", spec
+	return fr, "-c " + client + " sync -q --parallel=4 //" + client + "/...@12345", spec
 }
 
 // The brackets are one line each, and per-file progress is a separate concern.

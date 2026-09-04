@@ -62,15 +62,18 @@ func TestClassifyP4Error_ToleratesANilUnderlyingErrorJustLikeErrorDoes(t *testin
 
 // ResolveHead has returns that are NOT p4CommandError - a parse failure and a
 // strconv error - and Provider.Prepare wraps them with the job's own depot path.
-// Driven through Prepare rather than a hand-built error: an assertion built from
-// a p4CommandError cannot see this, because having one in the chain is the very
+// That wrap is now the only route by which the job's path reaches the error at
+// all, because the argv carries the client path instead; rewriting the wrap to
+// the client path would make this test vacuous without failing it. Driven
+// through Prepare rather than a hand-built error: an assertion built from a
+// p4CommandError cannot see this, because having one in the chain is the very
 // condition that triggers the exclusion.
 func TestProvider_ANonP4CommandErrorCarryingASpecPathIsNotClassified(t *testing.T) {
 	fr := newFakeP4Fixture(t)
+	client := expectedClientName("h", "//depot/disk full")
 	// Output that does not match changeFirstLine, so ResolveHead returns
 	// fmt.Errorf("could not parse %q", line).
-	fr.set("changes -m1 //depot/disk full/...#head", "no changes.\n")
-	client := expectedClientName("h", "//depot/disk full")
+	fr.set("-c "+client+" changes -m1 //"+client+"/...#head", "no changes.\n")
 	fr.set("client -o -S //depot/disk full "+client, "")
 	fr.set("client -i", "Client saved.\n")
 

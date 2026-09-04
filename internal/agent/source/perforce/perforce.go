@@ -197,20 +197,34 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	// Resolve #head to a specific CL number.
+	//
+	// resolved and syncPaths stay keyed on the DEPOT path. BaselineHash is a
+	// cross-process contract: scheduler.BaselineHashFromAPISpec computes the same
+	// function server-side to score warm-workspace affinity, and the coordinator
+	// cannot know this agent's hostname or allocated short id, both of which feed
+	// clientName. Only syncSpecs - the p4 argv - becomes client-form.
 	resolved := make(map[string]string, len(pf.Sync))
 	syncSpecs := make([]string, 0, len(pf.Sync))
 	syncPaths := make([]string, 0, len(pf.Sync))
 	for _, e := range pf.Sync {
+		cp, err := toClientPath(clientName, pf.Stream, e.Path)
+		if err != nil {
+			return nil, err
+		}
 		rev := e.Rev
 		if rev == "#head" {
-			cl, err := p.cfg.Client.ResolveHead(ctx, e.Path)
+			cl, err := p.cfg.Client.ResolveHead(ctx, wsRoot, clientName, cp)
 			if err != nil {
+				// The wrap names the DEPOT path: it is what the operator wrote and
+				// can act on, and it is now the only place the job's own path
+				// reaches the error, because the argv no longer carries it.
+				// TestProvider_ANonP4CommandErrorCarryingASpecPathIsNotClassified.
 				return nil, classifyP4Error(fmt.Errorf("resolve head for %s: %w", e.Path, err))
 			}
 			rev = fmt.Sprintf("@%d", cl)
 			resolved[e.Path] = rev
 		}
-		syncSpecs = append(syncSpecs, e.Path+rev)
+		syncSpecs = append(syncSpecs, cp+rev)
 		syncPaths = append(syncPaths, e.Path)
 	}
 

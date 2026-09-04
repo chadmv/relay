@@ -43,17 +43,23 @@ View: //streams/X/main/... //relay_h_abc/...
 
 func TestClient_ResolveHead(t *testing.T) {
 	fr := newFakeP4Fixture(t)
-	fr.set("changes -m1 //streams/X/main/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
+	fr.set("-c relay_h_abc changes -m1 //relay_h_abc/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
 	c := &Client{r: fr}
-	cl, err := c.ResolveHead(context.Background(), "//streams/X/main/...")
+	cl, err := c.ResolveHead(context.Background(), `D:\rw\abcdef`, "relay_h_abc", "//relay_h_abc/...")
 	require.NoError(t, err)
 	require.Equal(t, int64(12345), cl)
+	// The cwd is not required by p4 - the global -c pins the client server-side -
+	// so nothing else would notice a future edit dropping it, and the package's
+	// cwd contract (assertCwdContract) would then be false for this call.
+	require.Len(t, fr.calls, 1)
+	require.Equal(t, `D:\rw\abcdef`, fr.calls[0].cwd)
 }
 
 func TestClient_RunFailureBubbles(t *testing.T) {
 	fr := newFakeP4Fixture(t)
-	fr.setErr("changes -m1 //x/...#head", errors.New("Perforce password (P4PASSWD) invalid or unset."))
+	fr.setErr("-c relay_h_abc changes -m1 //relay_h_abc/...#head",
+		errors.New("Perforce password (P4PASSWD) invalid or unset."))
 	c := &Client{r: fr}
-	_, err := c.ResolveHead(context.Background(), "//x/...")
+	_, err := c.ResolveHead(context.Background(), `D:\rw\abcdef`, "relay_h_abc", "//relay_h_abc/...")
 	require.ErrorContains(t, err, "P4PASSWD")
 }
