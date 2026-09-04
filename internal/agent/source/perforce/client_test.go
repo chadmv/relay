@@ -18,7 +18,7 @@ View: //streams/X/main/... //relay_h_abc/...
 `)
 	fr.set("client -i", "Client relay_h_abc saved.\n")
 	c := &Client{r: fr}
-	err := c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "")
+	err := c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "", false)
 	require.NoError(t, err)
 	// Two calls: -o (read template) then -i (commit)
 	require.Len(t, fr.calls, 2)
@@ -36,7 +36,7 @@ View: //streams/X/main/... //relay_h_abc/...
 `)
 	fr.set("client -i", "Client saved.\n")
 	c := &Client{r: fr}
-	err := c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "base")
+	err := c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "base", false)
 	require.NoError(t, err)
 	require.Equal(t, []string{"client", "-o", "-S", "//streams/X/main", "-t", "base", "relay_h_abc"}, fr.calls[0].args)
 }
@@ -61,7 +61,7 @@ Options: clobber
 `)
 	fr.set("client -i", "Client saved.\n")
 	c := &Client{r: fr}
-	require.NoError(t, c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", ""))
+	require.NoError(t, c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "", false))
 
 	spec := fr.calls[1].stdin
 	require.NotContains(t, spec, "AltRoots")

@@ -337,7 +337,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if !found && pf.ClientTemplate != nil {
 		tmpl = *pf.ClientTemplate
 	}
-	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
+	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl, false); err != nil {
 		return nil, classifyP4Error(fmt.Errorf("create client: %w", err))
 	}
 	// Upsert replaces the whole struct, so it runs only on the cold path: on a

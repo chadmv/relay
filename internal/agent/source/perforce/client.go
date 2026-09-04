@@ -127,7 +127,10 @@ func NewClient() *Client { return &Client{r: newExecRunner()} }
 
 // CreateStreamClient creates (or recreates) a stream-bound p4 client.
 // If template is non-empty, uses -t <template> to inherit non-View fields.
-func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, template string) error {
+// clobber, when true, rewrites the fetched spec's Options: token list so a
+// writable unopened file cannot wedge every later sync on this workspace;
+// when false nothing is written to Options: at all.
+func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, template string, clobber bool) error {
 	args := []string{"client", "-o", "-S", stream}
 	if template != "" {
 		args = append(args, "-t", template)
