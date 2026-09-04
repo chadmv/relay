@@ -53,6 +53,25 @@ output is best-effort by design, and the fence already discards a stale chunk.
 - The guard observes the holder count from inside the callback, as the existing release-ordering
   test does - an assertion made after `Prepare` returns cannot discriminate the ordering.
 
+## Notes
+
+**Two measurements from the sync-heartbeat slice, which had to design around this item.**
+
+First, the park-attempt count during a sync went from 0 to `elapsed / interval` - about 480
+for a four-hour sync at the 30s default. The set of scenarios that permanently strand a
+workspace is unchanged (a permanently wedged coordinator already stranded at `[sync]
+starting` or `[sync] complete`, and a transient wedge still recovers), so the marginal
+exposure is that a permanent strand becomes permanent up to one sync-duration earlier. The
+alternative that slice could have shipped - dropping `-q` while still forwarding lines -
+would have been one park site per p4 stdout line, so this is a large reduction against the
+obvious design rather than a regression against HEAD.
+
+Second, and new to this item: the heartbeat also put a `statfs` inside the handle-held
+window. That is a different blocking primitive from a channel send - it has no cancellation
+at all - and the slice bounds it with a timeout and an abandoned goroutine rather than a
+context. Whatever remedy this item takes should ask the same question of any other
+uninterruptible call reachable while a workspace handle is held, not only of `progress`.
+
 ## Related
 
 - `internal/agent/runner.go` - `makePrepareProgressFn`, `send`, `sendOrAbort`

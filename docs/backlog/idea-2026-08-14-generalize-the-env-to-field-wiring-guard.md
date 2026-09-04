@@ -370,3 +370,14 @@ wherever two parameters share a type - and that is the common case for durations
 Two evasions remain disclosed rather than closed in the slice-4 copy, and a generalization should
 decide whether to close them: a `go func() { wd.Run(ctx) }()` wrapper is a false positive, and
 reassignment of the bound variables between parse and call is unreachable by any scanner.
+
+**`cmd/relay-agent` is a second unguarded package, and it now has a knob whose whole value
+is observability.** Every guard this item describes lives in `cmd/relay-server`; the
+agent's only tests are for its duration parser. Measured on the sync-heartbeat slice:
+deleting the `SyncHeartbeatInterval:` or `FreeDiskGB:` assignment from the `perforce.Config`
+literal in `main()` compiles and leaves every package green.
+
+That slice closed the half it could reach - the provider's ticker seam now captures the
+requested duration, so a hard-coded interval at the call site goes red - but the
+env-var-to-`Config`-field hop is still unpinned, and a monitoring feature that is silently
+absent is worse than one that is loudly broken.

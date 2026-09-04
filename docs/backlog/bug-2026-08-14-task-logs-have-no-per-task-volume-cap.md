@@ -118,3 +118,18 @@ easier half.** Duration has a defensible number behind it (the worst case for a 
 chunk, derived from three agent-side timers). Volume does not: the ceiling is whatever the largest
 legitimate build log in the deployment is, which nobody in this project has measured. That is why
 this is a separate item and why its first task is a measurement, not a predicate.
+
+**A new producer, and the first one whose rate is a constant rather than a consequence of
+what a task prints.** The p4 sync heartbeat writes one durable row per interval per
+syncing task for as long as the sync runs: 2/min at the 30s default, 12/min at the 5s
+floor. An 8-hour sync is about 960 rows at the default, times the fleet's slot count.
+
+The qualitative change matters more than the number. Before it, `p4 sync -q` plus no
+heartbeat meant a multi-hour sync wrote **zero** durable rows - a task that produced no
+output cost nothing. It now costs `duration / interval` rows unconditionally.
+
+The interval is operator-set (`RELAY_SYNC_HEARTBEAT_INTERVAL`) and not caller-set, and
+concurrency is bounded by fleet slots rather than by `maxTasksPerJob`, so this is a
+constant factor on the existing amplifier rather than a new one. But whichever cap this
+item lands on has to bound a **steady low-rate producer**, not just a burst of subprocess
+output - a cap sized for "a task printed a lot" may not be the control a heartbeat needs.
