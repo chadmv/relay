@@ -106,3 +106,89 @@ func TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero(t *testing.T) 
 			"zero per-file lines is success here, not emptiness")
 	require.NotContains(t, strings.ToLower(marked), "no such file")
 }
+
+// THE ORDER IS LOAD-BEARING: the EXCLUDING task runs FIRST.
+//
+// Run the unexcluding task first and its full sync leaves heavy/asset.txt on
+// disk; the excluding task then shares the same directory under a build that
+// ignores exclusions in the workspace key, finds the file already there, and
+// every assertion below passes against exactly the defect this design exists to
+// prevent. Only excluding-then-including can observe a workspace missing files
+// the second task asked for.
+//
+// THE MUTATION THIS MUST KILL: make SourceKey ignore exclusions and return the
+// bare stream. Task B then shares Task A's workspace, the preempted files are
+// never fetched, and B's read of heavy/asset.txt goes RED.
+//
+// Same CI note as TestPerforce_E2E_SyncKReportsNoSuchFilesOnStderrAndExitsZero
+// above: nothing in .github/workflows provides p4d or the p4 client, so this is
+// human-run until a workflow job builds testdata/p4d, installs the Perforce CLI
+// and is added to a Makefile target's package list. It cannot move to the
+// default lane at all - a fake runner cannot say whether a file is on disk.
+func TestPerforce_E2E_AnExcludingTaskDoesNotStripFilesFromAnUnexcludingPeer(t *testing.T) {
+	p4dEnv(t)
+
+	root := t.TempDir()
+	prov := New(Config{Root: root, Hostname: "ci"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	mk := func(exclude bool) *relayv1.SourceSpec {
+		sync := []*relayv1.SyncEntry{{Path: "//test/main/...", Rev: "#head"}}
+		if exclude {
+			sync = append(sync, &relayv1.SyncEntry{Path: "//test/main/heavy/...", Exclude: true})
+		}
+		return &relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{Stream: "//test/main", Sync: sync},
+		}}
+	}
+
+	// --- Task A: EXCLUDES heavy/. Runs FIRST; see the comment above. ---
+	hA, err := prov.Prepare(ctx, "task-a", mk(true), func(s string) { t.Logf("A: %s", s) })
+	require.NoError(t, err, "the excluding prepare must succeed")
+	invA := hA.Inventory()
+	wsA := hA.WorkingDir()
+
+	require.NoFileExists(t, filepath.Join(wsA, "heavy", "asset.txt"),
+		"the excluded subtree must never be transferred")
+	require.FileExists(t, filepath.Join(wsA, "readme.txt"),
+		"everything outside the exclusion must still be synced")
+
+	require.NoError(t, hA.Finalize(ctx))
+
+	// --- Task B: NO exclusion. It must not observe a workspace missing files. ---
+	hB, err := prov.Prepare(ctx, "task-b", mk(false), func(s string) { t.Logf("B: %s", s) })
+	require.NoError(t, err)
+	invB := hB.Inventory()
+	wsB := hB.WorkingDir()
+	defer func() { _ = hB.Finalize(ctx) }()
+
+	// THE ACCEPTANCE CRITERION IS ASSERTED FIRST, before any structural
+	// assertion about the workspaces. Put the NotEqual checks above it and a
+	// SourceKey that ignores exclusions is caught by a PROXY - two paths being
+	// equal - and the test halts before it ever reads the file the criterion is
+	// about. The criterion has to be the assertion that goes RED.
+	b, err := os.ReadFile(filepath.Join(wsB, "heavy", "asset.txt"))
+	require.NoError(t, err,
+		"THE ACCEPTANCE CRITERION: a task with no exclusions gets the whole stream, "+
+			"whatever a previous task on the same stream excluded")
+	require.Equal(t, "heavy", strings.TrimSpace(string(b)))
+
+	require.NotEqual(t, wsA, wsB, "a different exclusion set is a different workspace")
+	require.NotEqual(t, invA.ShortID, invB.ShortID)
+
+	// The keys themselves: B's is exactly today's, A's is the versioned composite.
+	require.Equal(t, "//test/main", invB.SourceKey,
+		"a task with no exclusions keeps today's key byte for byte")
+	require.True(t, strings.HasPrefix(invA.SourceKey, "x1|"))
+	require.True(t, strings.HasSuffix(invA.SourceKey, "|//test/main"))
+
+	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	require.NoError(t, err)
+	keys := map[string]bool{}
+	for _, e := range reg.Snapshot() {
+		keys[e.SourceKey] = true
+	}
+	require.Len(t, keys, 2, "the registry holds two entries with distinct source keys")
+	require.True(t, keys["//test/main"] && keys[invA.SourceKey])
+}
