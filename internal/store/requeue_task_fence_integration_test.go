@@ -305,3 +305,47 @@ func TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath(t *testing.T) 
 	assert.Equal(t, "running", after.Status)
 	assert.Equal(t, int32(1), after.AssignmentEpoch)
 }
+
+// TestRequeueTask_APreparingTaskIsNotRequeuedByTheSendFailurePath is the
+// negative half of the preparing partition, and it is GREEN ON FIRST WRITE -
+// stated rather than disguised. Its value is as a regression guard against a
+// later "harmonize with RequeueTaskByID" edit, and its discriminating power is
+// established by mutation, not by a red-first run.
+//
+// RequeueTask's only production caller is Dispatcher.dispatchOne's send-failure
+// path, reached only when Registry.Send or workerSender.Send returns an error -
+// and on every one of those error values the DispatchTask was never queued,
+// never written to the stream and never seen by the agent. PREPARING is sent by
+// a Runner that exists only because the agent received a DispatchTask, so at
+// this caller's own (epoch, worker) pair the task cannot be preparing, for
+// exactly the reason it cannot be running. Widening a statement that ENDS AN
+// ASSIGNMENT for symmetry is the fail-open direction.
+func TestRequeueTask_APreparingTaskIsNotRequeuedByTheSendFailurePath(t *testing.T) {
+	f := newRequeueFence(t)
+
+	claimed := f.claimedBy(t, "rqt-preparing", f.w1)
+
+	preparing, err := f.q.UpdateTaskStatus(f.ctx, store.UpdateTaskStatusParams{
+		ID: claimed.ID, Status: "preparing", WorkerID: f.w1.ID,
+		AssignmentEpoch: claimed.AssignmentEpoch,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "preparing", preparing.Status)
+	require.Equal(t, claimed.AssignmentEpoch, preparing.AssignmentEpoch,
+		"precondition: reporting preparing must not bump the epoch")
+	require.False(t, preparing.StartedAt.Valid,
+		"precondition: preparing stamps no start time")
+
+	// Both fence predicates PASS here, so only the status predicate can reject.
+	n, err := f.q.RequeueTask(f.ctx, store.RequeueTaskParams{
+		ID: claimed.ID, AssignmentEpoch: claimed.AssignmentEpoch, WorkerID: f.w1.ID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n,
+		"the send-failure requeue must stay 'dispatched'-only: a preparing task got its dispatch, so this caller cannot be the one requeueing it")
+
+	after, err := f.q.GetTask(f.ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "preparing", after.Status)
+	assert.Equal(t, int32(1), after.AssignmentEpoch)
+}
