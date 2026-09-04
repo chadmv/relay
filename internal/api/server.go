@@ -144,9 +144,17 @@ func New(
 	}
 }
 
-// Handler returns an http.Handler with all routes registered. Call it once per
-// Server: each call allocates a fresh job-submit bucket and starts the gc
-// goroutine that prunes it, and that goroutine is never stopped.
+// Handler returns an http.Handler with all routes registered.
+//
+// CALL IT ONCE PER Server. Each call allocates a fresh bucket for every armed
+// user-keyed limiter and starts a gc goroutine per bucket that nothing stops, so
+// a second call is a second budget as well as a leak. Build every limiter here,
+// never inside a route closure and never inside a handler: that is what makes
+// "once per Server" the same statement as "once per Handler call".
+//
+// A test that drives more than one request through a limiter must bind the
+// result once and reuse it; re-deriving it per request gives each request its
+// own empty window.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
