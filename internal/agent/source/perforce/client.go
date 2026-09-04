@@ -33,6 +33,8 @@ type p4CommandError struct {
 	stderr string
 }
 
+// Never nest one of these inside another: errors.As binds the outer, and the
+// inner's args would render back into classifiable text through pe.err.
 func newP4CommandError(args []string, err error, stderr string) *p4CommandError {
 	return &p4CommandError{args: append([]string(nil), args...), err: err, stderr: stderr}
 }

@@ -18,10 +18,10 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 )
 
-// maxLoggedArgBytes bounds one caller-supplied string on the host log. Matched
-// to the coordinator's own bound on ErrorMessage so that on the prepare path,
-// where a lost send makes the host log the surviving record, it does not carry
-// less than the send would have.
+// maxLoggedArgBytes bounds one caller-supplied string on the host log. Wide
+// enough to keep a real p4 cause readable.
+// TestRunner_TheHostLogClipBoundIsWhatItSaysItIs is what makes a change to it
+// deliberate; the two clip guards scale with it and cannot see it move.
 const maxLoggedArgBytes = 4096
 
 // clipArg bounds one caller-supplied string for the host log. Pair it with %q,
@@ -191,8 +191,7 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			// The record that survives when the send does not.
 			// TestRunner_APrepareFailureIsOnTheHostLogWithItsCause pins the cause
 			// reaching the log; TestRunner_APrepareFailureQuotesAndBoundsItsCause
-			// pins the %q and clipArg pair, which this line needs for the same
-			// reason the step line does (see clipArg).
+			// pins the %q and clipArg pair.
 			log.Printf("runner: prepare failed for %s: %q", r.taskID, clipArg(err.Error()))
 			r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 				TaskStatus: &relayv1.TaskStatusUpdate{
@@ -299,8 +298,9 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		// TestRunner_AStepLineNamesTheProgramAndNotItsArguments is the guard. It
 		// bounds THIS surface and closes nothing: sendStepMarker above already
 		// writes the whole vector into task_logs.
-		// %q is the injection defence and clipArg the volume defence; argv[0] is
-		// unvalidated (see clipArg), so without %q a newline in it forges a line.
+		// %q is the injection defence and clipArg the volume defence; nothing in
+		// this package constrains argv[0], so without %q a newline in it forges a
+		// host-log line.
 		// TestRunner_AStepLineQuotesTheProgramSoItCannotForgeALogLine and
 		// TestRunner_AStepLineBoundsAnOverlongProgramName pin the pair.
 		log.Printf("runner: exec step %d/%d for %s: %q", step, stepTotal, r.taskID, clipArg(argv[0]))
