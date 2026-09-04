@@ -3,6 +3,8 @@ package perforce
 import (
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // syncLineDepotPathMax bounds the depot path a summary line carries. The path is
@@ -16,9 +18,22 @@ const syncLineDepotPathMax = 200
 // The path ends at the FIRST '#', not at the first " - ": p4 requires @ # % *
 // to be escaped inside a depot path, so the first '#' in a line beginning "//"
 // is always the rev separator, whereas a filename may legitimately contain
-// " - " (My File - Copy.ma) and a split there truncates the path. Control bytes
-// are stripped before the clip, so a path padded with them cannot smuggle
-// content past the bound. TestSyncLineDepotPath.
+// " - " (My File - Copy.ma) and a split there truncates the path. TestSyncLineDepotPath.
+//
+// THE FILTER AND THE CLIP ARE BOTH RUNE-WISE, and a byte-wise version of either
+// is a live defect rather than an untidiness. This text reaches
+// task_logs.content, a Postgres TEXT column, through a proto field of type
+// bytes, so nothing on the wire rejects invalid UTF-8 on its behalf: a NUL is
+// SQLSTATE 22021, a half rune is a 22021-class encoding error too, and either
+// one fails the INSERT for the WHOLE batched chunk. lastPath is sticky, so a
+// single poisoned path silences the task log for the rest of the sync - which
+// makes it reachable by whoever chose the filename in the depot.
+//
+// ToValidUTF8 therefore runs before the walk, dropping high bytes that arrived
+// whole from a non-unicode-mode server; the category test drops Cc, Cf, Zl and
+// Zp, which covers NUL, DEL, the C1 range, U+2028/U+2029 and the bidi overrides
+// that would otherwise forge a line break or reorder the rendered path; and the
+// bound is checked before each write so the result never ends mid-rune.
 func syncLineDepotPath(line string) string {
 	if !strings.HasPrefix(line, "//") {
 		return ""
@@ -28,16 +43,16 @@ func syncLineDepotPath(line string) string {
 		return ""
 	}
 	var b strings.Builder
-	for j := 0; j < i; j++ {
-		if line[j] >= 0x20 {
-			b.WriteByte(line[j])
+	for _, r := range strings.ToValidUTF8(line[:i], "") {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
+			continue
 		}
+		if b.Len()+utf8.RuneLen(r) > syncLineDepotPathMax {
+			break
+		}
+		b.WriteRune(r)
 	}
-	out := b.String()
-	if len(out) > syncLineDepotPathMax {
-		out = out[:syncLineDepotPathMax]
-	}
-	return out
+	return b.String()
 }
 
 // syncProgress counts what a running p4 sync writes to stdout. onLine runs on

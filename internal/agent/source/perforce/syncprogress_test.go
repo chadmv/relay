@@ -3,9 +3,9 @@ package perforce
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // Each row names the rule it discriminates against, because the property being
@@ -34,22 +34,49 @@ func TestSyncLineDepotPath(t *testing.T) {
 		})
 	}
 
-	// The remaining two rows assert a property of the result rather than an
-	// exact string: this text is p4-derived and reaches task_logs and then the
-	// SPA, so a control byte could forge a second line and an unbounded path
-	// could crowd out the fixed fields ahead of it.
-	t.Run("control_bytes", func(t *testing.T) {
-		got := syncLineDepotPath("//depot/x/a\rb.ma#3 - added as /ws/a.ma")
-		assert.NotContains(t, got, "\r")
-		for i := 0; i < len(got); i++ {
-			require.GreaterOrEqual(t, got[i], byte(0x20),
-				"byte %d of %q is a control byte", i, got)
+	// The remaining rows assert properties of the result rather than an exact
+	// string. This text is p4-derived and reaches task_logs.content, which is a
+	// Postgres TEXT column, over a proto field of type bytes - so nothing between
+	// the depot and the INSERT rejects invalid UTF-8, and the whole batched chunk
+	// is dropped when Postgres does. lastPath is sticky, so one poisoned path
+	// silences the task log for the rest of the sync.
+	t.Run("removed_runes", func(t *testing.T) {
+		rows := []struct{ name, in string }{
+			{"cr", "\r"},
+			{"nul_is_sqlstate_22021", "\x00"},
+			{"del", "\u007f"},
+			{"c1_next_line", "\u0085"},
+			{"line_separator", "\u2028"},
+			{"paragraph_separator", "\u2029"},
+			{"bidi_override", "\u202e"},
+			{"zero_width_joiner_is_a_format_rune", "\u200d"},
+		}
+		for _, row := range rows {
+			t.Run(row.name, func(t *testing.T) {
+				got := syncLineDepotPath("//depot/x/a" + row.in + "b.ma#3 - added as /ws/a.ma")
+				assert.Equal(t, "//depot/x/ab.ma", got)
+			})
 		}
 	})
 
+	// A non-unicode-mode p4 server hands back raw high bytes. They arrive WHOLE
+	// rather than being manufactured by the clip, so a rune-boundary walk-back
+	// alone does not see them.
+	t.Run("invalid_utf8_arriving_whole", func(t *testing.T) {
+		got := syncLineDepotPath("//depot/" + string([]byte{0x80, 0xff}) + "q.ma#1 - added as /ws/q")
+		assert.True(t, utf8.ValidString(got), "got % x", got)
+		assert.Equal(t, "//depot/q.ma", got)
+	})
+
+	// The bound is a BYTE bound over text that need not be ASCII. The input puts
+	// a two-byte rune astride byte 200, which is the position a raw slice halves.
 	t.Run("clip_at_200", func(t *testing.T) {
-		got := syncLineDepotPath("//depot/" + strings.Repeat("z", 400) + "#1 - added as /ws/z")
-		assert.Equal(t, 200, len(got))
+		got := syncLineDepotPath("//depot/" + strings.Repeat("z", 191) + "\u00e9" + strings.Repeat("z", 400) + "#1 - added as /ws/z")
+		assert.True(t, utf8.ValidString(got), "the clip must land on a rune boundary, got % x", got)
+		assert.LessOrEqual(t, len(got), 200)
+		// A clip that lands short by more than one rune is a different rule; a
+		// clip that returns "" would satisfy the two assertions above alone.
+		assert.GreaterOrEqual(t, len(got), 198)
 	})
 }
 

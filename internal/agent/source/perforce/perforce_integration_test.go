@@ -65,8 +65,7 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	})
 	require.NoError(t, err, "Prepare should succeed")
 
-	// Recorded against p4d r25.2, not predicted: the one-file baseline produces
-	// exactly one file line and no totals line.
+	// The one-file baseline produces exactly one file line and no totals line.
 	require.Len(t, progress1, 2, "the two brackets and nothing else, got: %v", progress1)
 	require.Equal(t, 1, countLinesContaining(progress1, "1 files; 0 other lines"),
 		"real p4 wrote one file line and the counter saw it, got: %v", progress1)

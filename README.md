@@ -501,7 +501,7 @@ hidden: a legitimately refused agent produces no server-side line identifying it
 | `RELAY_WORKSPACE_MIN_FREE_GB` | Free-disk threshold in GB. When free disk drops below this, LRU workspaces are evicted until the threshold is met. |
 | `RELAY_WORKSPACE_SWEEP_INTERVAL` | How often the sweeper runs. Default `15m`. Only active when `MAX_AGE` or `MIN_FREE_GB` is set. |
 | `RELAY_EVICTION_TIMEOUT` | Per-eviction deadline (Go duration, e.g. `45m`, `2h`) bounding the `p4 client -d` call during workspace eviction. Default `30m`. A wedged delete becomes a logged, retryable best-effort skip instead of stalling the sweeper. Does NOT bound the on-disk `os.RemoveAll`. |
-| `RELAY_SYNC_HEARTBEAT_INTERVAL` | How often a running `p4 sync` writes a progress summary to the task log (`4m30s; 12483 files; 0 other lines; 811 GB free; last //depot/...`). Default `30s`. **`0s` disables the timer**; the completion line still carries a summary. A bare `0`, a negative value, or an interval under `5s` is refused with a warning and the default is used. The file count is a lower bound: p4 block-buffers its output to a pipe, so it moves in bursts while the elapsed field moves continuously. |
+| `RELAY_SYNC_HEARTBEAT_INTERVAL` | How often a running `p4 sync` writes a progress summary to the task log (`4m30s; 12483 files; 0 other lines; 811 GB free; last "//depot/..."`). Default `30s`. **A zero with a unit (`0s`) disables the timer**; the completion line still carries a summary. A bare `0`, a negative value, a value too large to represent as a duration, or an interval under `5s` is refused with a warning and the default is used. The file count is a snapshot of a stream still in flight, so it is a lower bound on a running sync; it counts the lines p4 printed that parse as a depot path, which is not the same as the number of files transferred - p4 also prints a depot path for a file it declined to touch. The trailing depot path is quoted because it is the one field whose content comes from the depot. |
 
 ### Task subprocess environment
 
@@ -595,7 +595,9 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
 
 Active workspaces (held by a running task) are never evicted. Admins can also evict on demand via `relay workers evict-workspace`.
 
-**Sync heartbeat.** A running `p4 sync` writes a periodic summary to the task log (`RELAY_SYNC_HEARTBEAT_INTERVAL`), which is how you tell a live multi-hour transfer from a wedged one - the elapsed field moves whether or not p4 has written anything. Its free-space figure is read on the same volume `RELAY_WORKSPACE_MIN_FREE_GB` is compared against, so a sync approaching the eviction threshold is visible in the log before the sweeper acts.
+**Sync heartbeat.** A running `p4 sync` writes a periodic summary to the task log (`RELAY_SYNC_HEARTBEAT_INTERVAL`), which is how you tell a live multi-hour transfer from a wedged one - the elapsed field moves whether or not p4 has written anything. Its free-space figure is read on the same volume `RELAY_WORKSPACE_MIN_FREE_GB` is compared against, so the two numbers are directly comparable when a sweeper is running. The heartbeat is wired whenever `RELAY_WORKSPACE_ROOT` is set; the sweeper is built only when `RELAY_WORKSPACE_MAX_AGE` or `RELAY_WORKSPACE_MIN_FREE_GB` is set, so the figure can appear with no sweeper behind it.
+
+Note what this discloses. `GET /v1/tasks/{id}/logs` is authenticated but not admin-only and carries no per-owner gate, so any authenticated user can read any task's log, and the free-space field therefore tells them the free space in GB on a worker host's workspace volume - the same quantity `RELAY_WORKSPACE_MIN_FREE_GB` is compared against. It is not on any other non-admin surface. `RELAY_SYNC_HEARTBEAT_INTERVAL=0s` does not remove it: the two bracket lines carry the same summary regardless, so the interval changes how often the figure appears, not whether it does.
 
 ---
 

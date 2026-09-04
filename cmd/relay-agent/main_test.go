@@ -30,6 +30,50 @@ func TestParseDurationEnv_LogsWarningOnInvalidNonEmptyInput(t *testing.T) {
 	require.Contains(t, buf.String(), "7days", "warning should echo the bad value")
 }
 
+// The regex admits an arbitrarily long digit run, and the parse behind it is an
+// Atoi whose error was discarded followed by an unchecked multiply - so a value
+// well inside the syntax lands OUTSIDE int64 nanoseconds and wraps NEGATIVE.
+// Every caller of this parser then reads that as its own kind of "off": the
+// heartbeat's `<= 0` disables the timer, and RELAY_WORKSPACE_MAX_AGE's
+// `maxAge > 0` silently declines to build a sweeper. A knob whose observability
+// control switches itself off is the failure this refuses.
+func TestParseDurationEnv_AnOverflowingValueIsRefusedRatherThanWrappedNegative(t *testing.T) {
+	rows := []struct{ name, in string }{
+		// 1e10 seconds is ~1.0e19 ns against an int64 ceiling of ~9.22e18.
+		{"seconds_overflow", "10000000000s"},
+		{"days_overflow", "1000000000000d"},
+		// Past Atoi's own range, so the discarded error is the first thing wrong.
+		{"beyond_int64_digits", "99999999999999999999999s"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stderr)
+
+			got := parseDurationEnv("RELAY_WORKSPACE_MAX_AGE", row.in, time.Hour)
+
+			require.Equal(t, time.Hour, got, "an unrepresentable value must take the fallback")
+			require.Contains(t, buf.String(), "RELAY_WORKSPACE_MAX_AGE")
+			require.Contains(t, buf.String(), row.in, "the warning must echo the bad value")
+		})
+	}
+}
+
+// The boundary the check above must not swallow: a legitimate zero is how every
+// caller spells "disabled", and it is also what a wrapped multiply can look
+// like, so the two are separated by the operand rather than by the product.
+func TestParseDurationEnv_AnExplicitZeroIsStillZero(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	for _, in := range []string{"0s", "0m", "0h", "0d", "00s"} {
+		require.Equal(t, time.Duration(0), parseDurationEnv("SOME_VAR", in, time.Hour), "input %q", in)
+	}
+	require.Empty(t, buf.String(), "a representable value must not warn")
+}
+
 func TestParseDurationEnv_NoWarningOnEmptyInput(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
@@ -42,10 +86,7 @@ func TestParseDurationEnv_NoWarningOnEmptyInput(t *testing.T) {
 }
 
 // Covers the PARSING only. The assignment of the result into the
-// perforce.Config literal in main() is not covered by this or any other test:
-// cmd/relay-agent has no env-to-field wiring guard of any kind, so deleting
-// that line compiles and leaves every package green, exactly like the existing
-// unguarded assignments beside it
+// perforce.Config literal in main() is not covered here
 // (docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md).
 func TestResolveSyncHeartbeatInterval(t *testing.T) {
 	rows := []struct {
@@ -54,8 +95,9 @@ func TestResolveSyncHeartbeatInterval(t *testing.T) {
 		warn     []string
 	}{
 		{name: "unset", in: "", want: 30 * time.Second},
-		// "0s" is the ONLY spelling that disables the timer: the shared regex
-		// has no unit-less form, so a bare "0" is unparseable rather than zero.
+		// A zero WITH a unit disables the timer; the shared regex has no
+		// unit-less form, so the bare "0" below is unparseable rather than zero.
+		// TestParseDurationEnv_AnExplicitZeroIsStillZero covers the other units.
 		{name: "explicit_zero_disables", in: "0s", want: 0},
 		{name: "seconds", in: "45s", want: 45 * time.Second},
 		{name: "minutes", in: "2m", want: 2 * time.Minute},

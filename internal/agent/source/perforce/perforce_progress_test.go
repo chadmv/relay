@@ -83,7 +83,7 @@ func TestProvider_PerFileSyncOutputIsCountedAndNeverForwarded(t *testing.T) {
 			"that emitted nothing at all, got: %v", lines)
 	assert.Equal(t, 1, countLinesContaining(lines, "0 other lines"),
 		"every fixture line parsed as a depot path, got: %v", lines)
-	assert.Equal(t, 1, countLinesContaining(lines, "last //depot/x/c.ma"),
+	assert.Equal(t, 1, countLinesContaining(lines, `last "//depot/x/c.ma"`),
 		"lastPath tracks the LAST line, not the first, got: %v", lines)
 }
 

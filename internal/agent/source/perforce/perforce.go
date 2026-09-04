@@ -36,9 +36,9 @@ var lookPath = exec.LookPath
 var prepareAcquireHook func(shortID string)
 
 // syncNow and newSyncTicker are the heartbeat's clock seams, following the
-// package-level var pattern lookPath and prepareAcquireHook already use. The
-// package has no t.Parallel() anywhere, so cross-test interference is not
-// reachable; tests restore both in t.Cleanup.
+// package-level var pattern lookPath and prepareAcquireHook already use. Being
+// package-level, they are shared process-wide: a test that swaps either one
+// must restore it in t.Cleanup and must not call t.Parallel.
 var syncNow = time.Now
 
 var newSyncTicker = func(d time.Duration) (<-chan time.Time, func()) {
@@ -133,22 +133,72 @@ func (p *Provider) Type() string { return "perforce" }
 // subdirectory, so the number matches what the sweeper and
 // RELAY_WORKSPACE_MIN_FREE_GB act on, and one error disables it for the rest of
 // the sync. TestProvider_SyncSummaryRendersFiveFixedFields.
+//
+// THE PATH IS RENDERED WITH %q, NOT %s. syncLineDepotPath already removes every
+// rune that could end the physical line, so what %q closes is the remaining
+// half of the same hole: the field can still spell the brackets, semicolons,
+// digits and words a genuine line is built from, and a bare %s leaves nothing
+// saying where the value ends, so a forged "[sync] failed: ..." inside a real
+// row matches an operator grep exactly as the real line would.
 func (p *Provider) syncSummary(prefix string, sp *syncProgress, elapsed time.Duration) string {
 	files, other, lastPath := sp.snapshot()
 	free := "-"
-	if p.cfg.FreeDiskGB != nil && !sp.freeDiskIsDisabled() {
-		gb, err := p.cfg.FreeDiskGB(p.cfg.Root)
-		if err != nil {
-			sp.disableFreeDisk()
-		} else {
-			free = strconv.FormatInt(gb, 10)
-		}
+	if gb, ok := p.probeFreeDiskGB(sp); ok {
+		free = strconv.FormatInt(gb, 10)
 	}
 	if lastPath == "" {
 		lastPath = "-"
 	}
-	return fmt.Sprintf("%s %s; %d files; %d other lines; %s GB free; last %s",
+	return fmt.Sprintf("%s %s; %d files; %d other lines; %s GB free; last %q",
 		prefix, elapsed.Round(time.Second), files, other, free, lastPath)
+}
+
+// freeDiskProbeTimeout bounds one FreeDiskGB call. Package-level var so tests
+// can shorten it, as with syncNow and newSyncTicker above.
+var freeDiskProbeTimeout = 2 * time.Second
+
+// probeFreeDiskGB reads free disk for one summary, reporting ok=false for every
+// reason the field renders "-".
+//
+// THE PROBE RUNS OFF THE CALLER'S GOROUTINE BECAUSE THE CALLER CANNOT WAIT.
+// The heartbeat renders on Prepare's own goroutine with the workspace handle
+// held, which is the one thing the failure bracket avoids by releasing before
+// it renders; a statfs on a wedged network volume is an uninterruptible block,
+// so an in-line call parks Prepare, and with it every later task for that
+// stream, for the life of the agent. The sticky latch alone does not cover
+// this: it trips on an error RETURN, and a probe that never returns never
+// returns one - so a timeout latches too, and the abandoned goroutine is the
+// only one there will be.
+//
+// The bound lives HERE rather than as a third case in runSyncWithHeartbeat's
+// select: that loop keeps exactly two arms and progress keeps exactly one
+// caller. TestProvider_SyncSummaryRendersFiveFixedFields.
+func (p *Provider) probeFreeDiskGB(sp *syncProgress) (int64, bool) {
+	if p.cfg.FreeDiskGB == nil || sp.freeDiskIsDisabled() {
+		return 0, false
+	}
+	type probe struct {
+		gb  int64
+		err error
+	}
+	// Buffered, so the send completes and the goroutine exits even after this
+	// function has stopped listening.
+	ch := make(chan probe, 1)
+	go func() {
+		gb, err := p.cfg.FreeDiskGB(p.cfg.Root)
+		ch <- probe{gb, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			sp.disableFreeDisk()
+			return 0, false
+		}
+		return r.gb, true
+	case <-time.After(freeDiskProbeTimeout):
+		sp.disableFreeDisk()
+		return 0, false
+	}
 }
 
 // Preflight verifies the agent host is configured for Perforce work.

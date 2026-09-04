@@ -89,16 +89,31 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	for sc.Scan() {
 		onLine(sc.Text())
 	}
-	if err := cmd.Wait(); err != nil {
-		return newP4CommandError(args, err, stderr.String())
+	// THE DRAIN IS WHAT MAKES THE CHECK BELOW REACHABLE, and skipping it is a
+	// hang rather than a wrong count. StdoutPipe's contract is that Wait must
+	// not run until every read from the pipe has completed; a scanner that
+	// stopped on an error has not reached EOF, so p4 blocks writing into a full
+	// pipe, Wait blocks on p4, and Stream never returns - while Prepare holds
+	// the workspace handle and nothing on this path carries a deadline.
+	// cmd.WaitDelay does not cover it: WaitDelay bounds a cancelled context and
+	// an exited-but-unclosed child, and here the context is live and the child
+	// has not exited.
+	scanErr := sc.Err()
+	if scanErr != nil {
+		_, _ = io.Copy(io.Discard, stdout)
 	}
-	// A scan that ended on an error, not on EOF, means the caller saw only part
-	// of p4's output while p4 itself exited zero. Since the sync summary's file
-	// count is built from these lines, an unchecked scanner error renders a
-	// confident count for a stream that was truncated.
+	waitErr := cmd.Wait()
+	// The scan error is reported IN PREFERENCE to the exit status. A scan that
+	// ended on an error, not on EOF, means the caller saw only part of p4's
+	// output while p4 itself exited zero, and the sync summary's file count is
+	// built from those lines - so the truncation is both the more specific fact
+	// and, on the common path, the only one there is.
 	// TestExecRunner_AStdoutScanFailureFailsTheStream.
-	if err := sc.Err(); err != nil {
-		return newP4CommandError(args, err, stderr.String())
+	if scanErr != nil {
+		return newP4CommandError(args, scanErr, stderr.String())
+	}
+	if waitErr != nil {
+		return newP4CommandError(args, waitErr, stderr.String())
 	}
 	return nil
 }

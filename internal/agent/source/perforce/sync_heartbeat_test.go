@@ -3,6 +3,7 @@ package perforce
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,13 +37,45 @@ func TestProvider_SyncSummaryRendersFiveFixedFields(t *testing.T) {
 			FreeDiskGB: func(string) (int64, error) { return 811, nil },
 		})
 		assert.Equal(t,
-			"[sync] 4m30s; 3 files; 0 other lines; 811 GB free; last //depot/x/c.ma",
+			`[sync] 4m30s; 3 files; 0 other lines; 811 GB free; last "//depot/x/c.ma"`,
 			p.syncSummary("[sync]", threeSyncedFiles(), 270*time.Second))
 	})
 
-	// A nil FreeDiskGB is a supported production state: every in-package test
-	// constructs Config without it, and so does any embedder that has no
-	// platform helper to pass.
+	// Round is not cosmetic here: the elapsed field is the operator's evidence
+	// that a silent sync is alive, and an unrounded Duration renders nanoseconds
+	// into a line that is read at a glance.
+	t.Run("elapsed_is_rounded_to_the_second", func(t *testing.T) {
+		p := New(Config{
+			Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)},
+			FreeDiskGB: func(string) (int64, error) { return 811, nil },
+		})
+		assert.Contains(t,
+			p.syncSummary("[sync]", threeSyncedFiles(), 270400*time.Millisecond),
+			"[sync] 4m30s;")
+	})
+
+	// The trailing field is the ONLY input-derived one, and after the rune filter
+	// it can still spell every character of the vocabulary a genuine line is made
+	// of: the brackets, the semicolons, a duration, a file count, the word
+	// failed. What a raw %s cannot do is say where the field's value ends, so a
+	// forged line lands inside a genuine row and matches an operator grep or an
+	// alert rule exactly as the real thing would. %q draws that boundary and
+	// escapes anything the filter did not have to remove.
+	t.Run("the_depot_path_is_rendered_as_a_quoted_string", func(t *testing.T) {
+		p := New(Config{
+			Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)},
+			FreeDiskGB: func(string) (int64, error) { return 811, nil },
+		})
+		sp := &syncProgress{}
+		sp.onLine("//depot/x[sync] failed: 3s; 99 files; 0 other lines; 1 GB free; last //depot/evil#1 - added as /ws/x")
+		assert.Equal(t,
+			`[sync] 1s; 1 files; 0 other lines; 811 GB free; last `+
+				`"//depot/x[sync] failed: 3s; 99 files; 0 other lines; 1 GB free; last //depot/evil"`,
+			p.syncSummary("[sync]", sp, time.Second))
+	})
+
+	// A nil FreeDiskGB is a supported production state: an embedder with no
+	// platform helper to pass leaves it unset, and the field must still render.
 	t.Run("nil_free_disk", func(t *testing.T) {
 		p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)}})
 		assert.Contains(t, p.syncSummary("[sync]", threeSyncedFiles(), time.Second), "- GB free")
@@ -63,9 +96,45 @@ func TestProvider_SyncSummaryRendersFiveFixedFields(t *testing.T) {
 		assert.Equal(t, 1, calls, "the free-disk probe must be disabled after its first error")
 	})
 
+	// The sticky latch above trips on an error RETURN, and a probe that never
+	// returns never returns an error. The heartbeat runs this on Prepare's own
+	// goroutine WITH THE WORKSPACE HANDLE HELD - it cannot do what the failure
+	// bracket does and render after releasing - so an unbounded statfs on a
+	// wedged network volume parks Prepare, and with it every later task for that
+	// stream, for the life of the agent. A timed-out probe must therefore render
+	// and latch exactly as an errored one does.
+	t.Run("a_wedged_free_disk_probe_is_bounded_and_latches", func(t *testing.T) {
+		prev := freeDiskProbeTimeout
+		freeDiskProbeTimeout = 20 * time.Millisecond
+		t.Cleanup(func() { freeDiskProbeTimeout = prev })
+
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		var calls atomic.Int32
+		p := New(Config{
+			Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)},
+			FreeDiskGB: func(string) (int64, error) { calls.Add(1); <-release; return 0, nil },
+		})
+
+		sp := threeSyncedFiles()
+		done := make(chan string, 1)
+		go func() { done <- p.syncSummary("[sync]", sp, time.Second) }()
+		select {
+		case got := <-done:
+			assert.Contains(t, got, "- GB free")
+		case <-time.After(5 * time.Second):
+			t.Fatal("syncSummary parked on the free-disk probe, holding Prepare and the workspace handle")
+		}
+
+		assert.Contains(t, p.syncSummary("[sync]", sp, 2*time.Second), "- GB free")
+		assert.Equal(t, int32(1), calls.Load(),
+			"a probe that timed out must latch like one that errored, or a wedged volume "+
+				"is re-probed once per heartbeat for the length of a multi-hour transfer")
+	})
+
 	t.Run("no_file_line_yet", func(t *testing.T) {
 		p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: newFakeP4Fixture(t)}})
-		assert.Contains(t, p.syncSummary("[sync]", &syncProgress{}, time.Second), "last -")
+		assert.Contains(t, p.syncSummary("[sync]", &syncProgress{}, time.Second), `last "-"`)
 	})
 
 	t.Run("zero_elapsed", func(t *testing.T) {
@@ -79,7 +148,7 @@ func TestProvider_SyncSummaryRendersFiveFixedFields(t *testing.T) {
 			FreeDiskGB: func(string) (int64, error) { return 811, nil },
 		})
 		assert.Equal(t,
-			"[sync] complete: 1s; 3 files; 0 other lines; 811 GB free; last //depot/x/c.ma",
+			`[sync] complete: 1s; 3 files; 0 other lines; 811 GB free; last "//depot/x/c.ma"`,
 			p.syncSummary("[sync] complete:", threeSyncedFiles(), time.Second))
 	})
 
@@ -139,17 +208,41 @@ func (r *progressRecorder) waitFor(t *testing.T, sub string, within time.Duratio
 	return nil
 }
 
-// useTestTicker swaps the heartbeat's ticker seam for an UNBUFFERED channel the
-// test drives. Unbuffered is load-bearing for the concurrency guard: with the
-// production single-caller loop each send blocks until the previous progress
-// call returns, so ticks cannot overlap on their own.
-func useTestTicker(t *testing.T) chan time.Time {
+// testTicker is the heartbeat's ticker seam under test. ch is UNBUFFERED, which
+// is load-bearing for the concurrency guard: with the production single-caller
+// loop each send blocks until the previous progress call returns, so ticks
+// cannot overlap on their own.
+//
+// requested records the duration the seam was asked for. A seam that discards
+// that parameter observes only THAT a ticker was built, so every assertion in
+// this file survives a hard-coded interval at the call site and the configured
+// value can stop reaching the ticker with nothing going red.
+// TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output.
+type testTicker struct {
+	ch chan time.Time
+
+	mu        sync.Mutex
+	requested []time.Duration
+}
+
+func (tt *testTicker) intervals() []time.Duration {
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	return append([]time.Duration(nil), tt.requested...)
+}
+
+func useTestTicker(t *testing.T) *testTicker {
 	t.Helper()
-	ch := make(chan time.Time)
+	tt := &testTicker{ch: make(chan time.Time)}
 	prev := newSyncTicker
-	newSyncTicker = func(time.Duration) (<-chan time.Time, func()) { return ch, func() {} }
+	newSyncTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		tt.mu.Lock()
+		tt.requested = append(tt.requested, d)
+		tt.mu.Unlock()
+		return tt.ch, func() {}
+	}
 	t.Cleanup(func() { newSyncTicker = prev })
-	return ch
+	return tt
 }
 
 // useSteppingClock makes syncNow advance by step on every call, so an elapsed
@@ -186,9 +279,12 @@ func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T)
 	tick := useTestTicker(t)
 	useSteppingClock(t, time.Second)
 
+	// Deliberately neither the 30s default nor the 5s floor: the value must be
+	// one no plausible hard-coded literal would agree with.
+	const configured = 7 * time.Second
 	p := New(Config{
 		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
-		SyncHeartbeatInterval: 30 * time.Second,
+		SyncHeartbeatInterval: configured,
 		FreeDiskGB:            func(string) (int64, error) { return 811, nil },
 	})
 	rec := &progressRecorder{}
@@ -201,11 +297,13 @@ func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T)
 	// Wait until the sync is actually in flight, so "no summary yet" cannot be
 	// satisfied by Prepare simply not having reached the sync.
 	rec.waitFor(t, "[sync] starting", 5*time.Second)
+	require.Equal(t, []time.Duration{configured}, tick.intervals(),
+		"the ticker must be built with the CONFIGURED interval, once")
 	time.Sleep(100 * time.Millisecond)
 	require.Equal(t, 0, rec.count("0 files"),
 		"no tick has been delivered, so no heartbeat may have been emitted, got: %v", rec.snapshot())
 
-	tick <- time.Now()
+	tick.ch <- time.Now()
 	rec.waitFor(t, "0 files", 5*time.Second)
 	var heartbeat string
 	for _, l := range rec.snapshot() {
@@ -215,7 +313,7 @@ func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T)
 	}
 	assert.Contains(t, heartbeat, "0 other lines")
 	assert.Contains(t, heartbeat, "811 GB free")
-	assert.Contains(t, heartbeat, "last -")
+	assert.Contains(t, heartbeat, `last "-"`)
 
 	close(release)
 	r := <-res
@@ -230,7 +328,7 @@ func TestProvider_ARunningSyncEmitsOneSummaryPerTickWithNoP4Output(t *testing.T)
 			assert.Contains(t, l, "0 files")
 			assert.Contains(t, l, "0 other lines")
 			assert.Contains(t, l, "811 GB free")
-			assert.Contains(t, l, "last -")
+			assert.Contains(t, l, `last "-"`)
 		}
 	}
 }
@@ -267,7 +365,7 @@ func TestProvider_ADisabledHeartbeatBuildsNoTickerAndStillSummarises(t *testing.
 			assert.Contains(t, l, "1 files")
 			assert.Contains(t, l, "0 other lines")
 			assert.Contains(t, l, "811 GB free")
-			assert.Contains(t, l, "last //depot/x/a.ma")
+			assert.Contains(t, l, `last "//depot/x/a.ma"`)
 		}
 	}
 }
@@ -314,6 +412,76 @@ func TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished(t *testin
 	case <-time.After(10 * time.Second):
 		t.Fatal("Prepare did not return after ctx cancellation")
 	}
+}
+
+// REGRESSION GUARD for the ONE claim errCh's capacity makes. Everything else in
+// this file is blind to it: a Prepare parked inside progress returns nothing
+// whether the send completed or not, and the loop drains errCh correctly either
+// way once progress comes back. What changes is whether the sync goroutine is
+// still ALIVE while progress is parked - and progress can park until agent
+// shutdown, so on an unbuffered channel it is parked for just as long. The
+// goroutine itself is therefore the observable, and the assertion is a DROP from
+// a baseline rather than an absolute count, so unrelated runtime goroutines do
+// not have to be enumerated.
+//
+// FreeDiskGB is left nil deliberately: a probe goroutine inside the measurement
+// window would move the count for a reason this test is not asking about.
+func TestProvider_TheSyncGoroutineExitsEvenWhileProgressIsParked(t *testing.T) {
+	fr, syncKey, spec := syncFixture(t)
+	release := make(chan struct{})
+	fr.setStreamBlock(syncKey, release)
+	tick := useTestTicker(t)
+
+	p := New(Config{
+		Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr},
+		SyncHeartbeatInterval: 30 * time.Second,
+	})
+
+	rec := &progressRecorder{}
+	entered := make(chan struct{})
+	parked := make(chan struct{})
+	var once sync.Once
+	res := make(chan prepResult, 1)
+	go func() {
+		h, err := p.Prepare(context.Background(), "task-1", spec, func(s string) {
+			rec.add(s)
+			if strings.Contains(s, "0 files") {
+				once.Do(func() { close(entered) })
+				<-parked
+			}
+		})
+		res <- prepResult{h, err}
+	}()
+	// Registered after t.TempDir's own cleanup, so it runs BEFORE it: Prepare
+	// must be let go and joined while the workspace directory still exists.
+	t.Cleanup(func() {
+		close(parked)
+		if r := <-res; r.h != nil {
+			_ = r.h.Finalize(context.Background())
+		}
+	})
+
+	rec.waitFor(t, "[sync] starting", 5*time.Second)
+	tick.ch <- time.Now()
+	<-entered
+
+	// Everything this test starts has started and settled; the sync goroutine is
+	// parked in the fixture and Prepare is parked in progress.
+	time.Sleep(100 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	close(release)
+
+	// Polled on the TEST goroutine on purpose. require.Eventually runs its
+	// condition on a goroutine of its own, which lands inside the measurement
+	// and cancels out the very exit being counted.
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() >= baseline && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.Less(t, runtime.NumGoroutine(), baseline,
+		"the sync finished while progress was parked and its goroutine never exited: "+
+			"errCh must be buffered so the send completes without a reader")
 }
 
 // REGRESSION GUARD, not a red-first criterion. Its RED is the mutation a future
@@ -364,7 +532,7 @@ func TestProvider_TheHeartbeatNeverCallsProgressConcurrentlyWithPrepare(t *testi
 	go func() {
 		for {
 			select {
-			case tick <- time.Now():
+			case tick.ch <- time.Now():
 			case <-stop:
 				return
 			}

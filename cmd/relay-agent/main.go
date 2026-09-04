@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -73,8 +74,9 @@ func main() {
 			Root:                  root,
 			Hostname:              caps.Hostname,
 			SyncHeartbeatInterval: resolveSyncHeartbeatInterval(os.Getenv("RELAY_SYNC_HEARTBEAT_INTERVAL")),
-			// The same identifier the sweeper below is given, so the heartbeat's
-			// figure and RELAY_WORKSPACE_MIN_FREE_GB read the same volume.
+			// Must stay the same helper on the same root as the sweeper's own
+			// free-disk check below, or the logged figure stops being comparable
+			// with RELAY_WORKSPACE_MIN_FREE_GB.
 			FreeDiskGB: freeDiskGB,
 		})
 		if err := pp.Preflight(ctx); err != nil {
@@ -188,6 +190,17 @@ var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 // parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
 // s (seconds), m (minutes), h (hours), or d (days). Returns fallback on empty or invalid input.
 // If v is non-empty but unparseable, a warning is logged naming the env var.
+//
+// SYNTACTICALLY VALID IS NOT REPRESENTABLE, and the range check below is the
+// only thing standing between the two. durRe admits an arbitrarily long digit
+// run, so the product can leave int64 nanoseconds - and the wrapped result is
+// not reliably negative, so no check on the PRODUCT can see it: 1000000000000d
+// wraps to a plausible-looking positive 225 years. Every caller reads a wrapped
+// value as its own kind of "off" and silently turns something off - a
+// non-positive RELAY_SYNC_HEARTBEAT_INTERVAL disables the heartbeat, a
+// non-positive RELAY_WORKSPACE_MAX_AGE declines to build the sweeper - with no
+// warning, which is the opposite of what an operator setting the knob asked for.
+// TestParseDurationEnv_AnOverflowingValueIsRefusedRatherThanWrappedNegative.
 func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 	if v == "" {
 		return fallback
@@ -197,16 +210,29 @@ func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 		log.Printf("warning: %s=%q is not a valid duration (want e.g. 14d, 8h, 30m); using fallback %v", name, v, fallback)
 		return fallback
 	}
-	n, _ := strconv.Atoi(m[1])
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		log.Printf("warning: %s=%q is larger than a duration can represent; using fallback %v", name, v, fallback)
+		return fallback
+	}
+	var unit time.Duration
 	switch m[2] {
 	case "s":
-		return time.Duration(n) * time.Second
+		unit = time.Second
 	case "m":
-		return time.Duration(n) * time.Minute
+		unit = time.Minute
 	case "h":
-		return time.Duration(n) * time.Hour
+		unit = time.Hour
 	case "d":
-		return time.Duration(n) * 24 * time.Hour
+		unit = 24 * time.Hour
+	default:
+		return fallback
 	}
-	return fallback
+	// n is non-negative by the regex, so division against the ceiling is the
+	// whole test; it is done on the OPERAND because the product is already lost.
+	if int64(n) > int64(math.MaxInt64)/int64(unit) {
+		log.Printf("warning: %s=%q is larger than a duration can represent; using fallback %v", name, v, fallback)
+		return fallback
+	}
+	return time.Duration(n) * unit
 }
