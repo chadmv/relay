@@ -16,6 +16,7 @@ import (
 	"relay/internal/api"
 	"relay/internal/events"
 	"relay/internal/store"
+	"relay/internal/testsupport/pgdsn"
 	"relay/internal/tokenhash"
 	"relay/internal/worker"
 
@@ -57,53 +58,13 @@ func testCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// boundedCleanup runs fn in a goroutine and fails the named step, via
-// t.Errorf, if fn either does not return within teardownTimeout (defined in
-// pgharness_integration_test.go, same package) or panics - instead of letting
-// either one hang or crash the whole test binary into the nameless panic:
-// banner docs/backlog/bug-2026-08-26-integration-lane-times-out-on-docker-teardown
-// describes. It exists because pgxpool.Pool.Close and httptest.Server.Close
-// both take no context - unlike the pgx.Connect/Exec calls elsewhere in this
-// lane, which accept one directly, these two have no argument to bound with,
-// so a goroutine plus a timeout is the only lever available.
-//
-// The recover here is load-bearing, not defensive filler: before round 2,
-// t.Cleanup(pool.Close) ran on the test goroutine, so a panic inside it was
-// caught by testing's own tRunner and attributed to the named test for free.
-// Moving the call onto a bare goroutine lost that for free lunch - a panic on
-// an unrecovered goroutine crashes the entire process with no test name
-// attached, which is the exact failure this helper exists to eliminate, so
-// the recover has to be re-earned here explicitly.
-//
-// On the hang branch, a goroutine that never returns leaks past the failed
-// test; that is an accepted cost of turning an indefinite hang into a named,
-// bounded failure. The done channel is buffered so that leaked goroutine's
-// eventual send (or, on the panic branch, one that already completed by the
-// time the timeout fires) never blocks on a receiver that stopped listening.
-func boundedCleanup(t dsnAssertT, name string, fn func()) {
-	t.Helper()
-	done := make(chan any, 1)
-	go func() {
-		defer func() { done <- recover() }()
-		fn()
-	}()
-	select {
-	case v := <-done:
-		if v != nil {
-			t.Errorf("%s panicked: %v", name, v)
-		}
-	case <-time.After(teardownTimeout):
-		t.Errorf("%s did not complete within %s", name, teardownTimeout)
-	}
-}
-
 func startRelayServer(t *testing.T) *relayServer {
 	t.Helper()
-	dsn := newIntegrationDSN(t)
+	dsn := pgdsn.NewIntegrationDSN(t)
 
 	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { boundedCleanup(t, "pool.Close", pool.Close) })
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "pool.Close", pool.Close) })
 
 	q := store.New(pool)
 	// The four trailing zeros disable the login and register rate limiters.
@@ -119,7 +80,7 @@ func startRelayServer(t *testing.T) *relayServer {
 	apiSrv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
 
 	httpSrv := httptest.NewServer(apiSrv.Handler())
-	t.Cleanup(func() { boundedCleanup(t, "httpSrv.Close", httpSrv.Close) })
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "httpSrv.Close", httpSrv.Close) })
 
 	s := &relayServer{
 		BaseURL:    httpSrv.URL,
@@ -276,25 +237,3 @@ func TestIntegration_HarnessServesAndAuthenticates(t *testing.T) {
 	require.Contains(t, userOut.String(), "Total: 0")
 }
 
-// TestBoundedCleanup_RecoversPanicAndAttributesToNamedTest is the regression
-// test for the 2026-08-27 review's finding C: before round 2,
-// t.Cleanup(pool.Close) ran on the test goroutine, so a panic inside it was
-// caught by testing's tRunner and attributed to the named test. boundedCleanup
-// moved that call onto a bare goroutine with no recover, which re-creates
-// exactly the failure mode it was written to eliminate - a panic there now
-// kills the whole test binary with an unrecovered goroutine panic and no test
-// name attached (docs/backlog/bug-2026-08-26-integration-lane-times-out-on-docker-teardown).
-//
-// This uses fakeDSNAssertT (defined in pgharness_integration_test.go, same
-// package) rather than the real *testing.T, for the same reason that type
-// exists: there is no way to prove a *testing.T did NOT crash the process by
-// making it crash the process.
-func TestBoundedCleanup_RecoversPanicAndAttributesToNamedTest(t *testing.T) {
-	ft := &fakeDSNAssertT{}
-	boundedCleanup(ft, "example.Cleanup", func() {
-		panic("boom")
-	})
-	require.True(t, ft.failed,
-		"a panic inside fn must be reported via Errorf on the named step, not left to crash "+
-			"the process with no test name attached")
-}

@@ -275,3 +275,18 @@ stub**, because the default lane's fake discards the field under test. The remed
 "move the test" but "make the stub record what the assertion needs" - a smaller change than a CI
 job, and one that generalises: a default-lane stub that drops a field makes every property of that
 field integration-only by construction.
+
+## Appended 2026-09-04 - a `pg-integration` CI lane now exists for the two remaining Postgres-only packages
+
+`internal/store` and `internal/schedrunner` (the seventh and eighth instances above) now run under a
+`pg-integration` job in `.github/workflows/go-ci.yml`, driven by a new `make test-pg-integration`
+target, using the same `internal/testsupport/pgdsn` harness `cli-integration` already used - extracted
+out of `internal/cli` so a Postgres-only package gets a CI-running lane by taking a database from it
+and being added to the target's package list.
+
+What this closes: the ninth and tenth instances recorded above
+(`increment_task_retry_count_budget_integration_test.go`, `retry_job_tasks_integration_test.go`,
+`stored_spec_bounds_test.go`, `startup_validation_integration_test.go`) now run on every push.
+
+What this does NOT close: guards that need p4d (`internal/agent/source/perforce`) or a real gRPC
+agent are still not covered by this mechanism. The item stays open for those.

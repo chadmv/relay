@@ -8,11 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"relay/internal/store"
+	"relay/internal/testsupport/pgdsn"
 )
 
 // taskCommandsDownTarget is the schema version just below 000008_task_commands,
@@ -23,29 +21,13 @@ const taskCommandsDownTarget = 7
 // so tests can drive golang-migrate past the startup up-only path.
 func newMigratedPoolWithDSN(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
-	ctx := context.Background()
-
-	pg, err := tcpostgres.Run(ctx,
-		"postgres:16",
-		tcpostgres.WithDatabase("relay_test"),
-		tcpostgres.WithUsername("relay"),
-		tcpostgres.WithPassword("relay"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-		),
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pg.Terminate(ctx) })
-
-	dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	migrateDSN := "pgx5" + dsn[len("postgres"):]
+	dsn := pgdsn.NewEmptyDSN(t)
+	migrateDSN := pgdsn.MigrateDSN(dsn)
 	require.NoError(t, store.Migrate(migrateDSN))
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "pool.Close", pool.Close) })
 
 	return pool, migrateDSN
 }

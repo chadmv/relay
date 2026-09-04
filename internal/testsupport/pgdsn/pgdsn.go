@@ -1,15 +1,41 @@
-//go:build integration
-
-package cli
+// Package pgdsn is the shared Postgres test-database harness for this
+// module's integration lanes. It hands a caller either a fresh, unmigrated
+// database (NewEmptyDSN) or a fresh, migrated one (NewIntegrationDSN), in one
+// of two modes selected by the RELAY_TEST_DATABASE_URL environment variable:
+// one Postgres testcontainer per call when it is unset, or one freshly
+// CREATEd database per call on the caller-supplied server when it is set -
+// the mode .github/workflows/go-ci.yml's Postgres-service jobs use, with no
+// Docker API, no image pull, and no Ryuk reaper.
+//
+// This package is deliberately untagged (no //go:build integration), so that
+// the pure DSN-validation guards in pgdsn_guards_test.go run in the default
+// lane and under -race. Its one database-touching test carries the tag on
+// its own file. Because it is untagged, go build and go vet compile
+// testcontainers-go and the testing package into it on every default run -
+// both are already go.mod requirements, so this adds no new dependency.
+//
+// NewEmptyDSN and NewIntegrationDSN must only be called from an
+// //go:build integration file: make test is documented as needing no
+// Docker, and a caller reached from an untagged test would start pulling
+// postgres:16 to satisfy it.
+//
+// IMPORT-CYCLE CONSTRAINT, PERMANENT: this package imports relay/internal/store
+// to run migrations. A future relay/internal/store test file that wants a
+// database from here would create an import cycle if it were an in-package
+// test (package store); it must be package store_test instead, as every
+// store test file except export_test.go already is. Do not "fix" this by
+// splitting the harness apart - splitting it is what an import cycle here
+// would otherwise force.
+package pgdsn
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
-	"os/user"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,10 +52,9 @@ import (
 )
 
 // dsnEnvVar selects the harness mode. Unset: one Postgres testcontainer per
-// test, which is what every other integration package in this repo does and
-// what a developer with Docker gets for free. Set: one freshly CREATEd
-// database per test on the supplied server, which is what
-// .github/workflows/go-ci.yml's cli-integration job uses - no Docker API, no
+// call, what a developer with Docker gets for free. Set: one freshly CREATEd
+// database per call on the supplied server, which is what
+// .github/workflows/go-ci.yml's Postgres-service jobs use - no Docker API, no
 // image pull, no Ryuk reaper. The name follows the existing
 // RELAY_E2E_DATABASE_URL convention rather than inventing a new one.
 const dsnEnvVar = "RELAY_TEST_DATABASE_URL"
@@ -54,22 +79,20 @@ const testDBPrefix = "relaytest_"
 // value.
 var dbNamePattern = regexp.MustCompile(`^relaytest_[0-9a-f]{16}$`)
 
-// teardownTimeout bounds EVERY cleanup step. Unbounded teardown is
+// TeardownTimeout bounds EVERY cleanup step. Unbounded teardown is
 // docs/backlog/bug-2026-08-26-integration-lane-times-out-on-docker-teardown:
-// the three existing copies pass context.Background() and discard the error, so
-// a hung Terminate renders as a bare panic:/FAIL with NO TEST NAME ATTACHED.
-// Bounded plus t.Errorf makes a hung teardown fail one named test.
-const teardownTimeout = 30 * time.Second
+// a hung Terminate/Close that passes context.Background() and discards the
+// error renders as a bare panic:/FAIL with NO TEST NAME ATTACHED. Bounded
+// plus t.Errorf makes a hung teardown fail one named test.
+const TeardownTimeout = 30 * time.Second
 
-// newIntegrationDSN returns a postgres:// DSN for a migrated, empty database
-// that belongs to this test alone, and registers its teardown.
-//
-// IT MUST NOT IMPORT ANYTHING FROM internal/cli OR internal/api. It takes a
-// *testing.T and returns a string; that is the whole surface. Keeping it true
-// is what makes the later extraction into a shared package (backlog B4) a file
-// move rather than a redesign - a shared harness that imports its consumer's
-// types cannot be shared.
-func newIntegrationDSN(t *testing.T) string {
+// NewEmptyDSN returns a postgres:// DSN for a fresh, UNMIGRATED database that
+// belongs to this call alone, and registers its teardown. Most callers want
+// NewIntegrationDSN instead; this exists for the two internal/store callers
+// that drive golang-migrate themselves (TestMigrate, whose subject is
+// store.Migrate; and the down-migration tests, which need to migrate to a
+// specific version rather than latest).
+func NewEmptyDSN(t *testing.T) string {
 	t.Helper()
 	if base := os.Getenv(dsnEnvVar); base != "" {
 		return newSharedServiceDSN(t, base)
@@ -77,10 +100,33 @@ func newIntegrationDSN(t *testing.T) string {
 	return newContainerDSN(t)
 }
 
-// migrateDSN rewrites a postgres:// DSN into the pgx5:// form store.Migrate
-// requires (see its doc comment in internal/store/migrate.go). Callers must
-// have already established the postgres:// prefix.
-func migrateDSN(dsn string) string {
+// NewIntegrationDSN returns a postgres:// DSN for a migrated, empty database
+// that belongs to this call alone, and registers its teardown.
+func NewIntegrationDSN(t *testing.T) string {
+	t.Helper()
+	dsn := NewEmptyDSN(t)
+	// golang-migrate takes pg_advisory_lock keyed on the database name being
+	// migrated (database.GenerateAdvisoryLockId), and each call here migrates
+	// a freshly random-named database, so concurrent calls do not serialize.
+	// Advisory locks are also database-scoped (the locktag includes the
+	// database OID), so even a colliding key would not conflict across two
+	// distinct databases. Both properties break only if a future change
+	// makes multiple calls migrate the SAME physical database, e.g. a shared,
+	// pre-migrated template reused as a CREATE DATABASE ... TEMPLATE source -
+	// do not add one without re-checking this.
+	require.NoError(t, store.Migrate(MigrateDSN(dsn)))
+	return dsn
+}
+
+// MigrateDSN rewrites a postgres:// DSN into the pgx5:// form store.Migrate
+// requires (see its doc comment in internal/store/migrate.go). Panics if dsn
+// does not start with postgres:// - strings.TrimPrefix is a silent no-op on a
+// mismatched prefix, so without this check a non-postgres dsn would produce a
+// wrong-but-plausible-looking pgx5 DSN instead of a loud failure.
+func MigrateDSN(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") {
+		panic(fmt.Sprintf("pgdsn: MigrateDSN requires a postgres:// dsn, got %q", dsn))
+	}
 	return "pgx5" + strings.TrimPrefix(dsn, "postgres")
 }
 
@@ -95,7 +141,7 @@ func newContainerDSN(t *testing.T) string {
 		testcontainers.WithWaitStrategy(
 			// WithOccurrence(2) IS LOAD-BEARING. postgres:16 emits this line once
 			// during its own init pass, before the real listener is up. Copy it
-			// verbatim; the three existing copies in this repo all do.
+			// verbatim.
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 		),
 	)
@@ -107,7 +153,7 @@ func newContainerDSN(t *testing.T) string {
 	// leaks forever.
 	if pg != nil {
 		t.Cleanup(func() {
-			tctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+			tctx, cancel := context.WithTimeout(context.Background(), TeardownTimeout)
 			defer cancel()
 			if err := pg.Terminate(tctx); err != nil {
 				t.Errorf("terminate postgres container: %v", err)
@@ -120,11 +166,10 @@ func newContainerDSN(t *testing.T) string {
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(dsn, "postgres://"),
 		"testcontainers DSN must start with postgres://, got %q", dsn)
-	require.NoError(t, store.Migrate(migrateDSN(dsn)))
 	return dsn
 }
 
-// dsnAssertT is the minimal surface two different callers need, for two
+// AssertT is the minimal surface two different callers need, for two
 // different reasons, neither of which is "the minimal surface
 // assertDSNTargetsDatabase needs" alone:
 //
@@ -135,18 +180,56 @@ func newContainerDSN(t *testing.T) string {
 //     any t.Run child inside it fails, with no way to un-fail it afterward,
 //     which would make this file's own "this must be rejected" case red
 //     forever instead of proving the rejection happened.
-//   - boundedCleanup (relayharness_integration_test.go, same package) is
-//     typed against it for a different reason: there is no way to prove a
-//     real *testing.T did NOT crash the process on a panic by making it
-//     crash the process, so its own regression test
-//     (TestBoundedCleanup_RecoversPanicAndAttributesToNamedTest) needs the
-//     same substitutable fake, not a smaller assertion surface.
+//   - BoundedCleanup is typed against it for a different reason: there is no
+//     way to prove a real *testing.T did NOT crash the process on a panic by
+//     making it crash the process, so its own regression test needs the same
+//     substitutable fake, not a smaller assertion surface.
 //
 // Every real call site, in both cases, passes a genuine *testing.T, which
 // satisfies this interface unchanged.
-type dsnAssertT interface {
+type AssertT interface {
 	require.TestingT
 	Helper()
+}
+
+// BoundedCleanup runs fn in a goroutine and fails the named step, via
+// t.Errorf, if fn either does not return within TeardownTimeout or panics -
+// instead of letting either one hang or crash the whole test binary into the
+// nameless panic: banner
+// docs/backlog/bug-2026-08-26-integration-lane-times-out-on-docker-teardown
+// describes. It exists because pgxpool.Pool.Close and httptest.Server.Close
+// both take no context - unlike the pgx.Connect/Exec calls elsewhere in this
+// package, which accept one directly, these two have no argument to bound
+// with, so a goroutine plus a timeout is the only lever available.
+//
+// The recover here is load-bearing, not defensive filler: a bare
+// t.Cleanup(pool.Close) runs on the test goroutine, so a panic inside it is
+// caught by testing's own tRunner and attributed to the named test for free.
+// Moving the call onto a bare goroutine loses that for free - a panic on an
+// unrecovered goroutine crashes the entire process with no test name
+// attached, which is the exact failure this helper exists to eliminate, so
+// the recover has to be re-earned here explicitly.
+//
+// On the hang branch, a goroutine that never returns leaks past the failed
+// test; that is an accepted cost of turning an indefinite hang into a named,
+// bounded failure. The done channel is buffered so that leaked goroutine's
+// eventual send (or, on the panic branch, one that already completed by the
+// time the timeout fires) never blocks on a receiver that stopped listening.
+func BoundedCleanup(t AssertT, name string, fn func()) {
+	t.Helper()
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		fn()
+	}()
+	select {
+	case v := <-done:
+		if v != nil {
+			t.Errorf("%s panicked: %v", name, v)
+		}
+	case <-time.After(TeardownTimeout):
+		t.Errorf("%s did not complete within %s", name, TeardownTimeout)
+	}
 }
 
 // pgConnectionTargetQueryKeys is NOT the closed set of every pgconn URL query
@@ -223,20 +306,23 @@ var pgConnectionTargetQueryKeys = map[string]bool{
 
 // assertNoConnectionTargetOverride rejects a DSN whose query string carries
 // any key in pgConnectionTargetQueryKeys. It exists to be run once, on the
-// harness's own base DSN, BEFORE either the admin URL or the per-test URL is
+// harness's own base DSN, BEFORE either the admin URL or the per-call URL is
 // built from it - closing the whole axis rather than the one member
 // (`dbname`) the original H1 finding demonstrated. Checking only cfg.Database
 // after the fact (assertDSNTargetsDatabase below) left `?host=`, `?port=`,
 // `?user=` and `?password=` free to redirect CREATE DATABASE, DROP DATABASE
-// ... WITH (FORCE), migrations and the admin-token seed to a different server
+// ... WITH (FORCE), migrations and any admin-token seed to a different server
 // while that check still reported "postgres, as intended".
 //
 // Called only from newSharedServiceDSN, i.e. only when RELAY_TEST_DATABASE_URL
-// is set. newContainerDSN (the unset/testcontainer path) never calls this: its
-// DSN comes from tcpostgres.Run/pg.ConnectionString, not from the environment,
-// so there is nothing here for an operator's env var to redirect. That
-// exemption is deliberate, not an oversight - do not add a call on the
-// container path.
+// is set. newContainerDSN (the unset/testcontainer path) never calls this -
+// not because its DSN is immune to redirection (tcpostgres.ConnectionString
+// builds from DockerProvider.DaemonHost, which does honour
+// TESTCONTAINERS_HOST_OVERRIDE/DOCKER_HOST/tc.host), but because that path
+// never issues a CREATE or DROP DATABASE - both live only in
+// newSharedServiceDSN below - so there is nothing here for a redirected
+// target to put at risk. That exemption is deliberate, not an oversight - do
+// not add a call on the container path.
 //
 // This narrows the set of DSNs RELAY_TEST_DATABASE_URL may legitimately use:
 // a unix-socket DSN such as postgres:///wanted?host=/var/run/postgresql is a
@@ -247,7 +333,7 @@ var pgConnectionTargetQueryKeys = map[string]bool{
 // itself a redirection vector - but it is a newly narrowed input surface
 // relative to before this guard existed, and is recorded here so it is not
 // mistaken for an oversight if someone hits it.
-func assertNoConnectionTargetOverride(t dsnAssertT, parsedURL *url.URL) {
+func assertNoConnectionTargetOverride(t AssertT, parsedURL *url.URL) {
 	t.Helper()
 	for k := range parsedURL.Query() {
 		// pgConnectionTargetQueryKeys is lowercase-only, and pgconn's own
@@ -304,7 +390,7 @@ func assertNoConnectionTargetOverride(t dsnAssertT, parsedURL *url.URL) {
 // axis at the harness's one entry point, but this function is what a caller
 // actually relies on for the specific DSN it is about to use, and pins the
 // same properties independent of how the guard is (or isn't) wired in.
-func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wantUser string) {
+func assertDSNTargetsDatabase(t AssertT, dsn, wantDB, wantHost, wantPort, wantUser string) {
 	t.Helper()
 	cfg, err := pgx.ParseConfig(dsn)
 	require.NoError(t, err, "parse dsn as a pgx config")
@@ -352,7 +438,7 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 // pgconn/defaults_windows.go in the pinned jackc/pgx@v5.9.1). Deriving it via
 // pgx.ParseConfig, the same entry point pgx.Connect uses, rather than
 // hand-rolling a second OS-username lookup, is what keeps this from drifting
-// out of sync with pgconn's own default the way the previous zero-value
+// out of sync with pgconn's own default the way an earlier zero-value
 // wantUser did: assertDSNTargetsDatabase then compared pgconn's real default
 // user against an empty string and rejected an ordinary, portless-userinfo
 // DSN such as postgres://localhost:5432/postgres.
@@ -367,10 +453,10 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 // function would derive its default via the exact same pgx.ParseConfig call
 // that assertDSNTargetsDatabase's user arm later re-parses to get cfg.User -
 // so for a userinfo-less DSN, a `?user=` in the query would move BOTH sides
-// of that require.Equal identically and the arm could never fail (2026-08-27
-// review, finding M1). Stripping the query here means only pgconn's genuine
-// environment/service default survives into wantUser, restoring the arm as
-// an independent check rather than a tautology - see
+// of that require.Equal identically and the arm could never fail. Stripping
+// the query here means only pgconn's genuine environment/service default
+// survives into wantUser, restoring the arm as an independent check rather
+// than a tautology - see
 // TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN.
 //
 // PG* environment variables (PGUSER) and a service file's user are NOT
@@ -378,7 +464,7 @@ func assertDSNTargetsDatabase(t dsnAssertT, dsn, wantDB, wantHost, wantPort, wan
 // this parse and to the real dsn's later parse in assertDSNTargetsDatabase,
 // so they can never be the cause of a mismatch on the user arm and
 // assertDSNTargetsDatabase's user message says so.
-func wantDefaultUser(t dsnAssertT, parsedBase *url.URL) string {
+func wantDefaultUser(t AssertT, parsedBase *url.URL) string {
 	t.Helper()
 	if u := parsedBase.User.Username(); u != "" {
 		return u
@@ -443,28 +529,15 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 	// between CREATE and t.Cleanup: a successful CREATE followed by a FailNow
 	// (Goexit, so nothing after it runs) previously leaked a relaytest_
 	// database on the shared server permanently.
-	// created is a LOWER BOUND on whether the CREATE below actually
-	// succeeded, not a certainty: execErr == nil proves the server REPORTED
-	// success, not merely that a response arrived, and that is not the gap -
-	// the gap is the converse, execErr != nil does not prove the CREATE did
-	// not commit: CREATE DATABASE can commit server-side while its response
-	// is lost (a deadline firing, or the connection resetting, in the window
-	// after the server commits but before the client reads the reply). In
-	// that window created is false even though the database now exists, which
-	// downgrades the cleanup's connect failure below from t.Errorf to
-	// t.Logf - silently leaking a relaytest_ database exactly the class the
-	// arm-before-CREATE ordering above exists to prevent. The DROP itself is
-	// still attempted whenever the cleanup's connect succeeds regardless of
-	// created; only the SEVERITY of a connect failure depends on it. Accepted
-	// as a lower bound rather than closed, because closing it would mean
-	// treating every CREATE as having possibly succeeded, which reintroduces
-	// the "flaky server buries the real error" problem this variable exists
-	// to solve: a connect failure in the cleanup is only a real problem when a
-	// database might exist to drop. Without created, a Postgres that is down
-	// or unreachable at CREATE time makes the cleanup connect again, fail
-	// again, and t.Errorf a database that was never created - a second,
-	// misleading error on top of the real one that buries it under a flaky
-	// server.
+	// created marks that CREATE was ISSUED, not that it succeeded: CREATE
+	// DATABASE can commit server-side while the client's response is lost (a
+	// deadline firing, or the connection resetting, between the server's
+	// commit and the client's read of the reply), so execErr != nil does not
+	// prove nothing was created. Set it immediately before the Exec call, not
+	// after checking execErr - checking execErr first hid that lost-response
+	// window behind a silent t.Logf instead of a leaked-database t.Errorf -
+	// and not before the admin Connect succeeds, which would report a leak
+	// for a CREATE that was never attempted (Postgres down or unreachable).
 	var created bool
 	t.Cleanup(func() {
 		// Fail closed rather than widen: see dbNamePattern.
@@ -472,7 +545,7 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 			t.Errorf("refusing to drop %q: fails validation for a %s database", dbName, testDBPrefix)
 			return
 		}
-		tctx, tcancel := context.WithTimeout(context.Background(), teardownTimeout)
+		tctx, tcancel := context.WithTimeout(context.Background(), TeardownTimeout)
 		defer tcancel()
 		conn, err := pgx.Connect(tctx, adminDSN)
 		if err != nil {
@@ -485,7 +558,7 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 		}
 		defer conn.Close(tctx)
 		// WITH (FORCE) terminates leftover sessions (PG13+; both environments
-		// run postgres:16), so a pool a test forgot to close cannot wedge the
+		// run postgres:16), so a pool a caller forgot to close cannot wedge the
 		// drop.
 		if _, err := conn.Exec(tctx,
 			`DROP DATABASE IF EXISTS "`+dbName+`" WITH (FORCE)`); err != nil {
@@ -493,339 +566,28 @@ func newSharedServiceDSN(t *testing.T, base string) string {
 		}
 	})
 
-	tctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+	tctx, cancel := context.WithTimeout(context.Background(), TeardownTimeout)
 	defer cancel()
 	adminConn, err := pgx.Connect(tctx, adminDSN)
 	require.NoError(t, err)
-	_, execErr := adminConn.Exec(tctx, `CREATE DATABASE "`+dbName+`"`)
-	created = execErr == nil
+	created = true
+	// TEMPLATE template0, not the default template1: template1 allows
+	// connections, so a session merely connected to it at this instant makes
+	// Postgres refuse the copy with "source database ... is being accessed by
+	// other users" (SQLSTATE 55006) - observed directly, intermittently,
+	// against a shared server. template0 has datallowconn=false, so nothing
+	// can ever be connected to it and the failure class cannot occur.
+	_, execErr := adminConn.Exec(tctx, `CREATE DATABASE "`+dbName+`" TEMPLATE template0`)
 	closeErr := adminConn.Close(tctx)
 	// execErr checked before closeErr: a genuine CREATE failure (out of disk,
 	// permission, name collision) must be reported as what it is, not
 	// misattributed to Close.
-	require.NoError(t, execErr)
+	require.NoError(t, execErr, "pgdsn: CREATE DATABASE %s", dbName)
 	require.NoError(t, closeErr)
 
 	testURL := *parsedBase
 	testURL.Path = "/" + dbName
 	dsn := testURL.String()
 	assertDSNTargetsDatabase(t, dsn, dbName, wantHost, wantPort, wantUser)
-
-	// One migration run per database, exactly as newTestPool already pays per
-	// test. golang-migrate takes pg_advisory_lock keyed on the DATABASE NAME
-	// (database.GenerateAdvisoryLockId), and every name here is distinct, so
-	// concurrent per-database migrations against one server do not serialize.
-	// A future TEMPLATE-database optimisation with a fixed name would put them
-	// all back on one lock - do not add one without re-checking this.
-	require.NoError(t, store.Migrate(migrateDSN(dsn)))
 	return dsn
-}
-
-// TestIntegration_HarnessDSNIsMigratedAndEmpty is the harness's own test. It
-// exists so that a later test's RED is attributable: without it, "the workers
-// list test failed" could mean the harness never produced a usable database.
-func TestIntegration_HarnessDSNIsMigratedAndEmpty(t *testing.T) {
-	dsn := newIntegrationDSN(t)
-
-	conn, err := pgx.Connect(t.Context(), dsn)
-	require.NoError(t, err)
-	closeCtx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
-	defer cancel()
-	defer conn.Close(closeCtx)
-
-	// Migrations ran: schema_migrations exists and carries a version.
-	var version int64
-	require.NoError(t, conn.QueryRow(t.Context(),
-		`SELECT version FROM schema_migrations`).Scan(&version))
-	require.Positive(t, version)
-
-	// The database is this test's alone. Every list assertion in this lane
-	// (Total: 1, one row rendered) is only meaningful against a known-empty
-	// database, so this is the property the whole lane rests on.
-	for _, table := range []string{"workers", "jobs", "tasks", "users", "task_logs"} {
-		var n int64
-		require.NoError(t, conn.QueryRow(t.Context(),
-			`SELECT count(*) FROM `+table).Scan(&n), "counting %s", table)
-		require.Zero(t, n, "table %s must be empty in a fresh test database", table)
-	}
-}
-
-// fakeDSNAssertT is a minimal dsnAssertT that records failure as a value
-// instead of failing the real *testing.T it runs inside. FailNow is
-// require's FailNow contract, which real *testing.T implements via
-// runtime.Goexit; a fake standing in for it must stop execution the same
-// way, so it panics with a sentinel and runAssertDSN recovers only that
-// sentinel.
-type fakeDSNAssertT struct{ failed bool }
-
-func (f *fakeDSNAssertT) Errorf(string, ...any) { f.failed = true }
-func (f *fakeDSNAssertT) FailNow()              { f.failed = true; panic(fakeDSNAssertFailNow{}) }
-func (f *fakeDSNAssertT) Helper()               {}
-
-type fakeDSNAssertFailNow struct{}
-
-// runAssertDSN runs assertDSNTargetsDatabase against a fake T and reports
-// whether it failed, without that failure propagating to the *testing.T
-// calling this helper.
-func runAssertDSN(dsn, wantDB, wantHost, wantPort, wantUser string) (failed bool) {
-	ft := &fakeDSNAssertT{}
-	defer func() {
-		if r := recover(); r != nil {
-			if _, ok := r.(fakeDSNAssertFailNow); ok {
-				failed = true
-				return
-			}
-			panic(r)
-		}
-	}()
-	assertDSNTargetsDatabase(ft, dsn, wantDB, wantHost, wantPort, wantUser)
-	return ft.failed
-}
-
-// runAssertNoOverride runs assertNoConnectionTargetOverride against a fake T
-// and reports whether it failed, using the same non-propagating pattern as
-// runAssertDSN above.
-func runAssertNoOverride(parsedURL *url.URL) (failed bool) {
-	ft := &fakeDSNAssertT{}
-	defer func() {
-		if r := recover(); r != nil {
-			if _, ok := r.(fakeDSNAssertFailNow); ok {
-				failed = true
-				return
-			}
-			panic(r)
-		}
-	}()
-	assertNoConnectionTargetOverride(ft, parsedURL)
-	return ft.failed
-}
-
-// TestAssertDSNTargetsDatabase_CatchesQueryOverridingPath is the harness's
-// regression test for the defect assertDSNTargetsDatabase exists to close.
-// It needs no Docker and no reachable Postgres: pgx.ParseConfig only parses
-// the connection string, it never dials, so this runs in every mode of the
-// integration lane in milliseconds.
-//
-// It drives host=, port=, user= and database= in addition to the original
-// dbname= case - assertDSNTargetsDatabase checked only cfg.Database until the
-// 2026-08-27 review found that the exact same pgx override loop lets any of
-// these four win too (H1): a guard that closes one axis and leaves its
-// siblings open is worse than the finding it descends from, since it reports
-// success while a different server, port, or user is actually in play.
-func TestAssertDSNTargetsDatabase_CatchesQueryOverridingPath(t *testing.T) {
-	const goodDSN = "postgres://u:p@example.invalid:5432/wanted"
-	const wantDB, wantHost, wantPort, wantUser = "wanted", "example.invalid", "5432", "u"
-
-	require.False(t, runAssertDSN(goodDSN, wantDB, wantHost, wantPort, wantUser),
-		"must accept a dsn that actually targets the wanted database, host, port and user")
-
-	require.False(t, runAssertDSN(
-		"postgres://u:p@example.invalid:5432/wanted?sslmode=disable&connect_timeout=5&pool_max_conns=3",
-		wantDB, wantHost, wantPort, wantUser),
-		"must accept ordinary connection-tuning query params alongside a correct path")
-
-	// Characterization: proves the pgx behaviour this whole guard exists for,
-	// independent of assertDSNTargetsDatabase itself. If a future pgx upgrade
-	// changes this, the guard's premise is gone and this fails loudly rather
-	// than the guard silently stopping being necessary or sufficient.
-	cfg, err := pgx.ParseConfig("postgres://u:p@example.invalid:5432/wanted?dbname=attacker")
-	require.NoError(t, err)
-	require.Equal(t, "attacker", cfg.Database,
-		"pgx must let dbname win over the path - this is the defect the guard closes, "+
-			"not a property assertDSNTargetsDatabase should try to prevent")
-
-	cases := []struct {
-		name string
-		dsn  string
-	}{
-		{"dbname", goodDSN + "?dbname=attacker"},
-		{"database", goodDSN + "?database=attacker"},
-		{"host", goodDSN + "?host=evil.invalid"},
-		{"port", goodDSN + "?port=6666"},
-		{"user", goodDSN + "?user=root"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			require.True(t, runAssertDSN(c.dsn, wantDB, wantHost, wantPort, wantUser),
-				"assertDSNTargetsDatabase must reject a dsn whose actual %s "+
-					"differs from wanted, even though its path/authority names "+
-					"the right one", c.name)
-		})
-	}
-}
-
-// TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys drives
-// every member of pgConnectionTargetQueryKeys - not just the one spelling
-// (dbname) the original finding demonstrated - and proves ordinary
-// connection-tuning params are left alone. This is the guard H1 added to
-// close the axis at the harness's one entry point, ahead of either URL
-// (admin or per-test) being built from the supplied base DSN.
-func TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys(t *testing.T) {
-	for key := range pgConnectionTargetQueryKeys {
-		t.Run(key, func(t *testing.T) {
-			u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?" + key + "=x")
-			require.NoError(t, err)
-			require.True(t, runAssertNoOverride(u),
-				"must reject a dsn whose query string carries %q", key)
-		})
-	}
-
-	t.Run("ordinary_tuning_params", func(t *testing.T) {
-		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted" +
-			"?sslmode=disable&connect_timeout=5&pool_max_conns=3" +
-			"&application_name=cli-lane&search_path=public")
-		require.NoError(t, err)
-		require.False(t, runAssertNoOverride(u),
-			"must accept ordinary connection-tuning query params")
-	})
-
-	// Mixed case must not slip past the map lookup. pgconn's own nameMap and
-	// notRuntimeParams are exact-case lowercase maps, so pgx does not honour
-	// `HOST` either - a mixed-case key currently escapes only because Postgres
-	// happens to reject an unrecognized startup parameter, not because this
-	// guard's own assertion closes the axis. See the case-fold comment on
-	// assertNoConnectionTargetOverride.
-	t.Run("mixed_case_key", func(t *testing.T) {
-		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?HOST=evil.example")
-		require.NoError(t, err)
-		require.True(t, runAssertNoOverride(u),
-			"must reject a dsn whose query string carries a mixed-case connection-target key")
-	})
-
-	// Regression test for the 2026-08-27 review's finding L5: `?host+=evil`
-	// decodes (net/url treats `+` in a query STRING, not a query VALUE, as an
-	// encoded space - RFC 1866 application/x-www-form-urlencoded) to the key
-	// "host " (trailing space), which strings.ToLower alone leaves as "host "
-	// - a miss on the map lookup that let this padded spelling through
-	// unrejected.
-	t.Run("padded_key", func(t *testing.T) {
-		u, err := url.Parse("postgres://u:p@example.invalid:5432/wanted?host+=evil.example")
-		require.NoError(t, err)
-		require.True(t, runAssertNoOverride(u),
-			"must reject a dsn whose query string carries a connection-target key "+
-				"padded with whitespace")
-	})
-}
-
-// TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs measures the shapes of
-// RELAY_TEST_DATABASE_URL the 2026-08-27 review named as needing to keep
-// working after H1: an IPv6 host and a percent-encoded password containing
-// both `@` and `/`, on top of the tuning params already covered above.
-// Neither assertNoConnectionTargetOverride nor assertDSNTargetsDatabase
-// should reject any of these.
-func TestAssertDSNTargetsDatabase_AcceptsLegitimateDSNs(t *testing.T) {
-	cases := []struct {
-		name                         string
-		dsn                          string
-		wantHost, wantPort, wantUser string
-	}{
-		{
-			name: "ipv6_host", wantHost: "::1", wantPort: "5432", wantUser: "u",
-			dsn: "postgres://u:p@[::1]:5432/wanted",
-		},
-		{
-			// Password is p@/pw, percent-encoded so url.Parse does not treat
-			// the @ or / as delimiters.
-			name:     "percent_encoded_password_with_at_and_slash",
-			wantHost: "example.invalid", wantPort: "5432", wantUser: "u",
-			dsn: "postgres://u:p%40%2Fpw@example.invalid:5432/wanted",
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			u, err := url.Parse(c.dsn)
-			require.NoError(t, err)
-			require.False(t, runAssertNoOverride(u),
-				"legitimate dsn must not be rejected by the query-key guard")
-			require.False(t, runAssertDSN(c.dsn, "wanted", c.wantHost, c.wantPort, c.wantUser),
-				"legitimate dsn must pass assertDSNTargetsDatabase")
-		})
-	}
-}
-
-// TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone is the regression test
-// for the 2026-08-27 review's finding A: wantPort got a "5432" default when
-// the DSN carries no port, but wantUser got no analogous treatment, so a
-// portless-userinfo DSN like postgres://localhost:5432/postgres - a normal
-// peer/trust-auth local-dev shape - made newSharedServiceDSN compare pgconn's
-// real default user (from os/user.Current(), see pgconn/defaults_windows.go
-// and pgconn/defaults.go) against wantUser's zero value and reject the DSN
-// with a message blaming a query parameter that was never there.
-//
-// wantDefaultUser must derive the same default pgx.ParseConfig itself would
-// apply, not hand-roll a second, independent OS-username lookup that could
-// drift from pgconn's.
-func TestWantDefaultUser_DerivesOSUserWhenDSNCarriesNone(t *testing.T) {
-	t.Run("no_userinfo", func(t *testing.T) {
-		// Pin the environment this test's own expectation (the OS user) must
-		// win against. Without this, an entirely ordinary PGUSER/PGSERVICE/
-		// PGSERVICEFILE in a developer's or CI's shell (anyone who uses psql
-		// sets PGUSER routinely) makes pgx.ParseConfig return THAT value
-		// instead of the OS default, and this test goes red for a reason that
-		// has nothing to do with wantDefaultUser - a false failure the
-		// 2026-08-27 review's finding M2 caught by exporting PGUSER=attacker
-		// and watching this red. parseEnvSettings skips empty values, so
-		// setting these to "" (not unsetting them) reliably restores the OS
-		// default regardless of what the ambient shell carries.
-		t.Setenv("PGUSER", "")
-		t.Setenv("PGSERVICE", "")
-		t.Setenv("PGSERVICEFILE", "")
-
-		u, err := url.Parse("postgres://localhost:5432/wanted")
-		require.NoError(t, err)
-
-		osUser, err := user.Current()
-		require.NoError(t, err)
-		wantOSUsername := osUser.Username
-		if idx := strings.LastIndex(wantOSUsername, `\`); idx >= 0 {
-			// Windows gives DOMAIN\user or LOCALPCNAME\user; pgconn strips the
-			// domain (see defaults_windows.go) and this test must match that,
-			// not assert the raw os/user value.
-			wantOSUsername = wantOSUsername[idx+1:]
-		}
-
-		got := wantDefaultUser(t, u)
-		require.Equal(t, wantOSUsername, got,
-			"a DSN with no userinfo must derive the same default user pgconn itself applies")
-		require.NotEmpty(t, got,
-			"an empty wantUser is what let assertDSNTargetsDatabase compare pgconn's real "+
-				"default user against a blank and reject a legitimate DSN")
-	})
-
-	t.Run("explicit_userinfo_wins", func(t *testing.T) {
-		u, err := url.Parse("postgres://explicit-user@localhost:5432/wanted")
-		require.NoError(t, err)
-		require.Equal(t, "explicit-user", wantDefaultUser(t, u),
-			"a DSN that names a user explicitly must not be overridden by the OS default")
-	})
-}
-
-// TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN is
-// the regression test for the 2026-08-27 review's finding M1: wantDefaultUser
-// used to derive its default by calling pgx.ParseConfig on the FULL dsn,
-// query string included - the exact same parse assertDSNTargetsDatabase's
-// user arm then compares cfg.User against. For a userinfo-less DSN carrying
-// `?user=`, both sides of that require.Equal came from the same parse of the
-// same string, so the arm could never fail: wantUser moved with the query
-// exactly as far as cfg.User did.
-//
-// This drives wantDefaultUser directly against a DSN
-// TestAssertNoConnectionTargetOverride_RejectsConnectionTargetKeys already
-// proves assertNoConnectionTargetOverride rejects, so that this test proves
-// the user arm's OWN discrimination, not its upstream guard's - the arm is
-// documented as defence in depth "independent of how the guard is (or isn't)
-// wired in", and this is what makes that claim true again.
-func TestAssertDSNTargetsDatabase_UserArmCatchesQueryOverrideOnNoUserinfoDSN(t *testing.T) {
-	const dsn = "postgres://example.invalid:5432/wanted?user=root"
-	u, err := url.Parse(dsn)
-	require.NoError(t, err)
-
-	wantUser := wantDefaultUser(t, u)
-	require.NotEqual(t, "root", wantUser,
-		"wantDefaultUser must not itself adopt the query override it exists to let "+
-			"assertDSNTargetsDatabase detect")
-
-	require.True(t, runAssertDSN(dsn, "wanted", "example.invalid", "5432", wantUser),
-		"assertDSNTargetsDatabase's user arm must reject a dsn whose query overrides "+
-			"the user, independent of assertNoConnectionTargetOverride")
 }
