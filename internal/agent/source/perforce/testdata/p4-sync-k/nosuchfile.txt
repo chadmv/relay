@@ -1,0 +1,6 @@
+$ p4 -c <client> sync -k //relay_ci_pwzap4/does-not-exist/...#head
+--- stdout ---
+
+--- stderr ---
+//relay_ci_pwzap4/does-not-exist/...#head - no such file(s).
+

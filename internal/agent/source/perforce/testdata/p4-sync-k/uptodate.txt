@@ -1,0 +1,6 @@
+$ p4 -c <client> sync -k //relay_ci_pwzap4/heavy/...#head
+--- stdout ---
+
+--- stderr ---
+//relay_ci_pwzap4/heavy/...#head - file(s) up-to-date.
+

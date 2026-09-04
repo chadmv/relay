@@ -1,1 +1,4 @@
 *.sh text eol=lf
+# Captured p4 output. These are recordings, not source: normalising their
+# line endings would rewrite the bytes the capture exists to preserve.
+internal/agent/source/perforce/testdata/p4-sync-k/*.txt -text
