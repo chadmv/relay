@@ -69,3 +69,56 @@ func TestBaselineHash_NoExclusionsIsUnchanged(t *testing.T) {
 	}
 	require.Equal(t, goldenNoExclusionBaseline, BaselineHash(p, nil))
 }
+
+// THE DISCRIMINATING INPUT: two specs whose entries agree on path AND rev and
+// differ ONLY in the exclusion flag. With the rev held equal the flag is the
+// only bit that moves, so a BaselineHash that does not read it returns one
+// value for both. Any pair that also varied the rev would pass against the
+// broken build, because the rev is already hashed.
+//
+// The pair is synthetic on purpose and could not come from two valid specs:
+// validateSourceSpec refuses a rev on an excluded entry, so a real exclusion
+// carries rev "". The property under test is the hash function's own contract,
+// and this is the input that isolates it.
+func TestBaselineHash_TheExcludeFlagIsHashed(t *testing.T) {
+	mk := func(exclude bool) *relayv1.PerforceSource {
+		return &relayv1.PerforceSource{
+			Stream: "//s/x",
+			Sync: []*relayv1.SyncEntry{
+				{Path: "//s/x/...", Rev: "@100"},
+				{Path: "//s/x/heavy/...", Rev: "", Exclude: exclude},
+			},
+		}
+	}
+	require.NotEqual(t, BaselineHash(mk(false), nil), BaselineHash(mk(true), nil))
+}
+
+// Which ENTRY carries the flag has to matter, not merely how many do. A marker
+// written once for the whole entry block, or a sort that ignores the flag,
+// passes the test above and fails this one.
+func TestBaselineHash_WhichEntryIsExcludedChangesTheHash(t *testing.T) {
+	a := &relayv1.PerforceSource{Stream: "//s/x", Sync: []*relayv1.SyncEntry{
+		{Path: "//s/x/a/...", Rev: "@100", Exclude: true},
+		{Path: "//s/x/b/...", Rev: "@100"},
+	}}
+	b := &relayv1.PerforceSource{Stream: "//s/x", Sync: []*relayv1.SyncEntry{
+		{Path: "//s/x/a/...", Rev: "@100"},
+		{Path: "//s/x/b/...", Rev: "@100", Exclude: true},
+	}}
+	require.NotEqual(t, BaselineHash(a, nil), BaselineHash(b, nil))
+}
+
+// Two entries sharing a path and a rev sort unstably against each other
+// without the flag in the sort key, so the digest would depend on the order the
+// two arrived in.
+func TestBaselineHash_StableWhenAPathAppearsBothIncludedAndExcluded(t *testing.T) {
+	a := &relayv1.PerforceSource{Stream: "//s/x", Sync: []*relayv1.SyncEntry{
+		{Path: "//s/x/a/...", Rev: "@100"},
+		{Path: "//s/x/a/...", Rev: "@100", Exclude: true},
+	}}
+	b := &relayv1.PerforceSource{Stream: "//s/x", Sync: []*relayv1.SyncEntry{
+		{Path: "//s/x/a/...", Rev: "@100", Exclude: true},
+		{Path: "//s/x/a/...", Rev: "@100"},
+	}}
+	require.Equal(t, BaselineHash(a, nil), BaselineHash(b, nil))
+}
