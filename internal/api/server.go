@@ -28,6 +28,19 @@ type Server struct {
 	RegisterLimitN   int
 	RegisterLimitWin time.Duration
 
+	// JobSubmitLimitN and JobSubmitLimitWin size the per-user bucket over the
+	// routes that let one principal buy task execution. Named fields rather than
+	// two more positional arguments to New, which already takes four same-typed
+	// arguments in a row; an int and a time.Duration cannot be transposed
+	// without a compile error.
+	//
+	// Zero on EITHER leaves the bucket off, which is what a Go caller that
+	// builds a Server directly wants - and the guard in Handler is not cosmetic:
+	// rateLimiter.allow indexes hits[0] whenever len(hits) >= limit, so a zero
+	// limit panics on the first request.
+	JobSubmitLimitN   int
+	JobSubmitLimitWin time.Duration
+
 	// AllowSelfRegister, when true, lets POST /v1/auth/register succeed without
 	// an invite_token. Set by main.go from RELAY_ALLOW_SELF_REGISTER. Defaults
 	// to false so existing deployments continue to require invites.
@@ -84,13 +97,30 @@ func New(
 	}
 }
 
-// Handler returns an http.Handler with all routes registered.
+// Handler returns an http.Handler with all routes registered. Call it once per
+// Server: each call allocates a fresh job-submit bucket and starts the gc
+// goroutine that prunes it, and that goroutine is never stopped.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Authenticated helpers
 	auth := BearerAuth(s.q)
 	admin := AdminOnly
+
+	// ONE bucket over the routes that let a non-admin buy EXECUTION, and it is
+	// shared on purpose: the quantity bounded is how much execution one
+	// principal can buy per unit time, and it does not care which verb bought
+	// it. Three instances would triple the ceiling and let a caller alternate
+	// between the routes to stay under all three.
+	//
+	// Built once here, not per route: UserRateLimit starts a gc goroutine that
+	// is never stopped. The rule for a future wrap is auth(userLimit(admin(h))),
+	// so a non-admin's rejected probes are charged to the prober's own bucket
+	// instead of being free.
+	userLimit := func(h http.Handler) http.Handler { return h }
+	if s.JobSubmitLimitN > 0 && s.JobSubmitLimitWin > 0 {
+		userLimit = UserRateLimit(s.JobSubmitLimitN, s.JobSubmitLimitWin)
+	}
 
 	// Public endpoints
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
@@ -135,12 +165,18 @@ func (s *Server) Handler() http.Handler {
 	// cancel 404 is therefore defense-in-depth for the destructive action, not
 	// a true existence secret. See the closed item
 	// docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md.
-	mux.Handle("POST /v1/jobs", auth(http.HandlerFunc(s.handleCreateJob)))
+	//
+	// POST /v1/jobs, POST /v1/jobs/{id}/retry and
+	// POST /v1/scheduled-jobs/{id}/run-now share ONE per-user bucket
+	// (RELAY_JOB_SUBMIT_RATE_LIMIT). retry carries no body and no spec
+	// validation and still re-buys a whole job's execution, which is why the
+	// cheapest of the three draws on the same budget as the most expensive.
+	mux.Handle("POST /v1/jobs", auth(userLimit(http.HandlerFunc(s.handleCreateJob))))
 	mux.Handle("GET /v1/jobs", auth(http.HandlerFunc(s.handleListJobs)))
 	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
-	mux.Handle("POST /v1/jobs/{id}/retry", auth(http.HandlerFunc(s.handleRetryJob)))
+	mux.Handle("POST /v1/jobs/{id}/retry", auth(userLimit(http.HandlerFunc(s.handleRetryJob))))
 
 	// Tasks (read routes are intentionally global - see Jobs note above).
 	mux.Handle("GET /v1/jobs/{id}/tasks", auth(http.HandlerFunc(s.handleListTasks)))
@@ -203,7 +239,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleGetScheduledJob)))
 	mux.Handle("PATCH /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handlePatchScheduledJob)))
 	mux.Handle("DELETE /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleDeleteScheduledJob)))
-	mux.Handle("POST /v1/scheduled-jobs/{id}/run-now", auth(http.HandlerFunc(s.handleRunScheduledJobNow)))
+	mux.Handle("POST /v1/scheduled-jobs/{id}/run-now", auth(userLimit(http.HandlerFunc(s.handleRunScheduledJobNow))))
 
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))

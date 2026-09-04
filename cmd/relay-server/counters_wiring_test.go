@@ -52,11 +52,27 @@ func (stubAdminDB) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row { ret
 
 type stubAdminRow struct{}
 
+// countersStubUUID is a fixed VALID uuid per destination position. A limiter or
+// an authz check keyed on uuidStr(AuthUser.ID) buckets every request under ""
+// when these are invalid, which is the state this exists to end.
+func countersStubUUID(n byte) pgtype.UUID {
+	var raw [16]byte
+	raw[0] = 0xc0
+	raw[15] = n
+	return pgtype.UUID{Bytes: raw, Valid: true}
+}
+
 // Scan fills GetTokenWithUserRow BY DESTINATION TYPE rather than by column
 // index, so a reordered or added column cannot silently authenticate a
 // zero-valued (non-admin) user and turn every assertion below into a 403.
+//
+// The uuid arm fills BY POSITION, so token_id gets 1, token_user_id 2 and
+// user_id 3. The arity check catches a field added or removed; it cannot catch
+// a reorder, and nothing here depends on which of the three a given field got -
+// only that user_id is valid and differs from token_id.
 func (stubAdminRow) Scan(dest ...any) error {
 	bools := 0
+	uuids := 0
 	for _, d := range dest {
 		switch v := d.(type) {
 		case *bool:
@@ -64,11 +80,23 @@ func (stubAdminRow) Scan(dest ...any) error {
 			bools++
 		case *string:
 			*v = "counters-wiring"
+		case *pgtype.UUID:
+			uuids++
+			*v = countersStubUUID(byte(uuids))
 		}
 	}
 	if bools != 1 {
 		return fmt.Errorf("stubAdminDB: GetTokenWithUserRow has %d bool destinations, want exactly 1 "+
 			"(user_is_admin); the row shape changed and this stub no longer authenticates an admin", bools)
+	}
+	// The wanted count is spelled once and rendered from the same constant, so a
+	// drift in it reports "has 3, want 2" rather than the self-contradicting
+	// "has 3, want exactly 3" a second literal in the message produces.
+	const wantUUIDs = 3
+	if uuids != wantUUIDs {
+		return fmt.Errorf("stubAdminDB: GetTokenWithUserRow has %d pgtype.UUID destinations, want "+
+			"exactly %d (token_id, token_user_id, user_id); the row shape changed and the ids this "+
+			"stub fills no longer line up with the fields BearerAuth reads", uuids, wantUUIDs)
 	}
 	return nil
 }
@@ -1061,4 +1089,27 @@ func TestBuildHTTPServer_ServesTheWiredHandlersTaskStatusFenceSection(t *testing
 	require.True(t, hasIngest && hasLogFence,
 		"one agentHandler feeds THREE sections under one nil filter, because all three controls live on "+
 			"that one object and neither exists without it")
+}
+
+// TestStubAdminDB_ResolvesAUserWithARenderableID pins what the stub has to
+// produce for any guard that reaches past AdminOnly. Filling only the bool left
+// GetTokenWithUserRow's uuid fields invalid, so uuidStr(AuthUser.ID) rendered ""
+// - fine for a route that only asks "is this an admin", and fatal for one whose
+// behaviour depends on WHICH principal is calling.
+//
+// The distinctness assertion is the transposition guard: token_id and user_id
+// are the same type, and an assertion that passes on either cannot tell a
+// per-user control apart from a per-token one.
+func TestStubAdminDB_ResolvesAUserWithARenderableID(t *testing.T) {
+	row, err := store.New(stubAdminDB{}).GetTokenWithUser(context.Background(), "any")
+	require.NoError(t, err)
+
+	require.True(t, row.UserID.Valid, "AuthUser.ID comes from user_id; invalid renders as \"\"")
+	require.True(t, row.TokenID.Valid, "AuthUser.TokenID comes from token_id")
+	require.True(t, row.TokenUserID.Valid)
+	require.NotEqual(t, row.TokenID, row.UserID,
+		"token_id and user_id must differ, so an assertion satisfied by one cannot be satisfied by "+
+			"the other")
+	require.True(t, row.UserIsAdmin, "the admin bool must still be set: every counters test above "+
+		"depends on it")
 }

@@ -817,9 +817,12 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // That ordering is load-bearing. Gating after GetJobForUpdate answers a stranger
 // correctly but makes them wait first: any authenticated caller could park in the
 // Postgres lock queue behind the owner's in-flight cancel or retry, holding a
-// pool connection for the duration of somebody else's transaction, and neither
-// route is rate limited. TestJobWrites_NonOwner_404_WithoutQueueingForTheJobRowLock
-// pins it.
+// pool connection for the duration of somebody else's transaction.
+// RELAY_JOB_SUBMIT_RATE_LIMIT bounds how many such probes one principal may issue
+// per window on the retry route, and does not cover cancel at all, so it bounds
+// that property rather than closing it and the gate order is still what makes the
+// answer cheap. TestJobWrites_NonOwner_404_WithoutQueueingForTheJobRowLock pins
+// it.
 //
 // Reading unlocked is safe for THIS question only because jobs.submitted_by is
 // immutable: it is set once by CreateJob and no statement in the repo ever

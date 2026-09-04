@@ -274,12 +274,12 @@ const maxCommandsPerTask = 500
 // string and an adversarial one is nine bytes, and a count bound cannot tell them
 // apart.
 //
-// IT IS NOT A DoS CONTROL AND MUST NOT BE TIGHTENED AS IF IT WERE. POST /v1/jobs
-// carries no rate limit - internal/api/server.go wraps only register and login in
-// RateLimit - so every figure above is per-request and an authenticated caller may
-// repeat it at whatever rate the network allows. The control for repetition is a
-// rate limit. Tightening this to buy a constant factor against an attack that
-// repetition makes unbounded anyway costs a refused real render, which has no
+// IT IS NOT A DoS CONTROL AND MUST NOT BE TIGHTENED AS IF IT WERE. Every figure
+// above is per-request; repetition is bounded separately and per authenticated
+// user by RELAY_JOB_SUBMIT_RATE_LIMIT, whose sliding window does bound the rate.
+// What neither control bounds is the CUMULATIVE total: a caller submitting at
+// exactly the permitted rate forever buys unbounded work over time. Tightening
+// this to buy a constant factor there costs a refused real render, which has no
 // workaround inside the product.
 //
 // DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about

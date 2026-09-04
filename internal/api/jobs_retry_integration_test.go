@@ -169,8 +169,10 @@ func TestRetryJob_NonOwner_404_NoSideEffects(t *testing.T) {
 // job-scoped writes. Lock-then-gate is a correct 404 with a denial-of-service
 // property attached: any authenticated stranger can queue up behind the owner's
 // in-flight cancel or retry, pinning a pool connection for the whole duration of
-// somebody else's transaction, and neither route is rate limited (server.go wraps
-// only register and login).
+// somebody else's transaction. RELAY_JOB_SUBMIT_RATE_LIMIT bounds how many such
+// probes one principal may issue per window on the retry route, and does not
+// cover cancel at all, so it bounds that property rather than closing it and the
+// gate order is still what makes the answer cheap.
 //
 // The lock is held for the whole request here, so a handler that takes it first
 // cannot answer at all until the test gives up.

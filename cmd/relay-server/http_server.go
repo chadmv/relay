@@ -32,6 +32,8 @@ type httpServerDeps struct {
 	loginLimitWin     time.Duration
 	registerLimitN    int
 	registerLimitWin  time.Duration
+	jobSubmitLimitN   int
+	jobSubmitLimitWin time.Duration
 	allowSelfRegister bool
 	metrics           *metrics.Store
 
@@ -144,17 +146,34 @@ type httpServerDeps struct {
 //     compiles, and every package stays green; login would then be rate-limited
 //     at the registration budget. The named fields on httpServerDeps make the
 //     CALL SITE in main readable; they do nothing for the four positions here.
-//   - Deleting any of the three assignments below - Metrics, StaticHandler,
-//     AllowSelfRegister - is likewise green everywhere. That is the same gap
-//     already named for agentHandler.Metrics and agentHandler.AllowAutoEnroll
-//     in trailing_log_window_test.go, which the conductor is filing; see the
-//     note there about why a guard parsing main.go alone would now miss these.
+//   - Deleting the Metrics, StaticHandler or AllowSelfRegister assignment below
+//     is green everywhere. That is the same gap already named for
+//     agentHandler.Metrics and agentHandler.AllowAutoEnroll in
+//     trailing_log_window_test.go, which the conductor is filing; see the note
+//     there about why a guard parsing main.go alone would now miss these. The
+//     JobSubmitLimit pair is NOT in that state:
+//     TestBuildHTTPServer_TheJobSubmitBucketIsWiredWithTheConfiguredLimit drives
+//     a real request through this function's output at a known limit and is RED
+//     on a deleted, hard-coded or substituted value. countersAssignmentSources
+//     does not cover it - that walk is specific to s.Counters assignments and
+//     does not generalize.
+//
+// THAT LAST CLAIM STOPS AT THIS FUNCTION'S OWN ASSIGNMENTS. The test supplies
+// jobSubmitLimitN itself, so it says nothing about what main puts in the
+// httpServerDeps literal: zeroing the value there, or trading it for another of
+// main's same-typed locals, leaves this package green. The named fields removed
+// the transposition hazard at the api.New boundary, not at the literal that
+// feeds this one. Closing it needs a wiring guard general enough to cover an
+// env-to-field pair, which is
+// docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md.
 func buildHTTPServer(d httpServerDeps) *http.Server {
 	s := api.New(d.pool, d.q, d.broker, d.registry, d.corsOrigins,
 		d.loginLimitN, d.loginLimitWin, d.registerLimitN, d.registerLimitWin)
 	s.Metrics = d.metrics
 	s.StaticHandler = d.static
 	s.AllowSelfRegister = d.allowSelfRegister
+	s.JobSubmitLimitN = d.jobSubmitLimitN
+	s.JobSubmitLimitWin = d.jobSubmitLimitWin
 
 	// A nil source leaves its section ABSENT, which is the payload's own
 	// vocabulary for "this control is not wired on this replica". It is

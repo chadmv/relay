@@ -71,6 +71,83 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// userRateLimitKey renders the bucket key for an authenticated principal.
+//
+// ok is false when the principal has no renderable id, and the second return
+// value is the point: rl.allow(userRateLimitKey(u)) does not compile, so a
+// caller cannot bucket an unidentified principal under "" by omission.
+func userRateLimitKey(u AuthUser) (string, bool) {
+	key := uuidStr(u.ID)
+	return key, key != ""
+}
+
+// UserRateLimit returns middleware that limits each AUTHENTICATED USER to
+// `limit` requests per `window`, answering 429 with a Retry-After on breach.
+//
+// THE KEY IS THE PRINCIPAL BearerAuth RESOLVED, NOT THE SOURCE ADDRESS, and
+// RateLimit's RemoteAddr argument above does not transfer. The address is the
+// only identifier that exists before a principal does, which is what makes it
+// right ahead of authentication; it is not an identifier the caller cannot
+// choose, since an IPv6 caller holds a whole /64 and clientIP keys per /128.
+// After authentication there is a principal, resolved
+// server-side from a token-hash lookup and not selectable by the caller at all.
+// On POST /v1/jobs it is also the unit the bounded cost belongs to: the task rows
+// and subprocess spawns are charged to the submitter's own jobs. That is NOT true
+// of the other two routes - an admin may retry another user's job or fire another
+// user's schedule, and CreateJobFromSpec charges the execution to the owner while
+// the bucket is charged to the admin - so the argument that carries all three is
+// the operational one. Keyed on the address, one office egress or load balancer
+// collapses a whole studio into a single bucket, while one user with a
+// workstation and a laptop gets two.
+//
+// IT MUST BE MOUNTED INSIDE THE AUTH CHAIN and outside any admin gate:
+// auth(userLimit(admin(h))). Inside admin, a non-admin's rejected probes are
+// free; outside it they are charged to the prober's own bucket. The cost of
+// being inside auth is real and is not hidden: a refused request has already
+// paid one GetTokenWithUser round trip, so this bounds repetition of expensive
+// work and does not bound the auth lookup or request volume.
+//
+// A request carrying no renderable principal is REFUSED with 401, never passed
+// through and never bucketed under "". This middleware is only correct inside
+// the auth chain, so such a request is a wiring fault.
+//
+// THE 401 RETURNS BEFORE rl.allow, WHICH IS WHY THE MAP IS BOUNDED BY THE USER
+// TABLE. An unauthenticated caller, or one arriving through a mis-wired chain,
+// creates no key at all, so the number of live buckets is the number of distinct
+// principals that have actually been resolved. Keying on the presented token
+// instead would let anyone mint a fresh key per request; that is the reason this
+// is keyed on the resolved user id, and the ordering here is what delivers it.
+func UserRateLimit(limit int, window time.Duration) func(http.Handler) http.Handler {
+	rl := &rateLimiter{
+		windows: make(map[string][]time.Time),
+		limit:   limit,
+		window:  window,
+	}
+	go rl.gcLoop()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The absent-principal case needs no separate arm: UserFromCtx
+			// yields the zero AuthUser when its type assertion fails, and a zero
+			// AuthUser has no renderable id, so the key check below refuses it
+			// too. Input does reach a second arm on the discarded bool; what it
+			// cannot do is make that arm answer differently.
+			u, _ := UserFromCtx(r.Context())
+			key, ok := userRateLimitKey(u)
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			retry, allowed := rl.allow(key)
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // allow returns (retryAfter, true) if the hit is allowed or (retryAfter, false)
 // if the key is over-limit. retryAfter is only meaningful when false.
 func (rl *rateLimiter) allow(key string) (time.Duration, bool) {
