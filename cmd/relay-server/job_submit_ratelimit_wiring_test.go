@@ -66,3 +66,37 @@ func TestBuildHTTPServer_TheJobSubmitBucketIsWiredWithTheConfiguredLimit(t *test
 	require.NotEmpty(t, rec.Header().Get("Retry-After"),
 		"a refusal must tell the caller when to come back")
 }
+
+// TestBuildHTTPServer_RetryAndRunNowDrawOnTheSubmitBucket makes the
+// one-bucket-not-three decision executable in the DEFAULT lane.
+//
+// IT NEEDS NO DATABASE, WHICH IS WHY IT IS HERE. A refusal is issued before the
+// handler runs, so proving route B draws on route A's bucket never reaches a
+// handler at all. The id is deliberately NOT a uuid: an unbucketed request is
+// then answered 400 by the handler's own parseUUID with no pool, so 429 and 400
+// are the two outcomes and they say different things. Reaching a SUCCESS code on
+// these routes would need real handlers and a container; reaching the REFUSAL
+// does not.
+func TestBuildHTTPServer_RetryAndRunNowDrawOnTheSubmitBucket(t *testing.T) {
+	cases := []struct{ name, path string }{
+		{"retry", "/v1/jobs/not-a-uuid/retry"},
+		{"run-now", "/v1/scheduled-jobs/not-a-uuid/run-now"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := submitBucketServer(1, time.Minute)
+
+			spend := postAsUser(t, srv, "/v1/jobs", `{}`)
+			require.Equal(t, http.StatusBadRequest, spend.Code,
+				"the fixture must actually spend the budget on POST /v1/jobs. body: %s",
+				spend.Body.String())
+
+			rec := postAsUser(t, srv, tc.path, "")
+			require.Equal(t, http.StatusTooManyRequests, rec.Code,
+				"%s must draw on the SAME bucket POST /v1/jobs just spent. A 400 here means the "+
+					"route is unwrapped or carries its own UserRateLimit instance, and a caller "+
+					"alternating between the two gets twice the ceiling. body: %s",
+				tc.path, rec.Body.String())
+		})
+	}
+}

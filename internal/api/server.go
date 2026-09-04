@@ -163,12 +163,18 @@ func (s *Server) Handler() http.Handler {
 	// cancel 404 is therefore defense-in-depth for the destructive action, not
 	// a true existence secret. See the closed item
 	// docs/backlog/closed/bug-2026-06-20-job-task-read-routes-missing-authz.md.
+	//
+	// POST /v1/jobs, POST /v1/jobs/{id}/retry and
+	// POST /v1/scheduled-jobs/{id}/run-now share ONE per-user bucket
+	// (RELAY_JOB_SUBMIT_RATE_LIMIT). retry carries no body and no spec
+	// validation and still re-buys a whole job's execution, which is why the
+	// cheapest of the three draws on the same budget as the most expensive.
 	mux.Handle("POST /v1/jobs", auth(userLimit(http.HandlerFunc(s.handleCreateJob))))
 	mux.Handle("GET /v1/jobs", auth(http.HandlerFunc(s.handleListJobs)))
 	mux.Handle("GET /v1/jobs/stats", auth(http.HandlerFunc(s.handleJobStats)))
 	mux.Handle("GET /v1/jobs/{id}", auth(http.HandlerFunc(s.handleGetJob)))
 	mux.Handle("DELETE /v1/jobs/{id}", auth(http.HandlerFunc(s.handleCancelJob)))
-	mux.Handle("POST /v1/jobs/{id}/retry", auth(http.HandlerFunc(s.handleRetryJob)))
+	mux.Handle("POST /v1/jobs/{id}/retry", auth(userLimit(http.HandlerFunc(s.handleRetryJob))))
 
 	// Tasks (read routes are intentionally global - see Jobs note above).
 	mux.Handle("GET /v1/jobs/{id}/tasks", auth(http.HandlerFunc(s.handleListTasks)))
@@ -231,7 +237,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleGetScheduledJob)))
 	mux.Handle("PATCH /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handlePatchScheduledJob)))
 	mux.Handle("DELETE /v1/scheduled-jobs/{id}", auth(http.HandlerFunc(s.handleDeleteScheduledJob)))
-	mux.Handle("POST /v1/scheduled-jobs/{id}/run-now", auth(http.HandlerFunc(s.handleRunScheduledJobNow)))
+	mux.Handle("POST /v1/scheduled-jobs/{id}/run-now", auth(userLimit(http.HandlerFunc(s.handleRunScheduledJobNow))))
 
 	// SSE
 	mux.Handle("GET /v1/events", auth(http.HandlerFunc(s.handleEvents)))
