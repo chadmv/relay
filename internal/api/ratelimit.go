@@ -88,6 +88,60 @@ func userRateLimitKey(u AuthUser) (string, bool) {
 	return key, key != ""
 }
 
+// UserRateLimit returns middleware that limits each AUTHENTICATED USER to
+// `limit` requests per `window`, answering 429 with a Retry-After on breach.
+//
+// THE KEY IS THE PRINCIPAL BearerAuth RESOLVED, NOT THE SOURCE ADDRESS, and
+// RateLimit's RemoteAddr argument above does not transfer. Before
+// authentication there is no principal and the address is the one identifier
+// the caller cannot choose; after it there is one, resolved server-side from a
+// token-hash lookup and unforgeable in the same sense, and it is the unit the
+// bounded cost belongs to - task rows and subprocess spawns are charged to a
+// user's jobs, not to a network path. Keyed on the address instead, one office
+// egress or load balancer collapses a whole studio into a single bucket, while
+// one user with a workstation and a laptop gets two.
+//
+// IT MUST BE MOUNTED INSIDE THE AUTH CHAIN and outside any admin gate:
+// auth(userLimit(admin(h))). Inside admin, a non-admin's rejected probes are
+// free; outside it they are charged to the prober's own bucket. The cost of
+// being inside auth is real and is not hidden: a refused request has already
+// paid one GetTokenWithUser round trip, so this bounds repetition of expensive
+// work and does not bound the auth lookup or request volume.
+//
+// A request carrying no renderable principal is REFUSED with 401, never passed
+// through and never bucketed under "". This middleware is only correct inside
+// the auth chain, so such a request is a wiring fault.
+func UserRateLimit(limit int, window time.Duration) func(http.Handler) http.Handler {
+	rl := &rateLimiter{
+		windows: make(map[string][]time.Time),
+		limit:   limit,
+		window:  window,
+	}
+	go rl.gcLoop()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The absent-principal case needs no separate arm: UserFromCtx
+			// yields the zero AuthUser when its type assertion fails, and a zero
+			// AuthUser has no renderable id, so the key check below refuses it
+			// too. A second arm on the discarded bool would be unreachable by
+			// any input and could not be pinned by a test.
+			u, _ := UserFromCtx(r.Context())
+			key, ok := userRateLimitKey(u)
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			retry, allowed := rl.allow(key)
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // allow returns (retryAfter, true) if the hit is allowed or (retryAfter, false)
 // if the key is over-limit. retryAfter is only meaningful when false.
 func (rl *rateLimiter) allow(key string) (time.Duration, bool) {

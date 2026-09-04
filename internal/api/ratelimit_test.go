@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -190,6 +191,54 @@ func TestUserRateLimitKey(t *testing.T) {
 			got, ok := userRateLimitKey(tt.u)
 			if got != tt.want || ok != tt.wantOK {
 				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestUserRateLimit_ARequestWithNoRenderablePrincipalIsRefused pins the
+// fail-closed half. This middleware is only correct inside the auth chain, so a
+// request reaching it without a principal is a wiring fault; a pass-through
+// would be a silent hole and a shared "" bucket would pool every such request
+// into one budget.
+//
+// THE LIMIT IS 10, NOT 1, DELIBERATELY. At a limit of 1 the second request would
+// be refused by the arithmetic whatever key it used, and the test would go green
+// against the very mutation it exists to kill.
+//
+// `reached` is asserted, not only the status: a mutant that passes through and
+// writes 401 afterwards would still have run the handler.
+func TestUserRateLimit_ARequestWithNoRenderablePrincipalIsRefused(t *testing.T) {
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	h := UserRateLimit(10, time.Minute)(next)
+
+	cases := []struct {
+		name string
+		with func(context.Context) context.Context
+	}{
+		{"no AuthUser in context at all", func(ctx context.Context) context.Context { return ctx }},
+		{"AuthUser whose id is not Valid", func(ctx context.Context) context.Context {
+			return ctxWithUser(ctx, AuthUser{ID: pgtype.UUID{Bytes: [16]byte{9}, Valid: false}})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reached = false
+			req := httptest.NewRequest("POST", "/v1/jobs", nil)
+			req = req.WithContext(tc.with(req.Context()))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("got %d, want 401", rec.Code)
+			}
+			if reached {
+				t.Fatal("the wrapped handler ran: a request with no renderable principal must be " +
+					"refused, never passed through and never bucketed under \"\"")
 			}
 		})
 	}
