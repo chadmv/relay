@@ -354,3 +354,29 @@ func TestSearchRefusal_BodyIsIdenticalAcrossEndpoints(t *testing.T) {
 	assert.Equal(t, jobs.Body.String(), scheds.Body.String(),
 		"one control, one body: an operator reading a log must not have to know which route it came from")
 }
+
+// THE ARITY 400 OUTRANKS THE 429, and this input is the only one that says so.
+// TestListJobs_SortVersusFilterGuardOutranksArity, which README's precedence
+// paragraph points at, sends sort=name&status=a&status=b and carries NO q, so no
+// placement of a q-gated charge can change its answer; it is green whether the
+// bucket is charged before rejectRepeatedParams or after.
+//
+// ?q=a&q=b is the input that discriminates. rejectRepeatedParams refuses it, and
+// url.Values.Get returns only the first value, so a charge moved above that
+// guard sees a present needle, spends the budget and answers 429 about a request
+// that is malformed and would never have run a statement.
+func TestListJobs_RepeatedQArityOutranksTheRateLimit(t *testing.T) {
+	s, db := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+
+	require.NotEqual(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+	require.Equal(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code,
+		"fixture: the budget must be exhausted, or the assertion below proves nothing")
+	spent := db.calls
+
+	rec := listJobsAs(t, s, u, "q=a&q=b")
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"a repeated q answers the arity 400 even with the budget gone")
+	assert.JSONEq(t, `{"error":"query parameter \"q\" must appear at most once"}`, rec.Body.String())
+	assert.Equal(t, spent, db.calls, "and it reaches no statement either")
+}
