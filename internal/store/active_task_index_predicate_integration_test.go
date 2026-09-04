@@ -18,9 +18,11 @@ import (
 // spelling in a way that string-comparing the whole expression is not.
 var indexPredicateLiteralRe = regexp.MustCompile(`'([^']*)'`)
 
-// TestActiveTaskIndexPredicateMatchesTheAssignmentPartition reads
+// TestActiveTaskIndexPredicateNamesTheExpectedStatuses reads
 // idx_tasks_worker_active's WHERE clause back off a live database and requires it
-// to name exactly the statuses the assignment-partition statements admit.
+// to name exactly the statuses written down below. THE EXPECTATION IS
+// HARD-CODED, deliberately: it does not read the assignment-partition statements,
+// because an expectation derived from the subject moves with it and pins nothing.
 //
 // The consequence of drift between the two is not a wrong answer, it is a silent
 // plan change: Postgres uses a partial index only where the query predicate
@@ -33,7 +35,7 @@ var indexPredicateLiteralRe = regexp.MustCompile(`'([^']*)'`)
 // depends on statistics and table size, so a green EXPLAIN on a small test table
 // proves nothing and a red one is a flake. The predicate is the property; the
 // plan is its consequence.
-func TestActiveTaskIndexPredicateMatchesTheAssignmentPartition(t *testing.T) {
+func TestActiveTaskIndexPredicateNamesTheExpectedStatuses(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
 

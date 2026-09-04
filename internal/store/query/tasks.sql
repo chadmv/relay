@@ -72,14 +72,13 @@ SELECT * FROM tasks WHERE job_id = $1 ORDER BY created_at;
 -- repeating it; change both or neither.
 --   * It is an ALLOW-LIST, not the complement deny-list, and that choice is
 --     load-bearing even though the two are exactly equivalent against today's
---     vocabulary (migration 000019's tasks_status_check pins it to the six
---     values pending/dispatched/running/done/failed/timed_out). A deny-list
---     fails OPEN on the next status added: a task-level `cancelled` is a
---     plausible near-term addition, because CancelJobTasks currently squashes
---     cancellation onto `failed`, and under `NOT IN (terminal)` such a status
---     would be silently writable and would re-open the resurrection this
---     predicate closes. The allow-list fails closed instead - a new status is
---     unwritable until somebody decides it should be. Every other status
+--     vocabulary. A deny-list fails OPEN on the next status added: a task-level
+--     `cancelled` is a plausible near-term addition, because CancelJobTasks
+--     currently squashes cancellation onto `failed`, and under
+--     `NOT IN (terminal)` such a status would be silently writable and would
+--     re-open the resurrection this predicate closes. The allow-list fails
+--     closed instead - a new status is unwritable until somebody decides it
+--     should be. Every other status
 --     predicate in this file is already an allow-list; these two now match.
 --   * The set is the complement of the terminal set RecomputeJobStatus counts
 --     (see the RecomputeJobStatus statement in jobs.sql - by name, because line
@@ -383,7 +382,7 @@ WHERE status = 'pending'
 -- generations can be rejected. Returns pgx.ErrNoRows if the task is no longer
 -- pending (another dispatcher already claimed it, or the row vanished).
 -- THIS IS THE ONLY LOAD-BEARING WRITE OF assigned_at. It is the sole route into
--- the ('dispatched','running') partition that ListOverdueAssignedTasks scans, so
+-- the currently-assigned partition that ListOverdueAssignedTasks scans, so
 -- a stale assigned_at left behind by a requeue can never be observed by the
 -- watchdog: this statement overwrites it on the way back in. assigned_at is
 -- supplied by the caller's Go clock, never NOW(), so it is directly comparable
@@ -445,11 +444,13 @@ RETURNING *;
 -- no log line anywhere, the same end state as its sibling.
 --
 -- THE STATUS PREDICATE STAYS 'dispatched' ONLY, pinned by
--- TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath. Do not widen it
--- to include 'running' for symmetry with RequeueTaskByID: at this caller's own
--- (epoch, worker) pair the task cannot have reported running - for any agent
--- that only reports epochs it was actually dispatched - because the Send that
--- would have delivered the dispatch is the thing that just failed.
+-- TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath and
+-- TestRequeueTask_APreparingTaskIsNotRequeuedByTheSendFailurePath. Do not widen
+-- it to the rest of the currently-assigned partition for symmetry with
+-- RequeueTaskByID: at this caller's own (epoch, worker) pair the task cannot have
+-- reported any status that only a dispatched agent can send - for any agent that
+-- only reports epochs it was actually dispatched - because the Send that would
+-- have delivered the dispatch is the thing that just failed.
 -- BE PRECISE ABOUT WHAT THAT PROOF COVERS, because the next reader will use this
 -- paragraph to decide whether the epoch is coordinator-side or agent-side.
 -- workerSender.Send has exactly TWO error values, ErrWorkerDisconnected and
@@ -955,20 +956,20 @@ RETURNING t.id;
 -- response's attribution_cleared count.
 --
 -- tasks.worker_id is ON DELETE SET NULL for EVERY row, but RequeueWorkerTasks
--- rescues only ('dispatched','running'). This statement is the OTHER side of
--- that partition among rows that actually carry a worker_id: a pending row never
--- does (both RequeueWorkerTasks and RetryJobTasks null it), so the rows that
--- silently lose attribution are exactly the terminal ones. worker_id is public
--- API (taskResponse.WorkerID, internal/api/jobs.go), so this is a real loss and
--- not bookkeeping.
+-- rescues only the currently-assigned partition, which excludes every terminal
+-- status. This statement is the OTHER side of that partition among rows that
+-- actually carry a worker_id: a pending row never does (both RequeueWorkerTasks
+-- and RetryJobTasks null it), so the rows that silently lose attribution are
+-- exactly the terminal ones. worker_id is public API (taskResponse.WorkerID,
+-- internal/api/jobs.go), so this is a real loss and not bookkeeping.
 --
 -- THE PREDICATE IS AN ALLOW-LIST ON THE TERMINAL SET, deliberately, and it is the
--- same set RecomputeJobStatus treats as terminal. The equivalent deny-list
--- (`status NOT IN ('pending','dispatched','running')`) counts the same rows today
--- and fails OPEN on the next status added - a new non-terminal status would be
--- reported as attribution destroyed while its rows were in fact requeued. This
--- fails closed by under-counting instead, and TestTasksStatusVocabularyIsExactly
--- names this site so the partition is revisited rather than desynchronized.
+-- same set RecomputeJobStatus treats as terminal. The equivalent deny-list on the
+-- currently-assigned partition fails OPEN on the next status added - a new
+-- non-terminal status would be reported as attribution destroyed while its rows
+-- were in fact requeued. This fails closed by under-counting instead, and
+-- TestTasksStatusVocabularyIsExactly names this site so the partition is
+-- revisited rather than desynchronized.
 SELECT COUNT(*) FROM tasks
 WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out');
 

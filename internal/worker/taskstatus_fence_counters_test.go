@@ -596,18 +596,21 @@ func taskStatusUniverse(t *testing.T, sqlAllowList []string) []string {
 // Postgres. This lane cannot reach a database (it is the no-tag CI lane), so it
 // reads the source the constraint is built from instead.
 //
-// IT SCANS EVERY up-MIGRATION, TAKES THE LEXICALLY GREATEST MATCH, AND ASSERTS
-// THAT IT DID. A hard-coded path goes stale silently the day a later migration
-// drops and re-adds the constraint with a wider set. So does taking the FIRST
-// match, or taking any match without checking it is the greatest: either reads a
-// superseded vocabulary forever while passing, which is a fail-open, because the
-// universe it feeds would no longer contain every status a row can hold.
+// IT SCANS EVERY up-MIGRATION AND TAKES THE LAST MATCH IN os.ReadDir ORDER. A
+// hard-coded path, or taking the first match, reads a superseded vocabulary
+// forever while passing - a fail-open, because the universe it feeds would no
+// longer contain every status a row can hold. os.ReadDir orders by filename, so
+// that selection is only the newest definition while filename order agrees with
+// migration-version order; the assertion below is what makes that a checked
+// premise rather than an assumption.
 //
-// `--` COMMENT LINES ARE STRIPPED BEFORE MATCHING. A migration's own doc block
-// may legitimately quote a prior vocabulary, and a quoted definition in prose is
-// exactly the thing this parse must not mistake for a real one. The
-// down-migrations are excluded because they drop or re-add the constraint by
-// name and would otherwise be extra hits.
+// `--` COMMENT LINES ARE STRIPPED BEFORE MATCHING, so that a migration's own doc
+// block quoting a prior vocabulary is not mistaken for a real definition. That
+// strip is also why a file whose EXECUTABLE text names the constraint but yields
+// no match fails hard: the regex is formatting-sensitive, and a parse that
+// silently skips the newest migration returns an older, narrower vocabulary
+// while every comparison it feeds still passes. The down-migrations are excluded
+// because they drop or re-add the constraint by name.
 func tasksStatusVocabulary(t *testing.T) []string {
 	t.Helper()
 	dir := filepath.Join("..", "store", "migrations")
@@ -624,6 +627,7 @@ func tasksStatusVocabulary(t *testing.T) []string {
 		statuses []string
 	}
 	var hits []hit
+	var named []string // up-migrations whose EXECUTABLE text names the constraint
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
@@ -641,6 +645,9 @@ func tasksStatusVocabulary(t *testing.T) []string {
 		}
 		body := strings.Join(stripped, "\n")
 
+		if strings.Contains(body, "tasks_status_check") {
+			named = append(named, e.Name())
+		}
 		for _, m := range def.FindAllStringSubmatch(body, -1) {
 			var statuses []string
 			for _, q := range quoted.FindAllStringSubmatch(m[1], -1) {
@@ -655,18 +662,43 @@ func tasksStatusVocabulary(t *testing.T) []string {
 			"parse no longer matches the migration's formatting - which is a FAIL-OPEN, because a "+
 			"parse that silently returns nothing makes every comparison it feeds vacuous. Re-derive it.")
 
+	matched := map[string]bool{}
+	for _, h := range hits {
+		matched[h.file] = true
+	}
+	for _, f := range named {
+		require.True(t, matched[f],
+			"%s names tasks_status_check in its executable text and this parse found no definition in "+
+				"it. The regex wants `ADD CONSTRAINT tasks_status_check` and `CHECK (status IN (...))` "+
+				"separated by whitespace ALONE - a trailing `--` comment on the constraint line, or a "+
+				"`status = ANY (ARRAY[...])` rewrite, breaks it. That is a FAIL-OPEN: this helper would "+
+				"return an older migration's narrower vocabulary and every comparison it feeds would "+
+				"still pass.", f)
+	}
+
 	last := hits[len(hits)-1]
 	for _, h := range hits {
-		require.LessOrEqual(t, h.file, last.file,
-			"this parse takes the LAST match in os.ReadDir order and got %s, but %s sorts after it. "+
-				"os.ReadDir returns entries sorted by filename and migration filenames are "+
-				"zero-padded, so the last match is the newest definition. If that stopped being "+
-				"true, this helper is reading a STALE vocabulary and the universe it feeds no "+
-				"longer contains every status a row can hold.", last.file, h.file)
+		require.LessOrEqual(t, migrationVersion(t, h.file), migrationVersion(t, last.file),
+			"this parse takes the last match in os.ReadDir's FILENAME order and got %s, but %s has a "+
+				"higher migration VERSION and is what golang-migrate applies last. The two orders "+
+				"agree only while every filename is zero-padded to the same width, and nothing "+
+				"enforces that. This helper is reading a STALE vocabulary and the universe it feeds "+
+				"no longer contains every status a row can hold.", last.file, h.file)
 	}
 	require.NotEmpty(t, last.statuses,
 		"parsed no statuses out of tasks_status_check in %s; the parse is broken, not the code", last.file)
 	return last.statuses
+}
+
+// migrationVersion is the numeric prefix golang-migrate orders by, which is the
+// property the caller needs; filename order is only a proxy for it.
+func migrationVersion(t *testing.T, name string) int {
+	t.Helper()
+	digits := name[:len(name)-len(strings.TrimLeft(name, "0123456789"))]
+	require.NotEmpty(t, digits, "migration %s has no numeric version prefix", name)
+	v, err := strconv.Atoi(digits)
+	require.NoError(t, err)
+	return v
 }
 
 // TestClassifyStatusFenceRejection is the classifier's own truth table, with the

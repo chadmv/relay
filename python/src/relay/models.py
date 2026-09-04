@@ -65,7 +65,12 @@ class JobStatus(str, Enum):
 
 
 class TaskStatus(str, Enum):
-    """Constants for the values the server publishes on Task.status."""
+    """Constants for comparing against Task.status, not a census of what the server stores.
+
+    Task.status is Optional[str] precisely so an unknown value parses, so a member
+    here is a convenience for callers writing comparisons and carries no claim that
+    the server can produce it.
+    """
 
     PENDING = "pending"
     QUEUED = "queued"

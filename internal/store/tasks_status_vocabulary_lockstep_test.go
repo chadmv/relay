@@ -137,7 +137,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     idx_tasks_worker_active as well, whose WHERE clause is a copy of this same
 //     predicate: a status added to the statements but not to the index turns
 //     every one of them into a sequential scan rather than making them wrong.
-//     TestActiveTaskIndexPredicateMatchesTheAssignmentPartition is what reads
+//     TestActiveTaskIndexPredicateNamesTheExpectedStatuses is what reads
 //     that predicate. A new non-terminal status MUST BE ADDED to all eight.
 //     A new TERMINAL status must stay OUT. For the three requeue statements the
 //     reason is that they WRITE, so admitting one would let a requeue resurrect
@@ -168,7 +168,7 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //
 //   - taskStatusIsWritable (internal/worker/taskstatus_fence_counters.go) - A GO
 //     -SIDE MIRROR, not SQL. It restates UpdateTaskStatus's and
-//     IncrementTaskRetryCount's `('pending','dispatched','running')` in Go so
+//     IncrementTaskRetryCount's non-terminal allow-list in Go so
 //     that handleTaskStatus can label a fence rejection `raced` versus
 //     `duplicate`/`conflicting` without a second round trip. It is the ONLY site
 //     on this list that decides nothing: it labels a counter, so drift mislabels
@@ -249,7 +249,7 @@ func TestTasksStatusVocabularyIsExactly(t *testing.T) {
 			"SelectRetryableTaskIDs, AppendTaskLog, CancelJobTasks, ListOverdueAssignedTasks, GetActiveTasksForWorker, "+
 			"ListGraceCandidates, RequeueTask, RequeueTaskByID, RequeueWorkerTasks, RequeueWorkerTasksIfEpoch, "+
 			"CountActiveTasksByAllWorkers, ListActiveTasksForWorkerPage and CountActiveTasksForWorker, "+
-			"and the partial index idx_tasks_worker_active (migration 000018). Revisit ALL OF THEM. "+
+			"and the partial index idx_tasks_worker_active. Revisit ALL OF THEM. "+
 			"AppendTaskLog and every statement carrying the 'currently assigned' partition "+
 			"fail OPEN in the damaging direction. A new NON-TERMINAL status omitted from AppendTaskLog's first "+
 			"arm silently discards 100% of that state's log output. One omitted from CancelJobTasks leaves that "+

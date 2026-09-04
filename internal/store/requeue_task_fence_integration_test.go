@@ -307,10 +307,8 @@ func TestRequeueTask_RunningTaskIsNotRequeuedByTheSendFailurePath(t *testing.T) 
 }
 
 // TestRequeueTask_APreparingTaskIsNotRequeuedByTheSendFailurePath is the
-// negative half of the preparing partition, and it is GREEN ON FIRST WRITE -
-// stated rather than disguised. Its value is as a regression guard against a
-// later "harmonize with RequeueTaskByID" edit, and its discriminating power is
-// established by mutation, not by a red-first run.
+// negative half of the preparing partition. Its value is as a regression guard
+// against a later "harmonize with RequeueTaskByID" edit.
 //
 // RequeueTask's only production caller is Dispatcher.dispatchOne's send-failure
 // path, reached only when Registry.Send or workerSender.Send returns an error -

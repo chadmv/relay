@@ -5,21 +5,20 @@
 -- widening this index makes it unusable for every one of them - including
 -- CountActiveTasksByAllWorkers, which the dispatcher runs every cycle over the
 -- whole tasks table. Pinned by
--- TestActiveTaskIndexPredicateMatchesTheAssignmentPartition.
+-- TestActiveTaskIndexPredicateNamesTheExpectedStatuses.
 --
 -- Plain CREATE INDEX (no CONCURRENTLY): golang-migrate wraps each migration in a
 -- transaction and CONCURRENTLY cannot run in one, exactly as 000018 notes. The
--- build takes a lock that blocks writes to tasks, and migrations run at server
--- startup - but the index is partial over the currently-assigned rows only, so
--- the build is bounded by live work rather than by history.
+-- ADD CONSTRAINT is not NOT VALID either, so it validates the existing rows. Both
+-- statements therefore take ACCESS EXCLUSIVE on tasks - blocking READS as well as
+-- writes - and each scans the whole table, at server startup. The window grows
+-- with the history in tasks, not with how much work is live.
 --
--- THE THREE-LINE ALTER SHAPE IS READ BY A TEST. tasksStatusVocabulary
--- (internal/worker/taskstatus_fence_counters_test.go) matches
--- `ADD CONSTRAINT tasks_status_check\s+CHECK \(status IN \(([^)]*)\)` across the
--- up-migrations. Anything other than whitespace between the constraint name and
--- CHECK - a trailing `--` comment on that line is the realistic case - makes the
--- parse miss this file, and the guard then reads an earlier migration's narrower
--- vocabulary while passing. That is a fail-open.
+-- DO NOT PUT A TRAILING `--` COMMENT ON THE ADD CONSTRAINT LINE, and keep CHECK
+-- adjacent to it: tasksStatusVocabulary
+-- (internal/worker/taskstatus_fence_counters_test.go) parses this file for the
+-- status vocabulary, and a definition it cannot see is a definition it silently
+-- replaces with an older migration's.
 ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
 
 ALTER TABLE tasks
