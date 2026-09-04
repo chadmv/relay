@@ -41,6 +41,36 @@ View: //streams/X/main/... //relay_h_abc/...
 	require.Equal(t, []string{"client", "-o", "-S", "//streams/X/main", "-t", "base", "relay_h_abc"}, fr.calls[0].args)
 }
 
+// p4 prefers an AltRoot over Root when the current working directory matches
+// one, and relay runs its workspace-scoped calls from the workspace root. An
+// AltRoots block inherited from a caller-supplied template would therefore be
+// able to move the whole workspace out from under Root, which
+// CreateStreamClient sets precisely to control where files land.
+//
+// The fixture carries a two-line block plus a following field, so a rule that
+// dropped only the "AltRoots:" line, or that swallowed the rest of the spec,
+// fails differently from one that removes the block.
+func TestClient_CreateStreamClient_DropsAltRoots(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.set("client -o -S //streams/X/main relay_h_abc", `Client: relay_h_abc
+Root: D:\somewhere\else
+AltRoots:
+	/mnt/elsewhere
+	C:\other
+Options: clobber
+`)
+	fr.set("client -i", "Client saved.\n")
+	c := &Client{r: fr}
+	require.NoError(t, c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", ""))
+
+	spec := fr.calls[1].stdin
+	require.NotContains(t, spec, "AltRoots")
+	require.NotContains(t, spec, "/mnt/elsewhere")
+	require.NotContains(t, spec, `C:\other`)
+	require.Contains(t, spec, "Root:\t"+`D:\rw\abcdef`, "Root is still the one we set")
+	require.Contains(t, spec, "Options: clobber", "and the field after the block survives")
+}
+
 func TestClient_ResolveHead(t *testing.T) {
 	fr := newFakeP4Fixture(t)
 	fr.set("-c relay_h_abc changes -m1 //relay_h_abc/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")

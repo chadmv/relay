@@ -199,3 +199,71 @@ func TestProvider_RecreatingTheClientClearsDirtyDelete(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, e.DirtyDelete, "the client exists again, so the sweeper must delete it")
 }
+
+// ClientTemplate is a caller-supplied field applied with `p4 client -o -t`.
+// Workspaces are keyed on the stream alone and ClientTemplate is in neither
+// that key nor BaselineHash, so two tasks carrying different templates hash
+// identically, are admitted together in ModeShared, and would flip one shared
+// client spec against each other - one of them possibly mid-sync - if the
+// template were re-applied on every Prepare. On the warm path `client -o`
+// returns the stored spec, so the fields the template contributed are already
+// in it and nothing is lost by omitting -t.
+//
+// The cold subtest is the control: it is what stops "never pass -t" from
+// passing, and it pins that a first Prepare still honours the field.
+func TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace(t *testing.T) {
+	const template = "base"
+	newSpec := func() *relayv1.SourceSpec {
+		s := warmStreamSpec()
+		tmpl := template
+		s.GetPerforce().ClientTemplate = &tmpl
+		return s
+	}
+
+	t.Run("cold", func(t *testing.T) {
+		root := t.TempDir()
+		fr := newFakeP4Fixture(t)
+		client := expectedClientName("h", "//s/x")
+		warmFixtures(fr, client)
+		fr.set("client -o -S //s/x -t "+template+" "+client, "")
+
+		p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+		h, err := p.Prepare(context.Background(), "task-1", newSpec(), func(string) {})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+		require.True(t, hasArgs(fr, "client", "-o", "-S", "//s/x", "-t", template, client),
+			"a first Prepare must honour client_template")
+	})
+
+	t.Run("warm", func(t *testing.T) {
+		root := t.TempDir()
+		fr := newFakeP4Fixture(t)
+		client := expectedClientName("h", "//s/x")
+		warmFixtures(fr, client)
+		fr.set("client -o -S //s/x -t "+template+" "+client, "")
+
+		p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+		reg, err := p.Registry()
+		require.NoError(t, err)
+		shortID := allocateShortID("//s/x", &Registry{})
+		reg.Upsert(WorkspaceEntry{
+			ShortID:      shortID,
+			SourceKey:    "//s/x",
+			ClientName:   client,
+			BaselineHash: BaselineHash(newSpec().GetPerforce(), nil),
+			LastUsedAt:   time.Now(),
+		})
+		require.NoError(t, reg.Save())
+		require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+
+		h, err := p.Prepare(context.Background(), "task-1", newSpec(), func(string) {})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+		require.False(t, hasArgs(fr, "client", "-o", "-S", "//s/x", "-t", template, client),
+			"a warm shared client must not have caller-supplied fields re-applied to it")
+		require.True(t, hasArgs(fr, "client", "-o", "-S", "//s/x", client),
+			"the spec is still re-read and re-written, which is what repairs a half-built workspace")
+	})
+}

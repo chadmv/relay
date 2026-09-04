@@ -120,6 +120,11 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 	spec = setSpecField(spec, "Root", root)
 	spec = setSpecField(spec, "Host", "")  // blank Host: portable across renames
 	spec = setSpecField(spec, "Owner", "") // let p4 default to the caller
+	// p4 prefers an AltRoot over Root when the cwd matches one, and relay runs
+	// its workspace-scoped calls from the workspace root, so an AltRoots block
+	// inherited from a template can move the workspace out from under the Root
+	// set above. TestClient_CreateStreamClient_DropsAltRoots.
+	spec = removeSpecBlock(spec, "AltRoots")
 
 	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err

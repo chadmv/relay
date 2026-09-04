@@ -181,8 +181,17 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 		return nil, err
 	}
+	// The caller-supplied template is applied only when the workspace is cold.
+	// Workspaces are keyed on the stream alone and ClientTemplate is in neither
+	// that key nor BaselineHash, so two tasks carrying different templates hash
+	// identically, are admitted together in ModeShared, and re-applying -t here
+	// would let them flip one shared client spec against each other outside the
+	// workspace lock - one of them possibly mid-sync. On the warm path
+	// `client -o` returns the stored spec, so the fields a template contributed
+	// are already in it.
+	// TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace.
 	tmpl := ""
-	if pf.ClientTemplate != nil {
+	if !found && pf.ClientTemplate != nil {
 		tmpl = *pf.ClientTemplate
 	}
 	if err := p.cfg.Client.CreateStreamClient(ctx, clientName, wsRoot, pf.Stream, tmpl); err != nil {
