@@ -323,3 +323,24 @@ func TestClient_RunFailureBubbles(t *testing.T) {
 	_, err := c.ResolveHead(context.Background(), "relay_h_abc", "//relay_h_abc/...")
 	require.ErrorContains(t, err, "P4PASSWD")
 }
+
+// SyncPreempt is the p4 call in this package whose CORRECTNESS depends on
+// stderr from a ZERO exit, which is what separates it from SyncStream. It must
+// also stream, not buffer: the excluded subtree can be millions of lines.
+func TestClient_SyncPreempt_ArgvAndStderr(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.setStream("-c cl sync -k //cl/heavy/...@99", "//cl/heavy/a.ma#1 - added\n")
+	fr.setStreamStderr("-c cl sync -k //cl/heavy/...@99", "//cl/heavy/... - no such file(s).\n")
+
+	var lines []string
+	stderr, err := (&Client{r: fr}).SyncPreempt(
+		context.Background(), "/ws", "cl", "//cl/heavy/...@99",
+		func(l string) { lines = append(lines, l) })
+
+	require.NoError(t, err, "p4 exits ZERO here; the refusal is the caller's, from the text")
+	require.Equal(t, "//cl/heavy/... - no such file(s).\n", stderr,
+		"stderr must survive a zero exit or a typo'd exclusion is undetectable")
+	require.Equal(t, []string{"//cl/heavy/a.ma#1 - added"}, lines,
+		"stdout must reach the callback, not a buffer")
+	require.Equal(t, []string{"-c", "cl", "sync", "-k", "//cl/heavy/...@99"}, fr.argHistory()[0])
+}

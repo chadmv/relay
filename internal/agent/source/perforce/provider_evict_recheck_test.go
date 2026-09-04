@@ -35,6 +35,10 @@ func (g *gatingRunner) Run(ctx context.Context, cwd string, args []string, stdin
 	return g.inner.Run(ctx, cwd, args, stdin)
 }
 
+func (g *gatingRunner) StreamWithStderr(ctx context.Context, cwd string, args []string, onLine func(string)) (string, error) {
+	return g.inner.StreamWithStderr(ctx, cwd, args, onLine)
+}
+
 func (g *gatingRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
 	return g.inner.Stream(ctx, cwd, args, onLine)
 }
