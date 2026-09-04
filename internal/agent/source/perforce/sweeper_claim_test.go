@@ -128,3 +128,99 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 		require.Zero(t, n, "losing Prepare must release the workspace handle it acquired")
 	}
 }
+
+// The registration moved above ws.Acquire, and between them the workspace has no
+// holders, so a sweep can reserve, evict and release entirely inside that gap.
+// The post-Acquire re-check then reads p.evicting and finds it clear, so Prepare
+// proceeds - with its registry entry deleted. The re-check partitions the
+// destructive window; it does not promise the registration survived one. This
+// pins the re-assertion that restores it.
+//
+// The fake runner does not model a deleted p4 client, so what is pinned here is
+// the REGISTRATION and not the sync's fate; the fake echoes what it is told and
+// pretending otherwise would make the assertion vacuous.
+func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	gate := &gatingRunner{
+		inner:   fr,
+		entered: make(chan struct{}),
+		proceed: make(chan struct{}),
+	}
+	p := New(Config{Root: root, Hostname: "host", Client: &Client{r: gate}})
+
+	reg, err := p.Registry()
+	require.NoError(t, err)
+	shortID := allocateShortID("//depot/main", reg)
+	clientName := "relay_host_" + shortID
+
+	fr.set("client -o -S //depot/main "+clientName, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("client -d "+clientName, "Client deleted.\n")
+	// Reached only in the GREEN state: without the re-assertion reg.Get misses,
+	// needsSync is false and neither of these runs at all.
+	fr.set("-c "+clientName+" changes -c "+clientName+" -s pending -l", "")
+	fr.setStream("-c "+clientName+" sync -q --parallel=4 //"+clientName+"/...@1", "")
+	gate.gateKey = "client -d " + clientName
+
+	reg.Upsert(WorkspaceEntry{
+		ShortID:    shortID,
+		SourceKey:  "//depot/main",
+		ClientName: clientName,
+		LastUsedAt: time.Now().Add(-30 * 24 * time.Hour),
+	})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+
+	sw := &Sweeper{
+		Root:        root,
+		Reg:         reg,
+		MaxAge:      14 * 24 * time.Hour,
+		Client:      p.Client(),
+		ListLocked:  p.LockedShortIDs,
+		Claim:       p.ReserveForEvict,
+		OnEvictedCB: p.InvalidateWorkspace,
+	}
+
+	type sweepOutcome struct {
+		evicted []string
+		err     error
+	}
+	sweepDone := make(chan sweepOutcome, 1)
+	var once bool
+	prepareAcquireHook = func(string) {
+		if once {
+			return
+		}
+		once = true
+		go func() {
+			ev, sweepErr := sw.SweepOnce(context.Background())
+			sweepDone <- sweepOutcome{ev, sweepErr}
+		}()
+		<-gate.entered
+		close(gate.proceed)
+		// Wait for the sweep to FINISH, not just to reserve: the reservation must
+		// be released before Prepare's post-Acquire re-check reads it, or this
+		// test measures the existing back-out path instead of the new one.
+		res := <-sweepDone
+		require.NoError(t, res.err)
+		require.Equal(t, []string{shortID}, res.evicted)
+	}
+	t.Cleanup(func() { prepareAcquireHook = nil })
+
+	spec := &relayv1.SourceSpec{
+		Provider: &relayv1.SourceSpec_Perforce{
+			Perforce: &relayv1.PerforceSource{
+				Stream: "//depot/main",
+				Sync:   []*relayv1.SyncEntry{{Path: "//depot/main/...", Rev: "@1"}},
+			},
+		},
+	}
+
+	h, prepErr := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.NoError(t, prepErr, "the sweep finished and released, so Prepare must not back out")
+	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+	_, ok := reg.Get(shortID)
+	require.True(t, ok, "Prepare must leave a registry entry for the workspace it is holding")
+}

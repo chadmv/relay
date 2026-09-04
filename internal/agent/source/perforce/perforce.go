@@ -253,12 +253,34 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// releasing the handle so we never sync into a workspace being deleted. If
 	// instead our Acquire landed first, EvictWorkspace sees holders > 0 and
 	// refuses; exactly one of the two proceeds.
+	//
+	// It does not follow that the registry entry survived: a sweep that completed
+	// entirely inside the window leaves p.evicting clear here. The re-assertion
+	// below is what restores it.
 	p.mu.Lock()
 	evicting := p.evicting[shortID]
 	p.mu.Unlock()
 	if evicting {
 		handle.Release()
 		return nil, fmt.Errorf("perforce: workspace %s is being evicted", shortID)
+	}
+
+	// A sweep that reserved this short id in the window between the registration
+	// above and ws.Acquire can have run to completion - client -d, RemoveAll,
+	// reg.Remove - and released before the re-check read p.evicting, so the
+	// re-check passes and the entry is gone. We hold a handle now, so no further
+	// eviction can reserve, and restoring the entry here makes the last registry
+	// write in Prepare's own ordering an upsert.
+	// TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired.
+	if _, ok := reg.Get(shortID); !ok {
+		reg.Upsert(WorkspaceEntry{
+			ShortID:      shortID,
+			SourceKey:    pf.Stream,
+			ClientName:   clientName,
+			BaselineHash: "",
+			LastUsedAt:   time.Now(),
+		})
+		_ = reg.Save()
 	}
 
 	// Trigger recovery and sync when we hold exclusive access OR when the
