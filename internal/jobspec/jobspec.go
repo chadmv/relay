@@ -49,10 +49,19 @@ type SourceSpec struct {
 	ClientTemplate     *string     `json:"client_template,omitempty"`
 }
 
-// SyncEntry is a single depot path + revision to sync.
+// SyncEntry is a single depot path + revision to sync, or - with Exclude - a
+// path to leave out of the sync.
+//
+// AN EXCLUDED ENTRY CARRIES NO REVISION. The revision its have-list preempt
+// runs at comes from the include that covers it; a revision here would name a
+// second one, and a preempt at the wrong revision does not merely fail to
+// exclude - p4 syncs a file whose have-revision differs from the target in
+// EITHER direction, so a preempt at a newer revision fetches the whole excluded
+// subtree. validateSourceSpec refuses it.
 type SyncEntry struct {
-	Path string `json:"path"`
-	Rev  string `json:"rev"`
+	Path    string `json:"path"`
+	Rev     string `json:"rev"`
+	Exclude bool   `json:"exclude,omitempty"`
 }
 
 var (
@@ -287,6 +296,24 @@ const maxCommandsPerTask = 500
 // to every bound in this file.
 const maxCommandsPerJob = 25000
 
+// maxSyncExclusions bounds how many entries of one source spec may set
+// `exclude`. Each one is an additional p4 subprocess inside the task's own
+// prepare phase and an additional operator-facing log line, on the same
+// per-entry axis
+// docs/backlog/bug-2026-08-29-source-unshelves-is-one-subprocess-per-entry-and-unbounded
+// already flags for `unshelves`. A realistic exclusion list is a handful of
+// named heavy subtrees; 16 is several times that.
+//
+// IT ALSO BOUNDS A QUADRATIC. The coverage and swallow rules in
+// validateSourceSpec compare every exclusion against every include, and the
+// include side is bounded only by maxBodyBytes. The count is therefore checked
+// BEFORE that loop runs, so an over-count spec is refused after one linear pass.
+//
+// DO NOT MAKE THIS ENV-CONFIGURABLE. See maxRetries above: the argument is about
+// Validate running on STORED scheduled_jobs.job_spec rows, and it applies
+// identically to every bound in this file.
+const maxSyncExclusions = 16
+
 // Validate applies the same checks as POST /v1/jobs and normalizes each
 // task's command form: a legacy single Command is rewritten into a one-element
 // Commands and Command is cleared. Setting both Command and Commands is
@@ -511,6 +538,7 @@ func validateSourceSpec(s *SourceSpec) error {
 	if len(s.Sync) == 0 {
 		return errors.New("source.sync must have at least one sync entry")
 	}
+	excluded := 0
 	for i, e := range s.Sync {
 		if !strings.HasPrefix(e.Path, "//") {
 			return fmt.Errorf("sync[%d].path must start with //", i)
@@ -520,9 +548,54 @@ func validateSourceSpec(s *SourceSpec) error {
 			!strings.HasPrefix(e.Path, s.Stream+"/") {
 			return fmt.Errorf("sync[%d].path must be under stream %s", i, s.Stream)
 		}
+		// The rev check is CARVED OUT for an exclusion, not relaxed: an empty
+		// rev matches none of the four patterns and is still refused for an
+		// include.
+		if e.Exclude {
+			excluded++
+			if e.Rev != "" {
+				return fmt.Errorf("sync[%d].rev: an excluded path carries no revision; "+
+					"it is preempted at the revision of the include that covers it", i)
+			}
+			continue
+		}
 		if !(revHeadRe.MatchString(e.Rev) || revCLRe.MatchString(e.Rev) ||
 			revLabelRe.MatchString(e.Rev) || revNumRe.MatchString(e.Rev)) {
 			return fmt.Errorf("sync[%d].rev: invalid rev %q", i, e.Rev)
+		}
+	}
+	if excluded > maxSyncExclusions {
+		return fmt.Errorf("at most %d excluded sync paths are allowed, got %d",
+			maxSyncExclusions, excluded)
+	}
+	for i, e := range s.Sync {
+		if !e.Exclude {
+			continue
+		}
+		covering := 0
+		for _, inc := range s.Sync {
+			if inc.Exclude {
+				continue
+			}
+			// The swallow check runs against EVERY include, not the covering
+			// one. An exclusion broader than an include is not covered BY that
+			// include - coverage is directional - so checking only the coverer
+			// would never fire for the case it exists to catch.
+			if DepotPathCovers(e.Path, inc.Path) {
+				return fmt.Errorf("sync[%d]: excluded path %s leaves included path %s "+
+					"with nothing to sync; remove the include instead", i, e.Path, inc.Path)
+			}
+			if DepotPathCovers(inc.Path, e.Path) {
+				covering++
+			}
+		}
+		// EXACTLY ONE, not "at one revision". Two covering includes spelled
+		// #head are literally equal and still ambiguous: the agent resolves
+		// #head per path, and this function cannot see which changelists they
+		// land on.
+		if covering != 1 {
+			return fmt.Errorf("sync[%d]: excluded path %s must be covered by exactly one "+
+				"included path, found %d", i, e.Path, covering)
 		}
 	}
 	for i, cl := range s.Unshelves {
@@ -534,4 +607,24 @@ func validateSourceSpec(s *SourceSpec) error {
 		return fmt.Errorf("invalid client_template %q", *s.ClientTemplate)
 	}
 	return nil
+}
+
+// DepotPathCovers reports whether outer's subtree contains inner. A trailing
+// "/..." is p4's recursive wildcard and names the same subtree as the bare path,
+// so it is trimmed from both sides before comparing.
+//
+// EXPORTED FOR A CALLER OUTSIDE THIS PACKAGE: the Perforce provider picks an
+// exclusion's covering include with the identical predicate, and a second
+// implementation there could disagree with this one about which include
+// supplies the preempt revision. This package imports only the standard
+// library, so an agent package importing it introduces no cycle.
+//
+// It is not perforce.PathPrefixOverlap and must not be replaced by it: that one
+// is symmetric ("could these two touch"), this one is directional ("is inner
+// inside outer"), and the direction is the whole of the coverage and swallow
+// rules in validateSourceSpec.
+func DepotPathCovers(outer, inner string) bool {
+	o := strings.TrimSuffix(outer, "/...")
+	n := strings.TrimSuffix(inner, "/...")
+	return n == o || strings.HasPrefix(n, o+"/")
 }
