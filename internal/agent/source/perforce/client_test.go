@@ -129,6 +129,43 @@ Description:
 		optionsTokensOf(t, spec))
 }
 
+// The property: with clobber off, the Options: line reaching `client -i` is the
+// fetched one, byte for byte.
+//
+// Byte identity is stronger than a token comparison here because it also pins
+// that setSpecField was never called for Options: that writer normalises the
+// separator to a tab, and the two rows' separators differ from each other, so
+// any row surviving a re-render would have to survive it unchanged.
+//
+// The second row is the discriminating one. An operator template that
+// deliberately sets clobber must not be overwritten with noclobber when the
+// knob is off - forcing noclobber would destroy a setting the operator chose,
+// and would insert an Options: line into a spec that has none.
+func TestClient_CreateStreamClient_ClobberOffLeavesTheOptionsLineByteIdentical(t *testing.T) {
+	rows := []struct {
+		name        string
+		optionsLine string
+	}{
+		{"p4 default", "Options:\tnoallwrite noclobber nocompress unlocked nomodtime normdir"},
+		{"operator template already sets clobber", "Options: clobber"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			fr := newFakeP4Fixture(t)
+			fr.set("client -o -S //streams/X/main relay_h_abc", `Client: relay_h_abc
+Root: D:\somewhere\else
+`+row.optionsLine+`
+View: //streams/X/main/... //relay_h_abc/...
+`)
+			fr.set("client -i", "Client saved.\n")
+			c := &Client{r: fr}
+			require.NoError(t, c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "", false))
+
+			require.Equal(t, []string{row.optionsLine}, optionsLinesOf(fr.calls[1].stdin))
+		})
+	}
+}
+
 func TestClient_ResolveHead(t *testing.T) {
 	fr := newFakeP4Fixture(t)
 	fr.set("-c relay_h_abc changes -m1 //relay_h_abc/...#head", "Change 12345 on 2026-04-24 by relay@h '...'\n")
