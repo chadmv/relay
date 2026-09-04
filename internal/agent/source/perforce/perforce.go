@@ -255,8 +255,8 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// refuses; exactly one of the two proceeds.
 	//
 	// It does not follow that the registry entry survived: a sweep that completed
-	// entirely inside the window leaves p.evicting clear here. The re-assertion
-	// below is what restores it.
+	// entirely inside the window leaves p.evicting clear here. The registry check
+	// below is what catches that case.
 	p.mu.Lock()
 	evicting := p.evicting[shortID]
 	p.mu.Unlock()
@@ -268,19 +268,14 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// A sweep that reserved this short id in the window between the registration
 	// above and ws.Acquire can have run to completion - client -d, RemoveAll,
 	// reg.Remove - and released before the re-check read p.evicting, so the
-	// re-check passes and the entry is gone. We hold a handle now, so no further
-	// eviction can reserve, and restoring the entry here makes the last registry
-	// write in Prepare's own ordering an upsert.
-	// TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired.
+	// re-check passes and the entry is gone. A missing entry here therefore
+	// means the client spec and the directory are gone too. Repairing the entry
+	// alone would hand the task a WorkingDir that does not exist; refuse instead
+	// and let the retry rebuild all three through the normal path.
+	// TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused.
 	if _, ok := reg.Get(shortID); !ok {
-		reg.Upsert(WorkspaceEntry{
-			ShortID:      shortID,
-			SourceKey:    pf.Stream,
-			ClientName:   clientName,
-			BaselineHash: "",
-			LastUsedAt:   time.Now(),
-		})
-		_ = reg.Save()
+		handle.Release()
+		return nil, fmt.Errorf("perforce: workspace %s was evicted during prepare", shortID)
 	}
 
 	// Trigger recovery and sync when we hold exclusive access OR when the

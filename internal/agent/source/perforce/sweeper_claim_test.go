@@ -132,14 +132,14 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 // The registration moved above ws.Acquire, and between them the workspace has no
 // holders, so a sweep can reserve, evict and release entirely inside that gap.
 // The post-Acquire re-check then reads p.evicting and finds it clear, so Prepare
-// proceeds - with its registry entry deleted. The re-check partitions the
-// destructive window; it does not promise the registration survived one. This
-// pins the re-assertion that restores it.
+// would otherwise proceed with its client spec deleted, its directory removed
+// and its registry entry gone. Prepare must refuse and let the retry rebuild
+// all three.
 //
-// The fake runner does not model a deleted p4 client, so what is pinned here is
-// the REGISTRATION and not the sync's fate; the fake echoes what it is told and
-// pretending otherwise would make the assertion vacuous.
-func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired(t *testing.T) {
+// The NoDirExists assertion is what keeps the premise honest. Without it the
+// test passes against a tree that repairs only the registry row and hands the
+// task a handle whose WorkingDir does not exist.
+func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
 	gate := &gatingRunner{
@@ -157,10 +157,9 @@ func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired
 	fr.set("client -o -S //depot/main "+clientName, "")
 	fr.set("client -i", "Client saved.\n")
 	fr.set("client -d "+clientName, "Client deleted.\n")
-	// Reached only in the GREEN state: without the re-assertion reg.Get misses,
-	// needsSync is false and neither of these runs at all.
-	fr.set("-c "+clientName+" changes -c "+clientName+" -s pending -l", "")
-	fr.setStream("-c "+clientName+" sync -q --parallel=4 //"+clientName+"/...@1", "")
+	// No recoverOrphanedCLs or sync fixture is registered. Prepare must back out
+	// before either; a tree that carries on syncs into the deleted workspace and
+	// fakeRunner fails the test on the missing fixture.
 	gate.gateKey = "client -d " + clientName
 
 	reg.Upsert(WorkspaceEntry{
@@ -218,9 +217,24 @@ func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRepaired
 	}
 
 	h, prepErr := p.Prepare(context.Background(), "task-1", spec, func(string) {})
-	require.NoError(t, prepErr, "the sweep finished and released, so Prepare must not back out")
-	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+	require.Error(t, prepErr, "the sweep destroyed the workspace, so Prepare must not hand out a handle to it")
+	require.ErrorContains(t, prepErr, "was evicted during prepare")
+	require.Nil(t, h)
 
+	// The sweep destroys three things, not one. Repairing only the registry row
+	// leaves these two red.
+	require.NoDirExists(t, filepath.Join(root, shortID),
+		"the sweep removed the workspace directory")
 	_, ok := reg.Get(shortID)
-	require.True(t, ok, "Prepare must leave a registry entry for the workspace it is holding")
+	require.False(t, ok, "and its registry entry; the retry rebuilds all three")
+
+	p.mu.Lock()
+	ws := p.workspaces[shortID]
+	p.mu.Unlock()
+	if ws != nil {
+		ws.mu.Lock()
+		n := len(ws.holders)
+		ws.mu.Unlock()
+		require.Zero(t, n, "the refusing Prepare must release the handle it acquired")
+	}
 }
