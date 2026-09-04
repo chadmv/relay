@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-cli-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
+.PHONY: build test test-integration test-cli-integration test-pg-integration test-race vet-integration generate clean python-test python-test-integration python-lint web-install web-build web-dev test-e2e
 
 # `go build -o` writes exactly the name it is given, and Windows shells will not
 # execute an extensionless file. web/playwright.config.ts picks the same two names
@@ -121,6 +121,25 @@ test-integration:
 # database it names.
 test-cli-integration:
 	go test -tags integration -count=1 ./internal/cli/... -timeout 480s
+
+# Run the store and schedrunner integration lanes, the two Postgres-only
+# packages that .github/workflows/go-ci.yml's pg-integration job runs. Both
+# take their database from internal/testsupport/pgdsn, the same harness
+# test-cli-integration uses, so the same two modes (unset: one testcontainer
+# per test; RELAY_TEST_DATABASE_URL set: one CREATEd database per test on a
+# shared server) apply here too.
+#
+# -count=1 for the same reason test-cli-integration's comment gives: the test
+# cache says nothing about whether a live TCP connection to Postgres
+# succeeded.
+#
+# No -p 1. Every test gets its own freshly created database under the
+# shared-service mode this job uses, so cross-package parallelism has no
+# shared mutable state to corrupt - unlike make test-integration's -p 1,
+# which exists for parallel CONTAINER conflicts, a hazard this mode does not
+# create.
+test-pg-integration:
+	go test -tags integration -count=1 ./internal/store/... ./internal/schedrunner/... -timeout 600s
 
 # Type-check (compile) the integration-tagged code without running it. Catches
 # shared-signature breaks in //go:build integration files that the unit `test`

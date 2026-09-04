@@ -95,3 +95,54 @@ jobs:
       # describe any job here as a "merge gate".
       - name: CLI integration lane (real relay-server, real Postgres)
         run: make test-cli-integration
+
+  pg-integration:
+    name: pg integration (store, schedrunner)
+    runs-on: ubuntu-latest
+    # DELIBERATELY NOT 15, for the reason cli-integration's comment gives: the
+    # `test` job above uses timeout-minutes: 15, so equal numbers make a Go
+    # panic and a GitHub job kill indistinguishable in the log. 12 here
+    # against the target's -timeout 600s means the two failures name
+    # themselves.
+    timeout-minutes: 12
+    services:
+      # Same image, user, password and port as cli-integration's service, so
+      # postgres://relay:relay@127.0.0.1:5432 is one string across every job
+      # in this file.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Selects the shared-service mode in internal/testsupport/pgdsn, the
+      # same harness cli-integration uses: one freshly CREATEd database per
+      # test on the service above, no Docker API, no image pull, no Ryuk
+      # reaper. 127.0.0.1, never localhost, for the same reason
+      # cli-integration's env comment gives.
+      RELAY_TEST_DATABASE_URL: postgres://relay:relay@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      # A SEPARATE JOB, not a step in cli-integration, for the same reason
+      # cli-integration is its own job rather than a step in `test`: two jobs
+      # run concurrently on separate runners, so the wall clock is the max of
+      # the two rather than the sum, and a red result names one lane.
+      #
+      # This job is ADVISORY, like every other job in this repo. `main`
+      # carries no branch protection and no rulesets, so no check anywhere
+      # blocks a merge - a red result reports and nothing more. Do not
+      # describe this job, or any other, as a "merge gate".
+      - name: Postgres integration lanes (internal/store, internal/schedrunner)
+        run: make test-pg-integration

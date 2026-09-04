@@ -20,6 +20,10 @@ make test-integration
 # running Postgres for one fresh database per test instead of one container per test.
 make test-cli-integration
 
+# internal/store and internal/schedrunner's integration lanes, the two other
+# packages that need only Postgres. Same two modes as test-cli-integration above.
+make test-pg-integration
+
 # Regenerate sqlc store layer and protobuf bindings after editing .sql or .proto files
 make generate
 
@@ -115,6 +119,29 @@ commands you would use to check disagree by design.
   expands** - a raw non-ASCII literal in a document is unverifiable by eye and survives every check
   this repo runs. Watch the shell layer specifically: a heredoc, a `python -c` and an editor tool
   each treat backslash escapes differently.
+
+### A guard behind a build tag must be able to run
+
+`.github/workflows/go-ci.yml` runs `go test -race ./...` with no tags, plus two `services:
+postgres` jobs (`cli-integration`, `pg-integration`). Every other `//go:build integration` test
+runs only when a human runs it. Before putting a guard behind the tag, ask in this order:
+
+1. **Does it need the tag at all?** A guard over a pure function does not. Move it to an untagged
+   file in the same package and delete the export shim it needed. That closes the gap by deleting
+   code rather than adding a job, and it is the cheapest outcome available.
+2. **Can it run in a lane CI runs?** A package that needs only Postgres joins `pg-integration` by
+   taking its database from `internal/testsupport/pgdsn`.
+3. **Otherwise write the reason in the test's own comment**, naming what would have to exist for
+   it to run. A security-property guard - one pinning an authorization check, an epoch or identity
+   fence, an input bound, or a sanitiser - must not be integration-only without that sentence.
+
+Two riders. A `go/parser` or `go/ast` guard is the expensive fallback, not an equivalent
+substitute: the `finishRegister` handoff guard was evaded five times before it held, each time by
+a construct that is nil in one context and real in the other. And a guard must live in a lane that
+runs on the commits that can break its property - a guard for a cross-language property placed
+under `.github/workflows/python.yml`'s `paths: python/**` filter cannot fire on the Go commit that
+renames the symbol, so it belongs on the Go side. `python/tests/integration/` is accepted as a
+manual lane, so an assertion whose only home is there is not evidence.
 
 ## Architecture
 
