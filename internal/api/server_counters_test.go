@@ -727,7 +727,7 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 				Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
 				Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
 			}},
-			IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()},
+			IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()},
 			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
 			TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()},
 			Watchdog:        fakeWatchdogSource{c: threeDistinctSweeps()},
@@ -822,14 +822,14 @@ func TestIngestLogKindCountsPublishesEveryWorkerSideField(t *testing.T) {
 			"TestServerCounters_ReportsTheIngestLogSnapshot.", src.NumField(), pub.NumField())
 }
 
-// fakeIngestLogSource returns a fixed snapshot. SIXTEEN DISTINCT VALUES: the
-// mapping from worker.IngestLogDrops into the response types is sixteen
-// hand-written assignments, and equal values would hide a crossed one.
+// fakeIngestLogSource returns a fixed snapshot with one distinct non-zero value
+// per (kind, arm), so a crossed assignment cannot be hidden by an equal pair.
+// The mapping into the response types is hand-written per field.
 type fakeIngestLogSource struct{ d worker.IngestLogDrops }
 
 func (f fakeIngestLogSource) IngestLogDropCounts() worker.IngestLogDrops { return f.d }
 
-func sixteenDistinctDrops() worker.IngestLogDrops {
+func distinctDropsPerKind() worker.IngestLogDrops {
 	return worker.IngestLogDrops{
 		Deduped: worker.IngestLogDropsByKind{
 			TaskLogPersist: 11, BadTaskIDLog: 22, BadTaskIDStatus: 33,
@@ -849,7 +849,7 @@ func sixteenDistinctDrops() worker.IngestLogDrops {
 func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
@@ -956,7 +956,7 @@ func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
 func TestServerCounters_OneWiredSectionDoesNotDragInTheOther(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))

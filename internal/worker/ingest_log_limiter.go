@@ -64,7 +64,7 @@ import "time"
 // the map already limits things - the map deliberately does not.
 //
 // Note what the composite key does and does not buy. It is required because one
-// map now holds eight kinds of key, NOT because it closes the flood. Moving the
+// map now holds every kind of key, NOT because it closes the flood. Moving the
 // epoch back into the value would still be bounded, because the bucket is the
 // bound. The key shape is a diagnostics decision; the bucket is the security
 // control.
@@ -76,12 +76,12 @@ import "time"
 // It is a stack local in Connect, so it dies with the frame: there is no
 // teardown to get wrong and no way for one connection to reach another's.
 //
-// WHAT THE BUDGET COVERS is exactly the logKind set below, and
+// EVERY BUDGETED SITE NAMES ONE OF THE logKind CONSTANTS BELOW, and
 // TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what keeps that
-// answer true: it parses the package and requires every `kind:` in every logKey
-// literal to be one of those constants. Read them rather than a list repeated
-// here - a hand-maintained enumeration goes stale at the next site added, and
-// this one did.
+// true: it parses the package and rejects a logKey literal whose `kind` is
+// anything else. THAT IS ALL IT BUYS. It cannot see an unbudgeted log.Printf,
+// which has no logKey literal to inspect, so do not read it - or this comment -
+// as a census of which sites are covered.
 //
 // WHAT IS STILL OUTSIDE IT, and why: registration-time lines (the budget is
 // allocated after authenticateAndRegister returns -
@@ -252,9 +252,9 @@ const (
 	ingestLogRefill = 10 * time.Second
 
 	// How long one key stays deduplicated before it re-arms. THE SUPPRESSION MUST
-	// BE TIME-BOUNDED, and that is not a nicety - seven of the eight kinds carry no
-	// wire value, so each of them is exactly ONE key for the connection's whole
-	// life and can never reach the capacity clear on its own. With a bare presence
+	// BE TIME-BOUNDED, and that is not a nicety - the kinds that carry no wire
+	// value are exactly ONE key each for the connection's whole life and can never
+	// reach the capacity clear on their own. With a bare presence
 	// flag they logged once per connection and then never again: a Postgres outage
 	// at hour 1 reported one line and a SECOND, unrelated outage at hour 40 on the
 	// same long-lived stream reported nothing at all. Measured with a frozen clock:
