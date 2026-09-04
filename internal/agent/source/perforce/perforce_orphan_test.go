@@ -101,8 +101,9 @@ func TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory(t *testin
 // The in-memory registry dies with the process. What makes the workspace
 // reclaimable after a crash - the case the directory-plus-client leak is about -
 // is that the registration reached .relay-registry.json, so the next agent's
-// LoadRegistry sees it. A fresh Registry read from disk is the only instrument
-// that can tell the two apart.
+// LoadRegistry sees it. Reading a fresh Registry off disk is what tells an
+// in-memory registration apart from a persisted one; the provider's own cached
+// instance cannot.
 func TestProvider_TheFirstUseRegistrationReachesDisk(t *testing.T) {
 	_, _, root, shortID, client := prepareFailingAtHeadResolution(t)
 

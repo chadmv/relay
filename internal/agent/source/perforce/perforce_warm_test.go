@@ -347,9 +347,8 @@ func TestProvider_AWarmPrepareStillRewritesTheClientSpec(t *testing.T) {
 
 // The registration on the cold path is an Upsert, which replaces the WHOLE
 // entry. Running it on a warm workspace would drop another task's open pending
-// changelist - the record Finalize needs to revert and delete it, and the only
-// thing recoverOrphanedCLs can distinguish a relay CL by - and reset the
-// baseline, re-syncing every warm workspace in the fleet on upgrade.
+// changelist and reset the baseline, forcing a re-sync of a workspace that is
+// already at the requested revision.
 //
 // The seeded changelist belongs to a DIFFERENT task id, so it can only have
 // survived; nothing in this Prepare would recreate it.
