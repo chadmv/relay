@@ -66,11 +66,25 @@ func main() {
 			dbMaxConns = n
 		}
 	}
+	// Read before the config is built and fatal on a bad value, because
+	// NewWithConfig does not necessarily open a connection eagerly: a malformed
+	// runtime parameter would otherwise surface as a connection error at the
+	// first query rather than at boot.
+	statementTimeout, err := parseDBStatementTimeout(
+		"RELAY_DB_STATEMENT_TIMEOUT", os.Getenv("RELAY_DB_STATEMENT_TIMEOUT"))
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		log.Fatalf("parse dsn: %v", err)
 	}
 	cfg.MaxConns = int32(dbMaxConns)
+	// Beside MaxConns, which is the other pool-wide bound, and BEFORE
+	// NewWithConfig copies the config. Migrations are already done by this point
+	// and are unreachable from here - see applyStatementTimeout's header.
+	applyStatementTimeout(cfg, statementTimeout)
+	log.Print(dbStatementTimeoutLine(statementTimeout))
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("connect db: %v", err)

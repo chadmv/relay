@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -135,4 +138,75 @@ func TestDBStatementTimeoutLine(t *testing.T) {
 	assert.Contains(t, off, "RELAY_DB_STATEMENT_TIMEOUT")
 	assert.Contains(t, strings.ToLower(off), "not set",
 		"an operator scanning the boot log must be able to see that this control is off")
+}
+
+// TestStatementTimeoutIsAppliedBeforeThePoolIsBuilt is a PARSED guard, and it is
+// parsed because nothing else can be: main ends in log.Fatalf, which no test can
+// call, and the pool it builds needs a database.
+//
+// It covers the two shapes that silently unarm this control while compiling and
+// vetting clean: the call being deleted, and the call being moved BELOW
+// pgxpool.NewWithConfig, where it mutates a config the pool has already copied.
+// It does NOT cover the VALUE - whether the second argument is the parsed
+// timeout rather than some other string is checked by nothing. It also does not
+// cover applyStatementTimeout's own body, which is EXECUTED in
+// TestApplyStatementTimeout_WritesTheRuntimeParam; this guard exists only to
+// prove main reaches it.
+func TestStatementTimeoutIsAppliedBeforeThePoolIsBuilt(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err)
+
+	var body *ast.BlockStmt
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "main" && fd.Recv == nil && fd.Body != nil {
+			body = fd.Body
+		}
+	}
+	require.NotNil(t, body, "main.go no longer declares func main with a body")
+
+	// Statement INDEX, not source line, and ast.Inspect descends: what is
+	// recorded is the index of the top-level statement of main's body that
+	// CONTAINS each call. So wrapping the call in an if still finds it, at the
+	// index of the if - which is the behaviour wanted here, since
+	// applyStatementTimeout already no-ops on the disabled value and an
+	// `if statementTimeout != ""` around it is an equivalent program, not a
+	// defect to redden on.
+	applyAt, poolAt := -1, -1
+	for i, st := range body.List {
+		found := map[string]bool{}
+		ast.Inspect(st, func(n ast.Node) bool {
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fn := ce.Fun.(type) {
+			case *ast.Ident:
+				found[fn.Name] = true
+			case *ast.SelectorExpr:
+				found[fn.Sel.Name] = true
+			}
+			return true
+		})
+		if found["applyStatementTimeout"] {
+			require.Equal(t, -1, applyAt,
+				"main calls applyStatementTimeout more than once; the last one decides and this guard "+
+					"cannot say which config it mutated")
+			applyAt = i
+		}
+		if found["NewWithConfig"] {
+			require.Equal(t, -1, poolAt, "main builds more than one pool")
+			poolAt = i
+		}
+	}
+
+	require.NotEqual(t, -1, applyAt,
+		"main never calls applyStatementTimeout as a direct statement of its own body, so "+
+			"RELAY_DB_STATEMENT_TIMEOUT reaches no connection. The variable would still parse, the "+
+			"startup line would still print, and nothing at all would be bounded.")
+	require.NotEqual(t, -1, poolAt, "main no longer calls pgxpool.NewWithConfig")
+	require.Less(t, applyAt, poolAt,
+		"applyStatementTimeout runs at statement %d and the pool is built at statement %d. Mutating "+
+			"the config after NewWithConfig has copied it is a no-op that compiles, vets clean and "+
+			"leaves every package green.", applyAt, poolAt)
 }
