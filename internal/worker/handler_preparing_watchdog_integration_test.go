@@ -98,11 +98,9 @@ func TestWatchdog_APreparingTaskIsInvisibleToTheExecutionArm(t *testing.T) {
 }
 
 // TestWatchdog_ARunningThenPreparingTaskIsStillSweptByTheExecutionArm composes
-// the two halves the sibling tests pin separately, which is the only place the
-// accepted bound on a backward transition is actually a statement about the
-// watchdog. Its siblings each cover one half and neither covers this: one proves
-// started_at survives running -> preparing without asking the scan anything, and
-// the other proves a NEVER-RAN preparing row is invisible to the execution arm.
+// the two halves the sibling tests pin separately: one proves started_at
+// survives running -> preparing without asking the scan anything, and the other
+// proves a NEVER-RAN preparing row is invisible to the execution arm.
 //
 // A row that HAS reported running must stay swept. Otherwise a misbehaving
 // assignee escapes its own timeout_sec for as long as it likes by sending one
@@ -136,7 +134,11 @@ func TestWatchdog_ARunningThenPreparingTaskIsStillSweptByTheExecutionArm(t *test
 	row, err := q.GetTask(ctx, taskID)
 	require.NoError(t, err)
 	require.Equal(t, "preparing", row.Status, "precondition: the backward transition was accepted")
-	require.True(t, row.StartedAt.Valid, "precondition: the run's start time survived it")
+	require.True(t, row.StartedAt.Valid,
+		"precondition: the run's start time survived it. started_at is guarded TWICE - "+
+			"handleTaskStatus carries the row's own value forward for every non-running status AND "+
+			"UpdateTaskStatus COALESCEs - so either guard alone keeps this assertion green and only "+
+			"losing both turns it red")
 
 	// The scan's clock is a parameter, so this test owns it: an hour past a
 	// one-second timeout, at zero margin.
@@ -159,7 +161,6 @@ func TestWatchdog_ARunningThenPreparingTaskIsStillSweptByTheExecutionArm(t *test
 			"execution arm, or a misbehaving assignee buys an unbounded assignment for the price of "+
 			"one extra PREPARING message. Two independent things hold it up: `preparing` in "+
 			"ListOverdueAssignedTasks' status predicate, and started_at surviving the transition. "+
-			"started_at is guarded TWICE - handleTaskStatus carries the row's own value forward for "+
-			"every non-running status AND UpdateTaskStatus COALESCEs - so either guard alone keeps "+
-			"this green and only losing both turns it red")
+			"Reaching this line means started_at survived - the precondition above covers that half - "+
+			"so the status predicate is what moved")
 }

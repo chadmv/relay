@@ -346,12 +346,13 @@ WHERE worker_id = $1 AND status IN ('done', 'failed', 'timed_out')
 // response's attribution_cleared count.
 //
 // tasks.worker_id is ON DELETE SET NULL for EVERY row, but RequeueWorkerTasks
-// rescues only the currently-assigned partition, which excludes every terminal
-// status. This statement is the OTHER side of that partition among rows that
-// actually carry a worker_id: a pending row never does (both RequeueWorkerTasks
-// and RetryJobTasks null it), so the rows that silently lose attribution are
-// exactly the terminal ones. worker_id is public API (taskResponse.WorkerID,
-// internal/api/jobs.go), so this is a real loss and not bookkeeping.
+// rescues only the currently-assigned partition, whose membership
+// TestTasksStatusVocabularyIsExactly pins. This statement is the OTHER side of
+// that partition among rows that actually carry a worker_id: a pending row never
+// does (both RequeueWorkerTasks and RetryJobTasks null it), so the rows that
+// silently lose attribution are exactly the terminal ones. worker_id is public
+// API (taskResponse.WorkerID, internal/api/jobs.go), so this is a real loss and
+// not bookkeeping.
 //
 // THE PREDICATE IS AN ALLOW-LIST ON THE TERMINAL SET, deliberately, and it is the
 // same set RecomputeJobStatus treats as terminal. The equivalent deny-list on the

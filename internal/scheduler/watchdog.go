@@ -78,8 +78,9 @@ type taskCanceller interface {
 //
 //   - Watchdog first, grace second: the row is terminal, and grace's
 //     RequeueWorkerTasksIfEpoch matches only the currently-assigned partition,
-//     which excludes every terminal status, so it moves zero rows. Correct - the
-//     task was overdue whether or not its worker later dropped.
+//     whose membership TestTasksStatusVocabularyIsExactly pins, so it moves zero
+//     rows. Correct - the task was overdue whether or not its worker later
+//     dropped.
 //   - Grace first, watchdog second: the requeue set pending, worker_id NULL and
 //     epoch N+1, so the watchdog's already-issued UpdateTaskStatus binds epoch N
 //     and matches zero rows - on the epoch, first and independently of the other

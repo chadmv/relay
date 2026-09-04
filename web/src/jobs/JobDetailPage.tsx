@@ -98,8 +98,8 @@ export function JobDetailPage() {
   // wire): docs/backlog/feature-2026-07-01-job-detail-timing-enrichment.md.
   const done = tasks.filter((t) => t.status === 'done').length
   const total = tasks.length
-  // preparing counts as active: it is the mid-sync state that used to sit at
-  // dispatched, and a job whose tasks are all syncing must not read as idle.
+  // preparing counts as active: a job whose tasks are all syncing must not read
+  // as idle.
   const active = tasks.filter(
     (t) => t.status === 'running' || t.status === 'dispatched' || t.status === 'preparing',
   ).length

@@ -216,8 +216,8 @@ test('counts a preparing task as active, not queued nor done', async () => {
   server.use(http.get(`/v1/jobs/${ID}`, () => HttpResponse.json(job)))
   renderDetail()
   await screen.findByText('shot-042 render')
-  // A syncing task used to sit at `dispatched` and count as active; it must
-  // still count, or a job mid-sync reads as 0 active while every agent works.
+  // A syncing task must count as active, or a job mid-sync reads as 0 active
+  // while every agent works.
   expect(await screen.findByText(/^1 active$/)).toBeInTheDocument()
   expect(screen.getByText(/^1 ACTIVE · 1 QUEUED$/)).toBeInTheDocument()
 })
