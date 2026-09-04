@@ -22,8 +22,8 @@ than deferred.
 settled it on two arguments. A creation-RATE limit bounds growth rate, not table SIZE, and it is
 size that breaks the boot - so shipping one would let the boot-sweep item record "bounded" for
 something that is not bounded. And `schedrunner.fireOne` runs on the runner goroutine and never
-touches an HTTP route, so no HTTP rate limit anywhere bounds a schedule's firing: one
-`@every 1s` schedule is an uncapped job engine regardless. Reversing that decision is one wrap
+touches an HTTP route, so no HTTP rate limit anywhere bounds a schedule's firing.
+Reversing that decision is one wrap
 line if a reason appears.
 
 **The cap is load-bearing for the paging slice, which is why this item exists as its own file.**
