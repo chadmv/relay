@@ -97,11 +97,12 @@ func TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit(t *testi
 
 // TestBuildHTTPServer_AHumansRetryRunIsNotRefused is the executable form of "a
 // normal password change is unaffected" for the case that actually produces a
-// burst: a user who mistypes their current password and retries. Five attempts
-// inside one minute is more than the two shipped clients can produce by hand -
-// the SPA disables its button while the mutation is pending and the CLI asks
-// three masked prompts per attempt - so the default ceiling is above anything a
-// person reaches.
+// burst: a user who mistypes their current password and retries at the shipped
+// default.
+//
+// WHAT IT KILLS THAT ITS SIBLING CANNOT is a count hard-coded to two, the value
+// TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit supplies:
+// under that mutant the third of the five attempts below answers 429.
 //
 // THE SIXTH REQUEST IS NOT OPTIONAL. Five 400s under a limit of five are also
 // what a limiter that does nothing produces, so without it this test is vacuous
@@ -209,6 +210,12 @@ func TestBuildHTTPServer_AHalfConfiguredPasswordLimitLeavesTheBucketOff(t *testi
 	}
 }
 
+// identNamed reports whether e is exactly the identifier name.
+func identNamed(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
 // mainBodyOfPackage returns the body of func main, found by parsing every
 // non-test .go file in this directory rather than one hardcoded name.
 //
@@ -286,8 +293,13 @@ func TestMain_PassesThePasswordChangeLimitItParsed(t *testing.T) {
 	// or a time.Duration parsed by the same function, so nothing about a value's
 	// type or its derivation distinguishes it from a sibling. The only thing that
 	// does is the env-var name its chain was parsed from.
+	//
+	// boundAt[name] is the INDEX of that assignment in main's body, which is
+	// what lets the fatal-on-error check below find the statement that must
+	// follow the parse.
 	from := map[string][]string{}
-	for _, st := range body.List {
+	boundAt := map[string]int{}
+	for i, st := range body.List {
 		as, ok := st.(*ast.AssignStmt)
 		if !ok {
 			continue
@@ -309,6 +321,7 @@ func TestMain_PassesThePasswordChangeLimitItParsed(t *testing.T) {
 		for _, l := range as.Lhs {
 			if id, ok := l.(*ast.Ident); ok {
 				from[id.Name] = append(from[id.Name], rhs...)
+				boundAt[id.Name] = i
 			}
 		}
 	}
@@ -422,6 +435,55 @@ func TestMain_PassesThePasswordChangeLimitItParsed(t *testing.T) {
 				"basis on which this test concludes anything: a second one, in an if or a loop, can "+
 				"take the wiring back on some deployments while every check above still passes.",
 			ident.Name, assignedAnywhere[ident.Name])
+
+		// THE PARSE'S OWN ERROR CHECK, without which every assertion above
+		// still passes while the control is silently unarmed in production.
+		// Deleting main's if err != nil { log.Fatalf(...) } compiles - err is a
+		// re-assignment on this statement, not a new declaration - and
+		// ParseRateLimit returns a zero pair with its error, which Server.Handler
+		// reads as "bucket off". An operator typo such as "5:1min" would then
+		// boot a server with no bound instead of refusing to boot.
+		parseAt := -1
+		for name := range seen {
+			for _, r := range from[name] {
+				if r == row.mustReach {
+					parseAt = boundAt[name]
+				}
+			}
+		}
+		require.GreaterOrEqual(t, parseAt, 0,
+			"no direct child of main's body binds a name in %s's chain from %s",
+			row.field, row.mustReach)
+		require.Less(t, parseAt+1, len(body.List),
+			"the %s call is the last statement in main, so nothing checks its error",
+			row.mustReach)
+		guard, isIf := body.List[parseAt+1].(*ast.IfStmt)
+		require.True(t, isIf,
+			"the statement after the %s call for %s is %T, not an if. Its error is "+
+				"unchecked, so a malformed %s boots an unarmed bucket.",
+			row.mustReach, row.field, body.List[parseAt+1], row.envVar)
+		cond, isBinary := guard.Cond.(*ast.BinaryExpr)
+		require.True(t, isBinary && cond.Op == token.NEQ && identNamed(cond.X, "err") &&
+			identNamed(cond.Y, "nil"),
+			"the if after the %s call for %s does not test err != nil", row.mustReach, row.field)
+		// log.Fatal and log.Fatalf both end the process, which is the property;
+		// the verb is not.
+		fatal := false
+		ast.Inspect(guard.Body, func(n ast.Node) bool {
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			se, ok := ce.Fun.(*ast.SelectorExpr)
+			if ok && identNamed(se.X, "log") && strings.HasPrefix(se.Sel.Name, "Fatal") {
+				fatal = true
+			}
+			return true
+		})
+		require.True(t, fatal,
+			"the err != nil branch after the %s call for %s does not end the process. A "+
+				"malformed %s would then leave the bucket off and the server running.",
+			row.mustReach, row.field, row.envVar)
 
 		if row.field == "passwordChangeLimitN" {
 			// DOC-AND-CODE CONSISTENCY, not a behavioural check: its subject is

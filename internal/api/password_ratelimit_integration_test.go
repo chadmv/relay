@@ -21,10 +21,11 @@ import (
 
 // putPassword drives one PUT /v1/users/me/password through the handler h.
 //
-// h IS BOUND ONCE BY THE CALLER, never re-derived per request: Server.Handler
-// allocates a fresh bucket for every armed user-keyed limiter on every call, so
-// a test that calls srv.Handler() per request gives each request its own empty
-// budget and can never observe a ceiling.
+// h IS BOUND ONCE BY THE CALLER and reused for every request it drives:
+// Server.Handler builds a fresh password-change bucket on every call, so a test
+// that re-derived it per request would give each request its own empty budget
+// and could never observe a ceiling. registerAndLogin calls srv.Handler() again
+// for its own setup; that is a spare bucket nothing on this route charges.
 func putPassword(t *testing.T, h http.Handler, token, current, next string) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"current_password": current, "new_password": next})
@@ -45,6 +46,16 @@ func putPassword(t *testing.T, h http.Handler, token, current, next string) *htt
 // handler answers 403 having run the compare and changed nothing. That makes
 // 403 and 429 the two outcomes, and they say different things: 403 is "the
 // bcrypt compare ran", 429 is "it did not".
+//
+// WHY IT CANNOT RUN IN THE DEFAULT LANE, per CLAUDE.md's rule that a guard
+// behind a build tag must be able to run: the 403 needs GetUser and a real
+// stored hash, which needs a pool. What would have to exist for it to run in CI
+// is a services:postgres lane covering internal/api, which
+// docs/backlog/idea-2026-08-23-integration-only-guards-ci-never-runs.md tracks.
+// The input bound itself is not left to this lane alone: cmd/relay-server's
+// TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfiguredLimit drives a
+// real request past the same ceiling on the same route in the lane CI runs, and
+// stops at the handler's length guard instead of its compare.
 func TestChangePassword_ABurstIsRefusedAndAnotherUserIsNot(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
@@ -82,8 +93,12 @@ func TestChangePassword_ABurstIsRefusedAndAnotherUserIsNot(t *testing.T) {
 
 // TestChangePassword_ANormalChangeSucceedsUnderTheBucket is the acceptance
 // criterion "a normal password change is unaffected", proven end to end: with
-// the bucket armed, one correct change answers 204 and the caller's own token
-// still authenticates afterwards.
+// the bucket armed, one correct change answers 204, the caller's own token still
+// authenticates afterwards, and the new password logs in.
+//
+// THE CEILING IS ONE AND THE SECOND REQUEST IS NOT OPTIONAL. Every assertion
+// here except that one is produced identically by a route the limiter never
+// wraps, which is what this test would then be silently reporting as a pass.
 //
 // WHY IT CANNOT RUN IN THE DEFAULT LANE, per CLAUDE.md's rule that a guard
 // behind a build tag must be able to run. It is the only assertion in this slice
@@ -103,7 +118,10 @@ func TestChangePassword_ANormalChangeSucceedsUnderTheBucket(t *testing.T) {
 	pool := newTestPool(t)
 	q := store.New(pool)
 	srv := api.New(pool, q, events.NewBroker(), worker.NewRegistry(), nil, 0, 0, 0, 0)
-	srv.PasswordChangeLimitN = 5
+	// A CEILING OF ONE IS WHAT MAKES THE SECOND REQUEST DISCRIMINATE. Under a
+	// ceiling of five, one 204 is also what an unwrapped route produces, so the
+	// whole test would be green against the implementation it names.
+	srv.PasswordChangeLimitN = 1
 	srv.PasswordChangeLimitWin = time.Minute
 	// BOUND ONCE. Handler allocates a fresh bucket per call, so re-deriving it
 	// per request would give every request its own budget.
@@ -114,6 +132,14 @@ func TestChangePassword_ANormalChangeSucceedsUnderTheBucket(t *testing.T) {
 	rec := putPassword(t, h, token, "oldpassword", "newpassword1")
 	require.Equal(t, http.StatusNoContent, rec.Code,
 		"one correct change under an armed bucket must succeed. body: %s", rec.Body.String())
+
+	// The 204 above spent the only token, so this one is refused before the
+	// handler runs. An unwrapped route answers 403 here - the compare against the
+	// password that just changed - so 429 is reachable only through the limiter.
+	over := putPassword(t, h, token, "oldpassword", "newpassword2")
+	require.Equal(t, http.StatusTooManyRequests, over.Code,
+		"the second change must be refused by the bucket: without this the 204 above is also "+
+			"what an unwrapped route produces. body: %s", over.Body.String())
 
 	probe := httptest.NewRequest("GET", "/v1/jobs", nil)
 	probe.Header.Set("Authorization", "Bearer "+token)

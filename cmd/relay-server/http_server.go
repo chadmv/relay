@@ -44,10 +44,9 @@ type httpServerDeps struct {
 	searchLimitWin time.Duration
 
 	// passwordChangeLimitN and passwordChangeLimitWin bound
-	// PUT /v1/users/me/password per authenticated principal. They reach
-	// api.Server as exported FIELDS, never as two more arguments on api.New,
-	// whose tail is already four same-typed arguments in a row and whose
-	// transposition this file's own header records as measured green.
+	// PUT /v1/users/me/password per authenticated principal. Exported FIELDS on
+	// api.Server rather than more api.New arguments, for the same reason as
+	// searchLimitN above.
 	passwordChangeLimitN   int
 	passwordChangeLimitWin time.Duration
 

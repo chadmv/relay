@@ -213,30 +213,26 @@ func main() {
 	// interactive submit - and sharing them would let a search burst refuse a job
 	// submission, which is the worse of the two outcomes to trade away.
 	//
-	// THERE IS NO OFF VALUE, deliberately: ParseRateLimit rejects a zero count
-	// and this is fatal, so an operator cannot disable the control from the
-	// environment. The escape is a large number, 100000:1s, which leaves the
-	// bound visible as a number in README and in the environment.
+	// NO ZERO COUNT AND NO ZERO WINDOW: ParseRateLimit refuses both and this is
+	// fatal. Every other value boots. The count is the burst and the window the
+	// recovery time, so shrinking the window loosens the bound rather than
+	// tightening it; the escape from a bound that is too tight is a large count.
 	searchN, searchWin, err := api.ParseRateLimit(envOrDefault("RELAY_JOB_SEARCH_RATE_LIMIT", "120:10s"))
 	if err != nil {
 		log.Fatalf("parse RELAY_JOB_SEARCH_RATE_LIMIT: %v", err)
 	}
 
-	// A THIRD INSTANCE of the user-keyed mechanism, and separate from both
-	// existing buckets. The quantity bounded here is CPU spent in a key
-	// derivation function, not task execution and not scan work; the ceilings
-	// are three orders of magnitude apart and no single value works for two of
-	// them. Folded into the submit bucket, this route would inherit a ceiling a
-	// human can never reach.
+	// A SEPARATE BUCKET from the submit and search ones. The quantity bounded
+	// here is CPU spent in a key derivation function, not task execution and not
+	// scan work; the ceilings are three orders of magnitude apart and no single
+	// value works for two of them. Folded into the submit bucket, this route
+	// would inherit a ceiling a human can never reach.
 	//
 	// TIGHTER THAN RELAY_LOGIN_RATE_LIMIT ON PURPOSE: a refused login is a user
 	// who cannot get in, while a refused password change is a user who already
 	// holds a valid session, whose session is untouched, and who waits.
 	//
-	// THERE IS NO OFF VALUE, deliberately: ParseRateLimit rejects a zero count
-	// and this is fatal, so an operator cannot disable the control from the
-	// environment. The escape is a large number, 100000:1s, which leaves the
-	// bound visible as a number in README and in the environment.
+	// Same no-zero-value reasoning as the search bucket above.
 	passwordChangeN, passwordChangeWin, err := api.ParseRateLimit(
 		envOrDefault("RELAY_PASSWORD_CHANGE_RATE_LIMIT", "5:1m"))
 	if err != nil {

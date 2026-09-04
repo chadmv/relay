@@ -394,7 +394,9 @@ Three things that slice owes this item:
 - **The guard was written as this item's table**, not as a bespoke walk: one row per wired
   field, with columns for the field, the function its value must derive from, and the env-var
   literal that distinguishes it from a same-typed sibling. Lifting it should be a matter of
-  moving rows, not redesigning the walk.
+  moving rows, not redesigning the walk. It also asserts that the statement immediately after
+  the `ParseRateLimit` call is an `err != nil` branch that ends the process, because deleting
+  that branch compiles and leaves every other check green.
 - **A correctness note for whoever generalizes.** `TestServerCountersIsWiredByMain`'s
   derivation walk skips any assignment where `len(Lhs) != len(Rhs)`. Every rate-limit parse in
   `main` binds three names from one `api.ParseRateLimit` call, so that walk collects nothing
@@ -403,8 +405,9 @@ Three things that slice owes this item:
   with `httpServerDeps.passwordChangeLimitN is fed "passwordChangeN", which does not derive
   from ParseRateLimit`. The arity-tolerant walk in `TestWatchdogIsStartedByMain` is the one to
   lift.
-- **All four mutations this item cares about were run against the new guard and all four were
-  killed**: the literal set to `0` (the plain-identifier assertion), the field fed another
+- **All four mutations this item cares about were run against the new guard, each with a
+  discard added for the local it orphans where one was needed, and all four were killed**:
+  the literal set to `0` (the plain-identifier assertion), the field fed another
   same-typed local `searchN` (the env-var-reachability assertion, not the other-env one - the
   chain does reach `ParseRateLimit`, so only the env-var name discriminates), the field
   omitted (the field-presence assertion), and a later `= 0` inside an `if` (the
@@ -412,9 +415,13 @@ Three things that slice owes this item:
   package stayed green under the fourth, which is the clearest available demonstration of what
   the parse buys over execution here.
 
-Note for whoever generalizes: two of those four mutations do not compile in their naive form,
-because the displaced local becomes unused. A battery that records them as kills without
-adding a discard for the orphaned local is recording build failures, not guard failures.
+Note for whoever generalizes: THREE of those four do not compile in their naive form - the
+zeroed literal, the crossed literal and the omitted field all orphan `passwordChangeN`; only
+the later `= 0` inside an `if` builds. Two more rows of the wider battery for this slice are
+non-compiling for the same reason on the other side: leaving the route bare `auth(...)`, and
+substituting `userLimit` for `passwordLimit`, each orphan `passwordLimit` in
+`internal/api/server.go`. A battery that records any of the five as a kill without adding a
+discard for the orphaned local is recording build failures, not guard failures.
 
 **Proposed, for the human rather than applied: raise this item from `low` to `medium`.** The
 argument is this item's own Notes - reconsider the priority the next time somebody adds a

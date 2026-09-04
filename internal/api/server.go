@@ -75,10 +75,10 @@ type Server struct {
 	// AUTHENTICATED PRINCIPAL may issue per window, across GET /v1/jobs and
 	// GET /v1/scheduled-jobs together. Set by cmd/relay-server's buildHTTPServer
 	// from RELAY_JOB_SEARCH_RATE_LIMIT. Either field at or below zero leaves the
-	// bucket unarmed, which is the only disabled state and is deliberately
-	// Go-reachable only: ParseRateLimit rejects a zero count and main is fatal on
-	// it, so an operator cannot turn the control off from the environment. The
-	// escape is a large number.
+	// bucket unarmed, and the environment cannot reach that state: ParseRateLimit
+	// refuses a zero count and a zero window, and main is fatal on the error.
+	// Every other value boots, and a smaller window is a LOOSER bound rather than
+	// a tighter one.
 	//
 	// Exported FIELDS rather than two more arguments on New, whose tail is
 	// already four same-typed arguments in a row; buildHTTPServer's own doc
@@ -96,17 +96,16 @@ type Server struct {
 	// per window. Set by cmd/relay-server's buildHTTPServer from
 	// RELAY_PASSWORD_CHANGE_RATE_LIMIT.
 	//
-	// A SMALLER CEILING THAN THE OTHER BUCKETS, because the handler runs a
-	// bcrypt compare at the shipped cost on every request and a second bcrypt
-	// operation on success, and the legitimate pattern is a human retyping a
-	// credential into a form.
+	// The ceiling is small because handleChangePassword runs a bcrypt compare at
+	// the shipped cost on every request that gets past readJSON and the
+	// eight-character length guard, and a second bcrypt operation on success,
+	// while the legitimate pattern is a human retyping a credential into a form.
 	//
 	// Zero on EITHER field leaves the bucket off, which is what a Go caller
 	// building a Server directly wants, and the guard in Handler is not
 	// cosmetic: rateLimiter.allow indexes hits[0] whenever len(hits) >= limit,
-	// so a zero limit panics on the first request. The environment cannot reach
-	// that state - ParseRateLimit refuses a zero count and main is fatal on the
-	// error - so the escape from a too-tight bound is a large number.
+	// so a zero limit panics on the first request. Same environment reasoning as
+	// SearchLimitN above.
 	PasswordChangeLimitN   int
 	PasswordChangeLimitWin time.Duration
 
@@ -146,14 +145,14 @@ func New(
 
 // Handler returns an http.Handler with all routes registered.
 //
-// CALL IT ONCE PER Server. Each call allocates a fresh bucket for every armed
-// user-keyed limiter and starts a gc goroutine per bucket that nothing stops, so
-// a second call is a second budget as well as a leak. Build every limiter here,
-// never inside a route closure and never inside a handler: that is what makes
-// "once per Server" the same statement as "once per Handler call".
+// CALL IT ONCE PER Server. Every limiter this function builds is a fresh bucket
+// with its own gc goroutine that nothing stops, so a second call is a second
+// budget as well as a leak. The search bucket is the carve-out and is unaffected:
+// searchRateLimiter memoizes one per Server and is built inside the handler, for
+// the reason search_ratelimit.go gives.
 //
-// A test that drives more than one request through a limiter must bind the
-// result once and reuse it; re-deriving it per request gives each request its
+// A test that drives more than one request through a limiter built here must bind
+// the result once and reuse it; re-deriving it per request gives each request its
 // own empty window.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -186,8 +185,8 @@ func (s *Server) Handler() http.Handler {
 	//
 	// Built here, not per route and not per request: UserRateLimit starts a gc
 	// goroutine that is never stopped, so a second instance is a second budget
-	// and a leak. TestBuildHTTPServer_ThePasswordBucketIsWiredWithTheConfigured-
-	// Limit is what pins that, at a ceiling of two.
+	// and a leak. cmd/relay-server's TestBuildHTTPServer_ThePasswordBucketIsWired-
+	// WithTheConfiguredLimit is what pins that, at a ceiling of two.
 	passwordLimit := func(h http.Handler) http.Handler { return h }
 	if s.PasswordChangeLimitN > 0 && s.PasswordChangeLimitWin > 0 {
 		passwordLimit = UserRateLimit(s.PasswordChangeLimitN, s.PasswordChangeLimitWin)
