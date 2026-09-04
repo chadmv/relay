@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -247,4 +248,42 @@ func seedAgentE2EWorker(t *testing.T, ctx context.Context, q *store.Queries, hos
 	require.True(t, creds.HasAgentToken(),
 		"the seeded token must be loadable, or the agent takes the auto-enroll path instead")
 	return w.ID, creds
+}
+
+// e2ePublicBase carries a PATH PREFIX because that is the shape a
+// reverse-proxied deployment uses and the one where an accidental separator
+// shows up. Same shape internal/scheduler's URL test uses.
+const e2ePublicBase = "https://relay.example.test/ops"
+
+// seedAgentE2EJob creates a user, a job, and one task whose single command
+// re-execs this test binary as the helper. Returns the job and task ids.
+//
+// timeout_seconds IS SET DELIBERATELY. It becomes DispatchTask.TimeoutSeconds,
+// which newRunner turns into a context deadline on the subprocess - so a child
+// that wedges is killed by the code under test rather than left to be killed by
+// the Go test timeout with no test name attached.
+func seedAgentE2EJob(t *testing.T, ctx context.Context, q *store.Queries) (pgtype.UUID, pgtype.UUID) {
+	t.Helper()
+	user, err := q.CreateUserWithPassword(ctx, store.CreateUserWithPasswordParams{
+		Name: "e2e", Email: "agent-e2e@example.com", IsAdmin: false, PasswordHash: "x",
+	})
+	require.NoError(t, err)
+	job, err := q.CreateJob(ctx, store.CreateJobParams{
+		Name: "agent-e2e-job", Priority: "normal", SubmittedBy: user.ID,
+		Labels: []byte(`{}`), ScheduledJobID: pgtype.UUID{},
+	})
+	require.NoError(t, err)
+
+	commands, err := json.Marshal([][]string{{os.Args[0], "-test.run=^TestAgentSubprocessE2EHelperProcess$"}})
+	require.NoError(t, err)
+	env, err := json.Marshal(map[string]string{agentE2EHelperEnv: "1"})
+	require.NoError(t, err)
+
+	timeout := int32(60)
+	task, err := q.CreateTask(ctx, store.CreateTaskParams{
+		JobID: job.ID, Name: "agent-e2e-task", Commands: commands, Env: env,
+		Requires: []byte(`{}`), TimeoutSeconds: &timeout, Retries: 0,
+	})
+	require.NoError(t, err)
+	return job.ID, task.ID
 }
