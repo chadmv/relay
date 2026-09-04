@@ -1,11 +1,13 @@
 ---
 title: Design sync-spec exclusion paths without poisoning the shared workspace's have-list
 type: idea
-status: open
+status: closed
 created: 2026-09-03
 priority: medium
 source: SDNM fork divergence analysis (relay_updates.md, PR-2), evaluated 2026-09-03
 blocked_by: [bug-2026-09-03-perforce-virtual-and-remap-streams-fail-to-sync]
+closed: 2026-09-04
+resolution: fixed
 ---
 
 # Design sync-spec exclusion paths without poisoning the shared workspace's have-list
@@ -82,3 +84,41 @@ questions the spec must settle:
 - [[bug-2026-09-03-perforce-virtual-and-remap-streams-fail-to-sync]] - supplies `toClientPath`
 - [[bug-2026-08-29-source-unshelves-is-one-subprocess-per-entry-and-unbounded]] - the other
   per-entry subprocess axis on the same spec
+
+## Resolution
+The spec is written: `docs/superpowers/specs/2026-09-04-sync-spec-exclusion-paths.md`. It settles
+all seven questions this item posed and refutes six of its own premises against the tree.
+
+The first acceptance bullet is met. **The second one is not, and it was never a property a
+document could have** - "no task can observe a workspace missing files it asked for" is a
+property of shipped code. It moves intact to
+[[feature-2026-09-04-implement-sync-spec-exclusion-paths]], along with the acceptance test the
+spec designs and the mutation that must kill it. This item is closed on its own stated scope:
+"A design item; run it through the brainstorming flow and write the spec before any code."
+
+The framing correction that drove the spec: this item presents folding the exclusion set into
+`SourceKey` as one mechanism among three. It is not a mechanism, it is a precondition every
+candidate needs, because a have-list preempt writes the shared client's have-list and a
+view-based exclusion writes the shared client's spec, which `CreateStreamClient` rewrites on
+every `Prepare`.
+
+Six premises of this item refuted, each checked against the symbol:
+
+1. `BaselineHash` does NOT already cover exclusions. It builds `entry{path, rev}` and hashes
+   nothing else, so an exclusion field hashes identically to its absence.
+2. The dispatcher's warm bias keys on nothing shared. `selectWorker` compares `ws.SourceKey` to
+   `taskSrc.Stream` directly; there is no key function to confirm, one must be created.
+3. `exclude: true` is not self-describing for the clients this item cites. The SPA source builder
+   does not exist yet, and the Python SDK's `Sync` carries `ConfigDict(extra="forbid")`, so the
+   field is a hard SDK rejection where a `-` prefix would pass through `path: str` untouched.
+4. A WARN line on preempt failure is refused. A warning inside a multi-hour sync log is read
+   after the volume has already filled; preempt failure fails the prepare instead.
+5. Extending the out-of-disk remedy to mention exclusions is refused as written, because under
+   this mechanism adding an exclusion creates a second full-size workspace.
+6. The replacement for the fossil include-ordering rule is weaker than needed. Every exclusion
+   must be covered by exactly one include at one revision, because the preempt's revision is
+   defined by the covering include.
+
+The spec also states the strongest argument against the whole design rather than burying it: a
+mixed-exclusion stream on one agent ALWAYS costs more disk than today, and the overflow converts
+to sweeper eviction churn that this repository cannot measure. Five follow-on items were filed.
