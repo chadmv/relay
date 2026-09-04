@@ -43,6 +43,14 @@ type httpServerDeps struct {
 	searchLimitN   int
 	searchLimitWin time.Duration
 
+	// passwordChangeLimitN and passwordChangeLimitWin bound
+	// PUT /v1/users/me/password per authenticated principal. They reach
+	// api.Server as exported FIELDS, never as two more arguments on api.New,
+	// whose tail is already four same-typed arguments in a row and whose
+	// transposition this file's own header records as measured green.
+	passwordChangeLimitN   int
+	passwordChangeLimitWin time.Duration
+
 	allowSelfRegister bool
 	metrics           *metrics.Store
 
@@ -188,6 +196,8 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	s.JobSubmitLimitWin = d.jobSubmitLimitWin
 	s.SearchLimitN = d.searchLimitN
 	s.SearchLimitWin = d.searchLimitWin
+	s.PasswordChangeLimitN = d.passwordChangeLimitN
+	s.PasswordChangeLimitWin = d.passwordChangeLimitWin
 
 	// A nil source leaves its section ABSENT, which is the payload's own
 	// vocabulary for "this control is not wired on this replica". It is
