@@ -1,8 +1,10 @@
 ---
 title: The server discards the agent's prepare-failure error message, so a failed sync leaves a task with empty logs
 type: bug
-status: open
+status: closed
 created: 2026-09-03
+closed: 2026-09-03
+resolution: fixed
 priority: high
 source: SDNM fork divergence analysis (relay_updates.md, PR-7), evaluated 2026-09-03
 ---
@@ -92,3 +94,27 @@ Tests, with the handler as the subject, in the integration lane beside the exist
   instance of the general cap that item owns
 - [[bug-2026-09-03-perforce-virtual-and-remap-streams-fail-to-sync]] - the failure that made the
   empty log visible in production
+
+## Resolution
+
+Fixed on `claude/top-3-roadmap-items-65856f`. `handleTaskStatus` now writes the agent's
+`ErrorMessage` through `AppendTaskLog` with the connection's authenticated `workerID` and
+`int32(upd.Epoch)`, above the retry branch (which bumps the epoch and returns, so an append below
+it could never run on that path), and publishes the log frame before the status frame.
+
+**Two of this item's prescriptions were wrong and the shipped code deviates.** The stream is
+`stderr`, not the one the item named: `task_logs.stream` carries a CHECK admitting only `stdout`
+and `stderr` (migration 000019), so `prepare` was unwritable rather than merely unused. And the
+fence-rejection arm counts nothing - joining `taskLogFenceRejects` would have falsified that
+counter's published meaning, and no count is needed because `AppendTaskLog`'s fence is strictly
+weaker than the status write that follows, so any rejection there is already counted in
+`task_status_fence`.
+
+The message is bounded at `MaxAgentErrorMessageBytes` (4096), NUL-stripped, coerced to valid UTF-8
+and cut at a rune boundary; the emptiness guard tests the sanitised value, so a NUL-only message
+writes no blank line. A non-`ErrNoRows` append failure is logged under the connection's budget on
+its own `kindStatusLogPersist` key, because sharing `kindTaskLogPersist` let the log path silence
+this line without owning the task.
+
+Rationale in `docs/superpowers/specs/2026-09-03-prepare-failure-visibility.md` and the retro
+`docs/retros/2026-09-03-prepare-failure-visibility.md`.

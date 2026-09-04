@@ -74,6 +74,7 @@ type IngestLogDropsByKind struct {
 	StatusRetryWrite     uint64
 	StatusUpdateWrite    uint64
 	StatusFailDependents uint64
+	StatusLogPersist     uint64
 }
 
 // ingestLogCounters is the process-lifetime home for what the per-connection log
@@ -87,7 +88,7 @@ type IngestLogDropsByKind struct {
 // its snapshot carries a cross-field invariant (max_per_source <= live_total <=
 // the configured cap) that only one critical section can hold, and plain fields
 // make an unsynchronised access a data race -race can see. NEITHER APPLIES HERE.
-// These sixteen numbers have no relation to each other - each is an independent
+// These numbers have no relation to each other - each is an independent
 // monotonic total - so a snapshot that reads them microseconds apart is not
 // inconsistent, merely unsynchronised in a way nothing can observe. And the
 // increment site is the gRPC recv goroutine, whose standing constraint is no new
@@ -167,5 +168,6 @@ func (c *ingestLogCounters) byKind(arm int) IngestLogDropsByKind {
 		StatusRetryWrite:     c.n[kindStatusRetryWrite][arm].Load(),
 		StatusUpdateWrite:    c.n[kindStatusUpdateWrite][arm].Load(),
 		StatusFailDependents: c.n[kindStatusFailDependents][arm].Load(),
+		StatusLogPersist:     c.n[kindStatusLogPersist][arm].Load(),
 	}
 }

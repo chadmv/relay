@@ -592,6 +592,7 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.deduped.status_retry_write",
 	"ingest_log_budget.counts.deduped.status_update_write",
 	"ingest_log_budget.counts.deduped.status_fail_dependents",
+	"ingest_log_budget.counts.deduped.status_log_persist",
 	"ingest_log_budget.counts.suppressed.task_log_persist",
 	"ingest_log_budget.counts.suppressed.bad_task_id_log",
 	"ingest_log_budget.counts.suppressed.bad_task_id_status",
@@ -600,6 +601,7 @@ var counterPayloadLeaves = []string{
 	"ingest_log_budget.counts.suppressed.status_retry_write",
 	"ingest_log_budget.counts.suppressed.status_update_write",
 	"ingest_log_budget.counts.suppressed.status_fail_dependents",
+	"ingest_log_budget.counts.suppressed.status_log_persist",
 	"task_log_fence.counts.rejected_total",
 	"task_status_fence.counts.raced_total",
 	"task_status_fence.counts.duplicate_total",
@@ -725,7 +727,7 @@ func TestCounterPayloadBytesCarryNoIdentifiers(t *testing.T) {
 				Counts: netlimit.RefusalCounts{RefusedTotal: 11, RefusedPerIP: 22},
 				Levels: netlimit.Occupancy{LiveTotal: 33, DistinctSources: 44, MaxPerSource: 55},
 			}},
-			IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()},
+			IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()},
 			TaskLogFence:    fakeTaskLogFenceSource{n: 123},
 			TaskStatusFence: fakeTaskStatusFenceSource{c: threeDistinctStatusRejections()},
 			Watchdog:        fakeWatchdogSource{c: threeDistinctSweeps()},
@@ -820,24 +822,26 @@ func TestIngestLogKindCountsPublishesEveryWorkerSideField(t *testing.T) {
 			"TestServerCounters_ReportsTheIngestLogSnapshot.", src.NumField(), pub.NumField())
 }
 
-// fakeIngestLogSource returns a fixed snapshot. SIXTEEN DISTINCT VALUES: the
-// mapping from worker.IngestLogDrops into the response types is sixteen
-// hand-written assignments, and equal values would hide a crossed one.
+// fakeIngestLogSource returns a fixed snapshot with one distinct non-zero value
+// per (kind, arm), so a crossed assignment cannot be hidden by an equal pair.
+// The mapping into the response types is hand-written per field.
 type fakeIngestLogSource struct{ d worker.IngestLogDrops }
 
 func (f fakeIngestLogSource) IngestLogDropCounts() worker.IngestLogDrops { return f.d }
 
-func sixteenDistinctDrops() worker.IngestLogDrops {
+func distinctDropsPerKind() worker.IngestLogDrops {
 	return worker.IngestLogDrops{
 		Deduped: worker.IngestLogDropsByKind{
 			TaskLogPersist: 11, BadTaskIDLog: 22, BadTaskIDStatus: 33,
 			StatusGetTask: 44, Inventory: 55,
 			StatusRetryWrite: 111, StatusUpdateWrite: 122, StatusFailDependents: 133,
+			StatusLogPersist: 177,
 		},
 		Suppressed: worker.IngestLogDropsByKind{
 			TaskLogPersist: 66, BadTaskIDLog: 77, BadTaskIDStatus: 88,
 			StatusGetTask: 99, Inventory: 110,
 			StatusRetryWrite: 144, StatusUpdateWrite: 155, StatusFailDependents: 166,
+			StatusLogPersist: 188,
 		},
 	}
 }
@@ -845,7 +849,7 @@ func sixteenDistinctDrops() worker.IngestLogDrops {
 func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))
@@ -873,6 +877,7 @@ func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	kinds := []string{
 		"task_log_persist", "bad_task_id_log", "bad_task_id_status", "status_get_task", "inventory",
 		"status_retry_write", "status_update_write", "status_fail_dependents",
+		"status_log_persist",
 	}
 	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Deduped))
 	assert.ElementsMatch(t, kinds, counterMapKeys(body.IngestLogBudget.Counts.Suppressed))
@@ -890,6 +895,8 @@ func TestServerCounters_ReportsTheIngestLogSnapshot(t *testing.T) {
 	assert.Equal(t, float64(111), body.IngestLogBudget.Counts.Deduped["status_retry_write"])
 	assert.Equal(t, float64(122), body.IngestLogBudget.Counts.Deduped["status_update_write"])
 	assert.Equal(t, float64(133), body.IngestLogBudget.Counts.Deduped["status_fail_dependents"])
+	assert.Equal(t, float64(177), body.IngestLogBudget.Counts.Deduped["status_log_persist"])
+	assert.Equal(t, float64(188), body.IngestLogBudget.Counts.Suppressed["status_log_persist"])
 	assert.Equal(t, float64(144), body.IngestLogBudget.Counts.Suppressed["status_retry_write"])
 	assert.Equal(t, float64(155), body.IngestLogBudget.Counts.Suppressed["status_update_write"])
 	assert.Equal(t, float64(166), body.IngestLogBudget.Counts.Suppressed["status_fail_dependents"])
@@ -930,7 +937,13 @@ func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
 	for _, arm := range []string{"deduped", "suppressed"} {
 		var fields map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(counts[arm], &fields))
-		require.Len(t, fields, 8, "%s must carry one key per kind, not an empty object", arm)
+		// DERIVED from the Go type, never a literal. A hardcoded count here is a
+		// census of another package that goes stale the next time a kind is
+		// added, which is the failure mode the ingest_log_limiter comment was
+		// just cleaned up for; ingestLogKindCounts is field-for-field with
+		// worker.IngestLogDropsByKind and counterPayloadLeaves pins that.
+		require.Len(t, fields, reflect.TypeOf(worker.IngestLogDropsByKind{}).NumField(),
+			"%s must carry one key per kind, not an empty object", arm)
 		for k, v := range fields {
 			assert.Equal(t, "0", string(v), "%s.%s must serialise as an explicit zero", arm, k)
 		}
@@ -943,7 +956,7 @@ func TestServerCounters_WiredButZeroIngestSectionIsStillPresent(t *testing.T) {
 func TestServerCounters_OneWiredSectionDoesNotDragInTheOther(t *testing.T) {
 	s := &Server{
 		startedAt: testStartedAt(),
-		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: sixteenDistinctDrops()}},
+		Counters:  CounterSources{IngestLogBudget: fakeIngestLogSource{d: distinctDropsPerKind()}},
 	}
 	rec := httptest.NewRecorder()
 	s.handleServerCounters(rec, httptest.NewRequest("GET", "/v1/server/counters", nil))

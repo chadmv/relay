@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	relayv1 "relay/internal/proto/relayv1"
 	"relay/internal/events"
@@ -186,6 +188,49 @@ func remoteAddr(ctx context.Context) string {
 // small enough that "forever" is genuinely closed. Override with
 // RELAY_TASKLOG_TRAILING_WINDOW.
 const DefaultTrailingLogWindow = 15 * time.Minute
+
+// MaxAgentErrorMessageBytes bounds how much of an agent-supplied
+// TaskStatusUpdate.ErrorMessage the coordinator stores as a task-log line. The
+// field is a proto3 string: agent-controlled, and bounded on the wire only by
+// gRPC's receive limit.
+const MaxAgentErrorMessageBytes = 4096
+
+// errorMessageLogStream is the task_logs.stream value the coordinator's
+// synthesized prepare-failure line lands on. task_logs_stream_check (migration
+// 000019) admits only 'stdout' and 'stderr', so anything outside that pair fails
+// at the database rather than here.
+const errorMessageLogStream = "stderr"
+
+// sanitizeAgentErrorMessage makes an agent-supplied message storable in a
+// Postgres TEXT column.
+//
+// TWO OF THE THREE TRANSFORMS ARE REACHABLE FROM THE WIRE; the third is defence
+// in depth, and saying which is which is the point of this paragraph. A NUL is
+// legal in a proto3 string and illegal in TEXT (SQLSTATE 22021), and a cut at a
+// byte offset can halve a multi-byte rune, manufacturing invalid UTF-8 out of
+// the bound - both are REAL errors rather than pgx.ErrNoRows. Invalid UTF-8
+// arriving whole is NOT reachable through gRPC: proto.Unmarshal rejects a string
+// field carrying it ("string field contains invalid UTF-8") and the stream dies
+// before this runs, so that arm guards a caller building the struct in Go.
+//
+// The result may be empty when the input was not, which is why the caller admits
+// on THIS value and never on the raw field. Pinned by
+// TestSanitizeAgentErrorMessage_BoundsAndValidity.
+func sanitizeAgentErrorMessage(msg string) string {
+	// No pre-checks: each of these returns its input unchanged when there is
+	// nothing to do, so an IndexByte or ValidString guard is a second full scan
+	// bought for nothing.
+	msg = strings.ReplaceAll(msg, "\x00", "")
+	msg = strings.ToValidUTF8(msg, "")
+	if len(msg) <= MaxAgentErrorMessageBytes {
+		return msg
+	}
+	cut := MaxAgentErrorMessageBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut]
+}
 
 // DefaultRegistrationTimeout bounds how long a peer that has opened a stream may
 // go without sending its RegisterRequest before the server closes the stream.
@@ -1451,6 +1496,87 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 
 	terminal := statusStr == "failed" || statusStr == "timed_out"
 
+	// Store the agent's own account of WHY, where an operator already looks. It
+	// has to be here and nowhere lower.
+	//
+	// ABOVE THE RETRY BRANCH, BECAUSE THAT BRANCH RETURNS AND ENDS THE
+	// GENERATION. IncrementTaskRetryCount bumps assignment_epoch, so an append
+	// placed below the branch never runs on the retry path and could not pass the
+	// fence after the bump at all - and a failure that is about to be retried is
+	// exactly the case where the cause of this attempt has to survive.
+	//
+	// PUBLISH BEFORE THE STATUS EVENT. The CLI's log follower stops at the
+	// terminal frame and the SPA's tail stops on a terminal status, so a line
+	// published after the status event is one the live view never shows; it
+	// appears only on a refresh. A2 and A5 in
+	// handler_taskstatus_errormessage_integration_test.go redden if either half
+	// moves.
+	//
+	// TERMINAL ONLY, and what that buys is a bound on the NON-terminal side, not
+	// a promise about this one. A non-terminal report leaves status, worker_id
+	// and assignment_epoch untouched and nothing rate-limits status messages, so
+	// admitting RUNNING here would be an unbudgeted insert at one gRPC message
+	// per row. A repeated TERMINAL message is not bounded by the generation
+	// ending - UpdateTaskStatus writes only status and the timestamps, so the
+	// sender still passes both gates at the same epoch - it is bounded by
+	// AppendTaskLog's recency arm, and writes a row for as long as finished_at
+	// stays inside the trailing window. That duplicate is expected, and README's
+	// task-log paging block is where an operator is told about it.
+	//
+	// THE GUARD IS ON THE SANITISED VALUE, never on upd.ErrorMessage: a proto3
+	// string may be entirely removable bytes (a lone NUL), and guarding the raw
+	// field would store a content-free "[failed] " line for one.
+	//
+	// A pgx.ErrNoRows is the fence refusing: drop it, publish nothing, count
+	// nothing, log nothing. AppendTaskLog's fence is strictly weaker than the
+	// fence of the write below - identical id, identity and currency predicates,
+	// and a status allow-list relaxed by a recency disjunct - so a refusal here is
+	// refused there too and lands in task_status_fence with a reason. That
+	// argument holds only while no production caller writes a status on the epoch
+	// alone; internal/store/updatetaskstatusepoch_guard_test.go is what keeps that
+	// true, and is named by FILE because spelling its identifier turns that guard
+	// RED.
+	//
+	// ANY OTHER ERROR IS A REAL FAULT and gets a budgeted line. Content cannot
+	// reach it - sanitizeAgentErrorMessage removes the causes a caller supplies -
+	// so what lands here is infrastructure, and the write below is a smaller
+	// statement that can survive a timeout this CTE did not: in that case this
+	// line is the only record that the cause was lost.
+	//
+	// ITS OWN KIND, NOT handleTaskLog's. The two look like one fault class and
+	// sharing kindTaskLogPersist made the keys byte-identical for a given
+	// (task, epoch), so whichever site logged first ate the other's dedupe entry
+	// for the window - and the log-path site can arm that entry WITHOUT OWNING
+	// THE TASK, because a chunk whose content Postgres refuses at Bind fails
+	// before the fence's WHERE is evaluated. The exposure was this line, in
+	// exactly the case it exists for. Pinned by
+	// TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine.
+	if terminal {
+		if cause := sanitizeAgentErrorMessage(upd.ErrorMessage); cause != "" {
+			content := "[" + statusStr + "] " + cause + "\n"
+			row, appendErr := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
+				TaskID:          taskID,
+				Stream:          errorMessageLogStream,
+				Content:         content,
+				AssignmentEpoch: int32(upd.Epoch),
+				WorkerID:        workerID,
+				MinFinishedAt:   h.trailingLogCutoff(),
+			})
+			switch {
+			case appendErr == nil:
+				h.publishTaskLog(uuidStr(taskID), errorMessageLogStream, content, row)
+			case !errors.Is(appendErr, pgx.ErrNoRows):
+				// Never log content: it is agent-supplied and can carry whatever a
+				// job's script echoed. %v on the error is safe for the reason the
+				// sibling arm in handleTaskLog states.
+				canonicalID := uuidStr(taskID)
+				if lim.allow(logKey{kind: kindStatusLogPersist, id: canonicalID, epoch: upd.Epoch}) {
+					log.Printf("worker: handleTaskStatus AppendTaskLog %s: %v", canonicalID, appendErr)
+				}
+			}
+		}
+	}
+
 	// Retry if applicable. The branch decision is made from the T0 row read by
 	// GetTask above, so the statement re-checks that row: AssignmentEpoch is the
 	// generation the currency gate already proved current (int32 is safe for the
@@ -1633,12 +1759,62 @@ type taskLogEvent struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// taskLogPublishes counts chunks that got past the HasLogSubscriber fast path,
+// taskLogPublishes counts task-log lines that got past the HasLogSubscriber fast path,
 // i.e. that are about to be marshalled and published. Test-only observability (read via
 // TaskLogPublishesForTest in export_test.go) for the "nothing is marshalled when
 // nobody is tailing" guarantee, which is otherwise unobservable from outside.
 // Production code never reads it.
 var taskLogPublishes atomic.Int64
+
+// trailingLogCutoff resolves the effective trailing window and returns it as the
+// absolute cutoff AppendTaskLog's recency arm compares against.
+//
+// Resolved PER CALL and never cached:
+// TestHandleTaskLog_TheWindowIsReadFromTheHandlerFieldAtEveryCall moves the
+// field between two calls on one handler and requires them to differ.
+// Non-positive means the default rather than a zero-length window, which is what
+// keeps every existing NewHandler call site correct with no edit;
+// TestHandleTaskLog_AZeroWindowMeansTheDefaultNotAZeroLengthWindow is that leg.
+func (h *Handler) trailingLogCutoff() pgtype.Timestamptz {
+	window := h.TrailingLogWindow
+	if window <= 0 {
+		window = DefaultTrailingLogWindow
+	}
+	return pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true}
+}
+
+// publishTaskLog fans a STORED task-log row out to anyone tailing that task.
+//
+// It takes the inserted row rather than a flag, so it cannot be reached without
+// the insert having happened - the "never publish an unstored chunk" rule made
+// structural instead of remembered at each call site. Pinned by
+// TestHandleTaskLog_StaleEpochIsNeitherStoredNorPublished.
+func (h *Handler) publishTaskLog(taskIDStr, stream, content string, row store.AppendTaskLogRow) {
+	if !h.broker.HasLogSubscriber(taskIDStr) {
+		return // steady state: one map lookup, no marshal, no allocation
+	}
+
+	taskLogPublishes.Add(1)
+	data, err := json.Marshal(taskLogEvent{
+		TaskID:    taskIDStr,
+		JobID:     uuidStr(row.JobID),
+		Seq:       row.ID,
+		Stream:    stream,
+		Content:   content,
+		CreatedAt: row.CreatedAt.Time,
+	})
+	if err != nil {
+		log.Printf("worker: task log publish marshal %s: %v", taskIDStr, err)
+		return
+	}
+
+	h.broker.Publish(events.Event{
+		Type:   events.TypeTaskLog,
+		JobID:  uuidStr(row.JobID),
+		TaskID: taskIDStr,
+		Data:   data,
+	})
+}
 
 // handleTaskLog appends a log chunk from an agent and, if anyone is tailing that
 // task, publishes it to the SSE broker.
@@ -1650,13 +1826,14 @@ var taskLogPublishes atomic.Int64
 //
 // The trailing window is resolved per call and passed to the fence as an
 // absolute cutoff. It costs one time.Now() and one bound parameter - still one
-// round trip, still no allocation on the quiet path. See AppendTaskLog's comment
+// round trip, and it allocates nothing of its own. See AppendTaskLog's comment
 // for why the cutoff is computed here rather than as NOW() - interval in SQL.
 //
 // This runs synchronously on the Connect recv goroutine, which also carries that
 // worker's status, inventory and telemetry messages, so everything below is
 // deliberately cheap: exactly one DB round trip (the insert itself returns the
-// job id and seq), one map lookup when nobody is watching, and a non-blocking
+// job id and seq), one string conversion that the INSERT needs and the publish
+// then reuses, one map lookup when nobody is watching, and a non-blocking
 // Publish. Do not add a query, a goroutine, or a queue here.
 //
 // lim is this connection's log budget, allocated once in Connect. It bounds
@@ -1693,22 +1870,21 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 		stream = "stderr"
 	}
 
-	// Resolved per call, never cached: a test moves the field between two calls
-	// on the same handler to prove this call site actually reads it. Non-positive
-	// means the default, which is what keeps every existing NewHandler call site
-	// correct with no edit.
-	window := h.TrailingLogWindow
-	if window <= 0 {
-		window = DefaultTrailingLogWindow
-	}
+	// ONE CONVERSION, HOISTED, and shared with the publish below. chunk.Content is
+	// a []byte the insert needs as a string anyway, so this copy is unavoidable;
+	// what must not happen is a SECOND one, and passing string(chunk.Content) as
+	// an argument to publishTaskLog would evaluate it before that function's
+	// no-subscriber early return and charge every chunk on an untailed task a
+	// spare copy of the agent's read buffer.
+	content := string(chunk.Content)
 
 	row, err := h.q.AppendTaskLog(ctx, store.AppendTaskLogParams{
 		TaskID:          taskID,
 		Stream:          stream,
-		Content:         string(chunk.Content),
+		Content:         content,
 		AssignmentEpoch: int32(chunk.Epoch),
 		WorkerID:        workerID,
-		MinFinishedAt:   pgtype.Timestamptz{Time: time.Now().Add(-window), Valid: true},
+		MinFinishedAt:   h.trailingLogCutoff(),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1822,31 +1998,7 @@ func (h *Handler) handleTaskLog(ctx context.Context, workerID pgtype.UUID, lim *
 
 	// Persistence is unconditional and strictly precedes any publish; the publish
 	// is derived from the stored row, so no line is ever published unstored.
-	taskIDStr := uuidStr(taskID)
-	if !h.broker.HasLogSubscriber(taskIDStr) {
-		return // steady state: one map lookup, no marshal, no allocation
-	}
-
-	taskLogPublishes.Add(1)
-	data, err := json.Marshal(taskLogEvent{
-		TaskID:    taskIDStr,
-		JobID:     uuidStr(row.JobID),
-		Seq:       row.ID,
-		Stream:    stream,
-		Content:   string(chunk.Content),
-		CreatedAt: row.CreatedAt.Time,
-	})
-	if err != nil {
-		log.Printf("worker: handleTaskLog marshal %s: %v", taskIDStr, err)
-		return
-	}
-
-	h.broker.Publish(events.Event{
-		Type:   events.TypeTaskLog,
-		JobID:  uuidStr(row.JobID),
-		TaskID: taskIDStr,
-		Data:   data,
-	})
+	h.publishTaskLog(uuidStr(taskID), stream, content, row)
 }
 
 // handleTelemetry records a host-utilization sample from an agent, stamped

@@ -64,7 +64,7 @@ import "time"
 // the map already limits things - the map deliberately does not.
 //
 // Note what the composite key does and does not buy. It is required because one
-// map now holds eight kinds of key, NOT because it closes the flood. Moving the
+// map now holds every kind of key, NOT because it closes the flood. Moving the
 // epoch back into the value would still be bounded, because the bucket is the
 // bound. The key shape is a diagnostics decision; the bucket is the security
 // control.
@@ -76,18 +76,20 @@ import "time"
 // It is a stack local in Connect, so it dies with the frame: there is no
 // teardown to get wrong and no way for one connection to reach another's.
 //
-// WHAT THE BUDGET COVERS, so the next reader does not have to enumerate call
-// sites to find out. EIGHT log sites on the gRPC receive path go through it:
-// handleTaskLog's bad-id and persist lines, handleTaskStatus's bad-id, GetTask,
-// retry-write, status-write and dependency-cascade lines, and
-// handleInventoryUpdate's persist line. WHAT IS STILL OUTSIDE IT, and why:
-// registration-time lines (the budget is allocated after
-// authenticateAndRegister returns - bug-2026-08-15-registration-log-sites-are-
-// outside-the-connection-budget) and markWorkerOffline's teardown line, which
-// runs once per connection teardown and so is bounded by the connection caps
-// rather than by message volume. handleTaskLog's marshal line is deliberately
-// unbudgeted; see its own comment for the argument. Counted at HEAD: thirteen
-// log.Printf sites in handler.go, eight budgeted and five not.
+// EVERY BUDGETED SITE NAMES ONE OF THE logKind CONSTANTS BELOW, and
+// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what keeps that
+// true: it parses the package and rejects a logKey literal whose `kind` is
+// anything else. THAT IS ALL IT BUYS. It cannot see an unbudgeted log.Printf,
+// which has no logKey literal to inspect, so do not read it - or this comment -
+// as a census of which sites are covered.
+//
+// WHAT IS STILL OUTSIDE IT, and why: registration-time lines (the budget is
+// allocated after authenticateAndRegister returns -
+// bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget) and
+// markWorkerOffline's teardown line, which runs once per connection teardown and
+// so is bounded by the connection caps rather than by message volume.
+// handleTaskLog's marshal line is deliberately unbudgeted; see its own comment
+// for the argument.
 //
 // ONE FIELD IS THE EXCEPTION AND IT IS DELIBERATE: `drops` points at the
 // Handler's process-lifetime counters, which every connection shares, because a
@@ -175,6 +177,27 @@ const (
 	kindStatusUpdateWrite    // handleTaskStatus's non-ErrNoRows UpdateTaskStatus failure
 	kindStatusFailDependents // handleTaskStatus's FailDependentTasks failure (an :exec; no ErrNoRows arm)
 
+	// kindStatusLogPersist is handleTaskStatus's non-ErrNoRows AppendTaskLog
+	// failure - the prepare-failure cause line, not a subprocess chunk.
+	//
+	// SEPARATE FROM kindTaskLogPersist, AND THE REASON IS DEDUPE CONSUMPTION,
+	// NOT MULTIPLICATION. Both sites append to one task's log, so sharing looked
+	// right and the epoch here cannot be varied by the caller - but the two keys
+	// would be byte-identical for the same (task, epoch), and whichever site
+	// logged first eats the other's dedupe entry for the whole window. The log
+	// path can arm it WITHOUT OWNING THE TASK: a chunk whose content Postgres
+	// refuses at Bind (a NUL, SQLSTATE 22021) fails before the fence's WHERE is
+	// evaluated, so any sender can arm any (task, epoch) it names. That silences
+	// the status-path line exactly when a concurrent real fault makes it the only
+	// record that the prepare-failure cause was lost. Same shape as the
+	// bad-task-id split above; pinned by
+	// TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine.
+	//
+	// It also buys the attribution the status-write kinds were split for: "the
+	// cause line did not persist" and "a subprocess chunk did not persist" are
+	// different incidents for an operator reading the published counts.
+	kindStatusLogPersist
+
 	// kindCount MUST STAY LAST and is NOT a kind. It is the length of
 	// ingestLogCounters' array. A kind added after it is not counted at all;
 	// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what makes
@@ -182,12 +205,17 @@ const (
 	kindCount
 )
 
-// logKey is the dedupe key. Only kindTaskLogPersist populates id and epoch; the
-// other SEVEN kinds deliberately carry NO wire value, so the caller cannot vary
-// them (see the per-site table in the spec's section 6.4). The three status-write
-// kinds joined that set for the reason already written at kindStatusGetTask: an
-// infrastructure episode is not per-task, so keying on the task id would multiply
-// one event by the task count.
+// logKey is the dedupe key. The id and epoch fields are populated by the two
+// PERSIST kinds only - kindTaskLogPersist and kindStatusLogPersist, whose
+// failures really are per task per generation; every other kind deliberately
+// carries NO wire value, so the caller cannot vary it (see the per-site table in
+// the spec's section 6.4). The status-write kinds joined that set for the reason
+// already written at kindStatusGetTask: an infrastructure episode is not
+// per-task, so keying on the task id would multiply one event by the task count.
+//
+// TWO KINDS SHARING THIS SHAPE IS NOT TWO KINDS SHARING A KEY. The kind is part
+// of the key, which is precisely what stops one persist site consuming the
+// other's entry; see kindStatusLogPersist.
 //
 // The only string that ever reaches this struct is a CANONICALLY RE-ENCODED task
 // id - uuidStr over the parsed pgtype.UUID, never the wire string. That is 36
@@ -224,9 +252,9 @@ const (
 	ingestLogRefill = 10 * time.Second
 
 	// How long one key stays deduplicated before it re-arms. THE SUPPRESSION MUST
-	// BE TIME-BOUNDED, and that is not a nicety - seven of the eight kinds carry no
-	// wire value, so each of them is exactly ONE key for the connection's whole
-	// life and can never reach the capacity clear on its own. With a bare presence
+	// BE TIME-BOUNDED, and that is not a nicety - the kinds that carry no wire
+	// value are exactly ONE key each for the connection's whole life and can never
+	// reach the capacity clear on their own. With a bare presence
 	// flag they logged once per connection and then never again: a Postgres outage
 	// at hour 1 reported one line and a SECOND, unrelated outage at hour 40 on the
 	// same long-lived stream reported nothing at all. Measured with a frozen clock:

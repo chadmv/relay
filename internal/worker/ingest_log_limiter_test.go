@@ -270,16 +270,16 @@ func TestIngestLogLimiter_AConstantKeyKeepsReportingAcrossALongConnection(t *tes
 	}
 }
 
-// THE `kind` COMPONENT OF THE KEY. SEVEN of the eight kinds carry NO wire value,
-// so each is exactly one logKey and `kind` is the ONLY thing keeping them apart.
-// Nothing else in the tree pins it: a lens set k.kind = 0 at the top of allow and
-// the entire package, unit plus integration, stayed green. A refactor that drops
-// the field, or a further kind with the same zero-value shape, would silently
-// collapse independent diagnostics into one.
+// THE `kind` COMPONENT OF THE KEY. The kinds that carry no wire value are each
+// exactly one logKey, so `kind` is the ONLY thing keeping them apart. Nothing else
+// in the tree pins it: a lens set k.kind = 0 at the top of allow and the entire
+// package, unit plus integration, stayed green. A refactor that drops the field,
+// or a further kind with the same zero-value shape, would silently collapse
+// independent diagnostics into one.
 //
-// THE COUNT MATTERS AGAINST THE BURST: len(kinds) distinct keys are spent in one
-// call each, so this test is only meaningful while len(kinds) <= ingestLogBurst
-// (16). Eight is comfortably inside it.
+// THE MAP BELOW IS A CENSUS, so it is checked rather than trusted. len(l.seen) ==
+// len(kinds) compares the map against itself and cannot see an omitted kind; the
+// length checks against kindCount and ingestLogBurst are what make one RED.
 func TestIngestLogLimiter_EveryKindIsItsOwnDedupeKey(t *testing.T) {
 	l, _ := newFrozen()
 	kinds := map[string]logKind{
@@ -291,6 +291,7 @@ func TestIngestLogLimiter_EveryKindIsItsOwnDedupeKey(t *testing.T) {
 		"kindStatusRetryWrite":     kindStatusRetryWrite,
 		"kindStatusUpdateWrite":    kindStatusUpdateWrite,
 		"kindStatusFailDependents": kindStatusFailDependents,
+		"kindStatusLogPersist":     kindStatusLogPersist,
 	}
 	for name, kind := range kinds {
 		if !l.allow(logKey{kind: kind}) {
@@ -299,6 +300,14 @@ func TestIngestLogLimiter_EveryKindIsItsOwnDedupeKey(t *testing.T) {
 	}
 	if len(l.seen) != len(kinds) {
 		t.Errorf("len(seen) = %d, want %d - one distinct key per kind", len(l.seen), len(kinds))
+	}
+	if len(kinds) != int(kindCount)-1 {
+		t.Errorf("kinds lists %d of %d - EVERY kind must be here, or this test silently stops "+
+			"covering the ones that are not", len(kinds), int(kindCount)-1)
+	}
+	if len(kinds) > ingestLogBurst {
+		t.Errorf("kinds lists %d and ingestLogBurst is %d - each key is spent in one call, so this "+
+			"test stops discriminating once the census exceeds the burst", len(kinds), ingestLogBurst)
 	}
 }
 

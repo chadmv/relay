@@ -20,6 +20,31 @@ type Runner interface {
 	Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error
 }
 
+// p4CommandError is what a failed p4 invocation returns. It keeps the command
+// ARGS, the underlying error and p4's stderr in separate fields so a reader can
+// tell which of the three a given phrase came from; classifiableText is what
+// depends on that and explains why.
+// Error() renders `p4 <args>: <err> (stderr: <stderr>)`, the shape every
+// classification fixture and operator-facing p4 failure message is written
+// against.
+type p4CommandError struct {
+	args   []string
+	err    error
+	stderr string
+}
+
+// Never nest one of these inside another: errors.As binds the outer, and the
+// inner's args would render back into classifiable text through pe.err.
+func newP4CommandError(args []string, err error, stderr string) *p4CommandError {
+	return &p4CommandError{args: append([]string(nil), args...), err: err, stderr: stderr}
+}
+
+func (e *p4CommandError) Error() string {
+	return fmt.Sprintf("p4 %s: %v (stderr: %s)", strings.Join(e.args, " "), e.err, e.stderr)
+}
+
+func (e *p4CommandError) Unwrap() error { return e.err }
+
 // execRunner uses os/exec to invoke the p4 binary on PATH.
 type execRunner struct{ binary string }
 
@@ -37,7 +62,7 @@ func (e *execRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("p4 %s: %w (stderr: %s)", strings.Join(args, " "), err, stderr.String())
+		return nil, newP4CommandError(args, err, stderr.String())
 	}
 	return out, nil
 }
@@ -49,12 +74,15 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return newP4CommandError(args, err, "")
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return err
+		// Structured like every other failure out of this type, because
+		// classifyP4Error only classifies what came from a p4 invocation and this
+		// is the route a missing binary takes on the sync path.
+		return newP4CommandError(args, err, "")
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -62,7 +90,7 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 		onLine(sc.Text())
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("p4 %s: %w (stderr: %s)", strings.Join(args, " "), err, stderr.String())
+		return newP4CommandError(args, err, stderr.String())
 	}
 	return nil
 }
@@ -90,8 +118,8 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 
 	// Override Root so the workspace points at our chosen on-disk dir.
 	spec = setSpecField(spec, "Root", root)
-	spec = setSpecField(spec, "Host", "")   // blank Host: portable across renames
-	spec = setSpecField(spec, "Owner", "")  // let p4 default to the caller
+	spec = setSpecField(spec, "Host", "")  // blank Host: portable across renames
+	spec = setSpecField(spec, "Owner", "") // let p4 default to the caller
 
 	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err

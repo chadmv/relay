@@ -245,3 +245,33 @@ first placed in `python/tests/unit/`, inside `python.yml`'s `paths: python/**` f
 the Go symbol and touching nothing under `python/` would never have triggered it. Placement in a lane
 that runs is not sufficient; the lane must run on the commits that can break the property.
 
+
+## Appended 2026-09-03 - a tenth instance, and the cheapest one yet to move
+
+The prepare-failure-visibility batch supplied two instances of this item's shape, one of which it
+fixed in place and one of which it could not.
+
+**Fixed, and worth recording because the fix was free.** The batch's sanitiser guard
+(`TestSanitizeAgentErrorMessage_BoundsAndValidity`) was first written inside a
+`//go:build integration` file, behind a seam exported from the equally tagged `export_test.go` -
+even though it tests a pure string function and touches no database. `internal/worker` already has
+fifteen untagged `package worker` test files, so the seam was not needed at all: the test moved to
+an untagged file, calls the unexported function directly, and the export shim was deleted. It now
+runs in `make test` and in CI's race lane. **When triaging an instance, ask first whether the guard
+needs the tag at all** - a pure-function guard behind a Postgres tag is the cheapest possible
+instance to retire, and this one was retired by deleting code rather than adding a CI job.
+
+**Not fixed, and it is the batch's first design decision.** `errorMessageLogStream = "stderr"`
+decides which stream the coordinator's synthesized prepare-failure line lands on - the spec's
+section 4.1, chosen against a migration CHECK that admits only `stdout` and `stderr`. Measured:
+mutating the constant to `"stdout"` **survives the untagged lane** and dies only under the
+integration tag, at a single assertion. The reason is structural rather than an oversight: the two
+untagged tests that drive `handleTaskStatus` use a stub that counts `AppendTaskLog` calls without
+capturing the `Stream` argument, so no untagged test **can** observe the constant's value.
+
+That is a new sub-shape for this item's menu. The previous instances are guards that were placed in
+an unrun lane; this one is a guard that cannot be placed anywhere else **without widening a test
+stub**, because the default lane's fake discards the field under test. The remedy is therefore not
+"move the test" but "make the stub record what the assertion needs" - a smaller change than a CI
+job, and one that generalises: a default-lane stub that drops a field makes every property of that
+field integration-only by construction.

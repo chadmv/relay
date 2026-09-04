@@ -87,13 +87,28 @@ func TestPerforce_E2E_SyncAndUnshelve(t *testing.T) {
 	require.True(t, ok, "workspace entry should remain in registry after finalize")
 	require.Empty(t, e.OpenTaskChangelists, "Finalize should clear pending changelists")
 
-	// --- Second prepare: same spec → should not re-sync (baseline matches) ---
+	// --- Second prepare: same spec, on a workspace already at that baseline ---
+	// This spec carries an unshelve, so tryAdmit's needsExclusive arm hands out
+	// ModeExclusive on every Prepare and needsSync is true regardless of the
+	// baseline: the second Prepare DOES run p4 sync, and it is a no-op.
+	// Asserting the progress callback saw nothing cannot express "no re-sync",
+	// because `p4 sync -q` on an up-to-date single-file workspace prints nothing
+	// either way - the same reason the first prepare above does not assert on it.
+	// The bracket lines are what make the sync observable at all, so assert them.
 	var progress2 []string
 	h2, err := prov.Prepare(ctx, "task-2", spec, func(s string) {
 		progress2 = append(progress2, s)
 	})
 	require.NoError(t, err, "second Prepare on same baseline should succeed")
-	require.Empty(t, progress2, "second Prepare with same baseline should not trigger re-sync")
+	// The count is part of the property: the per-phrase assertions below admit
+	// arbitrary extra output on their own. Keep both halves.
+	require.Len(t, progress2, 2, "the two brackets and nothing else, got: %v", progress2)
+	require.Equal(t, 1, countLinesContaining(progress2, "[sync] starting"),
+		"the second Prepare syncs under exclusive mode, got: %v", progress2)
+	require.Equal(t, 1, countLinesContaining(progress2, "[sync] complete"),
+		"and it completes, got: %v", progress2)
+	require.Equal(t, 0, countLinesContaining(progress2, "[recover]"),
+		"no crash-recovery path may fire here, got: %v", progress2)
 	require.NoError(t, h2.Finalize(ctx), "second Finalize should succeed")
 
 	// Workspace dir must still exist after second finalize.

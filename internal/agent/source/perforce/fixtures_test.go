@@ -15,6 +15,10 @@ type tHelper interface {
 	Errorf(format string, args ...any)
 }
 
+// fakeRunner returns the same error TYPE execRunner does. A fake that returned
+// bare errors could not exercise classifyP4Error at all once classification is
+// restricted to what a p4 invocation produced, and could not model the
+// args-exclusion that restriction exists for.
 type fakeRunner struct {
 	t         tHelper
 	calls     []runCall
@@ -61,6 +65,12 @@ func (f *fakeRunner) setStream(key, out string) {
 	f.streamOut[key] = out
 }
 
+// setStreamErr makes Stream return err for the given args key without invoking
+// onLine, which is how a test drives a p4 sync FAILURE.
+func (f *fakeRunner) setStreamErr(key string, err error) {
+	f.streamErr[key] = err
+}
+
 func (f *fakeRunner) argHistory() [][]string {
 	result := make([][]string, len(f.calls))
 	for i, c := range f.calls {
@@ -76,7 +86,7 @@ func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 		return nil, ctx.Err()
 	}
 	if e, ok := f.err[key]; ok && e != nil {
-		return nil, e
+		return nil, newP4CommandError(args, e, "")
 	}
 	if _, ok := f.out[key]; !ok {
 		f.t.Helper()
@@ -95,7 +105,7 @@ func (f *fakeRunner) Run(ctx context.Context, cwd string, args []string, stdin i
 func (f *fakeRunner) Stream(ctx context.Context, cwd string, args []string, onLine func(string)) error {
 	key := strings.Join(args, " ")
 	if e, ok := f.streamErr[key]; ok && e != nil {
-		return e
+		return newP4CommandError(args, e, "")
 	}
 	if _, ok := f.streamOut[key]; !ok {
 		f.t.Helper()

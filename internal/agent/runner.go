@@ -18,6 +18,22 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 )
 
+// maxLoggedArgBytes bounds one caller-supplied string on the host log. Wide
+// enough to keep a real p4 cause readable.
+// TestRunner_TheHostLogClipBoundIsWhatItSaysItIs is what makes a change to it
+// deliberate; the two clip guards scale with it and cannot see it move.
+const maxLoggedArgBytes = 4096
+
+// clipArg bounds one caller-supplied string for the host log. Pair it with %q,
+// which is the injection defence; this is the volume defence. Clipping mid-rune
+// is harmless because %q escapes whatever byte results.
+func clipArg(s string) string {
+	if len(s) <= maxLoggedArgBytes {
+		return s
+	}
+	return s[:maxLoggedArgBytes] + "...(truncated)"
+}
+
 // reservedIdentityNames are the environment names the coordinator owns in a task
 // subprocess. Nothing else may supply them; see the merge in Run.
 var reservedIdentityNames = [...]string{"RELAY_TASK_ID", "RELAY_JOB_ID", "RELAY_JOB_URL", "RELAY_TASK_URL"}
@@ -143,6 +159,12 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 	// workspace. Dispatch does not filter on provider capability, so this is the
 	// agent's last line of defense.
 	if task.Source != nil && r.provider == nil {
+		// The one prepare failure whose remedy is a change to THIS host, so it
+		// gets a host line as well as the coordinator-side one the server stores
+		// from ErrorMessage. It returns before the prepare line below, so without
+		// this it leaves no host record.
+		// TestRunner_ASourceTaskWithNoProviderLogsWhyOnTheHost.
+		log.Printf("runner: no workspace provider for %s; refusing its source spec (check p4 preflight / RELAY_WORKSPACE_ROOT)", r.taskID)
 		r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 			TaskStatus: &relayv1.TaskStatusUpdate{
 				TaskId:       r.taskID,
@@ -162,9 +184,15 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 			},
 		}})
 		progress, flushProgress := r.makePrepareProgressFn()
+		log.Printf("runner: preparing workspace for %s", r.taskID)
 		handle, err := r.provider.Prepare(ctx, r.taskID, task.Source, progress)
 		flushProgress() // drain any buffered tail lines whether Prepare succeeded or failed
 		if err != nil {
+			// The record that survives when the send does not.
+			// TestRunner_APrepareFailureIsOnTheHostLogWithItsCause pins the cause
+			// reaching the log; TestRunner_APrepareFailureQuotesAndBoundsItsCause
+			// pins the %q and clipArg pair.
+			log.Printf("runner: prepare failed for %s: %q", r.taskID, clipArg(err.Error()))
 			r.send(&relayv1.AgentMessage{Payload: &relayv1.AgentMessage_TaskStatus{
 				TaskStatus: &relayv1.TaskStatusUpdate{
 					TaskId:       r.taskID,
@@ -265,6 +293,18 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		stepTotal := int32(total)
 		r.sendStepMarker(step, stepTotal, argv)
 
+		// argv[0] ONLY. Nothing in relay sanitises command arguments, so a token
+		// passed as one would land here verbatim.
+		// TestRunner_AStepLineNamesTheProgramAndNotItsArguments is the guard. It
+		// bounds THIS surface and closes nothing: sendStepMarker above already
+		// writes the whole vector into task_logs.
+		// %q is the injection defence and clipArg the volume defence; nothing in
+		// this package constrains argv[0], so without %q a newline in it forges a
+		// host-log line.
+		// TestRunner_AStepLineQuotesTheProgramSoItCannotForgeALogLine and
+		// TestRunner_AStepLineBoundsAnOverlongProgramName pin the pair.
+		log.Printf("runner: exec step %d/%d for %s: %q", step, stepTotal, r.taskID, clipArg(argv[0]))
+
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.WaitDelay = 5 * time.Second // bound pipe draining after process exit/kill
 		assignProcTree, cleanupProcTree := setupProcTree(cmd)
@@ -284,6 +324,11 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 		cmd.Stderr = errW
 
 		if err := cmd.Start(); err != nil {
+			// This break skips the exit line below, so a step that never started
+			// would otherwise announce itself and then fall silent. The error text
+			// quotes argv[0], so it needs the same %q and clipArg pair.
+			// TestRunner_AStepThatCannotStartSaysSoInsteadOfGoingSilent.
+			log.Printf("runner: step %d/%d for %s failed to start: %q", step, stepTotal, r.taskID, clipArg(err.Error()))
 			finalStatus = relayv1.TaskStatus_TASK_STATUS_FAILED
 			break
 		}
@@ -333,6 +378,16 @@ func (r *Runner) Run(ctx context.Context, task *relayv1.DispatchTask) {
 				lastExitCode = &c
 			}
 		}
+
+		// After lastExitCode is computed and before either way out of the step, so
+		// a step that started logs exactly one exit line whether it succeeded or
+		// failed. The cmd.Start break above logs its own failure instead.
+		// TestRunner_EveryStepLogsItsStartAndItsExit.
+		exit := "unknown"
+		if lastExitCode != nil {
+			exit = strconv.Itoa(int(*lastExitCode))
+		}
+		log.Printf("runner: step %d/%d for %s exited (exit=%s, err=%v)", step, stepTotal, r.taskID, exit, waitErr)
 
 		if waitErr == nil {
 			continue

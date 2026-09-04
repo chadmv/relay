@@ -1,8 +1,10 @@
 ---
 title: The agent logs nothing between accepting a task and finalizing it, so a wedged prepare or step is invisible on the host
 type: feature
-status: open
+status: closed
 created: 2026-09-03
+closed: 2026-09-03
+resolution: fixed
 priority: low
 source: SDNM fork divergence analysis (relay_updates.md, PR-6), evaluated 2026-09-03
 ---
@@ -52,3 +54,33 @@ the one that carries the narrowing and must be written first.
 - `internal/agent/source/perforce/perforce.go` - `Provider.Prepare`, the sync call site
 - [[bug-2026-09-03-prepare-failure-error-message-is-discarded]] - the server-side half of the
   same prepare-failure visibility gap
+
+## Resolution
+
+Fixed on `claude/top-3-roadmap-items-65856f`. **Five host-log lines, not the four this item
+specified:** the no-provider `PREPARE_FAILED` returns above the prepare line and would otherwise
+leave no host record at all, so it got its own. The others are prepare start, prepare failure with
+cause, each step's start, and each step's exit - plus a sixth added during review for the
+`cmd.Start()` failure, which otherwise announced a step and then fell silent.
+
+The `argv[0]` narrowing shipped as specified and is pinned by a test whose secret lives in
+`argv[1:]`. Review found the narrowing bounds secrecy and not injection, so every caller-supplied
+string on these lines now carries `%q` and a clip - `argv[0]` is job-author-controlled with no
+content validation anywhere, so a newline in it could otherwise forge host-log lines attributing
+outcomes to other tasks.
+
+The provider's sync lifecycle goes through the `progress` callback into `task_logs` as specified,
+and the failure bracket deliberately carries no error text, because the coordinator now stores the
+cause exactly once. `handle.Release()` was moved above that bracket: `progress` flushes through a
+send bounded only by the agent context, so it could park while holding the workspace.
+
+**Two things this item's text got wrong**, both harmless: its rebase note was a history claim
+nothing in the tree could confirm, and its test hedge about `t.Parallel` was unnecessary -
+`internal/agent` has none, which the new tests preserve.
+
+Residuals filed separately:
+[[bug-2026-09-03-sendstepmarker-writes-full-argv-to-task-logs]] (the narrowing closes nothing
+already open - `sendStepMarker` still writes the whole vector into `task_logs`),
+[[bug-2026-09-03-provider-progress-parks-while-holding-the-workspace]] (two callbacks still park
+under the hold and cannot be reordered away), and
+[[feature-2026-09-03-sendfinalstatus-carries-no-error-message]].

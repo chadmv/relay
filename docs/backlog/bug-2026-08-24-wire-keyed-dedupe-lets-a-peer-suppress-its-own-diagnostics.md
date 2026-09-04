@@ -1,5 +1,5 @@
 ---
-title: A wire-keyed dedupe key lets a connection drain the shared log budget and suppress its own other seven kinds
+title: A wire-keyed dedupe key lets a connection drain the shared log budget and suppress its own other kinds
 type: bug
 status: open
 created: 2026-08-24
@@ -11,9 +11,9 @@ source: Phase 4 security lens of the 2026-08-24 handletaskstatus-pair slice; rep
 
 ## Summary
 
-`ingestLogLimiter` is one bucket of `ingestLogBurst` (16) tokens per `Connect`, shared by all eight
-log kinds. Seven of the eight carry no wire value, so each costs at most one token per dedupe window
-and a peer cannot drain the bucket through them.
+`ingestLogLimiter` is one bucket of `ingestLogBurst` (16) tokens per `Connect`, shared by every log
+kind. All but `kindTaskLogPersist` carry no wire value, so each costs at most one token per dedupe
+window and a peer cannot drain the bucket through them.
 
 `kindTaskLogPersist` is the exception: its key carries `chunk.Epoch` straight off the wire, so distinct
 keys are free **if** a peer can produce a non-`pgx.ErrNoRows` `AppendTaskLog` error. It can. A `\x00`
@@ -33,7 +33,7 @@ implementing engineer:
    with a different `epoch`.
 2. Observe `ingest_log_budget.counts.suppressed.task_log_persist` climbing while `deduped` stays zero -
    each malformed chunk mints a fresh dedupe key rather than collapsing onto one.
-3. Send any message that would produce one of the other seven kinds' log lines. It is suppressed. The
+3. Send any message that would produce one of the other kinds' log lines. It is suppressed. The
    identical message on a fresh connection is not.
 
 ## Context
@@ -52,6 +52,14 @@ is exactly the party with the ability.
 The slice half-saw this. `internal/worker/ingest_log_limiter_test.go` notes that the test is "only
 meaningful while `len(kinds) <= ingestLogBurst`" - the shared-bucket fact was noticed in a test and
 never carried across into "can a peer hold it at zero".
+
+The prepare-failure-visibility batch added a ninth kind, `kindStatusLogPersist`, whose line is the
+only record that a task's failure cause was lost before it could be stored. That line is a new
+victim of this drain. Note precisely what is and is not closed: the batch split the status site off
+`kindTaskLogPersist` so the log path can no longer consume the status path's dedupe ENTRY
+(`TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine`), but the two kinds still share
+one BUCKET, so the drain described above suppresses the new line exactly as it suppresses the
+others. A fix here is what makes the prepare-failure cause reliably diagnosable.
 
 ## Proposal
 
