@@ -124,19 +124,7 @@ func (d *Dispatcher) dispatch(ctx context.Context) {
 	}
 
 	// Build warm-workspace map for tasks that have a source spec.
-	streamsByType := make(map[string][]string) // source_type → []source_key
-	for _, task := range tasks {
-		if len(task.Source) == 0 {
-			continue
-		}
-		var s api.SourceSpec
-		if err := json.Unmarshal(task.Source, &s); err != nil {
-			continue
-		}
-		if s.Type != "" && s.Stream != "" {
-			streamsByType[s.Type] = append(streamsByType[s.Type], s.Stream)
-		}
-	}
+	streamsByType := warmKeysForTasks(tasks)
 	warmByWorker := make(map[pgtype.UUID][]store.WorkerWorkspace)
 	for typ, keys := range streamsByType {
 		rows, err := d.q.ListWarmWorkspacesForKeys(ctx, store.ListWarmWorkspacesForKeysParams{
@@ -187,6 +175,31 @@ func taskIsSourceBearing(task store.Task) bool {
 	return s.Type != ""
 }
 
+// warmKeysForTasks groups the eligible tasks' workspace source keys by source
+// type, for the warm-workspace lookup. Extracted from dispatch so the keys it
+// asks the database for and the keys selectWorker compares against provably
+// come from one producer; a lookup keyed on anything else fetches rows the
+// comparison can never match, and the bias just silently stops firing.
+func warmKeysForTasks(tasks []store.Task) map[string][]string {
+	out := make(map[string][]string)
+	for _, task := range tasks {
+		if len(task.Source) == 0 {
+			continue
+		}
+		var s api.SourceSpec
+		if err := json.Unmarshal(task.Source, &s); err != nil {
+			continue
+		}
+		if s.Type == "" || s.Stream == "" {
+			continue
+		}
+		if k := SourceKeyFromAPISpec(&s); k != "" {
+			out[s.Type] = append(out[s.Type], k)
+		}
+	}
+	return out
+}
+
 func (d *Dispatcher) selectWorker(
 	task store.Task,
 	workers []store.Worker,
@@ -213,6 +226,11 @@ func (d *Dispatcher) selectWorker(
 		}
 	}
 	sourceBearing := taskIsSourceBearing(task)
+	// Computed ONCE, outside the worker loop, and through the same function the
+	// agent's registry key comes from. Comparing taskSrc.Stream here - what this
+	// did before exclusions existed - silently stops matching for every excluded
+	// task, because a composite key never equals a bare stream.
+	warmKey := SourceKeyFromAPISpec(taskSrc)
 
 	var best *store.Worker
 	var bestScore int64 = -1
@@ -251,9 +269,9 @@ func (d *Dispatcher) selectWorker(
 			continue
 		}
 		score := free
-		if taskSrc != nil {
+		if warmKey != "" {
 			for _, ws := range warmByWorker[w.ID] {
-				if ws.SourceType == taskSrc.Type && ws.SourceKey == taskSrc.Stream {
+				if ws.SourceType == taskSrc.Type && ws.SourceKey == warmKey {
 					estimate := BaselineHashFromAPISpec(taskSrc)
 					if estimate != "" && ws.BaselineHash == estimate {
 						score += 10_000
