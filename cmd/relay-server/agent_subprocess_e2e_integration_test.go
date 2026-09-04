@@ -18,9 +18,13 @@ package main
 // runs a real subprocess, and reads task_logs back out of Postgres.
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // agentE2EHelperEnv selects helper mode. It travels through DispatchTask.Env,
@@ -96,4 +100,71 @@ func TestAgentSubprocessE2EHelperProcess(t *testing.T) {
 	_, _ = os.Stdout.WriteString(e2eStdoutIn)
 	_, _ = os.Stderr.WriteString(e2eStderrIn)
 	os.Exit(0)
+}
+
+// waitFor polls cond until it returns true, and FAILS THE TEST BY NAME if it
+// does not within limit.
+//
+// EVERY WAIT IN THIS FILE GOES THROUGH IT, and that is the point. This harness
+// starts a subprocess and a gRPC stream, and a mutation anywhere in the path
+// under test typically manifests as "the thing never happens" rather than "the
+// thing happens wrongly" - an epoch-0 mutant makes the fence reject every
+// status, so the task never reaches a terminal state at all. Without a deadline
+// that case is an indefinite hang, which reads in a mutation battery exactly
+// like a wedged container or a lost Docker socket. With one it is a named
+// failure that says which step never completed.
+//
+// cond runs on the test goroutine, so t.Fatalf here is legal and aborts the
+// test rather than leaking a goroutine that logs after the test returns.
+func waitFor(t *testing.T, what string, limit time.Duration, cond func() bool) {
+	t.Helper()
+	waitForOn(t, what, limit, cond)
+}
+
+// fatalT is the minimal surface waitForOn needs. It exists so waitFor's OWN
+// timeout behaviour is testable: there is no way to prove a real *testing.T did
+// not hang by making it hang, and a t.Fatalf on a real *testing.T marks the
+// parent permanently failed with no way to un-fail it. Every real call site
+// passes a genuine *testing.T. Same reasoning as pgdsn.AssertT.
+type fatalT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// fakeFatalT records the first Fatalf instead of aborting, so the timeout arm
+// can be observed as a value.
+type fakeFatalT struct {
+	failed bool
+	msg    string
+}
+
+func (f *fakeFatalT) Helper() {}
+func (f *fakeFatalT) Fatalf(format string, args ...any) {
+	if !f.failed {
+		f.failed = true
+		f.msg = fmt.Sprintf(format, args...)
+	}
+}
+
+func waitForOn(t fatalT, what string, limit time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", limit, what)
+			return // the fake does not abort; a real *testing.T never reaches here
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestWaitFor_ATimeoutFailsByNameInsteadOfHanging(t *testing.T) {
+	fake := &fakeFatalT{}
+	waitForOn(fake, "the thing that never happens", 50*time.Millisecond, func() bool { return false })
+	require.True(t, fake.failed, "a wait that never succeeds must fail, not return quietly")
+	require.Contains(t, fake.msg, "the thing that never happens",
+		"the failure must name what it was waiting for; an unnamed timeout is unreadable in a mutation battery")
 }
