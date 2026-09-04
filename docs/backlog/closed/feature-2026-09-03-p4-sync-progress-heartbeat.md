@@ -1,7 +1,9 @@
 ---
 title: A multi-hour p4 sync emits nothing, so the task log cannot distinguish progress from a stall
 type: feature
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-03
 priority: medium
 source: SDNM fork divergence analysis (relay_updates.md, PR-3), evaluated 2026-09-03
@@ -75,3 +77,38 @@ Tests.
 - [[bug-2026-09-03-perforce-virtual-and-remap-streams-fail-to-sync]] - same call site; land after it
 - [[feature-2026-09-03-preparing-task-status]] - the status the panel shows while this runs
 - [[feature-2026-09-03-classify-out-of-disk-p4-errors]]
+
+## Resolution
+
+`p4 sync` no longer carries `-q`; its per-file stdout lines are counted and never
+forwarded, and a five-field summary is emitted on a timer into `task_logs`.
+`RELAY_SYNC_HEARTBEAT_INTERVAL` defaults to 30s, disables at `0s` and refuses anything
+under a 5s floor.
+
+**The item's architecture was refuted and inverted.** It proposed a heartbeat GOROUTINE
+calling `progress` on a timer. `progress` is a closure that takes a mutex and holds it
+across a send selecting only on the send channel and the AGENT context, so a second
+caller is not merely slow when the consumer parks - it is a mutual-exclusion point, and
+`Prepare`'s own completion line, `Runner.Run`'s flush and any join on the goroutine all
+block on that mutex with the workspace handle still held, so `Prepare` never returns.
+What shipped inverts it: the SYNC runs on a goroutine and the heartbeat loop stays on
+`Prepare`'s own, so `progress` keeps exactly one caller and the select keeps exactly two
+cases.
+
+Three other item claims did not survive contact. A live test asserted the exact opposite
+of acceptance criterion 2 (that p4's own output must still reach `progress`); an existing
+guard refuses `stop(err)` emitting the failure cause; and `0` does not disable anything,
+because the duration parser's regex requires a unit.
+
+Review then found four defects in the slice's own new code. The depot-path field was cut
+at a raw byte offset, so a filename with a multi-byte rune straddling the bound produced
+invalid UTF-8, which Postgres rejects for a `TEXT` column - dropping the whole batched
+chunk, and stickily, so the task log went silent for the rest of the sync. The same filter
+admitted DEL, the C1 range, `U+2028` and the bidi controls, so a depot path could forge a
+`[sync] failed:` line; the tail is rendered with `%q` now. The configured interval never
+reached the ticker under test, so the whole knob could be ignored end to end with every
+package green. And `execRunner.Stream` wedged forever on a mid-stream scan error, because
+nothing drained stdout before `cmd.Wait()`.
+
+Scoped out and recorded rather than silently left: `p4 sync` exits zero when a path matches
+nothing, which dropping `-q` does not make observable because that family is on stderr.
