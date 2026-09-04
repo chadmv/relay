@@ -184,8 +184,19 @@ func TestRunner_AStepLineBoundsAnOverlongProgramName(t *testing.T) {
 
 	out := logged()
 	require.Contains(t, out, "exec step 1/1", "the step line must still be emitted")
-	assert.Less(t, len(out), 10_000,
-		"one over-long argv[0] must not write an unbounded host-log line")
+	assert.Less(t, len(out), 2*maxLoggedArgBytes+512,
+		"one over-long argv[0] must not write an unbounded host-log line; this "+
+			"path logs it twice, in the exec line and in the start-failure error")
+}
+
+// The two clip guards below express their thresholds in terms of
+// maxLoggedArgBytes, which is right for what they pin - output proportional to
+// the bound rather than to the input, so removing clipArg reddens them - but it
+// also means they scale with the constant and cannot see the constant itself
+// move. Raising the bound is a decision about host-log volume on a per-step and
+// per-task line; this is what keeps that decision deliberate rather than silent.
+func TestRunner_TheHostLogClipBoundIsWhatItSaysItIs(t *testing.T) {
+	assert.Equal(t, 4096, maxLoggedArgBytes)
 }
 
 // A step whose binary is missing breaks out of the loop BEFORE the exit line, so
@@ -234,5 +245,5 @@ func TestRunner_APrepareFailureQuotesAndBoundsItsCause(t *testing.T) {
 	require.Contains(t, out, "prepare failed for prep-forge", "the line must still be emitted")
 	assert.NotContains(t, out, forgedTail,
 		"a newline in the prepare cause must not start a new host-log line")
-	assert.Less(t, len(out), 10_000, "and the cause must be bounded")
+	assert.Less(t, len(out), maxLoggedArgBytes+512, "and the cause must be bounded")
 }
