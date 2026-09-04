@@ -18,13 +18,28 @@ package main
 // runs a real subprocess, and reads task_logs back out of Postgres.
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"relay/internal/agent"
+	"relay/internal/events"
+	"relay/internal/netlimit"
+	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/store"
+	"relay/internal/testsupport/pgdsn"
+	"relay/internal/tokenhash"
+	"relay/internal/worker"
+
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 )
 
 // agentE2EHelperEnv selects helper mode. It travels through DispatchTask.Env,
@@ -167,4 +182,69 @@ func TestWaitFor_ATimeoutFailsByNameInsteadOfHanging(t *testing.T) {
 	require.True(t, fake.failed, "a wait that never succeeds must fail, not return quietly")
 	require.Contains(t, fake.msg, "the thing that never happens",
 		"the failure must name what it was waiting for; an unnamed timeout is unreadable in a mutation battery")
+}
+
+// newPgdsnPoolAndQueries takes a fresh migrated database from the shared
+// harness. NOT tcpostgres directly, unlike this package's three older helpers:
+// pgdsn gives one testcontainer per call when RELAY_TEST_DATABASE_URL is unset
+// and one freshly CREATEd database on a supplied server when it is set, which
+// is the mode .github/workflows/go-ci.yml's Postgres-service jobs use - so this
+// harness can run in CI with no Docker daemon at all.
+func newPgdsnPoolAndQueries(t *testing.T) (*pgxpool.Pool, *store.Queries) {
+	t.Helper()
+	dsn := pgdsn.NewIntegrationDSN(t)
+	pool, err := pgxpool.New(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "agent e2e pgxpool.Close", pool.Close) })
+	return pool, store.New(pool)
+}
+
+// startAgentE2EServer wires a listener exactly as cmd/relay-server's main()
+// does: grpcServerOptions -> netlimit.Wrap -> grpc.Server -> worker.Handler,
+// over real TCP on loopback.
+//
+// IT RETURNS THE REGISTRY, which is why it is not
+// startProductionGRPCServerWithHandler. The scheduler.Dispatcher must send
+// through the SAME *worker.Registry the Handler registers its sender into -
+// that shared object is the composition under test, and a helper that hides it
+// cannot express this harness at all.
+func startAgentE2EServer(t *testing.T, pool *pgxpool.Pool, q *store.Queries) (string, *worker.Registry) {
+	t.Helper()
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	lis := netlimit.Wrap(raw, netlimit.Config{MaxTotal: 10, MaxPerIP: 10})
+
+	registry := worker.NewRegistry()
+	broker := events.NewBroker()
+	handler := worker.NewHandler(q, pool, registry, broker, func() {})
+
+	srv := grpc.NewServer(grpcServerOptions(grpcBounds{maxConns: 10, maxConnsPerIP: 10, maxConnIdle: 0})...)
+	relayv1.RegisterAgentServiceServer(srv, handler)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return raw.Addr().String(), registry
+}
+
+// seedAgentE2EWorker creates a worker row with a known agent token and writes
+// that token into a fresh state dir, so agent.LoadCredentials picks it up and
+// the agent takes the RECONNECT path (RegisterRequest_AgentToken). This avoids
+// needing an agent_enrollments row and matches what a long-lived agent does on
+// every boot after its first.
+func seedAgentE2EWorker(t *testing.T, ctx context.Context, q *store.Queries, hostname string) (pgtype.UUID, *agent.Credentials) {
+	t.Helper()
+	w, err := q.CreateWorker(ctx, store.CreateWorkerParams{
+		Name: hostname, Hostname: hostname, CpuCores: 4, RamGb: 8, GpuCount: 0, GpuModel: "", Os: "linux",
+	})
+	require.NoError(t, err)
+	raw := "e2e-agent-token-" + hostname
+	hash := tokenhash.Hash(raw)
+	require.NoError(t, q.SetWorkerAgentToken(ctx, store.SetWorkerAgentTokenParams{ID: w.ID, AgentTokenHash: &hash}))
+
+	stateDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "token"), []byte(raw), 0600))
+	creds, err := agent.LoadCredentials(stateDir)
+	require.NoError(t, err)
+	require.True(t, creds.HasAgentToken(),
+		"the seeded token must be loadable, or the agent takes the auto-enroll path instead")
+	return w.ID, creds
 }
