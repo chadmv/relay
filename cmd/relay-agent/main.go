@@ -156,6 +156,29 @@ func resolveCoordinator(ctx context.Context, addr string) (string, error) {
 	return discovery.Browse(ctx)
 }
 
+const (
+	defaultSyncHeartbeat = 30 * time.Second
+	syncHeartbeatFloor   = 5 * time.Second
+)
+
+// resolveSyncHeartbeatInterval reads RELAY_SYNC_HEARTBEAT_INTERVAL. "0s"
+// disables the timer. A bare "0", a negative value and any other unparseable
+// input take parseDurationEnv's warn-and-fall-back path, because the shared
+// regex has no unit-less or signed form. A positive value below
+// syncHeartbeatFloor is refused with its own warning and falls back too: the
+// only cost of this knob is durable task_logs rows, which nothing caps yet
+// (docs/backlog/bug-2026-08-14-task-logs-have-no-per-task-volume-cap.md).
+// TestResolveSyncHeartbeatInterval.
+func resolveSyncHeartbeatInterval(v string) time.Duration {
+	d := parseDurationEnv("RELAY_SYNC_HEARTBEAT_INTERVAL", v, defaultSyncHeartbeat)
+	if d > 0 && d < syncHeartbeatFloor {
+		log.Printf("warning: RELAY_SYNC_HEARTBEAT_INTERVAL=%q is below the %v minimum; using %v",
+			v, syncHeartbeatFloor, defaultSyncHeartbeat)
+		return defaultSyncHeartbeat
+	}
+	return d
+}
+
 var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 
 // parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
