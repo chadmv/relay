@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"relay/internal/events"
@@ -69,6 +70,33 @@ type Server struct {
 	// StaticHandler, when non-nil, serves the embedded web UI for any path not
 	// matched by a /v1 API route. Set by cmd/relay-server from package webui.
 	StaticHandler http.Handler
+
+	// SearchLimitN and SearchLimitWin bound how many ?q= text searches ONE
+	// AUTHENTICATED PRINCIPAL may issue per window, across GET /v1/jobs and
+	// GET /v1/scheduled-jobs together. Set by cmd/relay-server's buildHTTPServer
+	// from RELAY_JOB_SEARCH_RATE_LIMIT. Either field at or below zero leaves the
+	// bucket unarmed, which is the only disabled state and is deliberately
+	// Go-reachable only: ParseRateLimit rejects a zero count and main is fatal on
+	// it, so an operator cannot turn the control off from the environment. The
+	// escape is a large number.
+	//
+	// Exported FIELDS rather than two more arguments on New, whose tail is
+	// already four same-typed arguments in a row; buildHTTPServer's own doc
+	// comment records a measured green transpose across them.
+	//
+	// NOT A CPU BUDGET. At the measured cost of a no-match needle, 120 per 10 s
+	// is more database time per second than the box has. It is a fairness bound:
+	// it stops one principal monopolizing the connection pool, and leaves the
+	// pool itself as the concurrency ceiling it has always been.
+	SearchLimitN   int
+	SearchLimitWin time.Duration
+
+	// searchLimiterOnce guards ONE limiter per Server. Every limiter constructor
+	// in this package starts a gcLoop goroutine that is never stopped, so a
+	// second instance would be a second budget and a leaked goroutine.
+	// TestSearchLimiter_IsConstructedOncePerServer pins this.
+	searchLimiterOnce sync.Once
+	searchLimiter     *rateLimiter
 }
 
 // New creates a Server.
