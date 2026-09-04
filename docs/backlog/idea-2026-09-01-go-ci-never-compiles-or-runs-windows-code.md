@@ -1,5 +1,5 @@
 ---
-title: Go CI runs only on ubuntu-latest and never cross-compiles, so no Windows-only file is ever built
+title: Go CI compiles Windows code but runs none of it, so no Windows-only test ever executes
 type: idea
 status: open
 created: 2026-09-01
@@ -7,14 +7,21 @@ priority: medium
 source: 2026-09-01 per-task-identity-env-vars slice - a case-folding rule whose Windows arm no automated lane could execute
 ---
 
-# Go CI runs only on ubuntu-latest and never cross-compiles, so no Windows-only file is ever built
+# Go CI compiles Windows code but runs none of it, so no Windows-only test ever executes
 
 ## Summary
-Both jobs in `.github/workflows/go-ci.yml` are `runs-on: ubuntu-latest`, and no workflow or Makefile
-target sets `GOOS`. Build constraints therefore exclude every `//go:build windows` file from every
-automated lane: they are not compiled, not vetted, and not tested. **A syntax error or a type error
-in one of them leaves all three checks green.** Relay agents run on Windows render nodes, so this is
-the platform half of the product going unbuilt, not an edge case.
+**Half 1 of the Proposal shipped on 2026-09-04**, so the compile half of this item is done and its
+remaining scope is EXECUTION only. `.github/workflows/go-ci.yml`'s `test` job now runs
+`GOOS=windows go build ./...`, `GOOS=windows go vet ./...` and
+`GOOS=windows go vet -tags integration ./...`, and a `//go:build windows` file therefore reaches a
+compiler in CI.
+
+What is left: every job in `.github/workflows/go-ci.yml` is `runs-on: ubuntu-latest`, so no
+automated lane executes a Windows binary. The `//go:build windows` test files never run, and every
+`runtime.GOOS` branch takes its non-Windows arm. Cross-compiling type-checks those files and says
+nothing about their behaviour, so a logic error in one still leaves every check green. Relay agents
+run on Windows render nodes, so this is the platform half of the product going unrun, not an edge
+case.
 
 ## Repro / Symptoms
 Measured 2026-09-01. Three production files and two test files carry a `windows` constraint:
@@ -25,8 +32,10 @@ Measured 2026-09-01. Three production files and two test files carry a `windows`
 - `internal/agent/credentials_acl_windows_test.go`
 - `internal/agent/runner_cancel_windows_test.go`
 
-`grep -rn GOOS .github/ Makefile` returns nothing, so nothing cross-compiles them either.
-`release.yml` is the Python SDK's PyPI publish and builds no Go at all.
+`grep -rn GOOS .github/ Makefile` returned nothing on 2026-09-01, so nothing cross-compiled them
+either. That measurement no longer holds: as of 2026-09-04 the same grep hits the three
+`GOOS=windows` commands half 1 added, and those five files are compiled and vetted. They are still
+never executed. `release.yml` is the Python SDK's PyPI publish and builds no Go at all.
 
 Four non-test sites branch on `runtime.GOOS`, two of them on `"windows"`:
 `cmd/relay-agent/main.go`, `internal/cli/config.go` (the `%APPDATA%\relay\config.json` path),
@@ -62,12 +71,17 @@ cross-compile step or a second runner does.
 Two independent halves; the first is cheap enough that it should not wait for a decision on the
 second.
 
-1. **A cross-compile check in `go-ci.yml`.** `GOOS=windows go build ./...` plus
-   `GOOS=windows go vet ./...`, on the existing ubuntu runner, no new job. Seconds of runtime, no
-   Docker, no flakes. This closes the "cannot compile" hole completely and catches the type errors
-   and unused imports that are the realistic failure. It proves nothing about behaviour.
-   **Both commands exit 0 against HEAD (measured 2026-09-01), so adopting this is a pure guard
-   addition - there is no backlog of Windows build breakage to clear first.**
+1. **SHIPPED 2026-09-04. A cross-compile check in `go-ci.yml`.** `GOOS=windows go build ./...`,
+   `GOOS=windows go vet ./...` and `GOOS=windows go vet -tags integration ./...`, on the existing
+   ubuntu runner, no new job. Seconds of runtime, no Docker, no flakes. It catches the type errors
+   and unused imports that are the realistic failure, and proves nothing about behaviour. Each
+   command exited 0 against the tree it landed on (2026-09-01 for the first two, 2026-09-04 for the
+   tagged one), so it was a pure guard addition with no backlog of Windows build breakage to clear
+   first. `go build` does not read `_test.go` files, so the vet lines are what reach the
+   windows-constrained test files, and the tagged line is what reaches a
+   `//go:build windows && integration` file. `TestWindowsCrossCompileStepCommandsArePresent` in
+   `internal/agent` pins that all three commands are present, because deleting the step is otherwise
+   green in every lane.
 2. **A `windows-latest` job running `go test ./...`.** This is what actually executes the Windows
    arms and the two Windows-only test files. Costs real minutes, and note the constraint before
    scoping it: the integration lane needs Docker, which the Windows runner does not usefully
@@ -78,16 +92,17 @@ Do 1 regardless. 2 is the judgement call, and the honest framing is that it buys
 five files plus two `runtime.GOOS` branches, against added CI minutes on every PR.
 
 ## Acceptance / Done When
-- A deliberate compile error introduced into `internal/agent/proctree_windows.go` fails CI. Today it
-  does not - that is the discriminating test, and it is RED against HEAD.
+- MET 2026-09-04 by half 1: a deliberate compile error introduced into
+  `internal/agent/proctree_windows.go` fails CI. Measured both ways - green against the linux checks,
+  which build constraints keep from seeing the file, and RED against the cross-compile step.
 - If the second half is taken: `credentials_acl_windows_test.go` and `runner_cancel_windows_test.go`
   appear as executed tests in a CI log, and a mutation to the Windows arm of
   `isReservedIdentityNameFor` is killed by CI rather than only by a local Windows run.
-- `go-ci.yml` states which platform each job covers, so the next person adding a
-  platform-conditional branch can see what will and will not run.
+- MET 2026-09-04 by half 1: each job in `go-ci.yml` carries a `# Platform:` line, so the next
+  person adding a platform-conditional branch can see what will and will not run.
 
 ## Related
-- [.github/workflows/go-ci.yml](.github/workflows/go-ci.yml) - both jobs, both `ubuntu-latest`
+- [.github/workflows/go-ci.yml](.github/workflows/go-ci.yml) - every job `ubuntu-latest`
 - [internal/agent/proctree_windows.go](internal/agent/proctree_windows.go),
   [internal/agent/credentials_acl_windows.go](internal/agent/credentials_acl_windows.go),
   [cmd/relay-agent/free_disk_windows.go](cmd/relay-agent/free_disk_windows.go)
