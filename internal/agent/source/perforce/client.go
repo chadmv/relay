@@ -150,6 +150,9 @@ func (c *Client) CreateStreamClient(ctx context.Context, name, root, stream, tem
 	// inherited from a template can move the workspace out from under the Root
 	// set above. TestClient_CreateStreamClient_DropsAltRoots.
 	spec = removeSpecBlock(spec, "AltRoots")
+	if clobber {
+		spec = withClobberOption(spec, name)
+	}
 
 	if _, err := c.r.Run(ctx, "", []string{"client", "-i"}, bytes.NewReader(spec)); err != nil {
 		return err
@@ -277,6 +280,29 @@ func (c *Client) PendingChangesByDescPrefix(ctx context.Context, cwd, client, pr
 		}
 	}
 	return cls, nil
+}
+
+// optionsLineRe is anchored at line start for the same reason setSpecField's
+// own pattern is: a client spec carries SubmitOptions: as well as Options:, and
+// an unanchored match rewrites the wrong field.
+var optionsLineRe = regexp.MustCompile(`(?m)^Options:.*$`)
+
+// withClobberOption turns the Options: token noclobber into clobber, leaving
+// every other line untouched. It edits whatever tokens are present and asserts
+// nothing about their count or order: p4's default option set is an assumption
+// here, not something any fixture in this package observes.
+func withClobberOption(spec []byte, clientName string) []byte {
+	line := optionsLineRe.Find(spec)
+	if line == nil {
+		return spec
+	}
+	toks := strings.Fields(strings.TrimPrefix(string(line), "Options:"))
+	for i, t := range toks {
+		if t == "noclobber" {
+			toks[i] = "clobber"
+		}
+	}
+	return setSpecField(spec, "Options", strings.Join(toks, " "))
 }
 
 // setSpecField updates or inserts a "Field:\tvalue\n" line in a p4 spec form.

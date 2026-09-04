@@ -3,10 +3,35 @@ package perforce
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// optionsLinesOf returns every line of a written spec that BEGINS with
+// "Options:". The anchoring is the point: a client spec also carries a
+// SubmitOptions: field, and a Description: line may contain the word.
+func optionsLinesOf(spec string) []string {
+	var out []string
+	for _, line := range strings.Split(spec, "\n") {
+		if strings.HasPrefix(line, "Options:") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// optionsTokensOf returns the written Options: line's token list. Assertions in
+// this file compare that slice rather than searching the spec for a substring,
+// because "noclobber" contains "clobber" and so require.Contains on the word is
+// satisfied by an untransformed spec.
+func optionsTokensOf(t *testing.T, spec string) []string {
+	t.Helper()
+	lines := optionsLinesOf(spec)
+	require.Len(t, lines, 1, "expected exactly one Options: line in %q", spec)
+	return strings.Fields(strings.TrimPrefix(lines[0], "Options:"))
+}
 
 func TestClient_CreateStreamClient_Default(t *testing.T) {
 	fr := newFakeP4Fixture(t)
@@ -69,6 +94,39 @@ Options: clobber
 	require.NotContains(t, spec, `C:\other`)
 	require.Contains(t, spec, "Root:\t"+`D:\rw\abcdef`, "Root is still the one we set")
 	require.Contains(t, spec, "Options: clobber", "and the field after the block survives")
+}
+
+// The property: with clobber requested, only the Options: line's noclobber
+// TOKEN changes, and no other field does.
+//
+// The fixture's Description: block carries the word noclobber and is placed
+// BEFORE the Options: line, which is what discriminates. An implementation that
+// replaces the first "noclobber" byte sequence in the spec edits the
+// Description and leaves Options: untouched; with the poison after the subject
+// that same implementation edits the right field and the test passes on it.
+//
+// noallwrite sits in position 0 for the second discriminator: an implementation
+// that strips a "no" prefix rather than comparing whole tokens flips it to
+// allwrite, a different p4 option, and only a whole-slice comparison sees that.
+func TestClient_CreateStreamClient_ClobberEditsOnlyTheOptionsToken(t *testing.T) {
+	fr := newFakeP4Fixture(t)
+	fr.set("client -o -S //streams/X/main relay_h_abc", `Client: relay_h_abc
+Description:
+`+"\tbuild farm template - do not set noclobber here\n"+
+		`Root: D:\somewhere\else
+`+"Options:\tnoallwrite noclobber nocompress unlocked nomodtime normdir\n"+
+		`View: //streams/X/main/... //relay_h_abc/...
+`)
+	fr.set("client -i", "Client saved.\n")
+	c := &Client{r: fr}
+	require.NoError(t, c.CreateStreamClient(context.Background(), "relay_h_abc", `D:\rw\abcdef`, "//streams/X/main", "", true))
+
+	spec := fr.calls[1].stdin
+	require.Contains(t, spec, "\tbuild farm template - do not set noclobber here\n",
+		"the Description: block, including its own noclobber, must be byte-identical")
+	require.Equal(t,
+		[]string{"noallwrite", "clobber", "nocompress", "unlocked", "nomodtime", "normdir"},
+		optionsTokensOf(t, spec))
 }
 
 func TestClient_ResolveHead(t *testing.T) {
