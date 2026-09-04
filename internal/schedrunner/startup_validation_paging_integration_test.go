@@ -5,8 +5,6 @@ package schedrunner_test
 import (
 	"bytes"
 	"context"
-	"io"
-	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -148,10 +146,10 @@ func countRecordedFailures(t *testing.T, h *runnerHarness) int {
 // IT ALSO PINS THE TERMINATION CONDITION. A short page ends the loop and gives
 // 3; ending on an empty page gives 4.
 func TestValidateStoredSpecsOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
-	// One log line per recorded failure, and there are 250 of them.
-	prev := log.Writer()
-	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(prev) })
+	// One log line per recorded failure, and there are 250 of them. Nothing here
+	// reads them back; the capture only keeps them off the test output.
+	var discarded bytes.Buffer
+	captureLog(t, &discarded)
 
 	h := newRunnerHarness(t)
 	owner := h.createUser(t, "paged-sweep@example.com")
@@ -196,9 +194,7 @@ func TestValidateStoredSpecsOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
 // THREE ROWS, NOT 250. This property is independent of the page size.
 func TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEveryRow(t *testing.T) {
 	var logged bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(prev) })
+	captureLog(t, &logged)
 
 	h := newRunnerHarness(t)
 	owner := h.createUser(t, "cancelled-sweep@example.com")
