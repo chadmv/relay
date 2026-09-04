@@ -1,7 +1,9 @@
 ---
 title: Perforce virtual and import+ remap streams fail at prepare because relay addresses p4 by the stream-name depot path
 type: bug
-status: open
+status: closed
+closed: 2026-09-04
+resolution: fixed
 created: 2026-09-03
 priority: high
 source: SDNM fork divergence analysis (relay_updates.md, PR-1), evaluated 2026-09-03; reproduced in production against a real p4d
@@ -94,3 +96,35 @@ All in `internal/agent/source/perforce/`.
 - [[feature-2026-09-03-p4-sync-progress-heartbeat]] - edits the same sync call site; land it after
   this to avoid a rebase, no hard dependency
 - [[idea-2026-09-03-sync-spec-exclusion-paths-design]] - builds on `toClientPath`
+
+## Resolution
+
+`Prepare` now addresses p4 by client-relative path, so a virtual or `import+` remap
+stream resolves through the client's own view. Proven against a real p4d: the fixture
+gained a `Type: virtual` child stream with a `Remapped:` line, and
+`TestPerforce_E2E_VirtualStreamWithARemapSyncsIntoTheRemappedLayout` asserts the file
+lands in the remapped layout and NOT flat. It failed at HEAD with
+`resolve head for //test/virt/...: could not parse ""` - one step earlier than the
+`file(s) not in client view` the item quoted, because with `rev: "#head"` the failure
+is in `ResolveHead`, not in the sync.
+
+The reorder the item asked for OPENS a race the item did not anticipate: with client
+creation and registration moved above `ws.Acquire`, the workspace has zero holders for
+that whole window, so a sweep can complete AND release inside it and the post-Acquire
+evict re-check then reads clear. Review established that a partial repair of the
+registry row leaves `Prepare` holding a handle on a deleted directory and a deleted p4
+client, so the shipped behaviour refuses instead: a missing registry entry proves a
+sweep completed, and the task fails with a distinct, retryable cause.
+
+Scoped out and filed rather than silently left: a sync path that is a strict subpath of
+a stream whose view RENAMES a subtree still does not resolve, because `toClientPath` is
+a string rewrite rather than a view resolution. That is not a regression - the depot form
+failed identically before - but README no longer claims otherwise. The silent half is
+worse than the resolution failure and is filed separately: `p4 sync` reports
+`file(s) not in client view` on stderr and exits ZERO, and `execRunner.Stream` discards
+stderr on a nil `Wait()`, so a `@CL`-pinned spec of that shape syncs nothing and the task
+reports success.
+
+Acceptance criterion 2 as written ("no early return leaves an unregistered client spec or
+directory") was false as scoped - the leak was never on an early-return path - and the
+spec says so.
