@@ -204,6 +204,24 @@ func main() {
 		log.Fatalf("parse RELAY_JOB_SUBMIT_RATE_LIMIT: %v", err)
 	}
 
+	// A SECOND INSTANCE of the user-keyed mechanism, not a second mounting of
+	// api.RateLimit: that one keys on clientIP(r), which would collapse every
+	// user behind one proxy into one bucket on an authenticated read.
+	//
+	// SEPARATE FROM THE WRITE BUCKET. Different quantity, different first-party
+	// cadence - a polling read at 20 to 100 requests per minute versus an
+	// interactive submit - and sharing them would let a search burst refuse a job
+	// submission, which is the worse of the two outcomes to trade away.
+	//
+	// THERE IS NO OFF VALUE, deliberately: ParseRateLimit rejects a zero count
+	// and this is fatal, so an operator cannot disable the control from the
+	// environment. The escape is a large number, 100000:1s, which leaves the
+	// bound visible as a number in README and in the environment.
+	searchN, searchWin, err := api.ParseRateLimit(envOrDefault("RELAY_JOB_SEARCH_RATE_LIMIT", "120:10s"))
+	if err != nil {
+		log.Fatalf("parse RELAY_JOB_SEARCH_RATE_LIMIT: %v", err)
+	}
+
 	allowSelfRegister := false
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
@@ -290,6 +308,8 @@ func main() {
 		registerLimitWin:  registerWin,
 		jobSubmitLimitN:   jobSubmitN,
 		jobSubmitLimitWin: jobSubmitWin,
+		searchLimitN:      searchN,
+		searchLimitWin:    searchWin,
 		allowSelfRegister: allowSelfRegister,
 		metrics:           metricsStore,
 		static:            webui.Handler(),
