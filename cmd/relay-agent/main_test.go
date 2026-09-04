@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -80,6 +81,52 @@ func TestParseDurationEnv_NoWarningOnEmptyInput(t *testing.T) {
 
 	require.Equal(t, time.Duration(0), result)
 	require.Empty(t, buf.String(), "empty env var should not produce a warning")
+}
+
+// The property: a non-empty value strconv.ParseBool refuses takes the fallback
+// AND says so, while an unset variable takes it silently.
+//
+// "yes" is the discriminating row. It is the spelling an operator most
+// plausibly types for a boolean and the one ParseBool rejects, so it is exactly
+// where a silent fallback would read as "the knob is off because I set it off".
+// The empty rows are the other half of the same property: warning there would
+// make an unset variable indistinguishable from a typo.
+func TestParseBoolEnv(t *testing.T) {
+	rows := []struct {
+		in       string
+		fallback bool
+		want     bool
+		warn     bool
+	}{
+		{in: "", fallback: false, want: false},
+		{in: "", fallback: true, want: true},
+		{in: "true", fallback: false, want: true},
+		{in: "TRUE", fallback: false, want: true},
+		{in: "True", fallback: false, want: true},
+		{in: "1", fallback: false, want: true},
+		{in: "t", fallback: false, want: true},
+		{in: "false", fallback: true, want: false},
+		{in: "FALSE", fallback: true, want: false},
+		{in: "f", fallback: true, want: false},
+		{in: "0", fallback: true, want: false},
+		{in: "yes", fallback: false, want: false, warn: true},
+		{in: "maybe", fallback: false, want: false, warn: true},
+	}
+	for _, row := range rows {
+		t.Run(row.in+"_fallback_"+strconv.FormatBool(row.fallback), func(t *testing.T) {
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stderr)
+
+			require.Equal(t, row.want, parseBoolEnv("RELAY_WORKSPACE_CLOBBER", row.in, row.fallback))
+			if !row.warn {
+				require.Empty(t, buf.String(), "input %q must not warn", row.in)
+				return
+			}
+			require.Contains(t, buf.String(), "RELAY_WORKSPACE_CLOBBER", "the warning must name the env var")
+			require.Contains(t, buf.String(), row.in, "the warning must echo the bad value")
+		})
+	}
 }
 
 // Covers the PARSING only. The assignment of the result into the

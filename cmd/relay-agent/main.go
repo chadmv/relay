@@ -185,6 +185,26 @@ func resolveSyncHeartbeatInterval(v string) time.Duration {
 	return d
 }
 
+// parseBoolEnv parses a strconv.ParseBool spelling. Empty takes the fallback
+// silently, because an unset variable is not a typo; a non-empty unparseable
+// value takes the fallback and warns naming the variable, because otherwise a
+// misspelling is indistinguishable from a deliberate setting.
+//
+// Warn-and-fall-back rather than a fatal: this is an unattended daemon on a
+// render node, and the fallback a caller passes is its non-destructive default.
+// TestParseBoolEnv.
+func parseBoolEnv(name, v string, fallback bool) bool {
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("warning: %s=%q is not a boolean; using %v", name, v, fallback)
+		return fallback
+	}
+	return b
+}
+
 var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 
 // parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
