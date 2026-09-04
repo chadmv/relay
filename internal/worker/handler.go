@@ -1541,14 +1541,16 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 	// reach it - sanitizeAgentErrorMessage removes the causes a caller supplies -
 	// so what lands here is infrastructure, and the write below is a smaller
 	// statement that can survive a timeout this CTE did not: in that case this
-	// line is the only record that the cause was lost. It shares
-	// kindTaskLogPersist's key, on the same (task, epoch), with handleTaskLog's
-	// persist arm because both report one fault class - an append to this task's
-	// log did not persist - so one line per task per generation is the right
-	// granularity rather than a collision. Note the epoch in the key is NOT
-	// caller-multipliable here the way it is at that other site: the currency
-	// gate above has already required it to equal the task's own, so a sender
-	// cannot mint distinct keys by varying it.
+	// line is the only record that the cause was lost.
+	//
+	// ITS OWN KIND, NOT handleTaskLog's. The two look like one fault class and
+	// sharing kindTaskLogPersist made the keys byte-identical for a given
+	// (task, epoch), so whichever site logged first ate the other's dedupe entry
+	// for the window - and the log-path site can arm that entry WITHOUT OWNING
+	// THE TASK, because a chunk whose content Postgres refuses at Bind fails
+	// before the fence's WHERE is evaluated. The exposure was this line, in
+	// exactly the case it exists for. Pinned by
+	// TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine.
 	if terminal {
 		if cause := sanitizeAgentErrorMessage(upd.ErrorMessage); cause != "" {
 			content := "[" + statusStr + "] " + cause + "\n"
@@ -1568,7 +1570,7 @@ func (h *Handler) handleTaskStatus(ctx context.Context, workerID pgtype.UUID, li
 				// job's script echoed. %v on the error is safe for the reason the
 				// sibling arm in handleTaskLog states.
 				canonicalID := uuidStr(taskID)
-				if lim.allow(logKey{kind: kindTaskLogPersist, id: canonicalID, epoch: upd.Epoch}) {
+				if lim.allow(logKey{kind: kindStatusLogPersist, id: canonicalID, epoch: upd.Epoch}) {
 					log.Printf("worker: handleTaskStatus AppendTaskLog %s: %v", canonicalID, appendErr)
 				}
 			}

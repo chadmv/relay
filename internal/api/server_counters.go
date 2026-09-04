@@ -386,6 +386,7 @@ type ingestLogKindCounts struct {
 	StatusRetryWrite     uint64 `json:"status_retry_write"`
 	StatusUpdateWrite    uint64 `json:"status_update_write"`
 	StatusFailDependents uint64 `json:"status_fail_dependents"`
+	StatusLogPersist     uint64 `json:"status_log_persist"`
 }
 
 func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts {
@@ -398,6 +399,7 @@ func ingestLogKindCountsFrom(k worker.IngestLogDropsByKind) ingestLogKindCounts 
 		StatusRetryWrite:     k.StatusRetryWrite,
 		StatusUpdateWrite:    k.StatusUpdateWrite,
 		StatusFailDependents: k.StatusFailDependents,
+		StatusLogPersist:     k.StatusLogPersist,
 	}
 }
 

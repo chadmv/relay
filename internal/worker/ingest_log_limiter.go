@@ -76,18 +76,20 @@ import "time"
 // It is a stack local in Connect, so it dies with the frame: there is no
 // teardown to get wrong and no way for one connection to reach another's.
 //
-// WHAT THE BUDGET COVERS, so the next reader does not have to enumerate call
-// sites to find out. EIGHT log sites on the gRPC receive path go through it:
-// handleTaskLog's bad-id and persist lines, handleTaskStatus's bad-id, GetTask,
-// retry-write, status-write and dependency-cascade lines, and
-// handleInventoryUpdate's persist line. WHAT IS STILL OUTSIDE IT, and why:
-// registration-time lines (the budget is allocated after
-// authenticateAndRegister returns - bug-2026-08-15-registration-log-sites-are-
-// outside-the-connection-budget) and markWorkerOffline's teardown line, which
-// runs once per connection teardown and so is bounded by the connection caps
-// rather than by message volume. handleTaskLog's marshal line is deliberately
-// unbudgeted; see its own comment for the argument. Counted at HEAD: thirteen
-// log.Printf sites in handler.go, eight budgeted and five not.
+// WHAT THE BUDGET COVERS is exactly the logKind set below, and
+// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what keeps that
+// answer true: it parses the package and requires every `kind:` in every logKey
+// literal to be one of those constants. Read them rather than a list repeated
+// here - a hand-maintained enumeration goes stale at the next site added, and
+// this one did.
+//
+// WHAT IS STILL OUTSIDE IT, and why: registration-time lines (the budget is
+// allocated after authenticateAndRegister returns -
+// bug-2026-08-15-registration-log-sites-are-outside-the-connection-budget) and
+// markWorkerOffline's teardown line, which runs once per connection teardown and
+// so is bounded by the connection caps rather than by message volume.
+// handleTaskLog's marshal line is deliberately unbudgeted; see its own comment
+// for the argument.
 //
 // ONE FIELD IS THE EXCEPTION AND IT IS DELIBERATE: `drops` points at the
 // Handler's process-lifetime counters, which every connection shares, because a
@@ -175,6 +177,27 @@ const (
 	kindStatusUpdateWrite    // handleTaskStatus's non-ErrNoRows UpdateTaskStatus failure
 	kindStatusFailDependents // handleTaskStatus's FailDependentTasks failure (an :exec; no ErrNoRows arm)
 
+	// kindStatusLogPersist is handleTaskStatus's non-ErrNoRows AppendTaskLog
+	// failure - the prepare-failure cause line, not a subprocess chunk.
+	//
+	// SEPARATE FROM kindTaskLogPersist, AND THE REASON IS DEDUPE CONSUMPTION,
+	// NOT MULTIPLICATION. Both sites append to one task's log, so sharing looked
+	// right and the epoch here cannot be varied by the caller - but the two keys
+	// would be byte-identical for the same (task, epoch), and whichever site
+	// logged first eats the other's dedupe entry for the whole window. The log
+	// path can arm it WITHOUT OWNING THE TASK: a chunk whose content Postgres
+	// refuses at Bind (a NUL, SQLSTATE 22021) fails before the fence's WHERE is
+	// evaluated, so any sender can arm any (task, epoch) it names. That silences
+	// the status-path line exactly when a concurrent real fault makes it the only
+	// record that the prepare-failure cause was lost. Same shape as the
+	// bad-task-id split above; pinned by
+	// TestHandleTaskStatus_TheLogPathCannotSilenceTheStatusPersistLine.
+	//
+	// It also buys the attribution the status-write kinds were split for: "the
+	// cause line did not persist" and "a subprocess chunk did not persist" are
+	// different incidents for an operator reading the published counts.
+	kindStatusLogPersist
+
 	// kindCount MUST STAY LAST and is NOT a kind. It is the length of
 	// ingestLogCounters' array. A kind added after it is not counted at all;
 	// TestEveryIngestLogKindUsedAtACallSiteIsCountedAndPublished is what makes
@@ -182,12 +205,17 @@ const (
 	kindCount
 )
 
-// logKey is the dedupe key. Only kindTaskLogPersist populates id and epoch; the
-// other SEVEN kinds deliberately carry NO wire value, so the caller cannot vary
-// them (see the per-site table in the spec's section 6.4). The three status-write
-// kinds joined that set for the reason already written at kindStatusGetTask: an
-// infrastructure episode is not per-task, so keying on the task id would multiply
-// one event by the task count.
+// logKey is the dedupe key. The id and epoch fields are populated by the two
+// PERSIST kinds only - kindTaskLogPersist and kindStatusLogPersist, whose
+// failures really are per task per generation; every other kind deliberately
+// carries NO wire value, so the caller cannot vary it (see the per-site table in
+// the spec's section 6.4). The status-write kinds joined that set for the reason
+// already written at kindStatusGetTask: an infrastructure episode is not
+// per-task, so keying on the task id would multiply one event by the task count.
+//
+// TWO KINDS SHARING THIS SHAPE IS NOT TWO KINDS SHARING A KEY. The kind is part
+// of the key, which is precisely what stops one persist site consuming the
+// other's entry; see kindStatusLogPersist.
 //
 // The only string that ever reaches this struct is a CANONICALLY RE-ENCODED task
 // id - uuidStr over the parsed pgtype.UUID, never the wire string. That is 36

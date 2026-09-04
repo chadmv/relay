@@ -648,8 +648,11 @@ func TestBuildHTTPServer_ServesTheWiredHandlersIngestSection(t *testing.T) {
 		} `json:"counts"`
 	}
 	require.NoError(t, json.Unmarshal(top["ingest_log_budget"], &section))
-	require.Len(t, section.Counts.Deduped, 8, "one key per kind")
-	require.Len(t, section.Counts.Suppressed, 8, "one key per kind")
+	// DERIVED, never a literal: a hardcoded count here is a census of another
+	// package that goes stale the next time a kind is added.
+	kinds := reflect.TypeOf(worker.IngestLogDropsByKind{}).NumField()
+	require.Len(t, section.Counts.Deduped, kinds, "one key per kind")
+	require.Len(t, section.Counts.Suppressed, kinds, "one key per kind")
 }
 
 // TestBuildHTTPServer_ServesTheWiredHandlersTaskLogFenceSection is EXECUTED, and

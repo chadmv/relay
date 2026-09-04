@@ -74,6 +74,7 @@ type IngestLogDropsByKind struct {
 	StatusRetryWrite     uint64
 	StatusUpdateWrite    uint64
 	StatusFailDependents uint64
+	StatusLogPersist     uint64
 }
 
 // ingestLogCounters is the process-lifetime home for what the per-connection log
@@ -167,5 +168,6 @@ func (c *ingestLogCounters) byKind(arm int) IngestLogDropsByKind {
 		StatusRetryWrite:     c.n[kindStatusRetryWrite][arm].Load(),
 		StatusUpdateWrite:    c.n[kindStatusUpdateWrite][arm].Load(),
 		StatusFailDependents: c.n[kindStatusFailDependents][arm].Load(),
+		StatusLogPersist:     c.n[kindStatusLogPersist][arm].Load(),
 	}
 }
