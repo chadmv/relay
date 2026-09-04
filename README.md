@@ -1587,6 +1587,10 @@ ignored. Items:
 - There is no per-session revoke endpoint. `DELETE /v1/auth/tokens` revokes every session
   including the caller's; `PUT /v1/users/me/password` revokes every session except the
   caller's, after which this list contains exactly one row.
+- `PUT /v1/users/me/password` is rate-limited per authenticated user by
+  `RELAY_PASSWORD_CHANGE_RATE_LIMIT` (default five per minute), because the handler runs a
+  bcrypt compare on every request. Over the ceiling it answers `429` with `Retry-After`; the
+  caller's session is untouched.
 - No `last_used_at`, IP, user agent or device is available: no such column exists.
 
 ### Users
