@@ -18,7 +18,7 @@ a query and a product decision the list endpoint did not.
 ## Context
 Three independent reasons it was carved out, any one sufficient. No index covers a per-worker
 scan of terminal tasks: a Postgres foreign key creates none, and `idx_tasks_worker_active` is
-partial over `('dispatched','running')`, so a 24h aggregate on a 3s poll is a sequential scan of
+partial over the currently-assigned partition, so a 24h aggregate on a 3s poll is a sequential scan of
 `tasks`. "Jobs today" is a category error as labelled: relay assigns tasks to workers, `jobs` has
 no worker column and one job spans workers, so whether the KPI counts distinct jobs or tasks is a
 product decision. And the list slice was already one PR.
