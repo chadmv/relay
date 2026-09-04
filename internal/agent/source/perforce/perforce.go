@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -616,15 +617,24 @@ func toClientPath(clientName, stream, depotPath string) (string, error) {
 // isMissingOrEmptyDir reports whether path does not exist or holds no entries.
 // An unreadable directory reports false: the caller uses this to decide whether
 // to force a sync, and a read failure is not evidence that the tree is gone.
+//
+// Readdirnames(1) rather than os.ReadDir: this runs on every Prepare and a
+// populated workspace root is the common case, so reading the whole listing to
+// learn it is non-empty scales with the workspace.
 func isMissingOrEmptyDir(path string) bool {
-	entries, err := os.ReadDir(path)
-	if errors.Is(err, os.ErrNotExist) {
+	f, err := os.Open(path)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
 		return true
 	}
 	if err != nil {
 		return false
 	}
-	return len(entries) == 0
+	return len(names) == 0
 }
 
 // allocateShortID returns a short unique ID for a new workspace.
