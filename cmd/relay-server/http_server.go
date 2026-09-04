@@ -34,6 +34,15 @@ type httpServerDeps struct {
 	registerLimitWin  time.Duration
 	jobSubmitLimitN   int
 	jobSubmitLimitWin time.Duration
+
+	// searchLimitN and searchLimitWin bound ?q= text searches per authenticated
+	// principal, across GET /v1/jobs and GET /v1/scheduled-jobs together. They
+	// reach api.Server as exported FIELDS, never as two more arguments on
+	// api.New: that call's tail is already four same-typed arguments in a row and
+	// this file's own header records a measured green transpose across them.
+	searchLimitN   int
+	searchLimitWin time.Duration
+
 	allowSelfRegister bool
 	metrics           *metrics.Store
 
@@ -156,7 +165,10 @@ type httpServerDeps struct {
 //     a real request through this function's output at a known limit and is RED
 //     on a deleted, hard-coded or substituted value. countersAssignmentSources
 //     does not cover it - that walk is specific to s.Counters assignments and
-//     does not generalize.
+//     does not generalize. The SearchLimit pair is in the same guarded state,
+//     through TestBuildHTTPServer_SearchLimitRefusesAQCarryingRequestPastThe-
+//     Ceiling, which drives a real q-carrying request past the ceiling on the
+//     real route and asserts 429.
 //
 // THAT LAST CLAIM STOPS AT THIS FUNCTION'S OWN ASSIGNMENTS. The test supplies
 // jobSubmitLimitN itself, so it says nothing about what main puts in the
@@ -174,6 +186,8 @@ func buildHTTPServer(d httpServerDeps) *http.Server {
 	s.AllowSelfRegister = d.allowSelfRegister
 	s.JobSubmitLimitN = d.jobSubmitLimitN
 	s.JobSubmitLimitWin = d.jobSubmitLimitWin
+	s.SearchLimitN = d.searchLimitN
+	s.SearchLimitWin = d.searchLimitWin
 
 	// A nil source leaves its section ABSENT, which is the payload's own
 	// vocabulary for "this control is not wired on this replica". It is

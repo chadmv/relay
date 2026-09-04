@@ -66,11 +66,25 @@ func main() {
 			dbMaxConns = n
 		}
 	}
+	// Read before the config is built and fatal on a bad value, because
+	// NewWithConfig does not necessarily open a connection eagerly: a malformed
+	// runtime parameter would otherwise surface as a connection error at the
+	// first query rather than at boot.
+	statementTimeout, err := parseDBStatementTimeout(
+		"RELAY_DB_STATEMENT_TIMEOUT", os.Getenv("RELAY_DB_STATEMENT_TIMEOUT"))
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		log.Fatalf("parse dsn: %v", err)
 	}
 	cfg.MaxConns = int32(dbMaxConns)
+	// Beside MaxConns, which is the other pool-wide bound, and BEFORE
+	// NewWithConfig copies the config. Migrations are already done by this point
+	// and are unreachable from here - see applyStatementTimeout's header.
+	applyStatementTimeout(cfg, statementTimeout)
+	log.Print(dbStatementTimeoutLine(statementTimeout))
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("connect db: %v", err)
@@ -190,6 +204,24 @@ func main() {
 		log.Fatalf("parse RELAY_JOB_SUBMIT_RATE_LIMIT: %v", err)
 	}
 
+	// A SECOND INSTANCE of the user-keyed mechanism, not a second mounting of
+	// api.RateLimit: that one keys on clientIP(r), which would collapse every
+	// user behind one proxy into one bucket on an authenticated read.
+	//
+	// SEPARATE FROM THE WRITE BUCKET. Different quantity, different first-party
+	// cadence - a polling read at 20 to 100 requests per minute versus an
+	// interactive submit - and sharing them would let a search burst refuse a job
+	// submission, which is the worse of the two outcomes to trade away.
+	//
+	// THERE IS NO OFF VALUE, deliberately: ParseRateLimit rejects a zero count
+	// and this is fatal, so an operator cannot disable the control from the
+	// environment. The escape is a large number, 100000:1s, which leaves the
+	// bound visible as a number in README and in the environment.
+	searchN, searchWin, err := api.ParseRateLimit(envOrDefault("RELAY_JOB_SEARCH_RATE_LIMIT", "120:10s"))
+	if err != nil {
+		log.Fatalf("parse RELAY_JOB_SEARCH_RATE_LIMIT: %v", err)
+	}
+
 	allowSelfRegister := false
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
 		allow, err := strconv.ParseBool(v)
@@ -276,6 +308,8 @@ func main() {
 		registerLimitWin:  registerWin,
 		jobSubmitLimitN:   jobSubmitN,
 		jobSubmitLimitWin: jobSubmitWin,
+		searchLimitN:      searchN,
+		searchLimitWin:    searchWin,
 		allowSelfRegister: allowSelfRegister,
 		metrics:           metricsStore,
 		static:            webui.Handler(),
