@@ -44,8 +44,11 @@ func TestParseRateLimit(t *testing.T) {
 	}
 }
 
+// StatusAccepted rather than StatusOK throughout the RateLimit tests below:
+// 200 is httptest.NewRecorder's DEFAULT, so an assertion of 200 is also
+// satisfied by a middleware that writes nothing and never calls next.
 func TestRateLimit_UnderLimitPasses(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
 	h := RateLimit(3, time.Minute)(next)
 
 	for i := 0; i < 3; i++ {
@@ -53,14 +56,14 @@ func TestRateLimit_UnderLimitPasses(t *testing.T) {
 		req.RemoteAddr = "10.0.0.1:12345"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("request %d: got %d want 200", i+1, rec.Code)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("request %d: got %d want 202", i+1, rec.Code)
 		}
 	}
 }
 
 func TestRateLimit_OverLimitReturns429WithRetryAfter(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
 	h := RateLimit(2, time.Minute)(next)
 
 	for i := 0; i < 2; i++ {
@@ -88,14 +91,14 @@ func TestRateLimit_OverLimitReturns429WithRetryAfter(t *testing.T) {
 }
 
 func TestRateLimit_PerIPIsolation(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
 	h := RateLimit(1, time.Minute)(next)
 
 	req1 := httptest.NewRequest("POST", "/x", nil)
 	req1.RemoteAddr = "10.0.0.1:12345"
 	rec1 := httptest.NewRecorder()
 	h.ServeHTTP(rec1, req1)
-	if rec1.Code != http.StatusOK {
+	if rec1.Code != http.StatusAccepted {
 		t.Fatalf("IP1 first: got %d", rec1.Code)
 	}
 
@@ -103,7 +106,7 @@ func TestRateLimit_PerIPIsolation(t *testing.T) {
 	req2.RemoteAddr = "10.0.0.2:12345"
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
+	if rec2.Code != http.StatusAccepted {
 		t.Fatalf("IP2 first: got %d", rec2.Code)
 	}
 
@@ -118,7 +121,7 @@ func TestRateLimit_PerIPIsolation(t *testing.T) {
 }
 
 func TestRateLimit_WindowSlides(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
 	h := RateLimit(1, 50*time.Millisecond)(next)
 
 	req := httptest.NewRequest("POST", "/x", nil)
@@ -137,13 +140,13 @@ func TestRateLimit_WindowSlides(t *testing.T) {
 
 	rec3 := httptest.NewRecorder()
 	h.ServeHTTP(rec3, req)
-	if rec3.Code != http.StatusOK {
-		t.Fatalf("expected 200 after window slide, got %d", rec3.Code)
+	if rec3.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 after window slide, got %d", rec3.Code)
 	}
 }
 
 func TestRateLimit_ConcurrentHitsDontRace(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
 	h := RateLimit(100, time.Minute)(next)
 
 	var wg sync.WaitGroup
@@ -320,6 +323,50 @@ func TestUserRateLimit_TwoUsersFromOneAddressDoNotShareABucket(t *testing.T) {
 	if got := send(alice); got != http.StatusTooManyRequests {
 		t.Fatalf("alice second: got %d want 429 - without this the two 200s above are also what a "+
 			"middleware that does nothing produces", got)
+	}
+}
+
+// TestUserRateLimit_RetryAfterNamesWhenTheWindowActuallyClears pins the VALUE of
+// the header, which an assertion that it is non-empty or a positive integer does
+// not: replacing the arithmetic with a zero duration still renders "1" through
+// the +1, so a limiter telling every refused caller to come back in one second
+// under a ten-second window satisfies both of those.
+//
+// The band is what makes the input discriminate. One hit under a 1-minute window
+// leaves just under 60s on the clock, so the correct header is 55..61 for any
+// plausible delay between the two requests, and every value a constant-retry
+// implementation produces is below that band. 61 is the top rather than 60
+// because the seconds are truncated and then incremented, so two calls whose
+// elapsed time rounds to zero render the whole window plus one.
+func TestUserRateLimit_RetryAfterNamesWhenTheWindowActuallyClears(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) })
+	h := UserRateLimit(1, time.Minute)(next)
+
+	u := AuthUser{ID: pgtype.UUID{Bytes: [16]byte{5}, Valid: true}}
+	send := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/jobs", nil)
+		req = req.WithContext(ctxWithUser(req.Context(), u))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if got := send().Code; got != http.StatusAccepted {
+		t.Fatalf("first request: got %d want 202 - the window must be filled by a real hit", got)
+	}
+
+	rec := send()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: got %d want 429", rec.Code)
+	}
+	ra := rec.Header().Get("Retry-After")
+	secs, err := strconv.Atoi(ra)
+	if err != nil {
+		t.Fatalf("Retry-After must be an integer number of seconds, got %q", ra)
+	}
+	if secs < 55 || secs > 61 {
+		t.Fatalf("Retry-After = %d, want 55..61 - the header must name when the oldest hit falls out "+
+			"of the 1m window, not a constant", secs)
 	}
 }
 

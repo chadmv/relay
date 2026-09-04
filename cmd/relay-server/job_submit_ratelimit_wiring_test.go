@@ -26,8 +26,10 @@ func postAsUser(t *testing.T, srv *http.Server, path, body string) *httptest.Res
 
 // submitBucketServer builds a server whose only configured subsystem is the
 // job-submit bucket. pool is nil on purpose: every request below is answered
-// before any pool use, and stubAdminDB panics on any statement other than the
-// bearer-auth lookup, so a handler that grew a query fails loudly here.
+// before any pool use, and stubAdminDB panics on Exec and Query, so a handler
+// that grew a write or a multi-row read fails loudly here. A QueryRow is
+// answered rather than refused, so it is the nil pool, not the stub, that bounds
+// a handler which grows a single-row read.
 func submitBucketServer(n int, win time.Duration) *http.Server {
 	return buildHTTPServer(httpServerDeps{
 		addr:              "127.0.0.1:0",
@@ -140,6 +142,40 @@ func TestBuildHTTPServer_ScheduleCreationIsNotInTheSubmitBucket(t *testing.T) {
 // state is what internal/api's own test server and the CLI harness both rely on;
 // the environment cannot reach it, because ParseRateLimit refuses a zero count
 // and main fatals on the error.
+// TestBuildHTTPServer_AHalfConfiguredLimitLeavesTheBucketOff pins the other
+// half of the Server field's promise: zero on EITHER of the pair leaves the
+// bucket off, which is a conjunction and not a disjunction.
+//
+// THE ZERO-COUNT ROW IS THE DISCRIMINATING ONE. Relaxing the guard to an OR
+// constructs a limiter whose limit is 0, and rateLimiter.allow takes its
+// over-limit branch on an empty window and indexes hits[0], so that row fails
+// loudly on the first request. The zero-WINDOW row cannot discriminate against
+// the same relaxation - a limiter with a zero window prunes every hit before it
+// counts them and so admits everything, exactly as no limiter does - and it is
+// here to state the contract on the field the count row does not exercise.
+func TestBuildHTTPServer_AHalfConfiguredLimitLeavesTheBucketOff(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int
+		win  time.Duration
+	}{
+		{"count set, window zero", 5, 0},
+		{"window set, count zero", 0, time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := submitBucketServer(tc.n, tc.win)
+
+			for i := 1; i <= 3; i++ {
+				rec := postAsUser(t, srv, "/v1/jobs", `{}`)
+				require.Equal(t, http.StatusBadRequest, rec.Code,
+					"request %d: a half-configured pair must leave the bucket off, so every "+
+						"request reaches the handler. body: %s", i, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestBuildHTTPServer_AZeroLimitLeavesTheBucketOff(t *testing.T) {
 	srv := buildHTTPServer(httpServerDeps{
 		addr: "127.0.0.1:0",
