@@ -97,7 +97,9 @@ func New(
 	}
 }
 
-// Handler returns an http.Handler with all routes registered.
+// Handler returns an http.Handler with all routes registered. Call it once per
+// Server: each call allocates a fresh job-submit bucket and starts the gc
+// goroutine that prunes it, and that goroutine is never stopped.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 

@@ -73,13 +73,6 @@ func clientIP(r *http.Request) string {
 
 // userRateLimitKey renders the bucket key for an authenticated principal.
 //
-// It is a package-level function rather than an expression inside UserRateLimit
-// because a per-request read bucket has to call rl.allow with this same value
-// from INSIDE its handler, at the point a needle has already been parsed. A
-// middleware deciding that question for itself would be a second implementation
-// of the handler's own decision, and the two only have to disagree once for the
-// expensive path to go unbudgeted.
-//
 // ok is false when the principal has no renderable id, and the second return
 // value is the point: rl.allow(userRateLimitKey(u)) does not compile, so a
 // caller cannot bucket an unidentified principal under "" by omission.
@@ -92,14 +85,20 @@ func userRateLimitKey(u AuthUser) (string, bool) {
 // `limit` requests per `window`, answering 429 with a Retry-After on breach.
 //
 // THE KEY IS THE PRINCIPAL BearerAuth RESOLVED, NOT THE SOURCE ADDRESS, and
-// RateLimit's RemoteAddr argument above does not transfer. Before
-// authentication there is no principal and the address is the one identifier
-// the caller cannot choose; after it there is one, resolved server-side from a
-// token-hash lookup and unforgeable in the same sense, and it is the unit the
-// bounded cost belongs to - task rows and subprocess spawns are charged to a
-// user's jobs, not to a network path. Keyed on the address instead, one office
-// egress or load balancer collapses a whole studio into a single bucket, while
-// one user with a workstation and a laptop gets two.
+// RateLimit's RemoteAddr argument above does not transfer. The address is the
+// only identifier that exists before a principal does, which is what makes it
+// right ahead of authentication; it is not an identifier the caller cannot
+// choose, since an IPv6 caller holds a whole /64 and clientIP keys per /128.
+// After authentication there is a principal, resolved
+// server-side from a token-hash lookup and not selectable by the caller at all.
+// On POST /v1/jobs it is also the unit the bounded cost belongs to: the task rows
+// and subprocess spawns are charged to the submitter's own jobs. That is NOT true
+// of the other two routes - an admin may retry another user's job or fire another
+// user's schedule, and CreateJobFromSpec charges the execution to the owner while
+// the bucket is charged to the admin - so the argument that carries all three is
+// the operational one. Keyed on the address, one office egress or load balancer
+// collapses a whole studio into a single bucket, while one user with a
+// workstation and a laptop gets two.
 //
 // IT MUST BE MOUNTED INSIDE THE AUTH CHAIN and outside any admin gate:
 // auth(userLimit(admin(h))). Inside admin, a non-admin's rejected probes are
@@ -111,6 +110,13 @@ func userRateLimitKey(u AuthUser) (string, bool) {
 // A request carrying no renderable principal is REFUSED with 401, never passed
 // through and never bucketed under "". This middleware is only correct inside
 // the auth chain, so such a request is a wiring fault.
+//
+// THE 401 RETURNS BEFORE rl.allow, WHICH IS WHY THE MAP IS BOUNDED BY THE USER
+// TABLE. An unauthenticated caller, or one arriving through a mis-wired chain,
+// creates no key at all, so the number of live buckets is the number of distinct
+// principals that have actually been resolved. Keying on the presented token
+// instead would let anyone mint a fresh key per request; that is the reason this
+// is keyed on the resolved user id, and the ordering here is what delivers it.
 func UserRateLimit(limit int, window time.Duration) func(http.Handler) http.Handler {
 	rl := &rateLimiter{
 		windows: make(map[string][]time.Time),
@@ -123,8 +129,8 @@ func UserRateLimit(limit int, window time.Duration) func(http.Handler) http.Hand
 			// The absent-principal case needs no separate arm: UserFromCtx
 			// yields the zero AuthUser when its type assertion fails, and a zero
 			// AuthUser has no renderable id, so the key check below refuses it
-			// too. A second arm on the discarded bool would be unreachable by
-			// any input and could not be pinned by a test.
+			// too. Input does reach a second arm on the discarded bool; what it
+			// cannot do is make that arm answer differently.
 			u, _ := UserFromCtx(r.Context())
 			key, ok := userRateLimitKey(u)
 			if !ok {
