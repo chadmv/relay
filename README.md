@@ -577,7 +577,7 @@ Tasks can declare an optional `source` spec. When present, the agent prepares a 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `type` | Yes | Source provider — `"perforce"` is the only v1 value. |
-| `stream` | Yes | Perforce stream path. Workspaces are keyed by stream and reused across tasks. |
+| `stream` | Yes | Perforce stream path. Mainline, development, task, virtual and `import+` remap streams are all supported: relay addresses p4 by client path, so the stream's own view - remaps included - is what defines the layout on disk. Workspaces are keyed by stream and reused across tasks. |
 | `sync` | Yes | One or more paths to sync. Each entry has `path` (depot path or `...`) and `rev` (`"#head"`, `@CL`, or `@label`). |
 | `unshelves` | No | List of pending changelist numbers to unshelve into the workspace before running. Reverted automatically after the task. |
 | `workspace_exclusive` | No | If `true`, take an exclusive lock on the workspace (other tasks for the same stream queue). Default `false`. |
