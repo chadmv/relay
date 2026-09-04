@@ -70,8 +70,12 @@ func main() {
 	var provider source.Provider
 	if root := os.Getenv("RELAY_WORKSPACE_ROOT"); root != "" {
 		pp := perforce.New(perforce.Config{
-			Root:     root,
-			Hostname: caps.Hostname,
+			Root:                  root,
+			Hostname:              caps.Hostname,
+			SyncHeartbeatInterval: resolveSyncHeartbeatInterval(os.Getenv("RELAY_SYNC_HEARTBEAT_INTERVAL")),
+			// The same identifier the sweeper below is given, so the heartbeat's
+			// figure and RELAY_WORKSPACE_MIN_FREE_GB read the same volume.
+			FreeDiskGB: freeDiskGB,
 		})
 		if err := pp.Preflight(ctx); err != nil {
 			// Non-fatal: log loudly and run without the workspace provider.
