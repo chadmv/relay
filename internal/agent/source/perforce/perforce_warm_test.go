@@ -382,3 +382,85 @@ func TestProvider_AWarmPrepareKeepsAnotherTasksOpenChangelist(t *testing.T) {
 	require.Equal(t, []OpenTaskChangelist{{TaskID: "other-task", PendingCL: 91244}}, e.OpenTaskChangelists)
 	require.Equal(t, baseline, e.BaselineHash, "a warm workspace at its baseline must not be reset to re-sync")
 }
+
+// clientInputSpec returns the spec Prepare piped to `p4 client -i`. It scans for
+// the argv rather than indexing fr.calls: Prepare makes several p4 calls and
+// their number is not stable.
+func clientInputSpec(t *testing.T, fr *fakeRunner) string {
+	t.Helper()
+	for _, c := range fr.calls {
+		if len(c.args) == 2 && c.args[0] == "client" && c.args[1] == "-i" {
+			return c.stdin
+		}
+	}
+	t.Fatalf("no `client -i` call in %v", fr.argHistory())
+	return ""
+}
+
+// The property: Config.Clobber decides what reaches `p4 client -i`, on a real
+// Prepare rather than through a direct call to CreateStreamClient.
+//
+// This is the executed check standing in for a wiring guard the agent binary
+// does not have. It pins the Config-field-to-spec-bytes hop; TestParseBoolEnv
+// pins the env-to-value hop, and the single assignment between them is
+// deliberately unpinned.
+//
+// warmFixtures' own `client -o` fixture is empty, which would make both rows
+// assert the missing-line no-op instead of the transform, so it is replaced
+// here with one carrying an Options: line.
+func TestProvider_TheClobberConfigReachesTheWrittenSpec(t *testing.T) {
+	const fetchedOptions = "Options:\tnoallwrite noclobber nocompress unlocked nomodtime normdir"
+	rows := []struct {
+		name    string
+		clobber bool
+		assert  func(t *testing.T, spec string)
+	}{
+		{
+			name:    "on",
+			clobber: true,
+			assert: func(t *testing.T, spec string) {
+				require.Equal(t,
+					[]string{"noallwrite", "clobber", "nocompress", "unlocked", "nomodtime", "normdir"},
+					optionsTokensOf(t, spec))
+			},
+		},
+		{
+			name:    "off",
+			clobber: false,
+			assert: func(t *testing.T, spec string) {
+				require.Equal(t, []string{fetchedOptions}, optionsLinesOf(spec))
+			},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			root := t.TempDir()
+			fr := newFakeP4Fixture(t)
+			client := expectedClientName("h", "//s/x")
+			warmFixtures(fr, client)
+			fr.set("client -o -S //s/x "+client, "Client: "+client+"\n"+fetchedOptions+"\n")
+
+			p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}, Clobber: row.clobber})
+			reg, err := p.Registry()
+			require.NoError(t, err)
+			spec := warmStreamSpec()
+			shortID := allocateShortID("//s/x", &Registry{})
+			reg.Upsert(WorkspaceEntry{
+				ShortID:      shortID,
+				SourceKey:    "//s/x",
+				ClientName:   client,
+				BaselineHash: BaselineHash(spec.GetPerforce(), nil),
+				LastUsedAt:   time.Now(),
+			})
+			require.NoError(t, reg.Save())
+			require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, shortID, "synced.txt"), []byte("x"), 0o644))
+
+			h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+			row.assert(t, clientInputSpec(t, fr))
+		})
+	}
+}

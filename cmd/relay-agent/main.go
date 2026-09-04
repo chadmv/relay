@@ -78,6 +78,7 @@ func main() {
 			// free-disk check below, or the logged figure stops being comparable
 			// with RELAY_WORKSPACE_MIN_FREE_GB.
 			FreeDiskGB: freeDiskGB,
+			Clobber:    parseBoolEnv("RELAY_WORKSPACE_CLOBBER", os.Getenv("RELAY_WORKSPACE_CLOBBER"), false),
 		})
 		if err := pp.Preflight(ctx); err != nil {
 			// Non-fatal: log loudly and run without the workspace provider.
