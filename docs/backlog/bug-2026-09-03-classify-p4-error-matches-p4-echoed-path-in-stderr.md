@@ -62,6 +62,43 @@ Options, cheapest first, none of them complete on its own:
 - The discriminating test is built through the production error constructor, not a hand-written
   fixture.
 
+## Notes
+
+Measured against a live p4d r25.2 while reviewing the client-path slice. Three corrections and one
+new channel; the item's diagnosis stands, its repro and one of its remedies do not.
+
+**The stated repro does not fire.** It assumes a stream name carrying a classification phrase
+survives into stderr. p4 normalizes it first:
+
+    p4 client -o -S "//test/disk full" relay_probe
+    Stream '//test/disk_full' doesn't exist.
+
+So the `client -o -S` channel is closed by p4's own name normalization, and a fix aimed at it would
+pin nothing.
+
+**The live channels are the sync/resolve path and the local path.** `validateSourceSpec` applies no
+character set to a sync path, and an `@` in one makes p4 echo the tail with a non-zero exit:
+
+    p4 -c <client> changes -m1 "//<client>/a@no space left on device/...#head"
+    Unintelligible revision specification 'no space left on device/...#head'
+    exit=1
+
+Fed through the production constructor, that classifies as out-of-disk. A second channel nothing
+had enumerated: `Can't clobber writable file <local path>` (exit 1) puts the LOCAL path in stderr,
+and the local path is the workspace root joined with the caller's own remainder - so a path segment
+named `disk full` reaches it, and no client-path rewrite can remove it.
+
+**Proposal option 1 does not close it.** Suppressing a match that also appears in the args catches
+the revision-specification cases but not the clobber class, where the stderr carries a Windows local
+path that appears in no argv element at all. Option 2 remains the only closing fix.
+
+**The client-path slice is not even a partial mitigation.** It removes the stream name from the sync
+and resolve argv but passes the sub-stream remainder through byte for byte, and it made
+`CreateStreamClient` run on every Prepare rather than only on cold create, so the full stream name
+reaches argv more often than before. The stderr for the revision-specification case is byte-identical
+before and after. This item must not be closed on that work.
+
+
 ## Related
 
 - `internal/agent/source/perforce/diagnostics.go` - `classifiableText`, `classifyP4Error`
