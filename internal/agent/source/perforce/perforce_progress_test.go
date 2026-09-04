@@ -38,16 +38,27 @@ func syncFixture(t *testing.T) (*fakeRunner, string, *relayv1.SourceSpec) {
 			Sync:   []*relayv1.SyncEntry{{Path: "//s/x/...", Rev: "#head"}},
 		},
 	}}
-	return fr, "-c " + client + " sync -q --parallel=4 //" + client + "/...@12345", spec
+	return fr, "-c " + client + " sync --parallel=4 //" + client + "/...@12345", spec
 }
 
-// The brackets are one line each, and per-file progress is a separate concern.
-// The "of 3 files" assertion is what keeps "no per-file line of the provider's
-// own" from degenerating into "the sync emits nothing": p4's own output must
-// still reach progress unchanged.
-func TestProvider_PrepareBracketsTheSyncWithExactlyOneStartAndOneCompleteLine(t *testing.T) {
+// The brackets are one line each, and p4's per-file output is COUNTED rather
+// than forwarded. The verb probes and the file count are two halves of one
+// property and neither is sufficient alone: "no per-file line" is satisfied
+// vacuously by a sync that emitted nothing at all, and the count is what
+// refuses that reading by proving the counter is wired to onLine. Breaking
+// either half by editing the fixture leaves the other looking healthy.
+//
+// The fixture's three lines are real p4 sync output shapes. The middle one
+// carries " - " inside its filename, so it also fails a depot-path rule that
+// splits there - but only weakly: such a split still yields a non-empty prefix
+// and the line still counts as a file. TestSyncLineDepotPath is what kills that
+// rule; do not conflate the two tests.
+func TestProvider_PerFileSyncOutputIsCountedAndNeverForwarded(t *testing.T) {
 	fr, syncKey, spec := syncFixture(t)
-	fr.setStream(syncKey, "1 of 3 files\n2 of 3 files\n3 of 3 files\n")
+	fr.setStream(syncKey,
+		"//depot/x/a.ma#3 - added as /ws/a.ma\n"+
+			"//depot/x/My File - Copy.ma#1 - updating /ws/My File - Copy.ma\n"+
+			"//depot/x/c.ma#2 - refreshing /ws/c.ma\n")
 
 	p := New(Config{Root: t.TempDir(), Hostname: "h", Client: &Client{r: fr}})
 	var lines []string
@@ -61,8 +72,19 @@ func TestProvider_PrepareBracketsTheSyncWithExactlyOneStartAndOneCompleteLine(t 
 		"exactly one complete bracket, got: %v", lines)
 	assert.Equal(t, 1, countLinesContaining(lines, "1 path"),
 		"the start line reports how many paths are being synced, got: %v", lines)
-	assert.Equal(t, 3, countLinesContaining(lines, "of 3 files"),
-		"p4's own output must still reach progress unchanged, got: %v", lines)
+
+	for _, verb := range []string{"added as", "updating", "refreshing"} {
+		assert.Equal(t, 0, countLinesContaining(lines, verb),
+			"p4's per-file output is counted, never forwarded: a large sync is millions of "+
+				"lines and task_logs has no per-task cap, got: %v", lines)
+	}
+	assert.Equal(t, 1, countLinesContaining(lines, "3 files"),
+		"and the count is what keeps the assertions above from being satisfied by a sync "+
+			"that emitted nothing at all, got: %v", lines)
+	assert.Equal(t, 1, countLinesContaining(lines, "0 other lines"),
+		"every fixture line parsed as a depot path, got: %v", lines)
+	assert.Equal(t, 1, countLinesContaining(lines, `last "//depot/x/c.ma"`),
+		"lastPath tracks the LAST line, not the first, got: %v", lines)
 }
 
 // The cause has exactly ONE home. The error returned here becomes ErrorMessage

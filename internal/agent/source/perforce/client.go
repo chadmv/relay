@@ -89,8 +89,30 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	for sc.Scan() {
 		onLine(sc.Text())
 	}
-	if err := cmd.Wait(); err != nil {
-		return newP4CommandError(args, err, stderr.String())
+	// THE DRAIN IS WHAT MAKES THE CHECK BELOW REACHABLE, and skipping it is a
+	// hang rather than a wrong count. StdoutPipe's contract is that Wait must
+	// not run until every read from the pipe has completed; a scanner that
+	// stopped on an error has not reached EOF, so p4 blocks writing into a full
+	// pipe, Wait blocks on p4, and Stream never returns - while Prepare holds
+	// the workspace handle and nothing on this path carries a deadline.
+	// cmd.WaitDelay does not cover it: WaitDelay bounds a cancelled context and
+	// an exited-but-unclosed child, and here the context is live and the child
+	// has not exited.
+	scanErr := sc.Err()
+	if scanErr != nil {
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+	waitErr := cmd.Wait()
+	// The scan error is reported IN PREFERENCE to the exit status. A scan that
+	// ended on an error, not on EOF, means the caller saw only part of p4's
+	// output while p4 itself exited zero, and the sync summary's file count is
+	// built from those lines - so the truncation is the more specific fact.
+	// TestExecRunner_AStdoutScanFailureOutranksANonZeroExitStatus.
+	if scanErr != nil {
+		return newP4CommandError(args, scanErr, stderr.String())
+	}
+	if waitErr != nil {
+		return newP4CommandError(args, waitErr, stderr.String())
 	}
 	return nil
 }
@@ -161,10 +183,16 @@ func (c *Client) ResolveHead(ctx context.Context, client, path string) (int64, e
 	return strconv.ParseInt(m[1], 10, 64)
 }
 
-// SyncStream runs `p4 -c <client> sync -q --parallel=4 <specs...>` from cwd,
+// SyncStream runs `p4 -c <client> sync --parallel=4 <specs...>` from cwd,
 // streaming lines to onLine.
+//
+// NOT -q: the per-file lines are the only evidence a multi-hour sync is moving.
+// The hazard that creates is that they must be COUNTED and never forwarded to
+// the task log - a multi-terabyte sync is millions of lines and task_logs has
+// no per-task cap (docs/backlog/bug-2026-08-14-task-logs-have-no-per-task-volume-cap.md).
+// TestProvider_PerFileSyncOutputIsCountedAndNeverForwarded.
 func (c *Client) SyncStream(ctx context.Context, cwd, client string, specs []string, onLine func(string)) error {
-	args := append([]string{"-c", client, "sync", "-q", "--parallel=4"}, specs...)
+	args := append([]string{"-c", client, "sync", "--parallel=4"}, specs...)
 	return c.r.Stream(ctx, cwd, args, onLine)
 }
 

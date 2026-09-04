@@ -11,7 +11,7 @@ import (
 func TestClassifyP4Error(t *testing.T) {
 	// A realistic argv for the fixtures. It carries a depot path because that is
 	// what makes the args half caller-controlled in production.
-	syncArgs := []string{"-c", "relay_h_ab12", "sync", "-q", "//s/x/...@12345"}
+	syncArgs := []string{"-c", "relay_h_ab12", "sync", "//s/x/...@12345"}
 	cases := []struct {
 		name    string
 		in      error

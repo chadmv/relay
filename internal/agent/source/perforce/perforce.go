@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,11 +35,73 @@ var lookPath = exec.LookPath
 // lookPath above.
 var prepareAcquireHook func(shortID string)
 
+// syncNow and newSyncTicker are the heartbeat's clock seams, following the
+// package-level var pattern lookPath and prepareAcquireHook already use. Being
+// package-level, they are shared process-wide: a test that swaps either one
+// must restore it in t.Cleanup and must not call t.Parallel.
+var syncNow = time.Now
+
+var newSyncTicker = func(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// runSyncWithHeartbeat runs the sync on its own goroutine and stays on the
+// CALLER's goroutine emitting periodic summaries, so progress keeps exactly one
+// caller. A heartbeat goroutine calling progress instead would deadlock
+// Prepare: progress holds a mutex across a send bounded only by the agent
+// context (internal/agent/runner.go, makePrepareProgressFn and send), so a
+// parked heartbeat would block Prepare's own completion line, the runner's
+// flushProgress, and any join - with the workspace handle still held.
+// TestProvider_TheHeartbeatNeverCallsProgressConcurrentlyWithPrepare.
+//
+// The select has EXACTLY TWO cases and must never gain a ctx.Done() arm:
+// exec.CommandContext already kills p4 on cancellation and the errCh arm
+// reports it, whereas returning on ctx.Done() would let Prepare release the
+// workspace while a live p4 child was still writing into it.
+// TestProvider_PrepareDoesNotReturnUntilTheSyncGoroutineHasFinished.
+//
+// errCh is buffered at 1 so a sync that finishes while the caller is parked in
+// progress still completes its send and exits.
+func (p *Provider) runSyncWithHeartbeat(
+	ctx context.Context, wsRoot, clientName string, specs []string,
+	sp *syncProgress, progress func(string),
+) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.cfg.Client.SyncStream(ctx, wsRoot, clientName, specs, sp.onLine) }()
+
+	if p.cfg.SyncHeartbeatInterval <= 0 {
+		return <-errCh
+	}
+	start := syncNow()
+	tick, stopTick := newSyncTicker(p.cfg.SyncHeartbeatInterval)
+	defer stopTick()
+	for {
+		select {
+		case err := <-errCh:
+			return err
+		case <-tick:
+			progress(p.syncSummary("[sync]", sp, syncNow().Sub(start)))
+		}
+	}
+}
+
 // Config holds constructor parameters for the Perforce provider.
 type Config struct {
 	Root     string  // RELAY_WORKSPACE_ROOT — directory for all workspaces
 	Hostname string  // worker hostname, used in client name; sanitized on New()
 	Client   *Client // override for tests; nil → exec real p4
+
+	// SyncHeartbeatInterval is how often a running p4 sync emits a progress
+	// summary. Zero or negative builds no ticker at all; the bracket lines still
+	// carry a summary. RELAY_SYNC_HEARTBEAT_INTERVAL.
+	SyncHeartbeatInterval time.Duration
+
+	// FreeDiskGB reports free GIGABYTES on the volume holding root. Same
+	// signature as Sweeper.FreeDiskGB so cmd/relay-agent passes the same
+	// platform-gated helper to both; nil renders the field as "-" rather than
+	// adding a second platform pair inside this package.
+	FreeDiskGB func(root string) (int64, error)
 }
 
 // Provider implements source.Provider for Perforce.
@@ -60,6 +123,83 @@ func New(cfg Config) *Provider {
 }
 
 func (p *Provider) Type() string { return "perforce" }
+
+// syncSummary renders the operator-facing summary the heartbeat and both sync
+// brackets carry: five fields, fixed order, none ever omitted, "-" for a value
+// that could not be read. An omitted field is indistinguishable from a
+// truncated line or a knob that was never wired. The only input-derived field
+// is the depot path, and it is LAST so its clip truncates nothing structural.
+// The free-disk probe is read on the provider root, not a workspace
+// subdirectory, so the number matches what the sweeper and
+// RELAY_WORKSPACE_MIN_FREE_GB act on, and one error disables it for the rest of
+// the sync. TestProvider_SyncSummaryRendersFiveFixedFields.
+//
+// THE PATH IS RENDERED WITH %q, NOT %s. syncLineDepotPath already removes every
+// rune that could end the physical line, so what %q closes is the remaining
+// half of the same hole: the field can still spell the brackets, semicolons,
+// digits and words a genuine line is built from, and a bare %s leaves nothing
+// saying where the value ends, so a forged "[sync] failed: ..." inside a real
+// row matches an operator grep exactly as the real line would.
+func (p *Provider) syncSummary(prefix string, sp *syncProgress, elapsed time.Duration) string {
+	files, other, lastPath := sp.snapshot()
+	free := "-"
+	if gb, ok := p.probeFreeDiskGB(sp); ok {
+		free = strconv.FormatInt(gb, 10)
+	}
+	if lastPath == "" {
+		lastPath = "-"
+	}
+	return fmt.Sprintf("%s %s; %d files; %d other lines; %s GB free; last %q",
+		prefix, elapsed.Round(time.Second), files, other, free, lastPath)
+}
+
+// freeDiskProbeTimeout bounds one FreeDiskGB call. Package-level var so tests
+// can shorten it, as with syncNow and newSyncTicker above.
+var freeDiskProbeTimeout = 2 * time.Second
+
+// probeFreeDiskGB reads free disk for one summary, reporting ok=false for every
+// reason the field renders "-".
+//
+// THE PROBE RUNS OFF THE CALLER'S GOROUTINE BECAUSE THE CALLER CANNOT WAIT.
+// The heartbeat renders on Prepare's own goroutine with the workspace handle
+// held, which is the one thing the failure bracket avoids by releasing before
+// it renders; a statfs on a wedged network volume is an uninterruptible block,
+// so an in-line call parks Prepare, and with it every later task for that
+// stream, for the life of the agent. The sticky latch alone does not cover
+// this: it trips on an error RETURN, and a probe that never returns never
+// returns one - so a timeout latches too, and the abandoned goroutine is the
+// only one there will be.
+//
+// The bound lives here rather than in runSyncWithHeartbeat's select, so nothing
+// about that loop's shape depends on it.
+// TestProvider_SyncSummaryRendersFiveFixedFields.
+func (p *Provider) probeFreeDiskGB(sp *syncProgress) (int64, bool) {
+	if p.cfg.FreeDiskGB == nil || sp.freeDiskIsDisabled() {
+		return 0, false
+	}
+	type probe struct {
+		gb  int64
+		err error
+	}
+	// Buffered, so the send completes and the goroutine exits even after this
+	// function has stopped listening.
+	ch := make(chan probe, 1)
+	go func() {
+		gb, err := p.cfg.FreeDiskGB(p.cfg.Root)
+		ch <- probe{gb, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			sp.disableFreeDisk()
+			return 0, false
+		}
+		return r.gb, true
+	case <-time.After(freeDiskProbeTimeout):
+		sp.disableFreeDisk()
+		return 0, false
+	}
+}
 
 // Preflight verifies the agent host is configured for Perforce work.
 // Currently checks only that the p4 binary exists on PATH. Does not contact
@@ -338,17 +478,22 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 		// authoritative.
 		// TestProvider_ASyncFailureProgressLineDoesNotRepeatTheCause is the guard.
 		progress(fmt.Sprintf("[sync] starting: %d path(s)", len(syncSpecs)))
-		if err := p.cfg.Client.SyncStream(ctx, wsRoot, clientName, syncSpecs, progress); err != nil {
+		sp := &syncProgress{}
+		start := syncNow()
+		if err := p.runSyncWithHeartbeat(ctx, wsRoot, clientName, syncSpecs, sp, progress); err != nil {
 			// RELEASE FIRST. progress can park until agent shutdown (its flush
 			// reaches Runner.send, which only selects on sendCh and the agent
 			// context), and anything held across it strands every later task for
-			// this stream in Workspace.Acquire.
+			// this stream in Workspace.Acquire. The summary is rendered AFTER the
+			// release for the same reason: rendering reads free disk, and a statfs
+			// on a wedged network volume is an uninterruptible block.
 			// TestProvider_ASyncFailureReleasesTheWorkspaceBeforeItReportsAnything.
 			handle.Release()
-			progress("[sync] failed; the cause is reported on the task's final status")
+			progress(p.syncSummary("[sync] failed:", sp, syncNow().Sub(start)) +
+				"; the cause is reported on the task's final status")
 			return nil, classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 		}
-		progress("[sync] complete")
+		progress(p.syncSummary("[sync] complete:", sp, syncNow().Sub(start)))
 		if curOK {
 			_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
 				e.BaselineHash = baseline

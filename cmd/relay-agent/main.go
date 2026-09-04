@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -70,8 +71,13 @@ func main() {
 	var provider source.Provider
 	if root := os.Getenv("RELAY_WORKSPACE_ROOT"); root != "" {
 		pp := perforce.New(perforce.Config{
-			Root:     root,
-			Hostname: caps.Hostname,
+			Root:                  root,
+			Hostname:              caps.Hostname,
+			SyncHeartbeatInterval: resolveSyncHeartbeatInterval(os.Getenv("RELAY_SYNC_HEARTBEAT_INTERVAL")),
+			// Must stay the same helper on the same root as the sweeper's own
+			// free-disk check below, or the logged figure stops being comparable
+			// with RELAY_WORKSPACE_MIN_FREE_GB.
+			FreeDiskGB: freeDiskGB,
 		})
 		if err := pp.Preflight(ctx); err != nil {
 			// Non-fatal: log loudly and run without the workspace provider.
@@ -156,11 +162,43 @@ func resolveCoordinator(ctx context.Context, addr string) (string, error) {
 	return discovery.Browse(ctx)
 }
 
+const (
+	defaultSyncHeartbeat = 30 * time.Second
+	syncHeartbeatFloor   = 5 * time.Second
+)
+
+// resolveSyncHeartbeatInterval reads RELAY_SYNC_HEARTBEAT_INTERVAL. "0s"
+// disables the timer. A bare "0", a negative value and any other unparseable
+// input take parseDurationEnv's warn-and-fall-back path, because the shared
+// regex has no unit-less or signed form. A positive value below
+// syncHeartbeatFloor is refused with its own warning and falls back too: the
+// only cost of this knob is durable task_logs rows, which nothing caps yet
+// (docs/backlog/bug-2026-08-14-task-logs-have-no-per-task-volume-cap.md).
+// TestResolveSyncHeartbeatInterval.
+func resolveSyncHeartbeatInterval(v string) time.Duration {
+	d := parseDurationEnv("RELAY_SYNC_HEARTBEAT_INTERVAL", v, defaultSyncHeartbeat)
+	if d > 0 && d < syncHeartbeatFloor {
+		log.Printf("warning: RELAY_SYNC_HEARTBEAT_INTERVAL=%q is below the %v minimum; using %v",
+			v, syncHeartbeatFloor, defaultSyncHeartbeat)
+		return defaultSyncHeartbeat
+	}
+	return d
+}
+
 var durRe = regexp.MustCompile(`^(\d+)([smhd])$`)
 
 // parseDurationEnv parses a duration string of the form "<N><unit>" where unit is
 // s (seconds), m (minutes), h (hours), or d (days). Returns fallback on empty or invalid input.
 // If v is non-empty but unparseable, a warning is logged naming the env var.
+//
+// SYNTACTICALLY VALID IS NOT REPRESENTABLE, and the range check below is what
+// separates them. durRe admits an arbitrarily long digit run, so the product can
+// leave int64 nanoseconds - and the wrapped result is not reliably negative, so
+// no check on the PRODUCT can see it: 1000000000000d wraps to a plausible-looking
+// positive 225 years. An unrepresentable value therefore takes the fallback and
+// warns, rather than returning a wrapped duration the caller cannot tell from a
+// deliberate one.
+// TestParseDurationEnv_AnOverflowingValueIsRefusedRatherThanWrappedNegative.
 func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 	if v == "" {
 		return fallback
@@ -170,16 +208,29 @@ func parseDurationEnv(name, v string, fallback time.Duration) time.Duration {
 		log.Printf("warning: %s=%q is not a valid duration (want e.g. 14d, 8h, 30m); using fallback %v", name, v, fallback)
 		return fallback
 	}
-	n, _ := strconv.Atoi(m[1])
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		log.Printf("warning: %s=%q is larger than a duration can represent; using fallback %v", name, v, fallback)
+		return fallback
+	}
+	var unit time.Duration
 	switch m[2] {
 	case "s":
-		return time.Duration(n) * time.Second
+		unit = time.Second
 	case "m":
-		return time.Duration(n) * time.Minute
+		unit = time.Minute
 	case "h":
-		return time.Duration(n) * time.Hour
+		unit = time.Hour
 	case "d":
-		return time.Duration(n) * 24 * time.Hour
+		unit = 24 * time.Hour
+	default:
+		return fallback
 	}
-	return fallback
+	// n is non-negative by the regex, so division against the ceiling is the
+	// whole test; it is done on the OPERAND because the product is already lost.
+	if int64(n) > int64(math.MaxInt64)/int64(unit) {
+		log.Printf("warning: %s=%q is larger than a duration can represent; using fallback %v", name, v, fallback)
+		return fallback
+	}
+	return time.Duration(n) * unit
 }
