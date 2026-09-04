@@ -13,13 +13,13 @@ import (
 	relayv1 "relay/internal/proto/relayv1"
 )
 
-// assertCwdContract pins the cwd half of the client-selection contract: a p4
-// invocation runs from wsRoot only while Prepare holds the workspace handle for
-// it. The client-selection half is the `-c <client>` argv, pinned separately.
+// assertCwdContract partitions the runner's calls by argv SHAPE: a call that
+// carries `-c <client>` and is not head resolution must run from wsRoot, and
+// every other call must run with an empty cwd. It cannot see WHEN a call was
+// made, so it says nothing about ordering against ws.Acquire.
 //
-// Head resolution is the exception because it runs BEFORE ws.Acquire, when the
-// workspace has no holders and a sweep can be deleting it.
-// TestProvider_HeadResolutionRunsWithNoWorkspaceCwd is its own guard.
+// Head resolution is carved out because it runs with no workspace handle;
+// TestProvider_HeadResolutionRunsWithNoWorkspaceCwd pins its empty cwd.
 func assertCwdContract(t *testing.T, fr *fakeRunner, wsRoot string) {
 	t.Helper()
 	sawWorkspaceCall := false
@@ -271,10 +271,8 @@ func TestProvider_RegistryReturnsSharedInstance(t *testing.T) {
 func TestProvider_Prepare_ClassifiesAuthError(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
-	// Head resolution is the first p4 call carrying a job-supplied path, which is
-	// what makes it the realistic place for a ticket failure to surface. Inject
-	// the canonical "ticket invalid" stderr that execRunner would surface in
-	// production.
+	// Inject at head resolution the canonical "ticket invalid" stderr that
+	// execRunner would surface in production.
 	expectedClient := expectedClientName("h", "//s/x")
 	fr.set("client -o -S //s/x "+expectedClient, "")
 	fr.set("client -i", "Client saved.\n")

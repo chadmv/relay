@@ -99,10 +99,10 @@ func TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs(t *testing.T) {
 	require.NotNil(t, syncCall(fr), "a workspace whose directory was missing must be re-synced, not trusted")
 }
 
-// The control for the two tests around it: the same warm entry with a populated
-// directory must NOT re-sync. Without this, forcing a sync unconditionally would
-// pass. The synced file is what makes the directory intact rather than merely
-// present.
+// A warm entry whose directory is populated must NOT re-sync. This is the
+// control for the missing-directory and empty-directory cases: without it,
+// forcing a sync unconditionally would pass them both. The synced file is what
+// makes the directory intact rather than merely present.
 func TestProvider_AWarmEntryWithItsDirectoryIntactDoesNotResync(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
@@ -135,8 +135,7 @@ func TestProvider_AWarmEntryWithItsDirectoryIntactDoesNotResync(t *testing.T) {
 // clientName is recomputed from the hostname on every Prepare while the row
 // records the name used when the workspace was allocated. A rename of the agent
 // host makes the two disagree, and the recorded name is the one the sweeper
-// passes to client -d - so the client Prepare just created is never deleted,
-// and handle.Env() hands the task a P4CLIENT the inventory does not report.
+// passes to client -d - so the client Prepare just created is never deleted.
 func TestProvider_AWarmEntryRecordsTheClientNameThatWasActuallyCreated(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)
@@ -208,9 +207,7 @@ func TestProvider_RecreatingTheClientClearsDirtyDelete(t *testing.T) {
 // that key nor BaselineHash, so two tasks carrying different templates hash
 // identically, are admitted together in ModeShared, and would flip one shared
 // client spec against each other - one of them possibly mid-sync - if the
-// template were re-applied on every Prepare. On the warm path `client -o`
-// returns the stored spec, so the fields the template contributed are already
-// in it and nothing is lost by omitting -t.
+// template were re-applied on every Prepare.
 //
 // The cold subtest is the control: it is what stops "never pass -t" from
 // passing, and it pins that a first Prepare still honours the field.
@@ -274,8 +271,8 @@ func TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace(t *testing.T) {
 // os.RemoveAll deletes a directory's children before the directory itself, so a
 // failure on the final rmdir leaves the row intact and the directory EMPTY.
 // sweeper.evict takes that branch: it marks DirtyDelete and returns before
-// reg.Remove. The stat-based check cannot see it - the directory exists - so the
-// baseline would still match and the task would run in an empty tree.
+// reg.Remove. The directory is present and the baseline still matches, so
+// emptiness is what distinguishes this workspace from a healthy one.
 func TestProvider_AWarmEntryWhoseDirectoryIsEmptyStillSyncs(t *testing.T) {
 	root := t.TempDir()
 	fr := newFakeP4Fixture(t)

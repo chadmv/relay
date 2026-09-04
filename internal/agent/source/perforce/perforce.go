@@ -191,9 +191,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// that key nor BaselineHash, so two tasks carrying different templates hash
 	// identically, are admitted together in ModeShared, and re-applying -t here
 	// would let them flip one shared client spec against each other outside the
-	// workspace lock - one of them possibly mid-sync. On the warm path
-	// `client -o` returns the stored spec, so the fields a template contributed
-	// are already in it.
+	// workspace lock - one of them possibly mid-sync.
 	// TestProvider_TheClientTemplateIsAppliedOnlyToAColdWorkspace.
 	tmpl := ""
 	if !found && pf.ClientTemplate != nil {
@@ -238,7 +236,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 
 	// Resolve #head to a specific CL number.
 	//
-	// resolved and syncPaths stay keyed on the DEPOT path. BaselineHash is a
+	// resolved and syncPaths are keyed on the DEPOT path. BaselineHash is a
 	// cross-process contract: scheduler.BaselineHashFromAPISpec computes the same
 	// function server-side to score warm-workspace affinity, and the coordinator
 	// cannot know this agent's hostname or allocated short id, both of which feed
@@ -256,8 +254,7 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 			cl, err := p.cfg.Client.ResolveHead(ctx, clientName, cp)
 			if err != nil {
 				// The wrap names the DEPOT path: it is what the operator wrote and
-				// can act on, and it is now the only place the job's own path
-				// reaches the error, because the argv no longer carries it.
+				// can act on, where the argv carries the client path.
 				// TestProvider_ANonP4CommandErrorCarryingASpecPathIsNotClassified.
 				return nil, classifyP4Error(fmt.Errorf("resolve head for %s: %w", e.Path, err))
 			}
@@ -306,12 +303,12 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 
 	// A sweep that reserved this short id in the window between the registration
-	// above and ws.Acquire can have run to completion - client -d, RemoveAll,
-	// reg.Remove - and released before the re-check read p.evicting, so the
-	// re-check passes and the entry is gone. A missing entry here therefore
-	// means the client spec and the directory are gone too. Repairing the entry
-	// alone would hand the task a WorkingDir that does not exist; refuse instead
-	// and let the retry rebuild all three through the normal path.
+	// above and ws.Acquire can have run to completion and released before the
+	// re-check read p.evicting, so the re-check passes and the entry is gone.
+	// sweeper.evict reaches its reg.Remove only after client -d and os.RemoveAll
+	// have both succeeded, so repairing the entry alone would hand the task a
+	// WorkingDir that does not exist; refuse instead and let the retry rebuild
+	// through the normal path.
 	// TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused.
 	if _, ok := reg.Get(shortID); !ok {
 		handle.Release()

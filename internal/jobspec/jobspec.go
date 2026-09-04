@@ -62,8 +62,7 @@ var (
 	revNumRe     = regexp.MustCompile(`^#\d+$`)
 	// The first character excludes '-': CreateStreamClient places this value
 	// immediately after -t, so a leading hyphen makes it read as a flag rather
-	// than as the flag's value. p4's own parser rejects that today, but that is
-	// p4's safety and not relay's.
+	// than as the flag's value. relay owns that argument shape.
 	clientTmplRe = regexp.MustCompile(`^[A-Za-z0-9_.][A-Za-z0-9_.-]*$`)
 )
 

@@ -53,9 +53,7 @@ func TestValidateJobSpec_Source_Perforce(t *testing.T) {
 		}, "invalid client_template"},
 		// CreateStreamClient places this value immediately after -t, so a
 		// leading hyphen makes it read as a flag rather than as the flag's
-		// value. Today p4's own parser rejects that with a usage error, which
-		// means the safety is p4's and not relay's - and this branch moved that
-		// argument onto a call relay makes on the cold path of every stream.
+		// value. relay owns that argument shape, so relay is what refuses it.
 		{"client_template leading hyphen", func(s *JobSpec) {
 			tmpl := "-x"
 			s.Tasks[0].Source.ClientTemplate = &tmpl

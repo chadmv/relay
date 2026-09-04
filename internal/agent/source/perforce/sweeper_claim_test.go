@@ -13,8 +13,7 @@ import (
 )
 
 // waitEntered blocks until the gated sweeper reaches its client -d, and FAILS
-// if it does not. Both tests here run this on Prepare's goroutine, which is the
-// test goroutine, so t.Fatal is legal.
+// if it does not. It calls t.Fatal, so call it only from the test goroutine.
 //
 // The bound is the point. Anything that stops the sweeper's age pass from
 // selecting the entry - refreshing LastUsedAt, for one - means the gate never
@@ -146,8 +145,8 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 	}
 }
 
-// The registration moved above ws.Acquire, and between them the workspace has no
-// holders, so a sweep can reserve, evict and release entirely inside that gap.
+// The registration happens above ws.Acquire, and between them the workspace has
+// no holders, so a sweep can reserve, evict and release entirely inside that gap.
 // The post-Acquire re-check then reads p.evicting and finds it clear, so Prepare
 // would otherwise proceed with its client spec deleted, its directory removed
 // and its registry entry gone. Prepare must refuse and let the retry rebuild
