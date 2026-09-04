@@ -3,6 +3,7 @@
 package schedrunner_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -175,4 +176,59 @@ func TestValidateStoredSpecsOnStartup_ReadsInPagesOfOneHundred(t *testing.T) {
 	require.Equal(t, 250, countRecordedFailures(t, h),
 		"THE POSITIVE ASSERTION. Without it a sweep that dropped the final page, or stopped "+
 			"after one page, would still satisfy a statement count alone")
+}
+
+// TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEveryRow
+// pins the sweep's behaviour under a mid-pass shutdown.
+//
+// THE CANCELLATION MUST LAND MID-SWEEP OR THE TEST PROVES NOTHING. Cancelling
+// before the call makes the first page query itself fail, so a sweep with no
+// ctx.Err() check also returns an error and the assertions below cannot
+// distinguish them. The tracer fires on the END of the first
+// RecordScheduledJobFailure, which pgx calls on this goroutine after the Exec has
+// completed - so row 1's write lands and the row loop's next iteration is the
+// very next thing to run. No sleep, no poll, no second goroutine.
+//
+// THE HOOK MAY KEY ON THE STATEMENT NAME here, where the counter above may not:
+// this statement is not being renamed, and the hook is a fixture rather than the
+// thing under test.
+//
+// THREE ROWS, NOT 250. This property is independent of the page size.
+func TestValidateStoredSpecsOnStartup_ACancelledSweepReturnsInsteadOfLoggingEveryRow(t *testing.T) {
+	var logged bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	h := newRunnerHarness(t)
+	owner := h.createUser(t, "cancelled-sweep@example.com")
+	seedBrokenSchedules(t, h, owner, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tr := &sweepTracer{}
+	var once sync.Once
+	tr.setOnEnd(func(sql string) {
+		if strings.Contains(sql, "-- name: RecordScheduledJobFailure") {
+			once.Do(cancel)
+		}
+	})
+	q := store.New(tracedPool(t, h, tr))
+
+	err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q)
+
+	require.ErrorIs(t, err, context.Canceled,
+		"a cancelled sweep must return the cause once, not swallow it")
+
+	// THE EXPOSURE. One line per remaining BROKEN row. The success line reads
+	// "startup validation recorded a new failure for schedule", which does not
+	// contain this needle.
+	require.Equal(t, 0, strings.Count(logged.String(), "startup validation record for "),
+		"after cancellation no further row may reach RecordScheduledJobFailure, so none may log its rejection")
+
+	// ANTI-VACUITY. Without this a sweep that returned before doing any work at
+	// all would satisfy both assertions above.
+	require.Equal(t, 1, countRecordedFailures(t, h),
+		"exactly the one row processed before the cancellation must be recorded")
 }

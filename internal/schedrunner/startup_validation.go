@@ -79,8 +79,9 @@ const sweepPageSize = 100
 //
 // A PER-ROW FAILURE MUST NOT STOP THE SERVER BOOTING, and it cannot. A per-row
 // record failure is logged and the sweep continues, so one bad row costs one log
-// line rather than the remaining schedules; the only returned error is the list
-// query's, which the caller in cmd/relay-server logs as a warning. Converting an
+// line rather than the remaining schedules. Two things ARE returned: a page
+// query's error, and the cancellation the row loop checks for. The caller in
+// cmd/relay-server logs either as a warning. Converting an
 // operator-visible schedule problem into a server that will not start would be
 // strictly worse than the invisibility this sweep exists to fix.
 //
@@ -114,6 +115,18 @@ func ValidateStoredSpecsOnStartup(ctx context.Context, q *store.Queries) error {
 			return err
 		}
 		for _, row := range rows {
+			// A CANCELLED SWEEP RETURNS RATHER THAN RUNNING ON. Every remaining
+			// BROKEN row would otherwise reach RecordScheduledJobFailure, get
+			// context canceled back, and log its own line - and "most rows broken"
+			// is the case this sweep exists for, since that is the release that
+			// lands a new retroactive rule. At the top of the ROW loop rather than
+			// the page loop, because one page of broken rows is already up to
+			// sweepPageSize lines. RETURN rather than break, so the caller names
+			// the cause once instead of reporting a clean pass.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
 			text, ok := recordableFailure(validateStoredRow(row))
 			if !ok {
 				continue

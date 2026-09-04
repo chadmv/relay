@@ -331,9 +331,10 @@ func main() {
 	// be correct, so the purely diagnostic pass does not delay it.
 	//
 	// A FAILURE HERE MUST NOT STOP THE BOOT. Per-row record failures are logged
-	// inside and the sweep continues; the list query's error is logged here as a
-	// warning and the server carries on. Turning a schedule problem into a server
-	// that will not start would be worse than the invisibility this closes.
+	// inside and the sweep continues; a page query's error and a mid-sweep
+	// cancellation are returned and logged here as a warning, and the server
+	// carries on. Turning a schedule problem into a server that will not start
+	// would be worse than the invisibility this closes.
 	if err := schedrunner.ValidateStoredSpecsOnStartup(ctx, q); err != nil {
 		log.Printf("warn: schedrunner startup validation: %v", err)
 	}
