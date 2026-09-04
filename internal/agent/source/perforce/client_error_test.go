@@ -1,9 +1,11 @@
 package perforce
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -106,4 +108,39 @@ func TestClassifyP4Error_AMissingBinaryOnTheSyncPathStillClassifies(t *testing.T
 	got := classifyP4Error(fmt.Errorf("p4 sync: %w", err))
 	assert.Contains(t, got.Error(), "p4 binary not found on PATH",
 		"a missing binary on the sync path must keep its operator guidance; got %v", got)
+}
+
+// TestExecRunnerStreamHelperProcess is not a test. It is the child half of
+// TestExecRunner_AStdoutScanFailureFailsTheStream, re-exec'd through
+// execRunner's binary field, and it does nothing unless the parent set the
+// gate. It writes one line longer than Stream's 1 MB scanner cap and exits
+// ZERO, which is the shape that matters: a scan failure that is not checked is
+// invisible precisely because p4 succeeded.
+func TestExecRunnerStreamHelperProcess(t *testing.T) {
+	if os.Getenv("RELAY_TEST_STREAM_HELPER") != "1" {
+		return
+	}
+	// Just over the cap, not far over: the parent stops reading at the cap, and
+	// a large remainder would leave this process blocked on a full pipe while
+	// the parent waits for it to exit.
+	line := append(bytes.Repeat([]byte("x"), 1024*1024+1024), '\n')
+	_, _ = os.Stdout.Write(line)
+	os.Exit(0)
+}
+
+// execRunner.Stream scans stdout and then calls cmd.Wait, and an unchecked
+// sc.Err() turns a truncated read into a silent success. Dropping -q is what
+// makes that branch reachable: the failure mode is a confident file count in
+// the sync summary for a stream the agent stopped reading.
+func TestExecRunner_AStdoutScanFailureFailsTheStream(t *testing.T) {
+	t.Setenv("RELAY_TEST_STREAM_HELPER", "1")
+	e := &execRunner{binary: os.Args[0]}
+
+	var lines int
+	err := e.Stream(context.Background(), "",
+		[]string{"-test.run=TestExecRunnerStreamHelperProcess"}, func(string) { lines++ })
+
+	require.Error(t, err, "a scan that failed must fail the sync, got %d line(s)", lines)
+	assert.Contains(t, err.Error(), "token too long",
+		"and the scan failure must be the reported cause, not an exit status; got %v", err)
 }

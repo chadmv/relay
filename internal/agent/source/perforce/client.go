@@ -92,6 +92,14 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	if err := cmd.Wait(); err != nil {
 		return newP4CommandError(args, err, stderr.String())
 	}
+	// A scan that ended on an error, not on EOF, means the caller saw only part
+	// of p4's output while p4 itself exited zero. Since the sync summary's file
+	// count is built from these lines, an unchecked scanner error renders a
+	// confident count for a stream that was truncated.
+	// TestExecRunner_AStdoutScanFailureFailsTheStream.
+	if err := sc.Err(); err != nil {
+		return newP4CommandError(args, err, stderr.String())
+	}
 	return nil
 }
 
