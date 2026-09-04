@@ -97,3 +97,18 @@ func TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory(t *testin
 		require.Truef(t, ok, "directory %q under the workspace root has no registry entry", d.Name())
 	}
 }
+
+// The in-memory registry dies with the process. What makes the workspace
+// reclaimable after a crash - the case the directory-plus-client leak is about -
+// is that the registration reached .relay-registry.json, so the next agent's
+// LoadRegistry sees it. A fresh Registry read from disk is the only instrument
+// that can tell the two apart.
+func TestProvider_TheFirstUseRegistrationReachesDisk(t *testing.T) {
+	_, _, root, shortID, client := prepareFailingAtHeadResolution(t)
+
+	onDisk, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	require.NoError(t, err)
+	e, ok := onDisk.Get(shortID)
+	require.True(t, ok, "the registration must be readable by the next agent process")
+	require.Equal(t, client, e.ClientName)
+}

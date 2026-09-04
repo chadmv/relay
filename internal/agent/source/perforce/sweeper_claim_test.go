@@ -12,6 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// waitEntered blocks until the gated sweeper reaches its client -d, and FAILS
+// if it does not. Both tests here run this on Prepare's goroutine, which is the
+// test goroutine, so t.Fatal is legal.
+//
+// The bound is the point. Anything that stops the sweeper's age pass from
+// selecting the entry - refreshing LastUsedAt, for one - means the gate never
+// opens, and a bare receive turns that into a full-timeout hang with a
+// goroutine dump instead of a named failure.
+func waitEntered(t *testing.T, gate *gatingRunner) {
+	t.Helper()
+	select {
+	case <-gate.entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the sweep never reached its gated client -d: it did not select the seeded stale entry")
+	}
+}
+
 // TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire is the
 // background-sweeper analogue of
 // TestEvictWorkspace_PrepareBacksOutWhenEvictReservesDuringAcquire. The
@@ -84,7 +101,7 @@ func TestSweeperClaim_PrepareBacksOutWhenSweepReservesDuringAcquire(t *testing.T
 			ev, err := sw.SweepOnce(context.Background())
 			sweepDone <- sweepResult{ev, err}
 		}()
-		<-gate.entered // sweeper has reserved and is paused in client -d
+		waitEntered(t, gate)
 	}
 	t.Cleanup(func() { prepareAcquireHook = nil })
 
@@ -196,7 +213,7 @@ func TestSweeperClaim_ASweepThatCompletesBetweenRegistrationAndAcquireIsRefused(
 			ev, sweepErr := sw.SweepOnce(context.Background())
 			sweepDone <- sweepOutcome{ev, sweepErr}
 		}()
-		<-gate.entered
+		waitEntered(t, gate)
 		close(gate.proceed)
 		// Wait for the sweep to FINISH, not just to reserve: the reservation must
 		// be released before Prepare's post-Acquire re-check reads it, or this

@@ -304,3 +304,85 @@ func TestProvider_AWarmEntryWhoseDirectoryIsEmptyStillSyncs(t *testing.T) {
 
 	require.NotNil(t, syncCall(fr), "an emptied workspace must be re-synced, not trusted")
 }
+
+// The client spec is rewritten on EVERY Prepare, not only the first. That is
+// what repairs a workspace whose client spec was deleted while its registry row
+// survived, and it is why head resolution - which needs a client - can run
+// before ws.Acquire at all.
+//
+// The client -o/-i fixtures cannot detect the loss on their own: fakeRunner
+// errors on a MISSING fixture and never on an unused one, so a warm Prepare that
+// skips the create is silent. The argv assertion is the guard.
+func TestProvider_AWarmPrepareStillRewritesTheClientSpec(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	client := expectedClientName("h", "//s/x")
+	warmFixtures(fr, client)
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+	spec := warmStreamSpec()
+	shortID := allocateShortID("//s/x", &Registry{})
+	reg.Upsert(WorkspaceEntry{
+		ShortID:      shortID,
+		SourceKey:    "//s/x",
+		ClientName:   client,
+		BaselineHash: BaselineHash(spec.GetPerforce(), nil),
+		LastUsedAt:   time.Now(),
+	})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, shortID, "synced.txt"), []byte("x"), 0o644))
+
+	h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+	require.True(t, hasArgs(fr, "client", "-o", "-S", "//s/x", client),
+		"a warm Prepare must re-read the client spec")
+	require.True(t, hasArgs(fr, "client", "-i"),
+		"and write it back, which is what recreates a deleted client")
+}
+
+// The registration on the cold path is an Upsert, which replaces the WHOLE
+// entry. Running it on a warm workspace would drop another task's open pending
+// changelist - the record Finalize needs to revert and delete it, and the only
+// thing recoverOrphanedCLs can distinguish a relay CL by - and reset the
+// baseline, re-syncing every warm workspace in the fleet on upgrade.
+//
+// The seeded changelist belongs to a DIFFERENT task id, so it can only have
+// survived; nothing in this Prepare would recreate it.
+func TestProvider_AWarmPrepareKeepsAnotherTasksOpenChangelist(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	client := expectedClientName("h", "//s/x")
+	warmFixtures(fr, client)
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	reg, err := p.Registry()
+	require.NoError(t, err)
+	spec := warmStreamSpec()
+	shortID := allocateShortID("//s/x", &Registry{})
+	baseline := BaselineHash(spec.GetPerforce(), nil)
+	reg.Upsert(WorkspaceEntry{
+		ShortID:             shortID,
+		SourceKey:           "//s/x",
+		ClientName:          client,
+		BaselineHash:        baseline,
+		LastUsedAt:          time.Now(),
+		OpenTaskChangelists: []OpenTaskChangelist{{TaskID: "other-task", PendingCL: 91244}},
+	})
+	require.NoError(t, reg.Save())
+	require.NoError(t, os.MkdirAll(filepath.Join(root, shortID), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, shortID, "synced.txt"), []byte("x"), 0o644))
+
+	h, err := p.Prepare(context.Background(), "task-1", spec, func(string) {})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = h.Finalize(context.Background()) })
+
+	e, ok := reg.Get(shortID)
+	require.True(t, ok)
+	require.Equal(t, []OpenTaskChangelist{{TaskID: "other-task", PendingCL: 91244}}, e.OpenTaskChangelists)
+	require.Equal(t, baseline, e.BaselineHash, "a warm workspace at its baseline must not be reset to re-sync")
+}
