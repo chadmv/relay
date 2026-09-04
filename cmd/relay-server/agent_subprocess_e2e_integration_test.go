@@ -32,6 +32,7 @@ import (
 	"relay/internal/events"
 	"relay/internal/netlimit"
 	relayv1 "relay/internal/proto/relayv1"
+	"relay/internal/scheduler"
 	"relay/internal/store"
 	"relay/internal/testsupport/pgdsn"
 	"relay/internal/tokenhash"
@@ -286,4 +287,194 @@ func seedAgentE2EJob(t *testing.T, ctx context.Context, q *store.Queries) (pgtyp
 	})
 	require.NoError(t, err)
 	return job.ID, task.ID
+}
+
+// TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire is the single
+// harness the backlog item asks for, in BOTH directions, because a dispatch has
+// to reach the runner before any log can come back.
+//
+// WHAT IS REAL HERE: a listener built by grpcServerOptions and wrapped by
+// netlimit.Wrap; a worker.Handler over a real Postgres; a real agent.Agent that
+// dials that address, registers with a real agent token, and runs its own send
+// goroutine; a real scheduler.Dispatcher that claims the task with
+// ClaimTaskForWorker and renders the identity URLs from the claimed row; a real
+// Runner; a real subprocess. The only fake is the subprocess's identity - it is
+// this test binary, which is what makes the byte payload exact on both
+// platforms.
+//
+// WHY THE INTEGRATION LANE, AND WHY THAT IS NOT THE END OF THE SENTENCE HERE.
+// Reaching Connect's message loop is past authenticateAndRegister, which is a
+// Postgres round trip, so there is no default-lane home for this. Unlike the
+// other guards in this package, though, it does NOT need Docker: the database
+// comes from internal/testsupport/pgdsn, the gRPC server and the agent are both
+// in-process, and the subprocess is this test binary. It therefore runs in
+// go-ci.yml's pg-integration job on every push. Do not move it behind a helper
+// that reaches for testcontainers directly; that would take it back out of CI
+// without changing a line of the test.
+func TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire(t *testing.T) {
+	ctx := context.Background()
+
+	// POISON THE FOUR NAMES IN THE PARENT FIRST. Runner.Run appends the
+	// coordinator's values after os.Environ(), and os/exec keeps the last
+	// duplicate, so a correct build overwrites these. A mutation that deletes one
+	// append then yields the poison rather than an absent key, which an equality
+	// assertion kills and a presence assertion would not. t.Setenv forbids
+	// t.Parallel; this test must never call it.
+	for _, name := range e2eIdentityNames {
+		t.Setenv(name, "POISON-inherited-"+name)
+	}
+
+	pool, q := newPgdsnPoolAndQueries(t)
+	addr, registry := startAgentE2EServer(t, pool, q)
+
+	const hostname = "e2e-agent-subprocess"
+	workerID, creds := seedAgentE2EWorker(t, ctx, q, hostname)
+	jobID, taskID := seedAgentE2EJob(t, ctx, q)
+
+	// Start the real agent. TelemetryInterval is pushed out of the way: this
+	// test asserts nothing about telemetry and a 10s sampler only adds noise.
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	a := agent.NewAgent(addr, agent.Capabilities{
+		Hostname: hostname, OS: "linux", CPUCores: 4, RAMGB: 8,
+	}, "", creds, func(string) error { return nil }, nil)
+	a.TelemetryInterval = time.Hour
+	agentDone := make(chan struct{})
+	go func() { defer close(agentDone); a.Run(agentCtx) }()
+	t.Cleanup(func() {
+		agentCancel()
+		select {
+		case <-agentDone:
+		case <-time.After(10 * time.Second):
+			t.Errorf("agent.Run did not return within 10s of its context being cancelled")
+		}
+	})
+
+	// WAIT ON OUR OWN WORKER ROW, never on "some worker is online": this database
+	// belongs to this test alone, and the id is one we seeded.
+	waitFor(t, "the agent to register and its worker row to go online", 30*time.Second, func() bool {
+		w, err := q.GetWorker(ctx, workerID)
+		return err == nil && w.Status == "online"
+	})
+
+	d := scheduler.NewDispatcher(q, registry, events.NewBroker(), e2ePublicBase)
+
+	// RunOnce inside the wait, not before it: the first cycle can legitimately
+	// find the worker not yet online. Re-running after the claim is a no-op - the
+	// task is no longer pending, so ClaimTaskForWorker matches nothing.
+	waitFor(t, "the dispatcher to claim the task and send it to the agent", 30*time.Second, func() bool {
+		d.RunOnce(ctx)
+		tk, err := q.GetTask(ctx, taskID)
+		return err == nil && tk.Status != "pending"
+	})
+
+	// THE TERMINAL STATUS IS AN EXACT SYNCHRONISATION POINT, NOT A SETTLING
+	// HEURISTIC. handleTaskStatus and handleTaskLog run on the SAME sequential
+	// recv goroutine and AppendTaskLog is synchronous, while Runner.Run enqueues
+	// every chunk - including both per-step flush() calls - before
+	// sendFinalStatus. So the instant this row reads terminal, every log row this
+	// task will ever produce is already committed. Read the logs once; do not
+	// poll a row count and do not sleep.
+	//
+	// AN ALLOW-LIST, and it is the exact terminal subset of tasks_status_check
+	// (migration 000023): pending/dispatched/preparing/running are the
+	// non-terminal complement. Adding a value the constraint would reject makes
+	// this a dead arm and a false claim about the vocabulary.
+	var finalStatus string
+	waitFor(t, "the task to reach a terminal status", 60*time.Second, func() bool {
+		tk, err := q.GetTask(ctx, taskID)
+		if err != nil {
+			return false
+		}
+		switch tk.Status {
+		case "done", "failed", "timed_out":
+			finalStatus = tk.Status
+			return true
+		}
+		return false
+	})
+
+	rows, err := q.GetTaskLogs(ctx, taskID)
+	require.NoError(t, err)
+	require.NotEmpty(t, rows,
+		"fixture: zero task_logs rows means nothing crossed the wire at all, and every assertion below "+
+			"would then be measuring an empty string against another empty string")
+
+	// Per-stream concatenations. Order WITHIN a stream is guaranteed all the way
+	// down (one fd, io.Copy, FIFO sendCh, one send goroutine, one gRPC stream,
+	// one recv goroutine, a task_logs id sequence). Order BETWEEN the two streams
+	// is NOT - os/exec drives two independent copy goroutines - so nothing here
+	// may assert the interleaving.
+	var gotOut, gotErr strings.Builder
+	for _, r := range rows {
+		switch r.Stream {
+		case "stdout":
+			gotOut.WriteString(r.Content)
+		case "stderr":
+			gotErr.WriteString(r.Content)
+		default:
+			t.Fatalf("unexpected task_logs.stream %q", r.Stream)
+		}
+	}
+
+	require.Equal(t, "done", finalStatus,
+		"the helper exits 0, so anything else means the path broke before the assertions below could "+
+			"mean anything; stdout=%q stderr=%q", gotOut.String(), gotErr.String())
+
+	// Drop the synthetic step marker, which is always the first stdout content
+	// and is terminated by the first \n in the joined stream.
+	marker, rest, ok := strings.Cut(gotOut.String(), "\n")
+	require.True(t, ok,
+		"expected the step marker line then the subprocess bytes in task_logs; got %q", gotOut.String())
+	require.True(t, strings.HasPrefix(marker, "=== relay step 1/1 === "),
+		"fixture: the first stdout content must be the synthetic step marker, so the Cut above removed "+
+			"the marker and not the first line of real output; got %q", marker)
+
+	// COLLECT the identity report rather than skipping it. This is the DISPATCH
+	// direction, and it is half of what this harness exists for: three closed
+	// slices proved the coordinator RENDERS these values, that they SURVIVE a
+	// proto round trip, and that Runner.Run MERGES them - each against a
+	// different fixture, none composed.
+	observed := map[string]string{}
+	for strings.HasPrefix(rest, identityLinePrefix) {
+		line, tail, cut := strings.Cut(rest, "\n")
+		require.True(t, cut, "an identity line must be newline-terminated; remainder %q", rest)
+		k, v, split := strings.Cut(strings.TrimPrefix(line, identityLinePrefix), "=")
+		require.True(t, split, "malformed identity line %q", line)
+		observed[k] = v
+		rest = tail
+	}
+
+	require.Equal(t, e2eStdoutOut, rest,
+		"the bytes a real subprocess wrote must reach task_logs as the exact CRLF transform of what it wrote")
+	require.Equal(t, e2eStderrOut, gotErr.String(),
+		"stderr is a SECOND flush call site and a SECOND stream mapping; asserting only on stdout leaves both unpinned")
+
+	// THE EXPECTED VALUES ARE BUILT FROM THE IDS THIS TEST SEEDED, never from
+	// anything the message carried. Sourcing both sides from the dispatch would
+	// make the comparison agree with itself by construction and go blind to the
+	// two ids being transposed. jobID and taskID are independently generated
+	// UUIDs, so a transposed argument pair cannot produce these strings.
+	jobStr := uuidStringFromPG(t, jobID)
+	taskStr := uuidStringFromPG(t, taskID)
+	require.Equal(t, map[string]string{
+		"RELAY_TASK_ID":  taskStr,
+		"RELAY_JOB_ID":   jobStr,
+		"RELAY_JOB_URL":  e2ePublicBase + "/jobs/" + jobStr,
+		"RELAY_TASK_URL": e2ePublicBase + "/jobs/" + jobStr + "/tasks/" + taskStr,
+	}, observed,
+		"the four identity variables the coordinator rendered must be the four the subprocess resolved. "+
+			"A POISON-inherited-* value here means the coordinator's append was deleted and the parent's "+
+			"environment leaked through; a missing key means the variable never reached the child at all.")
+}
+
+// uuidStringFromPG renders a pgtype.UUID the way uuidStr does across the
+// coordinator, so the expected URL strings are built from the same spelling the
+// dispatcher used.
+func uuidStringFromPG(t *testing.T, u pgtype.UUID) string {
+	t.Helper()
+	v, err := u.Value()
+	require.NoError(t, err)
+	s, ok := v.(string)
+	require.True(t, ok, "pgtype.UUID.Value must render a string, got %T", v)
+	return s
 }
