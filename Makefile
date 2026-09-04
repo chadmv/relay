@@ -130,11 +130,11 @@ test-cli-integration:
 # testcontainer per test; RELAY_TEST_DATABASE_URL set: one CREATEd database per
 # test on a shared server) apply here too.
 #
-# cmd/relay-server is here because its integration lane needs POSTGRES AND
-# NOTHING ELSE. Its gRPC servers listen on 127.0.0.1:0 in-process, its agent
-# (agent_subprocess_e2e_integration_test.go) is an in-process agent.Agent rather
-# than a built binary, and the subprocess it runs is the test binary itself. No
-# Docker daemon, no image, no p4d.
+# cmd/relay-server is here because its integration lane, like the other three,
+# takes its database from internal/testsupport/pgdsn. Its gRPC servers listen
+# on 127.0.0.1:0 in-process, its agent (agent_subprocess_e2e_integration_test.go)
+# is an in-process agent.Agent rather than a built binary, and the subprocess
+# it runs is the test binary itself.
 #
 # -count=1 for the same reason test-cli-integration's comment gives: the test
 # cache says nothing about whether a live TCP connection to Postgres

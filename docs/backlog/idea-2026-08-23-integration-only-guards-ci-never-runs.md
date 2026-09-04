@@ -289,7 +289,7 @@ What this closes: the ninth and tenth instances recorded above
 `stored_spec_bounds_test.go`, `startup_validation_integration_test.go`) now run on every push.
 
 What this does NOT close: guards that need p4d (`internal/agent/source/perforce`) are still not
-covered by this mechanism. The item stays open for that.
+covered by this mechanism. The item stays open.
 
 ## Appended 2026-09-04 - the "or a real gRPC agent" clause above was wrong
 

@@ -2,17 +2,6 @@
 
 package main
 
-// THE ONLY TEST IN THE REPO THAT CROSSES THE WIRE IN BOTH DIRECTIONS.
-//
-// internal/worker/handler_tasklog_e2e_integration_test.go proves
-// handleTaskLog -> AppendTaskLog -> broker -> SSE, entering through a
-// test-exported method and never through a gRPC stream.
-// internal/agent/runner_crlf_test.go proves a real subprocess's bytes reach
-// chunkWriter and come out transformed, ending at a channel.
-// internal/scheduler/dispatch_test.go proves the coordinator renders the four
-// identity values, ending at a fakeSender. Nothing joined them, so chunk
-// framing, epoch stamping and the env merge composed only by assumption.
-//
 // This file starts a real agent.Agent against the listener cmd/relay-server's
 // main() builds, dispatches a real task through the real scheduler.Dispatcher,
 // runs a real subprocess, and reads task_logs back out of Postgres.
@@ -97,8 +86,11 @@ const (
 // reporting the CHILD's own environ is the only observation that proves what
 // the subprocess actually resolved.
 //
-// os.Exit(0) IS NOT OPTIONAL: without it the testing framework appends
-// "PASS\nok ..." to the very stdout the parent asserts on.
+// os.Exit(0) IS NOT OPTIONAL: this binary is exec'd directly as os.Args[0]
+// plus one -test.run flag, never through `go test`, so cmd/go's own
+// -test.paniconexit0 is never set here and Exit(0) is a plain process exit.
+// Returning normally instead would let the testing package finish its own
+// run and print "PASS\n" onto the same stdout the parent harness asserts on.
 func TestAgentSubprocessE2EHelperProcess(t *testing.T) {
 	if os.Getenv(agentE2EHelperEnv) == "" {
 		return // an ordinary test run; this process is not the helper
@@ -122,14 +114,14 @@ func TestAgentSubprocessE2EHelperProcess(t *testing.T) {
 // waitFor polls cond until it returns true, and FAILS THE TEST BY NAME if it
 // does not within limit.
 //
-// EVERY WAIT IN THIS FILE GOES THROUGH IT, and that is the point. This harness
-// starts a subprocess and a gRPC stream, and a mutation anywhere in the path
-// under test typically manifests as "the thing never happens" rather than "the
-// thing happens wrongly" - an epoch-0 mutant makes the fence reject every
-// status, so the task never reaches a terminal state at all. Without a deadline
-// that case is an indefinite hang, which reads in a mutation battery exactly
-// like a wedged container or a lost Docker socket. With one it is a named
-// failure that says which step never completed.
+// EVERY POLL-UNTIL-TRUE WAIT IN THIS FILE GOES THROUGH IT, and that is the
+// point. This harness starts a subprocess and a gRPC stream, and a mutation
+// anywhere in the path under test typically manifests as "the thing never
+// happens" rather than "the thing happens wrongly" - an epoch-0 mutant makes
+// the fence reject every status, so the task never reaches a terminal state at
+// all. Without a deadline that case is an indefinite hang, which reads in a
+// mutation battery exactly like a wedged container or a lost Docker socket.
+// With one it is a named failure that says which step never completed.
 //
 // cond runs on the test goroutine, so t.Fatalf here is legal and aborts the
 // test rather than leaking a goroutine that logs after the test returns.
@@ -187,17 +179,16 @@ func TestWaitFor_ATimeoutFailsByNameInsteadOfHanging(t *testing.T) {
 }
 
 // newPgdsnPoolAndQueries takes a fresh migrated database from the shared
-// harness. NOT tcpostgres directly, unlike this package's three older helpers:
-// pgdsn gives one testcontainer per call when RELAY_TEST_DATABASE_URL is unset
-// and one freshly CREATEd database on a supplied server when it is set, which
-// is the mode .github/workflows/go-ci.yml's Postgres-service jobs use - so this
-// harness can run in CI with no Docker daemon at all.
+// harness: pgdsn gives one testcontainer per call when RELAY_TEST_DATABASE_URL
+// is unset and one freshly CREATEd database on a supplied server when it is
+// set, which is the mode .github/workflows/go-ci.yml's Postgres-service jobs
+// use - so this harness can run in CI with no Docker daemon at all.
 func newPgdsnPoolAndQueries(t *testing.T) (*pgxpool.Pool, *store.Queries) {
 	t.Helper()
 	dsn := pgdsn.NewIntegrationDSN(t)
 	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "agent e2e pgxpool.Close", pool.Close) })
+	t.Cleanup(func() { pgdsn.BoundedCleanup(t, "cmd/relay-server pgxpool.Close", pool.Close) })
 	return pool, store.New(pool)
 }
 
@@ -304,8 +295,7 @@ func seedAgentE2EJob(t *testing.T, ctx context.Context, q *store.Queries) (pgtyp
 //
 // WHY THE INTEGRATION LANE, AND WHY THAT IS NOT THE END OF THE SENTENCE HERE.
 // Reaching Connect's message loop is past authenticateAndRegister, which is a
-// Postgres round trip, so there is no default-lane home for this. Unlike the
-// other guards in this package, though, it does NOT need Docker: the database
+// Postgres round trip, so there is no default-lane home for this. The database
 // comes from internal/testsupport/pgdsn, the gRPC server and the agent are both
 // in-process, and the subprocess is this test binary. It therefore runs in
 // go-ci.yml's pg-integration job on every push. Do not move it behind a helper
@@ -396,8 +386,8 @@ func TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire(t *testing.T) 
 	rows, err := q.GetTaskLogs(ctx, taskID)
 	require.NoError(t, err)
 	require.NotEmpty(t, rows,
-		"fixture: zero task_logs rows means nothing crossed the wire at all, and every assertion below "+
-			"would then be measuring an empty string against another empty string")
+		"fixture: zero task_logs rows means nothing crossed the wire; without this check the failure "+
+			"below would read as a confusing marker-line mismatch instead of naming the real cause")
 
 	// Per-stream concatenations. Order WITHIN a stream is guaranteed all the way
 	// down (one fd, io.Copy, FIFO sendCh, one send goroutine, one gRPC stream,
@@ -467,9 +457,9 @@ func TestAgentSubprocessEndToEnd_BytesAndIdentityCrossTheRealWire(t *testing.T) 
 			"environment leaked through; a missing key means the variable never reached the child at all.")
 }
 
-// uuidStringFromPG renders a pgtype.UUID the way uuidStr does across the
-// coordinator, so the expected URL strings are built from the same spelling the
-// dispatcher used.
+// uuidStringFromPG renders a pgtype.UUID via pgtype's own Value(), deliberately
+// not via dispatch.go's fmt.Sprintf-based uuidStr: the expected value must not
+// derive from the code under test, or a shared formatting bug would cancel out.
 func uuidStringFromPG(t *testing.T, u pgtype.UUID) string {
 	t.Helper()
 	v, err := u.Value()
