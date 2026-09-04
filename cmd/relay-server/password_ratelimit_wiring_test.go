@@ -1,8 +1,14 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,5 +206,232 @@ func TestBuildHTTPServer_AHalfConfiguredPasswordLimitLeavesTheBucketOff(t *testi
 						"reaches the handler. body: %s", i, rec.Body.String())
 			}
 		})
+	}
+}
+
+// mainBodyOfPackage returns the body of func main, found by parsing every
+// non-test .go file in this directory rather than one hardcoded name.
+//
+// PARSE THE PACKAGE, NOT THE FILE, per the constraint in
+// docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md: a
+// guard written against "main.go" reports clean after the thing it guards moves
+// to a sibling file.
+func mainBodyOfPackage(t *testing.T) *ast.BlockStmt {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	var body *ast.BlockStmt
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err, "parse %s", name)
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || fd.Name.Name != "main" || fd.Body == nil {
+				continue
+			}
+			require.Nil(t, body, "this package declares func main more than once")
+			body = fd.Body
+		}
+	}
+	require.NotNil(t, body, "no func main with a body in any non-test file of this package")
+	return body
+}
+
+// TestMain_PassesThePasswordChangeLimitItParsed closes the one gap the executed
+// tests above cannot reach: they supply the limits themselves, so they say
+// nothing about what main puts in the httpServerDeps literal. Zeroing that
+// literal, or trading it for another of main's same-typed locals, leaves this
+// whole package green while the control is off in production - which is the
+// worst available failure for a security control and is not stopped by a
+// sentence.
+//
+// A PARSER GUARD IS THE EXPENSIVE FALLBACK, and it was taken here only because
+// the cheaper rung does not exist: main is not callable from a test, and it
+// opens the pool and can log.Fatalf before it reaches the literal, so no
+// behavioural test in any lane this package has can observe that literal.
+//
+// DO NOT PASTE ANOTHER COPY OF THIS GUARD FAMILY. These rows belong in the table
+// prescribed by
+// docs/backlog/idea-2026-08-14-generalize-the-env-to-field-wiring-guard.md, and
+// they are written in that table's shape - one row per wired field, columns for
+// the field, the function its value must derive from, and the env-var literal
+// that distinguishes it from a sibling of the same type - so a generalization
+// lifts them without redesign.
+//
+// WHAT IT CANNOT SEE, so its name is not read as more than it checks: a value
+// laundered through an intermediate local is followed, but a value TRANSFORMED
+// on the way is not - a half-value bound from another local passes every check
+// here. It proves the wiring was not deleted, zeroed or crossed. It proves
+// nothing about fidelity.
+func TestMain_PassesThePasswordChangeLimitItParsed(t *testing.T) {
+	body := mainBodyOfPackage(t)
+
+	// from[name] = identifiers AND unquoted string literals its RHS mentions,
+	// collected only from assignments that are DIRECT children of main's body,
+	// so a parse moved inside an if reaches nothing.
+	//
+	// ARITY-TOLERANT ON PURPOSE. The parse binds three names from one
+	// ParseRateLimit call. A walk that skips len(Lhs) != len(Rhs) - the shape in
+	// TestServerCountersIsWiredByMain, correct for its own subject - collects
+	// nothing here and fails on correct code.
+	//
+	// STRING LITERALS ARE COLLECTED ALONGSIDE IDENTIFIERS, and that is what makes
+	// the env-var check below possible at all: every rate-limit local is an int
+	// or a time.Duration parsed by the same function, so nothing about a value's
+	// type or its derivation distinguishes it from a sibling. The only thing that
+	// does is the env-var name its chain was parsed from.
+	from := map[string][]string{}
+	for _, st := range body.List {
+		as, ok := st.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		var rhs []string
+		for _, e := range as.Rhs {
+			ast.Inspect(e, func(m ast.Node) bool {
+				if id, ok := m.(*ast.Ident); ok {
+					rhs = append(rhs, id.Name)
+				}
+				if bl, ok := m.(*ast.BasicLit); ok && bl.Kind == token.STRING {
+					if s, err := strconv.Unquote(bl.Value); err == nil {
+						rhs = append(rhs, s)
+					}
+				}
+				return true
+			})
+		}
+		for _, l := range as.Lhs {
+			if id, ok := l.(*ast.Ident); ok {
+				from[id.Name] = append(from[id.Name], rhs...)
+			}
+		}
+	}
+
+	// Every identifier assigned anywhere in main's subtree - ifs, loops,
+	// switches and closures included. Derivation alone is defeated by a later
+	// assignment of zero inside an if.
+	assignedAnywhere := map[string]int{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, l := range as.Lhs {
+			if id, ok := l.(*ast.Ident); ok {
+				assignedAnywhere[id.Name]++
+			}
+		}
+		return true
+	})
+
+	// The single buildHTTPServer(httpServerDeps{...}) literal.
+	fields := map[string]ast.Expr{}
+	calls := 0
+	ast.Inspect(body, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := ce.Fun.(*ast.Ident)
+		if !ok || id.Name != "buildHTTPServer" {
+			return true
+		}
+		calls++
+		require.Len(t, ce.Args, 1)
+		cl, ok := ce.Args[0].(*ast.CompositeLit)
+		require.True(t, ok,
+			"buildHTTPServer must be called with an httpServerDeps composite literal at the call "+
+				"site, so every dependency is readable there")
+		for _, e := range cl.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			if k, ok := kv.Key.(*ast.Ident); ok {
+				fields[k.Name] = kv.Value
+			}
+		}
+		return true
+	})
+	require.Equal(t, 1, calls,
+		"main must call buildHTTPServer exactly once: called twice the last one decides and this "+
+			"guard cannot say which")
+
+	const envVar = "RELAY_PASSWORD_CHANGE_RATE_LIMIT"
+	const defaultValue = "5:1m"
+
+	rows := []struct{ field, mustReach, envVar string }{
+		{"passwordChangeLimitN", "ParseRateLimit", envVar},
+		{"passwordChangeLimitWin", "ParseRateLimit", envVar},
+	}
+
+	for _, row := range rows {
+		value, present := fields[row.field]
+		require.True(t, present,
+			"buildHTTPServer is called with no %s field, so the bucket is unarmed in production "+
+				"while every test in this package stays green", row.field)
+
+		ident, isIdent := value.(*ast.Ident)
+		require.True(t, isIdent,
+			"httpServerDeps.%s must be fed a plain identifier, not %T. A literal there is a "+
+				"hard-coded bound that %s no longer controls.", row.field, value, row.envVar)
+
+		seen := map[string]bool{}
+		queue := []string{ident.Name}
+		reachedFn, reachedEnv := false, false
+		var otherEnv []string
+		for len(queue) > 0 {
+			name := queue[0]
+			queue = queue[1:]
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			switch {
+			case name == row.mustReach:
+				reachedFn = true
+			case name == row.envVar:
+				// Checked BEFORE the RELAY_*_RATE_LIMIT arm below, which would
+				// otherwise match this variable's own name.
+				reachedEnv = true
+			case strings.HasPrefix(name, "RELAY_") && strings.HasSuffix(name, "_RATE_LIMIT"):
+				otherEnv = append(otherEnv, name)
+			}
+			queue = append(queue, from[name]...)
+		}
+
+		require.True(t, reachedFn,
+			"httpServerDeps.%s is fed %q, which does not derive from %s through an unconditional "+
+				"assignment in main's body", row.field, ident.Name, row.mustReach)
+		require.True(t, reachedEnv,
+			"httpServerDeps.%s is fed %q, whose chain never mentions %s. Both values on this route "+
+				"are parsed by the same function from a same-typed sibling variable, so the env-var "+
+				"name is the only thing that says WHICH bound arrived.", row.field, ident.Name, row.envVar)
+		require.Empty(t, otherEnv,
+			"httpServerDeps.%s is fed %q, whose chain reaches %v - another rate limit's variable. "+
+				"The password route would then be bounded at some other control's budget.",
+			row.field, ident.Name, otherEnv)
+		require.Equal(t, 1, assignedAnywhere[ident.Name],
+			"%q is assigned %d times inside main. Exactly one unconditional assignment is the whole "+
+				"basis on which this test concludes anything: a second one, in an if or a loop, can "+
+				"take the wiring back on some deployments while every check above still passes.",
+			ident.Name, assignedAnywhere[ident.Name])
+
+		if row.field == "passwordChangeLimitN" {
+			// DOC-AND-CODE CONSISTENCY, not a behavioural check: its subject is
+			// the README row, which states this default as a number an operator
+			// plans against. It cannot tell which of the two strings on that
+			// statement is the key and which is the default - both are collected
+			// off the same RHS - so it says the pair is present, nothing more.
+			require.True(t, seen[defaultValue],
+				"main no longer defaults %s to %q, so the README row states a number the binary "+
+					"does not use", envVar, defaultValue)
+		}
 	}
 }
