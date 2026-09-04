@@ -506,6 +506,29 @@ func (h *perforceHandle) Finalize(ctx context.Context) error {
 	return nil
 }
 
+// toClientPath rewrites a depot-form sync path into client syntax so p4 resolves
+// it through the client's view. A virtual or import+ remap stream has no depot
+// storage under the stream name, so the depot form addresses nothing. The spec
+// this receives has passed jobspec.validateSourceSpec, which requires the path
+// to equal the stream or sit under it; a path that does not is refused rather
+// than rewritten, because emitting it unchanged is the defect this exists to
+// fix and synthesizing a tail the operator never wrote is worse.
+// TestToClientPath's sharesATextualPrefixButIsNotUnder row is why the prefix
+// test is stream+"/".
+func toClientPath(clientName, stream, depotPath string) (string, error) {
+	if depotPath == stream {
+		// //<client> with no wildcard names nothing, so an empty remainder maps
+		// to the whole client. This is a behaviour change for a spec whose path
+		// equals its stream: p4 read the old //s/x@12345 as a single file and
+		// synced nothing.
+		return "//" + clientName + "/...", nil
+	}
+	if strings.HasPrefix(depotPath, stream+"/") {
+		return "//" + clientName + depotPath[len(stream):], nil
+	}
+	return "", fmt.Errorf("sync path %q is not under stream %q; this spec did not come through jobspec validation", depotPath, stream)
+}
+
 // allocateShortID returns a short unique ID for a new workspace.
 func allocateShortID(stream string, reg *Registry) string {
 	sum := sha256.Sum256([]byte(stream))
