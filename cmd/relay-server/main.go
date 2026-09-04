@@ -184,6 +184,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("parse RELAY_REGISTER_RATE_LIMIT: %v", err)
 	}
+	jobSubmitN, jobSubmitWin, err := api.ParseRateLimit(
+		envOrDefault("RELAY_JOB_SUBMIT_RATE_LIMIT", "120:10s"))
+	if err != nil {
+		log.Fatalf("parse RELAY_JOB_SUBMIT_RATE_LIMIT: %v", err)
+	}
 
 	allowSelfRegister := false
 	if v := os.Getenv("RELAY_ALLOW_SELF_REGISTER"); v != "" {
@@ -269,6 +274,8 @@ func main() {
 		loginLimitWin:     loginWin,
 		registerLimitN:    registerN,
 		registerLimitWin:  registerWin,
+		jobSubmitLimitN:   jobSubmitN,
+		jobSubmitLimitWin: jobSubmitWin,
 		allowSelfRegister: allowSelfRegister,
 		metrics:           metricsStore,
 		static:            webui.Handler(),
