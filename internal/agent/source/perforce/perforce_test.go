@@ -332,3 +332,225 @@ func TestProvider_Prepare_ClassifiesRecoverError(t *testing.T) {
 		t.Errorf("expected classified auth error in progress lines, got: %v", progressLines)
 	}
 }
+
+// The exact preempt argv, and that it PRECEDES the sync. The discriminating
+// input is an include at #head: a mutant that passes the literal revision
+// through emits "#head" where the resolved "@12345" belongs, and a preempt at
+// the wrong revision does not merely fail to exclude - p4 syncs a file whose
+// have-revision differs in EITHER direction, so it fetches the whole subtree.
+func TestProvider_AnExclusionIsPreemptedAtItsCoveringIncludesResolvedRevision(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	pf := &relayv1.PerforceSource{
+		Stream: "//s/x",
+		Sync: []*relayv1.SyncEntry{
+			{Path: "//s/x/...", Rev: "#head"},
+			{Path: "//s/x/heavy/...", Exclude: true},
+		},
+	}
+	client := expectedClientName("h", SourceKey(pf))
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -m1 //"+client+"/...#head", "Change 12345 on 2026-09-04 by relay@h ...\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -k //"+client+"/heavy/...@12345", "//x/heavy/a.ma#1 - added\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@12345", "1 of 1 files\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	var lines []string
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}},
+		func(s string) { lines = append(lines, s) })
+	require.NoError(t, err)
+	defer h.Finalize(context.Background())
+
+	preemptAt, syncAt := -1, -1
+	for i, c := range fr.argHistory() {
+		if len(c) >= 4 && c[2] == "sync" && c[3] == "-k" {
+			preemptAt = i
+			require.Equal(t, []string{"-c", client, "sync", "-k", "//" + client + "/heavy/...@12345"}, c,
+				"the preempt runs at the covering include RESOLVED revision")
+		}
+		if len(c) >= 4 && c[2] == "sync" && c[3] == "--parallel=4" {
+			syncAt = i
+		}
+	}
+	require.NotEqual(t, -1, preemptAt, "expected a sync -k invocation")
+	require.Less(t, preemptAt, syncAt, "the preempt must precede the sync or it excludes nothing")
+
+	// The excluded path must NOT reach the real sync argv, and must NOT be
+	// recorded as synced: Request.SyncPaths feeds Workspace.syncedPaths, and
+	// putting an excluded path there asserts content is present that is
+	// deliberately absent.
+	for _, c := range fr.argHistory() {
+		if len(c) >= 4 && c[3] == "--parallel=4" {
+			require.NotContains(t, strings.Join(c, " "), "/heavy/")
+		}
+	}
+
+	// One count line, then one line per exclusion rendering the DEPOT path with
+	// %q and LAST, following syncSummary rule: a forged path cannot spell a
+	// convincing line of its own.
+	require.Contains(t, lines, "[sync] excluding: 1 path(s)")
+	require.Contains(t, lines, `[sync] exclude "//s/x/heavy/..."`)
+}
+
+// Every workspace-identity site must read the same key. A site left on pf.Stream
+// puts an excluded task into the unexcluding task workspace, which is the
+// poisoning hazard this design exists to close.
+func TestProvider_EveryWorkspaceIdentitySiteUsesTheSameKey(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	pf := &relayv1.PerforceSource{
+		Stream: "//s/x",
+		Sync: []*relayv1.SyncEntry{
+			{Path: "//s/x/...", Rev: "@100"},
+			{Path: "//s/x/heavy/...", Exclude: true},
+		},
+	}
+	key := SourceKey(pf)
+	client := expectedClientName("h", key)
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -k //"+client+"/heavy/...@100", "//x/heavy/a.ma#1 - added\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@100", "1 of 1 files\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.NoError(t, err)
+	defer h.Finalize(context.Background())
+
+	inv := h.Inventory()
+	require.Equal(t, key, inv.SourceKey, "the handle and the registry row carry the composite key")
+	require.Equal(t, allocateShortID(key, &Registry{}), inv.ShortID,
+		"the short id is derived from the key, not from the bare stream")
+
+	reg, err := LoadRegistry(filepath.Join(root, ".relay-registry.json"))
+	require.NoError(t, err)
+	e, ok := reg.GetBySourceKey(key)
+	require.True(t, ok, "GetBySourceKey must find the row the Upsert wrote")
+	require.Equal(t, inv.ShortID, e.ShortID)
+}
+
+// p4 exits ZERO when a filespec matches nothing, so a silently inert exclusion
+// is indistinguishable from a working one and the volume fills. Refusing costs
+// a false refusal on a legitimately-empty subtree; that trade is taken, and the
+// operator escape is to delete an exclusion that was doing nothing anyway.
+func TestProvider_APreemptThatMatchedNothingFailsThePrepare(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	pf := &relayv1.PerforceSource{
+		Stream: "//s/x",
+		Sync: []*relayv1.SyncEntry{
+			{Path: "//s/x/...", Rev: "@100"},
+			{Path: "//s/x/typo/...", Exclude: true},
+		},
+	}
+	client := expectedClientName("h", SourceKey(pf))
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -k //"+client+"/typo/...@100", "")
+	fr.setStreamStderr("-c "+client+" sync -k //"+client+"/typo/...@100",
+		"//"+client+"/typo/... - no such file(s).\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	var lines []string
+	_, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}},
+		func(s string) { lines = append(lines, s) })
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "//s/x/typo/...")
+	// The cause travels on the returned error and is NOT repeated on a progress
+	// line, the convention TestProvider_ASyncFailureProgressLineDoesNotRepeatTheCause
+	// already pins for the sync branch.
+	for _, l := range lines {
+		require.NotContains(t, l, "no such file")
+	}
+	// No sync may have run: an inert exclusion followed by a full sync is the
+	// exact outcome the refusal exists to prevent.
+	for _, c := range fr.argHistory() {
+		require.NotContains(t, strings.Join(c, " "), "--parallel=4")
+	}
+}
+
+// A preempt reporting nothing at all is an ALREADY-EXCLUDED subtree on a warm
+// workspace, which is success. Reading zero output as failure would refuse every
+// prepare after the first.
+func TestProvider_APreemptReportingUpToDateSucceeds(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	pf := &relayv1.PerforceSource{
+		Stream: "//s/x",
+		Sync: []*relayv1.SyncEntry{
+			{Path: "//s/x/...", Rev: "@100"},
+			{Path: "//s/x/heavy/...", Exclude: true},
+		},
+	}
+	client := expectedClientName("h", SourceKey(pf))
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -k //"+client+"/heavy/...@100", "")
+	fr.setStreamStderr("-c "+client+" sync -k //"+client+"/heavy/...@100",
+		"//"+client+"/heavy/... - file(s) up-to-date.\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@100", "1 of 1 files\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.NoError(t, err, "zero per-file lines is success, not emptiness")
+	require.NoError(t, h.Finalize(context.Background()))
+}
+
+// Request.SyncPaths feeds Workspace.syncedPaths, which is what a LATER holder
+// reads to decide whether it must re-sync exclusively. Recording an excluded
+// path there asserts content is present that is deliberately absent, so the
+// next task asking for that subtree is admitted shared into a workspace that
+// does not hold it.
+//
+// The argv assertions elsewhere cannot see this: syncSpecs (the p4 argv) and
+// syncPaths (this record) are built as two separate slices, so an excluded
+// path can be absent from one and present in the other. Finalize is called
+// before the read because Workspace.release is what populates the map.
+func TestProvider_AnExcludedPathIsNotRecordedAsSynced(t *testing.T) {
+	root := t.TempDir()
+	fr := newFakeP4Fixture(t)
+	pf := &relayv1.PerforceSource{
+		Stream: "//s/x",
+		Sync: []*relayv1.SyncEntry{
+			{Path: "//s/x/...", Rev: "@100"},
+			{Path: "//s/x/heavy/...", Exclude: true},
+		},
+	}
+	client := expectedClientName("h", SourceKey(pf))
+	fr.set("client -o -S //s/x "+client, "")
+	fr.set("client -i", "Client saved.\n")
+	fr.set("-c "+client+" changes -c "+client+" -s pending -l", "")
+	fr.setStream("-c "+client+" sync -k //"+client+"/heavy/...@100", "//x/heavy/a.ma#1 - added\n")
+	fr.setStream("-c "+client+" sync --parallel=4 //"+client+"/...@100", "1 of 1 files\n")
+
+	p := New(Config{Root: root, Hostname: "h", Client: &Client{r: fr}})
+	h, err := p.Prepare(context.Background(), "task-1",
+		&relayv1.SourceSpec{Provider: &relayv1.SourceSpec_Perforce{Perforce: pf}}, func(string) {})
+	require.NoError(t, err)
+	require.NoError(t, h.Finalize(context.Background()))
+
+	p.mu.Lock()
+	ws := p.workspaces[h.Inventory().ShortID]
+	p.mu.Unlock()
+	require.NotNil(t, ws)
+	ws.mu.Lock()
+	synced := make([]string, 0, len(ws.syncedPaths))
+	for path := range ws.syncedPaths {
+		synced = append(synced, path)
+	}
+	ws.mu.Unlock()
+
+	require.Contains(t, synced, "//s/x/...", "the include must be recorded as synced")
+	require.NotContains(t, synced, "//s/x/heavy/...",
+		"an excluded path was never transferred and must not be recorded as synced")
+}
