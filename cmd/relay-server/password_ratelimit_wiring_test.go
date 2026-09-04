@@ -166,3 +166,39 @@ func TestBuildHTTPServer_ThePasswordBucketIsSeparateFromTheSubmitBucket(t *testi
 			"a spent password budget must not refuse a job submission. body: %s", rec.Body.String())
 	})
 }
+
+// TestBuildHTTPServer_AHalfConfiguredPasswordLimitLeavesTheBucketOff pins the
+// field pair's promise: zero on EITHER field leaves the bucket off, which is a
+// conjunction and not a disjunction.
+//
+// THE ZERO-COUNT ROW IS THE DISCRIMINATING ONE, and it is placed first because a
+// poisoned input read after its target is read by neither the code nor the
+// mutant. Relaxing the guard in Server.Handler to an OR constructs a limiter
+// whose limit is 0, and rateLimiter.allow takes its over-limit branch on an
+// empty window and indexes hits[0], so that row fails loudly on the first
+// request. The zero-WINDOW row cannot discriminate against the same relaxation -
+// a limiter with a zero window prunes every hit before it counts them and admits
+// everything, exactly as no limiter does - and it is here to state the contract
+// on the field the count row does not exercise.
+func TestBuildHTTPServer_AHalfConfiguredPasswordLimitLeavesTheBucketOff(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int
+		win  time.Duration
+	}{
+		{"window set, count zero", 0, time.Minute},
+		{"count set, window zero", 5, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := passwordBucketServer(tc.n, tc.win)
+
+			for i := 1; i <= 3; i++ {
+				rec := putAsUser(t, srv, "/v1/users/me/password", `{}`)
+				require.Equal(t, http.StatusBadRequest, rec.Code,
+					"request %d: a half-configured pair must leave the bucket off, so every request "+
+						"reaches the handler. body: %s", i, rec.Body.String())
+			}
+		})
+	}
+}
