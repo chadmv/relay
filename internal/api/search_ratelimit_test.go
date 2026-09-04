@@ -285,3 +285,72 @@ func TestListJobs_RefusalMakesNoDatabaseCall(t *testing.T) {
 		"a refused search must make zero statements: the bucket exists to stop pool occupancy, and a "+
 			"refusal that still occupied a connection would bound nothing")
 }
+
+func listSchedulesAs(t *testing.T, s *Server, u AuthUser, rawQuery string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/scheduled-jobs?"+rawQuery, nil)
+	req = req.WithContext(ctxWithUser(req.Context(), u))
+	rec := httptest.NewRecorder()
+	s.handleListScheduledJobs(rec, req)
+	return rec
+}
+
+// ONE BUCKET OVER BOTH ROUTES. Two buckets would give a caller who alternates
+// routes exactly twice the ceiling, which is the shape where per-axis bounds
+// reduce nothing. The interleaving is the discriminator: with a ceiling of 2, a
+// jobs search and a schedules search must together exhaust it.
+func TestSearchBucket_IsSharedAcrossBothListRoutes(t *testing.T) {
+	s, _ := newSearchTestServer(t, 2, time.Minute)
+	u := searchTestUser(1)
+
+	require.NotEqual(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+	require.NotEqual(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code)
+
+	assert.Equal(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code,
+		"the schedules route must see a budget the jobs route already spent")
+	assert.Equal(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code,
+		"and the reverse direction too, or the two routes have separate maps")
+}
+
+func TestListScheduledJobs_WhitespaceOnlyQIsNotCounted(t *testing.T) {
+	s, _ := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+
+	for _, q := range []string{"q=%20%20", "q="} {
+		rec := listSchedulesAs(t, s, u, q)
+		require.NotEqual(t, http.StatusTooManyRequests, rec.Code, "%s trims to absent", q)
+	}
+	require.NotEqual(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code)
+	assert.Equal(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code)
+}
+
+func TestListScheduledJobs_UnfilteredPollingIsNotCounted(t *testing.T) {
+	s, _ := newSearchTestServer(t, 2, time.Minute)
+	u := searchTestUser(1)
+
+	for i := 0; i < 7; i++ {
+		require.NotEqual(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "limit=10").Code,
+			"unfiltered request %d", i)
+	}
+	for i := 0; i < 2; i++ {
+		require.NotEqual(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code, i)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, listSchedulesAs(t, s, u, "q=needle").Code)
+}
+
+// The 429 body must be BYTE-IDENTICAL across the two endpoints, mirroring
+// TestFilterQ_BodiesAreIdenticalAcrossEndpoints' rule for the q 400s. Two
+// endpoints growing their own copies of a refusal drift without either
+// endpoint's own tests noticing.
+func TestSearchRefusal_BodyIsIdenticalAcrossEndpoints(t *testing.T) {
+	s, _ := newSearchTestServer(t, 1, time.Minute)
+	u := searchTestUser(1)
+	require.NotEqual(t, http.StatusTooManyRequests, listJobsAs(t, s, u, "q=needle").Code)
+
+	jobs := listJobsAs(t, s, u, "q=needle")
+	scheds := listSchedulesAs(t, s, u, "q=needle")
+	require.Equal(t, http.StatusTooManyRequests, jobs.Code)
+	require.Equal(t, http.StatusTooManyRequests, scheds.Code)
+	assert.Equal(t, jobs.Body.String(), scheds.Body.String(),
+		"one control, one body: an operator reading a log must not have to know which route it came from")
+}

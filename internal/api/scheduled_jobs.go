@@ -491,6 +491,17 @@ func (s *Server) handleListScheduledJobs(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// The same bucket handleListJobs charges, at the same point in the same
+	// order: after the filters parse, gated on a non-nil needle. ONE bucket over
+	// both routes, because the quantity bounded is scan work and it does not care
+	// which route bought it - two buckets would hand a caller alternating routes
+	// exactly twice the ceiling. The identity 401 at the top of this handler has
+	// already run, so allowSearch's own fail-closed 401 is unreachable from here;
+	// it is kept because the helper, not its callers, owns that decision.
+	if filters.Q != nil && !s.allowSearch(w, u) {
+		return
+	}
+
 	ctx := r.Context()
 
 	if u.IsAdmin {
