@@ -1212,13 +1212,12 @@ func TestWatchJobLogs_SubscribeSnapshotHasNoTasks_EstablishesNothing(t *testing.
 // zero-value logCompleteness claiming the whole log was on stdout - the
 // silent-and-optimistic direction, which is the wrong one.
 //
-// It is unreachable today only by accident. CancelJobTasks' allow-list is
-// ('pending','queued','running','dispatched') and omits `preparing`, which is
-// already in the proto as TASK_STATUS_PREPARING with the agent already
-// streaming LOG_STREAM_PREPARE chunks for it. On the day that status lands, a
-// cancelled job with a preparing task hits this line - so print the rows the
-// server will give us, and say on errOut and in the exit code that the log is
-// not final.
+// It is reachable, and not through the status vocabulary: internal/api's
+// handleGetJob reads the job row and the task list in two separate statements
+// with no transaction around them, so a cancel landing between the two answers a
+// terminal job beside a task list read before the cancel committed. `preparing`
+// is the fixture's non-terminal status here only because it is the state a task
+// holds longest; any non-terminal value discriminates the same branch.
 func TestWatchJobLogs_NonTerminalTaskInFinalSnapshot_PrintsAndFlagsIt(t *testing.T) {
 	jobID, taskID := "job-nonterminal", "task-nonterminal"
 	srv := fakeJobSnapshotServer(t, jobID, taskID, []jobResp{

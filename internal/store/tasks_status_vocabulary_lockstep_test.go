@@ -33,10 +33,10 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 // of the partition the new status belongs on:
 //
 //   - UpdateTaskStatus (query/tasks.sql) - `status IN ('pending','dispatched',
-//     'running')`. A status omitted here is UNWRITABLE by an agent. That is the
-//     fail-closed direction and it is deliberate, but a new non-terminal status
-//     that agents must be able to write has to be added or status updates for it
-//     are silently dropped.
+//     'preparing','running')`. A status omitted here is UNWRITABLE by an agent.
+//     That is the fail-closed direction and it is deliberate, but a new
+//     non-terminal status that agents must be able to write has to be added
+//     or status updates for it are silently dropped.
 //   - IncrementTaskRetryCount (query/tasks.sql) - the identical predicate. A
 //     status omitted here cannot be retried. A new terminal status MUST stay
 //     omitted, or the resurrection bug this predicate closes
@@ -72,55 +72,58 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     predicate must stay byte-identical to RetryJobTasks's; change both or
 //     neither.
 //   - AppendTaskLog (query/tasks.sql) - `status IN ('pending','dispatched',
-//     'running')` as the FIRST ARM of a disjunction with a finished_at window.
+//     'preparing','running')` as the FIRST ARM of a disjunction with a
+//     finished_at window.
 //     READ THIS SITE BACKWARDS FROM THE FIVE ABOVE. There, a new status must
 //     usually stay OUT and the omission fails closed harmlessly - an unwritable
 //     status, an unretryable task. HERE THE OMISSION IS CATASTROPHIC AND SILENT:
 //     a new NON-TERMINAL status left out of this arm drops 100% of that state's
 //     log output, because a non-terminal row has finished_at IS NULL and so
 //     fails the second arm too, and the drop produces no error and no log line
-//     anywhere. A new NON-TERMINAL status MUST BE ADDED here.
-//     TASK_STATUS_PREPARING already exists in proto/relayv1/relay.proto and the
-//     agent already streams prepare progress as LOG_STREAM_PREPARE chunks
-//     (internal/agent/runner.go), so it is the concrete candidate - and its twin
-//     TASK_STATUS_PREPARE_FAILED needs the OPPOSITE call. A new TERMINAL status
-//     must stay OUT and is then bounded by finished_at like done/failed/
-//     timed_out. Never conjoin this arm with the rest of the fence: that closes
-//     the trailing flush.
+//     anywhere. A new NON-TERMINAL status MUST BE ADDED here: `preparing` is in
+//     this arm for exactly that reason, because the agent streams a workspace
+//     sync's progress as LOG_STREAM_PREPARE chunks (internal/agent/runner.go)
+//     for the whole time the row sits in it. Its twin TASK_STATUS_PREPARE_FAILED
+//     is the live instance of the OPPOSITE call. A new TERMINAL status must stay
+//     OUT and is then bounded by finished_at like done/failed/timed_out. Never
+//     conjoin this arm with the rest of the fence: that closes the trailing
+//     flush.
 //   - CancelJobTasks (query/tasks.sql) - `status IN ('pending','queued',
-//     'running','dispatched')`, the non-terminal set a job cancel fails. It
-//     WRITES: it stamps `failed`, nulls worker_id and assigned_at and bumps the
-//     epoch. A new NON-TERMINAL status omitted here means a cancelled job leaves
-//     that task live, with its agent still executing, while the job reads
-//     `cancelled` - and internal/cli/logs.go's emitSnapshot documents that exact
-//     reachability. A new TERMINAL status must stay OUT: it would restamp a
-//     finished task's finished_at and bump an epoch the trailing-log flush still
-//     needs. The `queued` literal in this list is DEAD - jobs_status_check admits
-//     `queued`, tasks_status_check never has - and removing it belongs to
-//     idea-2026-07-01-dead-status-vocabulary, not to whoever next widens this
-//     set.
+//     'preparing','running','dispatched')`, the non-terminal set a job cancel
+//     fails. It WRITES: it stamps `failed`, nulls worker_id and assigned_at and
+//     bumps the epoch. A new NON-TERMINAL status omitted here means a cancelled
+//     job leaves that task live, with its agent still executing, while the job
+//     reads `cancelled` - and internal/cli/logs.go's emitSnapshot documents
+//     that exact reachability. A new TERMINAL status must stay OUT: it would
+//     restamp a finished task's finished_at and bump an epoch the trailing-log
+//     flush still needs. The `queued` literal in this list is DEAD -
+//     jobs_status_check admits `queued`, tasks_status_check never has - and
+//     removing it belongs to idea-2026-07-01-dead-status-vocabulary, not to
+//     whoever next widens this set.
 //   - ListOverdueAssignedTasks (query/tasks.sql) - `status IN ('dispatched',
-//     'running')`, the "currently assigned" partition the coordinator's
-//     stale-task watchdog scans. READ THIS SITE BACKWARDS TOO: it is the SECOND
-//     inverted one. A new NON-TERMINAL status omitted here is NEVER SWEPT, which
-//     silently reopens the unbounded-assignment hole this statement exists to
-//     close, for that status - a task in it could hold its worker slot and its
-//     job forever with no error and no log line. `preparing` is the same live
-//     candidate as for AppendTaskLog and would need adding to BOTH. A new
-//     TERMINAL status must stay OUT - but NOT because it would resurrect
-//     anything: this statement is read-only, and UpdateTaskStatus's own
-//     allow-list would reject the write regardless. Including one simply buys a
-//     guaranteed zero-row round trip on every sweep, forever.
+//     'preparing','running')`, the "currently assigned" partition the
+//     coordinator's stale-task watchdog scans. READ THIS SITE BACKWARDS TOO: it
+//     is the SECOND inverted one. A new NON-TERMINAL status omitted here is
+//     NEVER SWEPT, which silently reopens the unbounded-assignment hole this
+//     statement exists to close, for that status - a task in it could hold its
+//     worker slot and its job forever with no error and no log line.
+//     `preparing` is in this partition, as it is in AppendTaskLog's first arm,
+//     for that reason. A new TERMINAL status must stay OUT - but NOT because it
+//     would resurrect anything: this statement is read-only, and
+//     UpdateTaskStatus's own allow-list would reject the write regardless.
+//     Including one simply buys a guaranteed zero-row round trip on every
+//     sweep, forever.
 //   - THE ASSIGNMENT-PARTITION GROUP - GetActiveTasksForWorker,
 //     ListGraceCandidates, RequeueTaskByID, RequeueWorkerTasks,
 //     RequeueWorkerTasksIfEpoch, CountActiveTasksByAllWorkers,
 //     ListActiveTasksForWorkerPage and CountActiveTasksForWorker
 //     (query/tasks.sql), all carrying the identical
-//     `status IN ('dispatched','running')`. THESE ARE INVERTED, exactly like
-//     ListOverdueAssignedTasks.
+//     `status IN ('dispatched','preparing','running')`. THESE ARE INVERTED,
+//     exactly like ListOverdueAssignedTasks.
 //     A new NON-TERMINAL status omitted here fails OPEN in the damaging
-//     direction at every one of them at once. Trace `preparing`, this file's own
-//     named candidate: a task sitting in it through a long P4 sync is invisible
+//     direction at every one of them at once. Trace `preparing`, which is in this
+//     partition precisely because of what follows: a task sitting in it through a
+//     long P4 sync would otherwise be invisible
 //     to GetActiveTasksForWorker, so reconcile never sees it and never requeues
 //     it; invisible to ListGraceCandidates, so no grace timer covers it;
 //     unmatched by all three requeue statements, so neither a disconnect nor an
@@ -130,11 +133,12 @@ var literalRe = regexp.MustCompile(`'([^']*)'`)
 //     by its Slots KPI (ListActiveTasksForWorkerPage, CountActiveTasksForWorker),
 //     so an operator sees an idle worker that is busy; and already unswept by
 //     ListOverdueAssignedTasks. It holds its worker slot and its job FOREVER,
-//     with no error and no log line - and it is outside idx_tasks_worker_active
-//     as well, whose WHERE clause is a copy of this same predicate that nothing
-//     on this list reads: a status added to the statements but not to the index
-//     turns the two panel queries into sequential scans rather than making them
-//     wrong. A new non-terminal status MUST BE ADDED to all eight.
+//     with no error and no log line - and it would be outside
+//     idx_tasks_worker_active as well, whose WHERE clause is a copy of this same
+//     predicate: a status added to the statements but not to the index turns
+//     every one of them into a sequential scan rather than making them wrong.
+//     TestActiveTaskIndexPredicateMatchesTheAssignmentPartition is what reads
+//     that predicate. A new non-terminal status MUST BE ADDED to all eight.
 //     A new TERMINAL status must stay OUT. For the three requeue statements the
 //     reason is that they WRITE, so admitting one would let a requeue resurrect
 //     a finished task, which is the guarantee

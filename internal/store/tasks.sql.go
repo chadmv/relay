@@ -99,15 +99,15 @@ type AppendTaskLogRow struct {
 //     omission is catastrophic and silent: a new NON-TERMINAL status left out of
 //     this arm drops 100% of that state's log output, because a non-terminal row
 //     has finished_at IS NULL and therefore fails the second arm too, and the
-//     drop produces no error and no log line anywhere. That is not hypothetical:
-//     TASK_STATUS_PREPARING already exists in proto/relayv1/relay.proto and the
-//     agent already streams prepare progress as LOG_STREAM_PREPARE chunks
-//     (internal/agent/runner.go, makePrepareProgressFn) while the row is still
-//     `dispatched`. The day `preparing` becomes a persisted status and is not
-//     added here, every workspace-sync log line in the system disappears. Its
-//     twin TASK_STATUS_PREPARE_FAILED needs the OPPOSITE treatment: a new
-//     TERMINAL status stays OUT and is then bounded by finished_at like
-//     done/failed/timed_out. TestTasksStatusVocabularyIsExactly names this site.
+//     drop produces no error and no log line anywhere. `preparing` is in this
+//     arm for exactly that reason: the agent streams a workspace sync's progress
+//     as LOG_STREAM_PREPARE chunks (internal/agent/runner.go,
+//     makePrepareProgressFn) for the whole time the row sits in it, and a row in
+//     that state has no finished_at. TASK_STATUS_PREPARE_FAILED is the live
+//     instance of the OPPOSITE shape: a new TERMINAL status stays OUT and is then
+//     bounded by finished_at like done/failed/timed_out.
+//     TestTasksStatusVocabularyIsExactly names this site, and
+//     TestAppendTaskLog_APreparingTaskAcceptsLogChunks pins the positive arm.
 //
 //   - min_finished_at is an ABSOLUTE cutoff computed in Go as
 //     time.Now().Add(-window), never NOW() - interval. Every finished_at
@@ -1064,20 +1064,20 @@ type ListActiveTasksForWorkerPageParams struct {
 // READ THE ALLOW-LIST BACKWARDS. A new NON-TERMINAL status omitted here is
 // invisible in the panel and uncounted by CountActiveTasksForWorker, so an
 // operator sees an idle worker that is busy and a Slots KPI that under-reports
-// its load - no error, no log line. `preparing` is the live candidate. A new
-// TERMINAL status must stay OUT: a finished task holds no slot.
+// its load - no error, no log line. A new TERMINAL status must stay OUT: a
+// finished task holds no slot.
 // TestTasksStatusVocabularyIsExactly names this statement, and
-// TestListActiveTasksForWorkerPage_ReturnsBothAssignedStatuses pins the positive
-// arm - halving this IN list must turn it RED.
+// TestListActiveTasksForWorkerPage_ReturnsEveryAssignedStatus pins the positive
+// arm - dropping any member of this IN list must turn it RED.
 //
 // SELECT * so sqlc emits []store.Task and the handler calls toTaskResponse on a
 // real row. The job name comes from GetJobNamesByIDs rather than a JOIN, so
 // there is no hand-written store.Task copy to lose a column `tasks` gains.
 //
-// Ordered by assigned_at, not started_at: started_at is NULL on a dispatched
-// row and a task spends the whole workspace sync as `dispatched`, so ordering by
-// it would bury the rows this panel exists to show. assigned_at is nullable, so
-// the NULLS LAST branch stays.
+// Ordered by assigned_at, not started_at: started_at stays NULL through both
+// `dispatched` and `preparing`, and a task spends the whole workspace sync in
+// the latter, so ordering by it would bury the rows this panel exists to show.
+// assigned_at is nullable, so the NULLS LAST branch stays.
 //
 //	SELECT id, job_id, name, env, requires, timeout_seconds, retries, retry_count, status, worker_id, started_at, finished_at, created_at, assignment_epoch, source, commands, assigned_at FROM tasks
 //	WHERE worker_id = $1
@@ -1213,21 +1213,22 @@ type ListOverdueAssignedTasksParams struct {
 // is READ-ONLY: the watchdog writes through UpdateTaskStatus, so this slice adds
 // no new writer of tasks.status and no new status partition on a write path.
 //
-// THE PARTITION IS ('dispatched','running'), i.e. "currently assigned" - the
-// same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
+// THE PARTITION IS ('dispatched','preparing','running'), i.e. "currently
+// assigned" - the same set GetActiveTasksForWorker, CountActiveTasksByAllWorkers,
 // ListGraceCandidates, RequeueWorkerTasks(IfEpoch) and idx_tasks_worker_active
 // already use. It is deliberately NOT `status = 'running'`: a task spends the
-// whole workspace sync as `dispatched` (handleTaskStatus has no case for
-// TASK_STATUS_PREPARING, so the row does not move), and a stale-epoch reconcile
-// can strand a `dispatched` row whose worker was told to abandon it. Keying on
-// `running` would miss both.
+// whole workspace sync in `preparing`, and a stale-epoch reconcile can strand a
+// `dispatched` row whose worker was told to abandon it. Keying on `running`
+// would miss both.
 //
 // READ THIS ALLOW-LIST BACKWARDS, exactly like AppendTaskLog's first arm and
 // unlike every other status predicate in this file. A new NON-TERMINAL status
 // omitted here is NEVER SWEPT, which silently reopens the unbounded-assignment
 // hole this statement exists to close, for that status - no error, no log line.
-// `preparing` is the live candidate. A new TERMINAL status must stay OUT.
-// TestTasksStatusVocabularyIsExactly names this site.
+// A new TERMINAL status must stay OUT.
+// TestTasksStatusVocabularyIsExactly names this site, and
+// TestListOverdueAssignedTasks_AbsoluteArmSweepsAPreparingTask pins that a task
+// in the state a workspace sync holds is still bounded by the absolute arm.
 //
 // worker_id IS NOT NULL is not decoration. UpdateTaskStatus's worker predicate is
 // a plain `=`, so a row with a NULL worker_id can never be written by it;

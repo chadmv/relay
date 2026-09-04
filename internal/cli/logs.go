@@ -138,8 +138,7 @@ func (lc logCompleteness) reason() string {
 // never fetched, while the exit code still claims every task's log printed in
 // full. A new terminal JOB status omitted from jobIsTerminal means relay logs
 // hangs until the connection drops and then reports "connection lost".
-// `preparing` is harmless at both because it is non-terminal; a task-level
-// `cancelled` is the candidate that would bite.
+// A task-level `cancelled` is the candidate that would bite.
 func taskIsTerminal(status string) bool {
 	return status == "done" || status == "failed" || status == "timed_out"
 }
@@ -299,13 +298,15 @@ func watchJobLogs(ctx context.Context, c *relayclient.Client, jobID string, out,
 	// Once the job is TERMINAL the same task is a contradiction - the job says
 	// everything is over and the task says it is not - and skipping it silently
 	// prints nothing for it while the zero-value logCompleteness still claims
-	// the whole log is on stdout. CancelJobTasks' allow-list omits `preparing`
-	// (already in the proto as TASK_STATUS_PREPARING, with the agent already
-	// streaming LOG_STREAM_PREPARE chunks), so a cancelled job with a preparing
-	// task reaches this line the day that status lands. Print the rows the
-	// server will give us - they are what the operator came for - and say on
-	// errOut and in the exit code that the log is not final. The failure
-	// direction has to be loud, not optimistic.
+	// the whole log is on stdout. It is REACHABLE, and not through the status
+	// vocabulary: internal/api's handleGetJob reads the job row and the task list
+	// in two separate statements with no transaction around them, so a cancel
+	// landing between the two answers a terminal job beside a task list read
+	// before the cancel committed. Any future non-terminal status omitted from
+	// CancelJobTasks reaches it too. Print the rows the server will give us -
+	// they are what the operator came for - and say on errOut and in the exit
+	// code that the log is not final. The failure direction has to be loud, not
+	// optimistic.
 	emitSnapshot := func(job jobResp) {
 		jobDone := jobIsTerminal(job.Status)
 		for _, t := range job.Tasks {

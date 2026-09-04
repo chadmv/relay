@@ -341,10 +341,9 @@ func TestTaskStatusFenceRejections_TwoHandlersDoNotShareCounts(t *testing.T) {
 // loops below assert SQL -> Go (everything the statement admits,
 // taskStatusIsWritable calls writable) and that the terminal triple is not
 // writable. Neither sees a GO-SIDE EXTRA - a status the mirror calls writable
-// that the statement does not admit - which is the edit this file's own
-// production comment anticipates: `preparing` added here ahead of the SQL. That
-// drift mislabels every genuine terminality rejection for such a row as `raced`,
-// quietly zeroing the actionable key for it.
+// that the statement does not admit - the edit this file's own production comment
+// warns about. That drift mislabels every genuine terminality rejection for such
+// a row as `raced`, quietly zeroing the actionable key for it.
 //
 // THE FIRST ATTEMPT AT THAT DIRECTION WAS A UNIVERSE LOOP, AND IT ONLY CLOSED
 // HALF OF IT - measured, not reasoned. Iterating a candidate set and requiring
@@ -552,9 +551,9 @@ func taskStatusWritableLiterals(t *testing.T) []string {
 //
 // THE PROTO IS NOT REDUNDANT WITH THE VOCABULARY and neither subsumes the other,
 // which is why both are here. A status appears in relay.proto BEFORE it is a
-// value in tasks_status_check: TASK_STATUS_PREPARING is in the proto today and
-// the agent already streams LOG_STREAM_PREPARE chunks, so `preparing` is a
-// candidate here years before the column can hold it. Going the other way, a
+// value in tasks_status_check: TASK_STATUS_PREPARE_FAILED is in the proto today
+// and the agent already sends it, so `prepare_failed` is a candidate here while
+// the column cannot hold it. Going the other way, a
 // status can be a legal column value with no wire spelling at all, which is
 // exactly the `cancelled` shape above. The union is what makes this a property
 // rather than a spelling.

@@ -72,7 +72,7 @@ export function WorkerTasksPanel({ workerId }: { workerId: string }) {
                 <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
                 {t.status}
               </TableCell>
-              {/* A dispatched task spends the whole workspace sync with no
+              {/* A preparing task spends the whole workspace sync with no
                   started_at, and that is the row this panel most exists to show. */}
               <TableCell className="text-fg-mute">
                 {t.started_at ? formatRelativeTime(t.started_at) : 'not started'}

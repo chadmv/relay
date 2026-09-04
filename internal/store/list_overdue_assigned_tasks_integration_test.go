@@ -55,8 +55,8 @@ func (f *overdueFixture) backdateCreatedAt(t *testing.T, id pgtype.UUID, at time
 }
 
 // dispatched creates a task with the given timeout and claims it at assignedAt.
-// The row never reaches `running`: started_at stays NULL, which is the state a
-// task sits in for the whole workspace sync.
+// The row never reaches `running`, so started_at stays NULL - the half of the
+// execution arm that decides whether it can see the row at all.
 func (f *overdueFixture) dispatched(t *testing.T, name string, timeoutSec *int32, assignedAt time.Time) store.Task {
 	t.Helper()
 	task, err := f.q.CreateTask(f.ctx, store.CreateTaskParams{
