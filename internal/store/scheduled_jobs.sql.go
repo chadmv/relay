@@ -417,24 +417,77 @@ func (q *Queries) ListEligibleScheduledJobs(ctx context.Context, limit int32) ([
 	return items, nil
 }
 
-const listEnabledScheduledJobs = `-- name: ListEnabledScheduledJobs :many
+const listEnabledScheduledJobsPage = `-- name: ListEnabledScheduledJobsPage :many
 SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
  WHERE enabled
+   AND (NOT $1::bool OR id > $2::uuid)
  ORDER BY id
+ LIMIT $3::int
 `
 
+type ListEnabledScheduledJobsPageParams struct {
+	CursorSet bool        `json:"cursor_set"`
+	CursorID  pgtype.UUID `json:"cursor_id"`
+	PageLimit int32       `json:"page_limit"`
+}
+
+// ONE PAGE of enabled schedules for schedrunner.ValidateStoredSpecsOnStartup,
+// keyset-paged on the primary key.
+//
 // EVERY enabled schedule, not just the overdue ones. The startup sweep's whole
 // point is the schedules NEITHER existing loop sees: ListEligibleScheduledJobs
 // and ListOverdueScheduledJobsForCatchup both require next_run_at to have
 // passed, so a healthy-looking @monthly schedule broken by a retroactive
 // validation change stays invisible for up to a month after the fix deploys.
-// Ordered by id purely for a deterministic sweep order in tests.
+//
+// ORDER BY id IS THE CURSOR'S TOTAL ORDER, not a sweep-determinism convenience.
+// Postgres compares uuid bytewise, so `id > cursor_id` is a well-defined range
+// served by the primary key index. Keyset paging is skip-free and duplicate-free
+// only while the cursor key is immutable, and id is the primary key.
+//
+// THE LIMIT IS EXACT: at most page_limit rows, and the caller detects the end by
+// a SHORT page. Do not add the `+ 1` a client-facing page needs to compute a
+// NextCursor - it makes the last full page indistinguishable from a short one,
+// so the sweep would stop one page early.
+//
+// cursor_set, NOT A ZERO-UUID SEED. A pgtype.UUID zero value has Valid: false,
+// which encodes as SQL NULL, and `id > NULL` is NULL, so the first page would
+// return no rows and the sweep would silently do nothing at all: no error, no
+// log line. Same failure shape as an epoch-fenced query called with a zero-value
+// epoch.
+//
+// WHAT A CONCURRENT WRITER DOES TO A SWEEP IN PROGRESS:
+//
+//	 DELETE - safe. A keyset cursor is a value in the key space, not a row
+//	   offset, so removing a row before the cursor cannot shift a later row into
+//	   or out of a page. With OFFSET n it would, silently. That is why OFFSET is
+//	   rejected here.
+//	 INSERT - id defaults to gen_random_uuid(), which is random rather than
+//	   monotonic, so a new row lands uniformly at random relative to the cursor
+//	   and is seen or missed in proportion to how much of the key space is left.
+//	   Nothing here is "stable for appends"; there are no appends. Missing one is
+//	   harmless: it arrived through a route that ran jobspec.Validate from the
+//	   same binary generation the sweep is applying, so this binary's retroactive
+//	   rule cannot have broken it.
+//	 enabled flipped - a row disabled after being read is still processed, as it
+//	   was under a single unpaged read. A row enabled mid-sweep is seen if its id
+//	   sorts above the cursor and missed otherwise; unpaged it was always missed.
+//	   A row disabled before its OWN page is read is missed, where one unpaged
+//	   read at t0 would have recorded its failure. Every page is a fresh
+//	   snapshot, so that direction is a paging effect and it loses a row.
+//	 UPDATE of the three fenced columns - a row already read is not revisited, so
+//	   a spec broken after its own page was read records nothing this pass, and a
+//	   spec repaired after it was read cannot have the stale verdict stamped back
+//	   (RecordScheduledJobFailure fences on exactly those columns). Not a paging
+//	   effect: one unpaged read at t0 missed the first case too.
 //
 //	SELECT id, name, owner_id, cron_expr, timezone, job_spec, overlap_policy, enabled, next_run_at, last_run_at, last_job_id, created_at, updated_at, last_error, last_error_at FROM scheduled_jobs
 //	 WHERE enabled
+//	   AND (NOT $1::bool OR id > $2::uuid)
 //	 ORDER BY id
-func (q *Queries) ListEnabledScheduledJobs(ctx context.Context) ([]ScheduledJob, error) {
-	rows, err := q.db.Query(ctx, listEnabledScheduledJobs)
+//	 LIMIT $3::int
+func (q *Queries) ListEnabledScheduledJobsPage(ctx context.Context, arg ListEnabledScheduledJobsPageParams) ([]ScheduledJob, error) {
+	rows, err := q.db.Query(ctx, listEnabledScheduledJobsPage, arg.CursorSet, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
