@@ -171,6 +171,13 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	// ws.Acquire holds no workspace handle and must not try to release one.
 	// TestProvider_AResolveHeadFailureOnFirstUseLeavesAReclaimableWorkspace and
 	// TestProvider_AFailedPrepareLeavesNoUnregisteredWorkspaceDirectory.
+	// A registry row can outlive its directory - a crash between sweeper.evict's
+	// os.RemoveAll and its reg.Remove, or an operator reclaiming disk by hand -
+	// and the MkdirAll below silently recreates it EMPTY. Read the state before
+	// destroying the evidence.
+	// TestProvider_AWarmEntryWhoseDirectoryIsGoneStillSyncs.
+	_, statErr := os.Stat(wsRoot)
+	wsRootMissing := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 		return nil, err
 	}
@@ -183,8 +190,9 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 	}
 	// The !found guard stays. An unconditional Upsert replaces the whole struct,
 	// dropping another task's OpenTaskChangelists and resetting BaselineHash to
-	// "", which re-syncs every warm workspace on upgrade. Registry.Mutate is the
-	// sanctioned way to edit an entry in place.
+	// "". Registry.Mutate is the sanctioned way to edit an entry in place, and
+	// the warm branch below uses it to reconcile the row with what the create
+	// above actually did.
 	if !found {
 		reg.Upsert(WorkspaceEntry{
 			ShortID:      shortID,
@@ -192,6 +200,24 @@ func (p *Provider) Prepare(ctx context.Context, taskID string, spec *relayv1.Sou
 			ClientName:   clientName,
 			BaselineHash: "",
 			LastUsedAt:   time.Now(),
+		})
+		_ = reg.Save()
+	} else {
+		_ = reg.Mutate(shortID, func(e *WorkspaceEntry) {
+			// clientName is recomputed from the hostname every call; the row
+			// records what an earlier Prepare created. The sweeper deletes the
+			// recorded name, so a disagreement orphans the client that exists.
+			e.ClientName = clientName
+			// DirtyDelete means the p4 client is already gone and sweeper.evict
+			// must skip client -d. The create above put it back.
+			e.DirtyDelete = false
+			if wsRootMissing {
+				// Clearing the baseline rather than setting a local flag: it is
+				// persisted, so a crash mid-sync still re-syncs, and a second
+				// task admitted in ModeShared reads the same "" and syncs too
+				// instead of running in the empty tree this one is filling.
+				e.BaselineHash = ""
+			}
 		})
 		_ = reg.Save()
 	}
