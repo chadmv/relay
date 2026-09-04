@@ -21,12 +21,12 @@ type Runner interface {
 }
 
 // p4CommandError is what a failed p4 invocation returns. It keeps the command
-// ARGS, the underlying error and p4's stderr in separate fields because the args
-// carry depot paths straight from the job spec, which jobspec.validateSourceSpec
-// constrains to a `//` prefix and nothing else. classifyP4Error must never match
-// against them; see classifiableText.
-// Error() renders exactly what the previous inline fmt.Errorf rendered, since
-// every classification fixture depends on that shape.
+// ARGS, the underlying error and p4's stderr in separate fields so a reader can
+// tell which of the three a given phrase came from; classifiableText is what
+// depends on that and explains why.
+// Error() renders `p4 <args>: <err> (stderr: <stderr>)`, the shape every
+// classification fixture and operator-facing p4 failure message is written
+// against.
 type p4CommandError struct {
 	args   []string
 	err    error
@@ -72,12 +72,15 @@ func (e *execRunner) Stream(ctx context.Context, cwd string, args []string, onLi
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return newP4CommandError(args, err, "")
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return err
+		// Structured like every other failure out of this type, because
+		// classifyP4Error only classifies what came from a p4 invocation and this
+		// is the route a missing binary takes on the sync path.
+		return newP4CommandError(args, err, "")
 	}
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)

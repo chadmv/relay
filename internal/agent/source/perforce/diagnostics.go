@@ -16,12 +16,12 @@ import (
 // TestClassifyP4Error's planted-phrase cases pin both halves.
 func classifiableText(err error) string {
 	var pe *p4CommandError
-	if errors.As(err, &pe) {
-		// %v, not .Error(), so this agrees with Error() on a nil underlying error
-		// instead of panicking where Error() renders "<nil>".
-		return fmt.Sprintf("%v %s", pe.err, pe.stderr)
+	if !errors.As(err, &pe) {
+		return ""
 	}
-	return err.Error()
+	// %v, not .Error(), so this agrees with Error() on a nil underlying error
+	// instead of panicking where Error() renders "<nil>".
+	return fmt.Sprintf("%v %s", pe.err, pe.stderr)
 }
 
 // classifyP4Error rewraps known-bad p4 errors with operator-facing guidance.
